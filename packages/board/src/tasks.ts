@@ -7,12 +7,25 @@ export type TaskType = "pr_review" | "review_pass" | "context" | "publish" | "cl
 export type TaskDispatchTopic = "run-review" | "run-research" | "run-publish" | "run-cleanup";
 
 export type TaskAssigneeRole =
-  | "factory"
+  | "system"
   | "review_agent"
   | "research_agent"
   | "publisher"
   | "cleanup_worker"
   | "human";
+
+export type TaskKind = "aggregate" | "dispatchable" | "waitpoint";
+
+export function taskKind(type: TaskType): TaskKind {
+  switch (type) {
+    case "pr_review":
+      return "aggregate";
+    case "human_decision":
+      return "waitpoint";
+    default:
+      return "dispatchable";
+  }
+}
 
 export interface BoardTask {
   readonly id: TaskId;

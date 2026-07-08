@@ -1,7 +1,7 @@
 import { createEmptyBoardState, type BoardState } from "@jina/board";
 import type { ContextItemDraft } from "@jina/context";
-import type { PrReviewFactoryPlan } from "@jina/factory";
 import type { PublicationResult } from "@jina/publication";
+import type { PrReviewPlan } from "@jina/review";
 
 export interface StoredContextItem {
   readonly taskId: string;
@@ -11,7 +11,7 @@ export interface StoredContextItem {
 
 export interface WorkflowState {
   readonly board: BoardState;
-  readonly factoryPlans: readonly PrReviewFactoryPlan[];
+  readonly reviewPlans: readonly PrReviewPlan[];
   readonly contextItems: readonly StoredContextItem[];
   readonly publications: readonly PublicationResult[];
 }
@@ -19,7 +19,7 @@ export interface WorkflowState {
 export function createWorkflowState(): WorkflowState {
   return {
     board: createEmptyBoardState(),
-    factoryPlans: [],
+    reviewPlans: [],
     contextItems: [],
     publications: []
   };

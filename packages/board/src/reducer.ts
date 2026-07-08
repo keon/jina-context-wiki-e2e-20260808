@@ -1,11 +1,11 @@
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskDependencyDraft, TaskId } from "./dependencies.js";
 import { isTerminalTaskStatus, type TaskStatus } from "./task-status.js";
-import { isDispatchableTask, type BoardTask } from "./tasks.js";
+import { isDispatchableTask, taskKind, type BoardTask } from "./tasks.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
-export type BoardOutboxStatus = "pending" | "published";
+export type BoardOutboxStatus = "pending" | "dispatched";
 
 export interface BoardOutboxMessage {
   readonly id: BoardOutboxMessageId;
@@ -18,7 +18,7 @@ export interface BoardOutboxMessage {
     readonly attempt: number;
   };
   readonly createdAt: IsoTimestamp;
-  readonly publishedAt?: IsoTimestamp;
+  readonly dispatchedAt?: IsoTimestamp;
 }
 
 export interface BoardEvent {
@@ -111,7 +111,7 @@ export function reduceBoard(state: BoardState, now: IsoTimestamp): BoardState {
   return next;
 }
 
-export function markOutboxPublished(
+export function markOutboxDispatched(
   state: BoardState,
   outboxMessageId: BoardOutboxMessageId,
   now: IsoTimestamp
@@ -120,7 +120,7 @@ export function markOutboxPublished(
     ...state,
     outbox: state.outbox.map((message) =>
       message.id === outboxMessageId && message.status === "pending"
-        ? { ...message, status: "published", publishedAt: now }
+        ? { ...message, status: "dispatched", dispatchedAt: now }
         : message
     )
   };
@@ -196,7 +196,7 @@ function completeReadyAggregateTasks(state: BoardState, now: IsoTimestamp): Boar
 
   for (const task of state.tasks) {
     const hasDependencies = state.dependencies.some((dependency) => dependency.taskId === task.id);
-    if (isDispatchableTask(task) || !hasDependencies || !isReadyForQueue(state, task)) {
+    if (taskKind(task.type) !== "aggregate" || !hasDependencies || !isReadyForQueue(state, task)) {
       continue;
     }
 

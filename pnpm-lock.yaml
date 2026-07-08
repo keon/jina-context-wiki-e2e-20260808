@@ -53,9 +53,6 @@ importers:
       '@jina/db':
         specifier: workspace:*
         version: link:../../packages/db
-      '@jina/factory':
-        specifier: workspace:*
-        version: link:../../packages/factory
       '@jina/github':
         specifier: workspace:*
         version: link:../../packages/github
@@ -94,12 +91,6 @@ importers:
         version: link:../shared-kernel
 
   packages/db:
-    dependencies:
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
-
-  packages/factory:
     dependencies:
       '@jina/shared-kernel':
         specifier: workspace:*

@@ -1,4 +1,4 @@
-import { markOutboxPublished, nextPendingOutboxMessage, type BoardOutboxMessage } from "@jina/board";
+import { markOutboxDispatched, nextPendingOutboxMessage, type BoardOutboxMessage } from "@jina/board";
 import type { IsoTimestamp } from "@jina/shared-kernel";
 import type { WorkflowState } from "../state.js";
 import { runPublishTask } from "../tasks/run-publish.js";
@@ -38,7 +38,7 @@ export function drainOneOutboxMessage(
 
   let next: WorkflowState = {
     ...state,
-    board: markOutboxPublished(state.board, message.id, clock())
+    board: markOutboxDispatched(state.board, message.id, clock())
   };
 
   switch (message.topic) {

@@ -5,7 +5,6 @@
     { "path": "./apps/dashboard" },
     { "path": "./apps/workflows" },
     { "path": "./packages/board" },
-    { "path": "./packages/factory" },
     { "path": "./packages/review" },
     { "path": "./packages/context" },
     { "path": "./packages/publication" },

@@ -15,7 +15,6 @@
     "@jina/context": "workspace:*",
     "@jina/daytona": "workspace:*",
     "@jina/db": "workspace:*",
-    "@jina/factory": "workspace:*",
     "@jina/github": "workspace:*",
     "@jina/publication": "workspace:*",
     "@jina/review": "workspace:*",

@@ -2,14 +2,19 @@
 
 This document defines the core Postgres data model for Jina. It is the schema-oriented companion to [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Jina is factory-board-driven: **work orders** are external software requests, **assembly lines** define how a class of work flows through the factory, and **tasks** are the Linear-style board cards executed by agents and humans. Trigger.dev schedules and durably executes one stateless run per ready task; a transactional **outbox** is the dispatch bridge. Postgres is the source of truth. Agent handoff is durable board state: dependencies, task events, context records, artifacts, and assignments.
+Jina is board-driven: **tasks** are the board cards executed by agents and humans, a versioned **pipeline** (code, not a table) plans which tasks a trigger creates, and Trigger.dev schedules one stateless run per ready task with a transactional **outbox** as the dispatch bridge. Postgres is the source of truth. Agent handoff is durable board state: dependencies, task events, context records, artifacts, and assignments.
+
+Deliberately deferred tables — introduced only when a second concrete use exists:
+
+- `work_orders` (normalized intake) — when a non-PR intake type (issues, incidents, manual requests) actually ships. Until then `pull_requests` is the intake record.
+- a pipeline/stage-template table — when tenants can configure pipelines. Until then the PR review pipeline is versioned code, and root tasks record `pipeline_slug`/`pipeline_version`.
 
 ## Conventions
 
 - Every tenant-owned table includes `tenant_id`.
 - External GitHub IDs are stored separately from internal IDs.
 - JSON fields hold provider payloads, policy blobs, model usage, and extensibility points — not primary relational links.
-- Side effects are idempotent through unique keys: GitHub delivery IDs, work-order keys, task dedupe keys, outbox idempotency keys, verb idempotency keys, checkout keys, publication keys.
+- Side effects are idempotent through unique keys: GitHub delivery IDs, task dedupe keys, outbox idempotency keys, verb idempotency keys, checkout keys, publication keys.
 - Review repository checkouts happen inside Daytona sandboxes. GCP runtimes persist checkout metadata but do not host PR working trees.
 - Agents never receive clone credentials. A checkout broker performs authenticated clone/fetch, removes credentials from the sandbox, then hands a read-only working tree to the reviewer.
 - External docs and dependency docs are untrusted input. Store source attribution and snapshots as `context_items` and artifacts when policy allows.
@@ -60,112 +65,6 @@ unique(tenant_memberships.tenant_id, tenant_memberships.user_id)
 ```
 
 Human-triggered verbs must resolve the GitHub actor to a `github_identities` row, then authorize through tenant membership, GitHub repository permissions, or explicit tenant policy. Store the actor snapshot on the verb invocation and event so audit history survives later role changes.
-
-## Factory Control Plane
-
-```text
-work_orders
-- id
-- tenant_id
-- source_type                 # github_pr | github_issue | linear_issue | jira_issue | incident | manual
-- source_external_id nullable
-- repo_id nullable
-- pr_id nullable
-- title
-- objective
-- acceptance_criteria jsonb
-- priority
-- status                      # intake | planned | running | blocked | done | failed | canceled | superseded
-- requested_by_actor_type
-- requested_by_actor_id nullable
-- budget_limit jsonb nullable
-- metadata jsonb
-- created_at
-- updated_at
-
-assembly_lines
-- id
-- tenant_id
-- slug                        # pr_review | context_research | issue_triage | fix | release | incident_response
-- name
-- version
-- enabled
-- trigger_type
-- stage_graph jsonb
-- default_policy jsonb
-- created_at
-- updated_at
-
-factory_runs
-- id
-- tenant_id
-- work_order_id
-- assembly_line_id
-- assembly_line_version
-- status                      # queued | running | waiting_gate | done | failed | canceled | superseded
-- current_stage nullable
-- head_sha nullable
-- epoch nullable
-- summary jsonb nullable
-- started_at nullable
-- completed_at nullable
-- error jsonb
-
-stage_runs
-- id
-- tenant_id
-- factory_run_id
-- task_id nullable
-- stage_slug
-- stage_type                  # plan | checkout | review | context | publish | test | fix | release | human_gate
-- status
-- required
-- input jsonb
-- output jsonb
-- started_at nullable
-- completed_at nullable
-- error jsonb
-
-quality_gate_results
-- id
-- tenant_id
-- factory_run_id
-- stage_run_id nullable
-- gate_slug
-- gate_type                   # policy | budget | review | test | approval | publication | security
-- status                      # pending | passed | failed | waived
-- evidence_artifact_id nullable
-- decided_by_actor_type nullable
-- decided_by_actor_id nullable
-- payload jsonb
-- created_at
-
-harness_versions
-- id
-- tenant_id
-- assembly_line_id nullable
-- name
-- version
-- prompt_version nullable
-- tool_config jsonb
-- context_rules jsonb
-- eval_suite_ref nullable
-- model_policy jsonb
-- created_at
-```
-
-Suggested constraints:
-
-```text
-unique(work_orders.tenant_id, work_orders.source_type, work_orders.source_external_id) where source_external_id is not null
-unique(assembly_lines.tenant_id, assembly_lines.slug, assembly_lines.version)
-unique(harness_versions.tenant_id, harness_versions.name, harness_versions.version)
-index(factory_runs.tenant_id, factory_runs.work_order_id)
-index(stage_runs.tenant_id, stage_runs.factory_run_id)
-index(quality_gate_results.tenant_id, quality_gate_results.factory_run_id)
-```
-
-The MVP creates one `work_order` and one `factory_run` for a PR review epoch. The `PRReviewAssemblyLine` creates stage tasks such as `review_pass`, optional `context`, and `publish`. Future lines reuse the same control plane for fixes, tests, releases, and incident work.
 
 ## GitHub Installation And Repositories
 
@@ -226,7 +125,8 @@ review_policies
 - min_publish_severity
 - min_publish_confidence
 - budget_unit                 # tokens | usd | task_count
-- budget_limit
+- budget_limits jsonb         # { per_epoch, per_pr_total, per_repo_per_day }
+- review_rate_limit jsonb     # { max_review_runs_per_pr_per_hour, synchronize_debounce_seconds }
 - context_egress_enabled
 - context_source_allowlist jsonb
 - context_fetch_limits jsonb  # max_sources, max_bytes_per_source, timeout_ms, max_redirects
@@ -242,7 +142,7 @@ review_policies
 
 `checkout_strategy` examples: `head_only`, `base_and_head`, `merge_ref`.
 
-`budget_unit`/`budget_limit` define the per-PR ceiling enforced at `CreateTask` time. Context egress fields define whether `run-research` can fetch external sources, where it can fetch from, how much it can fetch, how long source snapshots can be retained, and whether citations are required. The MVP supports read-only Daytona checkouts for review; dependency installation, tests, reproduction, and fixes are out of scope.
+`budget_limits` defines layered ceilings enforced at verb time and dispatch time: per epoch, per PR cumulative (never reset by a force push), and per repo per day. The cumulative and per-repo ceilings bound hostile force-push loops; fork PRs get lower defaults. Context egress fields define whether `run-research` can fetch external sources, where it can fetch from, how much it can fetch, how long source snapshots can be retained, and whether citations are required.
 
 ## Review Policy Snapshots
 
@@ -260,9 +160,9 @@ review_policy_snapshots
 - created_at
 ```
 
-Review runs link to the snapshot they used, making reviews reproducible after tenant settings, repo instructions, prompts, or model policy change.
+Review runs link to the snapshot they used, making reviews reproducible after tenant settings, repo instructions, prompts, or model policy change. The snapshot is also the authority for source-allowlist checks on context requests made by that review — a mid-flight policy edit cannot widen an in-progress review's scope.
 
-## GitHub Subjects And Pull Requests
+## Pull Requests And GitHub Subjects
 
 ```text
 pull_requests
@@ -280,16 +180,16 @@ pull_requests
 - base_ref
 - base_sha
 - head_repo_id nullable
-- head_repo_full_name
+- head_repo_full_name        # provenance only; checkouts fetch refs/pull/{n}/head from the base repo
 - head_is_fork
 - head_ref
 - head_sha
-- current_epoch              # bumped on each head SHA change; drives supersession + quiescence
+- current_epoch              # bumped on each head SHA change; drives supersession
 - merge_ref nullable
 - merge_sha nullable
 - draft
 - merged
-- budget_spent jsonb         # running token/cost/task-count spend for the active epoch
+- budget_spent jsonb         # cumulative for the PR lifetime, plus per-epoch breakdown
 - metadata jsonb
 - created_at
 - updated_at
@@ -322,7 +222,7 @@ unique(github_subjects.tenant_id, github_subjects.github_node_id) where github_n
 
 Subject types: `pull_request`, `issue`, `review`, `review_comment`, `check_run`, `workflow_run`.
 
-`pull_requests` is the canonical PR table; `github_subjects` is the routing abstraction for webhooks and comments. `repo_id` is the base repository. Fork PRs must preserve `head_repo_*` so the checkout broker can fetch the correct head commit.
+`pull_requests` is the canonical PR table and the MVP intake record; `github_subjects` is the routing abstraction for webhooks and comments. `repo_id` is the base repository.
 
 ## Webhook Events
 
@@ -352,15 +252,12 @@ Downstream mutations use delivery-aware idempotency keys, e.g. `github:{delivery
 
 ## Tasks
 
-`tasks` is the central work table — the Linear-style board cards.
+`tasks` is the central work table — the board cards.
 
 ```text
 tasks
 - id
 - tenant_id
-- work_order_id nullable
-- factory_run_id nullable
-- stage_run_id nullable
 - root_task_id nullable
 - parent_task_id nullable
 - repo_id nullable
@@ -371,6 +268,9 @@ tasks
 - status
 - head_sha nullable
 - epoch nullable             # the PR epoch this task belongs to
+- pipeline_slug nullable     # set on root tasks: which pipeline planned this graph
+- pipeline_version nullable
+- harness_version_id nullable
 - required_caps jsonb        # capabilities a runtime must hold to execute this task
 - dedupe_key nullable
 - title
@@ -385,12 +285,14 @@ tasks
 - updated_at
 ```
 
-Task types:
+Task types and kinds:
 
 ```text
-MVP/core:     pr_review, review_pass, context, publish, human_decision
+MVP/core:     pr_review (aggregate), review_pass, context, publish (dispatchable), human_decision (waitpoint)
 Future/gated: finding, grounding, fix, plan, build, test, docs, release, incident_triage, github_issue_triage
 ```
+
+Every type has a declared kind — `aggregate` (auto-completes from edges, never executes), `dispatchable` (queued to Trigger.dev; dispatch topic derived from type), or `waitpoint` (only a user verb completes it).
 
 Task statuses:
 
@@ -407,11 +309,13 @@ index(tasks.tenant_id, tasks.root_task_id)
 index(tasks.tenant_id, tasks.github_pr_id, tasks.epoch)
 ```
 
-The root `pr_review` task owns the PR review for an epoch. Review passes, context tasks, publication tasks, human decisions, and future grounding/fix tasks are child tasks. `dedupe_key` gives idempotent creation: one root `pr_review` per PR per epoch; one `review_pass` per `(pr, head_sha, review_profile)`; one `publish` task per `(pr, head_sha, publication_mode)`. Context tasks can be deduped by `(target_task_id, normalized_source_set, question_hash)` when a review task asks for the same missing context more than once.
+The root `pr_review` task owns the PR review for an epoch. Review passes, context tasks, publication tasks, human decisions, and future grounding/fix tasks are child tasks.
+
+`dedupe_key` gives idempotent creation and is **epoch-scoped**: one root `pr_review` per `(pr, epoch)`; one `review_pass` per `(pr, epoch, review_profile)`; one `publish` task per `(pr, epoch, publication_mode)`; one context task per `(target_task_id, normalized_source_set, question_hash)`. Head SHAs can recur across epochs (force-push away and back), so `head_sha` belongs in publication keys, not task dedupe keys.
 
 ## Task Dependencies
 
-Parent/child structure is not enough to decide execution order or completion. Dependency edges drive the readiness reducer and quiescence.
+Parent/child structure is not enough to decide execution order or completion. Dependency edges drive the readiness reducer and root completion.
 
 ```text
 task_dependencies
@@ -421,9 +325,10 @@ task_dependencies
 - depends_on_task_id
 - relationship              # blocks | relates_to | context_for | verifies | fixes | publishes | supersedes
 - required
-- blocks_parent_completion
 - created_at
 ```
+
+`relationship` describes why `task_id` depends on `depends_on_task_id`: it is blocked by it, gets context from it, is verified by it, is published by it.
 
 Suggested constraints:
 
@@ -432,26 +337,23 @@ unique(task_dependencies.tenant_id, task_id, depends_on_task_id, relationship)
 index(task_dependencies.tenant_id, depends_on_task_id)
 ```
 
-A task becomes `queued` only when every `required` dependency is terminal-success. The root `pr_review` completes only when all `blocks_parent_completion` descendants are terminal-success for the current epoch. For PR review, dependencies connect `publish` tasks to completed `review_pass` tasks and can connect a blocked `review_pass` to a required `context` task. The same review task resumes after its `context_for` dependency completes.
+A task becomes `queued` only when every `required` dependency is `done`. Root completion is purely edge-based: the aggregate root completes when all its required edges are satisfied. To keep dynamically created children visible to completion, `CreateTask` with `blocks_parent_completion = true` materializes a required `root -> child` edge in the same transaction — the flag is an instruction to the verb layer, not a column the reducer reads. If a required dependency reaches `failed` or `canceled`, the reducer transitions the dependent to `blocked` and creates a linked `human_decision` task.
 
-Exact context handoff dependency row:
+Exact context handoff dependency rows:
 
 ```text
-task_id = review_pass_id
-depends_on_task_id = context_task_id
-relationship = context_for
-required = true
-blocks_parent_completion = true
+task_id = review_pass_id, depends_on_task_id = context_task_id, relationship = context_for, required = true
+task_id = root_task_id,   depends_on_task_id = context_task_id, relationship = blocks,      required = true   # materialized by the verb layer
 ```
 
 ## Task Events
 
 ```text
 task_events
-- id
+- id                         # bigserial; the board-wide live-feed cursor
 - tenant_id
 - task_id
-- seq
+- seq                        # per-task counter; orders one task's timeline
 - actor_type
 - actor_id
 - event_type
@@ -497,7 +399,7 @@ outbox.dead_lettered
 
 Future event types: `grounding.requested`, `grounding.verified`, `grounding.refuted`, `fix.requested`, `fix.pushed`.
 
-`seq` is monotonic within the tenant or task scope. Dashboard cursors page by `(seq, id)`, not timestamp alone. Agent-posted context (e.g. extracted dependency docs) is a `context.collected` event whose payload references `context_items` and artifacts. The board thread is the agent's shared memory.
+`seq` is per-task, assigned in the same transaction that locks the task row for its transition. Per-task timelines page by `(task_id, seq)`; the board-wide feed pages by the global `id` cursor (`where tenant_id = ? and id > ? order by id`, indexed on `(tenant_id, id)` — strictly increasing, gaps are fine). Agent-posted context (e.g. extracted dependency docs) is a `context.collected` event whose payload references `context_items` and artifacts. The board thread is the agent's shared memory.
 
 ## Context Items
 
@@ -531,7 +433,7 @@ index(context_items.tenant_id, context_items.task_id)
 index(context_items.tenant_id, context_items.target_task_id)
 ```
 
-Large source snapshots live in `review_artifacts` or future generic artifacts. `context_items.citations` should point to stable source locations when available. A resumed review task assembles its context bundle from its own `task_events`, linked `context_for` tasks, `context_items`, and artifacts.
+Large source snapshots live in `review_artifacts`. `context_items.citations` should point to stable source locations when available. A resumed review task assembles its context bundle from its own `task_events`, linked `context_for` tasks, `context_items`, and artifacts.
 
 ## Outbox
 
@@ -548,7 +450,7 @@ outbox
 - payload jsonb
 - status                    # pending | dispatched | dead_lettered
 - attempts
-- next_attempt_at
+- next_attempt_at           # also used to debounce synchronize-seeded work
 - dispatched_at nullable
 - last_error jsonb
 - created_at
@@ -561,7 +463,45 @@ unique(outbox.tenant_id, outbox.task_id, outbox.attempt)
 index(outbox.status, outbox.next_attempt_at)
 ```
 
-An outbox row is inserted in the **same transaction** as the transition that made a task `queued` (by the readiness reducer or a webhook verb). The relay drains `pending` rows and calls `trigger(trigger_task, {taskId}, {idempotencyKey: task_id:attempt, concurrencyKey})`. The idempotency key makes the relay safe to retry; persistent failures move to `dead_lettered` for repair. This replaces the prior engine-signal repair job.
+An outbox row is inserted in the **same transaction** as the transition that made a task `queued` (by the readiness reducer or a webhook verb). The relay drains `pending` rows and calls `trigger(trigger_task, {taskId}, {idempotencyKey: task_id:attempt, concurrencyKey})`. The idempotency key makes the relay safe to retry; persistent failures move to `dead_lettered` for repair.
+
+## Gates And Harness Versions
+
+```text
+gate_results
+- id
+- tenant_id
+- task_id
+- gate_slug
+- gate_type                 # policy | budget | review | test | approval | publication | security
+- status                    # pending | passed | failed | waived
+- evidence_artifact_id nullable
+- decided_by_actor_type nullable
+- decided_by_actor_id nullable
+- payload jsonb
+- created_at
+
+harness_versions
+- id
+- tenant_id
+- name
+- version
+- prompt_version nullable
+- tool_config jsonb
+- context_rules jsonb
+- eval_suite_ref nullable
+- model_policy jsonb
+- created_at
+```
+
+Suggested constraints:
+
+```text
+unique(harness_versions.tenant_id, harness_versions.name, harness_versions.version)
+index(gate_results.tenant_id, gate_results.task_id)
+```
+
+Gate results attach to tasks — there is no separate stage table; a stage *is* a task. Harness versions are immutable per root task: a new prompt, tool config, model policy, or context rule creates a new row so run outcomes can be compared over time.
 
 ## Agents And Review Profiles
 
@@ -621,8 +561,6 @@ task_runs
 - id
 - tenant_id
 - task_id
-- factory_run_id nullable
-- stage_run_id nullable
 - agent_id nullable
 - trigger_run_id
 - trigger_task_identifier
@@ -668,14 +606,14 @@ review_checkouts
 - runtime_instance_id
 - checkout_path nullable
 - base_repo_full_name
-- head_repo_full_name
+- head_repo_full_name       # provenance only
 - base_sha
 - head_sha
 - checkout_ref
 - checkout_sha
 - merge_sha nullable
 - clone_depth
-- checkout_strategy
+- checkout_strategy         # strategy actually used (merge_ref may fall back to head_only)
 - credential_mode           # github_app_installation_token | none_public_repo
 - credentials_purged_at nullable
 - status                    # creating | cloning | ready | destroying | destroyed | failed | expired | leaked
@@ -696,7 +634,7 @@ index(review_checkouts.tenant_id, review_checkouts.pr_id, review_checkouts.head_
 index(review_checkouts.status, review_checkouts.expires_at)
 ```
 
-Checkouts use scoped GitHub App installation tokens. Tokens must not be stored in this table. The broker clones/fetches, removes credentials, records `credentials_purged_at`, and only then allows the reviewer to inspect files.
+Checkouts use scoped GitHub App installation tokens against the **base repository only**; fork heads are fetched as `refs/pull/{n}/head`. Tokens must not be stored in this table. The broker clones/fetches, removes credentials, records `credentials_purged_at`, and only then allows the reviewer to inspect files.
 
 ## Verb Invocations
 
@@ -742,8 +680,6 @@ review_runs
 - id
 - tenant_id
 - task_id
-- factory_run_id nullable
-- stage_run_id nullable
 - pr_id
 - task_run_id
 - checkout_id nullable
@@ -795,7 +731,6 @@ review_findings
 - fingerprint
 - evidence jsonb
 - confidence
-- grouped_by_finding_thread_id nullable
 - suggestion jsonb
 - created_at
 - updated_at
@@ -827,7 +762,7 @@ publication:  unpublished | publish_pending | published | publish_failed | suppr
 resolution:   open | dismissed | superseded | fix_requested | fixed
 ```
 
-`review_runs` is the review-specific view of a `review_pass` task's run (`task_run_id` links them). `review_findings` are per-run observations; `finding_threads` are the durable cross-run identity for dashboards, dedupe, and publication. The `fingerprint` dedupes repeated findings across PR updates (repository, file path, normalized line/hunk context, rule/profile, normalized content). Findings are grouped before publication, and GitHub inline comments are generated from `finding_locations`, not only `line_start`/`line_end`.
+`review_runs` is the review-specific view of a `review_pass` task's run (`task_run_id` links them). `review_findings` are per-run observations; `finding_threads` are the durable cross-run identity for dashboards, dedupe, and publication (thread merging uses `finding_threads.superseded_by_thread_id`). The `fingerprint` dedupes repeated findings across PR updates (repository, file path, normalized line/hunk context, rule/profile, normalized content). Findings are grouped before publication, and GitHub inline comments are generated from `finding_locations`, not only `line_start`/`line_end`.
 
 Suggested constraints:
 
@@ -920,13 +855,10 @@ The dashboard queries API-shaped read models, not raw internals. These can start
 
 ```text
 task_board_items
-work_order_items
-factory_run_summaries
-stage_run_summaries
 task_timeline_items
 task_dependency_edges
 context_item_summaries
-quality_gate_summaries
+gate_summaries
 pr_review_summaries
 finding_list_items
 task_run_summaries

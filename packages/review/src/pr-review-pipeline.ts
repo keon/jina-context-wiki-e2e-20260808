@@ -1,11 +1,7 @@
 import { entityId, type EntityId } from "@jina/shared-kernel";
-import type { FactoryRunId } from "./factory-runs.js";
-import type { WorkOrderId } from "./work-orders.js";
 
-export type AssemblyLineSlug = "pr_review" | "context_research" | "fix" | "release" | "incident_response";
-
-export interface AssemblyLineRef {
-  readonly slug: AssemblyLineSlug;
+export interface PipelineRef {
+  readonly slug: "pr_review";
   readonly version: string;
 }
 
@@ -15,7 +11,7 @@ export interface PlannedTask {
   readonly id: PlannedTaskId;
   readonly type: "pr_review" | "review_pass" | "publish";
   readonly title: string;
-  readonly assigneeRole: "factory" | "review_agent" | "publisher";
+  readonly assigneeRole: "system" | "review_agent" | "publisher";
   readonly dedupeKey: string;
   readonly required: boolean;
   readonly dispatchTopic?: "run-review" | "run-publish";
@@ -31,7 +27,7 @@ export interface PlannedTaskDependency {
   readonly blocksParentCompletion: boolean;
 }
 
-export interface PrReviewFactoryInput {
+export interface PrReviewInput {
   readonly tenantId: string;
   readonly repository: string;
   readonly pullRequestNumber: number;
@@ -40,26 +36,24 @@ export interface PrReviewFactoryInput {
   readonly needsExternalContext?: boolean;
 }
 
-export interface PrReviewFactoryPlan {
-  readonly assemblyLine: AssemblyLineRef;
-  readonly workOrderId: WorkOrderId;
-  readonly factoryRunId: FactoryRunId;
+export interface PrReviewPlan {
+  readonly pipeline: PipelineRef;
+  readonly rootTaskId: PlannedTaskId;
   readonly epoch: number;
   readonly headSha: string;
   readonly tasks: readonly PlannedTask[];
   readonly dependencies: readonly PlannedTaskDependency[];
 }
 
-export function planPrReviewFactoryRun(input: PrReviewFactoryInput): PrReviewFactoryPlan {
+export function planPrReview(input: PrReviewInput): PrReviewPlan {
   const subjectKey = `${input.tenantId}:${input.repository}:pr-${input.pullRequestNumber}:epoch-${input.epoch}`;
   const rootTaskId = entityId<"task">(`task_${subjectKey}:root`);
   const reviewTaskId = entityId<"task">(`task_${subjectKey}:review:general`);
   const publishTaskId = entityId<"task">(`task_${subjectKey}:publish`);
 
   return {
-    assemblyLine: { slug: "pr_review", version: "2026-07-08" },
-    workOrderId: entityId(`work_order_${subjectKey}`),
-    factoryRunId: entityId(`factory_run_${subjectKey}`),
+    pipeline: { slug: "pr_review", version: "2026-07-08" },
+    rootTaskId,
     epoch: input.epoch,
     headSha: input.headSha,
     tasks: [
@@ -67,7 +61,7 @@ export function planPrReviewFactoryRun(input: PrReviewFactoryInput): PrReviewFac
         id: rootTaskId,
         type: "pr_review",
         title: `Review ${input.repository}#${input.pullRequestNumber}`,
-        assigneeRole: "factory",
+        assigneeRole: "system",
         dedupeKey: `${subjectKey}:root`,
         required: true,
         metadata: {

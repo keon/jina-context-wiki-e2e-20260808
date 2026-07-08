@@ -1,23 +1,23 @@
 # Jina
 
-Jina is a multi-tenant agentic software factory, starting with GitHub pull request review.
+Jina is a multi-tenant agent platform for software work, starting with GitHub pull request review.
 
-The MVP receives GitHub webhooks, creates review work on a Postgres-backed factory board, runs stateless agent tasks on Trigger.dev, clones PR repositories only inside Daytona sandboxes, and publishes advisory feedback back to GitHub. It does not execute untrusted PR code, install dependencies, create fixes, push commits, or open PRs.
+The MVP receives GitHub webhooks, creates review tasks on a Postgres-backed board, runs stateless agent tasks on Trigger.dev, clones PR repositories only inside Daytona sandboxes, and publishes advisory feedback back to GitHub. It does not execute untrusted PR code, install dependencies, create fixes, push commits, or open PRs.
 
 ## Core Shape
 
 ```text
 GitHub event
-  -> work_order
-  -> assembly_line + factory_run
-  -> board tasks and dependencies
-  -> outbox relay
-  -> Trigger.dev task run
+  -> pipeline plans board tasks and dependencies
+  -> readiness reducer queues ready tasks + writes outbox rows (one tx)
+  -> outbox relay triggers a Trigger.dev run per task
   -> Daytona checkout when repository files are needed
   -> task events, artifacts, findings, gates, publications
 ```
 
-The board is the source of truth and orchestrator. Trigger.dev schedules durable attempts. Daytona is the isolated repository workbench. Agents and humans act through the same validated verbs.
+The board is the source of truth and the orchestrator. Trigger.dev schedules durable attempts. Daytona is the isolated repository workbench. Agents and humans act through the same validated verbs.
+
+Six concepts carry the whole design: **board**, **task**, **pipeline**, **run**, **gate**, **epoch**. Anything else is introduced only when a second concrete use exists.
 
 ## Repo Layout
 
@@ -28,9 +28,8 @@ apps/
   workflows/    Trigger.dev tasks and outbox relay
 
 packages/
-  board/        tasks, dependencies, verbs, reducer, completion
-  factory/      work orders, assembly lines, factory runs, stage runs, gates
-  review/       PR review line, review profiles, findings, dedupe
+  board/        tasks, dependencies, verbs, reducer, gates
+  review/       PR review pipeline, review profiles, findings, dedupe
   context/      context handoff, source policy, citations, extracted context
   publication/  publication planning, keys, publish results
   policy/       capabilities, budgets, review policy decisions
@@ -43,13 +42,13 @@ packages/
 
 `apps/*` own runtime wiring. Domain packages own their bounded rules and should not import HTTP, Trigger.dev, GitHub, Daytona, or model SDKs. `shared-kernel` stays small and contains no business workflows.
 
-## PR Review Line
+## PR Review Pipeline
 
 ```text
 intake -> policy_snapshot -> checkout -> review_passes -> finding_grouping -> publish -> close
 ```
 
-Context handoff is part of the review line:
+Context handoff is part of the pipeline:
 
 ```text
 review_pass R

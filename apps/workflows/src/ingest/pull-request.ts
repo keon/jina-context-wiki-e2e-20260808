@@ -1,13 +1,12 @@
 import {
   addDependency,
   addTask,
+  createBoardTask,
   reduceBoard,
-  type BoardState,
   type TaskDependencyDraft
 } from "@jina/board";
-import { planPrReviewFactoryRun, type PlannedTask, type PrReviewFactoryPlan } from "@jina/factory";
+import { planPrReview, type PlannedTask, type PrReviewPlan } from "@jina/review";
 import type { IsoTimestamp } from "@jina/shared-kernel";
-import { createBoardTask } from "@jina/board";
 import type { WorkflowState } from "../state.js";
 
 export interface PullRequestReviewInput {
@@ -24,7 +23,7 @@ export function ingestPullRequestReview(
   input: PullRequestReviewInput,
   now: IsoTimestamp
 ): WorkflowState {
-  const plan = planPrReviewFactoryRun({
+  const plan = planPrReview({
     ...input,
     epoch: input.epoch ?? 1
   });
@@ -38,18 +37,18 @@ export function ingestPullRequestReview(
     board = addDependency(board, toBoardDependency(dependency), now);
   }
 
-  const nextPlans = state.factoryPlans.some((existing) => existing.factoryRunId === plan.factoryRunId)
-    ? state.factoryPlans
-    : [...state.factoryPlans, plan];
+  const nextPlans = state.reviewPlans.some((existing) => existing.rootTaskId === plan.rootTaskId)
+    ? state.reviewPlans
+    : [...state.reviewPlans, plan];
 
   return {
     ...state,
     board: reduceBoard(board, now),
-    factoryPlans: nextPlans
+    reviewPlans: nextPlans
   };
 }
 
-function toBoardTask(task: PlannedTask, plan: PrReviewFactoryPlan, now: IsoTimestamp) {
+function toBoardTask(task: PlannedTask, plan: PrReviewPlan, now: IsoTimestamp) {
   return createBoardTask({
     id: task.id,
     type: task.type,
@@ -60,9 +59,8 @@ function toBoardTask(task: PlannedTask, plan: PrReviewFactoryPlan, now: IsoTimes
     required: task.required,
     metadata: {
       ...task.metadata,
-      factoryRunId: plan.factoryRunId,
-      assemblyLineSlug: plan.assemblyLine.slug,
-      assemblyLineVersion: plan.assemblyLine.version
+      pipelineSlug: plan.pipeline.slug,
+      pipelineVersion: plan.pipeline.version
     },
     ...(task.dispatchTopic ? { dispatchTopic: task.dispatchTopic } : {}),
     ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
@@ -70,7 +68,7 @@ function toBoardTask(task: PlannedTask, plan: PrReviewFactoryPlan, now: IsoTimes
   });
 }
 
-function toBoardDependency(dependency: PrReviewFactoryPlan["dependencies"][number]): TaskDependencyDraft {
+function toBoardDependency(dependency: PrReviewPlan["dependencies"][number]): TaskDependencyDraft {
   return {
     taskId: dependency.taskId,
     dependsOnTaskId: dependency.dependsOnTaskId,

@@ -73,7 +73,7 @@ function runDuplicatePrWebhookDoesNotDuplicateBoard(): void {
   assert(state.board.tasks.length === 3, "duplicate PR ingestion keeps one root, one review, one publish task");
   assert(state.board.dependencies.length === 2, "duplicate PR ingestion keeps one dependency graph");
   assert(state.board.outbox.length === 1, "duplicate PR ingestion keeps one initial outbox message");
-  assert(state.factoryPlans.length === 1, "duplicate PR ingestion keeps one factory plan");
+  assert(state.reviewPlans.length === 1, "duplicate PR ingestion keeps one review plan");
 }
 
 function drainRequiredStep(state: WorkflowState, clock: () => string): WorkflowState {
