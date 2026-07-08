@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "rootDir": ".",
+    "outDir": "dist"
+  },
+  "include": ["app/**/*.ts", "components/**/*.ts", "lib/**/*.ts"],
+  "references": [
+    { "path": "../../packages/shared-kernel" }
+  ]
+}
+

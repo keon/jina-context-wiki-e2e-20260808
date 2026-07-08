@@ -1,0 +1,22 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "rootDir": "src",
+    "outDir": "dist"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../packages/ai" },
+    { "path": "../../packages/board" },
+    { "path": "../../packages/context" },
+    { "path": "../../packages/daytona" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/factory" },
+    { "path": "../../packages/github" },
+    { "path": "../../packages/publication" },
+    { "path": "../../packages/review" },
+    { "path": "../../packages/shared-kernel" }
+  ]
+}

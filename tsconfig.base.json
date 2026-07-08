@@ -1,0 +1,24 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "skipLibCheck": true,
+    "paths": {
+      "@jina/board": ["./packages/board/src/index.ts"],
+      "@jina/factory": ["./packages/factory/src/index.ts"],
+      "@jina/review": ["./packages/review/src/index.ts"],
+      "@jina/context": ["./packages/context/src/index.ts"],
+      "@jina/publication": ["./packages/publication/src/index.ts"],
+      "@jina/policy": ["./packages/policy/src/index.ts"],
+      "@jina/db": ["./packages/db/src/index.ts"],
+      "@jina/github": ["./packages/github/src/index.ts"],
+      "@jina/daytona": ["./packages/daytona/src/index.ts"],
+      "@jina/ai": ["./packages/ai/src/index.ts"],
+      "@jina/shared-kernel": ["./packages/shared-kernel/src/index.ts"]
+    }
+  }
+}

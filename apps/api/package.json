@@ -1,0 +1,17 @@
+{
+  "name": "@jina/api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "echo \"lint not configured\"",
+    "test": "echo \"test not configured\""
+  },
+  "dependencies": {
+    "@jina/board": "workspace:*",
+    "@jina/db": "workspace:*",
+    "@jina/github": "workspace:*",
+    "@jina/shared-kernel": "workspace:*"
+  }
+}

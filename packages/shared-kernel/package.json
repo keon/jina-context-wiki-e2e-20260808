@@ -1,0 +1,17 @@
+{
+  "name": "@jina/shared-kernel",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "echo \"lint not configured\"",
+    "test": "echo \"test not configured\""
+  }
+}

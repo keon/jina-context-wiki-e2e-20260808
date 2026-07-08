@@ -1,0 +1,19 @@
+{
+  "files": [],
+  "references": [
+    { "path": "./apps/api" },
+    { "path": "./apps/dashboard" },
+    { "path": "./apps/workflows" },
+    { "path": "./packages/board" },
+    { "path": "./packages/factory" },
+    { "path": "./packages/review" },
+    { "path": "./packages/context" },
+    { "path": "./packages/publication" },
+    { "path": "./packages/policy" },
+    { "path": "./packages/db" },
+    { "path": "./packages/github" },
+    { "path": "./packages/daytona" },
+    { "path": "./packages/ai" },
+    { "path": "./packages/shared-kernel" }
+  ]
+}

@@ -1,0 +1,24 @@
+{
+  "name": "@jina/workflows",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "echo \"lint not configured\"",
+    "test": "pnpm build && node dist/simulations/pr-review-simulation.test.js",
+    "simulate:pr-review": "pnpm build && node dist/simulations/pr-review-trace.js"
+  },
+  "dependencies": {
+    "@jina/ai": "workspace:*",
+    "@jina/board": "workspace:*",
+    "@jina/context": "workspace:*",
+    "@jina/daytona": "workspace:*",
+    "@jina/db": "workspace:*",
+    "@jina/factory": "workspace:*",
+    "@jina/github": "workspace:*",
+    "@jina/publication": "workspace:*",
+    "@jina/review": "workspace:*",
+    "@jina/shared-kernel": "workspace:*"
+  }
+}
