@@ -201,6 +201,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/board") {
       json(response, 200, {
         tasks: intakeState.board.tasks,
+        dependencies: intakeState.board.dependencies,
         outbox: intakeState.board.outbox,
         publications,
         pullRequests: intakeState.pullRequests

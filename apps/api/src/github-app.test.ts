@@ -39,6 +39,12 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   const boardResponse = await fetch(`${baseUrl}/board`);
   const board = await boardResponse.json() as {
     tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
+    dependencies: Array<{
+      taskId: string;
+      dependsOnTaskId: string;
+      relationship: string;
+      required: boolean;
+    }>;
     outbox: Array<{ topic: string }>;
   };
 
@@ -59,6 +65,13 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
     "queued"
   );
   assert.equal(board.outbox.filter((message) => message.topic === "run-review").length, 3);
+  assert.equal(board.dependencies.length, 12);
+  assert.equal(
+    board.dependencies.some(
+      (dependency) => dependency.relationship === "blocks" && dependency.required
+    ),
+    true
+  );
 });
 
 test("durable state survives an API server restart", async () => {
