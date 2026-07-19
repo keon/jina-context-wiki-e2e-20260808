@@ -2,9 +2,9 @@ import type { OntologyGraph } from "./model.js";
 
 export interface OntologyGraphStore {
   save(graph: OntologyGraph): Promise<void>;
-  latest(tenantId?: string): Promise<OntologyGraph | undefined>;
-  get(graphId: string): Promise<OntologyGraph | undefined>;
-  list(tenantId?: string): Promise<readonly OntologyGraph[]>;
+  latest(tenantId: string): Promise<OntologyGraph | undefined>;
+  get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
+  list(tenantId: string): Promise<readonly OntologyGraph[]>;
   close(): Promise<void>;
 }
 
@@ -12,20 +12,21 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   private readonly graphs = new Map<string, OntologyGraph>();
 
   async save(graph: OntologyGraph): Promise<void> {
-    this.graphs.set(graph.id, graph);
+    if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
   }
 
-  async latest(tenantId?: string): Promise<OntologyGraph | undefined> {
+  async latest(tenantId: string): Promise<OntologyGraph | undefined> {
     return (await this.list(tenantId))[0];
   }
 
-  async get(graphId: string): Promise<OntologyGraph | undefined> {
-    return this.graphs.get(graphId);
+  async get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined> {
+    const graph = this.graphs.get(graphId);
+    return graph?.tenantId === tenantId ? graph : undefined;
   }
 
-  async list(tenantId?: string): Promise<readonly OntologyGraph[]> {
+  async list(tenantId: string): Promise<readonly OntologyGraph[]> {
     return [...this.graphs.values()]
-      .filter((graph) => !tenantId || graph.tenantId === tenantId)
+      .filter((graph) => graph.tenantId === tenantId)
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
   }
 

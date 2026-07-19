@@ -152,7 +152,7 @@ function applyTransitionTask(state: BoardState, command: TransitionTaskCommand, 
   if (task.status === command.toStatus) {
     return { state, accepted: true };
   }
-  if (!canTransition(task.type, task.status, command.toStatus, options.actor.type)) {
+  if (!canTransition(task.kind, task.status, command.toStatus, options.actor.type)) {
     return reject(
       state,
       command,

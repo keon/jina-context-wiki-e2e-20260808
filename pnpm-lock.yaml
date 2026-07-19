@@ -20,9 +20,6 @@ importers:
       '@jina/board':
         specifier: workspace:*
         version: link:../../packages/board
-      '@jina/daytona':
-        specifier: workspace:*
-        version: link:../../packages/daytona
       '@jina/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -51,6 +48,19 @@ importers:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../../packages/shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
+
+  apps/worker:
+    dependencies:
+      '@jina/daytona':
+        specifier: workspace:*
+        version: link:../../packages/daytona
+      '@jina/ontology':
+        specifier: workspace:*
+        version: link:../../packages/ontology
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -108,6 +118,10 @@ importers:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
 
   packages/context:
     dependencies:

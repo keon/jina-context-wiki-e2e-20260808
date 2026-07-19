@@ -1,21 +1,17 @@
 {
-  "name": "@jina/board",
+  "name": "@jina/worker",
   "private": true,
   "type": "module",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
-    }
-  },
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
-    "test": "pnpm build && node --test dist/board.test.js"
+    "test": "echo \"test not configured\"",
+    "start": "node dist/server.js"
   },
   "dependencies": {
-    "@jina/shared-kernel": "workspace:*"
+    "@jina/daytona": "workspace:*",
+    "@jina/ontology": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.0"

@@ -4,6 +4,7 @@ import {
   ONTOLOGY_SYSTEM_PROMPT,
   createOntologyGraph,
   parseGeneratedOntology,
+  validateOntologyEvidence,
   type OntologyBuildRequest,
   type OntologyExecutor,
   type OntologyGraph
@@ -105,6 +106,10 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       }
 
       const generated = parseGeneratedOntology(parseJsonResult(resultBuffer.toString("utf8")));
+      await validateOntologyEvidence(generated, async (path) => {
+        const contents = await sandbox!.fs.downloadFile(`${REPO_DIR}/${path}`, 120);
+        return contents.toString("utf8");
+      });
       return createOntologyGraph({
         request,
         commitSha: shaResult.result.trim(),

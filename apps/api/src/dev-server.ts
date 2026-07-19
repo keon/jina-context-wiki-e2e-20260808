@@ -1,4 +1,3 @@
-import { DaytonaCodexOntologyExecutor } from "@jina/daytona";
 import {
   PostgresJsonStateStore,
   PostgresOntologyGraphStore,
@@ -12,9 +11,9 @@ const port = Number(process.env.PORT ?? 4000);
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const stateStore = createStateStore();
 const ontologyStore = createOntologyStore();
-const ontologyExecutor = process.env.DAYTONA_API_KEY && (process.env.OPENAI_API_KEY || process.env.OPENROUTER_API_KEY)
-  ? new DaytonaCodexOntologyExecutor()
-  : undefined;
+if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.JINA_TENANT_ID)) {
+  throw new Error("INTERNAL_API_TOKEN and JINA_TENANT_ID are required in production");
+}
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
@@ -24,7 +23,6 @@ const server = createApiServer({
   seedDemo: enableDevEndpoints && process.env.JINA_SEED_DEMO !== "false",
   ...(stateStore ? { stateStore } : {}),
   ontologyStore,
-  ...(ontologyExecutor ? { ontologyExecutor } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {})
 });
 

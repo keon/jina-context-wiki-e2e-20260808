@@ -4,6 +4,7 @@ import { renderDashboardPage } from "../app/page.js";
 
 const port = Number(process.env.PORT ?? 3000);
 const apiUrl = process.env.JINA_API_URL ?? "http://localhost:4000";
+const internalApiToken = process.env.INTERNAL_API_TOKEN?.trim();
 const page = renderDashboardPage("/api", apiUrl);
 
 const server = createServer((request, response) => {
@@ -21,10 +22,26 @@ server.listen(port, () => {
 
 function proxyApiRequest(request: IncomingMessage, response: ServerResponse): void {
   const incoming = new URL(request.url ?? "/api/", "http://dashboard.internal");
+  const allowedRead = request.method === "GET" && (
+    incoming.pathname === "/api/board" ||
+    incoming.pathname === "/api/events" ||
+    incoming.pathname === "/api/task-types" ||
+    incoming.pathname === "/api/ontology" ||
+    incoming.pathname.startsWith("/api/ontology/graphs/")
+  );
+  const allowedLocalDemo = !internalApiToken && request.method === "POST" && incoming.pathname === "/api/dev/webhooks/github";
+  if (!allowedRead && !allowedLocalDemo) {
+    response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
+    response.end('{"error":"not found"}');
+    return;
+  }
   const upstreamUrl = new URL(`${incoming.pathname.slice(4)}${incoming.search}`, apiUrl);
   const headers = { ...request.headers };
   delete headers.host;
   delete headers.connection;
+  delete headers.authorization;
+  delete headers["x-jina-tenant-id"];
+  if (internalApiToken) headers.authorization = `Bearer ${internalApiToken}`;
   const upstreamRequest = (upstreamUrl.protocol === "https:" ? httpsRequest : httpRequest)(
     upstreamUrl,
     { method: request.method, headers },

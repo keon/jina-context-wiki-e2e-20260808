@@ -47,17 +47,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      await client.query(
+      const inserted = await client.query(
         `insert into jina_ontology.graphs
           (id, tenant_id, repository, ref, commit_sha, generated_at, executor, model, sandbox_id, summary)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-         on conflict (id) do update set generated_at=excluded.generated_at, executor=excluded.executor,
-           model=excluded.model, sandbox_id=excluded.sandbox_id, summary=excluded.summary`,
+         on conflict (id) do nothing
+         returning id`,
         [graph.id, graph.tenantId, graph.repository, graph.ref, graph.commitSha, graph.generatedAt,
           graph.generator.executor, graph.generator.model, graph.generator.sandboxId ?? null, graph.summary]
       );
-      await client.query("delete from jina_ontology.edges where graph_id = $1", [graph.id]);
-      await client.query("delete from jina_ontology.nodes where graph_id = $1", [graph.id]);
+      if (inserted.rowCount !== 1) {
+        await client.query("commit");
+        return;
+      }
       for (const node of graph.nodes) {
         await client.query(
           `insert into jina_ontology.nodes
@@ -82,18 +84,21 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
-  async latest(tenantId?: string): Promise<OntologyGraph | undefined> {
+  async latest(tenantId: string): Promise<OntologyGraph | undefined> {
     const graphs = await this.loadGraphs(tenantId, 1);
     return graphs[0];
   }
 
-  async get(graphId: string): Promise<OntologyGraph | undefined> {
+  async get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined> {
     await this.initialize();
-    const result = await this.pool.query<GraphRow>("select * from jina_ontology.graphs where id = $1", [graphId]);
+    const result = await this.pool.query<GraphRow>(
+      "select * from jina_ontology.graphs where id = $1 and tenant_id = $2",
+      [graphId, tenantId]
+    );
     return result.rows[0] ? this.hydrate(result.rows[0]) : undefined;
   }
 
-  async list(tenantId?: string): Promise<readonly OntologyGraph[]> {
+  async list(tenantId: string): Promise<readonly OntologyGraph[]> {
     return this.loadGraphs(tenantId, 50);
   }
 
@@ -101,14 +106,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     await this.pool.end();
   }
 
-  private async loadGraphs(tenantId: string | undefined, limit: number): Promise<readonly OntologyGraph[]> {
+  private async loadGraphs(tenantId: string, limit: number): Promise<readonly OntologyGraph[]> {
     await this.initialize();
-    const result = tenantId
-      ? await this.pool.query<GraphRow>(
-          "select * from jina_ontology.graphs where tenant_id = $1 order by generated_at desc limit $2",
-          [tenantId, limit]
-        )
-      : await this.pool.query<GraphRow>("select * from jina_ontology.graphs order by generated_at desc limit $1", [limit]);
+    const result = await this.pool.query<GraphRow>(
+      "select * from jina_ontology.graphs where tenant_id = $1 order by generated_at desc limit $2",
+      [tenantId, limit]
+    );
     return Promise.all(result.rows.map((row) => this.hydrate(row)));
   }
 

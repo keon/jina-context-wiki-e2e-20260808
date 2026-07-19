@@ -12,7 +12,6 @@
   },
   "dependencies": {
     "@jina/board": "workspace:*",
-    "@jina/daytona": "workspace:*",
     "@jina/db": "workspace:*",
     "@jina/github": "workspace:*",
     "@jina/ontology": "workspace:*",

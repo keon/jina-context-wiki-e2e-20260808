@@ -5,7 +5,7 @@ import { createBoardTask, type BoardTask } from "./tasks.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
-export type BoardOutboxStatus = "pending" | "dispatched";
+export type BoardOutboxStatus = "pending" | "leased" | "dispatched";
 
 export interface BoardOutboxMessage {
   readonly id: BoardOutboxMessageId;
@@ -18,6 +18,9 @@ export interface BoardOutboxMessage {
     readonly attempt: number;
   };
   readonly createdAt: IsoTimestamp;
+  readonly leaseId?: string;
+  readonly leasedAt?: IsoTimestamp;
+  readonly leaseExpiresAt?: IsoTimestamp;
   readonly dispatchedAt?: IsoTimestamp;
 }
 
@@ -150,12 +153,56 @@ export function markOutboxDispatched(
 ): BoardState {
   return {
     ...state,
-    outbox: state.outbox.map((message) =>
-      message.id === outboxMessageId && message.status === "pending"
-        ? { ...message, status: "dispatched", dispatchedAt: now }
-        : message
-    )
+    outbox: state.outbox.map((message) => {
+      if (message.id !== outboxMessageId || message.status === "dispatched") return message;
+      const { leaseId: _leaseId, leasedAt: _leasedAt, leaseExpiresAt: _leaseExpiresAt, ...unleased } = message;
+      return { ...unleased, status: "dispatched", dispatchedAt: now };
+    })
   };
+}
+
+export interface LeaseOutboxInput {
+  readonly topics: readonly string[];
+  readonly taskIds?: readonly TaskId[];
+  readonly leaseId: string;
+  readonly now: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
+}
+
+export interface LeasedOutboxMessage {
+  readonly state: BoardState;
+  readonly message: BoardOutboxMessage;
+}
+
+/** Atomically shaped board update used by the durable worker claim endpoint. */
+export function leaseNextOutboxMessage(state: BoardState, input: LeaseOutboxInput): LeasedOutboxMessage | undefined {
+  const candidate = state.outbox.find((message) => {
+    if (!input.topics.includes(message.topic) || message.status === "dispatched") return false;
+    if (input.taskIds && !input.taskIds.includes(message.taskId)) return false;
+    if (message.status === "pending") return true;
+    return message.leaseExpiresAt !== undefined && message.leaseExpiresAt <= input.now;
+  });
+  if (!candidate) return undefined;
+
+  const { dispatchedAt: _dispatchedAt, ...claimable } = candidate;
+  const leased: BoardOutboxMessage = {
+    ...claimable,
+    status: "leased",
+    leaseId: input.leaseId,
+    leasedAt: input.now,
+    leaseExpiresAt: input.expiresAt
+  };
+  return {
+    state: {
+      ...state,
+      outbox: state.outbox.map((message) => message.id === candidate.id ? leased : message)
+    },
+    message: leased
+  };
+}
+
+export function findOutboxMessage(state: BoardState, messageId: BoardOutboxMessageId): BoardOutboxMessage | undefined {
+  return state.outbox.find((message) => message.id === messageId);
 }
 
 export function nextPendingOutboxMessage(state: BoardState): BoardOutboxMessage | undefined {

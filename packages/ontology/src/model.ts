@@ -63,6 +63,13 @@ export interface GeneratedOntology {
   readonly edges: readonly Omit<OntologyEdge, "id">[];
 }
 
+export interface EvidenceCitation {
+  readonly value: string;
+  readonly path: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
 export interface OntologyExecutor {
   build(request: OntologyBuildRequest): Promise<OntologyGraph>;
 }
@@ -94,7 +101,7 @@ export function createOntologyGraph(input: {
   }
 
   return {
-    id: stableId("graph", `${input.request.tenantId}:${input.request.repository}:${input.commitSha}`),
+    id: stableId("graph", `${input.request.tenantId}:${input.request.repository}:${input.commitSha}:${input.request.taskId}`),
     tenantId: input.request.tenantId,
     repository: input.request.repository,
     ref: input.request.ref,
@@ -125,6 +132,36 @@ export function stableId(prefix: string, value: string): string {
   return `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 20)}`;
 }
 
+export function ontologyEvidenceCitations(generated: GeneratedOntology): readonly EvidenceCitation[] {
+  const values = new Set([
+    ...generated.nodes.flatMap((node) => node.evidence),
+    ...generated.edges.flatMap((edge) => edge.evidence)
+  ]);
+  return [...values].map(parseEvidenceCitation);
+}
+
+export async function validateOntologyEvidence(
+  generated: GeneratedOntology,
+  readFile: (path: string) => Promise<string>
+): Promise<void> {
+  const files = new Map<string, string>();
+  for (const citation of ontologyEvidenceCitations(generated)) {
+    let source = files.get(citation.path);
+    if (source === undefined) {
+      try {
+        source = await readFile(citation.path);
+      } catch {
+        throw new Error(`ontology evidence file does not exist: ${citation.path}`);
+      }
+      files.set(citation.path, source);
+    }
+    const lineCount = source.split(/\r?\n/).length;
+    if (citation.startLine > lineCount || citation.endLine > lineCount) {
+      throw new Error(`ontology evidence is outside ${citation.path}: ${citation.value}`);
+    }
+  }
+}
+
 function parseNode(value: unknown): OntologyNode {
   if (!isRecord(value)) {
     throw new Error("ontology node must be an object");
@@ -140,7 +177,7 @@ function parseNode(value: unknown): OntologyNode {
     label: requiredString(value.label, "node.label"),
     description: requiredString(value.description, "node.description"),
     ...(typeof value.path === "string" && value.path ? { path: value.path } : {}),
-    evidence: stringArray(value.evidence)
+    evidence: requiredEvidence(value.evidence, `node ${id}`)
   };
 }
 
@@ -157,7 +194,7 @@ function parseEdge(value: unknown): Omit<OntologyEdge, "id"> {
     target: requiredString(value.target, "edge.target"),
     predicate: normalizePredicate(requiredString(value.predicate, "edge.predicate")),
     plane,
-    evidence: stringArray(value.evidence)
+    evidence: requiredEvidence(value.evidence, "edge")
   };
 }
 
@@ -183,8 +220,26 @@ function normalizePredicate(value: string): string {
   return value.trim().replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
 }
 
-function stringArray(value: unknown): readonly string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.length > 0) : [];
+function requiredEvidence(value: unknown, owner: string): readonly string[] {
+  const evidence = Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+    : [];
+  if (evidence.length === 0) throw new Error(`${owner} must include evidence`);
+  evidence.forEach(parseEvidenceCitation);
+  return evidence;
+}
+
+function parseEvidenceCitation(value: string): EvidenceCitation {
+  const match = /^(.*):(\d+)(?:-(\d+))?$/.exec(value);
+  if (!match?.[1] || !match[2]) throw new Error(`invalid ontology evidence citation: ${value}`);
+  const path = match[1];
+  if (path.startsWith("/") || path.split("/").includes("..")) {
+    throw new Error(`ontology evidence path must be repository-relative: ${value}`);
+  }
+  const startLine = Number.parseInt(match[2], 10);
+  const endLine = match[3] ? Number.parseInt(match[3], 10) : startLine;
+  if (startLine < 1 || endLine < startLine) throw new Error(`invalid ontology evidence range: ${value}`);
+  return { value, path, startLine, endLine };
 }
 
 function requiredString(value: unknown, name: string): string {

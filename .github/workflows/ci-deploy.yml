@@ -19,6 +19,7 @@ env:
   GAR_REPOSITORY: jina
   API_SERVICE: jina-api
   DASHBOARD_SERVICE: jina-dashboard
+  WORKER_SERVICE: jina-ontology-worker
 
 jobs:
   ci:
@@ -46,7 +47,7 @@ jobs:
         run: pnpm test
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: ci
     runs-on: ubuntu-latest
     permissions:
@@ -97,27 +98,63 @@ jobs:
             --allow-unauthenticated
             --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
             --add-cloudsql-instances=jina-v2:us-central1:jina-postgres
-            --concurrency=1
-            --timeout=1800
+            --concurrency=20
+            --timeout=300
             --min-instances=0
             --max-instances=1
           env_vars: |-
             JINA_ENABLE_DEV_ENDPOINTS=false
-            JINA_SIMULATE_RUNS=true
+            JINA_SIMULATE_RUNS=false
             JINA_SEED_DEMO=false
+            JINA_TENANT_ID=e2e-production
             INSTANCE_UNIX_SOCKET=/cloudsql/jina-v2:us-central1:jina-postgres
             DB_NAME=jina
             DB_USER=jina_app
           secrets: |-
             DB_PASS=jina-db-password:latest
             GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest
-            DAYTONA_API_KEY=jina-daytona-api-key:latest
-            OPENAI_API_KEY=jina-openai-api-key:latest
-            GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
 
       - name: Verify API health
         run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/health"
+
+      - name: Build and push ontology worker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:latest
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+      - name: Deploy ontology worker
+        id: deploy-worker
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.WORKER_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --concurrency=1
+            --timeout=300
+            --min-instances=1
+            --max-instances=1
+            --no-cpu-throttling
+          env_vars: JINA_API_URL=${{ steps.deploy-api.outputs.url }}
+          secrets: |-
+            INTERNAL_API_TOKEN=jina-internal-api-token:latest
+            DAYTONA_API_KEY=jina-daytona-api-key:latest
+            OPENAI_API_KEY=jina-openai-api-key:latest
+            GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
+
+      - name: Verify ontology worker health
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-worker.outputs.url }}/health"
 
       - name: Build and push dashboard image
         uses: docker/build-push-action@v7
@@ -140,14 +177,22 @@ jobs:
           service: ${{ env.DASHBOARD_SERVICE }}
           image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:${{ github.sha }}
           flags: >-
-            --allow-unauthenticated
+            --no-allow-unauthenticated
             --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
             --min-instances=0
             --max-instances=2
           env_vars: JINA_API_URL=${{ steps.deploy-api.outputs.url }}
+          secrets: INTERNAL_API_TOKEN=jina-internal-api-token:latest
+
+      - name: Grant dashboard access
+        run: |
+          gcloud run services add-iam-policy-binding "${DASHBOARD_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --member="user:keon@omlabs.xyz" --role="roles/run.invoker" --quiet
+          gcloud run services add-iam-policy-binding "${DASHBOARD_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --member="serviceAccount:github-deployer@jina-v2.iam.gserviceaccount.com" --role="roles/run.invoker" --quiet
 
       - name: Verify dashboard
-        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-dashboard.outputs.url }}"
+        run: |
+          token="$(gcloud auth print-identity-token --audiences='${{ steps.deploy-dashboard.outputs.url }}')"
+          curl --fail --retry 10 --retry-all-errors --retry-delay 3 -H "Authorization: Bearer ${token}" "${{ steps.deploy-dashboard.outputs.url }}"
 
       - name: Publish deployment summary
         run: |
@@ -156,5 +201,6 @@ jobs:
             echo
             echo "- API: ${{ steps.deploy-api.outputs.url }}"
             echo "- Dashboard: ${{ steps.deploy-dashboard.outputs.url }}"
+            echo "- Ontology worker: ${{ steps.deploy-worker.outputs.url }}"
             echo "- Revision: \`${{ github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

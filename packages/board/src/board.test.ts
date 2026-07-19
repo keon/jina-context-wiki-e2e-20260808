@@ -1,0 +1,55 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { entityId } from "@jina/shared-kernel";
+import { canTransition } from "./transitions.js";
+import { leaseNextOutboxMessage, type BoardState } from "./reducer.js";
+
+test("transition policy follows task kind instead of an extension type name", () => {
+  assert.equal(canTransition("aggregate", "triage", "in_progress", "run"), false);
+  assert.equal(canTransition("manual", "triage", "done", "user"), true);
+  assert.equal(canTransition("waitpoint", "blocked", "done", "user"), true);
+  assert.equal(canTransition("dispatchable", "queued", "in_progress", "run"), true);
+});
+
+test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
+  const firstTask = entityId<"task">("task-a");
+  const secondTask = entityId<"task">("task-b");
+  const state: BoardState = {
+    tasks: [],
+    dependencies: [],
+    events: [],
+    outbox: [
+      {
+        id: entityId<"board_outbox_message">("message-a"),
+        taskId: firstTask,
+        topic: "run-ontology",
+        idempotencyKey: "a:1",
+        status: "leased",
+        payload: { taskId: firstTask, attempt: 1 },
+        createdAt: "2026-01-01T00:00:00.000Z",
+        leaseId: "old",
+        leasedAt: "2026-01-01T00:00:01.000Z",
+        leaseExpiresAt: "2026-01-01T00:01:00.000Z"
+      },
+      {
+        id: entityId<"board_outbox_message">("message-b"),
+        taskId: secondTask,
+        topic: "run-ontology",
+        idempotencyKey: "b:1",
+        status: "pending",
+        payload: { taskId: secondTask, attempt: 1 },
+        createdAt: "2026-01-01T00:00:00.000Z"
+      }
+    ]
+  };
+
+  const claimed = leaseNextOutboxMessage(state, {
+    topics: ["run-ontology"],
+    taskIds: [firstTask],
+    leaseId: "new",
+    now: "2026-01-01T00:02:00.000Z",
+    expiresAt: "2026-01-01T00:03:00.000Z"
+  });
+  assert.equal(claimed?.message.taskId, firstTask);
+  assert.equal(claimed?.message.leaseId, "new");
+});

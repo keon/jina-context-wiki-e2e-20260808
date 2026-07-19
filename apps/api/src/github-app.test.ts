@@ -2,13 +2,15 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createOntologyGraph, type OntologyExecutor } from "@jina/ontology";
+import { createOntologyGraph, MemoryOntologyGraphStore } from "@jina/ontology";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const SECRET = "test-webhook-secret";
+const INTERNAL_TOKEN = "test-internal-token";
+const TENANT = "github:installation:99";
 
 test("signed GitHub App deliveries create idempotent PR and issue tasks", async (context) => {
-  const server = createApiServer({ githubWebhookSecret: SECRET });
+  const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(() => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
 
@@ -37,7 +39,8 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   await deliver(baseUrl, "pull_request", "delivery-pr-2", pullRequestPayload(43, "other123"));
   await deliver(baseUrl, "pull_request", "delivery-pr-1-sync", pullRequestPayload(42, "def456", "synchronize"));
 
-  const boardResponse = await fetch(`${baseUrl}/board`);
+  assert.equal((await fetch(`${baseUrl}/board`)).status, 401);
+  const boardResponse = await authenticatedFetch(`${baseUrl}/board`);
   const board = await boardResponse.json() as {
     tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
     dependencies: Array<{
@@ -88,8 +91,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 test("ontology worker builds and exposes a graph end to end", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
-    simulateRuns: true,
-    ontologyExecutor: new FixtureOntologyExecutor()
+    tenantId: "default"
   });
   const baseUrl = await listen(server);
   try {
@@ -99,12 +101,33 @@ test("ontology worker builds and exposes a graph end to end", async () => {
       body: JSON.stringify({ repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test" })
     });
     assert.equal(created.status, 202);
-
-    const ontology = await waitFor(async () => {
-      const response = await fetch(`${baseUrl}/ontology`);
-      const value = await response.json() as { latest: { nodes: unknown[]; edges: unknown[] } | null };
-      return value.latest ? value : undefined;
+    const createdBody = await created.json() as { task: { id: string } };
+    const claim = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "fixture-worker" })
     });
+    assert.equal(claim.status, 200);
+    const work = await claim.json() as { message: { id: string; leaseId: string }; task: { id: string } };
+    assert.equal(work.task.id, createdBody.task.id);
+
+    const graph = fixtureGraph({ tenantId: "default", repository: "omxyz/ontology-fixture", ref: "main", taskId: work.task.id });
+    const completed = await fetch(`${baseUrl}/internal/worker/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messageId: work.message.id,
+        leaseId: work.message.leaseId,
+        taskId: work.task.id,
+        outcome: "done",
+        graph
+      })
+    });
+    assert.equal(completed.status, 200);
+
+    const ontology = await fetch(`${baseUrl}/ontology`).then(
+      (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
+    );
     assert.equal(ontology.latest?.nodes.length, 2);
     assert.equal(ontology.latest?.edges.length, 1);
 
@@ -117,19 +140,41 @@ test("ontology worker builds and exposes a graph end to end", async () => {
   }
 });
 
+test("ontology reads require authentication and cannot cross tenant boundaries", async () => {
+  const ontologyStore = new MemoryOntologyGraphStore();
+  const tenantAGraph = fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "main", taskId: "task-a" });
+  const tenantBGraph = fixtureGraph({ tenantId: "tenant-b", repository: "omxyz/b", ref: "main", taskId: "task-b" });
+  await ontologyStore.save(tenantAGraph);
+  await ontologyStore.save(tenantBGraph);
+  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
+  const baseUrl = await listen(server);
+  try {
+    assert.equal((await fetch(`${baseUrl}/ontology`)).status, 401);
+    const list = await authenticatedFetch(`${baseUrl}/ontology`).then(
+      (response) => response.json() as Promise<{ graphs: Array<{ id: string; tenantId: string }> }>
+    );
+    assert.deepEqual(list.graphs.map((graph) => graph.tenantId), ["tenant-a"]);
+    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`)).status, 200);
+    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantBGraph.id}`)).status, 404);
+  } finally {
+    await close(server);
+  }
+});
+
 test("durable state survives an API server restart", async () => {
   const stateStore = new MemoryStateStore();
-  const first = createApiServer({ githubWebhookSecret: SECRET, stateStore });
+  const config = { githubWebhookSecret: SECRET, stateStore, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT };
+  const first = createApiServer(config);
   const firstUrl = await listen(first);
 
   const created = await deliver(firstUrl, "issues", "delivery-persisted", issueOpenedPayload());
   assert.equal(created.status, 202);
   await close(first);
 
-  const second = createApiServer({ githubWebhookSecret: SECRET, stateStore });
+  const second = createApiServer(config);
   const secondUrl = await listen(second);
   try {
-    const board = await fetch(`${secondUrl}/board`).then(
+    const board = await authenticatedFetch(`${secondUrl}/board`).then(
       (response) => response.json() as Promise<{ tasks: Array<{ type: string }> }>
     );
     assert.equal(board.tasks.filter((task) => task.type === "issue_triage").length, 1);
@@ -185,8 +230,7 @@ class MemoryStateStore implements ApiStateStore {
   async close(): Promise<void> {}
 }
 
-class FixtureOntologyExecutor implements OntologyExecutor {
-  async build(request: Parameters<OntologyExecutor["build"]>[0]) {
+function fixtureGraph(request: { tenantId: string; repository: string; ref: string; taskId: string }) {
     return createOntologyGraph({
       request,
       commitSha: "fixture-sha",
@@ -202,17 +246,10 @@ class FixtureOntologyExecutor implements OntologyExecutor {
         edges: [{ source: "repo", target: "file:README.md", predicate: "CONTAINS", plane: "code", evidence: ["README.md:1"] }]
       }
     });
-  }
 }
 
-async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
-  const deadline = Date.now() + 6_000;
-  while (Date.now() < deadline) {
-    const value = await read();
-    if (value !== undefined) return value;
-    await new Promise((resolve) => setTimeout(resolve, 150));
-  }
-  throw new Error("timed out waiting for value");
+function authenticatedFetch(url: string): Promise<Response> {
+  return fetch(url, { headers: { authorization: `Bearer ${INTERNAL_TOKEN}` } });
 }
 
 async function deliver(

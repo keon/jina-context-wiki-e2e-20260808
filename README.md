@@ -40,7 +40,7 @@ Every run prints its trace (each step the harness took), exact model usage (toke
 
 ## Ontology Worker
 
-`ontology_build` is a worker-owned task type registered with the generic board. The API queues it on `run-ontology`; a Daytona sandbox clones the requested GitHub repository and runs Codex with a strict, cited graph schema. Completed graphs are stored in normalized PostgreSQL tables and rendered on the dashboard's `/ontology` page.
+`ontology_build` is a worker-owned task type registered with the generic board. The API durably leases `run-ontology` work to a separate worker; a Daytona sandbox clones the requested GitHub repository and runs Codex with a strict, cited graph schema. Citations are checked against that checkout before immutable graph generations are stored in PostgreSQL and rendered on the dashboard's `/ontology` page.
 
 Local execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and either `OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Override provider and model with `ONTOLOGY_CODEX_PROVIDER` and `ONTOLOGY_CODEX_MODEL` when needed.
 

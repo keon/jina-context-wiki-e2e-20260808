@@ -19,7 +19,7 @@ export const ONTOLOGY_OUTPUT_SCHEMA = {
           label: { type: "string" },
           description: { type: "string" },
           path: { type: ["string", "null"] },
-          evidence: { type: "array", items: { type: "string" } }
+          evidence: { type: "array", minItems: 1, items: { type: "string" } }
         }
       }
     },
@@ -35,7 +35,7 @@ export const ONTOLOGY_OUTPUT_SCHEMA = {
           target: { type: "string" },
           predicate: { type: "string" },
           plane: { type: "string", enum: ["code", "knowledge"] },
-          evidence: { type: "array", items: { type: "string" } }
+          evidence: { type: "array", minItems: 1, items: { type: "string" } }
         }
       }
     }
