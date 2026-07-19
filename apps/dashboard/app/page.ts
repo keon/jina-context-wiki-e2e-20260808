@@ -29,19 +29,23 @@ export function renderDashboardPage(apiUrl: string): string {
   }
   .toolbar button:hover, .ghost-button:hover { border-color: #56627c; background: #181f2d; }
   .toolbar-label { color: #77839a; font-size: .72rem; margin-right: .15rem; }
-  .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .85rem; align-items: start; }
-  .column { border: 1px solid #202637; border-radius: .8rem; background: rgb(15 19 28 / 78%); padding: .65rem; min-height: 10rem; }
-  .column h2 { display: flex; justify-content: space-between; margin: .15rem .15rem .65rem; color: #8e99ad; font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; }
-  .count { display: grid; place-items: center; min-width: 1.25rem; height: 1.25rem; border-radius: 99px; background: #20283a; color: #c6cede; font-size: .65rem; }
-  .card {
-    width: 100%; border: 1px solid #2a3144; border-radius: .7rem; background: linear-gradient(145deg, #171c27, #121620);
-    padding: .75rem; margin-bottom: .55rem; text-align: left; cursor: pointer; transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+  .task-panel { border: 1px solid #202637; border-radius: .85rem; background: rgb(15 19 28 / 78%); overflow: hidden; }
+  .task-panel-header { display: flex; align-items: center; justify-content: space-between; padding: .85rem 1rem; border-bottom: 1px solid #22293a; }
+  .task-panel-header h2 { margin: 0; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: #a5afc1; }
+  .task-count { color: #748198; font-size: .7rem; }
+  .task-list { display: grid; }
+  .task-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1rem; width: 100%;
+    border: 0; border-bottom: 1px solid #202738; background: transparent; padding: .85rem 1rem; text-align: left;
+    cursor: pointer; transition: background 120ms ease;
   }
-  .card:hover { transform: translateY(-1px); border-color: #5b6a88; background: #1a2030; }
-  .card:focus-visible { outline: 2px solid #8ea8ff; outline-offset: 2px; }
-  .card-title { display: block; font-size: .82rem; font-weight: 650; line-height: 1.35; }
-  .card-meta { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; color: #838ea2; font-size: .66rem; }
-  .chip { border: 1px solid #2d3548; border-radius: 99px; padding: .12rem .38rem; }
+  .task-row:last-child { border-bottom: 0; }
+  .task-row:hover { background: #171d29; }
+  .task-row:focus-visible { position: relative; outline: 2px solid #8ea8ff; outline-offset: -2px; }
+  .task-title { display: block; font-size: .84rem; font-weight: 650; line-height: 1.35; }
+  .task-meta { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .3rem; color: #7f8ba1; font-size: .67rem; }
+  .task-meta span + span::before { content: "·"; margin-right: .35rem; color: #465168; }
+  .task-arrow { color: #56627a; font-size: 1rem; }
   .superseded { opacity: .48; }
   .empty { padding: 1.5rem .5rem; color: #586277; text-align: center; font-size: .72rem; }
   .feed { margin-top: 1.4rem; border-top: 1px solid #1f2534; padding-top: 1rem; }
@@ -103,7 +107,10 @@ export function renderDashboardPage(apiUrl: string): string {
     <button type="button" data-demo="issue">Open issue</button>
     <button type="button" data-demo="push">Force-push PR #42</button>
   </div>
-  <section class="columns" id="columns" aria-label="Task board"></section>
+  <section class="task-panel" aria-labelledby="tasks-heading">
+    <header class="task-panel-header"><h2 id="tasks-heading">Tasks</h2><span class="task-count" id="task-count"></span></header>
+    <div class="task-list" id="task-list" aria-label="Task list"></div>
+  </section>
   <section class="feed"><h2>Recent board activity</h2><div id="log"></div></section>
 </main>
 
@@ -117,13 +124,12 @@ export function renderDashboardPage(apiUrl: string): string {
 
 <script>
 const API = ${JSON.stringify(apiUrl)};
-const STATUSES = ["triage", "blocked", "queued", "in_progress", "done", "superseded", "failed", "canceled"];
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let nextPr = 100;
 let nextIssue = 200;
 
-const columns = document.getElementById("columns");
+const taskList = document.getElementById("task-list");
 const log = document.getElementById("log");
 const dialog = document.getElementById("task-dialog");
 const detailTitle = document.getElementById("detail-title");
@@ -137,7 +143,7 @@ async function refresh() {
     boardState = await responses[0].json();
     boardEvents = await responses[1].json();
     setConnection(true);
-    renderColumns();
+    renderTaskList();
     renderLog();
     renderSelectedTask();
   } catch (error) {
@@ -150,35 +156,39 @@ function setConnection(online) {
   document.getElementById("connection-text").textContent = online ? "Live · " + API : "Cannot reach " + API;
 }
 
-function renderColumns() {
-  columns.replaceChildren();
-  for (const status of STATUSES) {
-    const items = boardState.tasks.filter(function(task) { return task.status === status; });
-    if (items.length === 0 && !["triage", "queued", "in_progress", "done"].includes(status)) continue;
-    const column = element("section", "column");
-    const heading = element("h2");
-    heading.append(document.createTextNode(humanize(status)), textElement("span", "count", String(items.length)));
-    column.append(heading);
-    if (items.length === 0) column.append(textElement("div", "empty", "No tasks"));
-    for (const task of items) column.append(taskCard(task));
-    columns.append(column);
-  }
+function renderTaskList() {
+  taskList.replaceChildren();
+  const tasks = boardState.tasks.slice().sort(compareTasks);
+  document.getElementById("task-count").textContent = tasks.length + (tasks.length === 1 ? " task" : " tasks");
+  if (tasks.length === 0) taskList.append(textElement("div", "empty", "No tasks"));
+  for (const task of tasks) taskList.append(taskRow(task));
 }
 
-function taskCard(task) {
-  const card = element("button", "card" + (task.status === "superseded" ? " superseded" : ""));
-  card.type = "button";
-  card.dataset.taskId = task.id;
-  card.setAttribute("aria-label", "Open task: " + task.title);
-  card.append(textElement("span", "card-title", task.title));
-  const meta = element("span", "card-meta");
+function taskRow(task) {
+  const row = element("button", "task-row" + (task.status === "superseded" ? " superseded" : ""));
+  row.type = "button";
+  row.dataset.taskId = task.id;
+  row.setAttribute("aria-label", "Open task: " + task.title + ", epoch " + (task.epoch ?? "none"));
+  const content = element("span");
+  content.append(textElement("span", "task-title", task.title));
+  const meta = element("span", "task-meta");
   meta.append(
-    textElement("span", "chip", humanize(task.type)),
-    textElement("span", "chip", "epoch " + (task.epoch ?? "–")),
-    textElement("span", "chip", "attempt " + task.attempt)
+    textElement("span", "", humanize(task.type)),
+    textElement("span", "", "epoch " + (task.epoch ?? "–")),
+    textElement("span", "", "attempt " + task.attempt)
   );
-  card.append(meta);
-  return card;
+  content.append(meta);
+  row.append(content, textElement("span", "task-arrow", "›"));
+  return row;
+}
+
+function compareTasks(left, right) {
+  const epochDifference = (right.epoch ?? 0) - (left.epoch ?? 0);
+  if (epochDifference !== 0) return epochDifference;
+  const order = { pr_review: 0, review_pass: 1, context: 2, publish: 3, cleanup: 4, issue_triage: 5, human_decision: 6 };
+  const typeDifference = (order[left.type] ?? 99) - (order[right.type] ?? 99);
+  if (typeDifference !== 0) return typeDifference;
+  return String(right.createdAt).localeCompare(String(left.createdAt));
 }
 
 function renderSelectedTask() {
@@ -323,9 +333,9 @@ function formatValue(value) { return typeof value === "object" ? JSON.stringify(
 function element(tag, className) { const node = document.createElement(tag); if (className) node.className = className; return node; }
 function textElement(tag, className, text) { const node = element(tag, className); node.textContent = text; return node; }
 
-columns.addEventListener("click", function(event) {
-  const card = event.target.closest("[data-task-id]");
-  if (card) openTask(card.dataset.taskId);
+taskList.addEventListener("click", function(event) {
+  const row = event.target.closest("[data-task-id]");
+  if (row) openTask(row.dataset.taskId);
 });
 detailBody.addEventListener("click", function(event) {
   const relationship = event.target.closest("[data-task-id]");
