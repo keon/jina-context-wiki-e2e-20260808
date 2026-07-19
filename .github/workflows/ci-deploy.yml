@@ -175,7 +175,7 @@ jobs:
             --no-cpu-throttling
           env_vars: |-
             JINA_API_URL=${{ steps.deploy-api.outputs.url }}
-            WORKER_TOPICS=run-ontology
+            WORKER_TOPICS=run-ontology,run-ontology-prepare,run-ontology-generate
           secrets: |-
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
             DAYTONA_API_KEY=jina-daytona-api-key:latest

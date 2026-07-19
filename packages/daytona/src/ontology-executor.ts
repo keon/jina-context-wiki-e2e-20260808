@@ -48,6 +48,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       );
 
       await cloneRepository(sandbox, request, cloneToken);
+      if (request.commitSha) await checkoutExpectedCommit(sandbox, request.commitSha);
       await prepareCodex(sandbox);
       await writeInputFiles(sandbox, request);
       if (provider === "openrouter") await startOutputLimitingProxy(sandbox);
@@ -104,6 +105,10 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       if (shaResult.exitCode !== 0) {
         throw new Error(`Unable to resolve repository commit: ${truncate(shaResult.result)}`);
       }
+      const commitSha = shaResult.result.trim();
+      if (request.commitSha && commitSha !== request.commitSha) {
+        throw new Error(`Repository ref moved before checkout: expected ${request.commitSha}, got ${commitSha}`);
+      }
 
       const generated = parseGeneratedOntology(parseJsonResult(resultBuffer.toString("utf8")));
       await validateOntologyEvidence(generated, async (path) => {
@@ -112,7 +117,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       });
       return createOntologyGraph({
         request,
-        commitSha: shaResult.result.trim(),
+        commitSha,
         generatedAt: new Date().toISOString(),
         executor: "daytona",
         model,
@@ -150,6 +155,28 @@ function selectedModel(provider: "openai" | "openrouter"): string {
 async function cloneRepository(sandbox: Sandbox, request: OntologyBuildRequest, token?: string): Promise<void> {
   const url = `https://github.com/${request.repository}.git`;
   await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, token ? "x-access-token" : undefined, token);
+}
+
+async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Promise<void> {
+  if (!/^[a-f0-9]{40}$/i.test(commitSha)) throw new Error("Ontology source commit must be a full Git SHA");
+  const ensureCommit = await sandbox.process.executeCommand(
+    `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || git fetch --depth=1 origin ${shellQuote(commitSha)}`,
+    REPO_DIR,
+    undefined,
+    60
+  );
+  if (ensureCommit.exitCode !== 0) {
+    throw new Error(`Unable to fetch prepared commit ${commitSha}: ${truncate(ensureCommit.result)}`);
+  }
+  const checkout = await sandbox.process.executeCommand(
+    `git checkout --detach ${shellQuote(commitSha)}`,
+    REPO_DIR,
+    undefined,
+    60
+  );
+  if (checkout.exitCode !== 0) {
+    throw new Error(`Unable to checkout prepared commit ${commitSha}: ${truncate(checkout.result)}`);
+  }
 }
 
 async function prepareCodex(sandbox: Sandbox): Promise<void> {

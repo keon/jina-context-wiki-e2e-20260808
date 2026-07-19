@@ -80,10 +80,13 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   const taskTypes = await fetch(`${baseUrl}/task-types`).then(
     (response) => response.json() as Promise<Array<{ type: string; kind: string; description: string }>>
   );
-  assert.equal(taskTypes.length, 8);
+  assert.equal(taskTypes.length, 10);
   assert.deepEqual(
     taskTypes.map((definition) => definition.type),
-    ["pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision", "ontology_build"]
+    [
+      "pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision",
+      "ontology_build", "ontology_prepare", "ontology_generate"
+    ]
   );
   assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
 });
@@ -102,36 +105,41 @@ test("ontology worker builds and exposes a graph end to end", async () => {
     });
     assert.equal(created.status, 202);
     const createdBody = await created.json() as { task: { id: string } };
-    const claim = await fetch(`${baseUrl}/internal/worker/claim`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workerId: "fixture-worker", topics: ["run-ontology"] })
-    });
-    assert.equal(claim.status, 200);
-    const work = await claim.json() as { message: { id: string; leaseId: string }; task: { id: string } };
-    assert.equal(work.task.id, createdBody.task.id);
+    const preparedCommitSha = "a".repeat(40);
+    const preparation = await claimTopic(baseUrl, "run-ontology-prepare");
+    assert.equal(preparation.message.topic, "run-ontology-prepare");
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageId: work.message.id, leaseId: work.message.leaseId })
+      body: JSON.stringify({ messageId: preparation.message.id, leaseId: preparation.message.leaseId })
     });
     assert.equal(renewed.status, 200);
     const staleRenewal = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageId: work.message.id, leaseId: "wrong-lease" })
+      body: JSON.stringify({ messageId: preparation.message.id, leaseId: "wrong-lease" })
     });
     assert.equal(staleRenewal.status, 409);
 
-    const graph = fixtureGraph({ tenantId: "default", repository: "omxyz/ontology-fixture", ref: "main", taskId: work.task.id });
+    assert.equal(await completeClaim(baseUrl, preparation, { commitSha: preparedCommitSha }), 200);
+
+    const generation = await claimTopic(baseUrl, "run-ontology-generate");
+    assert.equal(generation.message.topic, "run-ontology-generate");
+    const graph = fixtureGraph({
+      tenantId: "default",
+      repository: "omxyz/ontology-fixture",
+      ref: "main",
+      taskId: generation.task.id,
+      commitSha: preparedCommitSha
+    });
     const completed = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        messageId: work.message.id,
-        leaseId: work.message.leaseId,
-        taskId: work.task.id,
+        messageId: generation.message.id,
+        leaseId: generation.message.leaseId,
+        taskId: generation.task.id,
         outcome: "done",
         graph
       })
@@ -145,9 +153,12 @@ test("ontology worker builds and exposes a graph end to end", async () => {
     assert.equal(ontology.latest?.edges.length, 1);
 
     const board = await fetch(`${baseUrl}/board`).then(
-      (response) => response.json() as Promise<{ tasks: Array<{ type: string; status: string }> }>
+      (response) => response.json() as Promise<{ tasks: Array<{ id: string; type: string; status: string; metadata: Record<string, unknown> }> }>
     );
-    assert.equal(board.tasks.find((task) => task.type === "ontology_build")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "ontology_prepare")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "ontology_generate")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "ontology_generate")?.metadata.commitSha, preparedCommitSha);
   } finally {
     await close(server);
   }
@@ -344,10 +355,10 @@ async function completeClaim(baseUrl: string, work: TestClaim, result: Record<st
   return response.status;
 }
 
-function fixtureGraph(request: { tenantId: string; repository: string; ref: string; taskId: string }) {
+function fixtureGraph(request: { tenantId: string; repository: string; ref: string; taskId: string; commitSha?: string }) {
     return createOntologyGraph({
       request,
-      commitSha: "fixture-sha",
+      commitSha: request.commitSha ?? "fixture-sha",
       generatedAt: new Date().toISOString(),
       executor: "fixture",
       model: "fixture",

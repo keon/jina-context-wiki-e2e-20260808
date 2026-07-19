@@ -31,7 +31,15 @@ import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const WORKER_LEASE_MS = 5 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
-const WORKER_TOPICS = ["run-review", "run-research", "run-publish", "run-cleanup", "run-ontology"] as const;
+const WORKER_TOPICS = [
+  "run-review",
+  "run-research",
+  "run-publish",
+  "run-cleanup",
+  "run-ontology",
+  "run-ontology-prepare",
+  "run-ontology-generate"
+] as const;
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -308,22 +316,61 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const nonce = typeof body.requestKey === "string" && body.requestKey.trim()
       ? body.requestKey.trim()
       : `${Date.now()}-${devDeliverySequence}`;
-    const taskId = entityId<"task">(`task_ontology:${tenantId}:${repository}:${ref}:${nonce}`);
+    const taskKey = `task_ontology:${tenantId}:${repository}:${ref}:${nonce}`;
+    const taskId = entityId<"task">(`${taskKey}:root`);
+    const prepareTaskId = entityId<"task">(`${taskKey}:prepare`);
+    const generateTaskId = entityId<"task">(`${taskKey}:generate`);
     const created = await mutate(async () => {
       let board = applyCommand(intakeState.board, {
         command: "CreateTask",
         task: {
           id: taskId,
           type: "ontology_build",
-          kind: "dispatchable",
+          kind: "aggregate",
           title: `Build Ontology for ${repository}@${ref}`,
-          assigneeRole: "ontology_worker",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}`,
-          dispatchTopic: "run-ontology",
+          assigneeRole: "system",
+          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:root`,
           required: true,
           metadata: { tenantId, repository, ref, requestKey: nonce }
         },
         blocksParentCompletion: false
+      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
+      board = applyCommand(board, {
+        command: "CreateTask",
+        task: {
+          id: prepareTaskId,
+          type: "ontology_prepare",
+          kind: "dispatchable",
+          title: `Prepare source for ${repository}@${ref}`,
+          assigneeRole: "ontology_worker",
+          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:prepare`,
+          dispatchTopic: "run-ontology-prepare",
+          parentTaskId: taskId,
+          required: true,
+          metadata: { tenantId, repository, ref, requestKey: nonce }
+        }
+      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
+      board = applyCommand(board, {
+        command: "CreateTask",
+        task: {
+          id: generateTaskId,
+          type: "ontology_generate",
+          kind: "dispatchable",
+          title: `Generate graph for ${repository}@${ref}`,
+          assigneeRole: "ontology_worker",
+          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:generate`,
+          dispatchTopic: "run-ontology-generate",
+          parentTaskId: taskId,
+          required: true,
+          metadata: { tenantId, repository, ref, requestKey: nonce }
+        },
+        dependencies: [{
+          taskId: generateTaskId,
+          dependsOnTaskId: prepareTaskId,
+          relationship: "blocks",
+          required: true,
+          blocksParentCompletion: true
+        }]
       }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
       board = reduceBoard(board, nowIso());
       intakeState = { ...intakeState, board };
@@ -410,7 +457,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     const initialMessage = findOutboxMessage(intakeState.board, messageId);
-    const graph = outcome === "done" && initialMessage?.topic === "run-ontology"
+    const graph = outcome === "done" && (initialMessage?.topic === "run-ontology" || initialMessage?.topic === "run-ontology-generate")
       ? parseCompletedGraph(body.graph, task, tenantId)
       : undefined;
     const result = await mutate(async () => {
@@ -427,6 +474,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const previousIntakeState = intakeState;
       const previousPublications = publications;
       let board = markOutboxDispatched(intakeState.board, message.id, now);
+      if (outcome === "done" && message.topic === "run-ontology-prepare") {
+        const resultPayload = isRecord(body.result) ? body.result : {};
+        const commitSha = requiredGitSha(resultPayload.commitSha, "result.commitSha");
+        const generationTask = board.tasks.find((candidate) =>
+          candidate.parentTaskId === currentTask.parentTaskId && candidate.type === "ontology_generate"
+        );
+        if (!generationTask) throw new Error("ontology generation task not found");
+        board = applyCommand(board, {
+          command: "UpdateTask",
+          taskId: generationTask.id,
+          metadata: { commitSha }
+        }, { actor: RUN_ACTOR, now }).state;
+      }
       board = applyCommand(board, {
         command: "CommentTask",
         taskId,
@@ -510,6 +570,8 @@ function completionEventType(topic: string): string {
     case "run-publish": return "publish.completed";
     case "run-cleanup": return "cleanup.completed";
     case "run-ontology": return "ontology.graph_created";
+    case "run-ontology-prepare": return "ontology.source_prepared";
+    case "run-ontology-generate": return "ontology.graph_created";
     default: return "worker.completed";
   }
 }
@@ -560,6 +622,9 @@ function parseCompletedGraph(value: unknown, task: BoardTask, tenantId: string):
   if (!isRecord(value) || !isRecord(value.generator)) throw new Error("graph must be an object");
   const executor = value.generator.executor;
   if (executor !== "daytona" && executor !== "fixture") throw new Error("unsupported graph executor");
+  const commitSha = requiredString(value.commitSha, "graph.commitSha");
+  const preparedCommitSha = typeof task.metadata.commitSha === "string" ? task.metadata.commitSha : undefined;
+  if (preparedCommitSha && commitSha !== preparedCommitSha) throw new Error("graph commit does not match prepared source");
   return createOntologyGraph({
     request: {
       tenantId,
@@ -567,7 +632,7 @@ function parseCompletedGraph(value: unknown, task: BoardTask, tenantId: string):
       ref: requiredString(task.metadata.ref, "task.ref"),
       taskId: task.id
     },
-    commitSha: requiredString(value.commitSha, "graph.commitSha"),
+    commitSha,
     generatedAt: requiredString(value.generatedAt, "graph.generatedAt"),
     executor,
     model: requiredString(value.generator.model, "graph.generator.model"),
@@ -618,6 +683,12 @@ function firstHeader(value: string | readonly string[] | undefined): string | un
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${field} must be a non-empty string`);
   return value.trim();
+}
+
+function requiredGitSha(value: unknown, field: string): string {
+  const sha = requiredString(value, field);
+  if (!/^[a-f0-9]{40}$/i.test(sha)) throw new Error(`${field} must be a full Git SHA`);
+  return sha;
 }
 
 function requiredPositiveInteger(value: unknown, field: string): number {

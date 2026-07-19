@@ -77,15 +77,22 @@ sequenceDiagram
     participant User
     participant API as jina-api
     participant Worker as jina-ontology-worker
+    participant GitHub
     participant Daytona
     participant Codex
     participant DB as Cloud SQL
 
     User->>API: POST /ontology/build repository, ref
-    API->>DB: Create ontology_build task + run-ontology outbox
-    Worker->>API: Claim run-ontology lease
-    API->>DB: Transition task to in_progress
+    API->>DB: Create aggregate + prepare and generate children
+    Worker->>API: Claim run-ontology-prepare lease
+    Worker->>GitHub: Resolve repository ref
+    GitHub-->>Worker: Immutable commit SHA
+    Worker->>API: Complete preparation
+    API->>DB: Attach commit SHA to generation task and queue it
+    Worker->>API: Claim run-ontology-generate lease
+    API->>DB: Transition generation to in_progress
     Worker->>Daytona: Create sandbox and clone requested ref
+    Worker->>Daytona: Checkout prepared commit SHA
     Worker->>Codex: Run strict Ontology generation in checkout
     Codex-->>Worker: Summary, nodes, edges, citations
     Worker->>Daytona: Validate every cited file and line range
@@ -94,7 +101,7 @@ sequenceDiagram
     rect rgb(235,245,255)
         note right of API: one PostgreSQL transaction
         API->>DB: Insert immutable graph, nodes, and edges
-        API->>DB: Record event and completed board snapshot
+        API->>DB: Complete generation and aggregate board snapshot
     end
     API-->>Worker: accepted + graph ID
 ```

@@ -64,6 +64,7 @@ export interface OntologyBuildRequest {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
+  readonly commitSha?: string;
   readonly taskId: string;
 }
 

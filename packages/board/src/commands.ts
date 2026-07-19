@@ -43,6 +43,12 @@ export interface TransitionTaskCommand {
   readonly toStatus: TaskStatus;
 }
 
+export interface UpdateTaskCommand {
+  readonly command: "UpdateTask";
+  readonly taskId: TaskId;
+  readonly metadata: Record<string, unknown>;
+}
+
 export interface LinkTaskCommand {
   readonly command: "LinkTask";
   readonly dependency: TaskDependencyDraft;
@@ -55,7 +61,7 @@ export interface CommentTaskCommand {
   readonly payload?: Record<string, unknown>;
 }
 
-export type BoardCommandInput = CreateTaskCommand | TransitionTaskCommand | LinkTaskCommand | CommentTaskCommand;
+export type BoardCommandInput = CreateTaskCommand | UpdateTaskCommand | TransitionTaskCommand | LinkTaskCommand | CommentTaskCommand;
 
 export type CommandRejectionReason =
   | "invalid_transition"
@@ -94,6 +100,8 @@ export function applyCommand(state: BoardState, command: BoardCommandInput, opti
   switch (command.command) {
     case "CreateTask":
       return applyCreateTask(state, command, options);
+    case "UpdateTask":
+      return applyUpdateTask(state, command, options);
     case "TransitionTask":
       return applyTransitionTask(state, command, options);
     case "LinkTask":
@@ -101,6 +109,21 @@ export function applyCommand(state: BoardState, command: BoardCommandInput, opti
     case "CommentTask":
       return applyCommentTask(state, command, options);
   }
+}
+
+function applyUpdateTask(state: BoardState, command: UpdateTaskCommand, options: ApplyCommandOptions): CommandResult {
+  if (!findTask(state, command.taskId)) {
+    return reject(state, command, { reason: "unknown_task" }, options);
+  }
+  return {
+    accepted: true,
+    state: appendEvent({
+      ...state,
+      tasks: state.tasks.map((task) => task.id === command.taskId
+        ? { ...task, metadata: { ...task.metadata, ...command.metadata }, updatedAt: options.now }
+        : task)
+    }, "task.updated", options.now, command.taskId, { metadataKeys: Object.keys(command.metadata) })
+  };
 }
 
 function applyCreateTask(state: BoardState, command: CreateTaskCommand, options: ApplyCommandOptions): CommandResult {
@@ -210,6 +233,7 @@ function commandTaskId(command: BoardCommandInput): TaskId | undefined {
   switch (command.command) {
     case "CreateTask":
       return command.task.parentTaskId;
+    case "UpdateTask":
     case "TransitionTask":
     case "CommentTask":
       return command.taskId;

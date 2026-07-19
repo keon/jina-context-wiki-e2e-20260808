@@ -9,7 +9,7 @@ The current repository implementation is configured to run as four Cloud Run ser
 - `jina-api` verifies GitHub webhooks, applies board commands, runs the readiness reducer, and owns short lease/completion transactions.
 - `jina-dashboard` serves the board, task-type catalog, task details, and Ontology visualization. Direct Cloud Run IAP authenticates browser users; the server-side proxy adds the API service credential.
 - `jina-task-worker` polls for `run-review`, `run-research`, `run-publish`, and `run-cleanup` messages. Review fetches the PR diff from GitHub and calls OpenAI with a strict findings schema. Publish currently records an internal idempotent publication only.
-- `jina-ontology-worker` polls only for `run-ontology`, clones the repository in Daytona, runs Codex, validates cited paths and line ranges, and returns the graph.
+- `jina-ontology-worker` prepares a source commit and then generates the graph. The first child resolves a mutable ref to a Git SHA; the second checks out that exact commit in Daytona, runs Codex, validates cited paths and line ranges, and returns the graph. Legacy `run-ontology` messages remain consumable during migration.
 
 The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Ontology metadata, nodes, and edges use `jina_ontology` relational tables. Ontology completion writes the graph and completed board snapshot in one transaction.
 

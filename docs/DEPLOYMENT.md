@@ -30,7 +30,7 @@ credentials. No service-account key is stored in GitHub.
 
 The API owns only short board state transitions and persists outbox leases in
 Cloud SQL. Two instances of the same worker image claim disjoint topic sets. The
-ontology worker runs Daytona/Codex builds; the task worker handles review,
+ontology worker resolves source commits and runs Daytona/Codex builds; the task worker handles review,
 research, publish, and cleanup topics. Both renew five-minute leases while work
 is active. Expired leases are reclaimable after a worker crash. Each service has
 one minimum instance and CPU always allocated, while the durable lease remains

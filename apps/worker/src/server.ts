@@ -10,7 +10,15 @@ import {
 import { DaytonaCodexOntologyExecutor } from "@jina/daytona";
 import type { OntologyBuildRequest, OntologyGraph } from "@jina/ontology";
 
-const SUPPORTED_TOPICS = ["run-review", "run-research", "run-publish", "run-cleanup", "run-ontology"] as const;
+const SUPPORTED_TOPICS = [
+  "run-review",
+  "run-research",
+  "run-publish",
+  "run-cleanup",
+  "run-ontology",
+  "run-ontology-prepare",
+  "run-ontology-generate"
+] as const;
 type WorkerTopic = typeof SUPPORTED_TOPICS[number];
 
 interface ClaimedWork {
@@ -37,7 +45,9 @@ const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
-const ontologyExecutor = topics.includes("run-ontology") ? new DaytonaCodexOntologyExecutor() : undefined;
+const ontologyExecutor = topics.some((topic) => topic === "run-ontology" || topic === "run-ontology-generate")
+  ? new DaytonaCodexOntologyExecutor()
+  : undefined;
 let stopping = false;
 let active = false;
 let lastApiSuccessAt: string | undefined;
@@ -111,12 +121,29 @@ async function execute(work: ClaimedWork): Promise<void> {
 
 async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   switch (work.message.topic) {
+    case "run-ontology-prepare": {
+      const repository = requiredString(work.task.metadata.repository, "task repository");
+      const ref = requiredString(work.task.metadata.ref, "task ref");
+      const commit = await githubJson(`/repos/${repository}/commits/${encodeURIComponent(ref)}`);
+      return { outcome: "done", result: { commitSha: requiredGitSha(commit.sha, "GitHub commit SHA") } };
+    }
     case "run-ontology": {
       if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
       const request: OntologyBuildRequest = {
         tenantId: requiredString(work.task.metadata.tenantId, "task tenantId"),
         repository: requiredString(work.task.metadata.repository, "task repository"),
         ref: requiredString(work.task.metadata.ref, "task ref"),
+        taskId: work.task.id
+      };
+      return { outcome: "done", graph: await ontologyExecutor.build(request) };
+    }
+    case "run-ontology-generate": {
+      if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
+      const request: OntologyBuildRequest = {
+        tenantId: requiredString(work.task.metadata.tenantId, "task tenantId"),
+        repository: requiredString(work.task.metadata.repository, "task repository"),
+        ref: requiredString(work.task.metadata.ref, "task ref"),
+        commitSha: requiredGitSha(work.task.metadata.commitSha, "task commitSha"),
         taskId: work.task.id
       };
       return { outcome: "done", graph: await ontologyExecutor.build(request) };
@@ -293,6 +320,12 @@ function requiredString(value: unknown, name: string): string {
 function requiredPositiveInteger(value: unknown, name: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} is required`);
   return value;
+}
+
+function requiredGitSha(value: unknown, name: string): string {
+  const sha = requiredString(value, name);
+  if (!/^[a-f0-9]{40}$/i.test(sha)) throw new Error(`${name} must be a full Git SHA`);
+  return sha;
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {

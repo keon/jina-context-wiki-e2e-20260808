@@ -8,8 +8,8 @@ The shipped vertical slice as of 2026-07-19 is deliberately smaller:
 
 | Area | Current implementation |
 | --- | --- |
-| Board integration | Registered `ontology_build` dispatchable type and `run-ontology` outbox topic |
-| Execution | Dedicated Cloud Run worker with renewable leases; Daytona checkout and Codex generation |
+| Board integration | Aggregate `ontology_build` with `ontology_prepare` and `ontology_generate` children |
+| Execution | Dedicated Cloud Run worker with renewable leases; ref resolution followed by exact-commit Daytona/Codex generation |
 | Validation | Strict output schema, required citations, checkout path and line-range validation |
 | Persistence | Immutable graph generations in PostgreSQL; graph and task completion commit atomically |
 | Read API | Tenant-scoped summary listing, latest full graph, and tenant-constrained graph detail |

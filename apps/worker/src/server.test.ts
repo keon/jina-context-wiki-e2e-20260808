@@ -4,10 +4,10 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
-test("worker reviews a pull request, renews its lease, and completes it", async (context) => {
-  let claimed = false;
+test("worker reviews pull requests and prepares ontology sources", async (context) => {
+  let claimCount = 0;
   let renewals = 0;
-  let completion: Record<string, unknown> | undefined;
+  const completions: Record<string, unknown>[] = [];
   let resolveCompletion!: () => void;
   const completed = new Promise<void>((resolve) => { resolveCompletion = resolve; });
 
@@ -15,9 +15,23 @@ test("worker reviews a pull request, renews its lease, and completes it", async 
     const body = await readJson(request);
     if (request.url === "/internal/worker/claim") {
       const topics = (body as { topics?: unknown }).topics;
-      assert.deepEqual(topics, ["run-review"]);
-      if (claimed) return json(response, 204, {});
-      claimed = true;
+      assert.deepEqual(topics, ["run-review", "run-ontology-prepare"]);
+      claimCount += 1;
+      if (claimCount === 2) {
+        return json(response, 200, {
+          message: {
+            id: "message-2",
+            topic: "run-ontology-prepare",
+            leaseId: "lease-2",
+            leaseExpiresAt: new Date(Date.now() + 300_000).toISOString()
+          },
+          task: {
+            id: "task-2",
+            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main" }
+          }
+        });
+      }
+      if (claimCount > 2) return json(response, 204, {});
       return json(response, 200, {
         message: {
           id: "message-1",
@@ -36,9 +50,12 @@ test("worker reviews a pull request, renews its lease, and completes it", async 
       return json(response, 200, { accepted: true });
     }
     if (request.url === "/internal/worker/complete") {
-      completion = body as Record<string, unknown>;
-      resolveCompletion();
+      completions.push(body as Record<string, unknown>);
+      if (completions.length === 2) resolveCompletion();
       return json(response, 200, { accepted: true });
+    }
+    if (request.url === "/github/repos/omlabs/example/commits/main") {
+      return json(response, 200, { sha: "a".repeat(40) });
     }
     if (request.url === "/github/repos/omlabs/example/pulls/2") {
       if (request.headers.accept?.includes("diff")) {
@@ -66,7 +83,7 @@ test("worker reviews a pull request, renews its lease, and completes it", async 
       PORT: "0",
       JINA_API_URL: mockUrl,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-review",
+      WORKER_TOPICS: "run-review,run-ontology-prepare",
       WORKER_HEARTBEAT_INTERVAL_MS: "10",
       WORKER_POLL_INTERVAL_MS: "10",
       GITHUB_API_URL: `${mockUrl}/github`,
@@ -93,11 +110,15 @@ test("worker reviews a pull request, renews its lease, and completes it", async 
   }
 
   assert.ok(renewals > 0);
-  assert.equal(completion?.outcome, "done");
-  assert.equal(completion?.leaseId, "lease-1");
-  const result = completion?.result as Record<string, unknown>;
-  assert.equal(result.summary, "Looks safe.");
-  assert.equal(result.findingCount, 0);
+  assert.equal(completions[0]?.outcome, "done");
+  assert.equal(completions[0]?.leaseId, "lease-1");
+  const reviewResult = completions[0]?.result as Record<string, unknown>;
+  assert.equal(reviewResult.summary, "Looks safe.");
+  assert.equal(reviewResult.findingCount, 0);
+  assert.equal(completions[1]?.outcome, "done");
+  assert.equal(completions[1]?.leaseId, "lease-2");
+  const preparationResult = completions[1]?.result as Record<string, unknown>;
+  assert.equal(preparationResult.commitSha, "a".repeat(40));
 });
 
 async function readJson(request: import("node:http").IncomingMessage): Promise<unknown> {

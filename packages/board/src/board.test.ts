@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { entityId } from "@jina/shared-kernel";
+import { applyCommand } from "./commands.js";
+import { createEmptyBoardState, findTask } from "./reducer.js";
 import { canTransition } from "./transitions.js";
 import { leaseNextOutboxMessage, renewOutboxLease, type BoardState } from "./reducer.js";
 
@@ -9,6 +11,31 @@ test("transition policy follows task kind instead of an extension type name", ()
   assert.equal(canTransition("manual", "triage", "done", "user"), true);
   assert.equal(canTransition("waitpoint", "blocked", "done", "user"), true);
   assert.equal(canTransition("dispatchable", "queued", "in_progress", "run"), true);
+});
+
+test("workers can pass small durable metadata to a dependent task", () => {
+  const taskId = entityId<"task">("task-generation");
+  const now = "2026-01-01T00:00:00.000Z";
+  const created = applyCommand(createEmptyBoardState(), {
+    command: "CreateTask",
+    task: {
+      id: taskId,
+      type: "ontology_generate",
+      kind: "dispatchable",
+      title: "Generate ontology",
+      assigneeRole: "ontology_worker",
+      dedupeKey: "ontology:generate",
+      dispatchTopic: "run-ontology-generate"
+    }
+  }, { actor: { type: "user", id: "test" }, now }).state;
+  const updated = applyCommand(created, {
+    command: "UpdateTask",
+    taskId,
+    metadata: { commitSha: "a".repeat(40) }
+  }, { actor: { type: "run", id: "ontology-worker" }, now }).state;
+
+  assert.equal(findTask(updated, taskId)?.metadata.commitSha, "a".repeat(40));
+  assert.equal(updated.events.at(-1)?.type, "task.updated");
 });
 
 test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
