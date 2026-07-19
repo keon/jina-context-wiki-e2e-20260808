@@ -1,5 +1,5 @@
 {
-  "name": "@jina/daytona",
+  "name": "@jina/ontology",
   "private": true,
   "type": "module",
   "exports": {
@@ -12,11 +12,9 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
-    "test": "echo \"test not configured\""
+    "test": "pnpm build && node --test dist/ontology.test.js"
   },
   "dependencies": {
-    "@daytona/sdk": "^0.187.0",
-    "@jina/ontology": "workspace:*",
     "@jina/shared-kernel": "workspace:*"
   },
   "devDependencies": {

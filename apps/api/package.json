@@ -12,8 +12,10 @@
   },
   "dependencies": {
     "@jina/board": "workspace:*",
+    "@jina/daytona": "workspace:*",
     "@jina/db": "workspace:*",
     "@jina/github": "workspace:*",
+    "@jina/ontology": "workspace:*",
     "@jina/publication": "workspace:*",
     "@jina/review": "workspace:*",
     "@jina/shared-kernel": "workspace:*"

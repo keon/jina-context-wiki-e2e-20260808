@@ -2,24 +2,14 @@ import type { IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskId } from "./dependencies.js";
 import type { TaskStatus } from "./task-status.js";
 
-export type TaskType =
-  | "pr_review"
-  | "review_pass"
-  | "context"
-  | "publish"
-  | "cleanup"
-  | "issue_triage"
-  | "human_decision";
+/** Worker-owned identifier. The board treats task types as opaque strings. */
+export type TaskType = string;
 
-export type TaskDispatchTopic = "run-review" | "run-research" | "run-publish" | "run-cleanup";
+/** Runtime-owned dispatch route. New workers do not require board changes. */
+export type TaskDispatchTopic = string;
 
-export type TaskAssigneeRole =
-  | "system"
-  | "review_agent"
-  | "research_agent"
-  | "publisher"
-  | "cleanup_worker"
-  | "human";
+/** Worker-owned role identifier. */
+export type TaskAssigneeRole = string;
 
 export type TaskKind = "aggregate" | "dispatchable" | "manual" | "waitpoint";
 
@@ -105,6 +95,7 @@ export interface BoardTask {
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
   readonly metadata: Record<string, unknown>;
+  readonly kind: TaskKind;
   readonly dispatchTopic?: TaskDispatchTopic;
   readonly parentTaskId?: TaskId;
   readonly epoch?: number;
@@ -119,6 +110,7 @@ export interface CreateBoardTaskInput {
   readonly now: IsoTimestamp;
   readonly required?: boolean;
   readonly metadata?: Record<string, unknown>;
+  readonly kind?: TaskKind;
   readonly dispatchTopic?: TaskDispatchTopic;
   readonly parentTaskId?: TaskId;
   readonly epoch?: number;
@@ -137,6 +129,7 @@ export function createBoardTask(input: CreateBoardTaskInput): BoardTask {
     createdAt: input.now,
     updatedAt: input.now,
     metadata: input.metadata ?? {},
+    kind: input.kind ?? taskKind(input.type),
     ...(input.dispatchTopic ? { dispatchTopic: input.dispatchTopic } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
     ...(input.epoch !== undefined ? { epoch: input.epoch } : {})

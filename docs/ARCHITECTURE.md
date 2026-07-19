@@ -4,6 +4,8 @@
 
 Jina is a multi-tenant agent platform for software work, starting with GitHub pull request review. It receives GitHub events, represents work as tasks on a Postgres-backed **board**, schedules and executes specialized AI agents as **stateless durable runs on Trigger.dev**, publishes feedback or artifacts to developer systems, and stores durable state for a Next.js dashboard.
 
+Specialized workers keep their domain state outside the generic board. See [ONTOLOGY.md](ONTOLOGY.md) for the complete Ontology worker architecture and implementation strategy.
+
 The system is designed for agent collaboration without handing the whole job to one opaque autonomous agent. A PR review is the first pipeline: a root task plus stage tasks for checkout, review passes, context handoffs, publishing, and human decisions. New GitHub issues enter the board as manual triage cards; automated issue-triage, fix, test, documentation, release, and incident pipelines remain future capabilities.
 
 ## Vocabulary

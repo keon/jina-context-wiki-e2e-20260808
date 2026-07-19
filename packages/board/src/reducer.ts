@@ -1,7 +1,7 @@
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskDependencyDraft, TaskId } from "./dependencies.js";
 import { isTerminalFailure, isTerminalTaskStatus, type TaskStatus } from "./task-status.js";
-import { createBoardTask, taskKind, type BoardTask } from "./tasks.js";
+import { createBoardTask, type BoardTask } from "./tasks.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
@@ -183,7 +183,7 @@ function queueReadyDispatchableTasks(state: BoardState, now: IsoTimestamp): Boar
   let next = state;
 
   for (const task of state.tasks) {
-    if (taskKind(task.type) !== "dispatchable" || !task.dispatchTopic || !isReadyForQueue(state, task)) {
+    if (task.kind !== "dispatchable" || !task.dispatchTopic || !isReadyForQueue(state, task)) {
       continue;
     }
 
@@ -229,7 +229,7 @@ function completeReadyAggregateTasks(state: BoardState, now: IsoTimestamp): Boar
 
   for (const task of state.tasks) {
     const hasDependencies = state.dependencies.some((dependency) => dependency.taskId === task.id);
-    if (taskKind(task.type) !== "aggregate" || !hasDependencies || !isReadyForQueue(state, task)) {
+    if (task.kind !== "aggregate" || !hasDependencies || !isReadyForQueue(state, task)) {
       continue;
     }
 
@@ -243,7 +243,7 @@ function blockWaitpointTasks(state: BoardState, now: IsoTimestamp): BoardState {
   let next = state;
 
   for (const task of state.tasks) {
-    if (taskKind(task.type) === "waitpoint" && task.status === "triage") {
+    if (task.kind === "waitpoint" && task.status === "triage") {
       next = transitionBoardTask(next, task.id, "blocked", now);
     }
   }

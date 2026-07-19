@@ -20,7 +20,7 @@ const dispatchableRules: readonly TransitionRule[] = [
   { from: activeStatuses, to: ["canceled"], actors: ["user", "system"] }
 ];
 
-const transitionRules: Record<TaskType, readonly TransitionRule[]> = {
+const transitionRules: Partial<Record<TaskType, readonly TransitionRule[]>> = {
   pr_review: [
     { from: ["triage", "blocked"], to: ["done", "blocked"], actors: ["reducer", "system"] },
     { from: ["triage", "blocked"], to: ["superseded"], actors: ["system", "github"] },
@@ -42,7 +42,7 @@ const transitionRules: Record<TaskType, readonly TransitionRule[]> = {
 };
 
 export function canTransition(type: TaskType, from: TaskStatus, to: TaskStatus, actor: TransitionActorType): boolean {
-  return transitionRules[type].some(
+  return (transitionRules[type] ?? dispatchableRules).some(
     (rule) => rule.from.includes(from) && rule.to.includes(to) && rule.actors.includes(actor)
   );
 }

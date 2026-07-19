@@ -98,6 +98,7 @@ jobs:
             --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
             --add-cloudsql-instances=jina-v2:us-central1:jina-postgres
             --concurrency=1
+            --timeout=1800
             --min-instances=0
             --max-instances=1
           env_vars: |-
@@ -110,6 +111,10 @@ jobs:
           secrets: |-
             DB_PASS=jina-db-password:latest
             GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest
+            DAYTONA_API_KEY=jina-daytona-api-key:latest
+            OPENAI_API_KEY=jina-openai-api-key:latest
+            GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
+            INTERNAL_API_TOKEN=jina-internal-api-token:latest
 
       - name: Verify API health
         run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/health"

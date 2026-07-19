@@ -38,6 +38,12 @@ Every run prints its trace (each step the harness took), exact model usage (toke
 
 `pnpm dev` runs in-memory stand-ins for Postgres/Trigger.dev: the api seeds a PR, a relay tick completes one run per interval, and the dashboard shows cards moving across the board — including epoch supersession when you force-push from the toolbar.
 
+## Ontology Worker
+
+`ontology_build` is a worker-owned task type registered with the generic board. The API queues it on `run-ontology`; a Daytona sandbox clones the requested GitHub repository and runs Codex with a strict, cited graph schema. Completed graphs are stored in normalized PostgreSQL tables and rendered on the dashboard's `/ontology` page.
+
+Local execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and either `OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Override provider and model with `ONTOLOGY_CODEX_PROVIDER` and `ONTOLOGY_CODEX_MODEL` when needed.
+
 ## GitHub App Intake
 
 The API accepts signed GitHub App deliveries at `POST /webhooks/github`. A newly opened pull request creates the review task graph; a newly opened issue creates one manual triage card. Configure the App with read-only Pull requests and Issues permissions. See [GitHub App Setup](docs/GITHUB_APP.md).
@@ -59,6 +65,7 @@ packages/
   db/           schema, migrations, repositories
   github/       GitHub App and publication adapter
   daytona/      checkout broker adapter
+  ontology/     repository graph contract, task type, schema, and store port
   ai/           model clients and agent harnesses
   shared-kernel/ small shared primitives: ids, result, time, env, logging
 ```

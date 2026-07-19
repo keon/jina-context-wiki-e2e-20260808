@@ -65,6 +65,36 @@ export function renderDashboardPage(apiUrl: string): string {
   .feed { margin-top: 1.4rem; border-top: 1px solid #1f2534; padding-top: 1rem; }
   .feed h2 { margin: 0 0 .6rem; font-size: .78rem; color: #8f9aaf; }
   #log { color: #68748a; font: .68rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+  .ontology-shell { display: grid; gap: 1rem; }
+  .ontology-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .65rem; }
+  .ontology-stat { border: 1px solid #283149; border-radius: .8rem; background: linear-gradient(145deg, #151b29, #10151f); padding: .8rem; }
+  .ontology-stat strong { display: block; margin-top: .35rem; font-size: 1.05rem; }
+  .ontology-card { border: 1px solid #252d40; border-radius: .9rem; background: rgb(14 18 27 / 84%); overflow: hidden; }
+  .ontology-card header { display: flex; justify-content: space-between; gap: 1rem; padding: .9rem 1rem; border-bottom: 1px solid #252d40; }
+  .ontology-card h2 { margin: 0; font-size: .82rem; }
+  .ontology-card p { margin: .3rem 0 0; color: #7f8ba1; font-size: .72rem; line-height: 1.45; }
+  .graph-wrap { min-height: 590px; overflow: auto; background: radial-gradient(circle at 50% 50%, #182036, #0d1119 66%); }
+  #ontology-graph { display: block; width: 100%; min-width: 900px; height: 590px; }
+  .graph-edge { stroke-width: 1.5; opacity: .62; }
+  .graph-edge-code { stroke: #6495ed; }
+  .graph-edge-knowledge { stroke: #d88fff; stroke-dasharray: 5 4; }
+  .graph-edge-label { fill: #7e8ca5; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-anchor: middle; }
+  .graph-node circle { stroke-width: 2; filter: drop-shadow(0 5px 8px rgb(0 0 0 / 35%)); }
+  .graph-node text { fill: #e8ecf4; font-size: 11px; font-weight: 650; text-anchor: middle; pointer-events: none; }
+  .graph-node .node-kind { fill: #8794aa; font-size: 9px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
+  .kind-Repository circle { fill: #263d78; stroke: #8ba9ff; }
+  .kind-File circle { fill: #163f3b; stroke: #59d7bf; }
+  .kind-Symbol circle { fill: #45321c; stroke: #efb964; }
+  .kind-Document circle { fill: #3f244e; stroke: #cf89e9; }
+  .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { fill: #3c2830; stroke: #ef879f; }
+  .kind-Engineer circle, .kind-Team circle { fill: #283248; stroke: #91a7d4; }
+  .ontology-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .7rem; padding: 1rem; }
+  .ontology-item { border: 1px solid #262e42; border-radius: .7rem; background: #121722; padding: .72rem; }
+  .ontology-item strong { display: block; font-size: .74rem; }
+  .ontology-item span { display: block; margin-top: .3rem; color: #7e8aa0; font-size: .66rem; line-height: 1.45; }
+  .plane-key { display: flex; gap: .8rem; align-items: center; color: #7f8ca2; font-size: .66rem; }
+  .plane-key span::before { content: ""; display: inline-block; width: 1.4rem; margin-right: .35rem; border-top: 2px solid #6495ed; vertical-align: middle; }
+  .plane-key .knowledge::before { border-top-color: #d88fff; border-top-style: dashed; }
 
   dialog { width: min(760px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 0; border: 1px solid #30394e; border-radius: 1rem; background: #10141d; color: #f3f5f8; box-shadow: 0 2rem 6rem rgb(0 0 0 / 55%); }
   dialog::backdrop { background: rgb(3 5 9 / 72%); backdrop-filter: blur(5px); }
@@ -118,6 +148,7 @@ export function renderDashboardPage(apiUrl: string): string {
   <nav class="page-nav" aria-label="Dashboard pages">
     <a href="/" data-page="board">Board</a>
     <a href="/tasks" data-page="task-types">Task types</a>
+    <a href="/ontology" data-page="ontology">Ontology</a>
   </nav>
   <section id="board-page">
     <div class="toolbar" id="toolbar">
@@ -135,6 +166,19 @@ export function renderDashboardPage(apiUrl: string): string {
       <div class="task-list" id="task-type-list" aria-label="Task type list"></div>
     </section>
   </section>
+  <section id="ontology-page" hidden>
+    <div class="ontology-shell">
+      <section class="ontology-summary" id="ontology-summary"></section>
+      <section class="ontology-card">
+        <header>
+          <div><h2 id="ontology-title">Repository graph</h2><p id="ontology-description">Waiting for an Ontology worker result.</p></div>
+          <div class="plane-key"><span>Code plane</span><span class="knowledge">Knowledge plane</span></div>
+        </header>
+        <div class="graph-wrap"><svg id="ontology-graph" viewBox="0 0 1100 590" role="img" aria-label="Repository ontology graph"></svg></div>
+        <div class="ontology-details" id="ontology-details"></div>
+      </section>
+    </div>
+  </section>
 </main>
 
 <dialog id="task-dialog" aria-labelledby="detail-title">
@@ -150,6 +194,7 @@ const API = ${JSON.stringify(apiUrl)};
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
+let ontologyState = { latest: null, graphs: [] };
 let nextPr = 100;
 let nextIssue = 200;
 
@@ -160,18 +205,23 @@ const dialog = document.getElementById("task-dialog");
 const detailTitle = document.getElementById("detail-title");
 const detailEyebrow = document.getElementById("detail-eyebrow");
 const detailBody = document.getElementById("detail-body");
+const ontologyGraph = document.getElementById("ontology-graph");
+const ontologySummary = document.getElementById("ontology-summary");
+const ontologyDetails = document.getElementById("ontology-details");
 
 async function refresh() {
   try {
-    const responses = await Promise.all([fetch(API + "/board"), fetch(API + "/events"), fetch(API + "/task-types")]);
-    if (!responses[0].ok || !responses[1].ok || !responses[2].ok) throw new Error("API request failed");
+    const responses = await Promise.all([fetch(API + "/board"), fetch(API + "/events"), fetch(API + "/task-types"), fetch(API + "/ontology")]);
+    if (!responses[0].ok || !responses[1].ok || !responses[2].ok || !responses[3].ok) throw new Error("API request failed");
     boardState = await responses[0].json();
     boardEvents = await responses[1].json();
     taskTypes = await responses[2].json();
+    ontologyState = await responses[3].json();
     setConnection(true);
     renderPage();
     renderColumns();
     renderTaskTypes();
+    renderOntology();
     renderLog();
     renderSelectedTask();
   } catch (error) {
@@ -186,13 +236,105 @@ function setConnection(online) {
 
 function renderPage() {
   const showingTaskTypes = location.pathname === "/tasks";
-  document.getElementById("board-page").hidden = showingTaskTypes;
+  const showingOntology = location.pathname === "/ontology";
+  document.getElementById("board-page").hidden = showingTaskTypes || showingOntology;
   document.getElementById("task-types-page").hidden = !showingTaskTypes;
-  document.getElementById("page-title").textContent = showingTaskTypes ? "Task types" : "Jina board";
+  document.getElementById("ontology-page").hidden = !showingOntology;
+  document.getElementById("page-title").textContent = showingOntology ? "Ontology" : showingTaskTypes ? "Task types" : "Jina board";
   for (const link of document.querySelectorAll("[data-page]")) {
-    link.classList.toggle("active", link.dataset.page === (showingTaskTypes ? "task-types" : "board"));
+    link.classList.toggle("active", link.dataset.page === (showingOntology ? "ontology" : showingTaskTypes ? "task-types" : "board"));
   }
 }
+
+function renderOntology() {
+  ontologyGraph.replaceChildren();
+  ontologySummary.replaceChildren();
+  ontologyDetails.replaceChildren();
+  const graph = ontologyState.latest;
+  if (!graph) {
+    ontologySummary.append(ontologyStat("Status", "No graph yet"));
+    ontologyDetails.append(textElement("p", "empty-detail", "Run an ontology_build task to create the first graph."));
+    return;
+  }
+
+  document.getElementById("ontology-title").textContent = graph.repository + " @ " + graph.ref;
+  document.getElementById("ontology-description").textContent = graph.summary;
+  ontologySummary.append(
+    ontologyStat("Repository", graph.repository),
+    ontologyStat("Nodes", String(graph.nodes.length)),
+    ontologyStat("Edges", String(graph.edges.length)),
+    ontologyStat("Commit", graph.commitSha.slice(0, 12)),
+    ontologyStat("Generated", formatTime(graph.generatedAt)),
+    ontologyStat("Executor", graph.generator.executor + " · " + graph.generator.model)
+  );
+
+  const positions = graphPositions(graph.nodes);
+  for (const edge of graph.edges) {
+    const source = positions.get(edge.source);
+    const target = positions.get(edge.target);
+    if (!source || !target) continue;
+    const line = svgElement("line", "graph-edge graph-edge-" + edge.plane);
+    line.setAttribute("x1", source.x); line.setAttribute("y1", source.y);
+    line.setAttribute("x2", target.x); line.setAttribute("y2", target.y);
+    ontologyGraph.append(line);
+    const label = svgElement("text", "graph-edge-label");
+    label.setAttribute("x", String((source.x + target.x) / 2));
+    label.setAttribute("y", String((source.y + target.y) / 2 - 5));
+    label.textContent = edge.predicate;
+    ontologyGraph.append(label);
+  }
+  for (const node of graph.nodes) {
+    const point = positions.get(node.id);
+    if (!point) continue;
+    const group = svgElement("g", "graph-node kind-" + node.kind);
+    group.setAttribute("transform", "translate(" + point.x + " " + point.y + ")");
+    const circle = svgElement("circle"); circle.setAttribute("r", node.kind === "Repository" ? "38" : "30");
+    const label = svgElement("text"); label.setAttribute("y", "3"); label.textContent = truncateLabel(node.label, 18);
+    const kind = svgElement("text", "node-kind"); kind.setAttribute("y", "48"); kind.textContent = node.kind;
+    const title = svgElement("title"); title.textContent = node.label + " — " + node.description;
+    group.append(circle, label, kind, title);
+    ontologyGraph.append(group);
+  }
+
+  for (const node of graph.nodes) {
+    const item = element("article", "ontology-item");
+    item.append(
+      textElement("strong", "", node.kind + " · " + node.label),
+      textElement("span", "", node.description),
+      textElement("span", "", "Evidence: " + (node.evidence.join(", ") || "none"))
+    );
+    ontologyDetails.append(item);
+  }
+}
+
+function ontologyStat(label, value) {
+  const stat = element("article", "ontology-stat");
+  stat.append(textElement("span", "label", label), textElement("strong", "", value));
+  return stat;
+}
+
+function graphPositions(nodes) {
+  const positions = new Map();
+  const center = nodes.find(function(node) { return node.kind === "Repository"; });
+  if (center) positions.set(center.id, { x: 550, y: 295 });
+  const rest = nodes.filter(function(node) { return !center || node.id !== center.id; });
+  for (let index = 0; index < rest.length; index += 1) {
+    const ring = index < 10 ? 205 : 265;
+    const ringIndex = index < 10 ? index : index - 10;
+    const ringCount = index < 10 ? Math.min(rest.length, 10) : Math.max(rest.length - 10, 1);
+    const angle = -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
+    positions.set(rest[index].id, { x: 550 + Math.cos(angle) * ring * 1.75, y: 295 + Math.sin(angle) * ring });
+  }
+  return positions;
+}
+
+function svgElement(tag, className) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  if (className) node.setAttribute("class", className);
+  return node;
+}
+
+function truncateLabel(value, max) { return value.length <= max ? value : value.slice(0, max - 1) + "…"; }
 
 function renderColumns() {
   columns.replaceChildren();
@@ -356,6 +498,7 @@ function eventLabel(event) {
     "task.created": "Task created", "task.queued": "Queued for execution", "task.transitioned": "Status changed",
     "task.dependency_added": "Dependency linked", "run.step": "Run comment", "review.completed": "Review completed",
     "publish.completed": "Publication comment", "github.issue_opened": "GitHub issue received"
+    ,"ontology.graph_created": "Ontology graph created", "ontology.failed": "Ontology build failed"
   };
   return labels[event.type] || humanize(event.type);
 }

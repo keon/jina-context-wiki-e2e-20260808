@@ -9,8 +9,14 @@ import {
   type CommandActor
 } from "@jina/board";
 import type { ParsedGitHubWebhook } from "@jina/github";
+import {
+  MemoryOntologyGraphStore,
+  ontologyTaskTypeDefinitions,
+  type OntologyExecutor,
+  type OntologyGraphStore
+} from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
-import { nowIso } from "@jina/shared-kernel";
+import { entityId, nowIso } from "@jina/shared-kernel";
 import {
   createGitHubIntakeState,
   ingestGitHubWebhook,
@@ -29,6 +35,9 @@ export interface ApiServerConfig {
   readonly seedDemo?: boolean;
   readonly deliveryCacheSize?: number;
   readonly stateStore?: ApiStateStore;
+  readonly ontologyExecutor?: OntologyExecutor;
+  readonly ontologyStore?: OntologyGraphStore;
+  readonly internalApiToken?: string;
 }
 
 export interface ApiSnapshot {
@@ -54,6 +63,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
   const deliveries = new DeliveryCache(config.deliveryCacheSize ?? 10_000);
+  const ontologyStore = config.ontologyStore ?? new MemoryOntologyGraphStore();
   const ready = initializeState();
   let mutations = Promise.resolve();
 
@@ -155,6 +165,74 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       { actor: RUN_ACTOR, now: nowIso() }
     ).state;
 
+    if (message.topic === "run-ontology") {
+      if (!config.ontologyExecutor) {
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: "ontology.failed",
+            payload: { reason: "ontology_executor_not_configured" }
+          },
+          { actor: RUN_ACTOR, now: nowIso() }
+        ).state;
+        board = applyCommand(
+          board,
+          { command: "TransitionTask", taskId: task.id, toStatus: "failed" },
+          { actor: RUN_ACTOR, now: nowIso() }
+        ).state;
+        intakeState = { ...intakeState, board: reduceBoard(board, nowIso()) };
+        await persist();
+        return;
+      }
+
+      try {
+        const graph = await config.ontologyExecutor.build({
+          tenantId: String(task.metadata.tenantId ?? config.tenantId ?? "default"),
+          repository: String(task.metadata.repository ?? ""),
+          ref: String(task.metadata.ref ?? "main"),
+          taskId: task.id
+        });
+        await ontologyStore.save(graph);
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: "ontology.graph_created",
+            payload: {
+              graphId: graph.id,
+              nodeCount: graph.nodes.length,
+              edgeCount: graph.edges.length,
+              commitSha: graph.commitSha,
+              sandboxId: graph.generator.sandboxId ?? ""
+            }
+          },
+          { actor: RUN_ACTOR, now: nowIso() }
+        ).state;
+      } catch (error) {
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: task.id,
+            eventType: "ontology.failed",
+            payload: { reason: error instanceof Error ? error.message : String(error) }
+          },
+          { actor: RUN_ACTOR, now: nowIso() }
+        ).state;
+        board = applyCommand(
+          board,
+          { command: "TransitionTask", taskId: task.id, toStatus: "failed" },
+          { actor: RUN_ACTOR, now: nowIso() }
+        ).state;
+        intakeState = { ...intakeState, board: reduceBoard(board, nowIso()) };
+        await persist();
+        return;
+      }
+    }
+
     if (message.topic === "run-publish") {
       const headSha = String(task.metadata.headSha ?? "");
       const key = buildPublicationKey(`${repository}#${pullRequestNumber}`, headSha, "summary");
@@ -195,7 +273,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
-        storage: config.stateStore ? "postgres" : "memory"
+        storage: config.stateStore ? "postgres" : "memory",
+        ontologyExecutorConfigured: Boolean(config.ontologyExecutor)
       });
       return;
     }
@@ -210,7 +289,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/task-types") {
-      json(response, 200, taskTypeDefinitions);
+      json(response, 200, [...taskTypeDefinitions, ...ontologyTaskTypeDefinitions]);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/ontology") {
+      const graphs = await ontologyStore.list(config.tenantId);
+      json(response, 200, { latest: graphs[0] ?? null, graphs });
+      return;
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/ontology/graphs/")) {
+      const graphId = decodeURIComponent(url.pathname.slice("/ontology/graphs/".length));
+      const graph = await ontologyStore.get(graphId);
+      json(response, graph ? 200 : 404, graph ?? { error: "ontology graph not found" });
       return;
     }
     if (request.method === "GET" && url.pathname === "/events") {
@@ -283,10 +373,58 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/ontology/build") {
+      if (!config.enableDevEndpoints && !isAuthorizedInternalRequest(request, config.internalApiToken)) {
+        json(response, 401, { accepted: false, error: "unauthorized" });
+        return;
+      }
+      const body = parseJsonObject(await readRawBody(request));
+      const repository = requiredString(body.repository, "repository");
+      if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+        json(response, 400, { accepted: false, error: "repository must be owner/name" });
+        return;
+      }
+      const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
+      const tenantId = typeof body.tenantId === "string" && body.tenantId.trim()
+        ? body.tenantId.trim()
+        : config.tenantId ?? "default";
+      devDeliverySequence += 1;
+      const nonce = typeof body.requestKey === "string" && body.requestKey.trim()
+        ? body.requestKey.trim()
+        : `${Date.now()}-${devDeliverySequence}`;
+      const taskId = entityId<"task">(`task_ontology:${tenantId}:${repository}:${ref}:${nonce}`);
+      const created = await mutate(async () => {
+        let board = applyCommand(
+          intakeState.board,
+          {
+            command: "CreateTask",
+            task: {
+              id: taskId,
+              type: "ontology_build",
+              kind: "dispatchable",
+              title: `Build Ontology for ${repository}@${ref}`,
+              assigneeRole: "ontology_worker",
+              dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}`,
+              dispatchTopic: "run-ontology",
+              required: true,
+              metadata: { tenantId, repository, ref, requestKey: nonce }
+            },
+            blocksParentCompletion: false
+          },
+          { actor: { type: "user", id: "ontology-api" }, now: nowIso() }
+        ).state;
+        board = reduceBoard(board, nowIso());
+        intakeState = { ...intakeState, board };
+        await persist();
+        return board.tasks.find((task) => task.id === taskId);
+      });
+      json(response, 202, { accepted: true, task: created });
+      return;
+    }
 
     json(response, 404, {
       error: "not found",
-      routes: ["GET /health", "GET /board", "GET /task-types", "GET /events", "POST /webhooks/github"]
+      routes: ["GET /health", "GET /board", "GET /task-types", "GET /events", "GET /ontology", "POST /ontology/build", "POST /webhooks/github"]
     });
   }
 
@@ -303,8 +441,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   if (config.stateStore) {
     server.once("close", () => void config.stateStore?.close());
   }
+  server.once("close", () => void ontologyStore.close());
 
   return server;
+}
+
+function isAuthorizedInternalRequest(request: IncomingMessage, token?: string): boolean {
+  if (!token) return false;
+  const authorization = firstHeader(request.headers.authorization);
+  return authorization === `Bearer ${token}`;
 }
 
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {

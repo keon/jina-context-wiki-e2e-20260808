@@ -10,9 +10,11 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../../packages/board" },
+    { "path": "../../packages/daytona" },
     { "path": "../../packages/db" },
     { "path": "../../packages/github" },
     { "path": "../../packages/publication" },
+    { "path": "../../packages/ontology" },
     { "path": "../../packages/review" },
     { "path": "../../packages/shared-kernel" }
   ]

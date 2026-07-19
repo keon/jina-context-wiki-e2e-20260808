@@ -2,3 +2,7 @@ packages:
   - "apps/*"
   - "packages/*"
 
+onlyBuiltDependencies:
+  - protobufjs
+allowBuilds:
+  protobufjs: true

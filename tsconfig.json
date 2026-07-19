@@ -7,6 +7,7 @@
     { "path": "./packages/board" },
     { "path": "./packages/review" },
     { "path": "./packages/context" },
+    { "path": "./packages/ontology" },
     { "path": "./packages/publication" },
     { "path": "./packages/policy" },
     { "path": "./packages/db" },

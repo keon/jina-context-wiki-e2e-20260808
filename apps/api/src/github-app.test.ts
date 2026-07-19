@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { createOntologyGraph, type OntologyExecutor } from "@jina/ontology";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const SECRET = "test-webhook-secret";
@@ -76,12 +77,44 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   const taskTypes = await fetch(`${baseUrl}/task-types`).then(
     (response) => response.json() as Promise<Array<{ type: string; kind: string; description: string }>>
   );
-  assert.equal(taskTypes.length, 7);
+  assert.equal(taskTypes.length, 8);
   assert.deepEqual(
     taskTypes.map((definition) => definition.type),
-    ["pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision"]
+    ["pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision", "ontology_build"]
   );
   assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
+});
+
+test("ontology worker builds and exposes a graph end to end", async () => {
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    simulateRuns: true,
+    ontologyExecutor: new FixtureOntologyExecutor()
+  });
+  const baseUrl = await listen(server);
+  try {
+    const created = await fetch(`${baseUrl}/ontology/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test" })
+    });
+    assert.equal(created.status, 202);
+
+    const ontology = await waitFor(async () => {
+      const response = await fetch(`${baseUrl}/ontology`);
+      const value = await response.json() as { latest: { nodes: unknown[]; edges: unknown[] } | null };
+      return value.latest ? value : undefined;
+    });
+    assert.equal(ontology.latest?.nodes.length, 2);
+    assert.equal(ontology.latest?.edges.length, 1);
+
+    const board = await fetch(`${baseUrl}/board`).then(
+      (response) => response.json() as Promise<{ tasks: Array<{ type: string; status: string }> }>
+    );
+    assert.equal(board.tasks.find((task) => task.type === "ontology_build")?.status, "done");
+  } finally {
+    await close(server);
+  }
 });
 
 test("durable state survives an API server restart", async () => {
@@ -150,6 +183,36 @@ class MemoryStateStore implements ApiStateStore {
   }
 
   async close(): Promise<void> {}
+}
+
+class FixtureOntologyExecutor implements OntologyExecutor {
+  async build(request: Parameters<OntologyExecutor["build"]>[0]) {
+    return createOntologyGraph({
+      request,
+      commitSha: "fixture-sha",
+      generatedAt: new Date().toISOString(),
+      executor: "fixture",
+      model: "fixture",
+      generated: {
+        summary: "Fixture repository",
+        nodes: [
+          { id: "repo", kind: "Repository", label: request.repository, description: "Repository", evidence: ["README.md:1"] },
+          { id: "file:README.md", kind: "File", label: "README.md", description: "Documentation", path: "README.md", evidence: ["README.md:1"] }
+        ],
+        edges: [{ source: "repo", target: "file:README.md", predicate: "CONTAINS", plane: "code", evidence: ["README.md:1"] }]
+      }
+    });
+  }
+}
+
+async function waitFor<T>(read: () => Promise<T | undefined>): Promise<T> {
+  const deadline = Date.now() + 6_000;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value !== undefined) return value;
+    await new Promise((resolve) => setTimeout(resolve, 150));
+  }
+  throw new Error("timed out waiting for value");
 }
 
 async function deliver(

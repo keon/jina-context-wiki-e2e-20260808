@@ -4,5 +4,8 @@ export interface DashboardRoute {
 }
 
 export function dashboardRoutes(): readonly DashboardRoute[] {
-  return [{ path: "/tasks", requiresAuth: true }];
+  return [
+    { path: "/tasks", requiresAuth: true },
+    { path: "/ontology", requiresAuth: true }
+  ];
 }
