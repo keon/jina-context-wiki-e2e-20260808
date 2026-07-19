@@ -17,11 +17,18 @@ import {
 import type { ParsedGitHubWebhook } from "@jina/github";
 import {
   createOntologyGraph,
+  assertionsFromGeneratedOntology,
   MemoryOntologyGraphStore,
+  ONTOLOGY_GENERATOR_VERSION,
+  ONTOLOGY_PARSER_VERSION,
+  ONTOLOGY_REGISTRY_VERSION,
   ontologyTaskTypeDefinitions,
   parseGeneratedOntology,
+  type BlobAnalysis,
+  type OntologyAssertionBatch,
   type OntologyGraph,
-  type OntologyGraphStore
+  type OntologyGraphStore,
+  type RepositorySnapshot
 } from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { entityId, nowIso } from "@jina/shared-kernel";
@@ -29,6 +36,7 @@ import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } 
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
+const MAX_ONTOLOGY_SNAPSHOT_BYTES = 25 * 1024 * 1024;
 const WORKER_LEASE_MS = 5 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
@@ -38,7 +46,10 @@ const WORKER_TOPICS = [
   "run-cleanup",
   "run-ontology",
   "run-ontology-prepare",
-  "run-ontology-generate"
+  "run-ontology-generate",
+  "run-ontology-ingest",
+  "run-ontology-assert",
+  "run-ontology-project"
 ] as const;
 
 export interface ApiServerConfig {
@@ -142,7 +153,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   /** Local demo runner only. Ontology work is always claimed by the durable worker. */
   async function drainOneSimulatedRun(): Promise<void> {
     const message = intakeState.board.outbox.find(
-      (candidate) => candidate.status === "pending" && candidate.topic !== "run-ontology"
+      (candidate) => candidate.status === "pending" && !candidate.topic.startsWith("run-ontology")
     );
     if (!message) return;
     let board = markOutboxDispatched(intakeState.board, message.id, nowIso());
@@ -174,6 +185,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const server = createServer((request, response) => {
     void route(request, response).catch((error: unknown) => {
       const isTooLarge = error instanceof RequestBodyTooLargeError;
+      console.error("API request failed", error instanceof Error ? error.message : String(error));
       json(response, isTooLarge ? 413 : 500, {
         accepted: false,
         error: isTooLarge ? error.message : "internal server error"
@@ -254,6 +266,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await createOntologyTask(request, response, tenantId);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/plan") {
+      await planOntologyIngestion(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/blobs") {
+      await applyOntologyBlobAnalyses(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/cached") {
+      await findCachedOntologyAssertions(request, response, tenantId);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
       await claimWork(request, response, tenantId);
       return;
@@ -318,8 +342,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       : `${Date.now()}-${devDeliverySequence}`;
     const taskKey = `task_ontology:${tenantId}:${repository}:${ref}:${nonce}`;
     const taskId = entityId<"task">(`${taskKey}:root`);
-    const prepareTaskId = entityId<"task">(`${taskKey}:prepare`);
-    const generateTaskId = entityId<"task">(`${taskKey}:generate`);
+    const ingestTaskId = entityId<"task">(`${taskKey}:ingest`);
+    const assertionTaskId = entityId<"task">(`${taskKey}:assert`);
+    const projectionTaskId = entityId<"task">(`${taskKey}:project`);
     const created = await mutate(async () => {
       let board = applyCommand(intakeState.board, {
         command: "CreateTask",
@@ -338,13 +363,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       board = applyCommand(board, {
         command: "CreateTask",
         task: {
-          id: prepareTaskId,
-          type: "ontology_prepare",
+          id: ingestTaskId,
+          type: "ontology_ingest",
           kind: "dispatchable",
-          title: `Prepare source for ${repository}@${ref}`,
+          title: `Aggregate raw repository data for ${repository}@${ref}`,
           assigneeRole: "ontology_worker",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:prepare`,
-          dispatchTopic: "run-ontology-prepare",
+          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:ingest`,
+          dispatchTopic: "run-ontology-ingest",
           parentTaskId: taskId,
           required: true,
           metadata: { tenantId, repository, ref, requestKey: nonce }
@@ -353,20 +378,42 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       board = applyCommand(board, {
         command: "CreateTask",
         task: {
-          id: generateTaskId,
-          type: "ontology_generate",
+          id: assertionTaskId,
+          type: "ontology_assert",
           kind: "dispatchable",
-          title: `Generate graph for ${repository}@${ref}`,
+          title: `Derive assertions for ${repository}@${ref}`,
           assigneeRole: "ontology_worker",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:generate`,
-          dispatchTopic: "run-ontology-generate",
+          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:assert`,
+          dispatchTopic: "run-ontology-assert",
           parentTaskId: taskId,
           required: true,
           metadata: { tenantId, repository, ref, requestKey: nonce }
         },
         dependencies: [{
-          taskId: generateTaskId,
-          dependsOnTaskId: prepareTaskId,
+          taskId: assertionTaskId,
+          dependsOnTaskId: ingestTaskId,
+          relationship: "blocks",
+          required: true,
+          blocksParentCompletion: true
+        }]
+      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
+      board = applyCommand(board, {
+        command: "CreateTask",
+        task: {
+          id: projectionTaskId,
+          type: "ontology_project",
+          kind: "dispatchable",
+          title: `Project Ontology for ${repository}@${ref}`,
+          assigneeRole: "ontology_worker",
+          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:project`,
+          dispatchTopic: "run-ontology-project",
+          parentTaskId: taskId,
+          required: true,
+          metadata: { tenantId, repository, ref, requestKey: nonce }
+        },
+        dependencies: [{
+          taskId: projectionTaskId,
+          dependsOnTaskId: assertionTaskId,
           relationship: "blocks",
           required: true,
           blocksParentCompletion: true
@@ -378,6 +425,69 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return findTask(board, taskId);
     });
     json(response, 202, { accepted: true, task: created });
+  }
+
+  async function planOntologyIngestion(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
+    const snapshot = parseRepositorySnapshot(body.snapshot, tenantId);
+    const task = requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "ontology_ingest");
+    if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
+      throw new Error("repository snapshot does not match ontology task");
+    }
+    const plan = await ontologyStore.planIngestion(snapshot);
+    json(response, 200, plan);
+  }
+
+  async function applyOntologyBlobAnalyses(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+    const commitSha = requiredGitSha(body.commitSha, "commitSha");
+    const analyses = parseBlobAnalyses(body.analyses);
+    await ontologyStore.applyBlobAnalyses({
+      tenantId,
+      repository: requiredString(task.metadata.repository, "task.repository"),
+      commitSha
+    }, analyses);
+    json(response, 200, { accepted: true, count: analyses.length });
+  }
+
+  async function findCachedOntologyAssertions(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_assert");
+    const cached = await ontologyStore.hasAssertionGeneration(
+      tenantId,
+      requiredString(task.metadata.repository, "task.repository"),
+      requiredGitSha(body.commitSha, "commitSha"),
+      ONTOLOGY_GENERATOR_VERSION
+    );
+    json(response, 200, { cached: cached ?? null });
+  }
+
+  function requireOntologyTask(taskId: string, tenantId: string, type: string): BoardTask {
+    const task = findTask(intakeState.board, entityId<"task">(taskId) as TaskId);
+    if (!task || task.metadata.tenantId !== tenantId || task.type !== type) throw new Error("ontology task not found");
+    return task;
+  }
+
+  function requireLeasedOntologyTask(
+    body: Record<string, unknown>,
+    taskId: string,
+    tenantId: string,
+    type: string
+  ): BoardTask {
+    const task = requireOntologyTask(taskId, tenantId, type);
+    const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
+    const message = findOutboxMessage(intakeState.board, messageId);
+    const leaseId = requiredString(body.leaseId, "leaseId");
+    if (
+      !message || message.taskId !== task.id || message.status !== "leased" || message.leaseId !== leaseId ||
+      !message.leaseExpiresAt || message.leaseExpiresAt <= nowIso() || task.status !== "in_progress"
+    ) {
+      throw new Error("stale ontology worker lease");
+    }
+    return task;
   }
 
   async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -457,7 +567,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     const initialMessage = findOutboxMessage(intakeState.board, messageId);
-    const graph = outcome === "done" && (initialMessage?.topic === "run-ontology" || initialMessage?.topic === "run-ontology-generate")
+    let graph = outcome === "done" && (initialMessage?.topic === "run-ontology" || initialMessage?.topic === "run-ontology-generate")
       ? parseCompletedGraph(body.graph, task, tenantId)
       : undefined;
     const result = await mutate(async () => {
@@ -487,6 +597,54 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           metadata: { commitSha }
         }, { actor: RUN_ACTOR, now }).state;
       }
+      if (outcome === "done" && message.topic === "run-ontology-ingest") {
+        const resultPayload = isRecord(body.result) ? body.result : {};
+        const commitSha = requiredGitSha(resultPayload.commitSha, "result.commitSha");
+        const analysisPaths = Array.isArray(resultPayload.analysisPaths)
+          ? resultPayload.analysisPaths.map((path) => requiredRepositoryPath(path, "result.analysisPaths"))
+          : [];
+        const children = board.tasks.filter((candidate) => candidate.parentTaskId === currentTask.parentTaskId);
+        for (const childType of ["ontology_assert", "ontology_project"] as const) {
+          const child = children.find((candidate) => candidate.type === childType);
+          if (!child) throw new Error(`${childType} task not found`);
+          board = applyCommand(board, {
+            command: "UpdateTask",
+            taskId: child.id,
+            metadata: {
+              commitSha,
+              codeCheckpoint: requiredString(resultPayload.codeCheckpoint, "result.codeCheckpoint"),
+              ...(childType === "ontology_assert" ? { analysisPaths } : {})
+            }
+          }, { actor: RUN_ACTOR, now }).state;
+        }
+      }
+      let eventPayload = safeResultPayload(body.result);
+      if (outcome === "done" && message.topic === "run-ontology-assert") {
+        const cached = isRecord(body.result) && isRecord(body.result.cached) ? body.result.cached : undefined;
+        const assertionResult = cached
+          ? safeResultPayload(cached)
+          : await ontologyStore.saveAssertionBatch(parseOntologyAssertionBatch(body.assertionBatch, currentTask, tenantId));
+        eventPayload = safeResultPayload(assertionResult);
+        const projectionTask = board.tasks.find((candidate) =>
+          candidate.parentTaskId === currentTask.parentTaskId && candidate.type === "ontology_project"
+        );
+        if (!projectionTask) throw new Error("ontology_project task not found");
+        board = applyCommand(board, {
+          command: "UpdateTask",
+          taskId: projectionTask.id,
+          metadata: { knowledgeCheckpoint: requiredString(assertionResult.knowledgeCheckpoint, "knowledgeCheckpoint") }
+        }, { actor: RUN_ACTOR, now }).state;
+      }
+      if (outcome === "done" && message.topic === "run-ontology-project") {
+        graph = await ontologyStore.project({
+          tenantId,
+          repository: requiredString(currentTask.metadata.repository, "task.repository"),
+          ref: requiredString(currentTask.metadata.ref, "task.ref"),
+          commitSha: requiredGitSha(currentTask.metadata.commitSha, "task.commitSha"),
+          taskId: currentTask.id,
+          generatedAt: now
+        });
+      }
       board = applyCommand(board, {
         command: "CommentTask",
         taskId,
@@ -495,7 +653,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ? { reason: String(body.reason ?? "worker failed").slice(0, 2000) }
           : graph
           ? { graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
-          : safeResultPayload(body.result)
+          : eventPayload
       }, { actor: RUN_ACTOR, now }).state;
       if (outcome === "done" && message.topic === "run-publish") {
         const repository = String(currentTask.metadata.repository ?? "");
@@ -511,11 +669,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }, { actor: RUN_ACTOR, now }).state;
       intakeState = { ...intakeState, board: reduceBoard(board, now) };
       try {
-        if (graph && config.stateStore) {
+        if (graph && config.stateStore && message.topic !== "run-ontology-project") {
           if (!config.stateStore.saveWithOntologyGraph) throw new Error("state store does not support atomic ontology completion");
           await config.stateStore.saveWithOntologyGraph(snapshot(), graph);
         } else {
-          if (graph) await ontologyStore.save(graph);
+          if (graph && message.topic !== "run-ontology-project") await ontologyStore.save(graph);
           await persist();
         }
       } catch (error) {
@@ -572,6 +730,9 @@ function completionEventType(topic: string): string {
     case "run-ontology": return "ontology.graph_created";
     case "run-ontology-prepare": return "ontology.source_prepared";
     case "run-ontology-generate": return "ontology.graph_created";
+    case "run-ontology-ingest": return "ontology.code_ingested";
+    case "run-ontology-assert": return "ontology.assertions_recorded";
+    case "run-ontology-project": return "ontology.graph_projected";
     default: return "worker.completed";
   }
 }
@@ -641,6 +802,87 @@ function parseCompletedGraph(value: unknown, task: BoardTask, tenantId: string):
   });
 }
 
+function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySnapshot {
+  if (!isRecord(value) || !Array.isArray(value.files) || !Array.isArray(value.parents)) {
+    throw new Error("snapshot must include files and parents");
+  }
+  return {
+    tenantId,
+    repository: requiredString(value.repository, "snapshot.repository"),
+    ref: requiredString(value.ref, "snapshot.ref"),
+    commitSha: requiredGitSha(value.commitSha, "snapshot.commitSha"),
+    treeSha: requiredGitSha(value.treeSha, "snapshot.treeSha"),
+    parents: value.parents.map((parent) => requiredGitSha(parent, "snapshot.parent")),
+    recordedAt: requiredString(value.recordedAt, "snapshot.recordedAt"),
+    taskId: requiredString(value.taskId, "snapshot.taskId"),
+    files: value.files.map((file) => {
+      if (!isRecord(file)) throw new Error("snapshot file must be an object");
+      const path = requiredRepositoryPath(file.path, "snapshot.file.path");
+      const size = typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0;
+      return { path, blobSha: requiredGitSha(file.blobSha, "snapshot.file.blobSha"), size };
+    })
+  };
+}
+
+function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
+  if (!Array.isArray(value)) throw new Error("analyses must be an array");
+  return value.map((analysis) => {
+    if (!isRecord(analysis) || !Array.isArray(analysis.symbols) || !Array.isArray(analysis.imports)) {
+      throw new Error("blob analysis must include symbols and imports");
+    }
+    const parserVersion = requiredString(analysis.parserVersion, "analysis.parserVersion");
+    if (parserVersion !== ONTOLOGY_PARSER_VERSION) throw new Error("unsupported ontology parser version");
+    return {
+      blobSha: requiredGitSha(analysis.blobSha, "analysis.blobSha"),
+      parserVersion,
+      ...(typeof analysis.language === "string" && analysis.language.trim() ? { language: analysis.language.trim() } : {}),
+      symbols: analysis.symbols.map((symbol) => {
+        if (!isRecord(symbol)) throw new Error("symbol must be an object");
+        return {
+          moniker: requiredString(symbol.moniker, "symbol.moniker"),
+          name: requiredString(symbol.name, "symbol.name"),
+          kind: requiredString(symbol.kind, "symbol.kind"),
+          startLine: requiredPositiveInteger(symbol.startLine, "symbol.startLine"),
+          endLine: requiredPositiveInteger(symbol.endLine, "symbol.endLine")
+        };
+      }),
+      imports: analysis.imports.map((item) => {
+        if (!isRecord(item)) throw new Error("import must be an object");
+        return { specifier: requiredString(item.specifier, "import.specifier"), line: requiredPositiveInteger(item.line, "import.line") };
+      })
+    };
+  });
+}
+
+function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: string): OntologyAssertionBatch {
+  if (!isRecord(value)) throw new Error("assertionBatch must be an object");
+  const commitSha = requiredGitSha(value.commitSha, "assertionBatch.commitSha");
+  if (commitSha !== task.metadata.commitSha) throw new Error("assertion batch commit does not match task source");
+  const repository = requiredString(task.metadata.repository, "task.repository");
+  const rawOutput = parseGeneratedOntology(value.rawOutput);
+  return {
+    tenantId,
+    repository,
+    ref: requiredString(task.metadata.ref, "task.ref"),
+    commitSha,
+    taskId: task.id,
+    generatedAt: requiredString(value.generatedAt, "assertionBatch.generatedAt"),
+    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
+    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    model: requiredString(value.model, "assertionBatch.model"),
+    ...(typeof value.sandboxId === "string" && value.sandboxId ? { sandboxId: value.sandboxId } : {}),
+    summary: requiredString(value.summary, "assertionBatch.summary"),
+    rawOutput,
+    assertions: assertionsFromGeneratedOntology(rawOutput, repository)
+  };
+}
+
+function requiredRepositoryPath(value: unknown, field: string): string {
+  const path = requiredString(value, field);
+  if (path.startsWith("/") || path.split("/").includes("..")) throw new Error(`${field} must be repository-relative`);
+  return path;
+}
+
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
   const repository = requiredString(body.repository, "repository");
   if (body.issueNumber !== undefined) {
@@ -653,13 +895,13 @@ function devPullRequestWebhook(repository: string, pullRequestNumber: number, he
   return { repository, event: { type: "pull_request.opened", pullRequestNumber, headSha } };
 }
 
-async function readRawBody(request: IncomingMessage): Promise<Buffer> {
+async function readRawBody(request: IncomingMessage, maximumBytes = MAX_WEBHOOK_BYTES): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
     bytes += buffer.length;
-    if (bytes > MAX_WEBHOOK_BYTES) throw new RequestBodyTooLargeError(`request body exceeds ${MAX_WEBHOOK_BYTES} bytes`);
+    if (bytes > maximumBytes) throw new RequestBodyTooLargeError(`request body exceeds ${maximumBytes} bytes`);
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);

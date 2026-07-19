@@ -1,5 +1,7 @@
 import { Daytona, type Resources, type Sandbox } from "@daytona/sdk";
 import {
+  ONTOLOGY_ASSERTION_OUTPUT_SCHEMA,
+  ONTOLOGY_ASSERTION_SYSTEM_PROMPT,
   ONTOLOGY_OUTPUT_SCHEMA,
   ONTOLOGY_SYSTEM_PROMPT,
   createOntologyGraph,
@@ -23,6 +25,19 @@ const PROXY_PORT = 43123;
 
 export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
   async build(request: OntologyBuildRequest): Promise<OntologyGraph> {
+    return this.execute(request, ONTOLOGY_OUTPUT_SCHEMA, ONTOLOGY_SYSTEM_PROMPT, false);
+  }
+
+  async buildAssertions(request: OntologyBuildRequest): Promise<OntologyGraph> {
+    return this.execute(request, ONTOLOGY_ASSERTION_OUTPUT_SCHEMA, ONTOLOGY_ASSERTION_SYSTEM_PROMPT, true);
+  }
+
+  private async execute(
+    request: OntologyBuildRequest,
+    outputSchema: object,
+    systemPrompt: string,
+    allowEmptyEdges: boolean
+  ): Promise<OntologyGraph> {
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
     const openaiKey = process.env.OPENAI_API_KEY?.trim();
     const openrouterKey = process.env.OPENROUTER_API_KEY?.trim();
@@ -50,7 +65,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       await cloneRepository(sandbox, request, cloneToken);
       if (request.commitSha) await checkoutExpectedCommit(sandbox, request.commitSha);
       await prepareCodex(sandbox);
-      await writeInputFiles(sandbox, request);
+      await writeInputFiles(sandbox, request, outputSchema, systemPrompt);
       if (provider === "openrouter") await startOutputLimitingProxy(sandbox);
 
       const providerArguments = provider === "openrouter"
@@ -122,7 +137,8 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
         executor: "daytona",
         model,
         sandboxId: sandbox.id,
-        generated
+        generated,
+        allowEmptyEdges
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -191,10 +207,18 @@ async function prepareCodex(sandbox: Sandbox): Promise<void> {
   if (install.exitCode !== 0) throw new Error(`Codex installation failed: ${truncate(install.result)}`);
 }
 
-async function writeInputFiles(sandbox: Sandbox, request: OntologyBuildRequest): Promise<void> {
-  const prompt = `${ONTOLOGY_SYSTEM_PROMPT}\n\nRepository: ${request.repository}\nRef: ${request.ref}\nTask: ${request.taskId}`;
+async function writeInputFiles(
+  sandbox: Sandbox,
+  request: OntologyBuildRequest,
+  outputSchema: object,
+  systemPrompt: string
+): Promise<void> {
+  const focus = request.focusPaths?.length
+    ? `\nIncremental scope: inspect these newly changed content blobs first and do not rescan unrelated unchanged files except to resolve a cited relationship:\n${request.focusPaths.map((path) => `- ${path}`).join("\n")}`
+    : "";
+  const prompt = `${systemPrompt}\n\nRepository: ${request.repository}\nRef: ${request.ref}\nTask: ${request.taskId}${focus}`;
   await Promise.all([
-    sandbox.fs.uploadFile(Buffer.from(JSON.stringify(ONTOLOGY_OUTPUT_SCHEMA)), SCHEMA_PATH, 120),
+    sandbox.fs.uploadFile(Buffer.from(JSON.stringify(outputSchema)), SCHEMA_PATH, 120),
     sandbox.fs.uploadFile(Buffer.from(prompt), PROMPT_PATH, 120),
     sandbox.fs.uploadFile(Buffer.from(openrouterProxySource()), PROXY_PATH, 120)
   ]);

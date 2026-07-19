@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
-test("worker reviews pull requests and prepares ontology sources", async (context) => {
+test("worker reviews pull requests and incrementally ingests ontology source blobs", async (context) => {
   let claimCount = 0;
   let renewals = 0;
   const completions: Record<string, unknown>[] = [];
@@ -15,13 +15,13 @@ test("worker reviews pull requests and prepares ontology sources", async (contex
     const body = await readJson(request);
     if (request.url === "/internal/worker/claim") {
       const topics = (body as { topics?: unknown }).topics;
-      assert.deepEqual(topics, ["run-review", "run-ontology-prepare"]);
+      assert.deepEqual(topics, ["run-review", "run-ontology-ingest"]);
       claimCount += 1;
       if (claimCount === 2) {
         return json(response, 200, {
           message: {
             id: "message-2",
-            topic: "run-ontology-prepare",
+            topic: "run-ontology-ingest",
             leaseId: "lease-2",
             leaseExpiresAt: new Date(Date.now() + 300_000).toISOString()
           },
@@ -54,8 +54,44 @@ test("worker reviews pull requests and prepares ontology sources", async (contex
       if (completions.length === 2) resolveCompletion();
       return json(response, 200, { accepted: true });
     }
+    if (request.url === "/internal/ontology/ingest/plan") {
+      const snapshot = (body as { snapshot: { commitSha: string; files: unknown[] } }).snapshot;
+      assert.equal(snapshot.commitSha, "a".repeat(40));
+      assert.equal(snapshot.files.length, 1);
+      return json(response, 200, {
+        observationId: "observation-1",
+        commitSha: "a".repeat(40),
+        fileCount: 1,
+        discoveredBlobCount: 1,
+        reusedBlobCount: 0,
+        changedPaths: ["src/index.ts"],
+        missingBlobs: [{ blobSha: "c".repeat(40), path: "src/index.ts", size: 42 }]
+      });
+    }
+    if (request.url === "/internal/ontology/ingest/blobs") {
+      const analyses = (body as { analyses: Array<{ symbols: unknown[] }> }).analyses;
+      assert.equal(analyses.length, 1);
+      assert.equal(analyses[0]?.symbols.length, 1);
+      return json(response, 200, { accepted: true, count: 1 });
+    }
     if (request.url === "/github/repos/omlabs/example/commits/main") {
-      return json(response, 200, { sha: "a".repeat(40) });
+      return json(response, 200, {
+        sha: "a".repeat(40),
+        commit: { tree: { sha: "b".repeat(40) } },
+        parents: []
+      });
+    }
+    if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
+      return json(response, 200, {
+        truncated: false,
+        tree: [{ type: "blob", path: "src/index.ts", sha: "c".repeat(40), size: 42 }]
+      });
+    }
+    if (request.url === `/github/repos/omlabs/example/git/blobs/${"c".repeat(40)}`) {
+      return json(response, 200, {
+        encoding: "base64",
+        content: Buffer.from("export function main() { return true; }\n").toString("base64")
+      });
     }
     if (request.url === "/github/repos/omlabs/example/pulls/2") {
       if (request.headers.accept?.includes("diff")) {
@@ -83,7 +119,7 @@ test("worker reviews pull requests and prepares ontology sources", async (contex
       PORT: "0",
       JINA_API_URL: mockUrl,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-review,run-ontology-prepare",
+      WORKER_TOPICS: "run-review,run-ontology-ingest",
       WORKER_HEARTBEAT_INTERVAL_MS: "10",
       WORKER_POLL_INTERVAL_MS: "10",
       GITHUB_API_URL: `${mockUrl}/github`,
@@ -117,8 +153,10 @@ test("worker reviews pull requests and prepares ontology sources", async (contex
   assert.equal(reviewResult.findingCount, 0);
   assert.equal(completions[1]?.outcome, "done");
   assert.equal(completions[1]?.leaseId, "lease-2");
-  const preparationResult = completions[1]?.result as Record<string, unknown>;
-  assert.equal(preparationResult.commitSha, "a".repeat(40));
+  const ingestionResult = completions[1]?.result as Record<string, unknown>;
+  assert.equal(ingestionResult.commitSha, "a".repeat(40));
+  assert.equal(ingestionResult.parsedBlobCount, 1);
+  assert.equal(ingestionResult.reusedBlobCount, 0);
 });
 
 async function readJson(request: import("node:http").IncomingMessage): Promise<unknown> {

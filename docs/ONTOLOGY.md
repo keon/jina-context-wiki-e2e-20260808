@@ -2,21 +2,24 @@
 
 ## Status and scope
 
-This document defines the target production architecture for **Ontology**, one worker integration on Jina's general-purpose task board. The full two-plane registry, projections, retrieval service, ownership roles, and curated knowledge workflow described below remain target design.
+This document defines the production architecture for **Ontology**, one worker integration on Jina's general-purpose task board. Immutable intake, content-addressed code facts, provenance-bearing assertions, and graph projection are implemented in the current runtime. Retrieval, identity reconciliation, curation commands, search, SCIP/tree-sitter adapters, and database-role ownership remain target extensions.
 
-The shipped vertical slice as of 2026-07-19 is deliberately smaller:
+The shipped implementation as of 2026-07-19 is:
 
 | Area | Current implementation |
 | --- | --- |
-| Board integration | Aggregate `ontology_build` with `ontology_prepare` and `ontology_generate` children |
-| Execution | Dedicated Cloud Run worker with renewable leases; ref resolution followed by exact-commit Daytona/Codex generation |
-| Validation | Strict output schema, required citations, checkout path and line-range validation |
-| Persistence | Immutable graph generations in PostgreSQL; graph and task completion commit atomically |
+| Board integration | Aggregate `ontology_build` with `ontology_ingest`, `ontology_assert`, and `ontology_project` children |
+| Immutable intake | Git source snapshots and model output are stored as provenance-bearing observations |
+| Code plane | Commits, refs, manifests, tenant-scoped blobs, symbols, and imports; analysis is cached by blob SHA and parser version |
+| Knowledge plane | Typed entities and registry-validated assertions with confidence, provenance, status, generator version, and registry version |
+| Incrementality | Only unseen blob/parser-version pairs are parsed; Codex focuses on paths changed from the first parent; assertions backed by unchanged evidence blobs carry forward |
+| Projection | Dashboard graphs are disposable read models built from the selected manifest and active assertions |
+| Validation | Strict model schema plus checkout validation for every cited path and line range |
 | Read API | Tenant-scoped summary listing, latest full graph, and tenant-constrained graph detail |
 | Dashboard | Interactive `/ontology` graph visualization and metadata |
-| Not shipped | Canonical code/knowledge planes, observation ledger, registry service, projection consumers, retrieval, curation, and database-role ownership split |
+| Not shipped | Human assertion-review UI, identity redirects/reconciliation, retrieval templates, search index, lifecycle workers, SCIP/tree-sitter adapters, and database-role ownership split |
 
-The task board and graph remain separate in the shipped slice: board state stores task references and completion events, while graph nodes and edges live in Ontology-owned tables.
+The task board and Ontology remain separate: board state stores operational references and completion events; observations, code facts, assertions, and projections live in Ontology-owned tables.
 
 Ontology is the user-facing product name. Internally, the subsystem is repository context: engineering memory built from source observations, mechanical code structure, curated knowledge, and cited retrieval.
 
@@ -29,11 +32,11 @@ Ontology is not the task board and the task board is not the ontology graph. The
 3. **Ontology has one immutable intake and two canonical data planes.** Structural facts live in the code plane; disputable semantic facts live in the knowledge plane.
 4. **Ontology's graph is a read model, never canonical storage.** Canonical storage is relational; graph-shaped views are disposable projections.
 5. **The ontology registry is typed code.** Entity kinds, predicates, endpoints, qualifiers, cardinality, authority, and review policy are versioned and reviewed in Git.
-6. **Every table has one writing component.** Database roles enforce ownership. Workers call service commands and do not write another component's tables.
+6. **Every table has one writing component.** Workers call the authenticated API and never write Ontology tables directly. Dedicated database-role enforcement remains an operational hardening item.
 7. **Normalizers are pure.** They transform an immutable observation into intents and never write storage.
 8. **Board dependencies express execution readiness only.** Ontology predicates and data lineage never become task dependency relationships.
 9. **The board stores references, not Ontology records.** Task inputs and results contain opaque IDs and summaries; entities, assertions, observations, and code edges remain in Ontology-owned storage.
-10. **The full production behavior ships as one release.** There is no production mode in which the board snapshot is the Ontology store, agents write assertions directly, or citations are reconstructed from task comments.
+10. **The canonical path is indivisible.** There is no production mode in which the board snapshot is the Ontology store, agents write assertions directly, or citations are reconstructed from task comments. Optional retrieval, search, curation, and lifecycle consumers may be added independently.
 
 ## System context
 
@@ -186,19 +189,18 @@ The following are prohibited:
 
 ## Board-facing Ontology contract
 
-Ontology is one worker integration and may register several namespaced operations. These are Ontology worker operations, not new board primitives.
+Ontology is one worker integration. Its current build registers only the large operational boundaries; these are worker operations, not new board primitives.
 
 | Task type | Kind | Completion contract |
 |---|---|---|
-| `ontology.sync` | Dispatchable | Requested observations are committed to both canonical planes and required query checkpoints are ready |
-| `ontology.query` | Dispatchable | An immutable, permission-filtered context bundle has been written and attached |
-| `ontology.review_assertion` | Manual | The Knowledge Service accepted an audited decision or the task records a policy rejection |
-| `ontology.rebuild` | Dispatchable | Selected canonical or projection scope was rebuilt and verified at a recorded checkpoint |
-| `ontology.erase` | Dispatchable | An authorized erasure or tombstone command completed across canonical stores, projections, and artifacts |
+| `ontology_build` | Aggregate | Required ingestion, assertion, and projection children reached durable checkpoints |
+| `ontology_ingest` | Dispatchable | Raw repository snapshot, commit/ref manifest, and every cache-missing blob analysis are durable |
+| `ontology_assert` | Dispatchable | Cached or newly validated model output reached a knowledge checkpoint |
+| `ontology_project` | Dispatchable | An immutable graph projection was rebuilt from canonical code facts and current-evidence active assertions |
 
-Steady-state blob parsing, event relay, manifest updates, search indexing, and redirect reconciliation remain internal Ontology queues. They do not create one board card per row. A board task may expose aggregate progress counters and failed partitions.
+Blob parsing remains batched inside `ontology_ingest`; it does not create one board card per file. Future query, assertion-review, rebuild, erasure, search, and reconciliation operations can register additional task types without changing board primitives.
 
-### Typed task input
+### Future task input extensions
 
 ```typescript
 type OntologyTaskInput =
@@ -272,9 +274,9 @@ Ontology predicates such as `RESOLVES`, `REFERENCES`, `OWNED_BY`, and `IMPLEMENT
 
 ## Ontology worker execution
 
-### Repository synchronization
+### Target service decomposition
 
-An `ontology.sync` task executes this contract:
+The current `ontology_ingest` → `ontology_assert` → `ontology_project` chain implements the same canonical boundaries in one API and worker deployment. When those stores are separated into independently scaled services, the contract becomes:
 
 1. Load the validated task input and pinned worker, normalizer, parser, and registry versions.
 2. Load each immutable observation from Intake.
@@ -286,7 +288,7 @@ An `ontology.sync` task executes this contract:
 8. Write an immutable operation result artifact.
 9. Attach the artifact and transition the task through board commands.
 
-If one plane commits and the run fails before the other commits, Trigger.dev retries the task. Re-running the pure normalizer produces the same intents; natural keys and command idempotency make already-applied work a no-op.
+If one canonical write commits and the run fails before board completion, the renewable board lease expires and the Cloud Run worker retries the task. Re-running the pure parser/normalizer produces the same facts; natural keys and command idempotency make already-applied work a no-op.
 
 ```mermaid
 sequenceDiagram
@@ -303,7 +305,7 @@ sequenceDiagram
     Source->>Intake: Deliver event or snapshot
     Intake->>Intake: Commit observation + outbox
     Intake-->>Planner: observation_recorded
-    Planner->>Board: Create ontology.sync task
+    Planner->>Board: Create ontology_build task graph
     Board-->>Worker: Dispatch taskId and attempt
     Worker->>Intake: Load immutable observation
     par Apply structural intents
@@ -841,16 +843,15 @@ The system is at-least-once between components and convergent at every write bou
 | Projection application | `(consumer, eventId)` or monotonic source checkpoint |
 | Context bundle | `(requestId, targetCheckpoint, registryVersion)` |
 
-`ontology.sync` is complete when:
+`ontology_build` is complete when:
 
-- every input observation is present and unredacted or explicitly handled as redacted;
-- required code and knowledge intent batches committed;
-- target refs resolve to committed code checkpoints;
-- required manifests and query projections reached the operation checkpoint;
-- the immutable result artifact was written and attached;
-- no required internal partition is dead-lettered.
+- its Git snapshot observation, commit, ref, and manifest are durable;
+- every new tenant/blob SHA/parser-version tuple has an analysis row, including an explicit empty analysis for unsupported content;
+- model output was reused or stored as an observation and its registry-valid assertions committed;
+- the immutable graph projection was written from canonical data;
+- all three required child tasks completed through the normal board reducer.
 
-Search and non-required projections may be eventually consistent only when the result explicitly reports their lag. `ontology.query` always pins and reports the checkpoint it used.
+Future search and non-required projections may be eventually consistent only when the result explicitly reports their lag. A future `ontology.query` operation must always pin and report the checkpoint it used.
 
 ## Observability and service objectives
 

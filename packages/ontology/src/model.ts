@@ -30,6 +30,7 @@ export interface OntologyEdge {
   readonly target: string;
   readonly predicate: string;
   readonly plane: OntologyPlane;
+  readonly confidence?: number;
   readonly evidence: readonly string[];
 }
 
@@ -41,7 +42,7 @@ export interface OntologyGraph {
   readonly commitSha: string;
   readonly generatedAt: string;
   readonly generator: {
-    readonly executor: "daytona" | "fixture";
+    readonly executor: "daytona" | "fixture" | "projection";
     readonly model: string;
     readonly sandboxId?: string;
   };
@@ -65,6 +66,7 @@ export interface OntologyBuildRequest {
   readonly repository: string;
   readonly ref: string;
   readonly commitSha?: string;
+  readonly focusPaths?: readonly string[];
   readonly taskId: string;
 }
 
@@ -89,10 +91,12 @@ export function createOntologyGraph(input: {
   readonly request: OntologyBuildRequest;
   readonly commitSha: string;
   readonly generatedAt: string;
-  readonly executor: "daytona" | "fixture";
+  readonly executor: "daytona" | "fixture" | "projection";
   readonly model: string;
   readonly sandboxId?: string;
   readonly generated: GeneratedOntology;
+  /** Assertion-generation observations may be valid with no supported semantic relationship. */
+  readonly allowEmptyEdges?: boolean;
 }): OntologyGraph {
   const nodes = dedupeNodes(input.generated.nodes);
   const nodeIds = new Set(nodes.map((node) => node.id));
@@ -107,7 +111,7 @@ export function createOntologyGraph(input: {
   if (!nodes.some((node) => node.kind === "Repository")) {
     throw new Error("generated ontology must contain a Repository node");
   }
-  if (nodes.length < 2 || edges.length < 1) {
+  if ((!input.allowEmptyEdges && (nodes.length < 2 || edges.length < 1)) || nodes.length < 1) {
     throw new Error("generated ontology must contain at least two nodes and one valid edge");
   }
 
@@ -200,11 +204,16 @@ function parseEdge(value: unknown): Omit<OntologyEdge, "id"> {
   if (plane !== "code" && plane !== "knowledge") {
     throw new Error(`unsupported ontology plane: ${plane}`);
   }
+  const confidence = typeof value.confidence === "number" ? value.confidence : undefined;
+  if (confidence !== undefined && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
+    throw new Error("edge confidence must be between 0 and 1");
+  }
   return {
     source: requiredString(value.source, "edge.source"),
     target: requiredString(value.target, "edge.target"),
     predicate: normalizePredicate(requiredString(value.predicate, "edge.predicate")),
     plane,
+    ...(confidence !== undefined ? { confidence } : {}),
     evidence: requiredEvidence(value.evidence, "edge")
   };
 }

@@ -20,12 +20,12 @@ test("workers can pass small durable metadata to a dependent task", () => {
     command: "CreateTask",
     task: {
       id: taskId,
-      type: "ontology_generate",
+      type: "ontology_assert",
       kind: "dispatchable",
-      title: "Generate ontology",
+      title: "Generate assertions",
       assigneeRole: "ontology_worker",
-      dedupeKey: "ontology:generate",
-      dispatchTopic: "run-ontology-generate"
+      dedupeKey: "ontology:assert",
+      dispatchTopic: "run-ontology-assert"
     }
   }, { actor: { type: "user", id: "test" }, now }).state;
   const updated = applyCommand(created, {

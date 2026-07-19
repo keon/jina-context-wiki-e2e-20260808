@@ -80,18 +80,18 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   const taskTypes = await fetch(`${baseUrl}/task-types`).then(
     (response) => response.json() as Promise<Array<{ type: string; kind: string; description: string }>>
   );
-  assert.equal(taskTypes.length, 10);
+  assert.equal(taskTypes.length, 11);
   assert.deepEqual(
     taskTypes.map((definition) => definition.type),
     [
       "pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision",
-      "ontology_build", "ontology_prepare", "ontology_generate"
+      "ontology_build", "ontology_ingest", "ontology_assert", "ontology_project"
     ]
   );
   assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
 });
 
-test("ontology worker builds and exposes a graph end to end", async () => {
+test("ontology pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
     tenantId: "default"
@@ -105,60 +105,128 @@ test("ontology worker builds and exposes a graph end to end", async () => {
     });
     assert.equal(created.status, 202);
     const createdBody = await created.json() as { task: { id: string } };
-    const preparedCommitSha = "a".repeat(40);
-    const preparation = await claimTopic(baseUrl, "run-ontology-prepare");
-    assert.equal(preparation.message.topic, "run-ontology-prepare");
+    const commitSha = "a".repeat(40);
+    const treeSha = "b".repeat(40);
+    const readmeSha = "c".repeat(40);
+    const sourceSha = "d".repeat(40);
+    const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
+    assert.equal(ingestion.message.topic, "run-ontology-ingest");
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageId: preparation.message.id, leaseId: preparation.message.leaseId })
+      body: JSON.stringify({ messageId: ingestion.message.id, leaseId: ingestion.message.leaseId })
     });
     assert.equal(renewed.status, 200);
     const staleRenewal = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ messageId: preparation.message.id, leaseId: "wrong-lease" })
+      body: JSON.stringify({ messageId: ingestion.message.id, leaseId: "wrong-lease" })
     });
     assert.equal(staleRenewal.status, 409);
 
-    assert.equal(await completeClaim(baseUrl, preparation, { commitSha: preparedCommitSha }), 200);
-
-    const generation = await claimTopic(baseUrl, "run-ontology-generate");
-    assert.equal(generation.message.topic, "run-ontology-generate");
-    const graph = fixtureGraph({
+    const snapshot = {
       tenantId: "default",
       repository: "omxyz/ontology-fixture",
       ref: "main",
-      taskId: generation.task.id,
-      commitSha: preparedCommitSha
+      commitSha,
+      treeSha,
+      parents: [],
+      recordedAt: new Date().toISOString(),
+      taskId: ingestion.task.id,
+      files: [
+        { path: "README.md", blobSha: readmeSha, size: 40 },
+        { path: "src/index.ts", blobSha: sourceSha, size: 80 }
+      ]
+    };
+    const lease = { messageId: ingestion.message.id, leaseId: ingestion.message.leaseId };
+    const firstPlan = await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot }) as {
+      missingBlobs: unknown[];
+      changedPaths: string[];
+      observationId: string;
+    };
+    assert.equal(firstPlan.missingBlobs.length, 2);
+    assert.deepEqual(firstPlan.changedPaths, ["README.md", "src/index.ts"]);
+    await postJson(baseUrl, "/internal/ontology/ingest/blobs", {
+      taskId: ingestion.task.id,
+      ...lease,
+      commitSha,
+      analyses: [
+        { blobSha: readmeSha, parserVersion: "builtin-structural-v1", language: "markdown", symbols: [], imports: [] },
+        {
+          blobSha: sourceSha,
+          parserVersion: "builtin-structural-v1",
+          language: "typescript",
+          symbols: [{ moniker: "main", name: "main", kind: "function", startLine: 1, endLine: 1 }],
+          imports: []
+        }
+      ]
     });
-    const completed = await fetch(`${baseUrl}/internal/worker/complete`, {
+    const secondPlan = await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot }) as { missingBlobs: unknown[]; reusedBlobCount: number };
+    assert.equal(secondPlan.missingBlobs.length, 0);
+    assert.equal(secondPlan.reusedBlobCount, 2);
+    assert.equal(await completeClaim(baseUrl, ingestion, {
+      observationId: firstPlan.observationId,
+      commitSha,
+      fileCount: 2,
+      discoveredBlobCount: 2,
+      reusedBlobCount: 0,
+      parsedBlobCount: 2,
+      parserVersion: "builtin-structural-v1",
+      codeCheckpoint: "code-checkpoint"
+    }), 200);
+
+    const assertion = await claimTopic(baseUrl, "run-ontology-assert");
+    assert.equal(assertion.message.topic, "run-ontology-assert");
+    const asserted = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        messageId: generation.message.id,
-        leaseId: generation.message.leaseId,
-        taskId: generation.task.id,
+        messageId: assertion.message.id,
+        leaseId: assertion.message.leaseId,
+        taskId: assertion.task.id,
         outcome: "done",
-        graph
+        assertionBatch: {
+          tenantId: "default",
+          repository: "omxyz/ontology-fixture",
+          ref: "main",
+          commitSha,
+          taskId: assertion.task.id,
+          generatedAt: new Date().toISOString(),
+          generatorVersion: "codex-assertions-v2",
+          registryVersion: "ontology-registry-v1",
+          model: "fixture",
+          summary: "README documents the repository",
+          rawOutput: {
+            summary: "README documents the repository",
+            nodes: [
+              { id: "repo", kind: "Repository", label: "fixture", description: "repo", evidence: ["README.md:1"] },
+              { id: "readme", kind: "Document", label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
+            ],
+            edges: [{ source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95, evidence: ["README.md:1"] }]
+          }
+        }
       })
     });
-    assert.equal(completed.status, 200);
+    assert.equal(asserted.status, 200);
+
+    const projection = await claimTopic(baseUrl, "run-ontology-project");
+    assert.equal(await completeClaim(baseUrl, projection, { projected: true }), 200);
 
     const ontology = await fetch(`${baseUrl}/ontology`).then(
       (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
     );
-    assert.equal(ontology.latest?.nodes.length, 2);
-    assert.equal(ontology.latest?.edges.length, 1);
+    assert.equal((ontology.latest?.nodes.length ?? 0) >= 4, true);
+    assert.equal((ontology.latest?.edges.length ?? 0) >= 4, true);
 
     const board = await fetch(`${baseUrl}/board`).then(
       (response) => response.json() as Promise<{ tasks: Array<{ id: string; type: string; status: string; metadata: Record<string, unknown> }> }>
     );
     assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_prepare")?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_generate")?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_generate")?.metadata.commitSha, preparedCommitSha);
+    assert.equal(board.tasks.find((task) => task.type === "ontology_ingest")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "ontology_assert")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "ontology_project")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "ontology_project")?.metadata.commitSha, commitSha);
   } finally {
     await close(server);
   }
@@ -353,6 +421,16 @@ async function completeClaim(baseUrl: string, work: TestClaim, result: Record<st
     })
   });
   return response.status;
+}
+
+async function postJson(baseUrl: string, path: string, body: unknown): Promise<unknown> {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  assert.equal(response.status, 200, `${path}: ${await response.clone().text()}`);
+  return response.json();
 }
 
 function fixtureGraph(request: { tenantId: string; repository: string; ref: string; taskId: string; commitSha?: string }) {

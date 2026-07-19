@@ -2,7 +2,7 @@
 
 Jina is a tenant-scoped task board for software-work agents, starting with GitHub pull request review and repository Ontology generation.
 
-The current implementation receives signed GitHub webhooks, creates review tasks and dependencies, persists the board in PostgreSQL, and leases ready work to Cloud Run workers. The review worker reads a PR diff through the GitHub API and calls the OpenAI Responses API. The Ontology worker clones a requested repository into a Daytona sandbox, runs Codex, validates every citation against the checkout, and stores an immutable graph generation. The current publish step records an idempotent internal publication; posting findings back to GitHub is not shipped yet.
+The current implementation receives signed GitHub webhooks, creates review tasks and dependencies, persists the board in PostgreSQL, and leases ready work to Cloud Run workers. The review worker reads a PR diff through the GitHub API and calls the OpenAI Responses API. The Ontology worker records immutable source observations, parses only previously unseen content-addressed blobs, records cited Codex output as provenance-bearing assertions, and projects the dashboard graph from canonical code and knowledge data. The current publish step records an idempotent internal publication; posting findings back to GitHub is not shipped yet.
 
 ## Core Shape
 
@@ -41,7 +41,7 @@ The CLI review harness is a separate local evaluation path. Its trace and usage 
 
 ## Ontology Worker
 
-`ontology_build` is an aggregate with two worker-owned children: `ontology_prepare` resolves the requested ref to an immutable commit, then `ontology_generate` checks out that commit in Daytona, runs Codex with a strict cited schema, validates the citations, and stores the graph. This keeps the meaningful retry boundary visible without creating per-file tasks. Immutable generations are rendered on the dashboard's `/ontology` page.
+`ontology_build` is an aggregate with three worker-owned children: `ontology_ingest` aggregates the immutable Git tree and parses only blob SHA/parser-version cache misses; `ontology_assert` runs Codex in Daytona against paths added or modified relative to the first parent and records its cited output as model observations and registry-validated assertions; `ontology_project` builds a disposable graph from the canonical stores. Parser-cache misses and semantic change scope are intentionally separate: a previously analyzed blob is reused wherever it appears, while semantic work follows commit changes. Unchanged blob analyses and assertions backed by unchanged evidence carry forward across commits. Internal blob work remains batched and does not create per-file board tasks. Projection generations are rendered on the dashboard's `/ontology` page.
 
 Local execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and either `OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Override provider and model with `ONTOLOGY_CODEX_PROVIDER` and `ONTOLOGY_CODEX_MODEL` when needed.
 

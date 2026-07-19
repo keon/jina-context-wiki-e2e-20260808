@@ -3,20 +3,27 @@ export const ontologyTaskTypeDefinitions = [
     type: "ontology_build",
     kind: "aggregate",
     defaultAssigneeRole: "system",
-    description: "Coordinates source preparation and generation of a cited repository ontology."
+    description: "Coordinates raw-data aggregation, semantic assertion derivation, and graph projection."
   },
   {
-    type: "ontology_prepare",
+    type: "ontology_ingest",
     kind: "dispatchable",
     defaultAssigneeRole: "ontology_worker",
-    dispatchTopic: "run-ontology-prepare",
-    description: "Resolves a repository ref to the immutable commit used by an ontology build."
+    dispatchTopic: "run-ontology-ingest",
+    description: "Aggregates an immutable repository snapshot and reuses versioned, content-addressed structural facts."
   },
   {
-    type: "ontology_generate",
+    type: "ontology_assert",
     kind: "dispatchable",
     defaultAssigneeRole: "ontology_worker",
-    dispatchTopic: "run-ontology-generate",
-    description: "Generates, validates, and stores one immutable ontology graph."
+    dispatchTopic: "run-ontology-assert",
+    description: "Records cited model output and applies registry-validated semantic assertions with provenance."
+  },
+  {
+    type: "ontology_project",
+    kind: "dispatchable",
+    defaultAssigneeRole: "ontology_worker",
+    dispatchTopic: "run-ontology-project",
+    description: "Builds a disposable dashboard graph from canonical code facts and active assertions."
   }
 ] as const;

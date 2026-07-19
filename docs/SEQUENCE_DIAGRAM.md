@@ -69,7 +69,7 @@ sequenceDiagram
 
 If a worker crashes, the leased message becomes claimable after expiration. A completion with the wrong, expired, or replaced lease returns `409` and changes no state.
 
-## Ontology build and atomic completion
+## Incremental Ontology build
 
 ```mermaid
 sequenceDiagram
@@ -83,30 +83,34 @@ sequenceDiagram
     participant DB as Cloud SQL
 
     User->>API: POST /ontology/build repository, ref
-    API->>DB: Create aggregate + prepare and generate children
-    Worker->>API: Claim run-ontology-prepare lease
-    Worker->>GitHub: Resolve repository ref
-    GitHub-->>Worker: Immutable commit SHA
-    Worker->>API: Complete preparation
-    API->>DB: Attach commit SHA to generation task and queue it
-    Worker->>API: Claim run-ontology-generate lease
-    API->>DB: Transition generation to in_progress
-    Worker->>Daytona: Create sandbox and clone requested ref
-    Worker->>Daytona: Checkout prepared commit SHA
-    Worker->>Codex: Run strict Ontology generation in checkout
-    Codex-->>Worker: Summary, nodes, edges, citations
-    Worker->>Daytona: Validate every cited file and line range
-    Worker->>Daytona: Resolve commit SHA and delete sandbox
-    Worker->>API: Complete with graph and lease ID
-    rect rgb(235,245,255)
-        note right of API: one PostgreSQL transaction
-        API->>DB: Insert immutable graph, nodes, and edges
-        API->>DB: Complete generation and aggregate board snapshot
+    API->>DB: Create aggregate + ingest, assert, project children
+    Worker->>API: Claim run-ontology-ingest lease
+    Worker->>GitHub: Resolve ref and read recursive Git tree
+    Worker->>API: Record immutable snapshot and request cache misses
+    API->>DB: Upsert commit, ref, manifest, and blob identities
+    DB-->>Worker: Previously unseen blob SHAs only
+    Worker->>GitHub: Read and parse only missing blobs
+    Worker->>API: Store versioned symbols/imports and complete ingestion
+    API->>DB: Queue assertion task with commit and first-parent changed paths
+    Worker->>API: Claim run-ontology-assert and check generation cache
+    alt assertion input already processed
+        API-->>Worker: Reuse checkpoint
+    else new content needs semantic analysis
+        Worker->>Daytona: Clone and checkout immutable commit SHA
+        Worker->>Codex: Analyze first-parent changed paths with semantic-only cited schema
+        Codex-->>Worker: Cited semantic relationships
+        Worker->>Daytona: Validate every cited file and line range
+        Worker->>API: Complete with model-output observation
+        API->>DB: Apply registry validation and store assertions
     end
+    Worker->>API: Claim run-ontology-project
+    API->>DB: Join manifest, cached code facts, and active current-evidence assertions
+    API->>DB: Store immutable rebuildable graph projection
+    API->>DB: Complete projection and aggregate tasks
     API-->>Worker: accepted + graph ID
 ```
 
-Graph identity includes the task generation, so a later build of the same repository and commit cannot rewrite a graph referenced by an older task. PostgreSQL ignores an exact generation replay instead of replacing its nodes or edges.
+Graph identity includes the task generation, so a later projection cannot rewrite a graph referenced by an older task. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation is cached by repository commit and generator version, and projections carry forward assertions only while every cited path still resolves to the same blob.
 
 ## PR epoch supersession
 
