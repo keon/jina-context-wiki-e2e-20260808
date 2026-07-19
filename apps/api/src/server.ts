@@ -119,7 +119,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 204, {});
       return;
     }
-    if (request.method === "GET" && url.pathname === "/healthz") {
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
@@ -192,7 +192,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     json(response, 404, {
       error: "not found",
-      routes: ["GET /healthz", "GET /board", "GET /events", "POST /webhooks/github"]
+      routes: ["GET /health", "GET /board", "GET /events", "POST /webhooks/github"]
     });
   }
 

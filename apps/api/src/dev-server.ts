@@ -13,7 +13,7 @@ const server = createApiServer({
 
 server.listen(port, () => {
   console.log(`jina api server: http://localhost:${port}`);
-  console.log("  GET  /board  /events  /healthz");
+  console.log("  GET  /board  /events  /health");
   console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
   if (enableDevEndpoints) {
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
