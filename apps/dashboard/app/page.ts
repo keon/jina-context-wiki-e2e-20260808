@@ -1,4 +1,4 @@
-export function renderDashboardPage(apiUrl: string): string {
+export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -191,6 +191,7 @@ export function renderDashboardPage(apiUrl: string): string {
 
 <script>
 const API = ${JSON.stringify(apiUrl)};
+const API_LABEL = ${JSON.stringify(apiLabel)};
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
@@ -231,7 +232,7 @@ async function refresh() {
 
 function setConnection(online) {
   document.getElementById("connection-dot").classList.toggle("offline", !online);
-  document.getElementById("connection-text").textContent = online ? "Live · " + API : "Cannot reach " + API;
+  document.getElementById("connection-text").textContent = online ? "Live · " + API_LABEL : "Cannot reach " + API_LABEL;
 }
 
 function renderPage() {
