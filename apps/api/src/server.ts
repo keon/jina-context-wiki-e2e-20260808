@@ -5,6 +5,7 @@ import {
   markOutboxDispatched,
   nextPendingOutboxMessage,
   reduceBoard,
+  taskTypeDefinitions,
   type CommandActor
 } from "@jina/board";
 import type { ParsedGitHubWebhook } from "@jina/github";
@@ -208,6 +209,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    if (request.method === "GET" && url.pathname === "/task-types") {
+      json(response, 200, taskTypeDefinitions);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/events") {
       json(response, 200, intakeState.board.events);
       return;
@@ -281,7 +286,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     json(response, 404, {
       error: "not found",
-      routes: ["GET /health", "GET /board", "GET /events", "POST /webhooks/github"]
+      routes: ["GET /health", "GET /board", "GET /task-types", "GET /events", "POST /webhooks/github"]
     });
   }
 

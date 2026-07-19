@@ -29,23 +29,37 @@ export function renderDashboardPage(apiUrl: string): string {
   }
   .toolbar button:hover, .ghost-button:hover { border-color: #56627c; background: #181f2d; }
   .toolbar-label { color: #77839a; font-size: .72rem; margin-right: .15rem; }
+  .page-nav { display: flex; gap: .35rem; margin-bottom: 1.25rem; border-bottom: 1px solid #202637; }
+  .page-nav a { padding: .65rem .15rem .6rem; margin-right: 1rem; color: #78849a; text-decoration: none; font-size: .76rem; font-weight: 650; border-bottom: 2px solid transparent; }
+  .page-nav a:hover { color: #c5ccda; }
+  .page-nav a.active { color: #f1f3f7; border-bottom-color: #809cff; }
+  .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .85rem; align-items: start; }
+  .column { border: 1px solid #202637; border-radius: .8rem; background: rgb(15 19 28 / 78%); padding: .65rem; min-height: 10rem; }
+  .column h2 { display: flex; justify-content: space-between; margin: .15rem .15rem .65rem; color: #8e99ad; font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; }
+  .count { display: grid; place-items: center; min-width: 1.25rem; height: 1.25rem; border-radius: 99px; background: #20283a; color: #c6cede; font-size: .65rem; }
+  .card {
+    width: 100%; border: 1px solid #2a3144; border-radius: .7rem; background: linear-gradient(145deg, #171c27, #121620);
+    padding: .75rem; margin-bottom: .55rem; text-align: left; cursor: pointer; transition: transform 120ms ease, border-color 120ms ease, background 120ms ease;
+  }
+  .card:hover { transform: translateY(-1px); border-color: #5b6a88; background: #1a2030; }
+  .card:focus-visible { outline: 2px solid #8ea8ff; outline-offset: 2px; }
+  .card-title { display: block; font-size: .82rem; font-weight: 650; line-height: 1.35; }
+  .card-meta { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .6rem; color: #838ea2; font-size: .66rem; }
+  .chip { border: 1px solid #2d3548; border-radius: 99px; padding: .12rem .38rem; }
   .task-panel { border: 1px solid #202637; border-radius: .85rem; background: rgb(15 19 28 / 78%); overflow: hidden; }
   .task-panel-header { display: flex; align-items: center; justify-content: space-between; padding: .85rem 1rem; border-bottom: 1px solid #22293a; }
   .task-panel-header h2 { margin: 0; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: #a5afc1; }
   .task-count { color: #748198; font-size: .7rem; }
   .task-list { display: grid; }
-  .task-row {
+  .type-row {
     display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1rem; width: 100%;
-    border: 0; border-bottom: 1px solid #202738; background: transparent; padding: .85rem 1rem; text-align: left;
-    cursor: pointer; transition: background 120ms ease;
+    border-bottom: 1px solid #202738; padding: .9rem 1rem;
   }
-  .task-row:last-child { border-bottom: 0; }
-  .task-row:hover { background: #171d29; }
-  .task-row:focus-visible { position: relative; outline: 2px solid #8ea8ff; outline-offset: -2px; }
-  .task-title { display: block; font-size: .84rem; font-weight: 650; line-height: 1.35; }
-  .task-meta { display: flex; flex-wrap: wrap; gap: .35rem; margin-top: .3rem; color: #7f8ba1; font-size: .67rem; }
-  .task-meta span + span::before { content: "·"; margin-right: .35rem; color: #465168; }
-  .task-arrow { color: #56627a; font-size: 1rem; }
+  .type-row:last-child { border-bottom: 0; }
+  .type-name { display: block; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #dce2ed; }
+  .type-description { display: block; margin-top: .35rem; color: #8793a8; font-size: .72rem; line-height: 1.45; }
+  .type-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; color: #8b97ac; font-size: .65rem; }
+  .type-chip { border: 1px solid #30394d; border-radius: 99px; padding: .18rem .42rem; white-space: nowrap; }
   .superseded { opacity: .48; }
   .empty { padding: 1.5rem .5rem; color: #586277; text-align: center; font-size: .72rem; }
   .feed { margin-top: 1.4rem; border-top: 1px solid #1f2534; padding-top: 1rem; }
@@ -92,26 +106,35 @@ export function renderDashboardPage(apiUrl: string): string {
   .event-payload { margin: .35rem 0 0; color: #7e8aa0; font: .64rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .empty-detail { color: #68758c; font-size: .72rem; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
+  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .type-row { grid-template-columns: 1fr; } .type-meta { justify-content: flex-start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
 </style>
 </head>
 <body>
 <main class="shell">
   <header class="topbar">
-    <div><p class="eyebrow">Review operations</p><h1>Jina board</h1></div>
+    <div><p class="eyebrow">Review operations</p><h1 id="page-title">Jina board</h1></div>
     <div id="connection"><span class="pulse" id="connection-dot"></span><span id="connection-text">Connecting…</span></div>
   </header>
-  <div class="toolbar" id="toolbar">
-    <span class="toolbar-label">Demo events</span>
-    <button type="button" data-demo="pr">Open PR</button>
-    <button type="button" data-demo="issue">Open issue</button>
-    <button type="button" data-demo="push">Force-push PR #42</button>
-  </div>
-  <section class="task-panel" aria-labelledby="tasks-heading">
-    <header class="task-panel-header"><h2 id="tasks-heading">Tasks</h2><span class="task-count" id="task-count"></span></header>
-    <div class="task-list" id="task-list" aria-label="Task list"></div>
+  <nav class="page-nav" aria-label="Dashboard pages">
+    <a href="/" data-page="board">Board</a>
+    <a href="/tasks" data-page="task-types">Task types</a>
+  </nav>
+  <section id="board-page">
+    <div class="toolbar" id="toolbar">
+      <span class="toolbar-label">Demo events</span>
+      <button type="button" data-demo="pr">Open PR</button>
+      <button type="button" data-demo="issue">Open issue</button>
+      <button type="button" data-demo="push">Force-push PR #42</button>
+    </div>
+    <section class="columns" id="columns" aria-label="Task board"></section>
+    <section class="feed"><h2>Recent board activity</h2><div id="log"></div></section>
   </section>
-  <section class="feed"><h2>Recent board activity</h2><div id="log"></div></section>
+  <section id="task-types-page" hidden>
+    <section class="task-panel" aria-labelledby="task-types-heading">
+      <header class="task-panel-header"><h2 id="task-types-heading">Task types</h2><span class="task-count" id="task-type-count"></span></header>
+      <div class="task-list" id="task-type-list" aria-label="Task type list"></div>
+    </section>
+  </section>
 </main>
 
 <dialog id="task-dialog" aria-labelledby="detail-title">
@@ -126,10 +149,12 @@ export function renderDashboardPage(apiUrl: string): string {
 const API = ${JSON.stringify(apiUrl)};
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
+let taskTypes = [];
 let nextPr = 100;
 let nextIssue = 200;
 
-const taskList = document.getElementById("task-list");
+const columns = document.getElementById("columns");
+const taskTypeList = document.getElementById("task-type-list");
 const log = document.getElementById("log");
 const dialog = document.getElementById("task-dialog");
 const detailTitle = document.getElementById("detail-title");
@@ -138,12 +163,15 @@ const detailBody = document.getElementById("detail-body");
 
 async function refresh() {
   try {
-    const responses = await Promise.all([fetch(API + "/board"), fetch(API + "/events")]);
-    if (!responses[0].ok || !responses[1].ok) throw new Error("API request failed");
+    const responses = await Promise.all([fetch(API + "/board"), fetch(API + "/events"), fetch(API + "/task-types")]);
+    if (!responses[0].ok || !responses[1].ok || !responses[2].ok) throw new Error("API request failed");
     boardState = await responses[0].json();
     boardEvents = await responses[1].json();
+    taskTypes = await responses[2].json();
     setConnection(true);
-    renderTaskList();
+    renderPage();
+    renderColumns();
+    renderTaskTypes();
     renderLog();
     renderSelectedTask();
   } catch (error) {
@@ -156,39 +184,64 @@ function setConnection(online) {
   document.getElementById("connection-text").textContent = online ? "Live · " + API : "Cannot reach " + API;
 }
 
-function renderTaskList() {
-  taskList.replaceChildren();
-  const tasks = boardState.tasks.slice().sort(compareTasks);
-  document.getElementById("task-count").textContent = tasks.length + (tasks.length === 1 ? " task" : " tasks");
-  if (tasks.length === 0) taskList.append(textElement("div", "empty", "No tasks"));
-  for (const task of tasks) taskList.append(taskRow(task));
+function renderPage() {
+  const showingTaskTypes = location.pathname === "/tasks";
+  document.getElementById("board-page").hidden = showingTaskTypes;
+  document.getElementById("task-types-page").hidden = !showingTaskTypes;
+  document.getElementById("page-title").textContent = showingTaskTypes ? "Task types" : "Jina board";
+  for (const link of document.querySelectorAll("[data-page]")) {
+    link.classList.toggle("active", link.dataset.page === (showingTaskTypes ? "task-types" : "board"));
+  }
 }
 
-function taskRow(task) {
-  const row = element("button", "task-row" + (task.status === "superseded" ? " superseded" : ""));
-  row.type = "button";
-  row.dataset.taskId = task.id;
-  row.setAttribute("aria-label", "Open task: " + task.title + ", epoch " + (task.epoch ?? "none"));
-  const content = element("span");
-  content.append(textElement("span", "task-title", task.title));
-  const meta = element("span", "task-meta");
+function renderColumns() {
+  columns.replaceChildren();
+  const statuses = ["triage", "blocked", "queued", "in_progress", "done", "superseded", "failed", "canceled"];
+  for (const status of statuses) {
+    const items = boardState.tasks.filter(function(task) { return task.status === status; });
+    if (items.length === 0 && !["triage", "queued", "in_progress", "done"].includes(status)) continue;
+    const column = element("section", "column");
+    const heading = element("h2");
+    heading.append(document.createTextNode(humanize(status)), textElement("span", "count", String(items.length)));
+    column.append(heading);
+    if (items.length === 0) column.append(textElement("div", "empty", "No tasks"));
+    for (const task of items) column.append(taskCard(task));
+    columns.append(column);
+  }
+}
+
+function taskCard(task) {
+  const card = element("button", "card" + (task.status === "superseded" ? " superseded" : ""));
+  card.type = "button";
+  card.dataset.taskId = task.id;
+  card.setAttribute("aria-label", "Open task: " + task.title + ", epoch " + (task.epoch ?? "none"));
+  card.append(textElement("span", "card-title", task.title));
+  const meta = element("span", "card-meta");
   meta.append(
-    textElement("span", "", humanize(task.type)),
-    textElement("span", "", "epoch " + (task.epoch ?? "–")),
-    textElement("span", "", "attempt " + task.attempt)
+    textElement("span", "chip", humanize(task.type)),
+    textElement("span", "chip", "epoch " + (task.epoch ?? "–")),
+    textElement("span", "chip", "attempt " + task.attempt)
   );
-  content.append(meta);
-  row.append(content, textElement("span", "task-arrow", "›"));
-  return row;
+  card.append(meta);
+  return card;
 }
 
-function compareTasks(left, right) {
-  const epochDifference = (right.epoch ?? 0) - (left.epoch ?? 0);
-  if (epochDifference !== 0) return epochDifference;
-  const order = { pr_review: 0, review_pass: 1, context: 2, publish: 3, cleanup: 4, issue_triage: 5, human_decision: 6 };
-  const typeDifference = (order[left.type] ?? 99) - (order[right.type] ?? 99);
-  if (typeDifference !== 0) return typeDifference;
-  return String(right.createdAt).localeCompare(String(left.createdAt));
+function renderTaskTypes() {
+  taskTypeList.replaceChildren();
+  document.getElementById("task-type-count").textContent = taskTypes.length + " types";
+  for (const definition of taskTypes) {
+    const row = element("article", "type-row");
+    const copy = element("div");
+    copy.append(textElement("span", "type-name", definition.type), textElement("span", "type-description", definition.description));
+    const meta = element("div", "type-meta");
+    meta.append(
+      textElement("span", "type-chip", humanize(definition.kind)),
+      textElement("span", "type-chip", humanize(definition.defaultAssigneeRole))
+    );
+    if (definition.dispatchTopic) meta.append(textElement("span", "type-chip", definition.dispatchTopic));
+    row.append(copy, meta);
+    taskTypeList.append(row);
+  }
 }
 
 function renderSelectedTask() {
@@ -333,9 +386,9 @@ function formatValue(value) { return typeof value === "object" ? JSON.stringify(
 function element(tag, className) { const node = document.createElement(tag); if (className) node.className = className; return node; }
 function textElement(tag, className, text) { const node = element(tag, className); node.textContent = text; return node; }
 
-taskList.addEventListener("click", function(event) {
-  const row = event.target.closest("[data-task-id]");
-  if (row) openTask(row.dataset.taskId);
+columns.addEventListener("click", function(event) {
+  const card = event.target.closest("[data-task-id]");
+  if (card) openTask(card.dataset.taskId);
 });
 detailBody.addEventListener("click", function(event) {
   const relationship = event.target.closest("[data-task-id]");

@@ -6,9 +6,13 @@ test("dashboard page renders clickable task detail affordances", () => {
   const html = renderDashboardPage("https://api.example.test");
 
   assert.match(html, /data-task-id/);
-  assert.match(html, /aria-label="Task list"/);
-  assert.match(html, /function renderTaskList/);
-  assert.doesNotMatch(html, /function renderColumns/);
+  assert.match(html, /href="\/" data-page="board"/);
+  assert.match(html, /href="\/tasks" data-page="task-types"/);
+  assert.match(html, /aria-label="Task board"/);
+  assert.match(html, /aria-label="Task type list"/);
+  assert.match(html, /function renderColumns/);
+  assert.match(html, /function renderTaskTypes/);
+  assert.doesNotMatch(html, /function renderTaskList/);
   assert.match(html, /Dependencies & relationships/);
   assert.match(html, /Comments & activity/);
   assert.match(html, /#task=/);

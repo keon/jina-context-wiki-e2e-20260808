@@ -72,6 +72,16 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
     ),
     true
   );
+
+  const taskTypes = await fetch(`${baseUrl}/task-types`).then(
+    (response) => response.json() as Promise<Array<{ type: string; kind: string; description: string }>>
+  );
+  assert.equal(taskTypes.length, 7);
+  assert.deepEqual(
+    taskTypes.map((definition) => definition.type),
+    ["pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision"]
+  );
+  assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
 });
 
 test("durable state survives an API server restart", async () => {

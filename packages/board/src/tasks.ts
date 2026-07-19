@@ -23,6 +23,63 @@ export type TaskAssigneeRole =
 
 export type TaskKind = "aggregate" | "dispatchable" | "manual" | "waitpoint";
 
+export interface TaskTypeDefinition {
+  readonly type: TaskType;
+  readonly kind: TaskKind;
+  readonly defaultAssigneeRole: TaskAssigneeRole;
+  readonly description: string;
+  readonly dispatchTopic?: TaskDispatchTopic;
+}
+
+export const taskTypeDefinitions: readonly TaskTypeDefinition[] = [
+  {
+    type: "pr_review",
+    kind: "aggregate",
+    defaultAssigneeRole: "system",
+    description: "Coordinates a pull-request review and completes when its required child tasks finish."
+  },
+  {
+    type: "review_pass",
+    kind: "dispatchable",
+    defaultAssigneeRole: "review_agent",
+    dispatchTopic: "run-review",
+    description: "Runs one focused code-review pass and records findings against a pull-request revision."
+  },
+  {
+    type: "context",
+    kind: "dispatchable",
+    defaultAssigneeRole: "research_agent",
+    dispatchTopic: "run-research",
+    description: "Collects approved external context needed by another task."
+  },
+  {
+    type: "publish",
+    kind: "dispatchable",
+    defaultAssigneeRole: "publisher",
+    dispatchTopic: "run-publish",
+    description: "Publishes or records the final output produced by a completed workflow."
+  },
+  {
+    type: "cleanup",
+    kind: "dispatchable",
+    defaultAssigneeRole: "cleanup_worker",
+    dispatchTopic: "run-cleanup",
+    description: "Releases temporary resources after workflow execution."
+  },
+  {
+    type: "issue_triage",
+    kind: "manual",
+    defaultAssigneeRole: "human",
+    description: "Routes a newly opened issue for human triage."
+  },
+  {
+    type: "human_decision",
+    kind: "waitpoint",
+    defaultAssigneeRole: "human",
+    description: "Pauses automated work until a human records a required decision."
+  }
+];
+
 export function taskKind(type: TaskType): TaskKind {
   switch (type) {
     case "pr_review":
