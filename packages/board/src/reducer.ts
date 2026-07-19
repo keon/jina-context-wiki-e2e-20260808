@@ -205,6 +205,28 @@ export function findOutboxMessage(state: BoardState, messageId: BoardOutboxMessa
   return state.outbox.find((message) => message.id === messageId);
 }
 
+export function renewOutboxLease(
+  state: BoardState,
+  messageId: BoardOutboxMessageId,
+  leaseId: string,
+  now: IsoTimestamp,
+  expiresAt: IsoTimestamp
+): BoardState | undefined {
+  const message = findOutboxMessage(state, messageId);
+  if (
+    !message || message.status !== "leased" || message.leaseId !== leaseId ||
+    !message.leaseExpiresAt || message.leaseExpiresAt <= now
+  ) {
+    return undefined;
+  }
+  return {
+    ...state,
+    outbox: state.outbox.map((candidate) => candidate.id === messageId
+      ? { ...candidate, leasedAt: now, leaseExpiresAt: expiresAt }
+      : candidate)
+  };
+}
+
 export function nextPendingOutboxMessage(state: BoardState): BoardOutboxMessage | undefined {
   return state.outbox.find((message) => message.status === "pending");
 }

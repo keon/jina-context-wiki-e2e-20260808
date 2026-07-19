@@ -18,6 +18,7 @@ if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.JINA
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
   ...(process.env.JINA_TENANT_ID ? { tenantId: process.env.JINA_TENANT_ID } : {}),
+  tenantAliases: commaSeparatedEnv("JINA_TENANT_ALIASES"),
   enableDevEndpoints,
   simulateRuns: process.env.JINA_SIMULATE_RUNS === "true",
   seedDemo: enableDevEndpoints && process.env.JINA_SEED_DEMO !== "false",
@@ -82,4 +83,8 @@ function requiredEnv(name: string): string {
     throw new Error(`${name} is required when Postgres storage is enabled`);
   }
   return value;
+}
+
+function commaSeparatedEnv(name: string): readonly string[] {
+  return (process.env[name] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
 }

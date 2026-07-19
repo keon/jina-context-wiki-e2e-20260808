@@ -6,10 +6,11 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
-    "test": "echo \"test not configured\"",
+    "test": "pnpm build && node --test dist/server.test.js",
     "start": "node dist/server.js"
   },
   "dependencies": {
+    "@jina/ai": "workspace:*",
     "@jina/daytona": "workspace:*",
     "@jina/ontology": "workspace:*"
   },

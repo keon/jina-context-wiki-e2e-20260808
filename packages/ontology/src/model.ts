@@ -50,6 +50,16 @@ export interface OntologyGraph {
   readonly edges: readonly OntologyEdge[];
 }
 
+export interface OntologyGraphSummary extends Omit<OntologyGraph, "nodes" | "edges"> {
+  readonly nodeCount: number;
+  readonly edgeCount: number;
+}
+
+export function summarizeOntologyGraph(graph: OntologyGraph): OntologyGraphSummary {
+  const { nodes, edges, ...summary } = graph;
+  return { ...summary, nodeCount: nodes.length, edgeCount: edges.length };
+}
+
 export interface OntologyBuildRequest {
   readonly tenantId: string;
   readonly repository: string;

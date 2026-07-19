@@ -1,10 +1,12 @@
-import type { OntologyGraph } from "./model.js";
+import { summarizeOntologyGraph, type OntologyGraph, type OntologyGraphSummary } from "./model.js";
 
 export interface OntologyGraphStore {
   save(graph: OntologyGraph): Promise<void>;
   latest(tenantId: string): Promise<OntologyGraph | undefined>;
   get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
   list(tenantId: string): Promise<readonly OntologyGraph[]>;
+  listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]>;
+  migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -28,6 +30,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return [...this.graphs.values()]
       .filter((graph) => graph.tenantId === tenantId)
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+  }
+
+  async listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]> {
+    return (await this.list(tenantId)).map(summarizeOntologyGraph);
+  }
+
+  async migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void> {
+    for (const [id, graph] of this.graphs) {
+      if (aliases.includes(graph.tenantId)) this.graphs.set(id, { ...graph, tenantId });
+    }
   }
 
   async close(): Promise<void> {}

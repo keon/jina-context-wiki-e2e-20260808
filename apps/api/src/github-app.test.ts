@@ -105,11 +105,24 @@ test("ontology worker builds and exposes a graph end to end", async () => {
     const claim = await fetch(`${baseUrl}/internal/worker/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workerId: "fixture-worker" })
+      body: JSON.stringify({ workerId: "fixture-worker", topics: ["run-ontology"] })
     });
     assert.equal(claim.status, 200);
     const work = await claim.json() as { message: { id: string; leaseId: string }; task: { id: string } };
     assert.equal(work.task.id, createdBody.task.id);
+
+    const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageId: work.message.id, leaseId: work.message.leaseId })
+    });
+    assert.equal(renewed.status, 200);
+    const staleRenewal = await fetch(`${baseUrl}/internal/worker/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageId: work.message.id, leaseId: "wrong-lease" })
+    });
+    assert.equal(staleRenewal.status, 409);
 
     const graph = fixtureGraph({ tenantId: "default", repository: "omxyz/ontology-fixture", ref: "main", taskId: work.task.id });
     const completed = await fetch(`${baseUrl}/internal/worker/complete`, {
@@ -135,6 +148,37 @@ test("ontology worker builds and exposes a graph end to end", async () => {
       (response) => response.json() as Promise<{ tasks: Array<{ type: string; status: string }> }>
     );
     assert.equal(board.tasks.find((task) => task.type === "ontology_build")?.status, "done");
+  } finally {
+    await close(server);
+  }
+});
+
+test("durable workers can drain review and publish topics", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    const intake = await fetch(`${baseUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omlabs/example", pullRequestNumber: 22, headSha: "sha-22" })
+    });
+    assert.equal(intake.status, 202);
+
+    const review = await claimTopic(baseUrl, "run-review");
+    assert.equal(review.message.topic, "run-review");
+    assert.equal(await completeClaim(baseUrl, review, { summary: "Reviewed", findingCount: 0 }), 200);
+
+    const publish = await claimTopic(baseUrl, "run-publish");
+    assert.equal(publish.message.topic, "run-publish");
+    assert.equal(await completeClaim(baseUrl, publish, { published: true }), 200);
+
+    const board = await fetch(`${baseUrl}/board`).then(
+      (response) => response.json() as Promise<{ tasks: Array<{ type: string; status: string }>; publications: unknown[] }>
+    );
+    assert.equal(board.tasks.find((task) => task.type === "review_pass")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "publish")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "pr_review")?.status, "done");
+    assert.equal(board.publications.length, 1);
   } finally {
     await close(server);
   }
@@ -192,6 +236,46 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("configured aliases migrate existing tasks and ontology graphs to the canonical tenant", async () => {
+  const stateStore = new MemoryStateStore();
+  const ontologyStore = new MemoryOntologyGraphStore();
+  const oldTenant = "github:unscoped";
+  const first = createApiServer({
+    githubWebhookSecret: SECRET,
+    stateStore,
+    ontologyStore,
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: oldTenant
+  });
+  const firstUrl = await listen(first);
+  assert.equal((await deliver(firstUrl, "pull_request", "delivery-old-tenant", pullRequestPayload(55, "old-sha"))).status, 202);
+  await ontologyStore.save(fixtureGraph({ tenantId: oldTenant, repository: "omlabs/example", ref: "main", taskId: "old-task" }));
+  await close(first);
+
+  const second = createApiServer({
+    githubWebhookSecret: SECRET,
+    stateStore,
+    ontologyStore,
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: "omlabs",
+    tenantAliases: [oldTenant]
+  });
+  const secondUrl = await listen(second);
+  try {
+    const board = await authenticatedFetch(`${secondUrl}/board`).then(
+      (response) => response.json() as Promise<{ tasks: Array<{ metadata: Record<string, unknown> }> }>
+    );
+    assert.equal(board.tasks.length, 3);
+    assert.equal(board.tasks.every((task) => task.metadata.tenantId === "omlabs"), true);
+    const ontology = await authenticatedFetch(`${secondUrl}/ontology`).then(
+      (response) => response.json() as Promise<{ graphs: Array<{ tenantId: string }> }>
+    );
+    assert.deepEqual(ontology.graphs.map((graph) => graph.tenantId), ["omlabs"]);
+  } finally {
+    await close(second);
+  }
+});
+
 async function listen(server: ReturnType<typeof createApiServer>): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;
@@ -228,6 +312,36 @@ class MemoryStateStore implements ApiStateStore {
   }
 
   async close(): Promise<void> {}
+}
+
+interface TestClaim {
+  readonly message: { readonly id: string; readonly leaseId: string; readonly topic: string };
+  readonly task: { readonly id: string };
+}
+
+async function claimTopic(baseUrl: string, topic: string): Promise<TestClaim> {
+  const response = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ workerId: `test-${topic}`, topics: [topic] })
+  });
+  assert.equal(response.status, 200);
+  return response.json() as Promise<TestClaim>;
+}
+
+async function completeClaim(baseUrl: string, work: TestClaim, result: Record<string, unknown>): Promise<number> {
+  const response = await fetch(`${baseUrl}/internal/worker/complete`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      messageId: work.message.id,
+      leaseId: work.message.leaseId,
+      taskId: work.task.id,
+      outcome: "done",
+      result
+    })
+  });
+  return response.status;
 }
 
 function fixtureGraph(request: { tenantId: string; repository: string; ref: string; taskId: string }) {

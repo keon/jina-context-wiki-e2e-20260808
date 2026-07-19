@@ -212,19 +212,31 @@ const ontologyDetails = document.getElementById("ontology-details");
 
 async function refresh() {
   try {
-    const responses = await Promise.all([fetch(API + "/board"), fetch(API + "/events"), fetch(API + "/task-types"), fetch(API + "/ontology")]);
-    if (!responses[0].ok || !responses[1].ok || !responses[2].ok || !responses[3].ok) throw new Error("API request failed");
-    boardState = await responses[0].json();
-    boardEvents = await responses[1].json();
-    taskTypes = await responses[2].json();
-    ontologyState = await responses[3].json();
+    const showingTaskTypes = location.pathname === "/tasks";
+    const showingOntology = location.pathname === "/ontology";
+    if (showingOntology) {
+      const response = await fetch(API + "/ontology");
+      if (!response.ok) throw new Error("API request failed");
+      ontologyState = await response.json();
+    } else if (showingTaskTypes) {
+      const response = await fetch(API + "/task-types");
+      if (!response.ok) throw new Error("API request failed");
+      taskTypes = await response.json();
+    } else {
+      const responses = await Promise.all([fetch(API + "/board"), fetch(API + "/events")]);
+      if (!responses[0].ok || !responses[1].ok) throw new Error("API request failed");
+      boardState = await responses[0].json();
+      boardEvents = await responses[1].json();
+    }
     setConnection(true);
     renderPage();
-    renderColumns();
-    renderTaskTypes();
-    renderOntology();
-    renderLog();
-    renderSelectedTask();
+    if (showingOntology) renderOntology();
+    else if (showingTaskTypes) renderTaskTypes();
+    else {
+      renderColumns();
+      renderLog();
+      renderSelectedTask();
+    }
   } catch (error) {
     setConnection(false);
   }

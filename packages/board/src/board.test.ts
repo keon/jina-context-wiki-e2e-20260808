@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { entityId } from "@jina/shared-kernel";
 import { canTransition } from "./transitions.js";
-import { leaseNextOutboxMessage, type BoardState } from "./reducer.js";
+import { leaseNextOutboxMessage, renewOutboxLease, type BoardState } from "./reducer.js";
 
 test("transition policy follows task kind instead of an extension type name", () => {
   assert.equal(canTransition("aggregate", "triage", "in_progress", "run"), false);
@@ -52,4 +52,16 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
   });
   assert.equal(claimed?.message.taskId, firstTask);
   assert.equal(claimed?.message.leaseId, "new");
+  const renewed = renewOutboxLease(
+    claimed!.state,
+    claimed!.message.id,
+    "new",
+    "2026-01-01T00:02:30.000Z",
+    "2026-01-01T00:04:00.000Z"
+  );
+  assert.equal(renewed?.outbox[0]?.leaseExpiresAt, "2026-01-01T00:04:00.000Z");
+  assert.equal(
+    renewOutboxLease(claimed!.state, claimed!.message.id, "wrong", "2026-01-01T00:02:30.000Z", "2026-01-01T00:04:00.000Z"),
+    undefined
+  );
 });

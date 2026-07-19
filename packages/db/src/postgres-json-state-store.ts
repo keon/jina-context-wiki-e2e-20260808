@@ -1,4 +1,6 @@
+import type { OntologyGraph } from "@jina/ontology";
 import { Pool, type PoolConfig } from "pg";
+import { insertOntologyGraph, ONTOLOGY_SCHEMA_SQL } from "./postgres-ontology-graph-store.js";
 
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
@@ -93,6 +95,32 @@ export class PostgresJsonStateStore<T> {
     }
   }
 
+  /** Commits an immutable ontology generation and its board completion together. */
+  async saveWithOntologyGraph(snapshot: T, graph: OntologyGraph): Promise<void> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+      await insertOntologyGraph(client, graph);
+      await client.query(
+        `insert into jina_runtime.api_state (id, snapshot)
+         values (1, $1::jsonb)
+         on conflict (id) do update
+           set snapshot = excluded.snapshot,
+               version = jina_runtime.api_state.version + 1,
+               updated_at = now()`,
+        [JSON.stringify(snapshot)]
+      );
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async close(): Promise<void> {
     await this.pool.end();
   }
@@ -117,6 +145,6 @@ export class PostgresJsonStateStore<T> {
         delivery_id text primary key,
         received_at timestamptz not null default now()
       );
-    `);
+    ${ONTOLOGY_SCHEMA_SQL}`);
   }
 }

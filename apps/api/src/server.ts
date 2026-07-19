@@ -6,6 +6,7 @@ import {
   findTask,
   leaseNextOutboxMessage,
   markOutboxDispatched,
+  renewOutboxLease,
   reduceBoard,
   taskTypeDefinitions,
   type BoardTask,
@@ -28,12 +29,14 @@ import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } 
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
-const WORKER_LEASE_MS = 35 * 60 * 1000;
+const WORKER_LEASE_MS = 5 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
+const WORKER_TOPICS = ["run-review", "run-research", "run-publish", "run-cleanup", "run-ontology"] as const;
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
   readonly tenantId?: string;
+  readonly tenantAliases?: readonly string[];
   readonly enableDevEndpoints?: boolean;
   readonly simulateRuns?: boolean;
   readonly seedDemo?: boolean;
@@ -54,6 +57,7 @@ export interface ApiStateStore {
   ping(): Promise<void>;
   hasDelivery(deliveryId: string): Promise<boolean>;
   save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean>;
+  saveWithOntologyGraph?(snapshot: ApiSnapshot, graph: OntologyGraph): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -76,11 +80,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function initializeState(): Promise<void> {
     const stored = await config.stateStore?.load();
     if (stored) {
-      intakeState = stored.intakeState;
-      publications = stored.publications;
-      devDeliverySequence = stored.devDeliverySequence;
+      const migrated = migrateSnapshotTenantAliases(stored, config.tenantId, config.tenantAliases ?? []);
+      intakeState = migrated.snapshot.intakeState;
+      publications = migrated.snapshot.publications;
+      devDeliverySequence = migrated.snapshot.devDeliverySequence;
+      if (migrated.changed) await persist();
+      if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
       return;
     }
+    if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
     if (config.seedDemo) {
       devDeliverySequence += 1;
       acceptWebhook(devPullRequestWebhook("omlabs/example", 42, "abc123"), `dev-seed-${devDeliverySequence}`);
@@ -216,8 +224,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/ontology") {
-      const graphs = await ontologyStore.list(tenantId);
-      json(response, 200, { latest: graphs[0] ?? null, graphs });
+      const [latest, graphs] = await Promise.all([
+        ontologyStore.latest(tenantId),
+        ontologyStore.listSummaries(tenantId)
+      ]);
+      json(response, 200, { latest: latest ?? null, graphs });
       return;
     }
     if (request.method === "GET" && url.pathname.startsWith("/ontology/graphs/")) {
@@ -236,11 +247,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
-      await claimOntologyWork(request, response, tenantId);
+      await claimWork(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/worker/renew") {
+      await renewWork(request, response, tenantId);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/complete") {
-      await completeOntologyWork(request, response, tenantId);
+      await completeWork(request, response, tenantId);
       return;
     }
 
@@ -318,15 +333,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 202, { accepted: true, task: created });
   }
 
-  async function claimOntologyWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+  async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerId = requiredString(body.workerId, "workerId");
+    const requestedTopics = Array.isArray(body.topics)
+      ? body.topics.filter((topic): topic is string => typeof topic === "string" && WORKER_TOPICS.includes(topic as typeof WORKER_TOPICS[number]))
+      : [];
+    if (requestedTopics.length === 0) {
+      json(response, 400, { accepted: false, error: "at least one supported topic is required" });
+      return;
+    }
     const claimed = await mutate(async () => {
-      const taskIds = [...tenantTaskIds(intakeState, tenantId)];
+      const taskIds = intakeState.board.tasks
+        .filter((task) => task.metadata.tenantId === tenantId && (task.status === "queued" || task.status === "in_progress"))
+        .map((task) => task.id);
       const now = nowIso();
       const leaseId = randomUUID();
       const leased = leaseNextOutboxMessage(intakeState.board, {
-        topics: ["run-ontology"],
+        topics: requestedTopics,
         taskIds,
         leaseId,
         now,
@@ -349,41 +373,96 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, claimed ? 200 : 204, claimed ?? {});
   }
 
-  async function completeOntologyWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+  async function renewWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
+    const leaseId = requiredString(body.leaseId, "leaseId");
+    const renewed = await mutate(async () => {
+      const message = findOutboxMessage(intakeState.board, messageId);
+      const task = message ? findTask(intakeState.board, message.taskId) : undefined;
+      if (!task || task.metadata.tenantId !== tenantId || task.status !== "in_progress") return false;
+      const now = nowIso();
+      const board = renewOutboxLease(
+        intakeState.board,
+        messageId,
+        leaseId,
+        now,
+        new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+      );
+      if (!board) return false;
+      intakeState = { ...intakeState, board };
+      await persist();
+      return true;
+    });
+    json(response, renewed ? 200 : 409, renewed ? { accepted: true } : { accepted: false, error: "stale lease" });
+  }
+
+  async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
     const leaseId = requiredString(body.leaseId, "leaseId");
     const outcome = body.outcome;
     if (outcome !== "done" && outcome !== "failed") throw new Error("outcome must be done or failed");
-    const task = findTask(intakeState.board, entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId);
+    const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
+    const task = findTask(intakeState.board, taskId);
     if (!task || task.metadata.tenantId !== tenantId) {
       json(response, 404, { accepted: false, error: "task not found" });
       return;
     }
-    const graph = outcome === "done" ? parseCompletedGraph(body.graph, task, tenantId) : undefined;
+    const initialMessage = findOutboxMessage(intakeState.board, messageId);
+    const graph = outcome === "done" && initialMessage?.topic === "run-ontology"
+      ? parseCompletedGraph(body.graph, task, tenantId)
+      : undefined;
     const result = await mutate(async () => {
       const message = findOutboxMessage(intakeState.board, messageId);
-      if (!message || message.taskId !== task.id || message.status !== "leased" || message.leaseId !== leaseId) {
+      const currentTask = findTask(intakeState.board, taskId);
+      const now = nowIso();
+      if (
+        !message || !currentTask || message.taskId !== taskId || message.status !== "leased" ||
+        message.leaseId !== leaseId || !message.leaseExpiresAt || message.leaseExpiresAt <= now ||
+        currentTask.status !== "in_progress" || currentTask.metadata.tenantId !== tenantId
+      ) {
         return false;
       }
-      if (graph) await ontologyStore.save(graph);
-      const now = nowIso();
+      const previousIntakeState = intakeState;
+      const previousPublications = publications;
       let board = markOutboxDispatched(intakeState.board, message.id, now);
       board = applyCommand(board, {
         command: "CommentTask",
-        taskId: task.id,
-        eventType: graph ? "ontology.graph_created" : "ontology.failed",
-        payload: graph
+        taskId,
+        eventType: outcome === "failed" ? `${message.topic}.failed` : completionEventType(message.topic),
+        payload: outcome === "failed"
+          ? { reason: String(body.reason ?? "worker failed").slice(0, 2000) }
+          : graph
           ? { graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
-          : { reason: String(body.reason ?? "worker failed").slice(0, 2000) }
+          : safeResultPayload(body.result)
       }, { actor: RUN_ACTOR, now }).state;
+      if (outcome === "done" && message.topic === "run-publish") {
+        const repository = String(currentTask.metadata.repository ?? "");
+        const pullRequestNumber = Number(currentTask.metadata.pullRequestNumber ?? 0);
+        const headSha = String(currentTask.metadata.headSha ?? "");
+        const key = buildPublicationKey(`${repository}#${pullRequestNumber}`, headSha, "summary");
+        publications = upsertPublication(publications, { key, headSha, target: "summary" }).records;
+      }
       board = applyCommand(board, {
         command: "TransitionTask",
-        taskId: task.id,
-        toStatus: graph ? "done" : "failed"
+        taskId,
+        toStatus: outcome
       }, { actor: RUN_ACTOR, now }).state;
       intakeState = { ...intakeState, board: reduceBoard(board, now) };
-      await persist();
+      try {
+        if (graph && config.stateStore) {
+          if (!config.stateStore.saveWithOntologyGraph) throw new Error("state store does not support atomic ontology completion");
+          await config.stateStore.saveWithOntologyGraph(snapshot(), graph);
+        } else {
+          if (graph) await ontologyStore.save(graph);
+          await persist();
+        }
+      } catch (error) {
+        intakeState = previousIntakeState;
+        publications = previousPublications;
+        throw error;
+      }
       return true;
     });
     json(response, result ? 200 : 409, result ? { accepted: true, graphId: graph?.id } : { accepted: false, error: "stale lease" });
@@ -422,6 +501,59 @@ function tenantBoardView(state: GitHubIntakeState, publications: readonly Public
     publications: publications.filter((record) => publicationSubjects.some((subject) => record.key.startsWith(subject))),
     pullRequests
   };
+}
+
+function completionEventType(topic: string): string {
+  switch (topic) {
+    case "run-review": return "review.completed";
+    case "run-research": return "context.collected";
+    case "run-publish": return "publish.completed";
+    case "run-cleanup": return "cleanup.completed";
+    case "run-ontology": return "ontology.graph_created";
+    default: return "worker.completed";
+  }
+}
+
+function safeResultPayload(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(Object.entries(value).slice(0, 30).map(([key, item]) => {
+    if (item === null || typeof item === "boolean" || typeof item === "number") return [key, item];
+    if (typeof item === "string") return [key, item.slice(0, 5_000)];
+    return [key, JSON.stringify(item).slice(0, 5_000)];
+  }));
+}
+
+function migrateSnapshotTenantAliases(
+  snapshot: ApiSnapshot,
+  tenantId: string | undefined,
+  aliases: readonly string[]
+): { readonly snapshot: ApiSnapshot; readonly changed: boolean } {
+  if (!tenantId) return { snapshot, changed: false };
+  const aliasSet = new Set(aliases.filter((alias) => alias && alias !== tenantId));
+  if (aliasSet.size === 0) return { snapshot, changed: false };
+  let changed = false;
+  const tasks = snapshot.intakeState.board.tasks.map((task) => {
+    if (!aliasSet.has(String(task.metadata.tenantId ?? ""))) return task;
+    changed = true;
+    return { ...task, metadata: { ...task.metadata, tenantId } };
+  });
+  const pullRequests = snapshot.intakeState.pullRequests.map((pullRequest) => {
+    if (!aliasSet.has(pullRequest.tenantId)) return pullRequest;
+    changed = true;
+    return { ...pullRequest, tenantId };
+  });
+  return changed
+    ? {
+        changed,
+        snapshot: {
+          ...snapshot,
+          intakeState: {
+            board: { ...snapshot.intakeState.board, tasks },
+            pullRequests
+          }
+        }
+      }
+    : { snapshot, changed };
 }
 
 function parseCompletedGraph(value: unknown, task: BoardTask, tenantId: string): OntologyGraph {
