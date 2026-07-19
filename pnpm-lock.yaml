@@ -126,6 +126,9 @@ importers:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../shared-kernel
+      ws:
+        specifier: ^8.21.1
+        version: 8.21.1
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
