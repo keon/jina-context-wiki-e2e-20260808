@@ -26,15 +26,29 @@ importers:
       '@jina/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@jina/publication':
+        specifier: workspace:*
+        version: link:../../packages/publication
+      '@jina/review':
+        specifier: workspace:*
+        version: link:../../packages/review
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../../packages/shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
 
   apps/dashboard:
     dependencies:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../../packages/shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
 
   apps/workflows:
     dependencies:
@@ -56,6 +70,9 @@ importers:
       '@jina/github':
         specifier: workspace:*
         version: link:../../packages/github
+      '@jina/policy':
+        specifier: workspace:*
+        version: link:../../packages/policy
       '@jina/publication':
         specifier: workspace:*
         version: link:../../packages/publication
@@ -65,12 +82,20 @@ importers:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../../packages/shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
 
   packages/ai:
     dependencies:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
 
   packages/board:
     dependencies:
@@ -101,6 +126,10 @@ importers:
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.0
 
   packages/policy:
     dependencies:
@@ -154,6 +183,9 @@ packages:
     cpu: [arm64]
     os: [win32]
 
+  '@types/node@26.1.0':
+    resolution: {integrity: sha512-O0A1G3xPGy4w7AgQdAQYUlQ+BKk2Oovw8eRpofyp5KdBZULnbe+WqaOVNrm705SHphCiG4XHsACrSmPu1f+Kgw==}
+
   turbo@2.10.4:
     resolution: {integrity: sha512-GQpduILaKjoaGljw097ScsSyKTtZSY7cZ3bJktzfTkPMyCf3ShKLuXK2IaOEN2Plziml+ArR7WJ1m+V4VbnaKQ==}
     hasBin: true
@@ -162,6 +194,9 @@ packages:
     resolution: {integrity: sha512-y2TvuxSZPDyQakkFRPZHKFm+KKVqIisdg9/CZwm9ftvKXLP8NRWj38/ODjNbr43SsoXqNuAisEf1GdCxqWcdBw==}
     engines: {node: '>=14.17'}
     hasBin: true
+
+  undici-types@8.3.0:
+    resolution: {integrity: sha512-j375ScV60dom+YkPFIfTLcOiPxkN/buHz5GobjLhixFuANaNs3C9l4GmrWqejgXWJ7BbJcFYpTEUkS1Ge8bpZQ==}
 
 snapshots:
 
@@ -183,6 +218,10 @@ snapshots:
   '@turbo/windows-arm64@2.10.4':
     optional: true
 
+  '@types/node@26.1.0':
+    dependencies:
+      undici-types: 8.3.0
+
   turbo@2.10.4:
     optionalDependencies:
       '@turbo/darwin-64': 2.10.4
@@ -193,3 +232,5 @@ snapshots:
       '@turbo/windows-arm64': 2.10.4
 
   typescript@6.0.3: {}
+
+  undici-types@8.3.0: {}

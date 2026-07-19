@@ -26,7 +26,8 @@ state = ingestGitHubWebhook(
   {
     tenantId: "tenant_1",
     repository: "omlabs/example",
-    needsExternalContext: true
+    needsExternalContext: true,
+    sourcePolicy: { egressEnabled: true, allowlist: ["https://example.com/"] }
   },
   clock()
 );
@@ -93,7 +94,8 @@ function printState(current: WorkflowState): void {
   console.log(`Pending outbox: ${pending ? `${pending.topic} (${pending.idempotencyKey})` : "none"}`);
   console.log(`Dependencies: ${current.board.dependencies.length}`);
   console.log(`Context items: ${current.contextItems.length}`);
-  console.log(`Publications: ${current.publications.length}`);
+  console.log(`Findings: ${current.findings.length} (threads: ${current.findingThreads.length})`);
+  console.log(`Publications: ${current.publications.map((publication) => publication.key).join(", ") || "none"}`);
   console.log(`Root done: ${isSingleTaskDone(current, "pr_review") ? "yes" : "no"}`);
 }
 

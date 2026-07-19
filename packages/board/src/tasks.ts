@@ -2,7 +2,14 @@ import type { IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskId } from "./dependencies.js";
 import type { TaskStatus } from "./task-status.js";
 
-export type TaskType = "pr_review" | "review_pass" | "context" | "publish" | "cleanup" | "human_decision";
+export type TaskType =
+  | "pr_review"
+  | "review_pass"
+  | "context"
+  | "publish"
+  | "cleanup"
+  | "issue_triage"
+  | "human_decision";
 
 export type TaskDispatchTopic = "run-review" | "run-research" | "run-publish" | "run-cleanup";
 
@@ -14,12 +21,14 @@ export type TaskAssigneeRole =
   | "cleanup_worker"
   | "human";
 
-export type TaskKind = "aggregate" | "dispatchable" | "waitpoint";
+export type TaskKind = "aggregate" | "dispatchable" | "manual" | "waitpoint";
 
 export function taskKind(type: TaskType): TaskKind {
   switch (type) {
     case "pr_review":
       return "aggregate";
+    case "issue_triage":
+      return "manual";
     case "human_decision":
       return "waitpoint";
     default:
@@ -75,8 +84,4 @@ export function createBoardTask(input: CreateBoardTaskInput): BoardTask {
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
     ...(input.epoch !== undefined ? { epoch: input.epoch } : {})
   };
-}
-
-export function isDispatchableTask(task: BoardTask): boolean {
-  return task.dispatchTopic !== undefined;
 }

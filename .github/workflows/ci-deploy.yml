@@ -1,0 +1,147 @@
+name: CI and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT_ID: jina-v2
+  GCP_REGION: us-central1
+  GAR_REPOSITORY: jina
+  API_SERVICE: jina-api
+  DASHBOARD_SERVICE: jina-dashboard
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+  deploy:
+    if: github.event_name != 'pull_request'
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: projects/749416389045/locations/global/workloadIdentityPools/github/providers/omxyz-jina
+          service_account: github-deployer@jina-v2.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Artifact Registry authentication
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Deploy API
+        id: deploy-api
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.API_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api:${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --min-instances=0
+            --max-instances=2
+          env_vars: |-
+            JINA_ENABLE_DEV_ENDPOINTS=false
+            JINA_SIMULATE_RUNS=true
+            JINA_SEED_DEMO=false
+
+      - name: Verify API health
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/healthz"
+
+      - name: Build and push dashboard image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/dashboard/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:latest
+          cache-from: type=gha,scope=dashboard
+          cache-to: type=gha,mode=max,scope=dashboard
+
+      - name: Deploy dashboard
+        id: deploy-dashboard
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.DASHBOARD_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --min-instances=0
+            --max-instances=2
+          env_vars: JINA_API_URL=${{ steps.deploy-api.outputs.url }}
+
+      - name: Verify dashboard
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-dashboard.outputs.url }}"
+
+      - name: Publish deployment summary
+        run: |
+          {
+            echo '## Cloud Run deployment'
+            echo
+            echo "- API: ${{ steps.deploy-api.outputs.url }}"
+            echo "- Dashboard: ${{ steps.deploy-dashboard.outputs.url }}"
+            echo "- Revision: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

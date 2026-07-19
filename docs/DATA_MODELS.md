@@ -6,7 +6,7 @@ Jina is board-driven: **tasks** are the board cards executed by agents and human
 
 Deliberately deferred tables — introduced only when a second concrete use exists:
 
-- `work_orders` (normalized intake) — when a non-PR intake type (issues, incidents, manual requests) actually ships. Until then `pull_requests` is the intake record.
+- `work_orders` (normalized intake) — when a second intake provider or configurable intake workflow ships. GitHub PRs and issues currently map directly to their subject rows/tasks.
 - a pipeline/stage-template table — when tenants can configure pipelines. Until then the PR review pipeline is versioned code, and root tasks record `pipeline_slug`/`pipeline_version`.
 
 ## Conventions
@@ -14,7 +14,7 @@ Deliberately deferred tables — introduced only when a second concrete use exis
 - Every tenant-owned table includes `tenant_id`.
 - External GitHub IDs are stored separately from internal IDs.
 - JSON fields hold provider payloads, policy blobs, model usage, and extensibility points — not primary relational links.
-- Side effects are idempotent through unique keys: GitHub delivery IDs, task dedupe keys, outbox idempotency keys, verb idempotency keys, checkout keys, publication keys.
+- Side effects are idempotent through unique keys: GitHub delivery IDs, task dedupe keys, outbox idempotency keys, command idempotency keys, checkout keys, publication keys.
 - Review repository checkouts happen inside Daytona sandboxes. GCP runtimes persist checkout metadata but do not host PR working trees.
 - Agents never receive clone credentials. A checkout broker performs authenticated clone/fetch, removes credentials from the sandbox, then hands a read-only working tree to the reviewer.
 - External docs and dependency docs are untrusted input. Store source attribution and snapshots as `context_items` and artifacts when policy allows.
@@ -64,7 +64,7 @@ unique(github_identities.github_node_id) where github_node_id is not null
 unique(tenant_memberships.tenant_id, tenant_memberships.user_id)
 ```
 
-Human-triggered verbs must resolve the GitHub actor to a `github_identities` row, then authorize through tenant membership, GitHub repository permissions, or explicit tenant policy. Store the actor snapshot on the verb invocation and event so audit history survives later role changes.
+Human-triggered commands must resolve the GitHub actor to a `github_identities` row, then authorize through tenant membership, GitHub repository permissions, or explicit tenant policy. Store the actor snapshot on the command invocation and event so audit history survives later role changes.
 
 ## GitHub Installation And Repositories
 
@@ -142,7 +142,7 @@ review_policies
 
 `checkout_strategy` examples: `head_only`, `base_and_head`, `merge_ref`.
 
-`budget_limits` defines layered ceilings enforced at verb time and dispatch time: per epoch, per PR cumulative (never reset by a force push), and per repo per day. The cumulative and per-repo ceilings bound hostile force-push loops; fork PRs get lower defaults. Context egress fields define whether `run-research` can fetch external sources, where it can fetch from, how much it can fetch, how long source snapshots can be retained, and whether citations are required.
+`budget_limits` defines layered ceilings enforced at command time and dispatch time: per epoch, per PR cumulative (never reset by a force push), and per repo per day. The cumulative and per-repo ceilings bound hostile force-push loops; fork PRs get lower defaults. Context egress fields define whether `run-research` can fetch external sources, where it can fetch from, how much it can fetch, how long source snapshots can be retained, and whether citations are required.
 
 ## Review Policy Snapshots
 
@@ -288,11 +288,11 @@ tasks
 Task types and kinds:
 
 ```text
-MVP/core:     pr_review (aggregate), review_pass, context, publish (dispatchable), human_decision (waitpoint)
-Future/gated: finding, grounding, fix, plan, build, test, docs, release, incident_triage, github_issue_triage
+MVP/core:     pr_review (aggregate), review_pass, context, publish (dispatchable), issue_triage (manual), human_decision (waitpoint)
+Future/gated: finding, grounding, fix, plan, build, test, docs, release, incident_triage
 ```
 
-Every type has a declared kind — `aggregate` (auto-completes from edges, never executes), `dispatchable` (queued to Trigger.dev; dispatch topic derived from type), or `waitpoint` (only a user verb completes it).
+Every type has a declared kind — `aggregate` (auto-completes from edges, never executes), `dispatchable` (queued to Trigger.dev; dispatch topic derived from type), `manual` (stays in triage for a user), or `waitpoint` (only a user command completes it).
 
 Task statuses:
 
@@ -337,13 +337,13 @@ unique(task_dependencies.tenant_id, task_id, depends_on_task_id, relationship)
 index(task_dependencies.tenant_id, depends_on_task_id)
 ```
 
-A task becomes `queued` only when every `required` dependency is `done`. Root completion is purely edge-based: the aggregate root completes when all its required edges are satisfied. To keep dynamically created children visible to completion, `CreateTask` with `blocks_parent_completion = true` materializes a required `root -> child` edge in the same transaction — the flag is an instruction to the verb layer, not a column the reducer reads. If a required dependency reaches `failed` or `canceled`, the reducer transitions the dependent to `blocked` and creates a linked `human_decision` task.
+A task becomes `queued` only when every `required` dependency is `done`. Root completion is purely edge-based: the aggregate root completes when all its required edges are satisfied. To keep dynamically created children visible to completion, `CreateTask` with `blocks_parent_completion = true` materializes a required `root -> child` edge in the same transaction — the flag is an instruction to the command layer, not a column the reducer reads. If a required dependency reaches `failed` or `canceled`, the reducer transitions the dependent to `blocked` and creates a linked `human_decision` task.
 
 Exact context handoff dependency rows:
 
 ```text
 task_id = review_pass_id, depends_on_task_id = context_task_id, relationship = context_for, required = true
-task_id = root_task_id,   depends_on_task_id = context_task_id, relationship = blocks,      required = true   # materialized by the verb layer
+task_id = root_task_id,   depends_on_task_id = context_task_id, relationship = blocks,      required = true   # materialized by the command layer
 ```
 
 ## Task Events
@@ -371,9 +371,9 @@ github.pr_closed
 task.created
 task.assigned
 task.status_changed
-verb.submitted
-verb.accepted
-verb.rejected
+command.submitted
+command.accepted
+command.rejected
 review.checkout_started
 review.checkout_ready
 review.checkout_failed
@@ -384,6 +384,7 @@ review.context_requested
 review.resumed
 review.completed
 review.superseded
+run.step
 context.requested
 context.source_fetched
 context.collected
@@ -398,6 +399,8 @@ outbox.dead_lettered
 ```
 
 Future event types: `grounding.requested`, `grounding.verified`, `grounding.refuted`, `fix.requested`, `fix.pushed`.
+
+`run.step` is the observability event: every step a harness takes during a run (model call, tool action, decision) is appended to the task timeline with the step type, ordinal, and payload — a run's behavior must be reconstructible from its task thread plus its `model_usage` rows.
 
 `seq` is per-task, assigned in the same transaction that locks the task row for its transition. Per-task timelines page by `(task_id, seq)`; the board-wide feed pages by the global `id` cursor (`where tenant_id = ? and id > ? order by id`, indexed on `(tenant_id, id)` — strictly increasing, gaps are fine). Agent-posted context (e.g. extracted dependency docs) is a `context.collected` event whose payload references `context_items` and artifacts. The board thread is the agent's shared memory.
 
@@ -463,7 +466,7 @@ unique(outbox.tenant_id, outbox.task_id, outbox.attempt)
 index(outbox.status, outbox.next_attempt_at)
 ```
 
-An outbox row is inserted in the **same transaction** as the transition that made a task `queued` (by the readiness reducer or a webhook verb). The relay drains `pending` rows and calls `trigger(trigger_task, {taskId}, {idempotencyKey: task_id:attempt, concurrencyKey})`. The idempotency key makes the relay safe to retry; persistent failures move to `dead_lettered` for repair.
+An outbox row is inserted in the **same transaction** as the transition that made a task `queued` (by the readiness reducer or a webhook command). The relay drains `pending` rows and calls `trigger(trigger_task, {taskId}, {idempotencyKey: task_id:attempt, concurrencyKey})`. The idempotency key makes the relay safe to retry; persistent failures move to `dead_lettered` for repair.
 
 ## Gates And Harness Versions
 
@@ -484,6 +487,7 @@ gate_results
 harness_versions
 - id
 - tenant_id
+- harness_type              # openrouter-chat | codex-cli | future harnesses
 - name
 - version
 - prompt_version nullable
@@ -587,7 +591,87 @@ unique(task_runs.tenant_id, task_runs.idempotency_key)
 index(task_runs.tenant_id, task_runs.task_id)
 ```
 
-A task describes work; a task run describes a concrete execution attempt. For MVP review runs, `runtime_provider = daytona`, `runtime_instance_id` is the sandbox/session, and `checkout_ref` is the reviewed head SHA. `deferred` means the attempt reached a valid waitpoint, such as requesting context and blocking the task, rather than completing the review. Runs report `token_usage`/`cost`, which increment `pull_requests.budget_spent`.
+A task describes work; a task run describes a concrete execution attempt. For MVP review runs, `runtime_provider = daytona`, `runtime_instance_id` is the sandbox/session, and `checkout_ref` is the reviewed head SHA. `deferred` means the attempt reached a valid waitpoint, such as requesting context and blocking the task, rather than completing the review. Runs report `token_usage`/`cost`, which increment `pull_requests.budget_spent`; exact per-call usage lives in `model_usage`.
+
+## Model Usage
+
+One row per model call, from the harness's captured usage — the source of truth for both billing and the per-run cost breakdown. See [BILLING.md](BILLING.md) for the lifecycle.
+
+```text
+model_usage
+- id
+- tenant_id
+- task_id
+- task_run_id
+- harness_type              # openrouter-chat | codex-cli | future harnesses
+- operation                 # review | planner | grounding | ... (the priced dimension)
+- provider                  # openrouter | anthropic
+- key_source                # user | managed — from the key actually used, never re-derived
+- model
+- generation_id nullable
+- dedupe_key                # generation_id, or '{task_run_id}:{request_seq}' when missing
+- request_seq
+- prompt_tokens
+- completion_tokens
+- total_tokens
+- reasoning_tokens nullable
+- cached_tokens nullable
+- cost_usd numeric nullable # OpenRouter's returned cost; null for direct-provider harnesses
+- customer_share numeric    # 1 - subsidy applied to this row
+- ai_credits_charged        # ceil(cost_usd * customer_share * 100); 0 for own-harness
+- raw_usage jsonb           # the provider's usage payload, unmodified
+- billing_status            # pending_outcome -> pending -> billed | waived; not_billable for own-harness
+- autumn_event_id nullable
+- recorded_at
+- billed_at nullable
+```
+
+Suggested constraints:
+
+```text
+unique(model_usage.task_run_id, model_usage.dedupe_key)
+index(model_usage.tenant_id, model_usage.task_id)
+index(model_usage.billing_status) where billing_status = 'pending'
+```
+
+Retried attempts create new `task_runs`, so their genuinely new usage records cleanly while replayed callbacks dedupe. Credits are integers rounded up per row; costs stay `numeric` — no floating-point math on billed amounts.
+
+## Run Billing
+
+Run-level billing summary, keyed by the root task (one per PR epoch): rate mode fixed at dispatch, the one-shot infra charge, and dashboard totals.
+
+```text
+run_billing
+- root_task_id (pk)
+- tenant_id
+- rate_mode                 # included | overage — fixed at dispatch, customer-favorable
+- key_source                # user | managed
+- infra_credits_charged nullable   # set on first terminal done; 0 for failed/superseded epochs
+- ai_credits_charged_total
+- infra_billing_status      # pending | billed | waived
+- infra_autumn_event_id nullable
+- created_at
+- updated_at
+```
+
+Autumn event ids are stable for idempotency: `infra:{root_task_id}` and `ai:{root_task_id}:{dedupe_key}`.
+
+## Tenant Billing Policy
+
+The fast-iteration surface: Autumn holds plans and balances, this table holds the rate variables. An absent row means platform defaults; editing a row changes a tenant's economics with no deploy and no Autumn resync.
+
+```text
+tenant_billing_policy
+- tenant_id (pk)
+- subsidy_rate numeric              # default 0.30
+- infra_credits_per_run             # default 100
+- overage_infra_credits_per_run     # default 150
+- overage_subsidy_rate numeric      # default 0.00
+- notes nullable
+- updated_at
+```
+
+Tenant OpenRouter credentials extend the integrations store (encrypted at rest; API returns configured/source/label/last4 only). Per-stage model selection lives on `review_profiles.config` (profiles are already per-tenant), validated against OpenRouter's cached model catalog on save.
 
 ## Review Checkouts
 
@@ -636,12 +720,12 @@ index(review_checkouts.status, review_checkouts.expires_at)
 
 Checkouts use scoped GitHub App installation tokens against the **base repository only**; fork heads are fetched as `refs/pull/{n}/head`. Tokens must not be stored in this table. The broker clones/fetches, removes credentials, records `credentials_purged_at`, and only then allows the reviewer to inspect files.
 
-## Verb Invocations
+## Command Invocations
 
-Every generic-verb invocation (from agents, GitHub comments, the dashboard, or the system) is recorded for audit and idempotency. This is the board's command-audit log.
+Every generic-command invocation (from agents, GitHub comments, the dashboard, or the system) is recorded for audit and idempotency. This is the board's command-audit log.
 
 ```text
-verb_invocations
+command_invocations
 - id
 - tenant_id
 - task_id nullable
@@ -653,7 +737,7 @@ verb_invocations
 - requested_by_actor_id nullable
 - github_actor_login nullable
 - github_comment_id nullable
-- verb                      # CreateTask | UpdateTask | TransitionTask | CommentTask | LinkTask | AssignTask | AttachArtifact
+- command                      # CreateTask | UpdateTask | TransitionTask | CommentTask | LinkTask | AssignTask | AttachArtifact
 - idempotency_key
 - status                    # submitted | accepted | rejected | applied | failed
 - authorization_result      # allowed | denied | policy_disabled | permission_unknown
@@ -667,11 +751,11 @@ verb_invocations
 Suggested constraints:
 
 ```text
-unique(verb_invocations.tenant_id, verb_invocations.source, verb_invocations.idempotency_key)
-unique(verb_invocations.tenant_id, verb_invocations.source, verb_invocations.source_external_id) where source_external_id is not null
+unique(command_invocations.tenant_id, command_invocations.source, command_invocations.idempotency_key)
+unique(command_invocations.tenant_id, command_invocations.source, command_invocations.source_external_id) where source_external_id is not null
 ```
 
-Each accepted/rejected verb emits exactly one `task_event`. Verbs targeting disabled capabilities (e.g. requesting grounding while it is off) are stored with `status = rejected` and `authorization_result = policy_disabled`, keeping the audit trail complete.
+Each accepted/rejected command emits exactly one `task_event`. Commands targeting disabled capabilities (e.g. requesting grounding while it is off) are stored with `status = rejected` and `authorization_result = policy_disabled`, keeping the audit trail complete.
 
 ## Review Runs And Findings
 

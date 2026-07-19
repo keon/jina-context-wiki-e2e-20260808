@@ -15,3 +15,10 @@ export function isTerminalTaskStatus(status: TaskStatus): boolean {
   return terminalTaskStatuses.includes(status as (typeof terminalTaskStatuses)[number]);
 }
 
+export function isTerminalSuccess(status: TaskStatus): boolean {
+  return status === "done";
+}
+
+export function isTerminalFailure(status: TaskStatus): boolean {
+  return status === "failed" || status === "canceled";
+}

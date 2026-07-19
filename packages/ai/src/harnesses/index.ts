@@ -1,15 +1,4 @@
-export interface AgentRunInput {
-  readonly taskId: string;
-  readonly prompt: string;
-  readonly contextItemIds: readonly string[];
-}
-
-export interface AgentRunOutput {
-  readonly taskId: string;
-  readonly summary: string;
-  readonly artifactIds: readonly string[];
-}
-
-export interface AgentHarness {
-  run(input: AgentRunInput): Promise<AgentRunOutput>;
-}
+export * from "./harness.js";
+export * from "./review-spec.js";
+export { OpenRouterReviewHarness } from "./openrouter-harness.js";
+export { CodexCliReviewHarness } from "./codex-harness.js";

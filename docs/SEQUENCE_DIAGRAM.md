@@ -2,11 +2,11 @@
 
 These diagrams describe the main Jina flows in the board / Trigger.dev model. They use Mermaid syntax. MVP diagrams are review-only; context handoff is capability-gated and non-mutating; grounding, fixing, and broader pipelines are future extension points.
 
-Orchestration is the board, not a coordinator workflow. A task becomes ready via the readiness reducer, is dispatched by a transactional outbox + relay, and is executed by a stateless Trigger.dev run that writes results back through generic verbs. Runs and HTTP handlers never mark tasks complete out-of-band; they transition tasks, which re-runs the reducer.
+Orchestration is the board, not a coordinator workflow. A task becomes ready via the readiness reducer, is dispatched by a transactional outbox + relay, and is executed by a stateless Trigger.dev run that writes results back through generic commands. Runs and HTTP handlers never mark tasks complete out-of-band; they transition tasks, which re-runs the reducer.
 
 Participants:
 
-- **API** — API server (verify webhooks, apply generic verbs, run the readiness reducer).
+- **API** — API server (verify webhooks, apply generic commands, run the readiness reducer).
 - **Board** — Postgres source of truth: tasks, dependencies, events, runs, gates, outbox.
 - **Relay** — outbox relay that triggers runs.
 - **Trigger** — Trigger.dev (scheduler + durable execution).
@@ -28,11 +28,13 @@ sequenceDiagram
     API->>Board: Insert raw webhook by delivery_id (dedupe)
     API->>API: Resolve tenant, repo, subject. Ignore self bot events
     rect rgb(235,245,255)
-    note right of API: apply verbs + reducer + outbox, one tx
+    note right of API: apply commands + reducer + outbox, one tx
     alt Pull request event
         API->>Board: Upsert PR, plan pr_review pipeline tasks for current epoch
+    else Newly opened issue
+        API->>Board: Create one manual issue_triage task by subject dedupe key
     else Comment on PR
-        API->>Board: Parse command verb, create command or human_decision task
+        API->>Board: Parse comment command, create command or human_decision task
     else Installation event
         API->>Board: Upsert installation, enable or suspend repositories
     end
@@ -79,7 +81,7 @@ sequenceDiagram
     autonumber
     participant Trigger as Trigger.dev
     participant Run as run-review
-    participant API as Verb API
+    participant API as Command API
     participant Board as Postgres Board
     participant Broker as Checkout Broker
     participant Daytona
@@ -182,7 +184,7 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant Run as run-review
-    participant API as Verb API
+    participant API as Command API
     participant Board as Postgres Board
     participant Relay as Outbox Relay
     participant Trigger as Trigger.dev
@@ -212,7 +214,7 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant Board as Postgres Board
-    participant API as Verb API
+    participant API as Command API
     participant Relay as Outbox Relay
     participant Trigger as Trigger.dev
     participant Fixer as run-fix
@@ -236,7 +238,7 @@ sequenceDiagram
 sequenceDiagram
     autonumber
     participant R as run-review R
-    participant API as Verb API
+    participant API as Command API
     participant Board as Postgres Board
     participant Relay as Outbox Relay
     participant Trigger as Trigger.dev
@@ -244,7 +246,7 @@ sequenceDiagram
     participant Rp as run-review R resume
     R->>API: Needs external/dependency context to proceed
     rect rgb(235,245,255)
-    note right of API: one tx, validated verbs
+    note right of API: one tx, validated commands
     API->>Board: Validate can_request_context, budget, source allowlist from pinned snapshot
     API->>Board: CreateTask context C with source questions and required_caps
     API->>Board: LinkTask R context_for C, plus root blocks C (required edges)
@@ -288,7 +290,7 @@ sequenceDiagram
     UI->>API: Poll or subscribe after cursor
     API->>Board: Query new events after global id cursor
     API-->>UI: New events, move cards, update timelines
-    note over UI,API: Human actions use the same generic verbs
+    note over UI,API: Human actions use the same generic commands
     UI->>API: TransitionTask human_decision to done, CommentTask, dismiss finding
-    API->>Board: Validate verb, apply, reducer advances board and outbox
+    API->>Board: Validate command, apply, reducer advances board and outbox
 ```
