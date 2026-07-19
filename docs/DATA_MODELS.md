@@ -1,5 +1,7 @@
 # Data Models
 
+> **Implementation status (2026-07-19):** Most of this document is the normalized target schema. Production currently persists a JSONB board snapshot in `jina_runtime.api_state`, unique GitHub delivery IDs in `jina_runtime.github_deliveries`, and immutable Ontology graphs in `jina_ontology.graphs`, `nodes`, and `edges`. Ontology graph creation and board completion share one PostgreSQL transaction. Tables described below for normalized tasks, runs, findings, gates, usage, billing, and artifacts are not yet migrations in this repository.
+
 This document defines the core Postgres data model for Jina. It is the schema-oriented companion to [ARCHITECTURE.md](ARCHITECTURE.md).
 
 Jina is board-driven: **tasks** are the board cards executed by agents and humans, a versioned **pipeline** (code, not a table) plans which tasks a trigger creates, and Trigger.dev schedules one stateless run per ready task with a transactional **outbox** as the dispatch bridge. Postgres is the source of truth. Agent handoff is durable board state: dependencies, task events, context records, artifacts, and assignments.

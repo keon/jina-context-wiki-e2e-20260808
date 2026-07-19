@@ -1,296 +1,153 @@
-# Sequence Diagrams
+# Current Sequence Diagrams
 
-These diagrams describe the main Jina flows in the board / Trigger.dev model. They use Mermaid syntax. MVP diagrams are review-only; context handoff is capability-gated and non-mutating; grounding, fixing, and broader pipelines are future extension points.
+These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-19. They intentionally exclude the Trigger.dev and normalized-storage target designs in [ARCHITECTURE.md](ARCHITECTURE.md).
 
-Orchestration is the board, not a coordinator workflow. A task becomes ready via the readiness reducer, is dispatched by a transactional outbox + relay, and is executed by a stateless Trigger.dev run that writes results back through generic commands. Runs and HTTP handlers never mark tasks complete out-of-band; they transition tasks, which re-runs the reducer.
+The board reducer is the orchestrator. Workers never mutate board state directly: they claim a durable outbox lease through the API, perform external work outside the API mutation lock, renew the lease while active, and complete through the API.
 
-Participants:
-
-- **API** — API server (verify webhooks, apply generic commands, run the readiness reducer).
-- **Board** — Postgres source of truth: tasks, dependencies, events, runs, gates, outbox.
-- **Relay** — outbox relay that triggers runs.
-- **Trigger** — Trigger.dev (scheduler + durable execution).
-- **Run** — a stateless per-task run (run-review, run-publish, ...).
-- **Daytona** — review sandbox checkout.
-
-## GitHub Trigger Routing (MVP)
+## Signed GitHub intake
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant GitHub
-    participant API
-    participant Board as Postgres Board
-    participant Relay as Outbox Relay
-    participant Trigger as Trigger.dev
-    GitHub->>API: webhook event
-    API->>API: Verify signature
-    API->>Board: Insert raw webhook by delivery_id (dedupe)
-    API->>API: Resolve tenant, repo, subject. Ignore self bot events
-    rect rgb(235,245,255)
-    note right of API: apply commands + reducer + outbox, one tx
-    alt Pull request event
-        API->>Board: Upsert PR, plan pr_review pipeline tasks for current epoch
-    else Newly opened issue
-        API->>Board: Create one manual issue_triage task by subject dedupe key
-    else Comment on PR
-        API->>Board: Parse comment command, create command or human_decision task
-    else Installation event
-        API->>Board: Upsert installation, enable or suspend repositories
+    participant API as jina-api
+    participant DB as Cloud SQL PostgreSQL
+
+    GitHub->>API: POST /webhooks/github
+    API->>API: Verify HMAC, event type, delivery ID
+    API->>DB: Check unique delivery ID
+    alt duplicate delivery
+        API-->>GitHub: 200 duplicate
+    else supported PR or issue event
+        API->>API: Plan tasks and dependencies
+        API->>API: Reduce readiness and create outbox messages
+        API->>DB: Commit delivery ID + board snapshot
+        API-->>GitHub: 202 accepted
+    else ignored event
+        API->>DB: Commit delivery ID
+        API-->>GitHub: 200 acknowledged
     end
-    API->>Board: Append task_events, reducer queues ready tasks, insert outbox rows
-    end
-    API-->>GitHub: 200 OK
-    Relay->>Board: Drain pending outbox
-    Relay->>Trigger: trigger run-type with taskId, idempotencyKey, concurrencyKey=tenant
 ```
 
-## PR Opened Or Updated (MVP)
+An opened pull request creates `pr_review`, `review_pass`, and `publish` tasks. A `synchronize` event supersedes non-terminal tasks from the old epoch and creates the next epoch. An opened issue creates one manual `issue_triage` card.
+
+## Durable review and publication flow
 
 ```mermaid
 sequenceDiagram
     autonumber
+    participant Worker as jina-task-worker
+    participant API as jina-api
+    participant DB as Cloud SQL
     participant GitHub
-    participant API
-    participant Board as Postgres Board
-    participant Relay as Outbox Relay
-    participant Trigger as Trigger.dev
-    participant Run as run-review
-    GitHub->>API: pull_request webhook
-    API->>Board: Insert raw webhook by delivery_id (dedupe)
-    rect rgb(235,245,255)
-    note right of API: one transaction
-    API->>Board: Upsert repo and PR, set current_epoch
-    API->>Board: Upsert root pr_review task by dedupe_key for epoch
-    API->>Board: Create review_pass tasks per enabled profile
-    API->>Board: Create publish task depending on required review_pass tasks
-    API->>Board: Append github.pr_opened and task.created events
-    API->>Board: Reducer queues ready review_pass tasks, insert outbox rows
+    participant OpenAI as OpenAI Responses API
+
+    loop poll
+        Worker->>API: POST /internal/worker/claim topics=[run-review,...]
+        API->>DB: Lease eligible tenant outbox message
+        API->>DB: Transition review task to in_progress
+        API-->>Worker: message, lease ID, task metadata
     end
-    API-->>GitHub: 200 OK
-    Relay->>Board: Drain pending outbox
-    Relay->>Trigger: trigger run-review with taskId and idempotencyKey
-    Trigger->>Run: Start durable run
-    Run->>Board: Validate currency by epoch, set in_progress, open task_run
-```
-
-## Review Pass With Brokered Daytona Checkout (MVP)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Trigger as Trigger.dev
-    participant Run as run-review
-    participant API as Command API
-    participant Board as Postgres Board
-    participant Broker as Checkout Broker
-    participant Daytona
-    participant Reviewer as Reviewer Agent
-    Trigger->>Run: Start run-review with taskId
-    Run->>Board: Validate currency, load harness version, set in_progress
-    Run->>Board: Snapshot policy, open task_run
-    Run->>Broker: Request checkout for base and head SHAs
-    Broker->>Daytona: Create sandbox
-    Broker->>Daytona: Clone base repo with scoped installation token
-    Broker->>Daytona: Fetch refs/pull/n/head, checkout head SHA or merge ref
-    Broker->>Daytona: Purge clone credentials
-    Broker->>Board: Mark review_checkouts ready, set credentials_purged_at
-    Daytona-->>Run: Read-only working tree
-    Run->>Reviewer: Run read-only review over the checkout
-    Reviewer-->>Run: Review outcome
-    alt More context needed
-        Run->>API: CreateTask context C, LinkTask R context_for C, TransitionTask R blocked
-        API->>Board: Validate budget, source policy against pinned snapshot, capabilities
-        API->>Board: Create C, add dependency rows (R -> C, root -> C), mark task_run deferred
-        API->>Board: Transition R to blocked, queue C, insert outbox
-        Run->>Broker: Tear down sandbox
-        Broker->>Daytona: Destroy, or mark leaked and schedule cleanup on failure
-    else Review completed
-        Run->>Board: Store review_run, finding_threads, findings, finding_locations, artifacts
-        Run->>Board: Record gate_results for checkout and review completion
-        Run->>Broker: Tear down sandbox
-        Broker->>Daytona: Destroy, or mark leaked and schedule cleanup on failure
-        rect rgb(235,245,255)
-        note right of Run: terminal transition + reducer, one tx
-        Run->>Board: Transition review_pass to done
-        Run->>Board: Reducer queues dependents like publish, insert outbox
+    par external work
+        Worker->>GitHub: Read PR metadata and diff
+        Worker->>OpenAI: Strict review findings schema
+        OpenAI-->>Worker: Summary and findings
+    and lease heartbeat
+        loop every 60 seconds
+            Worker->>API: POST /internal/worker/renew
+            API->>DB: Extend matching unexpired lease by five minutes
         end
     end
+    Worker->>API: POST /internal/worker/complete
+    API->>DB: Record result event, finish review, reduce board
+    DB-->>API: Publish task becomes queued
+    Worker->>API: Claim and complete run-publish
+    API->>DB: Upsert internal publication record, finish aggregate
 ```
 
-## Publishing Review Feedback (MVP)
+`run-publish` currently records the idempotent publication in Jina. It does not post a GitHub comment or check yet. `run-research` records its requested source context without arbitrary network retrieval, and `run-cleanup` acknowledges the cleanup task.
+
+If a worker crashes, the leased message becomes claimable after expiration. A completion with the wrong, expired, or replaced lease returns `409` and changes no state.
+
+## Ontology build and atomic completion
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Board as Postgres Board
-    participant Relay as Outbox Relay
-    participant Trigger as Trigger.dev
-    participant Run as run-publish
-    participant GitHub
-    note over Board: publish task depends_on all required review_pass tasks
-    Board->>Board: Last required review_pass done, reducer queues publish, outbox
-    Relay->>Trigger: trigger run-publish with taskId
-    Trigger->>Run: Start run-publish
-    Run->>Board: Validate currency by epoch, load publishable finding_threads and summary
-    Run->>Board: Load prior publications by publication_key, dedupe and group findings
-    alt PR review comments
-        Run->>GitHub: Create PR review with inline comments from finding_locations
-    end
-    alt Check run
-        Run->>GitHub: Create or update check run and annotations
-    end
-    alt Summary comment
-        Run->>GitHub: Create or update PR summary comment
-    end
-    Run->>Board: Store GitHub object IDs in review_publications keyed on pr and head_sha
-    Run->>Board: Mark finding_threads published, transition publish to done
-    Board->>Board: Reducer sees root pr_review edges satisfied, mark done
-```
-
-## PR Synchronized While Work Is Running (supersession + fencing)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant GitHub
-    participant API
-    participant Board as Postgres Board
-    participant Trigger as Trigger.dev
-    participant Run as in-flight run
+    participant User
+    participant API as jina-api
+    participant Worker as jina-ontology-worker
     participant Daytona
-    GitHub->>API: pull_request synchronize webhook
-    API->>Board: Dedupe delivery
-    rect rgb(255,240,240)
-    note right of API: one transaction
-    API->>Board: Bump current_epoch, update head_sha
-    API->>Board: Transition prior-epoch non-terminal tasks to superseded
-    API->>Board: Mark stale review_checkouts destroying
-    API->>Board: Seed fresh review_pass tasks for new epoch, outbox with debounce delay
-    API->>Board: Append review.superseded events
-    end
-    API-->>GitHub: 200 OK
-    API->>Trigger: Cancel in-flight runs for superseded tasks
-    API->>Daytona: Destroy stale sandboxes
-    alt Cancel races with an active run
-        Run->>Board: Currency check finds task.epoch does not equal current_epoch
-        Run->>Board: No-op exit, publication_key on pr and head_sha blocks stale writes
-    end
-```
+    participant Codex
+    participant DB as Cloud SQL
 
-## Multi-Agent Review With Grounding (Future)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Run as run-review
-    participant API as Command API
-    participant Board as Postgres Board
-    participant Relay as Outbox Relay
-    participant Trigger as Trigger.dev
-    participant Ground as run-grounding
-    participant Daytona
-    Run->>API: CreateTask grounding with can_execute_code, LinkTask verifies finding
-    API->>Board: Validate capability and policy, create grounding task, reducer queues outbox
-    Relay->>Trigger: trigger run-grounding with taskId
-    Trigger->>Ground: Execute grounding run
-    Ground->>Daytona: Create isolated sandbox, checkout PR head SHA
-    Ground->>Daytona: Install dependencies, run reproduction, egress controlled
-    Daytona-->>Ground: Logs, exit codes, artifacts
-    Ground->>API: AttachArtifact evidence, CommentTask grounding verified or refuted
-    alt Finding verified
-        Ground->>Board: Mark finding verified, transition grounding to done
-    else Finding refuted
-        Ground->>Board: Mark finding refuted, transition grounding to done
-    else Grounding blocked
-        Ground->>Board: Transition grounding to blocked, creates human_decision
-    end
-    Board->>Board: Reducer advances dependents like publish or fix
-```
-
-## Verified Finding To Fix Task (Future)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Board as Postgres Board
-    participant API as Command API
-    participant Relay as Outbox Relay
-    participant Trigger as Trigger.dev
-    participant Fixer as run-fix
-    participant Daytona
-    participant GitHub
-    Board->>Board: Verified finding and fix policy allows, create fix task with can_push_commits
-    Board->>Board: Reducer queues fix, outbox
-    Relay->>Trigger: trigger run-fix with taskId
-    Trigger->>Fixer: Execute fix run
-    Fixer->>Board: Validate currency, repo fix policy, installation perms
-    Fixer->>Daytona: Create sandbox, checkout branch, modify code, run checks
-    Daytona-->>Fixer: Test results
-    Fixer->>GitHub: Push commit or branch with idempotency key on task and head_sha
-    Fixer->>API: AttachArtifact patch, CommentTask fix pushed
-    Fixer->>Board: Mark finding fixed, transition fix to done
-```
-
-## Context Handoff, Same-Task Resume (capability-gated)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant R as run-review R
-    participant API as Command API
-    participant Board as Postgres Board
-    participant Relay as Outbox Relay
-    participant Trigger as Trigger.dev
-    participant Research as run-research C
-    participant Rp as run-review R resume
-    R->>API: Needs external/dependency context to proceed
+    User->>API: POST /ontology/build repository, ref
+    API->>DB: Create ontology_build task + run-ontology outbox
+    Worker->>API: Claim run-ontology lease
+    API->>DB: Transition task to in_progress
+    Worker->>Daytona: Create sandbox and clone requested ref
+    Worker->>Codex: Run strict Ontology generation in checkout
+    Codex-->>Worker: Summary, nodes, edges, citations
+    Worker->>Daytona: Validate every cited file and line range
+    Worker->>Daytona: Resolve commit SHA and delete sandbox
+    Worker->>API: Complete with graph and lease ID
     rect rgb(235,245,255)
-    note right of API: one tx, validated commands
-    API->>Board: Validate can_request_context, budget, source allowlist from pinned snapshot
-    API->>Board: CreateTask context C with source questions and required_caps
-    API->>Board: LinkTask R context_for C, plus root blocks C (required edges)
-    API->>Board: AssignTask C to researcher
-    API->>Board: TransitionTask R to blocked, append review.context_requested
-    API->>Board: Reducer queues C, insert outbox
+        note right of API: one PostgreSQL transaction
+        API->>DB: Insert immutable graph, nodes, and edges
+        API->>DB: Record event and completed board snapshot
     end
-    Relay->>Trigger: trigger run-research with C
-    Trigger->>Research: Execute research run, egress/source allowlist enforced
-    Research->>API: AttachArtifact source snapshots
-    Research->>API: CommentTask C context.collected with extracted facts and citations
-    API->>Board: Store context_items, task_events, artifacts
-    Research->>API: TransitionTask C to done
-    API->>Board: Reducer sees R deps satisfied, queues same review_pass R
-    Relay->>Trigger: trigger run-review with R
-    Trigger->>Rp: Execute resumed review attempt
-    Rp->>Board: Append review.resumed, rehydrate R thread, linked C, context_items, artifacts
-    Rp->>Board: Continue review, write findings, transition R to done
-    opt Deliberate branch instead of resume
-        Rp->>API: CreateTask review_pass R-prime depends_on C
-        API->>Board: Create follow-up task only when review scope should branch
-    end
+    API-->>Worker: accepted + graph ID
 ```
 
-## Dashboard Live View (humans are board actors)
+Graph identity includes the task generation, so a later build of the same repository and commit cannot rewrite a graph referenced by an older task. PostgreSQL ignores an exact generation replay instead of replacing its nodes or edges.
+
+## PR epoch supersession
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant UI as Next.js Dashboard
+    participant GitHub
     participant API
-    participant Board as Postgres Board
-    participant Run as Runs
-    UI->>API: GET tasks filtered by repo_id and status
-    API->>Board: Query tenant-scoped task_board_items
-    API-->>UI: Current board columns
-    UI->>API: GET task events with cursor
-    API->>Board: Query task_events
-    API-->>UI: Timeline events
-    Run->>Board: Append task_events during live work
-    UI->>API: Poll or subscribe after cursor
-    API->>Board: Query new events after global id cursor
-    API-->>UI: New events, move cards, update timelines
-    note over UI,API: Human actions use the same generic commands
-    UI->>API: TransitionTask human_decision to done, CommentTask, dismiss finding
-    API->>Board: Validate command, apply, reducer advances board and outbox
+    participant DB as Cloud SQL
+    participant Worker
+
+    GitHub->>API: pull_request synchronize with new head SHA
+    API->>DB: Load current board snapshot
+    API->>API: Increment epoch and supersede old non-terminal tasks
+    API->>API: Plan new review graph and outbox
+    API->>DB: Commit delivery + new snapshot
+    alt old worker finishes after supersession
+        Worker->>API: Complete old leased task
+        API->>API: Recheck current task status and lease
+        API-->>Worker: 409 stale lease
+    end
 ```
+
+## Dashboard authentication and reads
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser
+    participant IAP as Cloud Run IAP
+    participant Dashboard as jina-dashboard
+    participant API as jina-api
+    participant DB as Cloud SQL
+
+    Browser->>IAP: Open dashboard URL
+    IAP->>IAP: Google sign-in and access policy
+    IAP->>Dashboard: Authenticated request
+    Dashboard-->>Browser: Board, task types, or Ontology page
+    Browser->>Dashboard: GET /api/board, /events, /task-types, or /ontology
+    Dashboard->>API: Proxy allowlisted read + internal bearer token
+    API->>API: Resolve canonical omlabs tenant
+    API->>DB: Tenant-scoped query
+    API-->>Dashboard: Read model
+    Dashboard-->>Browser: JSON
+```
+
+Each page polls only the endpoints it needs. The Ontology list request returns the latest full graph and lightweight summaries for older generations; historical node and edge collections are loaded only through graph detail.
+
+## Local development difference
+
+`pnpm dev` uses memory stores unless database variables are present. It enables the unsigned `/dev/webhooks/github` endpoint, can seed a demo PR, and may simulate non-Ontology task completion with an in-process timer. All three features are disabled in production; production work is handled only by the durable workers above.

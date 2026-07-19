@@ -1,5 +1,7 @@
 # Billing: OpenRouter + Autumn + Jina Credits
 
+> **Implementation status (2026-07-19):** This is a target billing and usage-accounting design. The local review CLI can report provider usage, but the deployed Cloud Run worker does not yet persist normalized model-usage rows, enforce Autumn credits, or run an OpenRouter capture proxy. Do not treat the schemas or rollout steps below as deployed controls.
+
 Strategy source: `jina-code-review/docs/BILLING_OPENROUTER_AUTUMN.md` (2026-07-08). This document adapts that strategy to this codebase's board/pipeline model. The vendor facts, plan tables, and credit math there are canonical; this file defines how they map onto tasks, runs, gates, and epochs here.
 
 ## Strategy summary

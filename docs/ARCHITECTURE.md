@@ -1,8 +1,35 @@
 # Jina Architecture
 
-## Purpose
+> **Documentation status (2026-07-19):** The "Current implementation" section is authoritative for the runtime implemented in this repository. The remainder of this document is the target architecture and intentionally describes capabilities and normalized tables that have not shipped. Trigger.dev, normalized task/run/finding tables, Daytona PR-review checkouts, external GitHub publication, and the expanded gate model are targets, not current production behavior.
 
-Jina is a multi-tenant agent platform for software work, starting with GitHub pull request review. It receives GitHub events, represents work as tasks on a Postgres-backed **board**, schedules and executes specialized AI agents as **stateless durable runs on Trigger.dev**, publishes feedback or artifacts to developer systems, and stores durable state for a Next.js dashboard.
+## Current implementation
+
+The current repository implementation is configured to run as four Cloud Run services backed by one Cloud SQL PostgreSQL 17 instance:
+
+- `jina-api` verifies GitHub webhooks, applies board commands, runs the readiness reducer, and owns short lease/completion transactions.
+- `jina-dashboard` serves the board, task-type catalog, task details, and Ontology visualization. Direct Cloud Run IAP authenticates browser users; the server-side proxy adds the API service credential.
+- `jina-task-worker` polls for `run-review`, `run-research`, `run-publish`, and `run-cleanup` messages. Review fetches the PR diff from GitHub and calls OpenAI with a strict findings schema. Publish currently records an internal idempotent publication only.
+- `jina-ontology-worker` polls only for `run-ontology`, clones the repository in Daytona, runs Codex, validates cited paths and line ranges, and returns the graph.
+
+The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Ontology metadata, nodes, and edges use `jina_ontology` relational tables. Ontology completion writes the graph and completed board snapshot in one transaction.
+
+```text
+GitHub webhook -> API -> PostgreSQL board snapshot/outbox
+                              |
+                       renewable lease
+                              v
+                 task worker or Ontology worker
+                              |
+                       completion through API
+
+Browser -> Cloud Run IAP -> dashboard proxy -> authenticated API reads
+```
+
+Production is scoped to the canonical `omlabs` tenant. Startup migration rewrites configured legacy tenant aliases. The API is public only where required for health and signed webhook intake; tenant reads and worker mutations require the internal bearer credential.
+
+## Target architecture and purpose
+
+Jina's target is a multi-tenant agent platform for software work. It receives GitHub events, represents work as tasks on a Postgres-backed **board**, schedules specialized AI agents as stateless durable runs, publishes feedback or artifacts to developer systems, and stores durable dashboard read models.
 
 Specialized workers keep their domain state outside the generic board. See [ONTOLOGY.md](ONTOLOGY.md) for the complete Ontology worker architecture and implementation strategy.
 

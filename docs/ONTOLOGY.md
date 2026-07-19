@@ -2,7 +2,21 @@
 
 ## Status and scope
 
-This document defines the complete production architecture for **Ontology**, one worker integration on Jina's general-purpose task board. It is a single delivery scope: the board integration, intake, code plane, knowledge plane, ontology registry, projections, retrieval, security, dashboard, operations, tests, and deployment ship together.
+This document defines the target production architecture for **Ontology**, one worker integration on Jina's general-purpose task board. The full two-plane registry, projections, retrieval service, ownership roles, and curated knowledge workflow described below remain target design.
+
+The shipped vertical slice as of 2026-07-19 is deliberately smaller:
+
+| Area | Current implementation |
+| --- | --- |
+| Board integration | Registered `ontology_build` dispatchable type and `run-ontology` outbox topic |
+| Execution | Dedicated Cloud Run worker with renewable leases; Daytona checkout and Codex generation |
+| Validation | Strict output schema, required citations, checkout path and line-range validation |
+| Persistence | Immutable graph generations in PostgreSQL; graph and task completion commit atomically |
+| Read API | Tenant-scoped summary listing, latest full graph, and tenant-constrained graph detail |
+| Dashboard | Interactive `/ontology` graph visualization and metadata |
+| Not shipped | Canonical code/knowledge planes, observation ledger, registry service, projection consumers, retrieval, curation, and database-role ownership split |
+
+The task board and graph remain separate in the shipped slice: board state stores task references and completion events, while graph nodes and edges live in Ontology-owned tables.
 
 Ontology is the user-facing product name. Internally, the subsystem is repository context: engineering memory built from source observations, mechanical code structure, curated knowledge, and cited retrieval.
 

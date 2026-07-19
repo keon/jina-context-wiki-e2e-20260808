@@ -6,6 +6,10 @@ including manual workflow dispatches. Deployment builds immutable container
 images, pushes them to Artifact Registry, deploys all services, and verifies
 their HTTP endpoints.
 
+This file documents the deployment produced by the current `main` workflow.
+Changes on a pull-request branch are validated but are not production state until
+they are merged and the protected deployment job succeeds.
+
 ## Production resources
 
 - Region: `us-central1`
@@ -58,3 +62,31 @@ can run only from `refs/heads/main`, including manual dispatches. The protected
 Before production GitHub App intake is enabled, store the webhook secret in
 Secret Manager and attach it to the API as `GITHUB_WEBHOOK_SECRET`. Never add
 that secret to the workflow or repository files.
+
+## Verification
+
+Pull-request CI must pass all of the following before merge:
+
+```sh
+pnpm typecheck
+pnpm test
+pnpm audit --prod --audit-level=high
+docker build -f apps/api/Dockerfile .
+docker build -f apps/worker/Dockerfile .
+docker build -f apps/dashboard/Dockerfile .
+```
+
+CI supplies PostgreSQL 17 through a service container, so the `@jina/db`
+integration test exercises the atomic graph/board transaction and tenant-scoped
+graph queries. After a `main` deployment, the workflow verifies API health,
+worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
+policy for `keon@omlabs.xyz`.
+
+Useful production checks:
+
+```sh
+gcloud run services list --project=jina-v2 --region=us-central1
+gcloud run services describe jina-dashboard --project=jina-v2 --region=us-central1 --format=json
+gcloud iap web get-iam-policy --project=jina-v2 --region=us-central1 \
+  --resource-type=cloud-run --service=jina-dashboard
+```

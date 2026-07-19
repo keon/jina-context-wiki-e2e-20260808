@@ -44,9 +44,9 @@ Create a private GitHub App under the account or organization that owns the repo
 - Repository permission: **Issues — Read-only**
 - Subscribe to events: **Pull request** and **Issues**
 
-Install the App on the repositories Jina should watch. GitHub App webhook payloads include the installation ID; unless `JINA_TENANT_ID` is set, Jina uses `github:installation:<id>` as the intake tenant key.
+Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Production sets the canonical `JINA_TENANT_ID=omlabs`; configured aliases are migrated at API startup so historical tasks remain visible.
 
-This inbound-only slice does not use the App ID or private key. Those become necessary when Jina starts making authenticated GitHub API calls as the bot, such as publishing review comments or checks.
+The webhook slice does not use an App ID or private key. The current review worker uses `GITHUB_CLONE_TOKEN` to read PR metadata and diffs. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
 
 GitHub documents the registration flow in [Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app) and the event setup in [Using webhooks with GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/using-webhooks-with-github-apps).
 
@@ -59,6 +59,8 @@ curl http://localhost:4000/board
 curl http://localhost:4000/events
 ```
 
+Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>` and always use the configured tenant. Browsers should use the IAP-protected dashboard rather than calling the API credential directly.
+
 GitHub's App settings also show every delivery, response status, and redelivery control.
 
 ## Local demo endpoint
@@ -67,4 +69,4 @@ GitHub's App settings also show every delivery, response status, and redelivery 
 
 ## Persistence boundary
 
-The current API process keeps board state and delivery IDs in memory, matching the rest of the development runtime. Signed GitHub delivery is real, but tasks do not survive an API restart yet. Before production deployment, move the board and the unique GitHub delivery ID into the planned Postgres transaction; the webhook contract and intake mapping can remain unchanged.
+Development without database variables uses in-memory stores. Production uses PostgreSQL: the board snapshot is stored in `jina_runtime.api_state`, and `github_deliveries.delivery_id` provides durable webhook deduplication. Delivery insertion and snapshot persistence occur in one transaction, so acknowledged tasks survive API restarts.
