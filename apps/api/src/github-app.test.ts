@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createApiServer } from "./server.js";
+import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const SECRET = "test-webhook-secret";
 
@@ -60,6 +60,74 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
   assert.equal(board.outbox.filter((message) => message.topic === "run-review").length, 3);
 });
+
+test("durable state survives an API server restart", async () => {
+  const stateStore = new MemoryStateStore();
+  const first = createApiServer({ githubWebhookSecret: SECRET, stateStore });
+  const firstUrl = await listen(first);
+
+  const created = await deliver(firstUrl, "issues", "delivery-persisted", issueOpenedPayload());
+  assert.equal(created.status, 202);
+  await close(first);
+
+  const second = createApiServer({ githubWebhookSecret: SECRET, stateStore });
+  const secondUrl = await listen(second);
+  try {
+    const board = await fetch(`${secondUrl}/board`).then(
+      (response) => response.json() as Promise<{ tasks: Array<{ type: string }> }>
+    );
+    assert.equal(board.tasks.filter((task) => task.type === "issue_triage").length, 1);
+
+    const duplicate = await deliver(secondUrl, "issues", "delivery-persisted", issueOpenedPayload());
+    assert.equal(duplicate.status, 200);
+    assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
+
+    const health = await fetch(`${secondUrl}/health`).then(
+      (response) => response.json() as Promise<{ storage: string }>
+    );
+    assert.equal(health.storage, "postgres");
+  } finally {
+    await close(second);
+  }
+});
+
+async function listen(server: ReturnType<typeof createApiServer>): Promise<string> {
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address() as AddressInfo;
+  return `http://127.0.0.1:${address.port}`;
+}
+
+async function close(server: ReturnType<typeof createApiServer>): Promise<void> {
+  await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+}
+
+class MemoryStateStore implements ApiStateStore {
+  private snapshot?: ApiSnapshot;
+  private readonly deliveries = new Set<string>();
+
+  async load(): Promise<ApiSnapshot | undefined> {
+    return this.snapshot;
+  }
+
+  async hasDelivery(deliveryId: string): Promise<boolean> {
+    return this.deliveries.has(deliveryId);
+  }
+
+  async ping(): Promise<void> {}
+
+  async save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean> {
+    if (deliveryId && this.deliveries.has(deliveryId)) {
+      return false;
+    }
+    if (deliveryId) {
+      this.deliveries.add(deliveryId);
+    }
+    this.snapshot = structuredClone(snapshot);
+    return true;
+  }
+
+  async close(): Promise<void> {}
+}
 
 async function deliver(
   baseUrl: string,

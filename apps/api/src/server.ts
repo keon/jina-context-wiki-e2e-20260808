@@ -27,6 +27,21 @@ export interface ApiServerConfig {
   readonly simulateRuns?: boolean;
   readonly seedDemo?: boolean;
   readonly deliveryCacheSize?: number;
+  readonly stateStore?: ApiStateStore;
+}
+
+export interface ApiSnapshot {
+  readonly intakeState: GitHubIntakeState;
+  readonly publications: readonly PublicationRecord[];
+  readonly devDeliverySequence: number;
+}
+
+export interface ApiStateStore {
+  load(): Promise<ApiSnapshot | undefined>;
+  ping(): Promise<void>;
+  hasDelivery(deliveryId: string): Promise<boolean>;
+  save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean>;
+  close(): Promise<void>;
 }
 
 /**
@@ -38,6 +53,60 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
   const deliveries = new DeliveryCache(config.deliveryCacheSize ?? 10_000);
+  const ready = initializeState();
+  let mutations = Promise.resolve();
+
+  function mutate<T>(operation: () => Promise<T>): Promise<T> {
+    const result = mutations.then(operation);
+    mutations = result.then(
+      () => undefined,
+      () => undefined
+    );
+    return result;
+  }
+
+  async function initializeState(): Promise<void> {
+    const stored = await config.stateStore?.load();
+    if (stored) {
+      intakeState = stored.intakeState;
+      publications = stored.publications;
+      devDeliverySequence = stored.devDeliverySequence;
+      return;
+    }
+
+    if (config.seedDemo) {
+      devDeliverySequence += 1;
+      acceptWebhook(devPullRequestWebhook("omlabs/example", 42, "abc123"), `dev-seed-${devDeliverySequence}`);
+      await persist();
+    }
+  }
+
+  function snapshot(): ApiSnapshot {
+    return { intakeState, publications, devDeliverySequence };
+  }
+
+  async function persist(deliveryId?: string): Promise<boolean> {
+    if (!config.stateStore) {
+      if (deliveryId) {
+        deliveries.add(deliveryId);
+      }
+      return true;
+    }
+    return config.stateStore.save(snapshot(), deliveryId);
+  }
+
+  async function reload(): Promise<void> {
+    const stored = await config.stateStore?.load();
+    if (stored) {
+      intakeState = stored.intakeState;
+      publications = stored.publications;
+      devDeliverySequence = stored.devDeliverySequence;
+    }
+  }
+
+  async function hasDelivery(deliveryId: string): Promise<boolean> {
+    return config.stateStore ? config.stateStore.hasDelivery(deliveryId) : deliveries.has(deliveryId);
+  }
 
   function acceptWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
     const result = ingestGitHubWebhook(intakeState, webhook, {
@@ -49,7 +118,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return result;
   }
 
-  function drainOneSimulatedRun(): void {
+  async function drainOneSimulatedRun(): Promise<void> {
+    await ready;
     const message = nextPendingOutboxMessage(intakeState.board);
     if (!message) {
       return;
@@ -59,6 +129,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const task = findTask(board, message.payload.taskId);
     if (!task || task.status !== "queued") {
       intakeState = { ...intakeState, board };
+      await persist();
       return;
     }
 
@@ -73,6 +144,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     );
     if (pullRequest && task.epoch !== undefined && task.epoch !== pullRequest.epoch) {
       intakeState = { ...intakeState, board };
+      await persist();
       return;
     }
 
@@ -94,11 +166,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       { actor: RUN_ACTOR, now: nowIso() }
     ).state;
     intakeState = { ...intakeState, board: reduceBoard(board, nowIso()) };
-  }
-
-  if (config.seedDemo) {
-    devDeliverySequence += 1;
-    acceptWebhook(devPullRequestWebhook("omlabs/example", 42, "abc123"), `dev-seed-${devDeliverySequence}`);
+    await persist();
   }
 
   const server = createServer((request, response) => {
@@ -113,6 +181,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   });
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    await ready;
+    await mutations;
     const url = new URL(request.url ?? "/", "http://localhost");
 
     if (request.method === "OPTIONS") {
@@ -120,10 +190,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
+      await config.stateStore?.ping();
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
-        storage: "memory"
+        storage: config.stateStore ? "postgres" : "memory"
       });
       return;
     }
@@ -154,25 +225,38 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, result.statusCode, result);
         return;
       }
-      if (deliveries.has(result.deliveryId)) {
-        json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
-        return;
-      }
+      const committed = await mutate(async () => {
+        if (await hasDelivery(result.deliveryId!)) {
+          return {
+            statusCode: 200,
+            payload: { accepted: true, duplicate: true, deliveryId: result.deliveryId }
+          };
+        }
 
-      if (!result.webhook) {
-        deliveries.add(result.deliveryId);
-        json(response, result.statusCode, result);
-        return;
-      }
+        if (!result.webhook) {
+          await persist(result.deliveryId!);
+          return { statusCode: result.statusCode, payload: result };
+        }
 
-      const intake = acceptWebhook(result.webhook, result.deliveryId);
-      deliveries.add(result.deliveryId);
-      json(response, result.statusCode, {
-        accepted: true,
-        deliveryId: result.deliveryId,
-        outcome: intake.outcome,
-        createdTaskIds: intake.createdTaskIds
+        const intake = acceptWebhook(result.webhook, result.deliveryId!);
+        if (!(await persist(result.deliveryId!))) {
+          await reload();
+          return {
+            statusCode: 200,
+            payload: { accepted: true, duplicate: true, deliveryId: result.deliveryId }
+          };
+        }
+        return {
+          statusCode: result.statusCode,
+          payload: {
+            accepted: true,
+            deliveryId: result.deliveryId,
+            outcome: intake.outcome,
+            createdTaskIds: intake.createdTaskIds
+          }
+        };
       });
+      json(response, committed.statusCode, committed.payload);
       return;
     }
     if (request.method === "POST" && url.pathname === "/dev/webhooks/github" && config.enableDevEndpoints) {
@@ -180,7 +264,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const webhook = parseDevWebhook(body);
       devDeliverySequence += 1;
       const deliveryId = `dev-${devDeliverySequence}`;
-      const intake = acceptWebhook(webhook, deliveryId);
+      const intake = await mutate(async () => {
+        const accepted = acceptWebhook(webhook, deliveryId);
+        await persist(deliveryId);
+        return accepted;
+      });
       json(response, 202, {
         accepted: true,
         deliveryId,
@@ -197,9 +285,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   if (config.simulateRuns) {
-    const timer = setInterval(drainOneSimulatedRun, 1500);
+    const timer = setInterval(() => {
+      void mutate(drainOneSimulatedRun).catch((error: unknown) => {
+        console.error("simulated run failed", error);
+      });
+    }, 1500);
     timer.unref();
     server.once("close", () => clearInterval(timer));
+  }
+
+  if (config.stateStore) {
+    server.once("close", () => void config.stateStore?.close());
   }
 
   return server;

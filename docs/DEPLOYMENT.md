@@ -12,6 +12,8 @@ endpoints.
 - Artifact Registry repository: `jina`
 - API service: `jina-api`
 - Dashboard service: `jina-dashboard`
+- Cloud SQL instance: `jina-postgres` (PostgreSQL 17)
+- Database: `jina`
 - GitHub deployer: `github-deployer@jina-v2.iam.gserviceaccount.com`
 - Workload identity provider: `github/omxyz-jina`
 
@@ -21,12 +23,14 @@ credentials. No service-account key is stored in GitHub.
 ## Current runtime boundary
 
 The API and dashboard are the two deployable HTTP services today. The API uses
-the in-process simulated-run loop so the current MVP can advance queued board
-tasks. `apps/workflows` is built and tested in CI, but is not deployed as a
-separate service because it does not yet expose a worker entry point and the
-board is not yet backed by shared Postgres storage.
+Cloud SQL for durable board snapshots and GitHub delivery deduplication, and an
+in-process simulated-run loop advances queued board tasks. The API is capped at
+one Cloud Run instance while the MVP stores its board as a transactionally
+updated JSON snapshot. `apps/workflows` is built and tested in CI, but is not
+deployed as a separate service because it does not yet expose a worker entry
+point. Normalized domain tables and multi-worker locking are the next storage
+milestone.
 
 Before production GitHub App intake is enabled, store the webhook secret in
 Secret Manager and attach it to the API as `GITHUB_WEBHOOK_SECRET`. Never add
 that secret to the workflow or repository files.
-

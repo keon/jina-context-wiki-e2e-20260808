@@ -15,6 +15,10 @@
     "test": "echo \"test not configured\""
   },
   "dependencies": {
-    "@jina/shared-kernel": "workspace:*"
+    "@jina/shared-kernel": "workspace:*",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0"
   }
 }

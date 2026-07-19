@@ -96,12 +96,18 @@ jobs:
           flags: >-
             --allow-unauthenticated
             --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --add-cloudsql-instances=jina-v2:us-central1:jina-postgres
+            --concurrency=1
             --min-instances=0
-            --max-instances=2
+            --max-instances=1
           env_vars: |-
             JINA_ENABLE_DEV_ENDPOINTS=false
             JINA_SIMULATE_RUNS=true
             JINA_SEED_DEMO=false
+            INSTANCE_UNIX_SOCKET=/cloudsql/jina-v2:us-central1:jina-postgres
+            DB_NAME=jina
+            DB_USER=jina_app
+          secrets: DB_PASS=jina-db-password:latest
 
       - name: Verify API health
         run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/health"
