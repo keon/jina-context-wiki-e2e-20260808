@@ -96,6 +96,8 @@ Useful production checks:
 ```sh
 gcloud run services list --project=jina-v2 --region=us-central1
 gcloud run services describe jina-dashboard --project=jina-v2 --region=us-central1 --format=json
-curl --fail --header "Authorization: Bearer $(gcloud auth print-access-token)" \
+curl --fail-with-body --request POST \
+  --header "Authorization: Bearer $(gcloud auth print-access-token)" \
+  --header "Content-Type: application/json" --data '{}' \
   "https://iap.googleapis.com/v1/projects/749416389045/iap_web/cloud_run-us-central1/services/jina-dashboard:getIamPolicy"
 ```
