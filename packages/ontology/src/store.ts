@@ -396,17 +396,18 @@ export function createOntologyProjection(
     }
   }
   for (const assertion of assertions) {
+    const evidence = projectionEvidence(assertion);
     const source = projectionEntityId(assertion.subject);
     const target = projectionEntityId(assertion.object);
-    ensureAssertionNode(nodes, source, assertion.subject, assertion.evidence);
-    ensureAssertionNode(nodes, target, assertion.object, assertion.evidence);
+    ensureAssertionNode(nodes, source, assertion.subject, evidence);
+    ensureAssertionNode(nodes, target, assertion.object, evidence);
     edges.push({
       source,
       target,
       predicate: assertion.predicate,
       plane: "knowledge",
       confidence: assertion.confidence,
-      evidence: assertion.evidence
+      evidence
     });
   }
   return createOntologyGraph({
@@ -421,6 +422,14 @@ export function createOntologyProjection(
       edges
     }
   });
+}
+
+function projectionEvidence(assertion: StoredAssertion): readonly string[] {
+  if (assertion.evidence.length > 0) return assertion.evidence;
+  if (assertion.commitSha === "source" && assertion.sourceObservationId) {
+    return [`observation:${assertion.sourceObservationId}`];
+  }
+  throw new Error(`active assertion ${assertion.id} has no projection evidence`);
 }
 
 function ensureAssertionNode(nodes: Map<string, OntologyNode>, id: string, entity: StoredAssertion["subject"], evidence: readonly string[]): void {

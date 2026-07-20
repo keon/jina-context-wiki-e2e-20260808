@@ -1468,11 +1468,13 @@ function applicableAssertions(
   const currentMap = new Map(currentFiles.map((file) => [file.path, file.blob_sha]));
   const selected = new Map<string, StoredAssertion>();
   for (const assertion of assertions) {
-    const current = assertion.evidence.every((citation) => {
-      const path = citation.replace(/:\d+(?:-\d+)?$/, "");
-      const sourceBlob = sourceMap.get(`${assertion.commitSha}:${path}`);
-      return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
-    });
+    const current = assertion.evidence.length === 0
+      ? assertion.commitSha === "source" && Boolean(assertion.sourceObservationId)
+      : assertion.evidence.every((citation) => {
+          const path = citation.replace(/:\d+(?:-\d+)?$/, "");
+          const sourceBlob = sourceMap.get(`${assertion.commitSha}:${path}`);
+          return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
+        });
     if (!current) continue;
     const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}`;
     const prior = selected.get(key);

@@ -85,6 +85,12 @@ The project task uses queue-claim semantics (`FOR UPDATE SKIP LOCKED`) for canon
 5. acknowledges claimed outbox events;
 6. creates a new immutable dashboard graph generation.
 
+Every projected graph item carries evidence. Code and accepted model facts keep
+their checkout-validated `path:line` citations. Deterministic GitHub facts that
+come from PR, issue, or CODEOWNERS normalization carry their immutable
+`observation:<id>` provenance into the graph; an active source assertion without
+that provenance is excluded instead of relying on an empty-evidence shortcut.
+
 Bulk history ingestion bypasses per-blob outbox fan-out; the final project rebuild is the bulk recovery path. Steady-state canonical changes emit aggregate events transactionally.
 
 The ontology worker also drains canonical events while idle. Repository events lease and rebuild only that repository/ref; tenant-global identity or redirect events fan out across current repositories and are acknowledged only after every affected projection succeeds. Tombstones with no remaining ref are acknowledged after their command transaction has purged the projections. A repository rebuild can never acknowledge another repository's pending event.

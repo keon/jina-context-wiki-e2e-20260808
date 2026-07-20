@@ -282,6 +282,9 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     });
     assert.equal(graph.edges.some((edge) => edge.predicate === "CALLS"), true);
     assert.equal(graph.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"), true);
+    const sourceOwnership = graph.edges.find((edge) => edge.predicate === "OWNED_BY");
+    assert.equal(sourceOwnership?.evidence[0]?.startsWith("observation:"), true);
+    assert.equal([...graph.nodes, ...graph.edges].every((item) => item.evidence.length > 0), true);
 
     const otherRepository = `${repository}-other`;
     await store.planIngestion({
