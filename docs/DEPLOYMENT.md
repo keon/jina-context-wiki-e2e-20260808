@@ -89,7 +89,13 @@ integration test exercises commit deltas, parsing caches, GitHub normalization,
 knowledge review, outbox projection, all four cited templates, ACL denial,
 redaction, erasure, and graph creation. After a `main` deployment, the workflow verifies API health,
 worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
-policy for `keon@omlabs.xyz`.
+policy for `keon@omlabs.xyz`. It then reads the internal credential directly from
+Secret Manager into a masked runner variable, submits `omxyz/jina-ontology-e2e`
+to the production three-chunk workflow, and waits for the aggregate to finish.
+The acceptance check fails the deployment unless the graph has cited nodes and
+edges, the fixed retrieval orchestrator returns cited results, and the canonical
+outbox and parser backlog are empty. Repeated deployments deliberately exercise
+the unchanged-head cache path instead of rebuilding repository facts.
 
 Useful production checks:
 
