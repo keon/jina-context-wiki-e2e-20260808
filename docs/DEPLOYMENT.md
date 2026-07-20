@@ -27,14 +27,6 @@ they are merged and the protected deployment job succeeds.
 GitHub Actions exchanges its GitHub OIDC token for short-lived Google Cloud
 credentials. No service-account key is stored in GitHub.
 
-The production deploy supports a one-time clone-token rotation through the
-protected repository secret `JINA_GITHUB_CLONE_TOKEN`. When that secret is
-present, the main-only deploy streams it directly into a new Secret Manager
-version before rolling out workers; it is never written to the checkout or a
-Cloud Run environment variable. Remove the repository secret after the first
-successful deployment. Later deploys skip rotation and continue consuming
-`jina-github-clone-token:latest` from Secret Manager.
-
 ## Current runtime boundary
 
 The API owns only short board state transitions and persists outbox leases in
@@ -79,6 +71,13 @@ can run only from `refs/heads/main`, including manual dispatches. The protected
 Before production GitHub App intake is enabled, store the webhook secret in
 Secret Manager and attach it to the API as `GITHUB_WEBHOOK_SECRET`. Never add
 that secret to the workflow or repository files.
+
+`GITHUB_CLONE_TOKEN` is the worker's temporary private-repository credential
+until installation tokens replace it. A fine-grained PAT must select every
+repository the worker is allowed to process and grant read-only access to
+Contents, Issues, Pull requests, and Metadata. Ingestion intentionally fails
+instead of silently omitting a GitHub source when one of these permissions is
+missing; worker health reports only the safe GitHub failure category.
 
 ## Verification
 
