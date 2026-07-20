@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
-const TERMINAL_FAILURES = new Set(["failed", "canceled", "superseded"]);
+const TERMINAL_FAILURES = new Set(["blocked", "failed", "canceled", "superseded"]);
 
 export interface ProductionAcceptanceConfig {
   readonly apiUrl: string;
@@ -70,12 +70,16 @@ export async function runProductionOntologyAcceptance(
     }
     if (status === "done") break;
     if (TERMINAL_FAILURES.has(status)) {
-      throw new Error(`production ontology task ${taskId} ended as ${status} (${taskSummary})`);
+      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
+      throw new Error(`production ontology task ${taskId} ended as ${status} (${taskSummary}${failureSummary})`);
     }
     await delay(pollIntervalMs);
   }
   if (lastStatus !== "done") {
-    throw new Error(`production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"})`);
+    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
+    const tasks = requiredArray(board.tasks, "board.tasks");
+    const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
+    throw new Error(`production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`);
   }
 
   const ontology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
@@ -121,16 +125,50 @@ export async function runProductionOntologyAcceptance(
 }
 
 async function apiJson(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {
+  return requiredRecord(await apiValue(fetchImpl, url, init), new URL(url).pathname);
+}
+
+async function apiArray(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown[]> {
+  return requiredArray(await apiValue(fetchImpl, url, init), new URL(url).pathname);
+}
+
+async function apiValue(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown> {
   const response = await fetchImpl(url, init);
   const body = await response.text();
   if (!response.ok) throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${body.slice(0, 500)}`);
-  let parsed: unknown;
   try {
-    parsed = JSON.parse(body);
+    return JSON.parse(body) as unknown;
   } catch {
     throw new Error(`${new URL(url).pathname} returned invalid JSON`);
   }
-  return requiredRecord(parsed, new URL(url).pathname);
+}
+
+async function workflowFailureSummary(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  tasks: readonly unknown[],
+  rootTaskId: string
+): Promise<string> {
+  const taskLabels = new Map<string, string>();
+  for (const task of tasks) {
+    if (!isRecord(task) || typeof task.id !== "string") continue;
+    if (task.id !== rootTaskId && task.parentTaskId !== rootTaskId) continue;
+    taskLabels.set(task.id, task.id === rootTaskId
+      ? "root"
+      : typeof task.type === "string" && task.type ? task.type : "child");
+  }
+  const events = await apiArray(fetchImpl, `${apiUrl}/events`, { headers });
+  const failures = events.flatMap((event) => {
+    if (!isRecord(event) || typeof event.taskId !== "string" || !taskLabels.has(event.taskId)) return [];
+    if (typeof event.type !== "string" || !event.type.endsWith(".failed")) return [];
+    const payload = isRecord(event.payload) ? event.payload : {};
+    const reason = typeof payload.reason === "string" && payload.reason.trim()
+      ? payload.reason.trim().replace(/\s+/g, " ").slice(0, 800)
+      : event.type;
+    return [`${taskLabels.get(event.taskId)}: ${reason}`];
+  });
+  return failures.length > 0 ? `; failures: ${failures.slice(-3).join(" | ")}` : "";
 }
 
 function hasEvidence(value: unknown): boolean {

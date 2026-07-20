@@ -54,9 +54,12 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
 });
 
 test("production acceptance fails on a terminal task failure", async () => {
-  const fetchImpl: typeof fetch = async (input) => String(input).endsWith("/ontology/build")
-    ? json({ task: { id: "ontology-root" } }, 202)
-    : json({ tasks: [{ id: "ontology-root", status: "failed" }] });
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    if (url.endsWith("/ontology/build")) return json({ task: { id: "ontology-root" } }, 202);
+    if (url.endsWith("/events")) return json([]);
+    return json({ tasks: [{ id: "ontology-root", status: "failed" }] });
+  };
 
   await assert.rejects(
     runProductionOntologyAcceptance({
@@ -65,6 +68,37 @@ test("production acceptance fails on a terminal task failure", async () => {
     }, fetchImpl),
     /ended as failed/
   );
+});
+
+test("production acceptance treats a blocked aggregate as terminal and reports its failed chunk", async () => {
+  const requests: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    requests.push(new URL(url).pathname);
+    if (url.endsWith("/ontology/build")) return json({ task: { id: "ontology-root" } }, 202);
+    if (url.endsWith("/events")) {
+      return json([{
+        taskId: "ontology-assert",
+        type: "run-ontology-assert.failed",
+        payload: { reason: "Daytona assertion failed\nwithout leaking credentials" }
+      }]);
+    }
+    return json({ tasks: [
+      { id: "ontology-root", type: "ontology_build", status: "blocked" },
+      { id: "ontology-ingest", parentTaskId: "ontology-root", type: "ontology_ingest", status: "done" },
+      { id: "ontology-assert", parentTaskId: "ontology-root", type: "ontology_assert", status: "failed" },
+      { id: "ontology-project", parentTaskId: "ontology-root", type: "ontology_project", status: "blocked" }
+    ] });
+  };
+
+  await assert.rejects(
+    runProductionOntologyAcceptance({
+      apiUrl: "https://api.example.test", token: "secret", requestKey: "deploy-3",
+      pollIntervalMs: 1, timeoutMs: 100, log: () => undefined
+    }, fetchImpl),
+    /ended as blocked .*failures: ontology_assert: Daytona assertion failed without leaking credentials/
+  );
+  assert.deepEqual(requests, ["/ontology/build", "/board", "/events"]);
 });
 
 function json(body: unknown, status = 200): Response {

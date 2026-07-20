@@ -103,11 +103,13 @@ The acceptance poll window is 50 minutes and its Cloud Run task limit is 55
 minutes. This outer wall-clock budget includes sandbox provisioning, repository
 checkout, Codex installation, the ontology worker's 30-minute model-command
 budget, evidence validation, and cleanup. It reports the root, ingest,
-assertion, and projection statuses whenever they change. On exit it writes its
-brief success or failure summary to Cloud Run's termination-message file. The
-deployment step prints the execution and task status on both success and
-failure, so a stalled chunk is diagnosable from the Actions run without granting
-the GitHub deployer Cloud Logging access or exposing the internal API credential.
+assertion, and projection statuses whenever they change. A blocked aggregate is
+terminal for this automated check: acceptance reads the related board events and
+includes the failed chunk's redacted worker reason instead of waiting for the
+full timeout. On exit it also writes its brief success or failure summary to the
+container termination-message path. The deployment step prints the execution
+and task status on both success and failure without exposing the internal API
+credential; application diagnostics remain in the Cloud Run Job logs.
 
 Worker topic sets use a pipe-separated `WORKER_TOPICS` value in Cloud Run.
 Commas are reserved by the deployment CLI for separating environment entries;
