@@ -114,9 +114,13 @@ assertion, and projection statuses whenever they change. A blocked aggregate is
 terminal for this automated check: acceptance reads the related board events and
 includes the failed chunk's redacted worker reason instead of waiting for the
 full timeout. On exit it also writes its brief success or failure summary to the
-container termination-message path. The deployment step prints the execution
-and task status on both success and failure without exposing the internal API
-credential; application diagnostics remain in the Cloud Run Job logs.
+container termination-message path. Because Cloud Run does not currently
+project that message into the task status, failures use stable coarse exit
+categories: 20 for workflow state, 21-23 for graph scope/content/evidence, 24
+for cited retrieval, 25 for convergence, and 26 for transport or unexpected
+failures. The deployment step prints the execution and task status on both
+success and failure without exposing the internal API credential; detailed
+application diagnostics remain in the Cloud Run Job logs.
 
 Worker topic sets use a pipe-separated `WORKER_TOPICS` value in Cloud Run.
 Commas are reserved by the deployment CLI for separating environment entries;

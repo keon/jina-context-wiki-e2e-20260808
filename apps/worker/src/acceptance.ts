@@ -24,6 +24,23 @@ export interface ProductionAcceptanceSummary {
   readonly citationCount: number;
 }
 
+/**
+ * Cloud Run exposes a job's numeric exit code to the deployer, but not the
+ * container termination message. Keep these codes coarse and stable so CI can
+ * identify the failed acceptance boundary without gaining access to private
+ * repository logs.
+ */
+export function productionAcceptanceExitCode(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/ended as|timed out|missing from the board/.test(message)) return 20;
+  if (/latest ontology graph|ontology\.latest/.test(message)) return 21;
+  if (/ontology graph is empty/.test(message)) return 22;
+  if (/ontology graph contains uncited/.test(message)) return 23;
+  if (/context retrieval/.test(message)) return 24;
+  if (/ontology backlog/.test(message)) return 25;
+  return 26;
+}
+
 /** Runs inside Cloud Run so Secret Manager never exposes the service credential to CI. */
 export async function runProductionOntologyAcceptance(
   config: ProductionAcceptanceConfig,
@@ -233,7 +250,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const message = error instanceof Error ? error.message : String(error);
     await writeTerminationMessage(message);
     console.error(message);
-    process.exitCode = 1;
+    process.exitCode = productionAcceptanceExitCode(error);
   }
 }
 

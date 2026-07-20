@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { runProductionOntologyAcceptance } from "./acceptance.js";
+import { productionAcceptanceExitCode, runProductionOntologyAcceptance } from "./acceptance.js";
+
+test("production acceptance exposes coarse failure categories without log access", () => {
+  assert.equal(productionAcceptanceExitCode(new Error("production ontology task task-1 ended as failed")), 20);
+  assert.equal(productionAcceptanceExitCode(new Error("latest ontology graph does not match")), 21);
+  assert.equal(productionAcceptanceExitCode(new Error("production ontology graph is empty")), 22);
+  assert.equal(productionAcceptanceExitCode(new Error("production ontology graph contains uncited items")), 23);
+  assert.equal(productionAcceptanceExitCode(new Error("production context retrieval did not return cited results")), 24);
+  assert.equal(productionAcceptanceExitCode(new Error("production ontology backlog is not empty")), 25);
+  assert.equal(productionAcceptanceExitCode(new Error("/ontology returned invalid JSON")), 26);
+});
 
 test("production acceptance waits for all chunks and verifies cited canonical output", async () => {
   let boardReads = 0;
