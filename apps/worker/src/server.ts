@@ -650,8 +650,10 @@ function extractOutputText(payload: Record<string, unknown>): string {
 }
 
 function configuredTopics(value: string | undefined): WorkerTopic[] {
-  const requested = (value ?? "run-review,run-research,run-publish,run-cleanup")
-    .split(",")
+  const requested = (value ?? "run-review|run-research|run-publish|run-cleanup")
+    // Cloud Run's CLI uses commas as its own key/value delimiter. Accept a
+    // pipe-separated value so a multi-topic worker survives deployment intact.
+    .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
   const selected = requested.filter((topic): topic is WorkerTopic => SUPPORTED_TOPICS.includes(topic as WorkerTopic));
