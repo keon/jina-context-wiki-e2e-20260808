@@ -28,6 +28,34 @@ export const ontologyTaskTypeDefinitions = [
   }
 ] as const;
 
+/** Intake events that create workflow tasks; these are not board task-to-task dependencies. */
+export const ontologyTaskTypeTriggers = [
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_build",
+    source: "POST /ontology/build",
+    description: "Creates the aggregate workflow parent for the requested repository and ref."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_ingest",
+    source: "POST /ontology/build",
+    description: "Creates and queues the first executable Ontology task."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_assert",
+    source: "POST /ontology/build",
+    description: "Creates the assertion task in a waiting state; ontology_ingest completion unblocks it."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_project",
+    source: "POST /ontology/build",
+    description: "Creates the projection task in a waiting state; ontology_assert completion unblocks it."
+  }
+] as const;
+
 /** Static topology of the board-visible Ontology workflow chunks. */
 export const ontologyTaskTypeDependencies = [
   {

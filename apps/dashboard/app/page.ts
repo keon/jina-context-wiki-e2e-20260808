@@ -51,6 +51,33 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .task-panel-header { display: flex; align-items: center; justify-content: space-between; padding: .85rem 1rem; border-bottom: 1px solid #22293a; }
   .task-panel-header h2 { margin: 0; font-size: .78rem; letter-spacing: .08em; text-transform: uppercase; color: #a5afc1; }
   .task-count { color: #748198; font-size: .7rem; }
+  .workflow-panel { margin-bottom: 1rem; border: 1px solid #202637; border-radius: .85rem; background: rgb(15 19 28 / 78%); overflow: hidden; }
+  .workflow-help { margin: 0; padding: .75rem 1rem 0; color: #7c899f; font-size: .7rem; line-height: 1.5; }
+  .workflow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: .8rem; padding: 1rem; }
+  .workflow-tree { min-width: 0; border: 1px solid #293249; border-radius: .8rem; background: linear-gradient(145deg, #141a26, #0f141e); overflow: hidden; }
+  .workflow-tree-header { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .72rem .8rem; border-bottom: 1px solid #252e42; }
+  .workflow-tree-name { color: #dce3ef; font: .77rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 750; }
+  .workflow-tree-count { color: #748198; font-size: .62rem; }
+  .workflow-tree-body { padding: .8rem; }
+  .workflow-tree-root, .workflow-children { margin: 0; padding: 0; list-style: none; }
+  .workflow-children { position: relative; display: grid; gap: .15rem; margin-left: 1rem; padding-left: 1.15rem; border-left: 1px solid #33405a; }
+  .workflow-branch { position: relative; min-width: 0; }
+  .workflow-children > .workflow-branch::before { content: ""; position: absolute; top: 1.12rem; left: -1.15rem; width: .85rem; border-top: 1px solid #33405a; }
+  .workflow-connector { display: flex; align-items: center; flex-wrap: wrap; gap: .35rem; min-height: 1.1rem; margin: .1rem 0 .25rem; color: #71809a; font-size: .58rem; }
+  .workflow-connector strong { color: #8da8f2; font-size: .59rem; letter-spacing: .03em; text-transform: uppercase; }
+  .workflow-connector-condition { color: #c69a59; }
+  .workflow-trigger { display: flex; align-items: flex-start; flex-wrap: wrap; gap: .35rem; margin: 0 0 .38rem; border: 1px solid #3d4c6b; border-radius: .58rem; background: #111a29; padding: .5rem .58rem; color: #9ba9c0; font-size: .61rem; line-height: 1.4; }
+  .workflow-trigger strong { color: #a9c1ff; font-size: .58rem; letter-spacing: .08em; text-transform: uppercase; }
+  .workflow-trigger-source { color: #d9e2f2; font: .62rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; }
+  .workflow-trigger-description { flex-basis: 100%; color: #78879f; }
+  .workflow-node { border: 1px solid #303a50; border-radius: .65rem; background: #151b27; padding: .62rem .68rem; }
+  .workflow-node.aggregate { border-color: #55658a; background: linear-gradient(145deg, #1a2232, #141a26); }
+  .workflow-node-top { display: flex; align-items: center; justify-content: space-between; gap: .55rem; }
+  .workflow-node-name { min-width: 0; color: #e0e6f0; font: .7rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 720; overflow-wrap: anywhere; }
+  .workflow-node-badge { flex: 0 0 auto; border: 1px solid #35415a; border-radius: 99px; padding: .12rem .35rem; color: #8391a8; font-size: .54rem; white-space: nowrap; }
+  .workflow-node-description { display: block; margin-top: .32rem; color: #7f8ca2; font-size: .63rem; line-height: 1.42; }
+  .workflow-node-gates { display: block; margin-top: .38rem; color: #9b8db7; font-size: .58rem; line-height: 1.4; }
+  .workflow-empty { padding: 1rem; color: #657188; font-size: .7rem; }
   .task-list { display: grid; }
   .type-row {
     display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 1rem; width: 100%;
@@ -62,7 +89,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .type-description { display: block; margin-top: .35rem; color: #8793a8; font-size: .72rem; line-height: 1.45; }
   .type-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; color: #8b97ac; font-size: .65rem; }
   .type-chip { border: 1px solid #30394d; border-radius: 99px; padding: .18rem .42rem; white-space: nowrap; }
-  .type-dependency-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; margin-top: .75rem; }
+  .type-dependency-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; margin-top: .75rem; }
   .type-dependency-group { min-width: 0; border: 1px solid #252d40; border-radius: .6rem; background: #111620; padding: .55rem .6rem; }
   .type-dependency-label { display: block; margin-bottom: .38rem; color: #6f7d94; font-size: .58rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
   .type-dependency-list { display: grid; gap: .38rem; }
@@ -109,6 +136,17 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .context-query input { min-width: 0; border: 1px solid #303a50; border-radius: .55rem; background: #0d1119; color: #eef1f6; padding: .65rem .75rem; }
   .context-query button { border: 1px solid #52668f; border-radius: .55rem; background: #283a68; padding: .6rem .9rem; cursor: pointer; }
   .context-results { display: grid; gap: .55rem; }
+  .context-answer { border: 1px solid #465d88; border-radius: .75rem; background: linear-gradient(135deg, #121d30, #101722 72%); padding: .85rem; }
+  .context-answer-label { display: block; margin-bottom: .4rem; color: #a9c1ff; font-size: .6rem; font-weight: 780; letter-spacing: .1em; text-transform: uppercase; }
+  .context-answer-text { margin: 0; color: #e2e7f0; font-size: .76rem; line-height: 1.55; }
+  .context-claims { display: grid; gap: .38rem; margin-top: .7rem; }
+  .context-claims h4 { margin: 0; color: #8997af; font-size: .59rem; letter-spacing: .08em; text-transform: uppercase; }
+  .context-claim { border-left: 2px solid #526fa5; padding-left: .55rem; }
+  .context-claim strong { display: block; color: #cad3e3; font-size: .68rem; line-height: 1.42; }
+  .context-citations { display: block; margin-top: .18rem; color: #7f8ca2; font: .59rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .context-notices { display: grid; gap: .35rem; }
+  .context-notice { border: 1px solid #554629; border-radius: .58rem; background: #1b1812; padding: .55rem .62rem; color: #c4ad82; font-size: .65rem; line-height: 1.45; }
+  .context-notice strong { margin-right: .25rem; color: #e2c58f; text-transform: uppercase; letter-spacing: .05em; font-size: .57rem; }
   .context-call { border: 1px solid #283149; border-radius: .7rem; background: #111722; padding: .75rem; }
   .context-call h3 { margin: 0 0 .5rem; color: #aeb9cd; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
   .context-result { padding: .45rem 0; border-top: 1px solid #252d40; }
@@ -116,10 +154,19 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .context-result span { display: block; margin-top: .25rem; color: #7f8ca2; font: .64rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
   .issue-trace { display: grid; gap: .6rem; padding: .7rem 0 .2rem; }
   .trace-chain { display: flex; flex-wrap: wrap; align-items: center; gap: .42rem; padding: .58rem .65rem; border: 1px solid #2d3851; border-radius: .58rem; background: #0e141e; }
+  .trace-chain.trace-cause { border-color: #4a628d; background: linear-gradient(135deg, #111b2b, #0e141e 68%); }
   .trace-chain a { color: #91afff; font-size: .72rem; font-weight: 650; text-decoration: none; }
   .trace-chain a:hover { text-decoration: underline; }
+  .trace-answer-label { flex-basis: 100%; color: #8290aa; font-size: .58rem; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
+  .trace-answer-label-cause { color: #a9c1ff; }
   .trace-arrow { color: #697993; font-size: .7rem; }
   .trace-changes { flex-basis: 100%; color: #7f8ca2; font: .62rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .trace-explanation { flex-basis: 100%; display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .55rem; margin-top: .18rem; }
+  .trace-fact { min-width: 0; border: 1px solid #29364e; border-radius: .5rem; background: #101724; padding: .58rem .62rem; }
+  .trace-fact-label { display: block; margin-bottom: .28rem; color: #afc4fb; font-size: .6rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
+  .trace-fact-value { margin: 0; color: #d5dbe7; font-size: .68rem; line-height: 1.48; overflow-wrap: anywhere; }
+  .trace-evidence-list { display: flex; flex-wrap: wrap; gap: .3rem; }
+  .trace-evidence { border: 1px solid #34425c; border-radius: .35rem; background: #151e2d; padding: .2rem .35rem; color: #aebbd1; font: .6rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
   .trace-empty { color: #8b98ad; font-size: .7rem; }
 
   dialog { width: min(760px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 0; border: 1px solid #30394e; border-radius: 1rem; background: #10141d; color: #f3f5f8; box-shadow: 0 2rem 6rem rgb(0 0 0 / 55%); }
@@ -162,7 +209,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .event-payload { margin: .35rem 0 0; color: #7e8aa0; font: .64rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .empty-detail { color: #68758c; font-size: .72rem; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .type-row, .type-dependency-groups { grid-template-columns: 1fr; } .type-meta { justify-content: flex-start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
+  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .workflow-grid, .type-row, .type-dependency-groups { grid-template-columns: 1fr; } .workflow-grid { padding: .7rem; } .type-meta { justify-content: flex-start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
 </style>
 </head>
 <body>
@@ -189,8 +236,13 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     <section class="feed" id="activity-feed"><h2>Recent board activity</h2><div id="log"></div></section>
   </section>
   <section id="task-types-page" hidden>
+    <section class="workflow-panel" aria-labelledby="workflow-trees-heading">
+      <header class="task-panel-header"><h2 id="workflow-trees-heading">Workflow dependency trees</h2><span class="task-count" id="workflow-count"></span></header>
+      <p class="workflow-help">Read top to bottom: completing a prerequisite unblocks the waiting task below it; task creation triggers are shown separately. Conditional connectors apply only when their condition is true, and aggregate tasks close after all required work completes.</p>
+      <div class="workflow-grid" id="workflow-tree-list" aria-label="Task dependency trees"></div>
+    </section>
     <section class="task-panel" aria-labelledby="task-types-heading">
-      <header class="task-panel-header"><h2 id="task-types-heading">Task types</h2><span class="task-count" id="task-type-count"></span></header>
+      <header class="task-panel-header"><h2 id="task-types-heading">Task type registry</h2><span class="task-count" id="task-type-count"></span></header>
       <div class="task-list" id="task-type-list" aria-label="Task type list"></div>
     </section>
   </section>
@@ -236,6 +288,7 @@ let nextIssue = 200;
 
 const columns = document.getElementById("columns");
 const taskTypeList = document.getElementById("task-type-list");
+const workflowTreeList = document.getElementById("workflow-tree-list");
 const log = document.getElementById("log");
 const dialog = document.getElementById("task-dialog");
 const detailTitle = document.getElementById("detail-title");
@@ -370,6 +423,9 @@ function renderContextResults() {
     contextResults.append(textElement("p", "empty-detail", contextState.error));
     return;
   }
+  if (contextState.answer) contextResults.append(renderContextAnswer(contextState));
+  const notices = renderContextNotices(contextState);
+  if (notices) contextResults.append(notices);
   for (const call of contextState.calls || []) {
     const section = element("article", "context-call");
     section.append(textElement("h3", "", call.template + (call.truncated ? " · truncated" : "")));
@@ -377,67 +433,156 @@ function renderContextResults() {
       "p",
       "empty-detail",
       call.template === "issue_trace"
-        ? "No matching ingested issue or cited relationship. Try an exact quoted issue title or issue number."
+        ? "No matching ingested issue or cited relationship was found for the validated issue description or identifier."
         : "No cited results."
     ));
     for (const item of call.items) {
       if (item.kind === "issue_trace" && item.data && item.data.issue) {
-        section.append(renderIssueTrace(item.data, item.citations));
+        section.append(renderIssueTrace(item.data, item.citations, contextState.question));
         continue;
       }
       const row = element("div", "context-result");
-      row.append(
-        textElement("strong", "", item.title),
-        textElement("span", "", item.citations.map(function(citation) {
-          return citation.path ? citation.path + (citation.startLine ? ":" + citation.startLine : "") : citation.kind + ":" + citation.id;
-        }).join(" · "))
-      );
+      row.append(textElement("strong", "", item.title));
+      if (item.data && item.data.excerpt) row.append(textElement("span", "", item.data.excerpt));
+      row.append(textElement("span", "", citationLabels(item.citations).join(" · ")));
       section.append(row);
     }
     contextResults.append(section);
   }
 }
 
-function renderIssueTrace(trace, citations) {
+function renderContextAnswer(state) {
+  const answer = element("article", "context-answer");
+  answer.append(
+    textElement("span", "context-answer-label", "Answer"),
+    textElement("p", "context-answer-text", state.answer)
+  );
+  const claims = Array.isArray(state.citedClaims) ? state.citedClaims : [];
+  if (claims.length) {
+    const list = element("div", "context-claims");
+    list.append(textElement("h4", "", "Cited claims"));
+    for (const claim of claims) {
+      const row = element("div", "context-claim");
+      row.append(
+        textElement("strong", "", claim.text),
+        textElement("span", "context-citations", citationLabels(claim.citations).join(" · "))
+      );
+      list.append(row);
+    }
+    answer.append(list);
+  }
+  return answer;
+}
+
+function renderContextNotices(state) {
+  const ambiguities = Array.isArray(state.unresolvedAmbiguities) ? state.unresolvedAmbiguities : [];
+  const gaps = Array.isArray(state.coverageGaps) ? state.coverageGaps : [];
+  if (!ambiguities.length && !gaps.length) return null;
+  const notices = element("div", "context-notices");
+  for (const ambiguity of ambiguities) {
+    const row = element("div", "context-notice");
+    row.append(textElement("strong", "", "Ambiguity"), document.createTextNode(ambiguity));
+    notices.append(row);
+  }
+  for (const gap of gaps) {
+    const row = element("div", "context-notice");
+    row.append(textElement("strong", "", "Coverage gap · " + gap.capability), document.createTextNode(gap.message));
+    notices.append(row);
+  }
+  return notices;
+}
+
+function citationLabels(citations) {
+  return (Array.isArray(citations) ? citations : []).map(function(citation) {
+    return citation.path ? citation.path + (citation.startLine ? ":" + citation.startLine : "") : citation.kind + ":" + citation.id;
+  });
+}
+
+function isCausationQuestion(question) {
+  return /\\b(caus(?:e|ed|ation|al)|introduc(?:e|ed|ing)|root cause)\\b/i.test(String(question || ""));
+}
+
+function issueTraceSections(trace, question) {
+  const causeSections = (Array.isArray(trace.introducedBy) ? trace.introducedBy : []).map(function(commit) {
+    return { kind: "cause", value: commit };
+  });
+  const resolutionSections = (Array.isArray(trace.resolutions) ? trace.resolutions : []).map(function(resolution) {
+    return { kind: "resolution", value: resolution };
+  });
+  return isCausationQuestion(question)
+    ? causeSections.concat(resolutionSections)
+    : resolutionSections.concat(causeSections);
+}
+
+function renderIssueTrace(trace, citations, question) {
   const container = element("div", "issue-trace");
   const issue = trace.issue;
-  const resolutions = Array.isArray(trace.resolutions) ? trace.resolutions : [];
-  const introducedBy = Array.isArray(trace.introducedBy) ? trace.introducedBy : [];
-  if (!resolutions.length && !introducedBy.length) {
+  const sections = issueTraceSections(trace, question);
+  const causalQuestion = isCausationQuestion(question);
+  if (!sections.length) {
     container.append(externalLink("Issue #" + issue.number + " · " + issue.title, issue.url));
     container.append(textElement("p", "trace-empty", "No verified pull request or commit relationship has been asserted."));
     appendTraceCitations(container, citations);
     return container;
   }
-  for (const resolution of resolutions) {
-    const chain = element("div", "trace-chain");
-    chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "→"));
-    chain.append(externalLink("PR #" + resolution.pullRequestNumber + " · " + resolution.title, resolution.url));
-    for (const commit of Array.isArray(resolution.commits) ? resolution.commits : []) {
-      chain.append(textElement("span", "trace-arrow", "→"));
-      chain.append(externalLink((commit.role === "merge" ? "merge " : "commit ") + commit.sha.slice(0, 12), commit.url));
-      const changes = Array.isArray(commit.changes) ? commit.changes : [];
-      if (changes.length) {
-        chain.append(textElement("div", "trace-changes", changes.length + " changed file" + (changes.length === 1 ? "" : "s") + ": " + changes.map(function(change) { return change.path; }).join(", ")));
-      }
-    }
-    container.append(chain);
-  }
-  for (const commit of introducedBy) {
-    const chain = element("div", "trace-chain");
-    chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "was caused by"));
-    for (const pullRequest of Array.isArray(commit.pullRequests) ? commit.pullRequests : []) {
-      chain.append(externalLink("PR #" + pullRequest.number + " · " + pullRequest.title, pullRequest.url), textElement("span", "trace-arrow", "containing"));
-    }
-    chain.append(externalLink("commit " + commit.sha.slice(0, 12), commit.url));
-    if (commit.why) chain.append(textElement("div", "trace-changes", "Why: " + commit.why));
-    if (Array.isArray(commit.evidence) && commit.evidence.length) {
-      chain.append(textElement("div", "trace-changes", "Causal evidence: " + commit.evidence.join(", ")));
-    }
-    container.append(chain);
+  for (const section of sections) {
+    container.append(section.kind === "cause"
+      ? renderCauseTrace(issue, section.value)
+      : renderResolutionTrace(issue, section.value, causalQuestion));
   }
   appendTraceCitations(container, citations);
   return container;
+}
+
+function renderCauseTrace(issue, commit) {
+  const chain = element("div", "trace-chain trace-cause");
+  chain.append(textElement("span", "trace-answer-label trace-answer-label-cause", "Cause"));
+  chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "was caused by"));
+  for (const pullRequest of Array.isArray(commit.pullRequests) ? commit.pullRequests : []) {
+    chain.append(externalLink("PR #" + pullRequest.number + " · " + pullRequest.title, pullRequest.url), textElement("span", "trace-arrow", "containing"));
+  }
+  chain.append(externalLink("commit " + commit.sha.slice(0, 12), commit.url));
+
+  const explanation = element("div", "trace-explanation");
+  explanation.append(traceFact("Why", commit.why || "No causal explanation was recorded."));
+  explanation.append(traceEvidence(Array.isArray(commit.evidence) ? commit.evidence : []));
+  chain.append(explanation);
+  return chain;
+}
+
+function renderResolutionTrace(issue, resolution, followsCause) {
+  const chain = element("div", "trace-chain");
+  chain.append(textElement("span", "trace-answer-label", followsCause ? "Later fix" : "Resolution"));
+  chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "→"));
+  chain.append(externalLink("PR #" + resolution.pullRequestNumber + " · " + resolution.title, resolution.url));
+  for (const commit of Array.isArray(resolution.commits) ? resolution.commits : []) {
+    chain.append(textElement("span", "trace-arrow", "→"));
+    chain.append(externalLink((commit.role === "merge" ? "merge " : "commit ") + commit.sha.slice(0, 12), commit.url));
+    const changes = Array.isArray(commit.changes) ? commit.changes : [];
+    if (changes.length) {
+      chain.append(textElement("div", "trace-changes", changes.length + " changed file" + (changes.length === 1 ? "" : "s") + ": " + changes.map(function(change) { return change.path; }).join(", ")));
+    }
+  }
+  return chain;
+}
+
+function traceFact(label, value) {
+  const fact = element("div", "trace-fact");
+  fact.append(textElement("span", "trace-fact-label", label), textElement("p", "trace-fact-value", value));
+  return fact;
+}
+
+function traceEvidence(evidence) {
+  const fact = element("div", "trace-fact");
+  fact.append(textElement("span", "trace-fact-label", "Evidence"));
+  if (!evidence.length) {
+    fact.append(textElement("p", "trace-fact-value", "No causal evidence was recorded."));
+    return fact;
+  }
+  const list = element("div", "trace-evidence-list");
+  for (const citation of evidence) list.append(textElement("span", "trace-evidence", citation));
+  fact.append(list);
+  return fact;
 }
 
 function appendTraceCitations(container, citations) {
@@ -555,6 +700,7 @@ function taskCard(task) {
 function renderTaskTypes() {
   taskTypeList.replaceChildren();
   document.getElementById("task-type-count").textContent = taskTypes.length + " types";
+  renderWorkflowTrees();
   for (const definition of taskTypes) {
     const row = element("article", "type-row");
     const copy = element("div", "type-copy");
@@ -574,13 +720,196 @@ function renderTaskTypes() {
   }
 }
 
+function buildWorkflowTrees(definitions) {
+  const byType = new Map(definitions.map(function(definition, index) { return [definition.type, { definition: definition, index: index }]; }));
+  const workflowNames = new Set();
+  for (const definition of definitions) {
+    for (const dependency of definition.dependsOn || []) {
+      for (const workflow of dependency.workflows || []) workflowNames.add(workflow);
+    }
+  }
+  return Array.from(workflowNames).sort(function(left, right) {
+    return (byType.get(left)?.index ?? Number.MAX_SAFE_INTEGER) - (byType.get(right)?.index ?? Number.MAX_SAFE_INTEGER) || left.localeCompare(right);
+  }).map(function(workflow) {
+    const nodeTypes = new Set();
+    const edges = [];
+    for (const definition of definitions) {
+      for (const dependency of definition.dependsOn || []) {
+        if (!(dependency.workflows || []).includes(workflow)) continue;
+        nodeTypes.add(dependency.taskType);
+        nodeTypes.add(definition.type);
+        edges.push({
+          from: dependency.taskType,
+          to: definition.type,
+          relationships: dependency.relationships || [],
+          required: dependency.required !== false,
+          conditions: dependency.conditions || []
+        });
+      }
+    }
+    const reducedEdges = [];
+    const collapsedEdges = [];
+    edges.forEach(function(edge, index) {
+      (hasDependencyPath(edge.from, edge.to, edges, index) ? collapsedEdges : reducedEdges).push(edge);
+    });
+    const incoming = new Map(Array.from(nodeTypes, function(type) { return [type, []]; }));
+    const outgoing = new Map(Array.from(nodeTypes, function(type) { return [type, []]; }));
+    for (const edge of reducedEdges) {
+      incoming.get(edge.to)?.push(edge);
+      outgoing.get(edge.from)?.push(edge);
+    }
+    const order = function(type) { return byType.get(type)?.index ?? Number.MAX_SAFE_INTEGER; };
+    for (const values of outgoing.values()) values.sort(function(left, right) { return order(left.to) - order(right.to) || left.to.localeCompare(right.to); });
+    const rootTypes = Array.from(nodeTypes).filter(function(type) { return (incoming.get(type) || []).length === 0; })
+      .sort(function(left, right) { return order(left) - order(right) || left.localeCompare(right); });
+    return {
+      name: workflow,
+      typeCount: nodeTypes.size,
+      edgeCount: edges.length,
+      roots: rootTypes.map(function(type) {
+        return workflowTreeNode(type, byType, incoming, outgoing, collapsedEdges, new Set());
+      })
+    };
+  });
+}
+
+function hasDependencyPath(from, target, edges, skippedIndex) {
+  const pending = [from];
+  const visited = new Set();
+  while (pending.length) {
+    const current = pending.shift();
+    if (current === target) return true;
+    if (visited.has(current)) continue;
+    visited.add(current);
+    edges.forEach(function(edge, index) {
+      if (index !== skippedIndex && edge.from === current && !visited.has(edge.to)) pending.push(edge.to);
+    });
+  }
+  return false;
+}
+
+function workflowTreeNode(type, byType, incoming, outgoing, collapsedEdges, ancestors) {
+  const nextAncestors = new Set(ancestors);
+  const cycle = nextAncestors.has(type);
+  nextAncestors.add(type);
+  const entry = byType.get(type);
+  return {
+    type: type,
+    definition: entry?.definition || { type: type, kind: "dispatchable", description: "Unregistered task type" },
+    incoming: incoming.get(type) || [],
+    collapsedDependencies: collapsedEdges.filter(function(edge) { return edge.to === type; }),
+    cycle: cycle,
+    children: cycle ? [] : (outgoing.get(type) || []).map(function(edge) {
+      return { edge: edge, node: workflowTreeNode(edge.to, byType, incoming, outgoing, collapsedEdges, nextAncestors) };
+    })
+  };
+}
+
+function renderWorkflowTrees() {
+  workflowTreeList.replaceChildren();
+  const workflows = buildWorkflowTrees(taskTypes);
+  document.getElementById("workflow-count").textContent = workflows.length + (workflows.length === 1 ? " workflow" : " workflows");
+  if (!workflows.length) {
+    workflowTreeList.append(textElement("p", "workflow-empty", "No workflow dependencies are declared."));
+    return;
+  }
+  for (const workflow of workflows) {
+    const card = element("article", "workflow-tree");
+    const header = element("header", "workflow-tree-header");
+    header.append(
+      textElement("span", "workflow-tree-name", workflow.name),
+      textElement("span", "workflow-tree-count", workflow.typeCount + " types · " + workflow.edgeCount + " declared links")
+    );
+    const body = element("div", "workflow-tree-body");
+    const roots = element("ol", "workflow-tree-root");
+    for (const root of workflow.roots) roots.append(renderWorkflowBranch(root, null));
+    body.append(roots);
+    card.append(header, body);
+    workflowTreeList.append(card);
+  }
+}
+
+function renderWorkflowBranch(node, incomingEdge) {
+  const branch = element("li", "workflow-branch");
+  for (const trigger of node.definition.triggeredBy || []) branch.append(workflowTrigger(trigger));
+  if (incomingEdge) {
+    const connector = element("div", "workflow-connector");
+    connector.append(textElement("strong", "", "↓ unblocks"));
+    const details = [];
+    if (incomingEdge.relationships.length) details.push(incomingEdge.relationships.map(humanize).join(" + "));
+    details.push(incomingEdge.required ? "required" : "optional");
+    connector.append(textElement("span", "", details.join(" · ")));
+    if (incomingEdge.conditions.length) {
+      const condition = incomingEdge.conditions.join("; ");
+      connector.append(textElement("span", "workflow-connector-condition", /^when\\b/i.test(condition) ? condition : "when " + condition));
+    }
+    branch.append(connector);
+  }
+  const card = element("div", "workflow-node" + (node.definition.kind === "aggregate" ? " aggregate" : ""));
+  const top = element("div", "workflow-node-top");
+  top.append(
+    textElement("span", "workflow-node-name", node.type),
+    textElement("span", "workflow-node-badge", node.definition.kind === "aggregate" && node.children.length === 0 ? "completes workflow" : humanize(node.definition.kind))
+  );
+  card.append(top, textElement("span", "workflow-node-description", node.definition.description));
+  if (node.collapsedDependencies.length) {
+    card.append(textElement(
+      "span",
+      "workflow-node-gates",
+      "Also directly waits for: " + node.collapsedDependencies.map(function(edge) { return edge.from; }).join(", ")
+    ));
+  }
+  if (node.cycle) card.append(textElement("span", "workflow-node-gates", "Cycle detected; branch stopped."));
+  branch.append(card);
+  if (node.children.length) {
+    const children = element("ol", "workflow-children");
+    for (const child of node.children) children.append(renderWorkflowBranch(child.node, child.edge));
+    branch.append(children);
+  }
+  return branch;
+}
+
 function taskTypeDependencyGroups(definition) {
   const groups = element("div", "type-dependency-groups");
   groups.append(
-    taskTypeDependencyGroup("Depends on", definition.dependsOn || [], "No declared dependencies"),
+    taskTypeTriggerGroup(definition.triggeredBy || []),
+    taskTypeDependencyGroup("Prerequisite tasks", definition.dependsOn || [], "No prerequisite task"),
     taskTypeDependencyGroup("Required by", definition.requiredBy || [], "Does not unlock another type")
   );
   return groups;
+}
+
+function taskTypeTriggerGroup(triggers) {
+  const group = element("section", "type-dependency-group");
+  group.append(textElement("span", "type-dependency-label", "Triggered by"));
+  const list = element("div", "type-dependency-list");
+  if (!triggers.length) list.append(textElement("span", "type-dependency-empty", "No declared workflow trigger"));
+  for (const trigger of triggers) {
+    const item = element("div", "type-dependency");
+    const details = [];
+    if ((trigger.workflows || []).length) details.push("workflow: " + trigger.workflows.map(humanize).join(", "));
+    if ((trigger.conditions || []).length) details.push(trigger.conditions.join("; "));
+    item.append(
+      textElement("span", "type-dependency-name", trigger.source),
+      textElement("span", "type-dependency-detail", [trigger.description].concat(details).filter(Boolean).join(" · "))
+    );
+    list.append(item);
+  }
+  group.append(list);
+  return group;
+}
+
+function workflowTrigger(trigger) {
+  const card = element("div", "workflow-trigger");
+  card.append(
+    textElement("strong", "", "Triggered by"),
+    textElement("span", "workflow-trigger-source", trigger.source),
+    textElement("span", "workflow-trigger-description", trigger.description)
+  );
+  if ((trigger.conditions || []).length) {
+    card.append(textElement("span", "workflow-connector-condition", trigger.conditions.join("; ")));
+  }
+  return card;
 }
 
 function taskTypeDependencyGroup(label, dependencies, emptyMessage) {

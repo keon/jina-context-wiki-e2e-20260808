@@ -97,6 +97,14 @@ export interface OntologyIngestResult extends Omit<OntologyIngestPlan, "missingB
   readonly codeCheckpoint: string;
 }
 
+export interface OntologySourceIngestResult {
+  readonly observationCount: number;
+  readonly assertionCount: number;
+  readonly newObservationCount: number;
+  readonly updatedObservationCount: number;
+  readonly confirmedObservationCount: number;
+}
+
 export interface OntologyEntityRef {
   readonly kind: OntologyNodeKind;
   readonly naturalKey: string;
@@ -121,6 +129,8 @@ export interface OntologyAssertionBatch {
   readonly generatedAt: string;
   readonly generatorVersion: string;
   readonly registryVersion: string;
+  /** Canonical fingerprint of the code and source evidence supplied to this generation. */
+  readonly evidenceFingerprint: string;
   readonly model: string;
   readonly sandboxId?: string;
   readonly summary: string;
@@ -172,12 +182,14 @@ export interface OntologyPipelineStore {
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
     analyses: readonly BlobAnalysis[]
   ): Promise<void>;
-  applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<{ readonly observationCount: number; readonly assertionCount: number }>;
+  applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<OntologySourceIngestResult>;
   hasAssertionGeneration(
     tenantId: string,
     repository: string,
     commitSha: string,
-    generatorVersion: string
+    generatorVersion: string,
+    registryVersion: string,
+    evidenceFingerprint: string
   ): Promise<OntologyAssertionResult | undefined>;
   saveAssertionBatch(batch: OntologyAssertionBatch): Promise<OntologyAssertionResult>;
   project(request: OntologyProjectionRequest): Promise<OntologyGraph>;
@@ -203,7 +215,10 @@ export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly
       ...assertion,
       predicate,
       evidence,
-      id: stableId("assertion", `${batch.tenantId}:${batch.repository}:${batch.commitSha}:${key}`),
+      id: stableId(
+        "assertion",
+        `${batch.tenantId}:${batch.repository}:${batch.commitSha}:${batch.registryVersion}:${batch.evidenceFingerprint}:${key}`
+      ),
       tenantId: batch.tenantId,
       repository: batch.repository,
       commitSha: batch.commitSha,
@@ -244,8 +259,11 @@ export function normalizeAssertionBatchLenient(batch: OntologyAssertionBatch): {
   return { assertions, warnings };
 }
 
-export function assertionObservationId(batch: Pick<OntologyAssertionBatch, "tenantId" | "repository" | "commitSha" | "generatorVersion">): string {
-  return stableId("observation", `${batch.tenantId}:${batch.repository}:${batch.commitSha}:model:${batch.generatorVersion}`);
+export function assertionObservationId(batch: Pick<OntologyAssertionBatch, "tenantId" | "repository" | "commitSha" | "generatorVersion" | "registryVersion" | "evidenceFingerprint">): string {
+  return stableId(
+    "observation",
+    `${batch.tenantId}:${batch.repository}:${batch.commitSha}:model:${batch.generatorVersion}:registry:${batch.registryVersion}:evidence:${batch.evidenceFingerprint}`
+  );
 }
 
 export function sourceObservationId(snapshot: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha" | "treeSha">): string {
@@ -256,8 +274,26 @@ export function codeCheckpoint(tenantId: string, repository: string, commitSha: 
   return stableId("code", `${tenantId}:${repository}:${commitSha}:${parserVersion}`);
 }
 
-export function knowledgeCheckpoint(tenantId: string, repository: string, commitSha: string, generatorVersion: string): string {
-  return stableId("knowledge", `${tenantId}:${repository}:${commitSha}:${generatorVersion}`);
+export function assertionEvidenceFingerprint(
+  codeCheckpointValue: string,
+  observations: readonly GitHubSourceObservation[]
+): string {
+  const sourceEvidence = observations.map((observation) => {
+    const { recordedAt: _recordedAt, ...stable } = observation;
+    return stable;
+  }).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  return stableId("evidence", canonicalJson({ codeCheckpoint: codeCheckpointValue, sourceEvidence }));
+}
+
+export function knowledgeCheckpoint(
+  tenantId: string,
+  repository: string,
+  commitSha: string,
+  generatorVersion: string,
+  registryVersion: string,
+  evidenceFingerprint: string
+): string {
+  return stableId("knowledge", `${tenantId}:${repository}:${commitSha}:${generatorVersion}:${registryVersion}:${evidenceFingerprint}`);
 }
 
 export function entityKey(entity: OntologyEntityRef): string {

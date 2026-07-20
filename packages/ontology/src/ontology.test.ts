@@ -6,6 +6,7 @@ import {
   ONTOLOGY_GENERATOR_VERSION,
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
+  assertionEvidenceFingerprint,
   assertionsFromGeneratedOntology,
   computeCommitChanges
 } from "./pipeline.js";
@@ -22,7 +23,14 @@ import {
   reviewAssertion,
   upsertIdentity
 } from "./knowledge.js";
-import { RepositoryContextOrchestrator, classifyTemplates, extractIssueText } from "./retrieval.js";
+import {
+  RepositoryContextOrchestrator,
+  classifyTemplates,
+  extractIssueText,
+  extractRepositoryPath,
+  extractSymbol,
+  type RetrievalRequest
+} from "./retrieval.js";
 import { linkedIssueNumbers, normalizeGitHubSourceObservation } from "./normalizers.js";
 
 test("pure structural parsing produces versioned symbols and imports", () => {
@@ -151,13 +159,21 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates(`Which issue did commit ${"a".repeat(40)} cause, and why?`), ["issue_trace"]);
   assert.deepEqual(classifyTemplates("Which issue did PR #42 introduce?"), ["issue_trace"]);
   assert.deepEqual(classifyTemplates('Which PR or commit caused "Administrators cannot delete resources"?'), ["issue_trace"]);
+  assert.deepEqual(classifyTemplates("What changed in PR #5?"), ["change"]);
   assert.equal(extractIssueText('What caused “Administrators   cannot delete resources”?'), "Administrators cannot delete resources");
+  assert.equal(extractIssueText("Which PR or commit caused Administrators cannot delete resources, and why?"), "Administrators cannot delete resources");
+  assert.equal(extractRepositoryPath("Why was src/access-policy.ts changed?"), "src/access-policy.ts");
+  assert.equal(extractSymbol("Where is authorize implemented and what calls it?"), "authorize");
   const called: string[] = [];
   const issueTexts: Array<string | undefined> = [];
+  const symbols: Array<string | undefined> = [];
+  const paths: Array<string | undefined> = [];
   const orchestrator = new RepositoryContextOrchestrator({
     async retrieve(request) {
       called.push(request.template);
       issueTexts.push(request.issueText);
+      symbols.push(request.symbol);
+      paths.push(request.path);
       return {
         template: request.template, repository: request.repository, ref: request.ref ?? "main", truncated: false,
         totalBeforeLimit: 1, limit: request.limit ?? 50,
@@ -173,6 +189,8 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   });
   assert.deepEqual(called, ["change", "ownership"]);
   assert.equal(context.citations.length, 2);
+  assert.match(context.answer, /cited change set/i);
+  assert.equal(context.citedClaims.length, 2);
 
   called.length = 0;
   await orchestrator.answer({
@@ -189,6 +207,138 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   });
   assert.deepEqual(called, ["issue_trace"]);
   assert.deepEqual(issueTexts, ["Administrators cannot delete resources"]);
+
+  called.length = 0;
+  issueTexts.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "Which PR or commit caused Administrators cannot delete resources, and why?"
+  });
+  assert.deepEqual(called, ["issue_trace"]);
+  assert.deepEqual(issueTexts, ["Administrators cannot delete resources"]);
+
+  called.length = 0;
+  symbols.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "Where is authorize implemented and what calls it?"
+  });
+  assert.deepEqual(called, ["structure"]);
+  assert.deepEqual(symbols, ["authorize"]);
+
+  called.length = 0;
+  paths.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "Who owns src/access-policy.ts?"
+  });
+  assert.deepEqual(called, ["ownership"]);
+  assert.deepEqual(paths, ["src/access-policy.ts"]);
+  assert.equal(extractRepositoryPath("Who owns README.md?"), "README.md");
+  assert.equal(extractRepositoryPath("Why does Dockerfile exist?"), "Dockerfile");
+});
+
+test("orchestrator produces a direct cited causal answer and withholds unreviewed causality", async () => {
+  const citations = [{
+    kind: "assertion" as const,
+    id: "assertion-cause",
+    repository: "org/repo",
+    commitSha: "3".repeat(40),
+    path: "src/access-policy.ts",
+    startLine: 12,
+    endLine: 18
+  }];
+  const answerWith = (introducedBy: readonly unknown[]) => new RepositoryContextOrchestrator({
+    async retrieve(request) {
+      return {
+        template: request.template,
+        repository: request.repository,
+        ref: "main",
+        truncated: false,
+        totalBeforeLimit: 1,
+        limit: request.limit ?? 50,
+        items: [{
+          kind: "issue_trace",
+          title: "Issue #123",
+          data: {
+            issue: { number: 123, title: "Administrators cannot delete resources" },
+            resolutions: [{ pullRequestNumber: 5, commits: [{ sha: "5".repeat(40) }], assertionIds: ["assertion-fix"], observationIds: ["observation-fix"] }],
+            introducedBy
+          },
+          citations,
+          score: 3
+        }]
+      };
+    }
+  }).answer({
+    tenantId: "t",
+    allowedRepositories: ["org/repo"],
+    repository: "org/repo",
+    question: "Which PR or commit caused Administrators cannot delete resources, and why?"
+  });
+
+  const reviewed = await answerWith([{
+    sha: "3".repeat(40),
+    why: "the administrator bypass was removed",
+    assertionIds: ["assertion-cause"],
+    pullRequests: [{ number: 3 }]
+  }]);
+  assert.match(reviewed.answer, /PR #3.*commit 333333333333.*because the administrator bypass was removed/);
+  assert.equal(reviewed.citedClaims.length, 2);
+  assert.deepEqual(reviewed.citedClaims[0]?.citations, citations);
+  assert.deepEqual(reviewed.coverageGaps, []);
+
+  const beforeReview = await answerWith([]);
+  assert.match(beforeReview.answer, /No active reviewed causal assertion/);
+  assert.match(beforeReview.answer, /later resolution.*PR #5/i);
+  assert.equal(beforeReview.coverageGaps[0]?.capability, "issue_trace");
+});
+
+test("orchestrator refuses ambiguous issue text and selects the requested causal PR", async () => {
+  const executor = {
+    async retrieve(request: RetrievalRequest) {
+      const issue = (number: number, title: string, introducedBy: readonly unknown[]) => ({
+        kind: "issue_trace",
+        title: `Issue #${number}`,
+        data: { issue: { number, title }, resolutions: [], introducedBy, citations: [] },
+        score: 1,
+        citations: [
+          { kind: "assertion" as const, id: "cause-2", repository: request.repository },
+          { kind: "assertion" as const, id: "cause-3", repository: request.repository }
+        ]
+      });
+      return {
+        template: request.template,
+        repository: request.repository,
+        ref: request.ref ?? "main",
+        truncated: false,
+        totalBeforeLimit: 2,
+        limit: request.limit ?? 50,
+        items: [
+          issue(123, "Administrators cannot delete resources", [
+            { sha: "2".repeat(40), why: "older cause", assertionIds: ["cause-2"], pullRequests: [{ number: 2 }] },
+            { sha: "3".repeat(40), why: "requested cause", assertionIds: ["cause-3"], pullRequests: [{ number: 3 }] }
+          ]),
+          issue(124, "Users cannot delete resources", [])
+        ]
+      };
+    }
+  };
+  const orchestrator = new RepositoryContextOrchestrator(executor);
+  const ambiguous = await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "Which commit caused cannot delete resources, and why?"
+  });
+  assert.match(ambiguous.answer, /Multiple issues matched/);
+  assert.equal(ambiguous.citedClaims.length, 0);
+  assert.equal(ambiguous.unresolvedAmbiguities.length, 1);
+
+  const selected = await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "Did PR #3 cause issue #123, and why?"
+  });
+  assert.match(selected.answer, /PR #3.*333333333333.*requested cause/);
+  assert.deepEqual(selected.citedClaims[0]?.citations.map((citation) => citation.id), ["cause-3"]);
 });
 
 test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNERS facts", () => {
@@ -214,6 +364,70 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
     "INCLUDES", "MERGED_AS", "RESOLVES", "RESOLVED_BY"
   ]);
   assert.equal(predicateDefinition("INTRODUCED_BY").review, "manual");
+});
+
+test("source ingestion distinguishes new, updated, and confirmed GitHub observations", async () => {
+  const store = new MemoryOntologyGraphStore();
+  const issue = {
+    tenantId: "t",
+    repository: "org/repo",
+    kind: "issue" as const,
+    number: 12,
+    title: "Initial title",
+    state: "open",
+    url: "https://github.com/org/repo/issues/12",
+    occurredAt: "2026-07-20T00:00:00.000Z",
+    recordedAt: "2026-07-20T00:00:01.000Z"
+  };
+  const first = await store.applyGitHubObservations([issue]);
+  assert.deepEqual(
+    [first.newObservationCount, first.updatedObservationCount, first.confirmedObservationCount],
+    [1, 0, 0]
+  );
+  const replay = await store.applyGitHubObservations([issue]);
+  assert.deepEqual(
+    [replay.newObservationCount, replay.updatedObservationCount, replay.confirmedObservationCount],
+    [0, 0, 1]
+  );
+  const updated = await store.applyGitHubObservations([{
+    ...issue,
+    title: "Updated title",
+    occurredAt: "2026-07-20T00:02:00.000Z",
+    recordedAt: "2026-07-20T00:02:01.000Z"
+  }]);
+  assert.deepEqual(
+    [updated.newObservationCount, updated.updatedObservationCount, updated.confirmedObservationCount],
+    [0, 1, 0]
+  );
+  assert.equal(
+    assertionEvidenceFingerprint("code-checkpoint", [issue]),
+    assertionEvidenceFingerprint("code-checkpoint", [{ ...issue, recordedAt: "2026-07-20T00:10:00.000Z" }])
+  );
+  assert.notEqual(
+    assertionEvidenceFingerprint("code-checkpoint", [issue]),
+    assertionEvidenceFingerprint("code-checkpoint", [{ ...issue, title: "Changed evidence" }])
+  );
+});
+
+test("memory source ingestion applies current deterministic assertions", async () => {
+  const store = new MemoryOntologyGraphStore();
+  await store.applyGitHubObservations([{
+    tenantId: "t", repository: "org/repo", kind: "pull_request", number: 4,
+    title: "Fix access", state: "closed", url: "https://github.com/org/repo/pull/4",
+    recordedAt: "2026-07-20T00:00:00.000Z", occurredAt: "2026-07-20T00:00:00.000Z",
+    commitShas: ["4".repeat(40)], resolvesIssueNumbers: [12]
+  }, {
+    tenantId: "t", repository: "org/repo", kind: "codeowners", commitSha: "4".repeat(40), path: "CODEOWNERS",
+    entries: [{ pattern: "*", owners: ["@org/platform"] }], recordedAt: "2026-07-20T00:00:00.000Z"
+  }]);
+  const assertions = await store.listAssertions("t", "org/repo");
+  assert.equal(assertions.some((assertion) => assertion.predicate === "RESOLVES" && assertion.commitSha === "source"), true);
+  assert.equal(assertions.some((assertion) => assertion.predicate === "OWNED_BY" && assertion.commitSha === "source"), true);
+  const ownership = await store.retrieve({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo", template: "ownership", path: "README.md"
+  });
+  assert.equal(ownership.items.length, 1);
+  assert.match(ownership.items[0]?.title ?? "", /platform/);
 });
 
 test("normalizes model output into distinct semantic entity identities", () => {
@@ -312,6 +526,39 @@ test("keeps graph generations immutable per task", () => {
     generated
   });
   assert.notEqual(build("task-1").id, build("task-2").id);
+});
+
+test("content-addresses identical projection generations across worker tasks", () => {
+  const generated = parseGeneratedOntology({
+    summary: "repo",
+    nodes: [
+      { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
+      { id: "readme", kind: "File", label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
+    ],
+    edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
+  });
+  const build = (taskId: string) => createOntologyGraph({
+    request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId },
+    commitSha: "abc",
+    generatedAt: "2026-01-01T00:00:00.000Z",
+    executor: "projection" as const,
+    model: "current-graph-v1",
+    contentAddressed: true,
+    generated
+  });
+  assert.equal(build("task-1").id, build("task-2").id);
+  const reordered = { ...generated, nodes: [...generated.nodes].reverse(), edges: [...generated.edges].reverse() };
+  assert.equal(build("task-1").id, createOntologyGraph({
+    request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId: "task-3" },
+    commitSha: "abc", generatedAt: "2026-01-01T00:00:00.000Z", executor: "projection", model: "current-graph-v1",
+    contentAddressed: true, generated: reordered
+  }).id);
+  assert.notEqual(build("task-1").id, createOntologyGraph({
+    request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId: "task-4" },
+    commitSha: "abc", generatedAt: "2026-01-01T00:00:00.000Z", executor: "projection", model: "current-graph-v1",
+    contentAddressed: true,
+    generated: { ...generated, nodes: generated.nodes.map((node) => node.id === "readme" ? { ...node, label: "Changed README" } : node) }
+  }).id);
 });
 
 test("does not overwrite an existing graph generation", async () => {
@@ -425,6 +672,7 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
     generatedAt: "2026-07-19T00:01:00.000Z",
     generatorVersion: ONTOLOGY_GENERATOR_VERSION,
     registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    evidenceFingerprint: "evidence-fixture",
     model: "fixture",
     summary: "README documents the repository",
     rawOutput: {
@@ -445,7 +693,22 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
   });
   assert.equal(assertions.activeCount, 0);
   assert.equal(assertions.proposedCount, 1);
-  assert.equal((await store.hasAssertionGeneration(snapshot.tenantId, snapshot.repository, snapshot.commitSha, ONTOLOGY_GENERATOR_VERSION))?.cached, true);
+  assert.equal((await store.hasAssertionGeneration(
+    snapshot.tenantId,
+    snapshot.repository,
+    snapshot.commitSha,
+    ONTOLOGY_GENERATOR_VERSION,
+    ONTOLOGY_REGISTRY_VERSION,
+    "evidence-fixture"
+  ))?.cached, true);
+  assert.equal(await store.hasAssertionGeneration(
+    snapshot.tenantId, snapshot.repository, snapshot.commitSha, ONTOLOGY_GENERATOR_VERSION,
+    ONTOLOGY_REGISTRY_VERSION, "different-evidence"
+  ), undefined);
+  assert.equal(await store.hasAssertionGeneration(
+    snapshot.tenantId, snapshot.repository, snapshot.commitSha, ONTOLOGY_GENERATOR_VERSION,
+    "different-registry", "evidence-fixture"
+  ), undefined);
 
   const graph = await store.project({
     tenantId: snapshot.tenantId,
@@ -458,6 +721,16 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
   assert.equal(graph.generator.executor, "projection");
   assert.equal(graph.nodes.some((node) => node.kind === "Symbol" && node.label === "main"), true);
   assert.equal(graph.edges.some((edge) => edge.plane === "knowledge" && edge.predicate === "DOCUMENTED_BY"), false);
+  const repeatedGraph = await store.project({
+    tenantId: snapshot.tenantId,
+    repository: snapshot.repository,
+    ref: snapshot.ref,
+    commitSha: snapshot.commitSha,
+    taskId: "second-project-task",
+    generatedAt: "2026-07-19T00:02:30.000Z"
+  });
+  assert.equal(repeatedGraph.id, graph.id);
+  assert.equal((await store.list(snapshot.tenantId)).length, 1, "identical projection content does not create a second graph generation");
 
   const nextSnapshot = {
     ...snapshot,

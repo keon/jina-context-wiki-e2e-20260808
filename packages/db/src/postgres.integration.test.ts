@@ -93,6 +93,7 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
       generatedAt: "2026-07-19T12:01:00.000Z",
       generatorVersion: ONTOLOGY_GENERATOR_VERSION,
       registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      evidenceFingerprint: "evidence-fixture",
       model: "fixture",
       summary: "README documents the repository",
       rawOutput: {
@@ -113,7 +114,14 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
     });
     assert.equal(asserted.activeCount, 0);
     assert.equal(asserted.proposedCount, 1);
-    assert.equal((await store.hasAssertionGeneration(snapshot.tenantId, snapshot.repository, snapshot.commitSha, ONTOLOGY_GENERATOR_VERSION))?.cached, true);
+    assert.equal((await store.hasAssertionGeneration(
+      snapshot.tenantId,
+      snapshot.repository,
+      snapshot.commitSha,
+      ONTOLOGY_GENERATOR_VERSION,
+      ONTOLOGY_REGISTRY_VERSION,
+      "evidence-fixture"
+    ))?.cached, true);
     const graph = await store.project({
       tenantId: snapshot.tenantId,
       repository: snapshot.repository,
@@ -223,7 +231,8 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     const batch = {
       tenantId, repository, ref: "main", commitSha: headSha, taskId: `assert-${suffix}`,
       generatedAt: "2026-07-20T00:03:00.000Z", generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-      registryVersion: ONTOLOGY_REGISTRY_VERSION, model: "fixture", summary: "README documents the repository and records a root cause",
+      registryVersion: ONTOLOGY_REGISTRY_VERSION, evidenceFingerprint: "evidence-causal-fixture",
+      model: "fixture", summary: "README documents the repository and records a root cause",
       rawOutput: {
         summary: "README documents the repository and records a root cause",
         nodes: [
@@ -251,8 +260,8 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     };
     const proposed = await store.saveAssertionBatch(batch);
     assert.equal(proposed.proposedCount, 2);
-    const assertionId = stableId("assertion", `${tenantId}:${repository}:${headSha}:Repository:github:repo:${repository}:DOCUMENTED_BY:Document:repo:${repository}:path:README.md:{}`);
-    const causalAssertionId = stableId("assertion", `${tenantId}:${repository}:${headSha}:Issue:github:issue:${repository}#7:INTRODUCED_BY:Commit:repo:${repository}:sha:${headSha}:{"reason":"The commit bypassed the app guard."}`);
+    const assertionId = stableId("assertion", `${tenantId}:${repository}:${headSha}:${ONTOLOGY_REGISTRY_VERSION}:evidence-causal-fixture:Repository:github:repo:${repository}:DOCUMENTED_BY:Document:repo:${repository}:path:README.md:{}`);
+    const causalAssertionId = stableId("assertion", `${tenantId}:${repository}:${headSha}:${ONTOLOGY_REGISTRY_VERSION}:evidence-causal-fixture:Issue:github:issue:${repository}#7:INTRODUCED_BY:Commit:repo:${repository}:sha:${headSha}:{"reason":"The commit bypassed the app guard."}`);
     await store.executeCommand(tenantId, "svc:api", {
       type: "grant_repository_access", repository, principalId: "user:curator", role: "writer"
     }, "2026-07-20T00:03:30.000Z");

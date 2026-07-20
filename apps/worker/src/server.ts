@@ -13,6 +13,7 @@ import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
   analyzeSourceBlob,
+  assertionEvidenceFingerprint,
   assertionsFromGeneratedOntology,
   codeCheckpoint,
   languageForPath,
@@ -23,6 +24,7 @@ import {
   type OntologyBuildRequest,
   type OntologyGraph,
   type OntologyIngestPlan,
+  type OntologySourceIngestResult,
   type RepositorySnapshot
 } from "@jina/ontology";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
@@ -227,8 +229,8 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
   const historyLimit = positiveInt(process.env.ONTOLOGY_HISTORY_LIMIT, 10_000);
-  const commits = await discoverNewCommits(work, repository, head, historyLimit);
-  const orderedShas = topologicalCommitOrder(commitSha, commits);
+  const discovery = await discoverNewCommits(work, repository, head, historyLimit);
+  const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
   const defaultBranch = typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
   let headPlan: OntologyIngestPlan | undefined;
   let parsedBlobCount = 0;
@@ -238,7 +240,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   let ownershipObservation: GitHubSourceObservation | undefined;
   const workItems = new Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>();
   for (const sha of orderedShas) {
-    const commit = commits.get(sha) ?? (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
+    const commit = discovery.commits.get(sha) ?? (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
     const snapshot = await repositorySnapshotFromGitHub({
       tenantId, repository, ref, taskId: work.task.id, commit,
       isHead: sha === commitSha, isDefaultRef: ref === defaultBranch
@@ -279,24 +281,44 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   if (!headPlan) throw new Error("head commit was not included in repository history ingestion");
   const observations: GitHubSourceObservation[] = await githubWorkItemObservations(tenantId, repository, workItems);
   if (ownershipObservation) observations.push(ownershipObservation);
+  let sourceResult: OntologySourceIngestResult = {
+    observationCount: 0,
+    assertionCount: 0,
+    newObservationCount: 0,
+    updatedObservationCount: 0,
+    confirmedObservationCount: 0
+  };
   if (observations.length > 0) {
-    await internalApiJson("/internal/ontology/ingest/github", {
+    sourceResult = await internalApiJson<OntologySourceIngestResult>("/internal/ontology/ingest/github", {
       taskId: work.task.id, ...lease, observations
     });
   }
+  const currentCodeCheckpoint = codeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_PARSER_VERSION);
+  const evidenceFingerprint = assertionEvidenceFingerprint(currentCodeCheckpoint, observations);
+  const newCommitCount = orderedShas.filter((sha) => !discovery.knownCommitShas.has(sha)).length;
+  const confirmedCommitCount = orderedShas.length - newCommitCount;
   return {
+    effect: newCommitCount > 0 || parsedBlobCount > 0 || sourceResult.newObservationCount > 0 || sourceResult.updatedObservationCount > 0
+      ? "changed"
+      : "confirmed",
     observationId: headPlan.observationId,
     commitSha,
     fileCount,
-    ingestedCommitCount: orderedShas.length,
+    ingestedCommitCount: newCommitCount,
+    newCommitCount,
+    confirmedCommitCount,
     workItemObservationCount: observations.length,
+    newWorkItemObservationCount: sourceResult.newObservationCount,
+    updatedWorkItemObservationCount: sourceResult.updatedObservationCount,
+    confirmedWorkItemObservationCount: sourceResult.confirmedObservationCount,
     discoveredBlobCount,
     reusedBlobCount,
     parsedBlobCount,
     analysisPaths: headPlan.changedPaths,
     changeCount: headPlan.changes.length,
     parserVersion: ONTOLOGY_PARSER_VERSION,
-    codeCheckpoint: codeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_PARSER_VERSION)
+    codeCheckpoint: currentCodeCheckpoint,
+    evidenceFingerprint
   };
 }
 
@@ -305,11 +327,12 @@ async function discoverNewCommits(
   repository: string,
   head: Record<string, unknown>,
   limit: number
-): Promise<Map<string, Record<string, unknown>>> {
+): Promise<{ readonly commits: Map<string, Record<string, unknown>>; readonly knownCommitShas: Set<string> }> {
   const headSha = requiredGitSha(head.sha, "GitHub head SHA");
   const commits = new Map<string, Record<string, unknown>>([[headSha, head]]);
   const pending = [headSha];
   const expanded = new Set<string>();
+  const knownCommitShas = new Set<string>();
   while (pending.length > 0) {
     const batch = pending.splice(0, 25).filter((sha) => !expanded.has(sha));
     if (batch.length === 0) continue;
@@ -320,6 +343,7 @@ async function discoverNewCommits(
     for (const sha of batch) {
       expanded.add(sha);
       if (knownSet.has(sha)) {
+        knownCommitShas.add(sha);
         if (sha !== headSha) commits.delete(sha);
         continue;
       }
@@ -333,7 +357,7 @@ async function discoverNewCommits(
       }
     }
   }
-  return commits;
+  return { commits, knownCommitShas };
 }
 
 function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Record<string, unknown>>): string[] {
@@ -448,10 +472,11 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
   const repository = requiredString(work.task.metadata.repository, "task repository");
   const ref = requiredString(work.task.metadata.ref, "task ref");
   const commitSha = requiredGitSha(work.task.metadata.commitSha, "task commitSha");
+  const evidenceFingerprint = requiredString(work.task.metadata.evidenceFingerprint, "task evidenceFingerprint");
   const focusPaths = stringArray(work.task.metadata.analysisPaths);
   const cache = await internalApiJson<{ readonly cached: Record<string, unknown> | null }>(
     "/internal/ontology/assertions/cached",
-    { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitSha }
+    { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitSha, evidenceFingerprint }
   );
   if (cache.cached) return { outcome: "done", result: { cached: cache.cached } };
   // A generator/schema version change intentionally performs one full semantic
@@ -471,6 +496,7 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
       generatedAt: graph.generatedAt,
       generatorVersion: ONTOLOGY_GENERATOR_VERSION,
       registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      evidenceFingerprint,
       model: graph.generator.model,
       ...(graph.generator.sandboxId ? { sandboxId: graph.generator.sandboxId } : {}),
       summary: graph.summary,

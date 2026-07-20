@@ -82,6 +82,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
       type: string;
       kind: string;
       description: string;
+      triggeredBy: Array<{ source: string; description: string; workflows: string[]; conditions: string[] }>;
       dependsOn: Array<{ taskType: string; relationships: string[]; conditions: string[] }>;
       requiredBy: Array<{ taskType: string; relationships: string[] }>;
     }>>
@@ -95,6 +96,18 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
     ]
   );
   assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
+  assert.deepEqual(
+    taskTypes.find((definition) => definition.type === "ontology_ingest")?.triggeredBy,
+    [{
+      source: "POST /ontology/build",
+      description: "Creates and queues the first executable Ontology task.",
+      workflows: ["ontology_build"],
+      conditions: []
+    }]
+  );
+  assert.equal(taskTypes.find((definition) => definition.type === "ontology_assert")?.triggeredBy[0]?.source, "POST /ontology/build");
+  assert.equal(taskTypes.find((definition) => definition.type === "ontology_project")?.triggeredBy[0]?.source, "POST /ontology/build");
+  assert.equal(taskTypes.find((definition) => definition.type === "publish")?.triggeredBy[0]?.source, "GitHub pull_request webhook");
   assert.deepEqual(
     taskTypes.find((definition) => definition.type === "ontology_project")?.dependsOn,
     [{ taskType: "ontology_assert", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }]
@@ -197,7 +210,8 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       reusedBlobCount: 0,
       parsedBlobCount: 2,
       parserVersion: ONTOLOGY_PARSER_VERSION,
-      codeCheckpoint: "code-checkpoint"
+      codeCheckpoint: "code-checkpoint",
+      evidenceFingerprint: "evidence-fixture"
     }), 200);
 
     const assertion = await claimTopic(baseUrl, "run-ontology-assert");
@@ -219,6 +233,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
           generatedAt: new Date().toISOString(),
           generatorVersion: "codex-assertions-v2",
           registryVersion: "ontology-registry-v1",
+          evidenceFingerprint: "evidence-fixture",
           model: "fixture",
           summary: "README documents the repository",
           rawOutput: {
@@ -242,6 +257,28 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     );
     assert.equal((ontology.latest?.nodes.length ?? 0) >= 4, true);
     assert.equal((ontology.latest?.edges.length ?? 0) >= 3, true);
+
+    const contextAnswer = await fetch(`${baseUrl}/ontology/ask`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "omxyz/ontology-fixture",
+        ref: "main",
+        question: "Where is main implemented?"
+      })
+    }).then((response) => response.json() as Promise<{
+      answer: string;
+      citedClaims: Array<{ text: string; citations: unknown[] }>;
+      calls: Array<{ template: string; items: Array<{ kind: string }> }>;
+      unresolvedAmbiguities: string[];
+      coverageGaps: unknown[];
+    }>);
+    assert.match(contextAnswer.answer, /main is function in src\/index\.ts/);
+    assert.equal(contextAnswer.citedClaims[0]?.citations.length, 1);
+    assert.equal(contextAnswer.calls[0]?.template, "structure");
+    assert.equal(contextAnswer.calls[0]?.items[0]?.kind, "symbol_definition");
+    assert.deepEqual(contextAnswer.unresolvedAmbiguities, []);
+    assert.deepEqual(contextAnswer.coverageGaps, []);
 
     const board = await fetch(`${baseUrl}/board`).then(
       (response) => response.json() as Promise<{ tasks: Array<{ id: string; type: string; status: string; metadata: Record<string, unknown> }> }>

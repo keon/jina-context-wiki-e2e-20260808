@@ -14,7 +14,7 @@ The implementation follows Repository Context Architecture v5.1 with three board
 
 `ontology_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
 
-The Task types page shows this declared topology in both directions: build depends on ingest/assert/project, assertion depends on ingest, and projection depends on assertion. This catalog view is workflow metadata and does not read or infer dependencies from live board task instances.
+The Task types page renders this declared topology as a workflow dependency tree, with prerequisite completion **unblocking** the waiting task, conditional links labeled inline, and redundant direct aggregate completion gates called out on the terminal node. Creation triggers are rendered separately on every task type: `POST /ontology/build` creates the aggregate and all three stage tasks, queues `ontology_ingest`, and leaves assertion/projection waiting on their declared prerequisites. `ontology_ingest` therefore has an intake trigger but no prerequisite **task**; making it depend on `ontology_build` would deadlock because that aggregate waits for ingestion, assertion, and projection to finish. The full registry shows creation triggers, prerequisite tasks, and downstream dependents separately. This catalog view is workflow metadata and does not read or infer dependencies from live board task instances.
 
 ## Separation of concerns
 
@@ -71,10 +71,11 @@ GitHub PRs and issues remain raw observations. Pure normalizers derive only expl
 - pattern-qualified `OWNED_BY` from CODEOWNERS.
 
 Commit authorship is derived from commits plus accepted identities and is not duplicated as an assertion.
+Ingest reports GitHub snapshots as `new`, `updated`, or `confirmed` independently from new commits and parsed/reused blobs. A PR or issue edit at an unchanged Git head therefore makes the ingest effect `changed` instead of being hidden as a ref confirmation. Ingest also emits a canonical evidence fingerprint over the code checkpoint and current GitHub/CODEOWNERS observations; the assertion cache identity includes that fingerprint plus generator and registry versions. A changed fingerprint creates a new immutable model-output generation and retracts active/proposed facts from the superseded generation before the new proposals can be reviewed.
 
 ### Semantic assertion generation
 
-The assertion worker checks out the immutable commit in Daytona and normally asks Codex only about added, modified, or renamed current paths. A generator/schema version change with an unchanged head intentionally performs one full semantic scan, then caches that generation. Every citation is checked against the checkout before completion. Raw model JSON is stored as a `model_output` observation before normalization.
+The assertion worker checks out the immutable commit in Daytona and normally asks Codex only about added, modified, or renamed current paths. Its cache identity is repository commit + generator version + registry version + evidence fingerprint, so a registry or source-evidence change cannot reuse an incompatible generation. Every citation is checked against the checkout before completion. Raw model JSON is stored as a `model_output` observation before normalization.
 
 Models never activate knowledge. All model relationships, including `INTRODUCED_BY`, enter as `proposed`. Causality requires a positive GitHub issue ID, a full commit SHA, a nonempty reason, and checked repository evidence explicitly naming the mechanism; temporal proximity or membership in a resolving PR is insufficient. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row. `GET /ontology/assertions` exposes repository-scoped summaries for review and production verification.
 
@@ -88,9 +89,9 @@ The project task uses queue-claim semantics (`FOR UPDATE SKIP LOCKED`) for canon
 4. folds append-only entity redirects and reconciles logical assertion collisions;
 5. performs reachability/recent-window code-plane GC and bounded rejected-model payload retention;
 6. acknowledges claimed outbox events;
-7. creates a new immutable dashboard graph generation.
+7. creates or reuses the immutable, content-addressed dashboard graph generation for the commit, projection version, and resulting canonical content.
 
-An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus reviewed `INTRODUCED_BY` commits, their associated introducing PRs, causal reason, evidence-generation commit, and checkout-validated evidence. It supports repository-scoped lookup by exact quoted text from an ingested issue title/body, issue number, PR number, or commit SHA prefix and retains the citations needed to explain every hop. Text first resolves to the canonical issue; causal traversal still follows accepted assertions rather than inferring from lexical similarity. The graph persists the same Issue → Commit edge, reason, and evidence. Rebuilding a trace never creates an assertion.
+An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus reviewed `INTRODUCED_BY` commits, their associated introducing PRs, causal reason, evidence-generation commit, and checkout-validated evidence. It supports repository-scoped lookup by quoted or unquoted text from an ingested issue title/body, issue number, PR number, or commit SHA prefix and retains the citations needed to explain every hop. An exact title wins; multiple non-exact matches are returned as an ambiguity instead of silently selecting the first issue. Text first resolves to the canonical issue; causal traversal still follows accepted assertions rather than inferring from lexical similarity. The graph persists the same Issue → Commit edge, reason, and evidence. Rebuilding a trace never creates an assertion.
 
 Every projected graph item carries evidence. Code and accepted model facts keep
 their checkout-validated `path:line` citations. Deterministic GitHub facts that
@@ -102,7 +103,7 @@ Bulk history ingestion bypasses per-blob outbox fan-out; the final project rebui
 
 The ontology worker also drains canonical events while idle. Repository events lease only that repository and fan affected repository-wide issue facts across all of its refs before acknowledgment; tenant-global identity or redirect events fan out across current repositories. Tombstones with no remaining ref are acknowledged after their command transaction has purged the projections. A repository rebuild can never acknowledge another repository's pending event.
 
-An unchanged ref is a no-op through the expensive path: the head tree is checked once, every blob analysis is reused, the generator checkpoint returns cached proposals without starting Daytona, and manifest/search rebuilding is skipped when no scoped canonical event is pending. The project task still writes a small immutable graph generation so its board result remains independently inspectable; its event reports `rebuilt: false` and `processedEventCount: 0`.
+An unchanged ref is a no-op through the expensive path: the head is reported as confirmed rather than newly ingested, every blob analysis is reused, the generator checkpoint returns cached proposals without starting Daytona, and manifest/search rebuilding is skipped when no scoped canonical event is pending. Stage results carry `effect: changed | confirmed | noop`. Projection content is addressed independently of its worker task, so an unchanged result returns the existing graph ID and the graph store performs no duplicate write.
 
 ## Canonical storage
 
@@ -161,14 +162,16 @@ Models cannot compose database queries. The API exposes five deterministic templ
 | Template | Answer path |
 | --- | --- |
 | `issue_trace` | issue title/body phrase, issue number, PR, or commit → materialized issue → resolving and introducing PRs/commits → causal reason/evidence and changes |
-| `structure` | name/moniker → typed edges inside the selected ref manifest |
+| `structure` | validated name/moniker/path → definitions and typed edges inside the selected ref manifest |
 | `change` | PR → included commits → first-parent changes → changed symbols → inbound affected surface |
 | `intent` | file history → commits → PRs → resolved/referenced issues → raw observation text |
 | `ownership` | active/source ownership by registry authority → recent commit authors via accepted identities |
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` is a thin classifier/composer over these five tools. It extracts issue numbers, exact quoted issue phrases, PRs, and commits and routes resolution/causality questions directly to `issue_trace`; it does not reconstruct that path with query-time assertion joins or an LLM. A quoted phrase is matched case-insensitively against ingested issue titles and bodies inside the authorized repository. The dashboard renders resolution and causality chains, reasons, evidence, and provenance citations above the graph.
+`POST /ontology/ask` composes only these five tools. Its conservative planner extracts issue numbers, quoted or unquoted causal issue descriptions, PRs, commits, repository paths, and identifier-shaped symbols, then passes typed parameters instead of the whole English question to structural/change/ownership retrieval. PR change questions route to `change`; only causal or resolution traversal routes to `issue_trace`. Query-time synthesis returns `answer`, `citedClaims`, `calls`, `unresolvedAmbiguities`, and `coverageGaps`. Unsupported or uncovered questions say so instead of treating arbitrary nonempty search rows as an answer. This first planner remains deterministic; bounded model-based candidate selection is still required for ambiguous natural-language entities that cannot be extracted conservatively.
+
+The dashboard renders the direct answer and cited claims before the underlying retrieval calls. It also renders ambiguities and coverage gaps explicitly. Causation questions lead with the introducing PR and commit plus dedicated **Why** and **Evidence** fields; any later resolving PR is shown afterward as a later fix. An absent reviewed causal assertion is reported as unavailable rather than inferred from the later fix.
 
 ## Security
 

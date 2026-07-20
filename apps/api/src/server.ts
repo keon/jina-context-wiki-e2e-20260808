@@ -27,6 +27,7 @@ import {
   retrievalTemplateNames,
   ontologyTaskTypeDependencies,
   ontologyTaskTypeDefinitions,
+  ontologyTaskTypeTriggers,
   parseGeneratedOntology,
   type BlobAnalysis,
   type GitHubSourceObservation,
@@ -37,7 +38,7 @@ import {
   type RepositorySnapshot
 } from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
-import { prReviewTaskTypeDependencies } from "@jina/review";
+import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
@@ -226,7 +227,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/task-types") {
       json(response, 200, buildTaskTypeCatalog(
         [...taskTypeDefinitions, ...ontologyTaskTypeDefinitions],
-        [...prReviewTaskTypeDependencies, ...ontologyTaskTypeDependencies]
+        [...prReviewTaskTypeDependencies, ...ontologyTaskTypeDependencies],
+        [...prReviewTaskTypeTriggers, ...ontologyTaskTypeTriggers]
       ));
       return;
     }
@@ -603,7 +605,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       tenantId,
       requiredString(task.metadata.repository, "task.repository"),
       requiredGitSha(body.commitSha, "commitSha"),
-      ONTOLOGY_GENERATOR_VERSION
+      ONTOLOGY_GENERATOR_VERSION,
+      ONTOLOGY_REGISTRY_VERSION,
+      requiredString(body.evidenceFingerprint, "evidenceFingerprint")
     );
     json(response, 200, { cached: cached ?? null });
   }
@@ -756,6 +760,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             metadata: {
               commitSha,
               codeCheckpoint: requiredString(resultPayload.codeCheckpoint, "result.codeCheckpoint"),
+              evidenceFingerprint: requiredString(resultPayload.evidenceFingerprint, "result.evidenceFingerprint"),
               ...(childType === "ontology_assert" ? { analysisPaths } : {})
             }
           }, { actor: RUN_ACTOR, now }).state;
@@ -767,7 +772,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         const assertionResult = cached
           ? safeResultPayload(cached)
           : await ontologyStore.saveAssertionBatch(parseOntologyAssertionBatch(body.assertionBatch, currentTask, tenantId));
-        eventPayload = safeResultPayload(assertionResult);
+        eventPayload = {
+          ...safeResultPayload(assertionResult),
+          effect: assertionResult.cached ? "confirmed" : "changed"
+        };
         const projectionTask = board.tasks.find((candidate) =>
           candidate.parentTaskId === currentTask.parentTaskId && candidate.type === "ontology_project"
         );
@@ -785,6 +793,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           requiredString(currentTask.metadata.ref, "task.ref"),
           now
         ) };
+        eventPayload = { ...eventPayload, effect: eventPayload.rebuilt ? "changed" : "noop" };
         graph = await ontologyStore.project({
           tenantId,
           repository: requiredString(currentTask.metadata.repository, "task.repository"),
@@ -1170,6 +1179,8 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
   if (!isRecord(value)) throw new Error("assertionBatch must be an object");
   const commitSha = requiredGitSha(value.commitSha, "assertionBatch.commitSha");
   if (commitSha !== task.metadata.commitSha) throw new Error("assertion batch commit does not match task source");
+  const evidenceFingerprint = requiredString(value.evidenceFingerprint, "assertionBatch.evidenceFingerprint");
+  if (evidenceFingerprint !== task.metadata.evidenceFingerprint) throw new Error("assertion batch evidence does not match task source");
   const repository = requiredString(task.metadata.repository, "task.repository");
   const rawOutput = parseGeneratedOntology(value.rawOutput);
   return {
@@ -1181,6 +1192,7 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
     generatedAt: requiredString(value.generatedAt, "assertionBatch.generatedAt"),
     generatorVersion: ONTOLOGY_GENERATOR_VERSION,
     registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    evidenceFingerprint,
     model: requiredString(value.model, "assertionBatch.model"),
     ...(typeof value.sandboxId === "string" && value.sandboxId ? { sandboxId: value.sandboxId } : {}),
     summary: requiredString(value.summary, "assertionBatch.summary"),

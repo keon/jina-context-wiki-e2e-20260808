@@ -173,6 +173,10 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
   assert.equal(completions[1]?.leaseId, "lease-2");
   const ingestionResult = completions[1]?.result as Record<string, unknown>;
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
+  assert.equal(ingestionResult.effect, "changed");
+  assert.equal(ingestionResult.ingestedCommitCount, 1);
+  assert.equal(ingestionResult.newCommitCount, 1);
+  assert.equal(ingestionResult.confirmedCommitCount, 0);
   assert.equal(ingestionResult.parsedBlobCount, 1);
   assert.equal(ingestionResult.reusedBlobCount, 0);
   assert.equal(projectionDrains > 0, true);

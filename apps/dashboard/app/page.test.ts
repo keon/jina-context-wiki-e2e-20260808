@@ -17,6 +17,19 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /latestRequestByScope/);
   assert.match(html, /showingHistory \? partition\.history : partition\.current/);
   assert.match(html, /function renderTaskTypes/);
+  assert.match(html, /Workflow dependency trees/);
+  assert.match(html, /completing a prerequisite unblocks/);
+  assert.match(html, /aria-label="Task dependency trees"/);
+  assert.match(html, /function buildWorkflowTrees/);
+  assert.match(html, /function renderWorkflowTrees/);
+  assert.match(html, /function renderWorkflowBranch/);
+  assert.match(html, /function workflowTrigger/);
+  assert.match(html, /function taskTypeTriggerGroup/);
+  assert.match(html, /Triggered by/);
+  assert.match(html, /Prerequisite tasks/);
+  assert.match(html, /No prerequisite task/);
+  assert.match(html, /↓ unblocks/);
+  assert.match(html, /Also directly waits for:/);
   assert.match(html, /function taskTypeDependencyGroups/);
   assert.match(html, /Depends on/);
   assert.match(html, /Required by/);
@@ -26,12 +39,23 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /aria-label="Repository ontology graph"/);
   assert.match(html, /Ask with citations/);
   assert.match(html, /function renderIssueTrace/);
+  assert.match(html, /function issueTraceSections/);
+  assert.match(html, /function renderCauseTrace/);
+  assert.match(html, /function traceEvidence/);
   assert.match(html, /function appendTraceCitations/);
-  assert.match(html, /Causal evidence:/);
+  assert.match(html, /trace-fact-label/);
+  assert.match(html, /"Why"/);
+  assert.match(html, /"Evidence"/);
+  assert.match(html, /"Later fix"/);
   assert.match(html, /was caused by/);
   assert.match(html, /No verified pull request or commit relationship has been asserted/);
   assert.match(html, /\/ontology\/ask/);
   assert.match(html, /function renderContextResults/);
+  assert.match(html, /function renderContextAnswer/);
+  assert.match(html, /function renderContextNotices/);
+  assert.match(html, /Cited claims/);
+  assert.match(html, /Coverage gap/);
+  assert.match(html, /item\.data\.excerpt/);
   assert.doesNotMatch(html, /function renderTaskList/);
   assert.match(html, /Dependencies & relationships/);
   assert.match(html, /Comments & activity/);
@@ -59,4 +83,86 @@ test("dashboard page renders clickable task detail affordances", () => {
   ]);
   assert.deepEqual(result.current.map((task) => task.id), ["new-root", "new-project", "issue"]);
   assert.deepEqual(result.history.map((task) => task.id), ["old-root", "old-project", "old-review"]);
+
+  const workflowSource = script.match(/function buildWorkflowTrees\(definitions\) \{[\s\S]+?\nfunction renderWorkflowTrees/)?.[0]
+    .replace(/\nfunction renderWorkflowTrees$/, "");
+  assert.ok(workflowSource);
+  const buildWorkflowTrees = new Function(`${workflowSource}; return buildWorkflowTrees;`)() as (definitions: unknown[]) => Array<{
+    name: string;
+    roots: Array<{
+      type: string;
+      definition: { triggeredBy: Array<{ source: string }> };
+      collapsedDependencies: Array<{ from: string }>;
+      children: Array<{ edge: { conditions: string[] }; node: any }>;
+    }>;
+  }>;
+  const dependencies = {
+    ontology_build: [
+      { taskType: "ontology_ingest", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] },
+      { taskType: "ontology_assert", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] },
+      { taskType: "ontology_project", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }
+    ],
+    ontology_assert: [{ taskType: "ontology_ingest", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }],
+    ontology_project: [{ taskType: "ontology_assert", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }],
+    pr_review: [
+      { taskType: "review_pass", relationships: ["blocks"], workflows: ["pr_review"], required: true, conditions: [] },
+      { taskType: "publish", relationships: ["blocks", "publishes"], workflows: ["pr_review"], required: true, conditions: [] }
+    ],
+    review_pass: [{ taskType: "context", relationships: ["context_for"], workflows: ["pr_review"], required: true, conditions: ["when external context is requested"] }],
+    publish: [{ taskType: "review_pass", relationships: ["blocks"], workflows: ["pr_review"], required: true, conditions: [] }]
+  } as Record<string, unknown[]>;
+  const definitions = [
+    "pr_review", "review_pass", "context", "publish",
+    "ontology_build", "ontology_ingest", "ontology_assert", "ontology_project"
+  ].map((type) => ({
+    type,
+    kind: type.endsWith("build") || type === "pr_review" ? "aggregate" : "dispatchable",
+    description: type,
+    triggeredBy: type === "ontology_ingest" ? [{
+      source: "POST /ontology/build",
+      description: "Creates and queues the first executable Ontology task.",
+      workflows: ["ontology_build"],
+      conditions: []
+    }] : [],
+    dependsOn: dependencies[type] || []
+  }));
+  const workflows = buildWorkflowTrees(definitions);
+  assert.deepEqual(workflows.map((workflow) => workflow.name), ["pr_review", "ontology_build"]);
+
+  const reviewRoot = workflows[0]?.roots[0];
+  assert.equal(reviewRoot?.type, "context");
+  assert.deepEqual(reviewRoot?.children[0]?.edge.conditions, ["when external context is requested"]);
+  assert.equal(reviewRoot?.children[0]?.node.type, "review_pass");
+  assert.equal(reviewRoot?.children[0]?.node.children[0]?.node.type, "publish");
+  assert.equal(reviewRoot?.children[0]?.node.children[0]?.node.children[0]?.node.type, "pr_review");
+  assert.deepEqual(reviewRoot?.children[0]?.node.children[0]?.node.children[0]?.node.collapsedDependencies.map((edge: { from: string }) => edge.from), ["review_pass"]);
+
+  const ontologyRoot = workflows[1]?.roots[0];
+  assert.equal(ontologyRoot?.type, "ontology_ingest");
+  assert.equal(ontologyRoot?.definition.triggeredBy[0]?.source, "POST /ontology/build");
+  assert.equal(ontologyRoot?.children[0]?.node.type, "ontology_assert");
+  assert.equal(ontologyRoot?.children[0]?.node.children[0]?.node.type, "ontology_project");
+  assert.equal(ontologyRoot?.children[0]?.node.children[0]?.node.children[0]?.node.type, "ontology_build");
+  assert.deepEqual(
+    ontologyRoot?.children[0]?.node.children[0]?.node.children[0]?.node.collapsedDependencies.map((edge: { from: string }) => edge.from),
+    ["ontology_ingest", "ontology_assert"]
+  );
+
+  const issueTraceOrderingSource = script.match(/function isCausationQuestion\(question\) \{[\s\S]+?\n\}\n\nfunction renderIssueTrace/)?.[0]
+    .replace(/\n\nfunction renderIssueTrace$/, "");
+  assert.ok(issueTraceOrderingSource);
+  const issueTraceSections = new Function(`${issueTraceOrderingSource}; return issueTraceSections;`)() as (
+    trace: Record<string, unknown>,
+    question: string
+  ) => Array<{ kind: string; value: { sha?: string; pullRequestNumber?: number } }>;
+  const issueTrace = {
+    introducedBy: [{ sha: "334234bffedc" }],
+    resolutions: [{ pullRequestNumber: 5 }]
+  };
+  assert.deepEqual(
+    issueTraceSections(issueTrace, 'Which PR or commit caused "Administrators cannot delete resources", and why?')
+      .map((section) => section.kind),
+    ["cause", "resolution"]
+  );
+  assert.equal(issueTraceSections(issueTrace, "Which PR fixed the issue?")[0]?.value.pullRequestNumber, 5);
 });

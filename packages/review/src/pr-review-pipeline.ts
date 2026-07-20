@@ -70,6 +70,35 @@ export const prReviewTaskTypeDependencies = [
   }
 ] as const;
 
+/** Intake/runtime events that create executable workflow tasks. */
+export const prReviewTaskTypeTriggers = [
+  {
+    workflow: "pr_review",
+    taskType: "pr_review",
+    source: "GitHub pull_request webhook",
+    description: "Creates the aggregate review workflow parent for a pull-request revision."
+  },
+  {
+    workflow: "pr_review",
+    taskType: "review_pass",
+    source: "GitHub pull_request webhook",
+    description: "Creates and queues the first executable review task."
+  },
+  {
+    workflow: "pr_review",
+    taskType: "publish",
+    source: "GitHub pull_request webhook",
+    description: "Creates the publish task in a waiting state; review_pass completion unblocks it."
+  },
+  {
+    workflow: "pr_review",
+    taskType: "context",
+    source: "review_pass context request",
+    description: "Creates a context task when the running review needs external information.",
+    condition: "when external context is requested"
+  }
+] as const;
+
 export interface PrReviewInput {
   readonly tenantId: string;
   readonly repository: string;

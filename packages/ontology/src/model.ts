@@ -97,6 +97,8 @@ export function createOntologyGraph(input: {
   readonly model: string;
   readonly sandboxId?: string;
   readonly generated: GeneratedOntology;
+  /** Projection read models are keyed by their canonical content instead of the worker task that rebuilt them. */
+  readonly contentAddressed?: boolean;
   /** Assertion-generation observations may be valid with no supported semantic relationship. */
   readonly allowEmptyEdges?: boolean;
 }): OntologyGraph {
@@ -117,8 +119,11 @@ export function createOntologyGraph(input: {
     throw new Error("generated ontology must contain at least two nodes and one valid edge");
   }
 
+  const generationIdentity = input.contentAddressed
+    ? `${input.request.tenantId}:${input.request.repository}:${input.request.ref}:${input.commitSha}:${input.model}:${stableId("content", canonicalGraphJson({ summary: input.generated.summary.trim(), nodes, edges: dedupeEdges(edges) }))}`
+    : `${input.request.tenantId}:${input.request.repository}:${input.commitSha}:${input.request.taskId}`;
   return {
-    id: stableId("graph", `${input.request.tenantId}:${input.request.repository}:${input.commitSha}:${input.request.taskId}`),
+    id: stableId("graph", generationIdentity),
     tenantId: input.request.tenantId,
     repository: input.request.repository,
     ref: input.request.ref,
@@ -133,6 +138,18 @@ export function createOntologyGraph(input: {
     nodes,
     edges: dedupeEdges(edges)
   };
+}
+
+function canonicalGraphJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => canonicalGraphJson(item)).sort();
+    return `[${items.join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalGraphJson(record[key])}`).join(",")}}`;
+  }
+  return value === undefined ? "undefined" : JSON.stringify(value);
 }
 
 export function parseGeneratedOntology(value: unknown): GeneratedOntology {
