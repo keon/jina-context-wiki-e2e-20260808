@@ -17,12 +17,12 @@ const dispatchableRules: readonly TransitionRule[] = [
   { from: ["queued"], to: ["in_progress"], actors: ["run", "reducer"] },
   { from: ["in_progress"], to: ["done", "blocked", "failed"], actors: ["run"] },
   { from: activeStatuses, to: ["superseded"], actors: ["system", "github"] },
-  { from: activeStatuses, to: ["canceled"], actors: ["user", "system"] }
+  { from: activeStatuses, to: ["canceled"], actors: ["user", "system", "reducer"] }
 ];
 
 const transitionRules: Record<TaskKind, readonly TransitionRule[]> = {
   aggregate: [
-    { from: ["triage", "blocked"], to: ["done", "blocked"], actors: ["reducer", "system"] },
+    { from: ["triage", "blocked"], to: ["done", "blocked", "failed"], actors: ["reducer", "system"] },
     { from: ["triage", "blocked"], to: ["superseded"], actors: ["system", "github"] },
     { from: ["triage", "blocked"], to: ["canceled"], actors: ["user", "system"] }
   ],
@@ -34,7 +34,7 @@ const transitionRules: Record<TaskKind, readonly TransitionRule[]> = {
   waitpoint: [
     { from: ["triage"], to: ["blocked"], actors: ["system", "reducer"] },
     { from: ["blocked"], to: ["done", "canceled"], actors: ["user"] },
-    { from: ["triage", "blocked"], to: ["superseded"], actors: ["system", "github"] }
+    { from: ["triage", "blocked"], to: ["superseded"], actors: ["system", "github", "reducer"] }
   ]
 };
 

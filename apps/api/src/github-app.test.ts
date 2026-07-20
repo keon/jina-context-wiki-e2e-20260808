@@ -232,6 +232,33 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
   }
 });
 
+test("a new ontology attempt supersedes older active work for the same repository ref", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    for (const requestKey of ["first", "second", "second"]) {
+      const response = await fetch(`${baseUrl}/ontology/build`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ repository: "omxyz/ontology-fixture", ref: "main", requestKey })
+      });
+      assert.equal(response.status, 202);
+    }
+    const board = await fetch(`${baseUrl}/board`).then((response) => response.json() as Promise<{
+      tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
+    }>);
+    const first = board.tasks.filter((task) => task.metadata.requestKey === "first");
+    const second = board.tasks.filter((task) => task.metadata.requestKey === "second");
+    assert.equal(first.length, 4);
+    assert.equal(first.every((task) => task.status === "superseded"), true);
+    assert.equal(second.length, 4, "an idempotent request key does not duplicate the attempt");
+    assert.equal(second.find((task) => task.type === "ontology_ingest")?.status, "queued");
+    assert.equal(second.some((task) => task.status === "blocked"), false);
+  } finally {
+    await close(server);
+  }
+});
+
 test("durable workers can drain review and publish topics", async () => {
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
   const baseUrl = await listen(server);

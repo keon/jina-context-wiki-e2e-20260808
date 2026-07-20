@@ -32,7 +32,7 @@ export interface ProductionAcceptanceSummary {
  */
 export function productionAcceptanceExitCode(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
-  if (/ended as|timed out|missing from the board/.test(message)) return 20;
+  if (/ended as|timed out|missing from the board|retains blocked ontology tasks/.test(message)) return 20;
   if (/latest ontology graph|ontology\.latest/.test(message)) return 21;
   if (/ontology graph is empty/.test(message)) return 22;
   if (/ontology graph contains uncited/.test(message)) return 23;
@@ -70,6 +70,7 @@ export async function runProductionOntologyAcceptance(
   const deadline = Date.now() + timeoutMs;
   let lastStatus = "";
   let lastTaskSummary = "";
+  let completedBoardTasks: unknown[] | undefined;
 
   while (Date.now() < deadline) {
     const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
@@ -85,7 +86,10 @@ export async function runProductionOntologyAcceptance(
     if (status !== lastStatus) {
       lastStatus = status;
     }
-    if (status === "done") break;
+    if (status === "done") {
+      completedBoardTasks = tasks;
+      break;
+    }
     if (TERMINAL_FAILURES.has(status)) {
       const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
       throw new Error(`production ontology task ${taskId} ended as ${status} (${taskSummary}${failureSummary})`);
@@ -97,6 +101,10 @@ export async function runProductionOntologyAcceptance(
     const tasks = requiredArray(board.tasks, "board.tasks");
     const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
     throw new Error(`production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`);
+  }
+  const blockedTaskIds = blockedOntologyTaskIds(completedBoardTasks ?? [], repository, ref);
+  if (blockedTaskIds.length > 0) {
+    throw new Error(`production board retains blocked ontology tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`);
   }
 
   const ontology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
@@ -139,6 +147,14 @@ export async function runProductionOntologyAcceptance(
     edgeCount: edges.length,
     citationCount: citations.length
   };
+}
+
+export function blockedOntologyTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
+  return tasks.flatMap((task) => {
+    if (!isRecord(task) || task.status !== "blocked" || typeof task.type !== "string" || !task.type.startsWith("ontology_")) return [];
+    const metadata = isRecord(task.metadata) ? task.metadata : {};
+    return metadata.repository === repository && metadata.ref === ref && typeof task.id === "string" ? [task.id] : [];
+  });
 }
 
 async function apiJson(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {

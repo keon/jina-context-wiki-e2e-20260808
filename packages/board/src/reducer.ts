@@ -1,7 +1,7 @@
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskDependencyDraft, TaskId } from "./dependencies.js";
 import { isTerminalFailure, isTerminalTaskStatus, type TaskStatus } from "./task-status.js";
-import { createBoardTask, type BoardTask } from "./tasks.js";
+import type { BoardTask } from "./tasks.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
@@ -136,7 +136,8 @@ export function reduceBoard(state: BoardState, now: IsoTimestamp): BoardState {
 
   while (changed) {
     let step = blockWaitpointTasks(next, now);
-    step = escalateFailedDependencies(step, now);
+    step = terminateFailedDependencyTasks(step, now);
+    step = supersedeOrphanedRecoveryTasks(step, now);
     step = completeReadyAggregateTasks(step, now);
     step = queueReadyDispatchableTasks(step, now);
     changed = step !== next;
@@ -320,7 +321,7 @@ function blockWaitpointTasks(state: BoardState, now: IsoTimestamp): BoardState {
   return next;
 }
 
-function escalateFailedDependencies(state: BoardState, now: IsoTimestamp): BoardState {
+function terminateFailedDependencyTasks(state: BoardState, now: IsoTimestamp): BoardState {
   let next = state;
 
   for (const task of state.tasks) {
@@ -340,36 +341,22 @@ function escalateFailedDependencies(state: BoardState, now: IsoTimestamp): Board
       continue;
     }
 
-    next = transitionBoardTask(next, task.id, "blocked", now);
-
-    const decisionId = entityId<"task">(`${task.id}:unblock`);
-    next = addTask(
-      next,
-      createBoardTask({
-        id: decisionId,
-        type: "human_decision",
-        title: `Decide how to unblock: ${task.title}`,
-        assigneeRole: "human",
-        dedupeKey: `${task.dedupeKey}:unblock`,
-        now,
-        required: false,
-        parentTaskId: task.id,
-        ...(task.epoch !== undefined ? { epoch: task.epoch } : {})
-      })
-    );
-    next = addDependency(
-      next,
-      {
-        taskId: task.id,
-        dependsOnTaskId: decisionId,
-        relationship: "relates_to",
-        required: false,
-        blocksParentCompletion: false
-      },
-      now
-    );
+    next = transitionBoardTask(next, task.id, task.kind === "aggregate" ? "failed" : "canceled", now);
   }
 
+  return next;
+}
+
+/** Cleans up recovery waitpoints emitted by older reducer versions. */
+function supersedeOrphanedRecoveryTasks(state: BoardState, now: IsoTimestamp): BoardState {
+  let next = state;
+  for (const task of state.tasks) {
+    if (task.type !== "human_decision" || isTerminalTaskStatus(task.status) || !task.parentTaskId) continue;
+    const parent = findTask(next, task.parentTaskId);
+    if (parent && isTerminalTaskStatus(parent.status)) {
+      next = transitionBoardTask(next, task.id, "superseded", now);
+    }
+  }
   return next;
 }
 

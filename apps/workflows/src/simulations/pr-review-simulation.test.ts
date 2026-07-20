@@ -25,7 +25,7 @@ const BASE_CONTEXT: GitHubWebhookIngestContext = {
 runHappyPathWithContextHandoff();
 runDuplicatePrWebhookDoesNotDuplicateBoard();
 runSupersessionMidReview();
-runFailedContextEscalatesToHumanDecision();
+runFailedContextTerminatesAutomatedDependents();
 runBudgetExhaustionSkipsContext();
 runTransitionLegality();
 runBillingCreditMath();
@@ -123,7 +123,7 @@ function runSupersessionMidReview(): void {
   assert(state.findingThreads[0]?.lastSeenHeadSha === "def456", "finding thread tracks the latest head SHA");
 }
 
-function runFailedContextEscalatesToHumanDecision(): void {
+function runFailedContextTerminatesAutomatedDependents(): void {
   const clock = deterministicClock();
   const context: GitHubWebhookIngestContext = {
     ...BASE_CONTEXT,
@@ -135,29 +135,16 @@ function runFailedContextEscalatesToHumanDecision(): void {
   state = drainRequiredStep(state, clock); // research fails: egress disabled
 
   assertTaskStatus(state, "context", "failed");
-  assertTaskStatus(state, "review_pass", "blocked");
-  assertTaskStatus(state, "pr_review", "blocked");
+  assertTaskStatus(state, "review_pass", "canceled");
+  assertTaskStatus(state, "publish", "canceled");
+  assertTaskStatus(state, "pr_review", "failed");
 
   const decisions = findTasksByType(state.board, "human_decision");
-  assert(decisions.length > 0, "a failed required dependency creates a human_decision task");
-  assert(
-    decisions.every((decision) => decision.status === "blocked"),
-    "human_decision tasks wait as blocked waitpoints"
-  );
+  assert(decisions.length === 0, "generic dependency failure does not invent manual recovery work");
   assert(
     state.board.events.some((event) => event.type === "context.failed"),
     "the context failure is on the task timeline"
   );
-
-  // Only a user may complete a human decision.
-  const decision = decisions[0];
-  assert(decision !== undefined, "expected a human decision task");
-  const byUser = applyCommand(
-    state.board,
-    { command: "TransitionTask", taskId: decision.id, toStatus: "done" },
-    { actor: { type: "user", id: "keon" }, now: clock() }
-  );
-  assert(byUser.accepted, "a user can complete a human_decision");
 }
 
 function runBudgetExhaustionSkipsContext(): void {

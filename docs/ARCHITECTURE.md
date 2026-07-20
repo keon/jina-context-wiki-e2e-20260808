@@ -7,11 +7,19 @@
 The current repository implementation is configured to run as four Cloud Run services backed by one Cloud SQL PostgreSQL 17 instance:
 
 - `jina-api` verifies GitHub webhooks, applies board commands, runs the readiness reducer, and owns short lease/completion transactions.
-- `jina-dashboard` serves the board, task-type catalog, task details, Ontology visualization, and fixed-template cited context queries. Direct Cloud Run IAP authenticates browser users; the server-side proxy forwards the verified email as the application principal and adds the API service credential.
+- `jina-dashboard` serves the current board, retained task-attempt history, task-type catalog, task details, Ontology visualization, and fixed-template cited context queries. Direct Cloud Run IAP authenticates browser users; the server-side proxy forwards the verified email as the application principal and adds the API service credential.
 - `jina-task-worker` polls for `run-review`, `run-research`, `run-publish`, and `run-cleanup` messages. Review fetches the PR diff from GitHub and calls OpenAI with a strict findings schema. Publish currently records an internal idempotent publication only.
 - `jina-ontology-worker` runs three board-visible chunks: raw-data aggregation, assertion derivation, and projection. Aggregation walks only the previously unseen commit-DAG portion, records immutable GitHub/Git observations, computes first-parent deltas, normalizes PR/issue/CODEOWNERS facts, and applies the tree-sitter structural parser only to unseen tenant/blob/parser pairs. Assertion generation checks out the pinned commit in Daytona, validates citations, records model output, and stores inference as proposed knowledge. Projection claims repository-scoped canonical events, rebuilds ref/search projections, reconciles redirects, applies retention, and creates the cited graph shown on the dashboard; the same worker continuously drains global and steady-state projection events while idle.
 
 The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Ontology uses relational canonical intake, code-plane, knowledge, audit, outbox, ACL, lifecycle, manifest, search, and graph tables in `jina_ontology`. Canonical operations and board completion are independently idempotent and lease-fenced, so a retry converges after a crash between their transactions.
+
+Automated dependency failures are terminal: the failed stage remains `failed`,
+dispatchable descendants become `canceled`, and the aggregate becomes `failed`.
+The generic board reducer never invents manual recovery work; a workflow must
+declare an actual human decision and its resolution command explicitly. Starting
+a new Ontology attempt supersedes older active tasks for the same tenant,
+repository, and ref. The board shows only the latest attempt while `/history`
+retains prior attempts for audit and debugging.
 
 ```text
 GitHub webhook -> API -> PostgreSQL board snapshot/outbox
@@ -382,7 +390,7 @@ Runs on every task transition, in the same transaction as the transition:
 
 1. For the transitioning task, if it reached a terminal status, find dependents (`task_dependencies.depends_on_task_id = task.id`).
 2. For each dependent whose required deps are all `done`: dispatchable tasks transition `triage|blocked -> queued` and insert an `outbox` row; aggregate tasks transition to `done`.
-3. If a **required** dependency reached `failed` or `canceled`, the dependent transitions to `blocked` and a linked `human_decision` task is created — dependents never wait forever on a dead dependency.
+3. If a **required** dependency reached `failed` or `canceled`, aggregate dependents transition to `failed` and other automated dependents transition to `canceled`. Manual recovery is workflow-owned and is never inferred from a generic dependency edge.
 
 The reducer is idempotent: a dependent already `queued`/terminal is skipped, and the outbox idempotency key prevents double-dispatch when two deps finish concurrently.
 
@@ -423,7 +431,7 @@ One Trigger.dev task type per work type: `run-review` and `run-publish` first, c
 6. Writes results back via commands: `task_events`, findings, gate results, `AttachArtifact`, and child tasks (validated). If it needs more context, it can create a `context` task, link the current task as dependent on it, transition the current task to `blocked`, mark the current `task_run` as `deferred`, and exit.
 7. For irreversible side effects (publish; future push/release), **re-checks currency** and uses an idempotency/publication key derived from `(task, head_sha)`.
 8. Transitions the task to a terminal status or a waitpoint status such as `blocked`; the reducer re-evaluates dependents, gates, and root completion.
-9. On failure: Trigger.dev retries per policy; on terminal failure, the run's failure hook marks the task `failed` and creates a linked `human_decision` task.
+9. On failure: Trigger.dev retries per policy; on terminal failure, the run's failure hook marks the task `failed` and lets the reducer terminate its automated dependents. A workflow may separately create an actionable `human_decision` with a concrete resolution command.
 
 ### Run responsibilities (review)
 
@@ -506,7 +514,7 @@ Command application is idempotent: the command is recorded before execution, rep
 
 ```text
 pr_review (aggregate — never queues or executes):
-  system/reducer: triage -> done | blocked
+  system/reducer: triage|blocked -> done | failed
   system/github:  triage|blocked -> superseded
   user/system:    triage|blocked -> canceled
 
@@ -533,6 +541,7 @@ issue_triage (manual — never queues automatically):
 human_decision (waitpoint — only a user completes it):
   system: triage -> blocked
   user:   blocked -> done | canceled
+  reducer: blocked -> superseded when its parent is terminal
 ```
 
 Future task types (`grounding`, `fix`, `finding`, and later build/test/docs/release tasks) need their own transition rules before their commands are enabled. All accepted transitions write one `task_events` row; invalid transitions return a conflict and write no partial state.
@@ -557,6 +566,7 @@ The Next.js dashboard is hosted on Vercel and talks only to the API server. It i
 Primary views:
 
 - PR review board (task columns)
+- retained workflow-attempt history
 - task tree and dependency graph
 - task detail timeline (`task_events`)
 - gate results and waivers
@@ -613,13 +623,13 @@ Metrics to track:
 
 - Webhook duplicate: no-op by delivery ID.
 - Board mutation committed but relay cannot reach Trigger.dev: the outbox row stays `pending` and retries; persistent failures move to `dead_lettered` and surface a repair task. Return 5xx only if the board mutation itself cannot be durably stored.
-- Trigger.dev run failure: retried per policy; terminal failure marks the task `failed` and creates a linked `human_decision` task.
-- Required dependency fails or is canceled: the reducer transitions dependents to `blocked` and creates a linked `human_decision` task.
+- Trigger.dev run failure: retried per policy; terminal failure marks the task `failed`; the reducer cancels automated descendants and fails their aggregate.
+- Required dependency fails or is canceled: automated descendants terminate; a human decision is created only by a workflow with an explicit recovery command.
 - GitHub API failure inside a run: retry with backoff; surface a `task_event` if exhausted.
-- Daytona sandbox create/clone failure: mark `review_checkouts` failed, mark the `review_pass` failed/blocked per retry policy, emit `review.checkout_failed`.
+- Daytona sandbox create/clone failure: mark `review_checkouts` failed, mark the `review_pass` failed after retries are exhausted, terminate its automated dependents, and emit `review.checkout_failed`.
 - Daytona teardown failure: mark `review_checkouts` leaked, emit metrics, schedule cleanup retry by `expires_at`.
 - Model failure: retry by provider policy; fail the run if exhausted.
-- Context source failure: keep the requesting review task `blocked` or fail the context task according to policy; surface source URLs, fetch errors, and retry controls on the task timeline.
+- Context source failure: retry according to source policy; when exhausted, fail the context task, cancel its automated dependents, fail the aggregate, and surface source URLs, fetch errors, and retry controls on the task timeline.
 - Publication failure: keep findings unpublished, expose retry (publication key makes retry a no-op/update).
 - PR synchronized during review: bump epoch, supersede prior-epoch tasks, cancel their runs, seed fresh review passes; currency checks make any racing run a no-op.
 - Budget exhausted: reject new `CreateTask` commands, emit a `task_event`, optionally create a `human_decision` task to raise the ceiling.

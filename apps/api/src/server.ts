@@ -8,6 +8,7 @@ import {
   markOutboxDispatched,
   renewOutboxLease,
   reduceBoard,
+  supersedeTaskTree,
   taskTypeDefinitions,
   type BoardTask,
   type BoardOutboxMessageId,
@@ -436,7 +437,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const assertionTaskId = entityId<"task">(`${taskKey}:assert`);
     const projectionTaskId = entityId<"task">(`${taskKey}:project`);
     const created = await mutate(async () => {
-      let board = applyCommand(intakeState.board, {
+      const createdAt = nowIso();
+      let board = supersedeTaskTree(intakeState.board, createdAt, (task) =>
+        task.type.startsWith("ontology_") &&
+        task.metadata.tenantId === tenantId &&
+        task.metadata.repository === repository &&
+        task.metadata.ref === ref &&
+        task.metadata.requestKey !== nonce
+      );
+      board = applyCommand(board, {
         command: "CreateTask",
         task: {
           id: taskId,
@@ -449,7 +458,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           metadata: { tenantId, repository, ref, requestKey: nonce }
         },
         blocksParentCompletion: false
-      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
+      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
       board = applyCommand(board, {
         command: "CreateTask",
         task: {
@@ -464,7 +473,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           required: true,
           metadata: { tenantId, repository, ref, requestKey: nonce }
         }
-      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
+      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
       board = applyCommand(board, {
         command: "CreateTask",
         task: {
@@ -486,7 +495,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           required: true,
           blocksParentCompletion: true
         }]
-      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
+      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
       board = applyCommand(board, {
         command: "CreateTask",
         task: {
@@ -508,8 +517,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           required: true,
           blocksParentCompletion: true
         }]
-      }, { actor: { type: "user", id: "ontology-api" }, now: nowIso() }).state;
-      board = reduceBoard(board, nowIso());
+      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
+      board = reduceBoard(board, createdAt);
       intakeState = { ...intakeState, board };
       await persist();
       return findTask(board, taskId);

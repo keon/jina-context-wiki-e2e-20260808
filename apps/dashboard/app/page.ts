@@ -33,6 +33,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .page-nav a { padding: .65rem .15rem .6rem; margin-right: 1rem; color: #78849a; text-decoration: none; font-size: .76rem; font-weight: 650; border-bottom: 2px solid transparent; }
   .page-nav a:hover { color: #c5ccda; }
   .page-nav a.active { color: #f1f3f7; border-bottom-color: #809cff; }
+  .page-note { margin: 0 0 1rem; color: #77839a; font-size: .72rem; }
   .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .85rem; align-items: start; }
   .column { border: 1px solid #202637; border-radius: .8rem; background: rgb(15 19 28 / 78%); padding: .65rem; min-height: 10rem; }
   .column h2 { display: flex; justify-content: space-between; margin: .15rem .15rem .65rem; color: #8e99ad; font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; }
@@ -156,10 +157,12 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   </header>
   <nav class="page-nav" aria-label="Dashboard pages">
     <a href="/" data-page="board">Board</a>
+    <a href="/history" data-page="history">History</a>
     <a href="/tasks" data-page="task-types">Task types</a>
     <a href="/ontology" data-page="ontology">Ontology</a>
   </nav>
   <section id="board-page">
+    <p class="page-note" id="history-note" hidden>Completed older workflow attempts are retained here for audit and debugging.</p>
     <div class="toolbar" id="toolbar">
       <span class="toolbar-label">Demo events</span>
       <button type="button" data-demo="pr">Open PR</button>
@@ -167,7 +170,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
       <button type="button" data-demo="push">Force-push PR #42</button>
     </div>
     <section class="columns" id="columns" aria-label="Task board"></section>
-    <section class="feed"><h2>Recent board activity</h2><div id="log"></div></section>
+    <section class="feed" id="activity-feed"><h2>Recent board activity</h2><div id="log"></div></section>
   </section>
   <section id="task-types-page" hidden>
     <section class="task-panel" aria-labelledby="task-types-heading">
@@ -231,6 +234,7 @@ async function refresh() {
   try {
     const showingTaskTypes = location.pathname === "/tasks";
     const showingOntology = location.pathname === "/ontology";
+    const showingHistory = location.pathname === "/history";
     if (showingOntology) {
       const response = await fetch(API + "/ontology");
       if (!response.ok) throw new Error("API request failed");
@@ -250,8 +254,9 @@ async function refresh() {
     if (showingOntology) renderOntology();
     else if (showingTaskTypes) renderTaskTypes();
     else {
-      renderColumns();
-      renderLog();
+      const partition = partitionBoardTasks(boardState.tasks);
+      renderColumns(showingHistory ? partition.history : partition.current);
+      if (!showingHistory) renderLog(partition.current);
       renderSelectedTask();
     }
   } catch (error) {
@@ -267,12 +272,16 @@ function setConnection(online) {
 function renderPage() {
   const showingTaskTypes = location.pathname === "/tasks";
   const showingOntology = location.pathname === "/ontology";
+  const showingHistory = location.pathname === "/history";
   document.getElementById("board-page").hidden = showingTaskTypes || showingOntology;
   document.getElementById("task-types-page").hidden = !showingTaskTypes;
   document.getElementById("ontology-page").hidden = !showingOntology;
-  document.getElementById("page-title").textContent = showingOntology ? "Ontology" : showingTaskTypes ? "Task types" : "Jina board";
+  document.getElementById("toolbar").hidden = showingHistory;
+  document.getElementById("activity-feed").hidden = showingHistory;
+  document.getElementById("history-note").hidden = !showingHistory;
+  document.getElementById("page-title").textContent = showingOntology ? "Ontology" : showingTaskTypes ? "Task types" : showingHistory ? "Task history" : "Jina board";
   for (const link of document.querySelectorAll("[data-page]")) {
-    link.classList.toggle("active", link.dataset.page === (showingOntology ? "ontology" : showingTaskTypes ? "task-types" : "board"));
+    link.classList.toggle("active", link.dataset.page === (showingOntology ? "ontology" : showingTaskTypes ? "task-types" : showingHistory ? "history" : "board"));
   }
 }
 
@@ -392,11 +401,39 @@ function svgElement(tag, className) {
 
 function truncateLabel(value, max) { return value.length <= max ? value : value.slice(0, max - 1) + "…"; }
 
-function renderColumns() {
+function partitionBoardTasks(tasks) {
+  const latestRequestByScope = new Map();
+  for (const task of tasks) {
+    if (task.type !== "ontology_build") continue;
+    const metadata = task.metadata || {};
+    if (!metadata.repository || !metadata.ref || !metadata.requestKey) continue;
+    const scope = String(metadata.tenantId || "") + ":" + metadata.repository + ":" + metadata.ref;
+    const existing = latestRequestByScope.get(scope);
+    if (!existing || String(task.createdAt) > existing.createdAt || (String(task.createdAt) === existing.createdAt && task.id > existing.id)) {
+      latestRequestByScope.set(scope, { requestKey: metadata.requestKey, createdAt: String(task.createdAt), id: task.id });
+    }
+  }
+  const current = [];
+  const history = [];
+  for (const task of tasks) {
+    const metadata = task.metadata || {};
+    const ontologyTask = task.type.startsWith("ontology_") && metadata.repository && metadata.ref && metadata.requestKey;
+    if (ontologyTask) {
+      const scope = String(metadata.tenantId || "") + ":" + metadata.repository + ":" + metadata.ref;
+      const latest = latestRequestByScope.get(scope);
+      (latest && latest.requestKey === metadata.requestKey ? current : history).push(task);
+    } else {
+      (task.status === "superseded" ? history : current).push(task);
+    }
+  }
+  return { current: current, history: history };
+}
+
+function renderColumns(tasks) {
   columns.replaceChildren();
   const statuses = ["triage", "blocked", "queued", "in_progress", "done", "superseded", "failed", "canceled"];
   for (const status of statuses) {
-    const items = boardState.tasks.filter(function(task) { return task.status === status; });
+    const items = tasks.filter(function(task) { return task.status === status; });
     if (items.length === 0 && !["triage", "queued", "in_progress", "done"].includes(status)) continue;
     const column = element("section", "column");
     const heading = element("h2");
@@ -559,8 +596,9 @@ function eventLabel(event) {
   return labels[event.type] || humanize(event.type);
 }
 
-function renderLog() {
-  log.textContent = boardEvents.slice(-12).reverse().map(function(event) {
+function renderLog(tasks) {
+  const taskIds = new Set(tasks.map(function(task) { return task.id; }));
+  log.textContent = boardEvents.filter(function(event) { return !event.taskId || taskIds.has(event.taskId); }).slice(-12).reverse().map(function(event) {
     const task = event.taskId ? taskById(event.taskId) : null;
     return formatTime(event.at) + "  " + event.type + (task ? "  " + task.title : "");
   }).join("\\n");

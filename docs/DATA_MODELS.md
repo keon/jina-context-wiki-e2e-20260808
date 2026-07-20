@@ -354,7 +354,7 @@ unique(task_dependencies.tenant_id, task_id, depends_on_task_id, relationship)
 index(task_dependencies.tenant_id, depends_on_task_id)
 ```
 
-A task becomes `queued` only when every `required` dependency is `done`. Root completion is purely edge-based: the aggregate root completes when all its required edges are satisfied. To keep dynamically created children visible to completion, `CreateTask` with `blocks_parent_completion = true` materializes a required `root -> child` edge in the same transaction — the flag is an instruction to the command layer, not a column the reducer reads. If a required dependency reaches `failed` or `canceled`, the reducer transitions the dependent to `blocked` and creates a linked `human_decision` task.
+A task becomes `queued` only when every `required` dependency is `done`. Root completion is purely edge-based: the aggregate root completes when all its required edges are satisfied. To keep dynamically created children visible to completion, `CreateTask` with `blocks_parent_completion = true` materializes a required `root -> child` edge in the same transaction — the flag is an instruction to the command layer, not a column the reducer reads. If a required dependency reaches `failed` or `canceled`, the reducer cancels automated dependents and fails aggregate dependents. It never infers a `human_decision` from a generic edge; workflows create manual recovery only when they also define a concrete resolution command.
 
 Exact context handoff dependency rows:
 

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { entityId } from "@jina/shared-kernel";
 import { applyCommand } from "./commands.js";
-import { createEmptyBoardState, findTask } from "./reducer.js";
+import { createEmptyBoardState, findTask, reduceBoard, transitionBoardTask } from "./reducer.js";
 import { canTransition } from "./transitions.js";
 import { leaseNextOutboxMessage, renewOutboxLease, type BoardState } from "./reducer.js";
 
@@ -36,6 +36,69 @@ test("workers can pass small durable metadata to a dependent task", () => {
 
   assert.equal(findTask(updated, taskId)?.metadata.commitSha, "a".repeat(40));
   assert.equal(updated.events.at(-1)?.type, "task.updated");
+});
+
+test("failed automated dependencies terminate their workflow without synthetic blockers", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const rootId = entityId<"task">("ontology-root");
+  const ingestId = entityId<"task">("ontology-ingest");
+  const assertId = entityId<"task">("ontology-assert");
+  const projectId = entityId<"task">("ontology-project");
+  let state = createEmptyBoardState();
+  const create = (task: Parameters<typeof applyCommand>[1] & { command: "CreateTask" }) => {
+    state = applyCommand(state, task, { actor: { type: "system", id: "test" }, now }).state;
+  };
+  create({ command: "CreateTask", blocksParentCompletion: false, task: {
+    id: rootId, type: "ontology_build", kind: "aggregate", title: "Build ontology",
+    assigneeRole: "system", dedupeKey: "ontology:root"
+  } });
+  create({ command: "CreateTask", task: {
+    id: ingestId, type: "ontology_ingest", kind: "dispatchable", title: "Ingest",
+    assigneeRole: "worker", dedupeKey: "ontology:ingest", dispatchTopic: "run-ontology-ingest", parentTaskId: rootId
+  } });
+  create({ command: "CreateTask", task: {
+    id: assertId, type: "ontology_assert", kind: "dispatchable", title: "Assert",
+    assigneeRole: "worker", dedupeKey: "ontology:assert", dispatchTopic: "run-ontology-assert", parentTaskId: rootId
+  }, dependencies: [{ taskId: assertId, dependsOnTaskId: ingestId, relationship: "blocks", required: true, blocksParentCompletion: true }] });
+  create({ command: "CreateTask", task: {
+    id: projectId, type: "ontology_project", kind: "dispatchable", title: "Project",
+    assigneeRole: "worker", dedupeKey: "ontology:project", dispatchTopic: "run-ontology-project", parentTaskId: rootId
+  }, dependencies: [{ taskId: projectId, dependsOnTaskId: assertId, relationship: "blocks", required: true, blocksParentCompletion: true }] });
+
+  state = transitionBoardTask(state, ingestId, "failed", now);
+  state = reduceBoard(state, now);
+
+  assert.equal(findTask(state, ingestId)?.status, "failed");
+  assert.equal(findTask(state, assertId)?.status, "canceled");
+  assert.equal(findTask(state, projectId)?.status, "canceled");
+  assert.equal(findTask(state, rootId)?.status, "failed");
+  assert.equal(state.tasks.some((task) => task.type === "human_decision"), false);
+  assert.equal(state.tasks.some((task) => task.status === "blocked"), false);
+});
+
+test("reducer supersedes legacy recovery waitpoints after their parent terminates", () => {
+  const now = "2026-01-01T00:00:00.000Z";
+  const parentId = entityId<"task">("legacy-parent");
+  const failedId = entityId<"task">("legacy-failure");
+  const decisionId = entityId<"task">("legacy-decision");
+  let state = createEmptyBoardState();
+  for (const task of [
+    { id: failedId, type: "context", kind: "dispatchable" as const, title: "Context", dedupeKey: "context", dispatchTopic: "run-research" },
+    { id: parentId, type: "review_pass", kind: "dispatchable" as const, title: "Review", dedupeKey: "review", dispatchTopic: "run-review" },
+    { id: decisionId, type: "human_decision", kind: "waitpoint" as const, title: "Decide", dedupeKey: "decision", parentTaskId: parentId }
+  ]) {
+    state = applyCommand(state, { command: "CreateTask", task: { ...task, assigneeRole: "test" } }, {
+      actor: { type: "system", id: "test" }, now
+    }).state;
+  }
+  state = applyCommand(state, { command: "LinkTask", dependency: {
+    taskId: parentId, dependsOnTaskId: failedId, relationship: "blocks", required: true, blocksParentCompletion: true
+  } }, { actor: { type: "system", id: "test" }, now }).state;
+  state = transitionBoardTask(state, failedId, "failed", now);
+  state = reduceBoard(state, now);
+
+  assert.equal(findTask(state, parentId)?.status, "canceled");
+  assert.equal(findTask(state, decisionId)?.status, "superseded");
 });
 
 test("outbox leases are tenant-filterable and reclaimable after expiry", () => {

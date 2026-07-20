@@ -104,7 +104,10 @@ read it. The job submits `omxyz/jina-ontology-e2e` to the production three-chunk
 workflow and waits for the aggregate to finish.
 The acceptance check fails the deployment unless the graph has cited nodes and
 edges, the fixed retrieval orchestrator returns cited results, and the canonical
-outbox and parser backlog are empty. Repeated deployments deliberately exercise
+outbox and parser backlog are empty. It also rejects any blocked ontology task
+left for the accepted repository and ref; older active attempts must have been
+superseded, while their terminal records remain available on the History page.
+Repeated deployments deliberately exercise
 the unchanged-head cache path instead of rebuilding repository facts.
 The acceptance poll window is 50 minutes and its Cloud Run task limit is 55
 minutes. This outer wall-clock budget includes sandbox provisioning, repository
