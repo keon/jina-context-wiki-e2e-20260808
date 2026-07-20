@@ -123,11 +123,12 @@ Commas are reserved by the deployment CLI for separating environment entries;
 the workflow verifies each worker's complete ordered topic list after rollout so
 a truncated dispatcher configuration cannot pass health checks again.
 Worker health also reports the most recent topic, outcome, timestamp, and a
-coarse failure category. It never includes the task, repository, raw exception,
-or provider response; detailed redacted reasons stay in authenticated board
-events and Cloud Logging. GitHub failures distinguish authentication,
-authorization, not-found, rate-limit, timeout, response-shape, and checkout
-boundaries without returning the upstream response body.
+coarse failure category. The public response never includes API polling errors,
+task or repository identifiers, raw exceptions, or provider responses; detailed
+redacted reasons stay in authenticated board events and Cloud Logging. GitHub
+failures distinguish authentication, authorization, not-found, rate-limit,
+timeout, response-shape, and checkout boundaries without returning the upstream
+response body.
 
 Useful production checks:
 
