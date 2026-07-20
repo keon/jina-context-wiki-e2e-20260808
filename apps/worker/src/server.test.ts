@@ -137,7 +137,7 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
       PORT: "0",
       JINA_API_URL: mockUrl,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-review,run-ontology-ingest",
+      WORKER_TOPICS: "run-review|run-ontology-ingest",
       WORKER_HEARTBEAT_INTERVAL_MS: "10",
       WORKER_POLL_INTERVAL_MS: "10",
       GITHUB_API_URL: `${mockUrl}/github`,

@@ -109,6 +109,11 @@ deployment step prints the execution and task status on both success and
 failure, so a stalled chunk is diagnosable from the Actions run without granting
 the GitHub deployer Cloud Logging access or exposing the internal API credential.
 
+Worker topic sets use a pipe-separated `WORKER_TOPICS` value in Cloud Run.
+Commas are reserved by the deployment CLI for separating environment entries;
+the workflow verifies each worker's complete ordered topic list after rollout so
+a truncated dispatcher configuration cannot pass health checks again.
+
 Useful production checks:
 
 ```sh
