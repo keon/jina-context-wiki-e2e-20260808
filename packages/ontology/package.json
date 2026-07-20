@@ -1,5 +1,5 @@
 {
-  "name": "@jina/factory",
+  "name": "@jina/ontology",
   "private": true,
   "type": "module",
   "exports": {
@@ -12,9 +12,13 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
-    "test": "echo \"test not configured\""
+    "test": "pnpm build && node --test dist/ontology.test.js"
   },
   "dependencies": {
+    "@ast-grep/napi": "^0.44.1",
     "@jina/shared-kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
   }
 }

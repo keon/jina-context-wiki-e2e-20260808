@@ -1,11 +1,11 @@
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskDependencyDraft, TaskId } from "./dependencies.js";
-import { isTerminalTaskStatus, type TaskStatus } from "./task-status.js";
-import { isDispatchableTask, type BoardTask } from "./tasks.js";
+import { isTerminalFailure, isTerminalTaskStatus, type TaskStatus } from "./task-status.js";
+import { createBoardTask, type BoardTask } from "./tasks.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
-export type BoardOutboxStatus = "pending" | "published";
+export type BoardOutboxStatus = "pending" | "leased" | "dispatched";
 
 export interface BoardOutboxMessage {
   readonly id: BoardOutboxMessageId;
@@ -18,11 +18,15 @@ export interface BoardOutboxMessage {
     readonly attempt: number;
   };
   readonly createdAt: IsoTimestamp;
-  readonly publishedAt?: IsoTimestamp;
+  readonly leaseId?: string;
+  readonly leasedAt?: IsoTimestamp;
+  readonly leaseExpiresAt?: IsoTimestamp;
+  readonly dispatchedAt?: IsoTimestamp;
 }
 
 export interface BoardEvent {
   readonly id: EntityId<"board_event">;
+  readonly seq: number;
   readonly type: string;
   readonly at: IsoTimestamp;
   readonly taskId?: TaskId;
@@ -45,16 +49,41 @@ export function createEmptyBoardState(): BoardState {
   };
 }
 
+export function appendEvent(
+  state: BoardState,
+  type: string,
+  at: IsoTimestamp,
+  taskId?: TaskId,
+  payload?: Record<string, unknown>
+): BoardState {
+  const seq = taskId
+    ? state.events.filter((event) => event.taskId === taskId).length + 1
+    : state.events.filter((event) => event.taskId === undefined).length + 1;
+
+  return {
+    ...state,
+    events: [
+      ...state.events,
+      {
+        id: entityId(taskId ? `event_${taskId}_${seq}` : `event_board_${seq}`),
+        seq,
+        type,
+        at,
+        ...(taskId ? { taskId } : {}),
+        ...(payload ? { payload } : {})
+      }
+    ]
+  };
+}
+
 export function addTask(state: BoardState, task: BoardTask): BoardState {
   if (state.tasks.some((existing) => existing.dedupeKey === task.dedupeKey)) {
     return state;
   }
 
-  return {
-    ...state,
-    tasks: [...state.tasks, task],
-    events: [...state.events, boardEvent("task.created", task.updatedAt, task.id, { type: task.type })]
-  };
+  return appendEvent({ ...state, tasks: [...state.tasks, task] }, "task.created", task.updatedAt, task.id, {
+    type: task.type
+  });
 }
 
 export function addDependency(state: BoardState, dependency: TaskDependencyDraft, now: IsoTimestamp): BoardState {
@@ -69,17 +98,16 @@ export function addDependency(state: BoardState, dependency: TaskDependencyDraft
     return state;
   }
 
-  return {
-    ...state,
-    dependencies: [...state.dependencies, dependency],
-    events: [
-      ...state.events,
-      boardEvent("task.dependency_added", now, dependency.taskId, {
-        dependsOnTaskId: dependency.dependsOnTaskId,
-        relationship: dependency.relationship
-      })
-    ]
-  };
+  return appendEvent(
+    { ...state, dependencies: [...state.dependencies, dependency] },
+    "task.dependency_added",
+    now,
+    dependency.taskId,
+    {
+      dependsOnTaskId: dependency.dependsOnTaskId,
+      relationship: dependency.relationship
+    }
+  );
 }
 
 export function transitionBoardTask(state: BoardState, taskId: TaskId, toStatus: TaskStatus, now: IsoTimestamp): BoardState {
@@ -88,13 +116,18 @@ export function transitionBoardTask(state: BoardState, taskId: TaskId, toStatus:
     return state;
   }
 
-  return {
-    ...state,
-    tasks: state.tasks.map((existing) =>
-      existing.id === taskId ? { ...existing, status: toStatus, updatedAt: now } : existing
-    ),
-    events: [...state.events, boardEvent("task.transitioned", now, taskId, { fromStatus: task.status, toStatus })]
-  };
+  return appendEvent(
+    {
+      ...state,
+      tasks: state.tasks.map((existing) =>
+        existing.id === taskId ? { ...existing, status: toStatus, updatedAt: now } : existing
+      )
+    },
+    "task.transitioned",
+    now,
+    taskId,
+    { fromStatus: task.status, toStatus }
+  );
 }
 
 export function reduceBoard(state: BoardState, now: IsoTimestamp): BoardState {
@@ -102,27 +135,95 @@ export function reduceBoard(state: BoardState, now: IsoTimestamp): BoardState {
   let changed = true;
 
   while (changed) {
-    const afterAggregateCompletion = completeReadyAggregateTasks(next, now);
-    const afterDispatchQueueing = queueReadyDispatchableTasks(afterAggregateCompletion, now);
-    changed = afterDispatchQueueing !== next;
-    next = afterDispatchQueueing;
+    let step = blockWaitpointTasks(next, now);
+    step = escalateFailedDependencies(step, now);
+    step = completeReadyAggregateTasks(step, now);
+    step = queueReadyDispatchableTasks(step, now);
+    changed = step !== next;
+    next = step;
   }
 
   return next;
 }
 
-export function markOutboxPublished(
+export function markOutboxDispatched(
   state: BoardState,
   outboxMessageId: BoardOutboxMessageId,
   now: IsoTimestamp
 ): BoardState {
   return {
     ...state,
-    outbox: state.outbox.map((message) =>
-      message.id === outboxMessageId && message.status === "pending"
-        ? { ...message, status: "published", publishedAt: now }
-        : message
-    )
+    outbox: state.outbox.map((message) => {
+      if (message.id !== outboxMessageId || message.status === "dispatched") return message;
+      const { leaseId: _leaseId, leasedAt: _leasedAt, leaseExpiresAt: _leaseExpiresAt, ...unleased } = message;
+      return { ...unleased, status: "dispatched", dispatchedAt: now };
+    })
+  };
+}
+
+export interface LeaseOutboxInput {
+  readonly topics: readonly string[];
+  readonly taskIds?: readonly TaskId[];
+  readonly leaseId: string;
+  readonly now: IsoTimestamp;
+  readonly expiresAt: IsoTimestamp;
+}
+
+export interface LeasedOutboxMessage {
+  readonly state: BoardState;
+  readonly message: BoardOutboxMessage;
+}
+
+/** Atomically shaped board update used by the durable worker claim endpoint. */
+export function leaseNextOutboxMessage(state: BoardState, input: LeaseOutboxInput): LeasedOutboxMessage | undefined {
+  const candidate = state.outbox.find((message) => {
+    if (!input.topics.includes(message.topic) || message.status === "dispatched") return false;
+    if (input.taskIds && !input.taskIds.includes(message.taskId)) return false;
+    if (message.status === "pending") return true;
+    return message.leaseExpiresAt !== undefined && message.leaseExpiresAt <= input.now;
+  });
+  if (!candidate) return undefined;
+
+  const { dispatchedAt: _dispatchedAt, ...claimable } = candidate;
+  const leased: BoardOutboxMessage = {
+    ...claimable,
+    status: "leased",
+    leaseId: input.leaseId,
+    leasedAt: input.now,
+    leaseExpiresAt: input.expiresAt
+  };
+  return {
+    state: {
+      ...state,
+      outbox: state.outbox.map((message) => message.id === candidate.id ? leased : message)
+    },
+    message: leased
+  };
+}
+
+export function findOutboxMessage(state: BoardState, messageId: BoardOutboxMessageId): BoardOutboxMessage | undefined {
+  return state.outbox.find((message) => message.id === messageId);
+}
+
+export function renewOutboxLease(
+  state: BoardState,
+  messageId: BoardOutboxMessageId,
+  leaseId: string,
+  now: IsoTimestamp,
+  expiresAt: IsoTimestamp
+): BoardState | undefined {
+  const message = findOutboxMessage(state, messageId);
+  if (
+    !message || message.status !== "leased" || message.leaseId !== leaseId ||
+    !message.leaseExpiresAt || message.leaseExpiresAt <= now
+  ) {
+    return undefined;
+  }
+  return {
+    ...state,
+    outbox: state.outbox.map((candidate) => candidate.id === messageId
+      ? { ...candidate, leasedAt: now, leaseExpiresAt: expiresAt }
+      : candidate)
   };
 }
 
@@ -151,15 +252,11 @@ function queueReadyDispatchableTasks(state: BoardState, now: IsoTimestamp): Boar
   let next = state;
 
   for (const task of state.tasks) {
-    if (!isDispatchableTask(task) || !isReadyForQueue(state, task)) {
+    if (task.kind !== "dispatchable" || !task.dispatchTopic || !isReadyForQueue(state, task)) {
       continue;
     }
 
     const topic = task.dispatchTopic;
-    if (!topic) {
-      continue;
-    }
-
     const attempt = task.attempt + 1;
     const idempotencyKey = `${task.id}:${attempt}`;
 
@@ -167,25 +264,30 @@ function queueReadyDispatchableTasks(state: BoardState, now: IsoTimestamp): Boar
       continue;
     }
 
-    next = {
-      ...next,
-      tasks: next.tasks.map((existing) =>
-        existing.id === task.id ? { ...existing, status: "queued", attempt, updatedAt: now } : existing
-      ),
-      outbox: [
-        ...next.outbox,
-        {
-          id: entityId(`outbox_${task.id}_${attempt}`),
-          taskId: task.id,
-          topic,
-          idempotencyKey,
-          status: "pending",
-          payload: { taskId: task.id, attempt },
-          createdAt: now
-        }
-      ],
-      events: [...next.events, boardEvent("task.queued", now, task.id, { attempt, topic })]
-    };
+    next = appendEvent(
+      {
+        ...next,
+        tasks: next.tasks.map((existing) =>
+          existing.id === task.id ? { ...existing, status: "queued", attempt, updatedAt: now } : existing
+        ),
+        outbox: [
+          ...next.outbox,
+          {
+            id: entityId(`outbox_${task.id}_${attempt}`),
+            taskId: task.id,
+            topic,
+            idempotencyKey,
+            status: "pending",
+            payload: { taskId: task.id, attempt },
+            createdAt: now
+          }
+        ]
+      },
+      "task.queued",
+      now,
+      task.id,
+      { attempt, topic }
+    );
   }
 
   return next;
@@ -196,11 +298,76 @@ function completeReadyAggregateTasks(state: BoardState, now: IsoTimestamp): Boar
 
   for (const task of state.tasks) {
     const hasDependencies = state.dependencies.some((dependency) => dependency.taskId === task.id);
-    if (isDispatchableTask(task) || !hasDependencies || !isReadyForQueue(state, task)) {
+    if (task.kind !== "aggregate" || !hasDependencies || !isReadyForQueue(state, task)) {
       continue;
     }
 
     next = transitionBoardTask(next, task.id, "done", now);
+  }
+
+  return next;
+}
+
+function blockWaitpointTasks(state: BoardState, now: IsoTimestamp): BoardState {
+  let next = state;
+
+  for (const task of state.tasks) {
+    if (task.kind === "waitpoint" && task.status === "triage") {
+      next = transitionBoardTask(next, task.id, "blocked", now);
+    }
+  }
+
+  return next;
+}
+
+function escalateFailedDependencies(state: BoardState, now: IsoTimestamp): BoardState {
+  let next = state;
+
+  for (const task of state.tasks) {
+    if (isTerminalTaskStatus(task.status)) {
+      continue;
+    }
+
+    const hasFailedRequiredDependency = state.dependencies.some((dependency) => {
+      if (dependency.taskId !== task.id || !dependency.required) {
+        return false;
+      }
+      const dependencyTask = findTask(state, dependency.dependsOnTaskId);
+      return dependencyTask !== undefined && isTerminalFailure(dependencyTask.status);
+    });
+
+    if (!hasFailedRequiredDependency) {
+      continue;
+    }
+
+    next = transitionBoardTask(next, task.id, "blocked", now);
+
+    const decisionId = entityId<"task">(`${task.id}:unblock`);
+    next = addTask(
+      next,
+      createBoardTask({
+        id: decisionId,
+        type: "human_decision",
+        title: `Decide how to unblock: ${task.title}`,
+        assigneeRole: "human",
+        dedupeKey: `${task.dedupeKey}:unblock`,
+        now,
+        required: false,
+        parentTaskId: task.id,
+        ...(task.epoch !== undefined ? { epoch: task.epoch } : {})
+      })
+    );
+    next = addDependency(
+      next,
+      {
+        taskId: task.id,
+        dependsOnTaskId: decisionId,
+        relationship: "relates_to",
+        required: false,
+        blocksParentCompletion: false
+      },
+      now
+    );
   }
 
   return next;
@@ -212,19 +379,4 @@ function isReadyForQueue(state: BoardState, task: BoardTask): boolean {
   }
 
   return requiredDependenciesSatisfied(state, task.id);
-}
-
-function boardEvent(
-  type: string,
-  at: IsoTimestamp,
-  taskId?: TaskId,
-  payload?: Record<string, unknown>
-): BoardEvent {
-  return {
-    id: entityId(`event_${type}_${at}_${taskId ?? "board"}`),
-    type,
-    at,
-    ...(taskId ? { taskId } : {}),
-    ...(payload ? { payload } : {})
-  };
 }

@@ -1,0 +1,20 @@
+{
+  "name": "@jina/worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "echo \"lint not configured\"",
+    "test": "pnpm build && node --test dist/server.test.js",
+    "start": "node dist/server.js"
+  },
+  "dependencies": {
+    "@jina/ai": "workspace:*",
+    "@jina/daytona": "workspace:*",
+    "@jina/ontology": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
+  }
+}

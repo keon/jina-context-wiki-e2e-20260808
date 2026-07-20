@@ -15,6 +15,12 @@
     "test": "echo \"test not configured\""
   },
   "dependencies": {
-    "@jina/shared-kernel": "workspace:*"
+    "@daytona/sdk": "^0.199.0",
+    "@jina/ontology": "workspace:*",
+    "@jina/shared-kernel": "workspace:*",
+    "ws": "^8.21.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
   }
 }

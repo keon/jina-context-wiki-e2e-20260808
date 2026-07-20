@@ -1,0 +1,272 @@
+name: CI and deploy
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT_ID: jina-v2
+  GCP_REGION: us-central1
+  GAR_REPOSITORY: jina
+  API_SERVICE: jina-api
+  DASHBOARD_SERVICE: jina-dashboard
+  WORKER_SERVICE: jina-ontology-worker
+  TASK_WORKER_SERVICE: jina-task-worker
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: jina_test
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d jina_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/jina_test
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Verify PostgreSQL repository context contract
+        run: pnpm --filter @jina/db test
+
+      - name: Audit production dependencies
+        run: pnpm audit --prod --audit-level=high
+
+      - name: Build deployable containers
+        run: |
+          docker build --file apps/api/Dockerfile --tag jina-api-ci .
+          docker build --file apps/worker/Dockerfile --tag jina-worker-ci .
+          docker build --file apps/dashboard/Dockerfile --tag jina-dashboard-ci .
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: ci
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment: production
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          workload_identity_provider: projects/749416389045/locations/global/workloadIdentityPools/github/providers/omxyz-jina
+          service_account: github-deployer@jina-v2.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@v3
+
+      - name: Configure Artifact Registry authentication
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api:latest
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Deploy API
+        id: deploy-api
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.API_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/api:${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --add-cloudsql-instances=jina-v2:us-central1:jina-postgres
+            --concurrency=20
+            --timeout=300
+            --min-instances=0
+            --max-instances=1
+          env_vars: |-
+            JINA_ENABLE_DEV_ENDPOINTS=false
+            JINA_SIMULATE_RUNS=false
+            JINA_SEED_DEMO=false
+            JINA_TENANT_ID=omlabs
+            JINA_TENANT_ADMIN_PRINCIPALS=user:keon@omlabs.xyz
+            JINA_TENANT_ALIASES=github:unscoped,e2e-production,e2e
+            INSTANCE_UNIX_SOCKET=/cloudsql/jina-v2:us-central1:jina-postgres
+            DB_NAME=jina
+            DB_USER=jina_app
+          secrets: |-
+            DB_PASS=jina-db-password:latest
+            GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest
+            INTERNAL_API_TOKEN=jina-internal-api-token:latest
+
+      - name: Verify API health
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/health"
+
+      - name: Build and push ontology worker image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/worker/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:latest
+          cache-from: type=gha,scope=worker
+          cache-to: type=gha,mode=max,scope=worker
+
+      - name: Deploy ontology worker
+        id: deploy-worker
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.WORKER_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --concurrency=1
+            --timeout=300
+            --min-instances=1
+            --max-instances=1
+            --no-cpu-throttling
+          env_vars: |-
+            JINA_API_URL=${{ steps.deploy-api.outputs.url }}
+            WORKER_TOPICS=run-ontology-ingest,run-ontology-assert,run-ontology-project,run-ontology,run-ontology-prepare,run-ontology-generate
+            ONTOLOGY_HISTORY_LIMIT=10000
+          secrets: |-
+            INTERNAL_API_TOKEN=jina-internal-api-token:latest
+            DAYTONA_API_KEY=jina-daytona-api-key:latest
+            OPENAI_API_KEY=jina-openai-api-key:latest
+            GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
+
+      - name: Verify ontology worker health
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-worker.outputs.url }}/health"
+
+      - name: Deploy task worker
+        id: deploy-task-worker
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.TASK_WORKER_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/worker:${{ github.sha }}
+          flags: >-
+            --allow-unauthenticated
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --concurrency=1
+            --timeout=300
+            --min-instances=1
+            --max-instances=1
+            --no-cpu-throttling
+          env_vars: |-
+            JINA_API_URL=${{ steps.deploy-api.outputs.url }}
+            WORKER_TOPICS=run-review,run-research,run-publish,run-cleanup
+            REVIEW_MODEL=gpt-5.6-sol
+          secrets: |-
+            INTERNAL_API_TOKEN=jina-internal-api-token:latest
+            OPENAI_API_KEY=jina-openai-api-key:latest
+            GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
+
+      - name: Verify task worker health
+        run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-task-worker.outputs.url }}/health"
+
+      - name: Build and push dashboard image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: apps/dashboard/Dockerfile
+          push: true
+          tags: |
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:${{ github.sha }}
+            ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:latest
+          cache-from: type=gha,scope=dashboard
+          cache-to: type=gha,mode=max,scope=dashboard
+
+      - name: Deploy dashboard
+        id: deploy-dashboard
+        uses: google-github-actions/deploy-cloudrun@v3
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          service: ${{ env.DASHBOARD_SERVICE }}
+          image: ${{ env.GCP_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPOSITORY }}/dashboard:${{ github.sha }}
+          flags: >-
+            --no-allow-unauthenticated
+            --iap
+            --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
+            --min-instances=0
+            --max-instances=2
+          env_vars: JINA_API_URL=${{ steps.deploy-api.outputs.url }}
+          secrets: INTERNAL_API_TOKEN=jina-internal-api-token:latest
+
+      - name: Configure dashboard IAP access
+        run: |
+          project_number="$(gcloud projects describe "${GCP_PROJECT_ID}" --format='value(projectNumber)')"
+          gcloud run services add-iam-policy-binding "${DASHBOARD_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --member="serviceAccount:service-${project_number}@gcp-sa-iap.iam.gserviceaccount.com" --role="roles/run.invoker" --quiet
+          gcloud iap web add-iam-policy-binding --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --resource-type=cloud-run --service="${DASHBOARD_SERVICE}" --member="user:keon@omlabs.xyz" --role="roles/iap.httpsResourceAccessor" --quiet
+          gcloud run services remove-iam-policy-binding "${DASHBOARD_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --member="user:keon@omlabs.xyz" --role="roles/run.invoker" --quiet || true
+
+      - name: Verify dashboard
+        run: |
+          gcloud run services describe "${DASHBOARD_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format=json | jq -e '.metadata.annotations["run.googleapis.com/iap-enabled"] == "true"'
+          gcloud iap web get-iam-policy --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --resource-type=cloud-run --service="${DASHBOARD_SERVICE}" --format=json | jq -e '.bindings[] | select(.role == "roles/iap.httpsResourceAccessor") | .members | index("user:keon@omlabs.xyz") != null'
+
+      - name: Publish deployment summary
+        run: |
+          {
+            echo '## Cloud Run deployment'
+            echo
+            echo "- API: ${{ steps.deploy-api.outputs.url }}"
+            echo "- Dashboard: ${{ steps.deploy-dashboard.outputs.url }}"
+            echo "- Ontology worker: ${{ steps.deploy-worker.outputs.url }}"
+            echo "- Task worker: ${{ steps.deploy-task-worker.outputs.url }}"
+            echo "- Revision: \`${{ github.sha }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

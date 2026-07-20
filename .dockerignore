@@ -1,0 +1,12 @@
+.git
+.github
+.turbo
+**/.turbo
+**/dist
+**/node_modules
+node_modules
+*.tsbuildinfo
+**/*.tsbuildinfo
+.env
+.env.*
+!.env.example

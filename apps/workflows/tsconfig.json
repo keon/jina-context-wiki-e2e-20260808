@@ -4,7 +4,8 @@
     "composite": true,
     "declaration": true,
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"],
   "references": [
@@ -13,8 +14,8 @@
     { "path": "../../packages/context" },
     { "path": "../../packages/daytona" },
     { "path": "../../packages/db" },
-    { "path": "../../packages/factory" },
     { "path": "../../packages/github" },
+    { "path": "../../packages/policy" },
     { "path": "../../packages/publication" },
     { "path": "../../packages/review" },
     { "path": "../../packages/shared-kernel" }

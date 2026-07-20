@@ -12,9 +12,12 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
-    "test": "echo \"test not configured\""
+    "test": "pnpm build && node --test dist/board.test.js"
   },
   "dependencies": {
     "@jina/shared-kernel": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0"
   }
 }

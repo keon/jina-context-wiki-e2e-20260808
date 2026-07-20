@@ -5,7 +5,7 @@ export interface PersistedRecord {
 }
 
 export interface TaskRecord extends PersistedRecord {
-  readonly factoryRunId: string;
+  readonly rootTaskId: string;
   readonly assigneeRole: string;
   readonly status: string;
 }

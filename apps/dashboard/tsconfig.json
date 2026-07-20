@@ -4,11 +4,11 @@
     "composite": true,
     "declaration": true,
     "rootDir": ".",
-    "outDir": "dist"
+    "outDir": "dist",
+    "types": ["node"]
   },
-  "include": ["app/**/*.ts", "components/**/*.ts", "lib/**/*.ts"],
+  "include": ["app/**/*.ts", "components/**/*.ts", "lib/**/*.ts", "server/**/*.ts"],
   "references": [
     { "path": "../../packages/shared-kernel" }
   ]
 }
-

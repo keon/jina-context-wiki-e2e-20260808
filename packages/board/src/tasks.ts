@@ -2,17 +2,86 @@ import type { IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskId } from "./dependencies.js";
 import type { TaskStatus } from "./task-status.js";
 
-export type TaskType = "pr_review" | "review_pass" | "context" | "publish" | "cleanup" | "human_decision";
+/** Worker-owned identifier. The board treats task types as opaque strings. */
+export type TaskType = string;
 
-export type TaskDispatchTopic = "run-review" | "run-research" | "run-publish" | "run-cleanup";
+/** Runtime-owned dispatch route. New workers do not require board changes. */
+export type TaskDispatchTopic = string;
 
-export type TaskAssigneeRole =
-  | "factory"
-  | "review_agent"
-  | "research_agent"
-  | "publisher"
-  | "cleanup_worker"
-  | "human";
+/** Worker-owned role identifier. */
+export type TaskAssigneeRole = string;
+
+export type TaskKind = "aggregate" | "dispatchable" | "manual" | "waitpoint";
+
+export interface TaskTypeDefinition {
+  readonly type: TaskType;
+  readonly kind: TaskKind;
+  readonly defaultAssigneeRole: TaskAssigneeRole;
+  readonly description: string;
+  readonly dispatchTopic?: TaskDispatchTopic;
+}
+
+export const taskTypeDefinitions: readonly TaskTypeDefinition[] = [
+  {
+    type: "pr_review",
+    kind: "aggregate",
+    defaultAssigneeRole: "system",
+    description: "Coordinates a pull-request review and completes when its required child tasks finish."
+  },
+  {
+    type: "review_pass",
+    kind: "dispatchable",
+    defaultAssigneeRole: "review_agent",
+    dispatchTopic: "run-review",
+    description: "Runs one focused code-review pass and records findings against a pull-request revision."
+  },
+  {
+    type: "context",
+    kind: "dispatchable",
+    defaultAssigneeRole: "research_agent",
+    dispatchTopic: "run-research",
+    description: "Collects approved external context needed by another task."
+  },
+  {
+    type: "publish",
+    kind: "dispatchable",
+    defaultAssigneeRole: "publisher",
+    dispatchTopic: "run-publish",
+    description: "Publishes or records the final output produced by a completed workflow."
+  },
+  {
+    type: "cleanup",
+    kind: "dispatchable",
+    defaultAssigneeRole: "cleanup_worker",
+    dispatchTopic: "run-cleanup",
+    description: "Releases temporary resources after workflow execution."
+  },
+  {
+    type: "issue_triage",
+    kind: "manual",
+    defaultAssigneeRole: "human",
+    description: "Routes a newly opened issue for human triage."
+  },
+  {
+    type: "human_decision",
+    kind: "waitpoint",
+    defaultAssigneeRole: "human",
+    description: "Pauses automated work until a human records a required decision."
+  }
+];
+
+export function taskKind(type: TaskType): TaskKind {
+  switch (type) {
+    case "pr_review":
+      return "aggregate";
+    case "issue_triage":
+      return "manual";
+    case "human_decision":
+      return "waitpoint";
+    default:
+      return "dispatchable";
+  }
+}
 
 export interface BoardTask {
   readonly id: TaskId;
@@ -26,6 +95,7 @@ export interface BoardTask {
   readonly createdAt: IsoTimestamp;
   readonly updatedAt: IsoTimestamp;
   readonly metadata: Record<string, unknown>;
+  readonly kind: TaskKind;
   readonly dispatchTopic?: TaskDispatchTopic;
   readonly parentTaskId?: TaskId;
   readonly epoch?: number;
@@ -40,6 +110,7 @@ export interface CreateBoardTaskInput {
   readonly now: IsoTimestamp;
   readonly required?: boolean;
   readonly metadata?: Record<string, unknown>;
+  readonly kind?: TaskKind;
   readonly dispatchTopic?: TaskDispatchTopic;
   readonly parentTaskId?: TaskId;
   readonly epoch?: number;
@@ -58,12 +129,9 @@ export function createBoardTask(input: CreateBoardTaskInput): BoardTask {
     createdAt: input.now,
     updatedAt: input.now,
     metadata: input.metadata ?? {},
+    kind: input.kind ?? taskKind(input.type),
     ...(input.dispatchTopic ? { dispatchTopic: input.dispatchTopic } : {}),
     ...(input.parentTaskId ? { parentTaskId: input.parentTaskId } : {}),
     ...(input.epoch !== undefined ? { epoch: input.epoch } : {})
   };
-}
-
-export function isDispatchableTask(task: BoardTask): boolean {
-  return task.dispatchTopic !== undefined;
 }
