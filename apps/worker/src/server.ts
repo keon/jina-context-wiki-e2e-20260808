@@ -24,6 +24,7 @@ import {
   type OntologyBuildRequest,
   type OntologyGraph,
   type OntologyIngestPlan,
+  type OntologySourceEvidence,
   type OntologySourceIngestResult,
   type RepositorySnapshot
 } from "@jina/ontology";
@@ -283,6 +284,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   if (ownershipObservation) observations.push(ownershipObservation);
   let sourceResult: OntologySourceIngestResult = {
     observationCount: 0,
+    observationIds: [],
     assertionCount: 0,
     newObservationCount: 0,
     updatedObservationCount: 0,
@@ -308,6 +310,13 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     newCommitCount,
     confirmedCommitCount,
     workItemObservationCount: observations.length,
+    sourceObservationIds: sourceResult.observationIds,
+    sourcePullRequestNumbers: observations.flatMap((observation) =>
+      observation.kind === "pull_request" ? [observation.number] : []
+    ),
+    resolvedPullRequestNumbers: observations.flatMap((observation) =>
+      observation.kind === "pull_request" && (observation.resolvesIssueNumbers?.length ?? 0) > 0 ? [observation.number] : []
+    ),
     newWorkItemObservationCount: sourceResult.newObservationCount,
     updatedWorkItemObservationCount: sourceResult.updatedObservationCount,
     confirmedWorkItemObservationCount: sourceResult.confirmedObservationCount,
@@ -474,17 +483,35 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
   const commitSha = requiredGitSha(work.task.metadata.commitSha, "task commitSha");
   const evidenceFingerprint = requiredString(work.task.metadata.evidenceFingerprint, "task evidenceFingerprint");
   const focusPaths = stringArray(work.task.metadata.analysisPaths);
+  const sourcePullRequestNumbers = Array.isArray(work.task.metadata.sourcePullRequestNumbers)
+    ? work.task.metadata.sourcePullRequestNumbers.map((value) => requiredPositiveInteger(value, "task sourcePullRequestNumber"))
+    : [];
+  const resolvedPullRequestNumbers = Array.isArray(work.task.metadata.resolvedPullRequestNumbers)
+    ? work.task.metadata.resolvedPullRequestNumbers.map((value) => requiredPositiveInteger(value, "task resolvedPullRequestNumber"))
+    : [];
   const cache = await internalApiJson<{ readonly cached: Record<string, unknown> | null }>(
     "/internal/ontology/assertions/cached",
     { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitSha, evidenceFingerprint }
   );
   if (cache.cached) return { outcome: "done", result: { cached: cache.cached } };
+  const evidence = await internalApiJson<{ readonly evidence: readonly OntologySourceEvidence[] }>(
+    "/internal/ontology/assertions/evidence",
+    { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId }
+  );
   // A generator/schema version change intentionally performs one full semantic
   // scan for an unchanged head. The resulting generation is cached, so routine
   // retries and subsequent builds still avoid Daytona entirely.
-  const graph = await ontologyExecutor.buildAssertions({ tenantId, repository, ref, commitSha, focusPaths, taskId: work.task.id });
+  const graph = await ontologyExecutor.buildAssertions({
+    tenantId,
+    repository,
+    ref,
+    commitSha,
+    focusPaths,
+    sourceEvidence: evidence.evidence,
+    taskId: work.task.id
+  });
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
-  const assertions = assertionsFromGeneratedOntology(rawOutput, repository);
+  const assertions = assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers });
   return {
     outcome: "done",
     assertionBatch: {
@@ -497,6 +524,7 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
       generatorVersion: ONTOLOGY_GENERATOR_VERSION,
       registryVersion: ONTOLOGY_REGISTRY_VERSION,
       evidenceFingerprint,
+      evidenceObservationIds: evidence.evidence.map((observation) => observation.id),
       model: graph.generator.model,
       ...(graph.generator.sandboxId ? { sandboxId: graph.generator.sandboxId } : {}),
       summary: graph.summary,

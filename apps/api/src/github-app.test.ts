@@ -2,7 +2,13 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createOntologyGraph, MemoryOntologyGraphStore, ONTOLOGY_PARSER_VERSION } from "@jina/ontology";
+import {
+  createOntologyGraph,
+  MemoryOntologyGraphStore,
+  ONTOLOGY_PARSER_VERSION,
+  type RetrievalRequest,
+  type RetrievalResult
+} from "@jina/ontology";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const SECRET = "test-webhook-secret";
@@ -128,6 +134,43 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
 });
 
+test("ontology retrieval forwards generalized Issue entity identity", async () => {
+  class CapturingOntologyStore extends MemoryOntologyGraphStore {
+    request?: RetrievalRequest;
+
+    override async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
+      this.request = request;
+      return {
+        template: request.template,
+        repository: request.repository,
+        ref: request.ref ?? "main",
+        items: [],
+        truncated: false,
+        totalBeforeLimit: 0,
+        limit: request.limit ?? 50
+      };
+    }
+  }
+  const ontologyStore = new CapturingOntologyStore();
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", ontologyStore });
+  const baseUrl = await listen(server);
+  try {
+    const response = await fetch(`${baseUrl}/ontology/retrieve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "omxyz/ontology-fixture",
+        template: "issue_trace",
+        issueEntityId: "entity_virtual_issue"
+      })
+    });
+    assert.equal(response.status, 200);
+    assert.equal(ontologyStore.request?.issueEntityId, "entity_virtual_issue");
+  } finally {
+    await close(server);
+  }
+});
+
 test("ontology pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
@@ -234,6 +277,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
           generatorVersion: "codex-assertions-v2",
           registryVersion: "ontology-registry-v1",
           evidenceFingerprint: "evidence-fixture",
+          evidenceObservationIds: [],
           model: "fixture",
           summary: "README documents the repository",
           rawOutput: {

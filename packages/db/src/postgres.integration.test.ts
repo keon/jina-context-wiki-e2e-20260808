@@ -5,6 +5,7 @@ import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
   createOntologyGraph,
+  derivedIssueNaturalKey,
   stableId
 } from "@jina/ontology";
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
@@ -94,6 +95,7 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
       generatorVersion: ONTOLOGY_GENERATOR_VERSION,
       registryVersion: ONTOLOGY_REGISTRY_VERSION,
       evidenceFingerprint: "evidence-fixture",
+      evidenceObservationIds: [],
       model: "fixture",
       summary: "README documents the repository",
       rawOutput: {
@@ -133,6 +135,168 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
     assert.equal(graph.generator.executor, "projection");
     assert.equal(graph.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"), false);
     assert.equal(graph.nodes.some((node) => node.kind === "Symbol"), true);
+  } finally {
+    await store.close();
+  }
+});
+
+test("Postgres projects an accepted virtual issue by entity identity", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const suffix = Date.now().toString(36);
+  const tenantId = `virtual-${suffix}`;
+  const repository = `omlabs/virtual-${suffix}`;
+  const commitSha = "7".repeat(40);
+  try {
+    await store.planIngestion({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha,
+      treeSha: "8".repeat(40),
+      parents: [],
+      isDefaultRef: true,
+      updateRef: true,
+      recordedAt: "2026-07-20T00:00:00.000Z",
+      taskId: `ingest-${suffix}`,
+      files: [{ path: "src/auth.ts", blobSha: "9".repeat(40), size: 10 }]
+    });
+    const source = await store.applyGitHubObservations([42, 43].map((number) => ({
+      tenantId,
+      repository,
+      kind: "pull_request" as const,
+      number,
+      title: number === 42 ? "Restore administrator deletion" : "Restore administrator audit export",
+      body: `Administrators are incorrectly denied in workflow ${number}.`,
+      state: "closed",
+      url: `https://github.com/${repository}/pull/${number}`,
+      occurredAt: "2026-07-20T00:00:00.000Z",
+      recordedAt: "2026-07-20T00:00:00.000Z",
+      commitShas: [commitSha],
+      resolvesIssueNumbers: [],
+      referencesIssueNumbers: []
+    })));
+    assert.equal((await store.loadAssertionEvidence(tenantId, repository, source.observationIds)).length, 2);
+    const issueKey = derivedIssueNaturalKey(repository, 42);
+    await store.saveAssertionBatch({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha,
+      taskId: `assert-${suffix}`,
+      generatedAt: "2026-07-20T00:01:00.000Z",
+      generatorVersion: ONTOLOGY_GENERATOR_VERSION,
+      registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      evidenceFingerprint: `evidence-${suffix}`,
+      evidenceObservationIds: source.observationIds,
+      model: "fixture",
+      summary: "PR 42 fixes an authorization regression",
+      rawOutput: {
+        summary: "PR 42 fixes an authorization regression",
+        nodes: [
+          { id: "repo", kind: "Repository", label: repository, description: "repo", evidence: ["src/auth.ts:1"] },
+          { id: "42", kind: "PullRequest", label: "PR #42", description: "fix", evidence: ["src/auth.ts:1"] },
+          { id: "43", kind: "PullRequest", label: "PR #43", description: "fix", evidence: ["src/auth.ts:1"] },
+          {
+            id: "virtual:pr:42",
+            kind: "Issue",
+            label: "Administrators encounter an authorization error",
+            description: "Administrator deletion is incorrectly denied.",
+            evidence: ["src/auth.ts:1"]
+          },
+          {
+            id: "virtual:pr:43",
+            kind: "Issue",
+            label: "Administrators encounter an authorization error",
+            description: "Administrator audit export is incorrectly denied.",
+            evidence: ["src/auth.ts:1"]
+          }
+        ],
+        edges: [42, 43].map((number) => ({
+          source: String(number), target: `virtual:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
+          confidence: 0.95, evidence: ["src/auth.ts:1"]
+        }))
+      },
+      assertions: [{
+        subject: { kind: "PullRequest", naturalKey: `github:pr:${repository}#42`, label: "PR #42" },
+        predicate: "RESOLVES",
+        object: { kind: "Issue", naturalKey: issueKey, label: "Administrators encounter an authorization error" },
+        confidence: 0.95,
+        evidence: ["src/auth.ts:1"]
+      }, {
+        subject: { kind: "PullRequest", naturalKey: `github:pr:${repository}#43`, label: "PR #43" },
+        predicate: "RESOLVES",
+        object: {
+          kind: "Issue", naturalKey: derivedIssueNaturalKey(repository, 43),
+          label: "Administrators encounter an authorization error"
+        },
+        confidence: 0.95,
+        evidence: ["src/auth.ts:1"]
+      }]
+    });
+    const proposals = await store.listAssertions(tenantId, repository, { status: "proposed", predicate: "RESOLVES" });
+    assert.equal(proposals.length, 2);
+    for (const [index, proposal] of proposals.entries()) {
+      await store.executeCommand(tenantId, "svc:test", {
+        type: "review_assertion", assertionId: proposal.id, decision: "accept"
+      }, `2026-07-20T00:02:0${index}.000Z`);
+    }
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:03:00.000Z");
+
+    const byText = await store.retrieve({
+      tenantId,
+      allowedRepositories: [repository],
+      repository,
+      ref: "main",
+      template: "issue_trace",
+      issueText: "deletion is incorrectly denied"
+    });
+    assert.equal(byText.items.length, 1);
+    const payload = byText.items[0]?.data as unknown as {
+      issue: { entityId: string; origin: string; number?: number; description?: string };
+      resolutions: { pullRequestNumber: number }[];
+    };
+    assert.equal(payload.issue.origin, "derived");
+    assert.equal(payload.issue.number, undefined);
+    assert.equal(payload.issue.description, "Administrator deletion is incorrectly denied.");
+    assert.equal(payload.resolutions[0]?.pullRequestNumber, 42);
+    const collidingTitle = await store.retrieve({
+      tenantId,
+      allowedRepositories: [repository],
+      repository,
+      ref: "main",
+      template: "issue_trace",
+      issueText: "audit export"
+    });
+    const collidingPayload = collidingTitle.items[0]?.data as unknown as {
+      issue: { description?: string };
+      resolutions: { pullRequestNumber: number }[];
+    };
+    assert.equal(collidingPayload.issue.description, "Administrator audit export is incorrectly denied.");
+    assert.equal(collidingPayload.resolutions[0]?.pullRequestNumber, 43);
+    assert.equal((await store.retrieve({
+      tenantId,
+      allowedRepositories: [repository],
+      repository,
+      ref: "main",
+      template: "issue_trace",
+      issueEntityId: payload.issue.entityId
+    })).items.length, 1);
+    await store.executeCommand(tenantId, "svc:test", {
+      type: "assign_relationship",
+      repository,
+      subject: {
+        kind: "Issue", key: derivedIssueNaturalKey(repository, 44), displayName: "Unresolved derived issue"
+      },
+      predicate: "LIKELY_AFFECTS",
+      object: { kind: "File", key: `repo:${repository}:path:src/auth.ts`, displayName: "src/auth.ts" },
+      reason: "exercise non-trace Issue projection completeness"
+    }, "2026-07-20T00:04:00.000Z");
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:05:00.000Z");
+    const confirmed = await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:06:00.000Z");
+    assert.equal(confirmed.rebuilt, false, "active non-trace Issue assertions do not force perpetual rebuilds");
   } finally {
     await store.close();
   }
@@ -232,6 +396,7 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
       tenantId, repository, ref: "main", commitSha: headSha, taskId: `assert-${suffix}`,
       generatedAt: "2026-07-20T00:03:00.000Z", generatorVersion: ONTOLOGY_GENERATOR_VERSION,
       registryVersion: ONTOLOGY_REGISTRY_VERSION, evidenceFingerprint: "evidence-causal-fixture",
+      evidenceObservationIds: [],
       model: "fixture", summary: "README documents the repository and records a root cause",
       rawOutput: {
         summary: "README documents the repository and records a root cause",

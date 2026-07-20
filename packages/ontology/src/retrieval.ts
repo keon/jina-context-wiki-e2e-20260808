@@ -30,6 +30,7 @@ export interface RetrievalRequest {
   readonly symbol?: string;
   readonly path?: string;
   readonly pullRequestNumber?: number;
+  readonly issueEntityId?: string;
   readonly issueNumber?: number;
   /** Exact phrase used to resolve an issue by its ingested title or body. */
   readonly issueText?: string;
@@ -72,9 +73,13 @@ export interface IssueTraceResolution {
 /** Materialized issue-centric read model. Canonical assertions remain the source of truth. */
 export interface IssueTraceProjection {
   readonly issue: {
-    readonly number: number;
+    readonly entityId: string;
+    readonly origin: string;
     readonly title: string;
-    readonly url: string;
+    readonly description?: string;
+    readonly displayId?: string;
+    readonly number?: number;
+    readonly url?: string;
     readonly state?: string;
   };
   readonly resolutions: readonly IssueTraceResolution[];
@@ -118,9 +123,10 @@ export class RepositoryContextOrchestrator {
   constructor(private readonly executor: RetrievalExecutor) {}
 
   async answer(input: Omit<RetrievalRequest, "template"> & { readonly question: string; readonly tokenBudget?: number }): Promise<OrchestratedContext> {
-    const templates = classifyTemplates(input.question);
+    const templates = input.issueEntityId ? ["issue_trace" as const] : classifyTemplates(input.question);
     const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
     const calls: RetrievalResult[] = [];
+    const issueEntityId = input.issueEntityId;
     const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
     const issueText = issueNumber ? undefined : input.issueText ?? extractIssueText(input.question);
     const pullRequestNumber = input.pullRequestNumber ?? extractPullRequestNumber(input.question);
@@ -143,6 +149,7 @@ export class RepositoryContextOrchestrator {
     }
     const citations = dedupeCitations(calls.flatMap((call) => call.items.flatMap((item) => item.citations)));
     const synthesis = synthesizeContextAnswer(input.question, calls, {
+      ...(issueEntityId ? { issueEntityId } : {}),
       ...(issueNumber ? { issueNumber } : {}),
       ...(issueText ? { issueText } : {}),
       ...(pullRequestNumber ? { pullRequestNumber } : {}),
@@ -246,6 +253,7 @@ function synthesizeContextAnswer(
   question: string,
   calls: readonly RetrievalResult[],
   extracted: {
+    readonly issueEntityId?: string;
     readonly issueNumber?: number;
     readonly issueText?: string;
     readonly pullRequestNumber?: number;
@@ -266,7 +274,7 @@ function synthesizeContextAnswer(
   if (templates.has("ownership") && !extracted.symbol && !extracted.path) {
     unresolvedAmbiguities.push("No exact repository path or symbol could be extracted for ownership lookup.");
   }
-  if (templates.has("issue_trace") && !extracted.issueNumber && !extracted.issueText && !extracted.pullRequestNumber && !extracted.commitSha) {
+  if (templates.has("issue_trace") && !extracted.issueEntityId && !extracted.issueNumber && !extracted.issueText && !extracted.pullRequestNumber && !extracted.commitSha) {
     unresolvedAmbiguities.push("No issue, pull request, commit, or issue description could be resolved from the question.");
   }
 
@@ -334,7 +342,9 @@ function synthesizeIssueTrace(
     : extracted.commitSha
       ? trace.resolutions?.find((candidate) => candidate.commits?.some((commit) => commit.sha?.startsWith(extracted.commitSha!)))
       : trace.resolutions?.[0];
-  const issueLabel = issue?.number ? `Issue #${issue.number}${issue.title ? ` (${issue.title})` : ""}` : "The issue";
+  const issueLabel = issue?.displayId
+    ? `Issue ${issue.displayId}${issue.title ? ` (${issue.title})` : ""}`
+    : issue?.title || "The issue";
   if (causal && introduced?.sha) {
     const pr = introduced.pullRequests?.[0]?.number;
     const cause = `${issueLabel} was introduced${pr ? ` by PR #${pr}` : ""} in commit ${introduced.sha.slice(0, 12)}`;
@@ -369,10 +379,20 @@ function synthesizeIssueTrace(
 
 function selectIssueTrace(
   items: readonly RetrievalItem[],
-  extracted: { readonly issueNumber?: number; readonly issueText?: string; readonly pullRequestNumber?: number; readonly commitSha?: string }
+  extracted: {
+    readonly issueEntityId?: string;
+    readonly issueNumber?: number;
+    readonly issueText?: string;
+    readonly pullRequestNumber?: number;
+    readonly commitSha?: string;
+  }
 ): { readonly item?: RetrievalItem; readonly ambiguity?: string } {
   if (items.length === 0) return {};
   if (items.length === 1) return { item: items[0]! };
+  const issueEntityMatches = extracted.issueEntityId
+    ? items.filter((item) => issueTraceData(item).issue.entityId === extracted.issueEntityId)
+    : [];
+  if (issueEntityMatches.length === 1) return { item: issueEntityMatches[0]! };
   const issueNumberMatches = extracted.issueNumber
     ? items.filter((item) => issueTraceData(item).issue?.number === extracted.issueNumber)
     : [];

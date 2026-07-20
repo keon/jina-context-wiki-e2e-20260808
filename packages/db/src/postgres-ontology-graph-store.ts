@@ -27,6 +27,7 @@ import {
   type OntologyIngestPlan,
   type OntologyNode,
   type OntologyProjectionRequest,
+  type OntologySourceEvidence,
   type OntologySourceIngestResult,
   type OntologyOperationalMetrics,
   type ProjectionRebuildResult,
@@ -404,6 +405,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     let newObservationCount = 0;
     let updatedObservationCount = 0;
     let confirmedObservationCount = 0;
+    const observationIds: string[] = [];
     try {
       await client.query("begin");
       for (const observation of observations) {
@@ -412,6 +414,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           ? `${observation.repository}:codeowners:${observation.commitSha}:${observation.path}`
           : `${observation.repository}:${observation.kind}:${observation.number}:${observation.occurredAt ?? observation.recordedAt}`;
         const observationId = stableId("observation", `${observation.tenantId}:github:${externalId}`);
+        observationIds.push(observationId);
         const payload = JSON.stringify(observation);
         const priorVersion = await client.query(
           `select 1 from jina_ontology.observations
@@ -521,6 +524,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await client.query("commit");
       return {
         observationCount: observations.length,
+        observationIds: [...new Set(observationIds)],
         assertionCount,
         newObservationCount,
         updatedObservationCount,
@@ -532,6 +536,38 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     } finally {
       client.release();
     }
+  }
+
+  async loadAssertionEvidence(
+    tenantId: string,
+    repository: string,
+    observationIds: readonly string[]
+  ): Promise<readonly OntologySourceEvidence[]> {
+    await this.initialize();
+    const requested = [...new Set(observationIds)];
+    if (requested.length === 0) return [];
+    const result = await this.pool.query<{
+      id: string;
+      source: string;
+      type: string;
+      repository: string | null;
+      payload_sha: string;
+      payload: unknown;
+    }>(
+      `select id,source,type,repository,payload_sha,payload
+       from jina_ontology.observations
+       where tenant_id=$1 and repository=$2 and id=any($3::text[]) and redacted_at is null and payload is not null`,
+      [tenantId, repository, requested]
+    );
+    if (result.rows.length !== requested.length) throw new Error("assertion evidence observation was not found");
+    return result.rows.map((row) => ({
+      id: row.id,
+      source: row.source,
+      type: row.type,
+      repository: row.repository ?? repository,
+      payloadSha: row.payload_sha,
+      payload: row.payload
+    })).sort((left, right) => left.id.localeCompare(right.id));
   }
 
   async hasAssertionGeneration(
@@ -973,11 +1009,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
               where tenant_id=$1 and repository=$2 and ref_name=$3 and commit_sha=$4) as manifest_count,
              (select count(*) from jina_ontology.search_documents
               where tenant_id=$1 and repository=$2) as search_count,
-             (select count(*) from jina_ontology.entities
-              where tenant_id=$1 and kind='Issue' and retired_at is null
-                and natural_key like 'github:issue:' || $2 || '#%') as issue_entity_count,
+             (select count(*) from jina_ontology.entities e
+              where e.tenant_id=$1 and e.kind='Issue' and e.retired_at is null and (
+                e.natural_key like 'github:issue:' || $2 || '#%' or exists (
+                  select 1 from jina_ontology.assertions a
+                  where a.tenant_id=$1 and a.repository=$2 and a.status='active'
+                    and a.predicate in ('RESOLVES','RESOLVED_BY','INTRODUCED_BY')
+                    and (a.subject_id=e.id or a.object_id=e.id)
+                )
+             )) as issue_entity_count,
              (select count(*) from jina_ontology.issue_traces
-              where tenant_id=$1 and repository=$2 and ref_name=$3) as issue_trace_count`,
+              where tenant_id=$1 and repository=$2 and ref_name=$3
+                and payload->'issue'->>'entityId'=issue_entity_id
+                and payload->'issue'->>'origin' is not null) as issue_trace_count`,
           [tenantId, repository, ref, commitSha]
         );
         const manifestFileCount = Number(existing.rows[0]?.manifest_count ?? 0);
@@ -1969,21 +2013,32 @@ async function projectIssueTraces(
       [tenantId, repository, [...ISSUE_TRACE_PREDICATES]]
     ),
     client.query<IssueTraceEntityRow>(
-      `select id,kind,natural_key,display_name from jina_ontology.entities
-       where tenant_id=$1 and retired_at is null and (
-         natural_key like 'github:issue:' || $2 || '#%' or
-         natural_key like 'github:pr:' || $2 || '#%' or
-         natural_key like 'repo:' || $2 || ':sha:%'
+      `select e.id,e.kind,e.natural_key,e.display_name from jina_ontology.entities e
+       where e.tenant_id=$1 and e.retired_at is null and (
+         e.natural_key like 'github:pr:' || $2 || '#%' or
+         e.natural_key like 'repo:' || $2 || ':sha:%' or
+         (e.kind='Issue' and (
+           e.natural_key like 'github:issue:' || $2 || '#%' or
+           exists (
+             select 1 from jina_ontology.assertions a
+             where a.tenant_id=$1 and a.repository=$2 and (a.subject_id=e.id or a.object_id=e.id)
+           )
+         ))
        )`,
       [tenantId, repository]
     )
   ]);
   const entitiesById = new Map(entityResult.rows.map((entity) => [entity.id, entity]));
   const entityIdByKey = new Map(entityResult.rows.map((entity) => [entity.natural_key, entity.id]));
-  const issueNumberByEntityId = new Map<string, number>();
-  for (const entity of entityResult.rows) {
-    const issueNumber = entity.kind === "Issue" ? numberFromNaturalKey(entity.natural_key) : undefined;
-    if (issueNumber) issueNumberByEntityId.set(entity.id, issueNumber);
+  const issueEntityIds = new Set(entityResult.rows.filter((entity) => entity.kind === "Issue").map((entity) => entity.id));
+  const projectableIssueIds = new Set(
+    entityResult.rows.flatMap((entity) =>
+      entity.kind === "Issue" && entity.natural_key.startsWith(`github:issue:${repository}#`) ? [entity.id] : []
+    )
+  );
+  for (const assertion of activeResult.rows) {
+    if (assertion.subject_kind === "Issue") projectableIssueIds.add(assertion.subject_id);
+    if (assertion.object_kind === "Issue") projectableIssueIds.add(assertion.object_id);
   }
   let rebuildAll = forceAll;
   if (!rebuildAll) {
@@ -1992,7 +2047,7 @@ async function projectIssueTraces(
        where tenant_id=$1 and repository=$2 and ref_name=$3`,
       [tenantId, repository, ref]
     );
-    rebuildAll = Number(existingTraceCount.rows[0]?.count ?? 0) < issueNumberByEntityId.size;
+    rebuildAll = Number(existingTraceCount.rows[0]?.count ?? 0) !== projectableIssueIds.size;
   }
 
   const changedAssertionIds = events.flatMap((event) =>
@@ -2032,9 +2087,9 @@ async function projectIssueTraces(
   const relationshipRows = [...new Map([...activeResult.rows, ...changedResult.rows].map((row) => [row.id, row])).values()];
   for (const assertion of relationshipRows) link(assertion.subject_id, assertion.object_id);
 
-  const affectedIssueNumbers = new Set<number>();
+  const affectedIssueIds = new Set<string>();
   if (rebuildAll) {
-    for (const issueNumber of issueNumberByEntityId.values()) affectedIssueNumbers.add(issueNumber);
+    for (const issueId of issueEntityIds) affectedIssueIds.add(issueId);
   } else {
     const pending = new Set<string>();
     for (const assertion of changedResult.rows) {
@@ -2057,8 +2112,7 @@ async function projectIssueTraces(
       pending.delete(current);
       if (visited.has(current)) continue;
       visited.add(current);
-      const issueNumber = issueNumberByEntityId.get(current);
-      if (issueNumber) affectedIssueNumbers.add(issueNumber);
+      if (issueEntityIds.has(current)) affectedIssueIds.add(current);
       for (const adjacent of adjacency.get(current) ?? []) if (!visited.has(adjacent)) pending.add(adjacent);
     }
   }
@@ -2068,12 +2122,12 @@ async function projectIssueTraces(
       [tenantId, repository, ref]
     );
   }
-  if (affectedIssueNumbers.size === 0) return;
+  if (affectedIssueIds.size === 0) return;
   if (!rebuildAll) {
     await client.query(
       `delete from jina_ontology.issue_traces
-       where tenant_id=$1 and repository=$2 and ref_name=$3 and issue_number=any($4::int[])`,
-      [tenantId, repository, ref, [...affectedIssueNumbers]]
+       where tenant_id=$1 and repository=$2 and ref_name=$3 and issue_entity_id=any($4::text[])`,
+      [tenantId, repository, ref, [...affectedIssueIds]]
     );
   }
 
@@ -2115,17 +2169,29 @@ async function projectIssueTraces(
       resolutionByPair.set(key, pair);
     }
   }
+  const modelObservationIds = [...new Set(active.flatMap((assertion) =>
+    assertion.source_observation_id ? [assertion.source_observation_id] : []
+  ))];
+  const modelObservations = modelObservationIds.length > 0
+    ? await client.query<{ id: string; payload: Record<string, unknown> }>(
+        `select id,payload from jina_ontology.observations
+         where tenant_id=$1 and repository=$2 and id=any($3::text[])
+           and type='model_output' and redacted_at is null and payload is not null`,
+        [tenantId, repository, modelObservationIds]
+      )
+    : { rows: [] as { id: string; payload: Record<string, unknown> }[] };
+  const modelPayloadByObservationId = new Map(modelObservations.rows.map((observation) => [observation.id, observation.payload]));
 
   const relevantCommitShas = new Set<string>();
   for (const pair of resolutionByPair.values()) {
-    if (!affectedIssueNumbers.has(issueNumberByEntityId.get(pair.issueId) ?? -1)) continue;
+    if (!affectedIssueIds.has(pair.issueId)) continue;
     for (const assertion of includedByPullRequest.get(pair.pullRequestId) ?? []) {
       const sha = shaFromNaturalKey(assertion.object_natural_key);
       if (sha) relevantCommitShas.add(sha);
     }
   }
   for (const [issueId, assertions] of causesByIssue) {
-    if (!affectedIssueNumbers.has(issueNumberByEntityId.get(issueId) ?? -1)) continue;
+    if (!affectedIssueIds.has(issueId)) continue;
     for (const assertion of assertions) {
       const sha = shaFromNaturalKey(assertion.object_natural_key);
       if (sha) relevantCommitShas.add(sha);
@@ -2146,11 +2212,16 @@ async function projectIssueTraces(
     changesByCommit.set(change.commit_sha, [...(changesByCommit.get(change.commit_sha) ?? []), change]);
   }
 
-  for (const [issueId, issueNumber] of issueNumberByEntityId) {
-    if (!affectedIssueNumbers.has(issueNumber)) continue;
+  for (const issueId of projectableIssueIds) {
+    if (!affectedIssueIds.has(issueId)) continue;
     const issueEntity = entitiesById.get(issueId)!;
-    const issueObservation = latestObservationByKey.get(`issue:${issueNumber}`);
+    const issueNumber = numberFromNaturalKey(issueEntity.natural_key);
+    const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
     const issuePayload = issueObservation?.payload;
+    const derivedDescription = issueNumber ? undefined : derivedIssueDescription(
+      issueEntity.natural_key,
+      modelPayloadByObservationId
+    );
     const citations: RetrievalCitation[] = [{ kind: "entity", id: issueId, repository }];
     if (issueObservation) citations.push({ kind: "observation", id: issueObservation.id, repository });
     const resolutions = [...resolutionByPair.values()]
@@ -2259,9 +2330,14 @@ async function projectIssueTraces(
     });
     const payload: IssueTraceProjection = {
       issue: {
-        number: issueNumber,
+        entityId: issueId,
+        origin: issueNumber ? "github" : "derived",
         title: typeof issuePayload?.title === "string" ? issuePayload.title : issueEntity.display_name,
-        url: typeof issuePayload?.url === "string" ? issuePayload.url : `https://github.com/${repository}/issues/${issueNumber}`,
+        ...(issueNumber ? { number: issueNumber, displayId: `#${issueNumber}` } : { displayId: "virtual" }),
+        ...(derivedDescription ? { description: derivedDescription } : {}),
+        ...(typeof issuePayload?.url === "string" ? { url: issuePayload.url } : issueNumber
+          ? { url: `https://github.com/${repository}/issues/${issueNumber}` }
+          : {}),
         ...(typeof issuePayload?.state === "string" ? { state: issuePayload.state } : {})
       },
       resolutions,
@@ -2272,9 +2348,9 @@ async function projectIssueTraces(
       `insert into jina_ontology.issue_traces
         (tenant_id,repository,ref_name,issue_number,issue_entity_id,payload,projected_at)
        values ($1,$2,$3,$4,$5,$6::jsonb,$7)
-       on conflict (tenant_id,repository,ref_name,issue_number)
-       do update set issue_entity_id=excluded.issue_entity_id,payload=excluded.payload,projected_at=excluded.projected_at`,
-      [tenantId, repository, ref, issueNumber, issueId, JSON.stringify(payload), now]
+       on conflict (tenant_id,repository,ref_name,issue_entity_id)
+       do update set issue_number=excluded.issue_number,payload=excluded.payload,projected_at=excluded.projected_at`,
+      [tenantId, repository, ref, issueNumber ?? null, issueId, JSON.stringify(payload), now]
     );
   }
 }
@@ -2286,6 +2362,36 @@ function numberFromNaturalKey(naturalKey: string): number | undefined {
 
 function shaFromNaturalKey(naturalKey: string): string | undefined {
   return /:sha:([a-f0-9]{40})$/i.exec(naturalKey)?.[1]?.toLowerCase();
+}
+
+function derivedIssueDescription(
+  issueNaturalKey: string,
+  modelPayloadByObservationId: ReadonlyMap<string, Record<string, unknown>>
+): string | undefined {
+  for (const payload of modelPayloadByObservationId.values()) {
+    if (!Array.isArray(payload.assertions)) continue;
+    const resolution = payload.assertions.find((candidate): candidate is Record<string, unknown> => {
+      if (typeof candidate !== "object" || candidate === null || candidate.predicate !== "RESOLVES") return false;
+      const object = typeof candidate.object === "object" && candidate.object !== null
+        ? candidate.object as Record<string, unknown>
+        : undefined;
+      return object?.naturalKey === issueNaturalKey;
+    });
+    const subject = resolution && typeof resolution.subject === "object" && resolution.subject !== null
+      ? resolution.subject as Record<string, unknown>
+      : undefined;
+    const pullRequestNumber = typeof subject?.naturalKey === "string" ? numberFromNaturalKey(subject.naturalKey) : undefined;
+    const rawOutput = typeof payload.rawOutput === "object" && payload.rawOutput !== null
+      ? payload.rawOutput as Record<string, unknown>
+      : undefined;
+    if (!pullRequestNumber || !Array.isArray(rawOutput?.nodes)) continue;
+    const node = rawOutput.nodes.find((candidate): candidate is Record<string, unknown> =>
+      typeof candidate === "object" && candidate !== null && candidate.kind === "Issue" &&
+        candidate.id === `virtual:pr:${pullRequestNumber}`
+    );
+    if (typeof node?.description === "string" && node.description.trim()) return node.description;
+  }
+  return undefined;
 }
 
 function retrievalCitationFromEvidence(repository: string, commitSha: string, value: string): RetrievalCitation | undefined {
@@ -2318,16 +2424,18 @@ async function retrieveIssueTrace(
   ref: string,
   limit: number
 ): Promise<RetrievalItem[]> {
-  if (!request.issueNumber && !request.issueText && !request.pullRequestNumber && !request.commitSha) return [];
+  if (!request.issueEntityId && !request.issueNumber && !request.issueText && !request.pullRequestNumber && !request.commitSha) return [];
   const commitPrefix = request.commitSha?.toLowerCase() ?? "";
   const issueText = request.issueText?.trim() ?? "";
   const result = await pool.query<{ payload: IssueTraceProjection }>(
     `select payload from jina_ontology.issue_traces
      where tenant_id=$1 and repository=$2 and ref_name=$3
        and (
+         ($8<>'' and issue_entity_id=$8) or
          ($4::int is not null and issue_number=$4) or
          ($4::int is null and $7<>'' and (
            position(lower($7) in lower(coalesce(payload->'issue'->>'title',''))) > 0 or
+           position(lower($7) in lower(coalesce(payload->'issue'->>'description',''))) > 0 or
            exists (
              select 1 from jina_ontology.observations observation
              where observation.tenant_id=$1
@@ -2368,9 +2476,10 @@ async function retrieveIssueTrace(
          when $7<>'' and position(lower($7) in lower(coalesce(payload->'issue'->>'title',''))) > 0 then 1
          else 2
        end,
-       issue_number
-     limit $8`,
-    [request.tenantId, request.repository, ref, request.issueNumber ?? null, commitPrefix, request.pullRequestNumber ?? null, issueText, limit]
+       issue_number nulls last,payload->'issue'->>'title'
+     limit $9`,
+    [request.tenantId, request.repository, ref, request.issueNumber ?? null, commitPrefix,
+      request.pullRequestNumber ?? null, issueText, request.issueEntityId ?? "", limit]
   );
   return result.rows.map(({ payload }) => {
     const firstResolution = payload.resolutions[0];
@@ -2381,13 +2490,14 @@ async function retrieveIssueTrace(
       : request.pullRequestNumber
         ? payload.introducedBy.find((commit) => commit.pullRequests?.some((pullRequest) => pullRequest.number === request.pullRequestNumber))
         : payload.introducedBy[0];
+    const issueLabel = payload.issue.displayId ? `Issue ${payload.issue.displayId}` : payload.issue.title;
     const title = causalCommit
-      ? `${causalCommit.sha.slice(0, 12)} caused Issue #${payload.issue.number}`
+      ? `${causalCommit.sha.slice(0, 12)} caused ${issueLabel}`
       : firstResolution
-      ? `Issue #${payload.issue.number} → PR #${firstResolution.pullRequestNumber}${firstCommit ? ` → ${firstCommit.sha.slice(0, 12)}` : ""}`
+      ? `${issueLabel} → PR #${firstResolution.pullRequestNumber}${firstCommit ? ` → ${firstCommit.sha.slice(0, 12)}` : ""}`
       : payload.introducedBy[0]
-        ? `Issue #${payload.issue.number} introduced by ${payload.introducedBy[0].sha.slice(0, 12)}`
-        : `Issue #${payload.issue.number} has no verified commit relationship`;
+        ? `${issueLabel} introduced by ${payload.introducedBy[0].sha.slice(0, 12)}`
+        : `${issueLabel} has no verified commit relationship`;
     return {
       kind: "issue_trace",
       title,
@@ -2981,14 +3091,29 @@ export const ONTOLOGY_SCHEMA_SQL = `
         tenant_id text not null,
         repository text not null,
         ref_name text not null,
-        issue_number integer not null check (issue_number > 0),
+        issue_number integer check (issue_number is null or issue_number > 0),
         issue_entity_id text not null references jina_ontology.entities(id),
         payload jsonb not null,
         projected_at timestamptz not null,
-        primary key (tenant_id,repository,ref_name,issue_number)
+        primary key (tenant_id,repository,ref_name,issue_entity_id)
       );
+      do $$
+      begin
+        if exists (
+          select 1 from pg_constraint
+          where conrelid='jina_ontology.issue_traces'::regclass and conname='issue_traces_pkey'
+            and pg_get_constraintdef(oid) not like '%issue_entity_id%'
+        ) then
+          alter table jina_ontology.issue_traces drop constraint issue_traces_pkey;
+          alter table jina_ontology.issue_traces
+            add primary key (tenant_id,repository,ref_name,issue_entity_id);
+        end if;
+      end $$;
+      alter table jina_ontology.issue_traces alter column issue_number drop not null;
       create index if not exists ontology_issue_traces_entity
         on jina_ontology.issue_traces (tenant_id,issue_entity_id);
+      create index if not exists ontology_issue_traces_number
+        on jina_ontology.issue_traces (tenant_id,repository,ref_name,issue_number) where issue_number is not null;
       create table if not exists jina_ontology.erasure_filters (
         id text primary key,
         tenant_id text not null,

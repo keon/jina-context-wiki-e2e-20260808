@@ -76,7 +76,7 @@ export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
         properties: {
           source: { type: "string" },
           target: { type: "string" },
-          predicate: { type: "string", enum: ["IMPLEMENTS", "DOCUMENTED_BY", "REFERENCES", "OWNED_BY", "MOVED_FROM", "LIKELY_AFFECTS", "INTRODUCED_BY"] },
+          predicate: { type: "string", enum: ["IMPLEMENTS", "DOCUMENTED_BY", "REFERENCES", "OWNED_BY", "MOVED_FROM", "LIKELY_AFFECTS", "INTRODUCED_BY", "RESOLVES"] },
           plane: { type: "string", enum: ["knowledge"] },
           confidence: { type: "number", minimum: 0, maximum: 1 },
           why: { type: ["string", "null"] },
@@ -110,13 +110,15 @@ The structural code plane is built separately by deterministic parsers. Do not e
 
 Rules:
 - Include exactly one Repository node and the File, Symbol, Document, Issue, PullRequest, Engineer, or Team nodes needed by assertions.
-- Use only IMPLEMENTS, DOCUMENTED_BY, REFERENCES, OWNED_BY, MOVED_FROM, LIKELY_AFFECTS, or INTRODUCED_BY.
-- Use bare positive GitHub numbers for Issue and PullRequest node IDs and the bare full 40-character SHA for Commit node IDs.
+- Use only IMPLEMENTS, DOCUMENTED_BY, REFERENCES, OWNED_BY, MOVED_FROM, LIKELY_AFFECTS, INTRODUCED_BY, or RESOLVES.
+- Use bare positive GitHub numbers for external Issue and PullRequest node IDs and the bare full 40-character SHA for Commit node IDs.
+- The source-evidence file may contain a pull request with no explicit resolving issue. Only when that pull request clearly fixes a bug, regression, or incorrect behavior, create one derived Issue node with id virtual:pr:<pull-request-number> and emit PullRequest RESOLVES Issue. Its label is a concise issue title and its description states the problem, not the implementation. Do not create virtual issues for refactors, dependencies, documentation, chores, or feature-only work.
+- Never use virtual:pr:<n> when the pull-request observation already has a nonempty resolvesIssueNumbers list. Never invent a GitHub issue number.
 - Every edge must include a why field; use null for non-causal relationships. INTRODUCED_BY means an Issue was caused by a Commit, and its why must concisely explain the causal mechanism. Emit it only when the checked-out repository contains explicit evidence naming the issue, full commit SHA, and reason; it always requires human review before projection.
 - When a changed root-cause or incident document explicitly names that issue, full commit SHA, and causal mechanism, emit the supported INTRODUCED_BY assertion instead of reducing it to a generic reference.
 - Every edge must use plane knowledge and include a calibrated confidence from 0 to 1.
 - Every node and edge needs repository-relative file:line evidence.
 - Prefer explicit README/design documentation, configuration, ownership files, and tests over guesses.
-- Never invent people, teams, issues, or ownership.
+- Never invent people, teams, external issues, or ownership. A virtual Issue is permitted only by the derived-issue rule above.
 - Return only well-supported semantic assertions. An empty edge list is correct when the repository contains no explicit evidence for a supported predicate.
 - Output only JSON matching the supplied schema.`;

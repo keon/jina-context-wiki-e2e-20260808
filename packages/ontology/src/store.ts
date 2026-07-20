@@ -5,7 +5,8 @@ import {
   type OntologyEdge,
   type OntologyGraph,
   type OntologyGraphSummary,
-  type OntologyNode
+  type OntologyNode,
+  type OntologySourceEvidence
 } from "./model.js";
 import type { OntologyAssertionSummary, OntologyCommand, OntologyCommandResult, RepositoryContextOperations } from "./operations.js";
 import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
@@ -154,11 +155,35 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     this.rebuildSourceAssertions();
     return {
       observationCount: observations.length,
+      observationIds: [...new Set(observations.map(sourceObservationIdForGitHub))],
       assertionCount: observations.reduce((count, observation) => count + normalizeGitHubSourceObservation(observation).assertions.length, 0),
       newObservationCount,
       updatedObservationCount,
       confirmedObservationCount
     };
+  }
+
+  async loadAssertionEvidence(
+    tenantId: string,
+    repository: string,
+    observationIds: readonly string[]
+  ): Promise<readonly OntologySourceEvidence[]> {
+    const requested = new Set(observationIds);
+    const evidence = this.githubObservations.flatMap((observation) => {
+      const id = sourceObservationIdForGitHub(observation);
+      if (!requested.has(id) || observation.tenantId !== tenantId || observation.repository !== repository) return [];
+      const payload = structuredClone(observation);
+      return [{
+        id,
+        source: "github",
+        type: "source_snapshot",
+        repository,
+        payloadSha: stableId("sha", JSON.stringify(payload)),
+        payload
+      }];
+    });
+    if (evidence.length !== requested.size) throw new Error("assertion evidence observation was not found");
+    return evidence.sort((left, right) => left.id.localeCompare(right.id));
   }
 
   async hasAssertionGeneration(
@@ -349,7 +374,13 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && (!request.ref || value.ref === request.ref))
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
     const items = request.template === "issue_trace"
-      ? memoryIssueTraceItems(request, this.githubObservations, this.snapshots, this.allAssertions())
+      ? memoryIssueTraceItems(
+          request,
+          this.githubObservations,
+          this.snapshots,
+          this.allAssertions(),
+          [...this.assertionBatches.values()].map((stored) => stored.batch)
+        )
       : memoryRetrievalItems(request, snapshot, this.blobAnalyses, this.allAssertions());
     return {
       template: request.template, repository: request.repository, ref: request.ref ?? snapshot?.ref ?? "main",
@@ -404,63 +435,125 @@ function memoryIssueTraceItems(
   request: RetrievalRequest,
   observations: readonly GitHubSourceObservation[],
   snapshots: ReadonlyMap<string, RepositorySnapshot>,
-  assertions: readonly StoredAssertion[]
+  assertions: readonly StoredAssertion[],
+  batches: readonly OntologyAssertionBatch[]
 ): RetrievalResult["items"] {
   const scoped = latestMemorySourceObservations(observations).filter((observation): observation is GitHubWorkItemObservation =>
     observation.tenantId === request.tenantId && observation.repository === request.repository && observation.kind !== "codeowners"
   );
-  const issueText = request.issueText?.trim().toLowerCase();
-  const issue = [...scoped].reverse().find((observation) => observation.kind === "issue" && (
-    request.issueNumber
-      ? observation.number === request.issueNumber
-      : issueText
-        ? observation.title.toLowerCase().includes(issueText) || observation.body?.toLowerCase().includes(issueText) === true
-        : false
-  ));
-  if (!issue || issue.kind !== "issue") return [];
-  const issueNumber = issue.number;
-  const pullRequests = scoped.filter((observation): observation is GitHubWorkItemObservation =>
-    observation.kind === "pull_request" && observation.resolvesIssueNumbers?.includes(issueNumber) === true
+  const active = assertions.filter((assertion) =>
+    assertion.tenantId === request.tenantId && assertion.repository === request.repository && assertion.status === "active"
   );
-  const citations: IssueTraceProjection["citations"][number][] = [{
-    kind: "observation", id: sourceGitHubObservationId(issue), repository: request.repository
-  }];
-  const resolutions = pullRequests.map((pullRequest) => {
-    const observationId = sourceGitHubObservationId(pullRequest);
-    citations.push({ kind: "observation", id: observationId, repository: request.repository });
-    const shas = new Set(pullRequest.commitShas ?? []);
-    if (pullRequest.mergedAt && pullRequest.mergeCommitSha) shas.add(pullRequest.mergeCommitSha);
+  const resolutionAssertions = active.filter((assertion) =>
+    assertion.predicate === "RESOLVES" && assertion.subject.kind === "PullRequest" && assertion.object.kind === "Issue"
+  );
+  const batchesByObservationId = new Map(batches.map((batch) => [assertionObservationId(batch), batch]));
+  const candidates = new Map<string, {
+    readonly naturalKey: string;
+    readonly label: string;
+    readonly description?: string;
+    readonly observation?: GitHubWorkItemObservation;
+  }>();
+  for (const observation of scoped) {
+    if (observation.kind !== "issue") continue;
+    const naturalKey = `github:issue:${request.repository}#${observation.number}`;
+    candidates.set(naturalKey, { naturalKey, label: observation.title, observation });
+  }
+  for (const assertion of [...resolutionAssertions, ...active.filter((item) => item.predicate === "INTRODUCED_BY")]) {
+    const issue = assertion.predicate === "RESOLVES" ? assertion.object : assertion.subject;
+    if (issue.kind !== "Issue" || candidates.has(issue.naturalKey)) continue;
+    const batch = assertion.sourceObservationId ? batchesByObservationId.get(assertion.sourceObservationId) : undefined;
+    const description = batch ? derivedIssueDescriptionFromBatch(batch, issue.naturalKey) : undefined;
+    candidates.set(issue.naturalKey, { naturalKey: issue.naturalKey, label: issue.label, ...(description ? { description } : {}) });
+  }
+  const issueText = request.issueText?.trim().toLowerCase();
+  const commitPrefix = request.commitSha?.toLowerCase();
+  const selected = [...candidates.values()].find((candidate) => {
+    const entityId = stableId("entity", `${request.tenantId}:Issue:${candidate.naturalKey}`);
+    const number = /^github:issue:.*#(\d+)$/.exec(candidate.naturalKey)?.[1];
+    if (request.issueEntityId) return entityId === request.issueEntityId;
+    if (request.issueNumber) return Number.parseInt(number ?? "", 10) === request.issueNumber;
+    if (issueText) {
+      return candidate.label.toLowerCase().includes(issueText) || candidate.description?.toLowerCase().includes(issueText) === true ||
+        candidate.observation?.body?.toLowerCase().includes(issueText) === true;
+    }
+    if (request.pullRequestNumber) {
+      return resolutionAssertions.some((assertion) =>
+        assertion.object.naturalKey === candidate.naturalKey && numberFromEntityNaturalKey(assertion.subject.naturalKey) === request.pullRequestNumber
+      );
+    }
+    if (commitPrefix) {
+      const caused = active.some((assertion) =>
+        assertion.predicate === "INTRODUCED_BY" && assertion.subject.naturalKey === candidate.naturalKey &&
+        shaFromEntityNaturalKey(assertion.object.naturalKey)?.startsWith(commitPrefix)
+      );
+      const resolved = resolutionAssertions.some((resolution) =>
+        resolution.object.naturalKey === candidate.naturalKey && active.some((inclusion) =>
+          (inclusion.predicate === "INCLUDES" || inclusion.predicate === "MERGED_AS") &&
+          inclusion.subject.naturalKey === resolution.subject.naturalKey &&
+          shaFromEntityNaturalKey(inclusion.object.naturalKey)?.startsWith(commitPrefix)
+        )
+      );
+      return caused || resolved;
+    }
+    return false;
+  });
+  if (!selected) return [];
+  const issueNumberText = /^github:issue:.*#(\d+)$/.exec(selected.naturalKey)?.[1];
+  const issueNumber = issueNumberText ? Number.parseInt(issueNumberText, 10) : undefined;
+  const issueEntityId = stableId("entity", `${request.tenantId}:Issue:${selected.naturalKey}`);
+  const citations: IssueTraceProjection["citations"][number][] = [{ kind: "entity", id: issueEntityId, repository: request.repository }];
+  if (selected.observation) citations.push({
+    kind: "observation", id: sourceGitHubObservationId(selected.observation), repository: request.repository
+  });
+  const resolutions = resolutionAssertions.filter((assertion) => assertion.object.naturalKey === selected.naturalKey).flatMap((resolution) => {
+    const pullRequestNumber = numberFromEntityNaturalKey(resolution.subject.naturalKey);
+    if (!pullRequestNumber) return [];
+    const pullRequest = scoped.find((observation) => observation.kind === "pull_request" && observation.number === pullRequestNumber);
+    citations.push({ kind: "assertion", id: resolution.id, repository: request.repository });
+    if (resolution.sourceObservationId) citations.push({ kind: "observation", id: resolution.sourceObservationId, repository: request.repository });
+    if (pullRequest) citations.push({ kind: "observation", id: sourceGitHubObservationId(pullRequest), repository: request.repository });
+    const inclusions = active.filter((assertion) =>
+      (assertion.predicate === "INCLUDES" || assertion.predicate === "MERGED_AS") && assertion.subject.naturalKey === resolution.subject.naturalKey
+    );
+    const shas = new Map<string, "merge" | "included">();
+    for (const inclusion of inclusions) {
+      const sha = shaFromEntityNaturalKey(inclusion.object.naturalKey);
+      if (!sha) continue;
+      shas.set(sha, inclusion.predicate === "MERGED_AS" ? "merge" : shas.get(sha) ?? "included");
+      citations.push({ kind: "assertion", id: inclusion.id, repository: request.repository });
+    }
     const commits = [...shas].map((sha) => {
-      const snapshot = snapshots.get(snapshotKey(request.tenantId, request.repository, sha));
+      const [commitSha, role] = sha;
+      const snapshot = snapshots.get(snapshotKey(request.tenantId, request.repository, commitSha));
       const parent = snapshot?.parents[0] ? snapshots.get(snapshotKey(request.tenantId, request.repository, snapshot.parents[0]!)) : undefined;
       const changes = snapshot ? computeCommitChanges(snapshot.files, parent?.files).map((change) => ({
-        commitSha: sha, path: change.path, change: change.change, ...(change.oldPath ? { oldPath: change.oldPath } : {})
+        commitSha, path: change.path, change: change.change, ...(change.oldPath ? { oldPath: change.oldPath } : {})
       })) : [];
       for (const change of changes) citations.push({
-        kind: "commit_change", id: `${sha}:${change.path}`, repository: request.repository, commitSha: sha, path: change.path
+        kind: "commit_change", id: `${commitSha}:${change.path}`, repository: request.repository, commitSha, path: change.path
       });
       return {
-        sha,
-        url: `https://github.com/${request.repository}/commit/${sha}`,
-        role: pullRequest.mergeCommitSha === sha ? "merge" as const : "included" as const,
+        sha: commitSha,
+        url: `https://github.com/${request.repository}/commit/${commitSha}`,
+        role,
         changes
       };
     });
-    return {
-      pullRequestNumber: pullRequest.number,
-      title: pullRequest.title,
-      url: pullRequest.url,
+    return [{
+      pullRequestNumber,
+      title: pullRequest?.title ?? resolution.subject.label,
+      url: pullRequest?.url ?? `https://github.com/${request.repository}/pull/${pullRequestNumber}`,
       commits,
-      assertionIds: [],
-      observationIds: [observationId]
-    };
+      assertionIds: [resolution.id, ...inclusions.map((assertion) => assertion.id)],
+      observationIds: [...new Set([resolution.sourceObservationId, pullRequest ? sourceGitHubObservationId(pullRequest) : undefined]
+        .filter((id): id is string => Boolean(id)))]
+    }];
   });
-  const issueNaturalKey = `github:issue:${request.repository}#${issueNumber}`;
-  const introducedBy = assertions.filter((assertion) =>
-    assertion.tenantId === request.tenantId && assertion.repository === request.repository && assertion.status === "active" &&
-    assertion.predicate === "INTRODUCED_BY" && assertion.subject.naturalKey === issueNaturalKey
+  const introducedBy = active.filter((assertion) =>
+    assertion.predicate === "INTRODUCED_BY" && assertion.subject.naturalKey === selected.naturalKey
   ).flatMap((assertion) => {
-    const sha = /:sha:([a-f0-9]{40})$/i.exec(assertion.object.naturalKey)?.[1]?.toLowerCase();
+    const sha = shaFromEntityNaturalKey(assertion.object.naturalKey);
     if (!sha) return [];
     citations.push({ kind: "assertion", id: assertion.id, repository: request.repository, commitSha: assertion.commitSha });
     const pullRequestAssertions = assertions.filter((candidate) =>
@@ -497,21 +590,51 @@ function memoryIssueTraceItems(
     }];
   });
   const payload: IssueTraceProjection = {
-    issue: { number: issue.number, title: issue.title, url: issue.url, state: issue.state },
+    issue: {
+      entityId: issueEntityId,
+      origin: issueNumber ? "github" : "derived",
+      displayId: issueNumber ? `#${issueNumber}` : "virtual",
+      ...(issueNumber ? { number: issueNumber } : {}),
+      title: selected.observation?.title ?? selected.label,
+      ...(selected.description ? { description: selected.description } : {}),
+      ...(selected.observation?.url ? { url: selected.observation.url } : {}),
+      ...(selected.observation?.state ? { state: selected.observation.state } : {})
+    },
     resolutions,
     introducedBy,
     citations
   };
   const first = resolutions[0];
+  const issueLabel = payload.issue.displayId ? `Issue ${payload.issue.displayId}` : payload.issue.title;
   return [{
     kind: "issue_trace",
     title: first
-      ? `Issue #${issue.number} → PR #${first.pullRequestNumber}${first.commits[0] ? ` → ${first.commits[0].sha.slice(0, 12)}` : ""}`
-      : `Issue #${issue.number} has no verified commit relationship`,
+      ? `${issueLabel} → PR #${first.pullRequestNumber}${first.commits[0] ? ` → ${first.commits[0].sha.slice(0, 12)}` : ""}`
+      : `${issueLabel} has no verified commit relationship`,
     data: payload as unknown as Readonly<Record<string, unknown>>,
     citations,
     score: first ? 3 : 1
   }];
+}
+
+function numberFromEntityNaturalKey(naturalKey: string): number | undefined {
+  const value = /#(\d+)$/.exec(naturalKey)?.[1];
+  return value ? Number.parseInt(value, 10) : undefined;
+}
+
+function derivedIssueDescriptionFromBatch(batch: OntologyAssertionBatch, issueNaturalKey: string): string | undefined {
+  const resolution = batch.assertions.find((assertion) =>
+    assertion.predicate === "RESOLVES" && assertion.object.naturalKey === issueNaturalKey
+  );
+  const pullRequestNumber = resolution ? numberFromEntityNaturalKey(resolution.subject.naturalKey) : undefined;
+  if (!pullRequestNumber) return undefined;
+  return batch.rawOutput.nodes.find((node) =>
+    node.kind === "Issue" && node.id === `virtual:pr:${pullRequestNumber}`
+  )?.description;
+}
+
+function shaFromEntityNaturalKey(naturalKey: string): string | undefined {
+  return /:sha:([a-f0-9]{40})$/i.exec(naturalKey)?.[1]?.toLowerCase();
 }
 
 function latestMemorySourceObservations(observations: readonly GitHubSourceObservation[]): GitHubSourceObservation[] {

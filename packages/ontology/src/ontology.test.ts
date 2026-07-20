@@ -8,7 +8,8 @@ import {
   ONTOLOGY_REGISTRY_VERSION,
   assertionEvidenceFingerprint,
   assertionsFromGeneratedOntology,
-  computeCommitChanges
+  computeCommitChanges,
+  derivedIssueNaturalKey
 } from "./pipeline.js";
 import { analyzeSourceBlob } from "./parser.js";
 import { predicateDefinition, validatePredicateEndpoints, validateQualifiers } from "./registry.js";
@@ -166,12 +167,14 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.equal(extractSymbol("Where is authorize implemented and what calls it?"), "authorize");
   const called: string[] = [];
   const issueTexts: Array<string | undefined> = [];
+  const issueEntityIds: Array<string | undefined> = [];
   const symbols: Array<string | undefined> = [];
   const paths: Array<string | undefined> = [];
   const orchestrator = new RepositoryContextOrchestrator({
     async retrieve(request) {
       called.push(request.template);
       issueTexts.push(request.issueText);
+      issueEntityIds.push(request.issueEntityId);
       symbols.push(request.symbol);
       paths.push(request.path);
       return {
@@ -198,6 +201,15 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
     question: "Which PR and commit resolved issue #7?"
   });
   assert.deepEqual(called, ["issue_trace"]);
+
+  called.length = 0;
+  issueEntityIds.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "What resolved this issue?", issueEntityId: "entity_virtual"
+  });
+  assert.deepEqual(called, ["issue_trace"]);
+  assert.deepEqual(issueEntityIds, ["entity_virtual"]);
 
   called.length = 0;
   issueTexts.length = 0;
@@ -409,6 +421,148 @@ test("source ingestion distinguishes new, updated, and confirmed GitHub observat
   );
 });
 
+test("reviews and retrieves a virtual issue through the generalized Issue assertion", async () => {
+  const store = new MemoryOntologyGraphStore();
+  const repository = "org/repo";
+  const observedAt = "2026-07-20T00:00:00.000Z";
+  const source = await store.applyGitHubObservations([{
+    tenantId: "t",
+    repository,
+    kind: "pull_request",
+    number: 42,
+    title: "Restore administrator deletion",
+    body: "Administrators are incorrectly denied when deleting resources.",
+    state: "closed",
+    url: `https://github.com/${repository}/pull/42`,
+    occurredAt: observedAt,
+    recordedAt: observedAt,
+    commitShas: [],
+    resolvesIssueNumbers: [],
+    referencesIssueNumbers: []
+  }]);
+  const evidence = await store.loadAssertionEvidence("t", repository, source.observationIds);
+  assert.equal((evidence[0]?.payload as { title?: string }).title, "Restore administrator deletion");
+
+  const rawOutput = {
+    summary: "PR 42 fixes a deletion regression",
+    nodes: [
+      { id: "repo", kind: "Repository" as const, label: repository, description: "repo", evidence: ["README.md:1"] },
+      { id: "42", kind: "PullRequest" as const, label: "PR #42", description: "restores deletion", evidence: ["src/auth.ts:10"] },
+      {
+        id: "virtual:pr:42",
+        kind: "Issue" as const,
+        label: "Administrators cannot delete resources",
+        description: "Administrator deletion is incorrectly denied.",
+        evidence: ["src/auth.ts:10"]
+      }
+    ],
+    edges: [{
+      source: "42",
+      target: "virtual:pr:42",
+      predicate: "RESOLVES",
+      plane: "knowledge" as const,
+      confidence: 0.94,
+      evidence: ["src/auth.ts:10"]
+    }]
+  };
+  await store.saveAssertionBatch({
+    tenantId: "t",
+    repository,
+    ref: "main",
+    commitSha: "a".repeat(40),
+    taskId: "assert-virtual",
+    generatedAt: "2026-07-20T00:01:00.000Z",
+    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
+    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    evidenceFingerprint: "virtual-evidence",
+    evidenceObservationIds: source.observationIds,
+    model: "fixture",
+    summary: rawOutput.summary,
+    rawOutput,
+    assertions: assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers: [42] })
+  });
+  const proposal = (await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" }))[0];
+  assert.ok(proposal);
+  await store.executeCommand("t", "svc:test", {
+    type: "review_assertion",
+    assertionId: proposal.id,
+    decision: "accept"
+  }, "2026-07-20T00:02:00.000Z");
+
+  const trace = await store.retrieve({
+    tenantId: "t",
+    allowedRepositories: [repository],
+    repository,
+    ref: "main",
+    template: "issue_trace",
+    issueText: "incorrectly denied"
+  });
+  assert.equal(trace.items.length, 1);
+  const payload = trace.items[0]?.data as unknown as {
+    issue: { origin: string; number?: number; description?: string };
+    resolutions: { pullRequestNumber: number }[];
+  };
+  assert.equal(payload.issue.origin, "derived");
+  assert.equal(payload.issue.number, undefined);
+  assert.equal(payload.issue.description, "Administrator deletion is incorrectly denied.");
+  assert.equal(payload.resolutions[0]?.pullRequestNumber, 42);
+});
+
+test("resolves derived issue descriptions by PR anchor when titles collide", async () => {
+  const store = new MemoryOntologyGraphStore();
+  const repository = "org/repo";
+  const observedAt = "2026-07-20T00:00:00.000Z";
+  const source = await store.applyGitHubObservations([42, 43].map((number) => ({
+    tenantId: "t", repository, kind: "pull_request" as const, number,
+    title: `Fix regression ${number}`, body: `Regression fixed by PR ${number}.`, state: "closed",
+    url: `https://github.com/${repository}/pull/${number}`, occurredAt: observedAt, recordedAt: observedAt,
+    commitShas: [], resolvesIssueNumbers: [], referencesIssueNumbers: []
+  })));
+  const rawOutput = {
+    summary: "Two independent authorization regressions",
+    nodes: [
+      { id: "repo", kind: "Repository" as const, label: repository, description: "repo", evidence: ["README.md:1"] },
+      { id: "42", kind: "PullRequest" as const, label: "PR #42", description: "fix", evidence: ["src/auth.ts:10"] },
+      { id: "43", kind: "PullRequest" as const, label: "PR #43", description: "fix", evidence: ["src/audit.ts:10"] },
+      {
+        id: "virtual:pr:42", kind: "Issue" as const, label: "Administrators encounter an authorization error",
+        description: "Administrator deletion is incorrectly denied.", evidence: ["src/auth.ts:10"]
+      },
+      {
+        id: "virtual:pr:43", kind: "Issue" as const, label: "Administrators encounter an authorization error",
+        description: "Administrator audit export is incorrectly denied.", evidence: ["src/audit.ts:10"]
+      }
+    ],
+    edges: [42, 43].map((number) => ({
+      source: String(number), target: `virtual:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
+      confidence: 0.94, evidence: [number === 42 ? "src/auth.ts:10" : "src/audit.ts:10"]
+    }))
+  };
+  await store.saveAssertionBatch({
+    tenantId: "t", repository, ref: "main", commitSha: "b".repeat(40), taskId: "assert-colliding-titles",
+    generatedAt: "2026-07-20T00:01:00.000Z", generatorVersion: ONTOLOGY_GENERATOR_VERSION,
+    registryVersion: ONTOLOGY_REGISTRY_VERSION, evidenceFingerprint: "colliding-title-evidence",
+    evidenceObservationIds: source.observationIds, model: "fixture", summary: rawOutput.summary, rawOutput,
+    assertions: assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers: [42, 43] })
+  });
+  const resolutions = await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" });
+  for (const [index, resolution] of resolutions.entries()) {
+    await store.executeCommand("t", "svc:test", {
+      type: "review_assertion", assertionId: resolution.id, decision: "accept"
+    }, `2026-07-20T00:02:0${index}.000Z`);
+  }
+  const trace = await store.retrieve({
+    tenantId: "t", allowedRepositories: [repository], repository, ref: "main", template: "issue_trace",
+    issueText: "audit export"
+  });
+  const payload = trace.items[0]?.data as unknown as {
+    issue: { description?: string };
+    resolutions: { pullRequestNumber: number }[];
+  };
+  assert.equal(payload.issue.description, "Administrator audit export is incorrectly denied.");
+  assert.equal(payload.resolutions[0]?.pullRequestNumber, 43);
+});
+
 test("memory source ingestion applies current deterministic assertions", async () => {
   const store = new MemoryOntologyGraphStore();
   await store.applyGitHubObservations([{
@@ -449,6 +603,85 @@ test("normalizes model output into distinct semantic entity identities", () => {
     "repo:omxyz/demo:moniker:symbol:src/app.ts:second"
   ]);
 });
+
+test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () => {
+  const repository = "omxyz/demo";
+  const assertions = assertionsFromGeneratedOntology({
+    summary: "PR 42 fixes an authorization regression",
+    nodes: [
+      { id: "repo", kind: "Repository", label: repository, description: "repo", evidence: ["README.md:1"] },
+      { id: "42", kind: "PullRequest", label: "PR #42", description: "restores deletion", evidence: ["src/auth.ts:10"] },
+      {
+        id: "virtual:pr:42",
+        kind: "Issue",
+        label: "Administrators cannot delete resources",
+        description: "Administrator deletion is incorrectly denied.",
+        evidence: ["src/auth.ts:10"]
+      }
+    ],
+    edges: [{
+      source: "42",
+      target: "virtual:pr:42",
+      predicate: "RESOLVES",
+      plane: "knowledge",
+      confidence: 0.94,
+      evidence: ["src/auth.ts:10"]
+    }]
+  }, repository, { sourcePullRequestNumbers: [42] });
+  const assertion = assertions.find((candidate) => candidate.predicate === "RESOLVES");
+  const inverse = assertions.find((candidate) => candidate.predicate === "RESOLVED_BY");
+  assert.equal(assertion?.subject.naturalKey, `github:pr:${repository}#42`);
+  assert.equal(assertion?.object.kind, "Issue");
+  assert.equal(assertion?.object.naturalKey, derivedIssueNaturalKey(repository, 42));
+  assert.equal(assertion?.object.naturalKey.startsWith("github:issue:"), false);
+  assert.equal(inverse?.subject.naturalKey, assertion?.object.naturalKey);
+  assert.equal(inverse?.object.naturalKey, assertion?.subject.naturalKey);
+  assert.throws(
+    () => assertionsFromGeneratedOntology(generatedVirtualIssue(repository, 42), repository),
+    /not present in source evidence/
+  );
+  assert.throws(
+    () => assertionsFromGeneratedOntology({
+      ...generatedVirtualIssue(repository, 42),
+      edges: [{
+        source: "43", target: "virtual:pr:42", predicate: "RESOLVES", plane: "knowledge", confidence: 0.9,
+        evidence: ["src/auth.ts:10"]
+      }],
+      nodes: [
+        ...generatedVirtualIssue(repository, 42).nodes.filter((node) => node.id !== "42"),
+        { id: "43", kind: "PullRequest", label: "PR #43", description: "wrong anchor", evidence: ["src/auth.ts:10"] }
+      ]
+    }, repository, { sourcePullRequestNumbers: [42] }),
+    /must be resolved by pull request #42/
+  );
+  assert.throws(
+    () => assertionsFromGeneratedOntology(generatedVirtualIssue(repository, 42), repository, {
+      sourcePullRequestNumbers: [42], resolvedPullRequestNumbers: [42]
+    }),
+    /already explicitly resolves an issue/
+  );
+});
+
+function generatedVirtualIssue(repository: string, pullRequestNumber: number) {
+  return {
+    summary: `PR ${pullRequestNumber} fixes an authorization regression`,
+    nodes: [
+      { id: "repo", kind: "Repository" as const, label: repository, description: "repo", evidence: ["README.md:1"] },
+      {
+        id: String(pullRequestNumber), kind: "PullRequest" as const, label: `PR #${pullRequestNumber}`,
+        description: "restores deletion", evidence: ["src/auth.ts:10"]
+      },
+      {
+        id: `virtual:pr:${pullRequestNumber}`, kind: "Issue" as const, label: "Administrators cannot delete resources",
+        description: "Administrator deletion is incorrectly denied.", evidence: ["src/auth.ts:10"]
+      }
+    ],
+    edges: [{
+      source: String(pullRequestNumber), target: `virtual:pr:${pullRequestNumber}`, predicate: "RESOLVES",
+      plane: "knowledge" as const, confidence: 0.94, evidence: ["src/auth.ts:10"]
+    }]
+  };
+}
 
 test("canonicalizes cited causal model assertions and rejects ambiguous entity ids", () => {
   const sha = "a".repeat(40);
@@ -628,6 +861,29 @@ test("requires causal evidence to name the issue and offending commit", async ()
     validateOntologyEvidence(generated, async () => "Issue #4 was caused by an earlier change.\nThe administrator bypass was removed."),
     /explicitly name Issue #4 and commit/
   );
+  const derived = parseGeneratedOntology({
+    summary: "derived root cause",
+    nodes: [
+      {
+        id: "virtual:pr:42", kind: "Issue", label: "Administrators cannot delete resources",
+        description: "Administrator deletion is incorrectly denied.", evidence: ["docs/root-cause.md:1"]
+      },
+      { id: sha, kind: "Commit", label: sha.slice(0, 12), description: "offending change", evidence: ["docs/root-cause.md:1"] }
+    ],
+    edges: [{
+      source: "virtual:pr:42", target: sha, predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.99,
+      why: "The commit removed the administrator bypass.", evidence: ["docs/root-cause.md:1-2"]
+    }]
+  });
+  await validateOntologyEvidence(derived, async () =>
+    `Administrators cannot delete resources was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
+  );
+  await assert.rejects(
+    validateOntologyEvidence(derived, async () =>
+      `A deletion bug was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
+    ),
+    /explicitly name derived Issue Administrators cannot delete resources and commit/
+  );
 });
 
 test("reuses parsed blobs and projects canonical code facts plus active assertions", async () => {
@@ -673,6 +929,7 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
     generatorVersion: ONTOLOGY_GENERATOR_VERSION,
     registryVersion: ONTOLOGY_REGISTRY_VERSION,
     evidenceFingerprint: "evidence-fixture",
+    evidenceObservationIds: [],
     model: "fixture",
     summary: "README documents the repository",
     rawOutput: {

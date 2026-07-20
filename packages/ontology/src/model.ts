@@ -69,7 +69,18 @@ export interface OntologyBuildRequest {
   readonly ref: string;
   readonly commitSha?: string;
   readonly focusPaths?: readonly string[];
+  /** Immutable source observations included in this generation's evidence fingerprint. */
+  readonly sourceEvidence?: readonly OntologySourceEvidence[];
   readonly taskId: string;
+}
+
+export interface OntologySourceEvidence {
+  readonly id: string;
+  readonly source: string;
+  readonly type: string;
+  readonly repository: string;
+  readonly payloadSha: string;
+  readonly payload: unknown;
 }
 
 export interface GeneratedOntology {
@@ -207,18 +218,22 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
       throw new Error("INTRODUCED_BY evidence must connect an Issue to a Commit");
     }
     const issueNumber = /^(?:issue:)?#?(\d+)$/i.exec(issue.id.trim())?.[1];
+    const derivedIssueAnchor = /^virtual:pr:(\d+)$/i.exec(issue.id.trim())?.[1];
     const commitSha = /^(?:(?:commit|sha):)?([a-f0-9]{40})$/i.exec(commit.id.trim())?.[1]?.toLowerCase();
-    if (!issueNumber || !commitSha) {
-      throw new Error("INTRODUCED_BY evidence requires a positive issue number and full commit SHA");
+    if ((!issueNumber && !derivedIssueAnchor) || !commitSha) {
+      throw new Error("INTRODUCED_BY evidence requires a valid Issue identity and full commit SHA");
     }
     const citedText = edge.evidence.map((value) => {
       const citation = parseEvidenceCitation(value);
       const lines = files.get(citation.path)?.split(/\r?\n/) ?? [];
       return lines.slice(citation.startLine - 1, citation.endLine).join("\n");
     }).join("\n");
-    const namesIssue = new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(citedText);
+    const namesIssue = issueNumber
+      ? new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(citedText)
+      : citedText.toLowerCase().includes(issue.label.trim().toLowerCase());
     if (!namesIssue || !citedText.toLowerCase().includes(commitSha)) {
-      throw new Error(`INTRODUCED_BY evidence must explicitly name Issue #${issueNumber} and commit ${commitSha}`);
+      const issueReference = issueNumber ? `Issue #${issueNumber}` : `derived Issue ${issue.label}`;
+      throw new Error(`INTRODUCED_BY evidence must explicitly name ${issueReference} and commit ${commitSha}`);
     }
   }
 }

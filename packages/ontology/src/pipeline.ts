@@ -1,4 +1,11 @@
-import { stableId, type EvidenceCitation, type GeneratedOntology, type OntologyGraph, type OntologyNodeKind } from "./model.js";
+import {
+  stableId,
+  type EvidenceCitation,
+  type GeneratedOntology,
+  type OntologyGraph,
+  type OntologyNodeKind,
+  type OntologySourceEvidence
+} from "./model.js";
 import { canonicalJson, type AssertionStatus } from "./knowledge.js";
 import type { GitHubSourceObservation } from "./normalizers.js";
 import {
@@ -11,7 +18,7 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v4";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v5";
 export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
 
 export interface RepositoryTreeEntry {
@@ -99,6 +106,7 @@ export interface OntologyIngestResult extends Omit<OntologyIngestPlan, "missingB
 
 export interface OntologySourceIngestResult {
   readonly observationCount: number;
+  readonly observationIds: readonly string[];
   readonly assertionCount: number;
   readonly newObservationCount: number;
   readonly updatedObservationCount: number;
@@ -131,6 +139,7 @@ export interface OntologyAssertionBatch {
   readonly registryVersion: string;
   /** Canonical fingerprint of the code and source evidence supplied to this generation. */
   readonly evidenceFingerprint: string;
+  readonly evidenceObservationIds: readonly string[];
   readonly model: string;
   readonly sandboxId?: string;
   readonly summary: string;
@@ -183,6 +192,11 @@ export interface OntologyPipelineStore {
     analyses: readonly BlobAnalysis[]
   ): Promise<void>;
   applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<OntologySourceIngestResult>;
+  loadAssertionEvidence(
+    tenantId: string,
+    repository: string,
+    observationIds: readonly string[]
+  ): Promise<readonly OntologySourceEvidence[]>;
   hasAssertionGeneration(
     tenantId: string,
     repository: string,
@@ -341,15 +355,25 @@ export function computeCommitChanges(
 /** Pure normalizer from an immutable model observation to proposed assertion intents. */
 export function assertionsFromGeneratedOntology(
   generated: GeneratedOntology,
-  repository: string
+  repository: string,
+  options: {
+    readonly sourcePullRequestNumbers?: readonly number[];
+    readonly resolvedPullRequestNumbers?: readonly number[];
+  } = {}
 ): readonly GeneratedAssertion[] {
   const nodes = new Map(generated.nodes.map((node) => [node.id, node]));
+  validateDerivedIssueNodes(
+    generated,
+    nodes,
+    options.sourcePullRequestNumbers ?? [],
+    options.resolvedPullRequestNumbers ?? []
+  );
   return generated.edges.flatMap((edge) => {
     if (edge.plane !== "knowledge") return [];
     const subject = nodes.get(edge.source);
     const object = nodes.get(edge.target);
     if (!subject || !object) return [];
-    return [{
+    const assertion: GeneratedAssertion = {
       subject: {
         kind: subject.kind,
         naturalKey: entityNaturalKey(subject, repository),
@@ -366,8 +390,58 @@ export function assertionsFromGeneratedOntology(
       ...(edge.predicate === "INTRODUCED_BY"
         ? { qualifiers: { reason: requiredCausalReason(edge.why) } }
         : {})
+    };
+    if (edge.predicate !== "RESOLVES" || !/^virtual:pr:\d+$/i.test(object.id.trim())) return [assertion];
+    return [assertion, {
+      subject: assertion.object,
+      predicate: "RESOLVED_BY",
+      object: assertion.subject,
+      confidence: assertion.confidence,
+      evidence: assertion.evidence
     }];
   });
+}
+
+function validateDerivedIssueNodes(
+  generated: GeneratedOntology,
+  nodes: ReadonlyMap<string, GeneratedOntology["nodes"][number]>,
+  sourcePullRequestNumbers: readonly number[],
+  resolvedPullRequestNumbers: readonly number[]
+): void {
+  const observed = new Set(sourcePullRequestNumbers);
+  const resolved = new Set(resolvedPullRequestNumbers);
+  const anchors = new Set<number>();
+  for (const node of generated.nodes) {
+    if (node.kind !== "Issue") continue;
+    const anchorText = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
+    if (!anchorText) continue;
+    const anchor = Number.parseInt(anchorText, 10);
+    if (!Number.isSafeInteger(anchor) || anchor < 1) throw new Error(`invalid virtual Issue anchor: ${node.id}`);
+    if (!observed.has(anchor)) throw new Error(`pull request #${anchor} is not present in source evidence`);
+    if (anchors.has(anchor)) throw new Error(`only one virtual Issue is allowed for pull request #${anchor}`);
+    if (resolved.has(anchor)) throw new Error(`pull request #${anchor} already explicitly resolves an issue`);
+    anchors.add(anchor);
+    const resolutions = generated.edges.filter((edge) => edge.predicate === "RESOLVES" && edge.target === node.id);
+    if (resolutions.length !== 1) throw new Error(`virtual Issue ${node.id} requires exactly one RESOLVES edge`);
+    const subject = nodes.get(resolutions[0]!.source);
+    const subjectNumber = subject?.kind === "PullRequest" ? canonicalWorkItemId(subject.id, "PullRequest") : undefined;
+    if (subjectNumber !== String(anchor)) throw new Error(`virtual Issue ${node.id} must be resolved by pull request #${anchor}`);
+  }
+  for (const edge of generated.edges) {
+    if (edge.predicate !== "RESOLVES") continue;
+    const target = nodes.get(edge.target);
+    if (target?.kind !== "Issue" || !/^virtual:pr:\d+$/i.test(target.id.trim())) {
+      throw new Error("model-generated RESOLVES must target a PR-anchored virtual Issue");
+    }
+  }
+}
+
+export function derivedIssueNaturalKey(repository: string, pullRequestNumber: number, slot = "primary"): string {
+  if (!Number.isSafeInteger(pullRequestNumber) || pullRequestNumber < 1) {
+    throw new Error(`derived Issue anchor must be a positive pull request number: ${pullRequestNumber}`);
+  }
+  const pullRequestKey = `github:pr:${repository}#${pullRequestNumber}`;
+  return `derived:issue:${repository}:${stableId("candidate", `${pullRequestKey}:${slot}`)}`;
 }
 
 function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: string): string {
@@ -376,7 +450,11 @@ function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: 
   if (node.kind === "Symbol") return `repo:${repository}:moniker:${node.id}`;
   if (node.kind === "Commit") return `repo:${repository}:sha:${canonicalCommitId(node.id)}`;
   if (node.kind === "PullRequest") return `github:pr:${repository}#${canonicalWorkItemId(node.id, "PullRequest")}`;
-  if (node.kind === "Issue") return `github:issue:${repository}#${canonicalWorkItemId(node.id, "Issue")}`;
+  if (node.kind === "Issue") {
+    const virtualAnchor = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
+    if (virtualAnchor) return derivedIssueNaturalKey(repository, Number.parseInt(virtualAnchor, 10));
+    return `github:issue:${repository}#${canonicalWorkItemId(node.id, "Issue")}`;
+  }
   return node.id;
 }
 

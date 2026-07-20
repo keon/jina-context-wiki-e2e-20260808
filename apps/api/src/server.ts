@@ -301,6 +301,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
+        ...(typeof body.issueEntityId === "string" ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
@@ -320,6 +321,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
+        ...(typeof body.issueEntityId === "string" ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
@@ -377,6 +379,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/cached") {
       await findCachedOntologyAssertions(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/evidence") {
+      await loadOntologyAssertionEvidence(request, response, tenantId);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/ontology/outbox/drain") {
@@ -612,6 +618,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { cached: cached ?? null });
   }
 
+  async function loadOntologyAssertionEvidence(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_assert");
+    const repository = requiredString(task.metadata.repository, "task.repository");
+    const observationIds = Array.isArray(task.metadata.sourceObservationIds)
+      ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
+      : [];
+    const evidence = await ontologyStore.loadAssertionEvidence(tenantId, repository, observationIds);
+    json(response, 200, { evidence });
+  }
+
   function requireOntologyTask(taskId: string, tenantId: string, type: string): BoardTask {
     const task = findTask(intakeState.board, entityId<"task">(taskId) as TaskId);
     if (!task || task.metadata.tenantId !== tenantId || task.type !== type) throw new Error("ontology task not found");
@@ -750,6 +768,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         const analysisPaths = Array.isArray(resultPayload.analysisPaths)
           ? resultPayload.analysisPaths.map((path) => requiredRepositoryPath(path, "result.analysisPaths"))
           : [];
+        const sourceObservationIds = Array.isArray(resultPayload.sourceObservationIds)
+          ? resultPayload.sourceObservationIds.map((id) => requiredString(id, "result.sourceObservationIds"))
+          : [];
+        const sourcePullRequestNumbers = Array.isArray(resultPayload.sourcePullRequestNumbers)
+          ? resultPayload.sourcePullRequestNumbers.map((number) => requiredPositiveInteger(number, "result.sourcePullRequestNumber"))
+          : [];
+        const resolvedPullRequestNumbers = Array.isArray(resultPayload.resolvedPullRequestNumbers)
+          ? resultPayload.resolvedPullRequestNumbers.map((number) => requiredPositiveInteger(number, "result.resolvedPullRequestNumber"))
+          : [];
         const children = board.tasks.filter((candidate) => candidate.parentTaskId === currentTask.parentTaskId);
         for (const childType of ["ontology_assert", "ontology_project"] as const) {
           const child = children.find((candidate) => candidate.type === childType);
@@ -761,7 +788,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               commitSha,
               codeCheckpoint: requiredString(resultPayload.codeCheckpoint, "result.codeCheckpoint"),
               evidenceFingerprint: requiredString(resultPayload.evidenceFingerprint, "result.evidenceFingerprint"),
-              ...(childType === "ontology_assert" ? { analysisPaths } : {})
+              ...(childType === "ontology_assert"
+                ? { analysisPaths, sourceObservationIds, sourcePullRequestNumbers, resolvedPullRequestNumbers }
+                : {})
             }
           }, { actor: RUN_ACTOR, now }).state;
         }
@@ -1182,7 +1211,22 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
   const evidenceFingerprint = requiredString(value.evidenceFingerprint, "assertionBatch.evidenceFingerprint");
   if (evidenceFingerprint !== task.metadata.evidenceFingerprint) throw new Error("assertion batch evidence does not match task source");
   const repository = requiredString(task.metadata.repository, "task.repository");
+  const evidenceObservationIds = Array.isArray(value.evidenceObservationIds)
+    ? value.evidenceObservationIds.map((id) => requiredString(id, "assertionBatch.evidenceObservationIds"))
+    : [];
+  const expectedObservationIds = Array.isArray(task.metadata.sourceObservationIds)
+    ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
+    : [];
+  if (JSON.stringify([...evidenceObservationIds].sort()) !== JSON.stringify([...expectedObservationIds].sort())) {
+    throw new Error("assertion batch source evidence does not match task source");
+  }
   const rawOutput = parseGeneratedOntology(value.rawOutput);
+  const sourcePullRequestNumbers = Array.isArray(task.metadata.sourcePullRequestNumbers)
+    ? task.metadata.sourcePullRequestNumbers.map((number) => requiredPositiveInteger(number, "task.sourcePullRequestNumber"))
+    : [];
+  const resolvedPullRequestNumbers = Array.isArray(task.metadata.resolvedPullRequestNumbers)
+    ? task.metadata.resolvedPullRequestNumbers.map((number) => requiredPositiveInteger(number, "task.resolvedPullRequestNumber"))
+    : [];
   return {
     tenantId,
     repository,
@@ -1193,11 +1237,12 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
     generatorVersion: ONTOLOGY_GENERATOR_VERSION,
     registryVersion: ONTOLOGY_REGISTRY_VERSION,
     evidenceFingerprint,
+    evidenceObservationIds,
     model: requiredString(value.model, "assertionBatch.model"),
     ...(typeof value.sandboxId === "string" && value.sandboxId ? { sandboxId: value.sandboxId } : {}),
     summary: requiredString(value.summary, "assertionBatch.summary"),
     rawOutput,
-    assertions: assertionsFromGeneratedOntology(rawOutput, repository)
+    assertions: assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers })
   };
 }
 
