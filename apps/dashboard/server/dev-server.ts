@@ -30,18 +30,28 @@ function proxyApiRequest(request: IncomingMessage, response: ServerResponse): vo
     incoming.pathname.startsWith("/api/ontology/graphs/")
   );
   const allowedLocalDemo = !internalApiToken && request.method === "POST" && incoming.pathname === "/api/dev/webhooks/github";
-  if (!allowedRead && !allowedLocalDemo) {
+  const allowedOntologyQuery = request.method === "POST" && (
+    incoming.pathname === "/api/ontology/ask" || incoming.pathname === "/api/ontology/retrieve"
+  );
+  if (!allowedRead && !allowedLocalDemo && !allowedOntologyQuery) {
     response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
     response.end('{"error":"not found"}');
     return;
   }
   const upstreamUrl = new URL(`${incoming.pathname.slice(4)}${incoming.search}`, apiUrl);
   const headers = { ...request.headers };
+  const iapEmail = firstHeader(request.headers["x-goog-authenticated-user-email"])
+    ?.replace(/^accounts\.google\.com:/i, "").trim().toLowerCase();
   delete headers.host;
   delete headers.connection;
   delete headers.authorization;
   delete headers["x-jina-tenant-id"];
+  delete headers["x-jina-principal-id"];
+  delete headers["x-goog-authenticated-user-email"];
   if (internalApiToken) headers.authorization = `Bearer ${internalApiToken}`;
+  if (internalApiToken && iapEmail && /^[^\s@]+@[^\s@]+$/.test(iapEmail)) {
+    headers["x-jina-principal-id"] = `user:${iapEmail}`;
+  }
   const upstreamRequest = (upstreamUrl.protocol === "https:" ? httpsRequest : httpRequest)(
     upstreamUrl,
     { method: request.method, headers },
@@ -57,4 +67,8 @@ function proxyApiRequest(request: IncomingMessage, response: ServerResponse): vo
     response.end(JSON.stringify({ error: "upstream API unavailable", detail: error.message }));
   });
   request.pipe(upstreamRequest);
+}
+
+function firstHeader(value: string | readonly string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : value?.[0];
 }

@@ -22,9 +22,13 @@ import {
   ONTOLOGY_GENERATOR_VERSION,
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
+  RepositoryContextOrchestrator,
+  retrievalTemplateNames,
   ontologyTaskTypeDefinitions,
   parseGeneratedOntology,
   type BlobAnalysis,
+  type GitHubSourceObservation,
+  type OntologyCommand,
   type OntologyAssertionBatch,
   type OntologyGraph,
   type OntologyGraphStore,
@@ -63,6 +67,8 @@ export interface ApiServerConfig {
   readonly stateStore?: ApiStateStore;
   readonly ontologyStore?: OntologyGraphStore;
   readonly internalApiToken?: string;
+  readonly principalId?: string;
+  readonly tenantAdminPrincipalIds?: readonly string[];
 }
 
 export interface ApiSnapshot {
@@ -185,10 +191,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const server = createServer((request, response) => {
     void route(request, response).catch((error: unknown) => {
       const isTooLarge = error instanceof RequestBodyTooLargeError;
-      console.error("API request failed", error instanceof Error ? error.message : String(error));
-      json(response, isTooLarge ? 413 : 500, {
+      const message = error instanceof Error ? error.message : String(error);
+      const isForbidden = /(?:access denied|administrator access required)/i.test(message);
+      console.error("API request failed", message);
+      json(response, isTooLarge ? 413 : isForbidden ? 403 : 500, {
         accepted: false,
-        error: isTooLarge ? error.message : "internal server error"
+        error: isTooLarge ? error.message : isForbidden ? "forbidden" : "internal server error"
       });
     });
   });
@@ -233,49 +241,122 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
-    const tenantId = authenticatedTenant(request, config);
-    if (!tenantId) {
+    const principal = authenticatedPrincipal(request, config);
+    if (!principal) {
       json(response, 401, { accepted: false, error: "unauthorized" });
       return;
     }
+    const { tenantId } = principal;
 
     if (request.method === "GET" && url.pathname === "/board") {
-      json(response, 200, tenantBoardView(intakeState, publications, tenantId));
+      const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
+      json(response, 200, tenantBoardView(intakeState, publications, tenantId, allowedRepositories));
       return;
     }
     if (request.method === "GET" && url.pathname === "/ontology") {
-      const [latest, graphs] = await Promise.all([
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      const [latest, graphValues] = await Promise.all([
         ontologyStore.latest(tenantId),
         ontologyStore.listSummaries(tenantId)
       ]);
-      json(response, 200, { latest: latest ?? null, graphs });
+      const graphs = graphValues.filter((graph) => allowedRepositories.includes(graph.repository));
+      json(response, 200, { latest: latest && allowedRepositories.includes(latest.repository) ? latest : null, graphs });
       return;
     }
     if (request.method === "GET" && url.pathname.startsWith("/ontology/graphs/")) {
       const graphId = decodeURIComponent(url.pathname.slice("/ontology/graphs/".length));
       const graph = await ontologyStore.get(graphId, tenantId);
-      json(response, graph ? 200 : 404, graph ?? { error: "ontology graph not found" });
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      const permitted = graph && allowedRepositories.includes(graph.repository) ? graph : undefined;
+      json(response, permitted ? 200 : 404, permitted ?? { error: "ontology graph not found" });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/ontology/metrics") {
+      if (!isTenantAdmin(principal)) {
+        json(response, 403, { error: "tenant administrator access required" });
+        return;
+      }
+      json(response, 200, await ontologyStore.operationalMetrics(tenantId, nowIso()));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/ontology/retrieve") {
+      const body = parseJsonObject(await readRawBody(request));
+      const repository = requiredString(body.repository, "repository");
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      const template = requiredString(body.template, "template");
+      if (!retrievalTemplateNames.includes(template as typeof retrievalTemplateNames[number])) throw new Error("unsupported retrieval template");
+      const result = await ontologyStore.retrieve({
+        tenantId, allowedRepositories, repository, template: template as typeof retrievalTemplateNames[number],
+        ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
+        ...(typeof body.query === "string" ? { query: body.query } : {}),
+        ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
+        ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
+        ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
+        ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
+      });
+      json(response, 200, result);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/ontology/ask") {
+      const body = parseJsonObject(await readRawBody(request));
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      const orchestrator = new RepositoryContextOrchestrator(ontologyStore);
+      json(response, 200, await orchestrator.answer({
+        tenantId, allowedRepositories, repository: requiredString(body.repository, "repository"),
+        question: requiredString(body.question, "question"),
+        ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
+        ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
+        ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
+        ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
+        ...(typeof body.tokenBudget === "number" ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") } : {})
+      }));
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/ontology/commands") {
+      const body = parseJsonObject(await readRawBody(request));
+      json(response, 200, await ontologyStore.executeCommand(
+        tenantId,
+        principal.principalId,
+        parseOntologyCommand(body),
+        nowIso(),
+        isTenantAdmin(principal)
+      ));
       return;
     }
     if (request.method === "GET" && url.pathname === "/events") {
-      const taskIds = tenantTaskIds(intakeState, tenantId);
+      const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
+      const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
       json(response, 200, intakeState.board.events.filter((event) => event.taskId && taskIds.has(event.taskId)));
       return;
     }
     if (request.method === "POST" && url.pathname === "/ontology/build") {
-      await createOntologyTask(request, response, tenantId);
+      const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
+      await createOntologyTask(request, response, tenantId, allowedRepositories);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/plan") {
       await planOntologyIngestion(request, response, tenantId);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/known") {
+      await findKnownOntologyCommits(request, response, tenantId);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/blobs") {
       await applyOntologyBlobAnalyses(request, response, tenantId);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/github") {
+      await applyOntologyGitHubObservations(request, response, tenantId);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/cached") {
       await findCachedOntologyAssertions(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/outbox/drain") {
+      await readRawBody(request);
+      json(response, 200, await ontologyStore.drainDerivedProjectionEvents(tenantId, nowIso()));
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
@@ -328,11 +409,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, committed.statusCode, committed.payload);
   }
 
-  async function createOntologyTask(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+  async function createOntologyTask(
+    request: IncomingMessage,
+    response: ServerResponse,
+    tenantId: string,
+    allowedRepositories?: ReadonlySet<string>
+  ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const repository = requiredString(body.repository, "repository");
     if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
       json(response, 400, { accepted: false, error: "repository must be owner/name" });
+      return;
+    }
+    if (allowedRepositories && !allowedRepositories.has(repository)) {
+      json(response, 403, { accepted: false, error: "repository access denied" });
       return;
     }
     const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
@@ -438,6 +528,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, plan);
   }
 
+  async function findKnownOntologyCommits(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+    if (!Array.isArray(body.commitShas)) throw new Error("commitShas must be an array");
+    const commitShas = body.commitShas.map((sha) => requiredGitSha(sha, "commitSha"));
+    json(response, 200, {
+      knownCommitShas: await ontologyStore.knownCommits(tenantId, requiredString(task.metadata.repository, "task.repository"), commitShas)
+    });
+  }
+
   async function applyOntologyBlobAnalyses(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
@@ -450,6 +551,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       commitSha
     }, analyses);
     json(response, 200, { accepted: true, count: analyses.length });
+  }
+
+  async function applyOntologyGitHubObservations(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+    if (!Array.isArray(body.observations)) throw new Error("observations must be an array");
+    const observations = body.observations.map((value) => parseGitHubWorkItemObservation(value, tenantId));
+    const repository = requiredString(task.metadata.repository, "task.repository");
+    if (observations.some((observation) => observation.repository !== repository)) throw new Error("GitHub observation repository does not match task");
+    json(response, 200, await ontologyStore.applyGitHubObservations(observations));
   }
 
   async function findCachedOntologyAssertions(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -636,6 +748,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         }, { actor: RUN_ACTOR, now }).state;
       }
       if (outcome === "done" && message.topic === "run-ontology-project") {
+        eventPayload = { ...await ontologyStore.rebuildDerivedProjections(
+          tenantId,
+          requiredString(currentTask.metadata.repository, "task.repository"),
+          requiredString(currentTask.metadata.ref, "task.ref"),
+          now
+        ) };
         graph = await ontologyStore.project({
           tenantId,
           repository: requiredString(currentTask.metadata.repository, "task.repository"),
@@ -652,7 +770,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         payload: outcome === "failed"
           ? { reason: String(body.reason ?? "worker failed").slice(0, 2000) }
           : graph
-          ? { graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
+          ? { ...eventPayload, graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
           : eventPayload
       }, { actor: RUN_ACTOR, now }).state;
       if (outcome === "done" && message.topic === "run-publish") {
@@ -686,6 +804,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, result ? 200 : 409, result ? { accepted: true, graphId: graph?.id } : { accepted: false, error: "stale lease" });
   }
 
+  function isTenantAdmin(principal: { readonly principalId: string }): boolean {
+    return principal.principalId.startsWith("svc:") || (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId);
+  }
+
+  async function repositoriesForPrincipal(principal: { readonly tenantId: string; readonly principalId: string }): Promise<readonly string[]> {
+    return ontologyStore.repositoriesForPrincipal(
+      principal.tenantId,
+      isTenantAdmin(principal) ? "svc:tenant-admin" : principal.principalId
+    );
+  }
+
   if (config.simulateRuns) {
     const timer = setInterval(() => void mutate(drainOneSimulatedRun).catch((error) => console.error("simulated run failed", error)), 1500);
     timer.unref();
@@ -696,21 +825,43 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   return server;
 }
 
-function authenticatedTenant(request: IncomingMessage, config: ApiServerConfig): string | undefined {
+function authenticatedPrincipal(request: IncomingMessage, config: ApiServerConfig): { readonly tenantId: string; readonly principalId: string } | undefined {
   if (config.enableDevEndpoints) {
-    return firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default";
+    return {
+      tenantId: firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default",
+      principalId: config.principalId ?? "svc:dev"
+    };
   }
   if (!config.internalApiToken || firstHeader(request.headers.authorization) !== `Bearer ${config.internalApiToken}`) return undefined;
-  return config.tenantId;
+  if (!config.tenantId) return undefined;
+  const forwardedPrincipal = firstHeader(request.headers["x-jina-principal-id"]);
+  const principalId = forwardedPrincipal && /^user:[^\s@]+@[^\s@]+$/.test(forwardedPrincipal)
+    ? forwardedPrincipal.toLowerCase()
+    : config.principalId ?? "svc:api";
+  return { tenantId: config.tenantId, principalId };
 }
 
-function tenantTaskIds(state: GitHubIntakeState, tenantId: string): Set<TaskId> {
-  return new Set(state.board.tasks.filter((task) => task.metadata.tenantId === tenantId).map((task) => task.id));
+function tenantTaskIds(
+  state: GitHubIntakeState,
+  tenantId: string,
+  allowedRepositories?: ReadonlySet<string>
+): Set<TaskId> {
+  return new Set(state.board.tasks.filter((task) =>
+    task.metadata.tenantId === tenantId &&
+    (!allowedRepositories || (typeof task.metadata.repository === "string" && allowedRepositories.has(task.metadata.repository)))
+  ).map((task) => task.id));
 }
 
-function tenantBoardView(state: GitHubIntakeState, publications: readonly PublicationRecord[], tenantId: string) {
-  const taskIds = tenantTaskIds(state, tenantId);
-  const pullRequests = state.pullRequests.filter((pullRequest) => pullRequest.tenantId === tenantId);
+function tenantBoardView(
+  state: GitHubIntakeState,
+  publications: readonly PublicationRecord[],
+  tenantId: string,
+  allowedRepositories?: ReadonlySet<string>
+) {
+  const taskIds = tenantTaskIds(state, tenantId, allowedRepositories);
+  const pullRequests = state.pullRequests.filter((pullRequest) =>
+    pullRequest.tenantId === tenantId && (!allowedRepositories || allowedRepositories.has(pullRequest.repository))
+  );
   const publicationSubjects = pullRequests.map((pullRequest) => `pr:${pullRequest.repository}#${pullRequest.number}:`);
   return {
     tasks: state.board.tasks.filter((task) => taskIds.has(task.id)),
@@ -813,6 +964,13 @@ function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySn
     commitSha: requiredGitSha(value.commitSha, "snapshot.commitSha"),
     treeSha: requiredGitSha(value.treeSha, "snapshot.treeSha"),
     parents: value.parents.map((parent) => requiredGitSha(parent, "snapshot.parent")),
+    ...(typeof value.authorExternalId === "string" && value.authorExternalId.trim() ? { authorExternalId: value.authorExternalId.trim() } : {}),
+    ...(typeof value.authorGitHubLogin === "string" && value.authorGitHubLogin.trim() ? { authorGitHubLogin: value.authorGitHubLogin.trim() } : {}),
+    ...(typeof value.authorName === "string" && value.authorName.trim() ? { authorName: value.authorName.trim() } : {}),
+    ...(typeof value.committedAt === "string" && value.committedAt.trim() ? { committedAt: value.committedAt.trim() } : {}),
+    ...(typeof value.message === "string" ? { message: value.message } : {}),
+    ...(typeof value.isDefaultRef === "boolean" ? { isDefaultRef: value.isDefaultRef } : {}),
+    ...(typeof value.updateRef === "boolean" ? { updateRef: value.updateRef } : {}),
     recordedAt: requiredString(value.recordedAt, "snapshot.recordedAt"),
     taskId: requiredString(value.taskId, "snapshot.taskId"),
     files: value.files.map((file) => {
@@ -824,11 +982,117 @@ function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySn
   };
 }
 
+function parseGitHubWorkItemObservation(value: unknown, tenantId: string): GitHubSourceObservation {
+  if (!isRecord(value)) throw new Error("GitHub observation must be an object");
+  const kind = requiredString(value.kind, "observation.kind");
+  if (kind === "codeowners") {
+    if (!Array.isArray(value.entries)) throw new Error("CODEOWNERS observation entries must be an array");
+    return {
+      tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
+      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
+      path: requiredRepositoryPath(value.path, "observation.path"),
+      entries: value.entries.map((entry) => {
+        if (!isRecord(entry) || !Array.isArray(entry.owners)) throw new Error("CODEOWNERS entry is invalid");
+        return {
+          pattern: requiredString(entry.pattern, "entry.pattern"),
+          owners: entry.owners.map((owner) => requiredString(owner, "entry.owner"))
+        };
+      }),
+      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
+    };
+  }
+  if (kind !== "pull_request" && kind !== "issue") throw new Error("GitHub observation kind must be pull_request, issue, or codeowners");
+  const positiveIntegerArray = (input: unknown, name: string): number[] => Array.isArray(input)
+    ? input.map((item) => requiredPositiveInteger(item, name))
+    : [];
+  return {
+    tenantId,
+    repository: requiredString(value.repository, "observation.repository"),
+    kind,
+    number: requiredPositiveInteger(value.number, "observation.number"),
+    title: requiredString(value.title, "observation.title"),
+    ...(typeof value.body === "string" ? { body: value.body } : {}),
+    state: requiredString(value.state, "observation.state"),
+    url: requiredString(value.url, "observation.url"),
+    ...(typeof value.authorLogin === "string" && value.authorLogin.trim() ? { authorLogin: value.authorLogin.trim() } : {}),
+    ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
+    recordedAt: requiredString(value.recordedAt, "observation.recordedAt"),
+    commitShas: Array.isArray(value.commitShas) ? value.commitShas.map((sha) => requiredGitSha(sha, "observation.commitSha")) : [],
+    resolvesIssueNumbers: positiveIntegerArray(value.resolvesIssueNumbers, "observation.resolvesIssueNumber"),
+    referencesIssueNumbers: positiveIntegerArray(value.referencesIssueNumbers, "observation.referencesIssueNumber")
+  };
+}
+
+function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
+  const type = requiredString(value.type, "command.type");
+  const reason = typeof value.reason === "string" && value.reason.trim() ? value.reason.trim() : undefined;
+  if (type === "review_assertion") {
+    const decision = requiredString(value.decision, "command.decision");
+    if (decision !== "accept" && decision !== "reject" && decision !== "retract") throw new Error("unsupported assertion review decision");
+    return { type, assertionId: requiredString(value.assertionId, "command.assertionId"), decision, ...(reason ? { reason } : {}) };
+  }
+  if (type === "merge_entities" || type === "unmerge_entities") {
+    return {
+      type, fromEntityId: requiredString(value.fromEntityId, "command.fromEntityId"),
+      toEntityId: requiredString(value.toEntityId, "command.toEntityId"), ...(reason ? { reason } : {})
+    };
+  }
+  if (type === "redact_observation") {
+    if (!reason) throw new Error("redaction reason is required");
+    return {
+      type, observationId: requiredString(value.observationId, "command.observationId"), reason,
+      ...(Array.isArray(value.commitShas) ? { commitShas: value.commitShas.map((sha) => requiredGitSha(sha, "command.commitSha")) } : {})
+    };
+  }
+  if (type === "erase_person") {
+    if (!reason) throw new Error("erasure reason is required");
+    return { type, entityId: requiredString(value.entityId, "command.entityId"), reason };
+  }
+  if (type === "tombstone_repository") {
+    if (!reason) throw new Error("tombstone reason is required");
+    return { type, repository: requiredString(value.repository, "command.repository"), reason };
+  }
+  if (type === "grant_repository_access") {
+    const role = requiredString(value.role, "command.role");
+    if (role !== "reader" && role !== "writer" && role !== "admin") throw new Error("unsupported repository role");
+    return {
+      type, repository: requiredString(value.repository, "command.repository"),
+      principalId: requiredString(value.principalId, "command.principalId"), role
+    };
+  }
+  if (type === "assign_relationship") {
+    const entity = (input: unknown, name: string) => {
+      if (!isRecord(input)) throw new Error(`${name} must be an object`);
+      const kind = requiredString(input.kind, `${name}.kind`);
+      if (!(["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Engineer", "Team", "Document"] as const).includes(kind as "Repository")) {
+        throw new Error(`${name}.kind is unsupported`);
+      }
+      return {
+        kind: kind as "Repository" | "File" | "Symbol" | "Commit" | "PullRequest" | "Issue" | "Engineer" | "Team" | "Document",
+        key: requiredString(input.key, `${name}.key`),
+        ...(typeof input.displayName === "string" ? { displayName: input.displayName } : {})
+      };
+    };
+    const qualifiers = isRecord(value.qualifiers)
+      ? Object.fromEntries(Object.entries(value.qualifiers).map(([key, item]) => {
+          if (!["string", "number", "boolean"].includes(typeof item)) throw new Error(`qualifier ${key} has an unsupported value`);
+          return [key, item as string | number | boolean];
+        }))
+      : undefined;
+    return {
+      type, ...(typeof value.repository === "string" ? { repository: value.repository } : {}),
+      subject: entity(value.subject, "command.subject"), predicate: requiredString(value.predicate, "command.predicate"),
+      object: entity(value.object, "command.object"), ...(qualifiers ? { qualifiers } : {}), ...(reason ? { reason } : {})
+    };
+  }
+  throw new Error("unsupported ontology command");
+}
+
 function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
   if (!Array.isArray(value)) throw new Error("analyses must be an array");
   return value.map((analysis) => {
-    if (!isRecord(analysis) || !Array.isArray(analysis.symbols) || !Array.isArray(analysis.imports)) {
-      throw new Error("blob analysis must include symbols and imports");
+    if (!isRecord(analysis) || !Array.isArray(analysis.symbols) || !Array.isArray(analysis.imports) || !Array.isArray(analysis.edges)) {
+      throw new Error("blob analysis must include symbols, imports, and edges");
     }
     const parserVersion = requiredString(analysis.parserVersion, "analysis.parserVersion");
     if (parserVersion !== ONTOLOGY_PARSER_VERSION) throw new Error("unsupported ontology parser version");
@@ -842,6 +1106,7 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
           moniker: requiredString(symbol.moniker, "symbol.moniker"),
           name: requiredString(symbol.name, "symbol.name"),
           kind: requiredString(symbol.kind, "symbol.kind"),
+          signatureHash: requiredString(symbol.signatureHash, "symbol.signatureHash"),
           startLine: requiredPositiveInteger(symbol.startLine, "symbol.startLine"),
           endLine: requiredPositiveInteger(symbol.endLine, "symbol.endLine")
         };
@@ -849,6 +1114,20 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
       imports: analysis.imports.map((item) => {
         if (!isRecord(item)) throw new Error("import must be an object");
         return { specifier: requiredString(item.specifier, "import.specifier"), line: requiredPositiveInteger(item.line, "import.line") };
+      }),
+      edges: analysis.edges.map((edge) => {
+        if (!isRecord(edge)) throw new Error("symbol edge must be an object");
+        const kind = requiredString(edge.kind, "edge.kind");
+        if (!(["calls", "imports", "references", "extends"] as const).includes(kind as "calls")) {
+          throw new Error("unsupported symbol edge kind");
+        }
+        return {
+          fromMoniker: requiredString(edge.fromMoniker, "edge.fromMoniker"),
+          kind: kind as "calls" | "imports" | "references" | "extends",
+          toMoniker: requiredString(edge.toMoniker, "edge.toMoniker"),
+          startLine: requiredPositiveInteger(edge.startLine, "edge.startLine"),
+          endLine: requiredPositiveInteger(edge.endLine, "edge.endLine")
+        };
       })
     };
   });
@@ -943,7 +1222,7 @@ function json(response: ServerResponse, statusCode: number, payload: unknown): v
   response.writeHead(statusCode, {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": "*",
-    "access-control-allow-headers": "content-type, authorization, x-jina-tenant-id, x-github-event, x-github-delivery, x-hub-signature-256",
+    "access-control-allow-headers": "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
     "access-control-allow-methods": "GET, POST, OPTIONS"
   });
   response.end(statusCode === 204 ? undefined : JSON.stringify(payload, null, 2));

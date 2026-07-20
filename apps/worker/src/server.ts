@@ -11,12 +11,15 @@ import { DaytonaCodexOntologyExecutor } from "@jina/daytona";
 import {
   ONTOLOGY_GENERATOR_VERSION,
   ONTOLOGY_PARSER_VERSION,
+  ONTOLOGY_REGISTRY_VERSION,
   analyzeSourceBlob,
   assertionsFromGeneratedOntology,
   codeCheckpoint,
   knowledgeCheckpoint,
   languageForPath,
+  linkedIssueNumbers,
   type BlobAnalysis,
+  type GitHubSourceObservation,
   type OntologyAssertionBatch,
   type OntologyBuildRequest,
   type OntologyGraph,
@@ -67,6 +70,7 @@ const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
+const drainsOntologyProjections = topics.some((topic) => topic.startsWith("run-ontology"));
 const ontologyExecutor = topics.some((topic) => topic === "run-ontology" || topic === "run-ontology-generate" || topic === "run-ontology-assert")
   ? new DaytonaCodexOntologyExecutor()
   : undefined;
@@ -95,12 +99,17 @@ async function poll(): Promise<void> {
     try {
       const work = await claim();
       if (work) await execute(work);
+      if (drainsOntologyProjections) await drainOntologyProjectionEvents();
     } catch (error) {
       lastApiError = errorMessage(error);
       console.error("worker poll failed", lastApiError);
     }
     if (!stopping) await delay(pollIntervalMs);
   }
+}
+
+async function drainOntologyProjectionEvents(): Promise<void> {
+  await internalApiJson("/internal/ontology/outbox/drain", {});
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
@@ -198,57 +207,222 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   const tenantId = requiredString(work.task.metadata.tenantId, "task tenantId");
   const repository = requiredString(work.task.metadata.repository, "task repository");
   const ref = requiredString(work.task.metadata.ref, "task ref");
-  const commit = await githubJson(`/repos/${repository}/commits/${encodeURIComponent(ref)}`);
-  const commitSha = requiredGitSha(commit.sha, "GitHub commit SHA");
-  const commitDetails = isRecord(commit.commit) ? commit.commit : {};
-  const treeDetails = isRecord(commitDetails.tree) ? commitDetails.tree : {};
-  const treeSha = requiredGitSha(treeDetails.sha, "GitHub tree SHA");
-  const tree = await githubJson(`/repos/${repository}/git/trees/${treeSha}?recursive=1`);
-  if (tree.truncated === true) throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
-  const entries = Array.isArray(tree.tree) ? tree.tree : [];
-  const files = entries.flatMap((entry) => {
-    if (!isRecord(entry) || entry.type !== "blob") return [];
-    return [{
-      path: requiredString(entry.path, "GitHub tree path"),
-      blobSha: requiredGitSha(entry.sha, "GitHub blob SHA"),
-      size: typeof entry.size === "number" && Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
-    }];
-  });
-  const snapshot: RepositorySnapshot = {
-    tenantId,
-    repository,
-    ref,
-    commitSha,
-    treeSha,
-    parents: (Array.isArray(commit.parents) ? commit.parents : []).map((parent) => {
-      if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
-      return requiredGitSha(parent.sha, "GitHub parent SHA");
-    }),
-    recordedAt: new Date().toISOString(),
-    taskId: work.task.id,
-    files
-  };
   const lease = { messageId: work.message.id, leaseId: work.message.leaseId };
-  const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", { ...lease, snapshot });
-  const analyses: BlobAnalysis[] = [];
-  for (const missing of plan.missingBlobs) {
-    analyses.push(await analyzeGitHubBlob(repository, missing));
-    if (analyses.length >= 50) {
-      await submitBlobAnalyses(work, commitSha, analyses.splice(0));
+  const [head, repositoryMetadata] = await Promise.all([
+    githubJson(`/repos/${repository}/commits/${encodeURIComponent(ref)}`),
+    githubJson(`/repos/${repository}`)
+  ]);
+  const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
+  const historyLimit = positiveInt(process.env.ONTOLOGY_HISTORY_LIMIT, 10_000);
+  const commits = await discoverNewCommits(work, repository, head, historyLimit);
+  const orderedShas = topologicalCommitOrder(commitSha, commits);
+  const defaultBranch = typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
+  let headPlan: OntologyIngestPlan | undefined;
+  let parsedBlobCount = 0;
+  let reusedBlobCount = 0;
+  let discoveredBlobCount = 0;
+  let fileCount = 0;
+  let ownershipObservation: GitHubSourceObservation | undefined;
+  const workItems = new Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>();
+  for (const sha of orderedShas) {
+    const commit = commits.get(sha) ?? (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
+    const snapshot = await repositorySnapshotFromGitHub({
+      tenantId, repository, ref, taskId: work.task.id, commit,
+      isHead: sha === commitSha, isDefaultRef: ref === defaultBranch
+    });
+    const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", { ...lease, snapshot });
+    const analyses: BlobAnalysis[] = [];
+    for (const missing of plan.missingBlobs) {
+      analyses.push(await analyzeGitHubBlob(repository, missing));
+      if (analyses.length >= 50) {
+        await submitBlobAnalyses(work, snapshot.commitSha, analyses.splice(0));
+      }
+    }
+    if (analyses.length > 0) await submitBlobAnalyses(work, snapshot.commitSha, analyses);
+    parsedBlobCount += plan.missingBlobs.length;
+    reusedBlobCount += plan.reusedBlobCount;
+    discoveredBlobCount += plan.discoveredBlobCount;
+    if (sha === commitSha) {
+      headPlan = plan;
+      fileCount = plan.fileCount;
+      const codeowners = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]
+        .map((path) => snapshot.files.find((file) => file.path === path))
+        .find(Boolean);
+      if (codeowners) {
+        const source = await readGitHubBlob(repository, codeowners.blobSha);
+        ownershipObservation = {
+          tenantId, repository, kind: "codeowners", commitSha, path: codeowners.path,
+          entries: parseCodeowners(source), recordedAt: snapshot.recordedAt
+        };
+      }
+    }
+    for (const pullRequest of await githubJsonArray(`/repos/${repository}/commits/${sha}/pulls`)) {
+      const number = requiredPositiveInteger(pullRequest.number, "GitHub pull request number");
+      const existing = workItems.get(number) ?? { item: pullRequest, commitShas: new Set<string>() };
+      existing.commitShas.add(sha);
+      workItems.set(number, existing);
     }
   }
-  if (analyses.length > 0) await submitBlobAnalyses(work, commitSha, analyses);
+  if (!headPlan) throw new Error("head commit was not included in repository history ingestion");
+  const observations: GitHubSourceObservation[] = await githubWorkItemObservations(tenantId, repository, workItems);
+  if (ownershipObservation) observations.push(ownershipObservation);
+  if (observations.length > 0) {
+    await internalApiJson("/internal/ontology/ingest/github", {
+      taskId: work.task.id, ...lease, observations
+    });
+  }
   return {
-    observationId: plan.observationId,
+    observationId: headPlan.observationId,
     commitSha,
-    fileCount: plan.fileCount,
-    discoveredBlobCount: plan.discoveredBlobCount,
-    reusedBlobCount: plan.reusedBlobCount,
-    parsedBlobCount: plan.missingBlobs.length,
-    analysisPaths: plan.changedPaths,
+    fileCount,
+    ingestedCommitCount: orderedShas.length,
+    workItemObservationCount: observations.length,
+    discoveredBlobCount,
+    reusedBlobCount,
+    parsedBlobCount,
+    analysisPaths: headPlan.changedPaths,
+    changeCount: headPlan.changes.length,
     parserVersion: ONTOLOGY_PARSER_VERSION,
     codeCheckpoint: codeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_PARSER_VERSION)
   };
+}
+
+async function discoverNewCommits(
+  work: ClaimedWork,
+  repository: string,
+  head: Record<string, unknown>,
+  limit: number
+): Promise<Map<string, Record<string, unknown>>> {
+  const headSha = requiredGitSha(head.sha, "GitHub head SHA");
+  const commits = new Map<string, Record<string, unknown>>([[headSha, head]]);
+  const pending = [headSha];
+  const expanded = new Set<string>();
+  while (pending.length > 0) {
+    const batch = pending.splice(0, 25).filter((sha) => !expanded.has(sha));
+    if (batch.length === 0) continue;
+    const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>("/internal/ontology/ingest/known", {
+      taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitShas: batch
+    });
+    const knownSet = new Set(known.knownCommitShas);
+    for (const sha of batch) {
+      expanded.add(sha);
+      if (knownSet.has(sha)) {
+        if (sha !== headSha) commits.delete(sha);
+        continue;
+      }
+      const commit = commits.get(sha) ?? await githubJson(`/repos/${repository}/commits/${sha}`);
+      commits.set(sha, commit);
+      if (commits.size > limit) throw new Error(`reachable Git history exceeds ONTOLOGY_HISTORY_LIMIT=${limit}; refusing a partial backfill`);
+      for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
+        if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
+        const parentSha = requiredGitSha(parent.sha, "GitHub parent SHA");
+        if (!expanded.has(parentSha)) pending.push(parentSha);
+      }
+    }
+  }
+  return commits;
+}
+
+function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Record<string, unknown>>): string[] {
+  const ordered: string[] = [];
+  const visited = new Set<string>();
+  const visit = (sha: string): void => {
+    if (visited.has(sha)) return;
+    visited.add(sha);
+    const commit = commits.get(sha);
+    if (!commit) return;
+    for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
+      if (isRecord(parent) && typeof parent.sha === "string") visit(parent.sha);
+    }
+    ordered.push(sha);
+  };
+  visit(headSha);
+  return ordered;
+}
+
+async function repositorySnapshotFromGitHub(input: {
+  readonly tenantId: string; readonly repository: string; readonly ref: string; readonly taskId: string;
+  readonly commit: Record<string, unknown>; readonly isHead: boolean; readonly isDefaultRef: boolean;
+}): Promise<RepositorySnapshot> {
+  const commitSha = requiredGitSha(input.commit.sha, "GitHub commit SHA");
+  const commitDetails = isRecord(input.commit.commit) ? input.commit.commit : {};
+  const treeDetails = isRecord(commitDetails.tree) ? commitDetails.tree : {};
+  const authorDetails = isRecord(commitDetails.author) ? commitDetails.author : {};
+  const githubAuthor = isRecord(input.commit.author) ? input.commit.author : {};
+  const treeSha = requiredGitSha(treeDetails.sha, "GitHub tree SHA");
+  const tree = await githubJson(`/repos/${input.repository}/git/trees/${treeSha}?recursive=1`);
+  if (tree.truncated === true) throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
+  const entries = Array.isArray(tree.tree) ? tree.tree : [];
+  return {
+    tenantId: input.tenantId,
+    repository: input.repository,
+    ref: input.ref,
+    commitSha,
+    treeSha,
+    parents: (Array.isArray(input.commit.parents) ? input.commit.parents : []).map((parent) => {
+      if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
+      return requiredGitSha(parent.sha, "GitHub parent SHA");
+    }),
+    ...(typeof authorDetails.email === "string" && authorDetails.email.trim() ? { authorExternalId: authorDetails.email.trim() } : {}),
+    ...(typeof githubAuthor.login === "string" && githubAuthor.login.trim() ? { authorGitHubLogin: githubAuthor.login.trim() } : {}),
+    ...(typeof authorDetails.name === "string" && authorDetails.name.trim() ? { authorName: authorDetails.name.trim() } : {}),
+    ...(typeof authorDetails.date === "string" ? { committedAt: authorDetails.date } : {}),
+    ...(typeof commitDetails.message === "string" ? { message: commitDetails.message } : {}),
+    isDefaultRef: input.isDefaultRef,
+    updateRef: input.isHead,
+    recordedAt: new Date().toISOString(),
+    taskId: input.taskId,
+    files: entries.flatMap((entry) => {
+      if (!isRecord(entry) || entry.type !== "blob") return [];
+      return [{
+        path: requiredString(entry.path, "GitHub tree path"),
+        blobSha: requiredGitSha(entry.sha, "GitHub blob SHA"),
+        size: typeof entry.size === "number" && Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
+      }];
+    })
+  };
+}
+
+async function githubWorkItemObservations(
+  tenantId: string,
+  repository: string,
+  pullRequests: ReadonlyMap<number, { readonly item: Record<string, unknown>; readonly commitShas: ReadonlySet<string> }>
+): Promise<GitHubSourceObservation[]> {
+  const recordedAt = new Date().toISOString();
+  const observations: GitHubSourceObservation[] = [];
+  const issueNumbers = new Set<number>();
+  for (const [number, value] of pullRequests) {
+    const item = value.item;
+    const body = typeof item.body === "string" ? item.body : "";
+    const title = requiredString(item.title, "GitHub pull request title");
+    const links = linkedIssueNumbers(`${title}\n${body}`);
+    links.resolves.forEach((issue) => issueNumbers.add(issue));
+    links.references.forEach((issue) => issueNumbers.add(issue));
+    const user = isRecord(item.user) ? item.user : {};
+    observations.push({
+      tenantId, repository, kind: "pull_request", number, title, body,
+      state: requiredString(item.state, "GitHub pull request state"),
+      url: requiredString(item.html_url, "GitHub pull request URL"),
+      ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
+      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
+      recordedAt, commitShas: [...value.commitShas], resolvesIssueNumbers: links.resolves, referencesIssueNumbers: links.references
+    });
+  }
+  for (const number of issueNumbers) {
+    const item = await githubJson(`/repos/${repository}/issues/${number}`);
+    const user = isRecord(item.user) ? item.user : {};
+    observations.push({
+      tenantId, repository, kind: "issue", number,
+      title: requiredString(item.title, "GitHub issue title"),
+      ...(typeof item.body === "string" ? { body: item.body } : {}),
+      state: requiredString(item.state, "GitHub issue state"),
+      url: requiredString(item.html_url, "GitHub issue URL"),
+      ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
+      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
+      recordedAt
+    });
+  }
+  return observations;
 }
 
 async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
@@ -291,7 +465,7 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
       taskId: work.task.id,
       generatedAt: graph.generatedAt,
       generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-      registryVersion: "ontology-registry-v1",
+      registryVersion: ONTOLOGY_REGISTRY_VERSION,
       model: graph.generator.model,
       ...(graph.generator.sandboxId ? { sandboxId: graph.generator.sandboxId } : {}),
       summary: graph.summary,
@@ -307,12 +481,25 @@ async function analyzeGitHubBlob(
 ): Promise<BlobAnalysis> {
   const language = languageForPath(input.path);
   if (!language || input.size > 512_000) {
-    return { blobSha: input.blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, symbols: [], imports: [] };
+    return { blobSha: input.blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, symbols: [], imports: [], edges: [] };
   }
-  const blob = await githubJson(`/repos/${repository}/git/blobs/${input.blobSha}`);
-  if (blob.encoding !== "base64" || typeof blob.content !== "string") throw new Error(`GitHub blob ${input.blobSha} is not base64 encoded`);
-  const source = Buffer.from(blob.content.replace(/\s/g, ""), "base64").toString("utf8");
+  const source = await readGitHubBlob(repository, input.blobSha);
   return analyzeSourceBlob(input.blobSha, language, source);
+}
+
+async function readGitHubBlob(repository: string, blobSha: string): Promise<string> {
+  const blob = await githubJson(`/repos/${repository}/git/blobs/${blobSha}`);
+  if (blob.encoding !== "base64" || typeof blob.content !== "string") throw new Error(`GitHub blob ${blobSha} is not base64 encoded`);
+  return Buffer.from(blob.content.replace(/\s/g, ""), "base64").toString("utf8");
+}
+
+function parseCodeowners(source: string): readonly { readonly pattern: string; readonly owners: readonly string[] }[] {
+  return source.split(/\r?\n/).flatMap((line) => {
+    const value = line.replace(/\s+#.*$/, "").trim();
+    if (!value || value.startsWith("#")) return [];
+    const [pattern, ...owners] = value.split(/\s+/);
+    return pattern && owners.length > 0 ? [{ pattern, owners }] : [];
+  });
 }
 
 async function submitBlobAnalyses(work: ClaimedWork, commitSha: string, analyses: readonly BlobAnalysis[]): Promise<void> {
@@ -420,6 +607,13 @@ function apiRequest(path: string, body: unknown): Promise<Response> {
 async function githubJson(path: string): Promise<Record<string, unknown>> {
   const response = await githubRequest(path, "application/vnd.github+json");
   return await response.json() as Record<string, unknown>;
+}
+
+async function githubJsonArray(path: string): Promise<Record<string, unknown>[]> {
+  const response = await githubRequest(path, "application/vnd.github+json");
+  const value = await response.json() as unknown;
+  if (!Array.isArray(value) || value.some((item) => !isRecord(item))) throw new Error(`GitHub response ${path} is not an object array`);
+  return value as Record<string, unknown>[];
 }
 
 async function githubText(path: string, accept: string): Promise<string> {

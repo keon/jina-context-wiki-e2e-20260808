@@ -63,6 +63,9 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Verify PostgreSQL repository context contract
+        run: pnpm --filter @jina/db test
+
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level=high
 
@@ -133,6 +136,7 @@ jobs:
             JINA_SIMULATE_RUNS=false
             JINA_SEED_DEMO=false
             JINA_TENANT_ID=omlabs
+            JINA_TENANT_ADMIN_PRINCIPALS=user:keon@omlabs.xyz
             JINA_TENANT_ALIASES=github:unscoped,e2e-production,e2e
             INSTANCE_UNIX_SOCKET=/cloudsql/jina-v2:us-central1:jina-postgres
             DB_NAME=jina
@@ -176,6 +180,7 @@ jobs:
           env_vars: |-
             JINA_API_URL=${{ steps.deploy-api.outputs.url }}
             WORKER_TOPICS=run-ontology-ingest,run-ontology-assert,run-ontology-project,run-ontology,run-ontology-prepare,run-ontology-generate
+            ONTOLOGY_HISTORY_LIMIT=10000
           secrets: |-
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
             DAYTONA_API_KEY=jina-daytona-api-key:latest

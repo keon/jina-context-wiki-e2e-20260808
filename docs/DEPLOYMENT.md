@@ -30,21 +30,25 @@ credentials. No service-account key is stored in GitHub.
 
 The API owns only short board state transitions and persists outbox leases in
 Cloud SQL. Two instances of the same worker image claim disjoint topic sets. The
-ontology worker incrementally ingests source facts, runs cited Daytona/Codex assertion jobs, and rebuilds projections; the task worker handles review,
+ontology worker incrementally ingests the unseen commit DAG, PR/issue/CODEOWNERS source facts, tree-sitter structure, runs cited Daytona/Codex assertion jobs, and rebuilds manifest/search/graph projections; the task worker handles review,
 research, publish, and cleanup topics. Both renew five-minute leases while work
 is active. Expired leases are reclaimable after a worker crash. Each service has
 one minimum instance and CPU always allocated, while the durable lease remains
 the source of truth.
 
 Ontology canonical writes are independently idempotent: source observations,
-content-addressed blob analyses, and model-output assertions survive worker
-retries without being recomputed. The final projection is immutable and
-rebuildable from those stores. Ontology list polling loads the newest full graph
-plus graph summaries in two queries; it does not hydrate historical node and
-edge collections.
+commit DAG rows, first-parent changes, content-addressed blob analyses, source
+facts, and model-output proposals survive worker retries. Before fetching trees,
+the worker asks which commits are known, so a repeat build reads only the head
+tree and a new head stops at known parents. With an unchanged head, blob parsing and Daytona/Codex generation are reused and manifest/search projection returns a no-op checkpoint when there are no pending scoped events. The project task claims repository-scoped canonical
+outbox rows and rebuilds ref manifests, lexical/vector search, redirect
+reconciliation, retention, and the immutable graph. The ontology worker continuously drains remaining events while idle; global redirect/identity changes fan out across repositories and events are acknowledged only after affected projections succeed. Ontology list polling loads
+the newest full graph plus graph summaries; it does not hydrate historical node
+and edge collections.
 
-Board, event, and ontology reads require the internal service credential and are
-scoped to the canonical `JINA_TENANT_ID=omlabs`. On startup,
+Board, event, and ontology reads/commands require the internal service credential
+and are scoped to the canonical `JINA_TENANT_ID=omlabs`. The dashboard forwards the IAP-authenticated email as the application principal; `JINA_TENANT_ADMIN_PRINCIPALS=user:keon@omlabs.xyz` grants the independent Jina tenant-admin role. Non-admin users are filtered through repository ACLs for board, graph, retrieval, and mutation access. Repository Context
+retrieval checks repository ACL scope at entry and at context assembly. On startup,
 `JINA_TENANT_ALIASES` migrates the earlier `github:unscoped`, `e2e-production`,
 and `e2e` records into that tenant, so old tasks remain visible. The dashboard
 proxies read requests and adds the credential server-side.
@@ -79,8 +83,9 @@ docker build -f apps/dashboard/Dockerfile .
 ```
 
 CI supplies PostgreSQL 17 through a service container, so the `@jina/db`
-integration test exercises the atomic graph/board transaction and tenant-scoped
-graph queries. After a `main` deployment, the workflow verifies API health,
+integration test exercises commit deltas, parsing caches, GitHub normalization,
+knowledge review, outbox projection, all four cited templates, ACL denial,
+redaction, erasure, and graph creation. After a `main` deployment, the workflow verifies API health,
 worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
 policy for `keon@omlabs.xyz`.
 

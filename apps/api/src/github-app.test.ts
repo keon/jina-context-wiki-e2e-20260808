@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
-import { createOntologyGraph, MemoryOntologyGraphStore } from "@jina/ontology";
+import { createOntologyGraph, MemoryOntologyGraphStore, ONTOLOGY_PARSER_VERSION } from "@jina/ontology";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const SECRET = "test-webhook-secret";
@@ -152,13 +152,13 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       ...lease,
       commitSha,
       analyses: [
-        { blobSha: readmeSha, parserVersion: "builtin-structural-v1", language: "markdown", symbols: [], imports: [] },
+        { blobSha: readmeSha, parserVersion: ONTOLOGY_PARSER_VERSION, language: "markdown", symbols: [], imports: [], edges: [] },
         {
           blobSha: sourceSha,
-          parserVersion: "builtin-structural-v1",
+          parserVersion: ONTOLOGY_PARSER_VERSION,
           language: "typescript",
-          symbols: [{ moniker: "main", name: "main", kind: "function", startLine: 1, endLine: 1 }],
-          imports: []
+          symbols: [{ moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }],
+          imports: [], edges: []
         }
       ]
     });
@@ -172,7 +172,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       discoveredBlobCount: 2,
       reusedBlobCount: 0,
       parsedBlobCount: 2,
-      parserVersion: "builtin-structural-v1",
+      parserVersion: ONTOLOGY_PARSER_VERSION,
       codeCheckpoint: "code-checkpoint"
     }), 200);
 
@@ -217,7 +217,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
     );
     assert.equal((ontology.latest?.nodes.length ?? 0) >= 4, true);
-    assert.equal((ontology.latest?.edges.length ?? 0) >= 4, true);
+    assert.equal((ontology.latest?.edges.length ?? 0) >= 3, true);
 
     const board = await fetch(`${baseUrl}/board`).then(
       (response) => response.json() as Promise<{ tasks: Array<{ id: string; type: string; status: string; metadata: Record<string, unknown> }> }>
@@ -269,7 +269,15 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
   const tenantBGraph = fixtureGraph({ tenantId: "tenant-b", repository: "omxyz/b", ref: "main", taskId: "task-b" });
   await ontologyStore.save(tenantAGraph);
   await ontologyStore.save(tenantBGraph);
-  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
+  await ontologyStore.executeCommand("tenant-a", "svc:test", {
+    type: "grant_repository_access", repository: "omxyz/a", principalId: "user:reader@example.com", role: "reader"
+  }, "2026-07-20T00:00:00.000Z");
+  const server = createApiServer({
+    ontologyStore,
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: "tenant-a",
+    tenantAdminPrincipalIds: ["user:admin@example.com"]
+  });
   const baseUrl = await listen(server);
   try {
     assert.equal((await fetch(`${baseUrl}/ontology`)).status, 401);
@@ -279,6 +287,31 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
     assert.deepEqual(list.graphs.map((graph) => graph.tenantId), ["tenant-a"]);
     assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`)).status, 200);
     assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantBGraph.id}`)).status, 404);
+    const reader = await authenticatedFetch(`${baseUrl}/ontology`, "user:reader@example.com").then(
+      (response) => response.json() as Promise<{ graphs: Array<{ repository: string }> }>
+    );
+    assert.deepEqual(reader.graphs.map((graph) => graph.repository), ["omxyz/a"]);
+    const stranger = await authenticatedFetch(`${baseUrl}/ontology`, "user:stranger@example.com").then(
+      (response) => response.json() as Promise<{ graphs: unknown[] }>
+    );
+    assert.deepEqual(stranger.graphs, []);
+    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`, "user:stranger@example.com")).status, 404);
+    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/metrics`, "user:reader@example.com")).status, 403);
+    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/metrics`, "user:admin@example.com")).status, 200);
+    const forbiddenCommand = await fetch(`${baseUrl}/ontology/commands`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": "user:stranger@example.com",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ type: "tombstone_repository", repository: "omxyz/a", reason: "not authorized" })
+    });
+    assert.equal(forbiddenCommand.status, 403);
+    const drained = await fetch(`${baseUrl}/internal/ontology/outbox/drain`, {
+      method: "POST", headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
+    });
+    assert.equal(drained.status, 200);
   } finally {
     await close(server);
   }
@@ -451,8 +484,11 @@ function fixtureGraph(request: { tenantId: string; repository: string; ref: stri
     });
 }
 
-function authenticatedFetch(url: string): Promise<Response> {
-  return fetch(url, { headers: { authorization: `Bearer ${INTERNAL_TOKEN}` } });
+function authenticatedFetch(url: string, principalId?: string): Promise<Response> {
+  return fetch(url, { headers: {
+    authorization: `Bearer ${INTERNAL_TOKEN}`,
+    ...(principalId ? { "x-jina-principal-id": principalId } : {})
+  } });
 }
 
 async function deliver(

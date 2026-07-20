@@ -1,8 +1,17 @@
 import { stableId, type EvidenceCitation, type GeneratedOntology, type OntologyGraph, type OntologyNodeKind } from "./model.js";
+import { canonicalJson, type AssertionStatus } from "./knowledge.js";
+import type { GitHubSourceObservation } from "./normalizers.js";
+import {
+  ONTOLOGY_REGISTRY_VERSION,
+  normalizePredicateName,
+  predicateDefinition,
+  validatePredicateEndpoints,
+  validateQualifiers
+} from "./registry.js";
 
-export const ONTOLOGY_PARSER_VERSION = "builtin-structural-v1";
-export const ONTOLOGY_REGISTRY_VERSION = "ontology-registry-v1";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v2";
+export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
+export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v3";
 export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
 
 export interface RepositoryTreeEntry {
@@ -18,6 +27,14 @@ export interface RepositorySnapshot {
   readonly commitSha: string;
   readonly treeSha: string;
   readonly parents: readonly string[];
+  readonly authorExternalId?: string;
+  readonly authorGitHubLogin?: string;
+  readonly authorName?: string;
+  readonly committedAt?: string;
+  readonly message?: string;
+  readonly isDefaultRef?: boolean;
+  /** Historical snapshots are canonical code-plane input but must not move the live ref. */
+  readonly updateRef?: boolean;
   readonly recordedAt: string;
   readonly taskId: string;
   readonly files: readonly RepositoryTreeEntry[];
@@ -27,6 +44,15 @@ export interface CodeSymbolFact {
   readonly moniker: string;
   readonly name: string;
   readonly kind: string;
+  readonly signatureHash: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
+export interface CodeSymbolEdgeFact {
+  readonly fromMoniker: string;
+  readonly kind: "calls" | "imports" | "references" | "extends";
+  readonly toMoniker: string;
   readonly startLine: number;
   readonly endLine: number;
 }
@@ -42,6 +68,15 @@ export interface BlobAnalysis {
   readonly language?: string;
   readonly symbols: readonly CodeSymbolFact[];
   readonly imports: readonly CodeImportFact[];
+  readonly edges: readonly CodeSymbolEdgeFact[];
+}
+
+export interface CommitChangeFact {
+  readonly path: string;
+  readonly change: "add" | "modify" | "delete" | "rename";
+  readonly oldPath?: string;
+  readonly oldBlobSha?: string;
+  readonly newBlobSha?: string;
 }
 
 export interface OntologyIngestPlan {
@@ -52,6 +87,7 @@ export interface OntologyIngestPlan {
   readonly reusedBlobCount: number;
   /** Added or modified paths relative to the first parent. This scopes semantic analysis independently of parser-cache misses. */
   readonly changedPaths: readonly string[];
+  readonly changes: readonly CommitChangeFact[];
   readonly missingBlobs: readonly { readonly blobSha: string; readonly path: string; readonly size: number }[];
 }
 
@@ -73,6 +109,7 @@ export interface GeneratedAssertion {
   readonly object: OntologyEntityRef;
   readonly confidence: number;
   readonly evidence: readonly string[];
+  readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
 }
 
 export interface OntologyAssertionBatch {
@@ -91,15 +128,19 @@ export interface OntologyAssertionBatch {
   readonly assertions: readonly GeneratedAssertion[];
 }
 
-export type AssertionStatus = "proposed" | "active" | "rejected" | "superseded" | "retracted";
-
 export interface StoredAssertion extends GeneratedAssertion {
   readonly id: string;
   readonly tenantId: string;
   readonly repository: string;
   readonly commitSha: string;
   readonly status: AssertionStatus;
-  readonly sourceObservationId: string;
+  readonly sourceObservationId?: string;
+  readonly assertedBy?: string;
+  readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
+  readonly validFrom?: string;
+  readonly validTo?: string;
+  readonly lastConfirmedAt: string;
+  readonly supersededBy?: string;
   readonly generatorVersion: string;
   readonly registryVersion: string;
   readonly recordedAt: string;
@@ -125,11 +166,13 @@ export interface OntologyProjectionRequest {
 }
 
 export interface OntologyPipelineStore {
+  knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]>;
   planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan>;
   applyBlobAnalyses(
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
     analyses: readonly BlobAnalysis[]
   ): Promise<void>;
+  applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<{ readonly observationCount: number; readonly assertionCount: number }>;
   hasAssertionGeneration(
     tenantId: string,
     repository: string,
@@ -140,61 +183,20 @@ export interface OntologyPipelineStore {
   project(request: OntologyProjectionRequest): Promise<OntologyGraph>;
 }
 
-interface PredicateDefinition {
-  readonly subjectKinds: readonly OntologyNodeKind[];
-  readonly objectKinds: readonly OntologyNodeKind[];
-  readonly activationThreshold?: number;
-}
-
-const PREDICATES: Readonly<Record<string, PredicateDefinition>> = {
-  IMPLEMENTS: {
-    subjectKinds: ["File", "Symbol"],
-    objectKinds: ["Issue", "Document"],
-    activationThreshold: 0.9
-  },
-  DOCUMENTED_BY: {
-    subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest"],
-    objectKinds: ["Document"],
-    activationThreshold: 0.9
-  },
-  REFERENCES: {
-    subjectKinds: ["Issue", "PullRequest", "Document"],
-    objectKinds: ["File", "Symbol", "Commit", "Issue", "PullRequest", "Document"],
-    activationThreshold: 0.95
-  },
-  OWNED_BY: {
-    subjectKinds: ["Repository", "File", "Symbol"],
-    objectKinds: ["Engineer", "Team"]
-  },
-  MOVED_FROM: {
-    subjectKinds: ["File", "Symbol"],
-    objectKinds: ["File", "Symbol"]
-  },
-  LIKELY_AFFECTS: {
-    subjectKinds: ["Commit", "PullRequest", "Issue"],
-    objectKinds: ["File", "Symbol", "Issue"]
-  }
-};
-
 export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly StoredAssertion[] {
   const observationId = assertionObservationId(batch);
   const seen = new Set<string>();
   return batch.assertions.map((assertion) => {
-    const predicate = normalizePredicate(assertion.predicate);
-    const definition = PREDICATES[predicate];
-    if (!definition) throw new Error(`unsupported ontology predicate: ${predicate}`);
-    if (!definition.subjectKinds.includes(assertion.subject.kind)) {
-      throw new Error(`${predicate} does not accept subject kind ${assertion.subject.kind}`);
-    }
-    if (!definition.objectKinds.includes(assertion.object.kind)) {
-      throw new Error(`${predicate} does not accept object kind ${assertion.object.kind}`);
-    }
+    const predicate = normalizePredicateName(assertion.predicate);
+    const definition = predicateDefinition(predicate);
+    validatePredicateEndpoints(definition, assertion.subject.kind, assertion.object.kind);
+    validateQualifiers(definition, assertion.qualifiers);
     if (!Number.isFinite(assertion.confidence) || assertion.confidence < 0 || assertion.confidence > 1) {
       throw new Error(`${predicate} confidence must be between 0 and 1`);
     }
     if (assertion.evidence.length === 0) throw new Error(`${predicate} must include evidence`);
     const evidence = assertion.evidence.map((value) => validateEvidence(value).value);
-    const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}`;
+    const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
     if (seen.has(key)) throw new Error(`duplicate ontology assertion: ${key}`);
     seen.add(key);
     return {
@@ -205,10 +207,11 @@ export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly
       tenantId: batch.tenantId,
       repository: batch.repository,
       commitSha: batch.commitSha,
-      status: definition.activationThreshold !== undefined && assertion.confidence >= definition.activationThreshold
-        ? "active"
-        : "proposed",
+      // Models only create proposals. Threshold activation is allowed only after
+      // calibration data is measured and installed by the knowledge service.
+      status: "proposed",
       sourceObservationId: observationId,
+      lastConfirmedAt: batch.generatedAt,
       generatorVersion: batch.generatorVersion,
       registryVersion: batch.registryVersion,
       recordedAt: batch.generatedAt
@@ -227,7 +230,7 @@ export function normalizeAssertionBatchLenient(batch: OntologyAssertionBatch): {
     try {
       const normalized = normalizeAssertionBatch({ ...batch, assertions: [proposal] })[0];
       if (!normalized) continue;
-      const key = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}`;
+      const key = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}:${canonicalJson(normalized.qualifiers ?? {})}`;
       if (seen.has(key)) {
         warnings.push(`duplicate ontology assertion ignored: ${key}`);
         continue;
@@ -261,6 +264,44 @@ export function entityKey(entity: OntologyEntityRef): string {
   return `${entity.kind}:${entity.naturalKey}`;
 }
 
+/** First-parent delta. State still comes directly from each snapshot's tree. */
+export function computeCommitChanges(
+  current: readonly RepositoryTreeEntry[],
+  parent: readonly RepositoryTreeEntry[] = []
+): readonly CommitChangeFact[] {
+  const currentByPath = new Map(current.map((file) => [file.path, file]));
+  const parentByPath = new Map(parent.map((file) => [file.path, file]));
+  const added = current.filter((file) => !parentByPath.has(file.path));
+  const deleted = parent.filter((file) => !currentByPath.has(file.path));
+  const addedByBlob = new Map<string, RepositoryTreeEntry[]>();
+  for (const file of added) addedByBlob.set(file.blobSha, [...(addedByBlob.get(file.blobSha) ?? []), file]);
+  const renamedNewPaths = new Set<string>();
+  const renamedOldPaths = new Set<string>();
+  const changes: CommitChangeFact[] = [];
+  for (const oldFile of deleted) {
+    const candidate = addedByBlob.get(oldFile.blobSha)?.find((file) => !renamedNewPaths.has(file.path));
+    if (!candidate) continue;
+    renamedOldPaths.add(oldFile.path);
+    renamedNewPaths.add(candidate.path);
+    changes.push({
+      path: candidate.path, change: "rename", oldPath: oldFile.path,
+      oldBlobSha: oldFile.blobSha, newBlobSha: candidate.blobSha
+    });
+  }
+  for (const file of current) {
+    const previous = parentByPath.get(file.path);
+    if (!previous && !renamedNewPaths.has(file.path)) {
+      changes.push({ path: file.path, change: "add", newBlobSha: file.blobSha });
+    } else if (previous && previous.blobSha !== file.blobSha) {
+      changes.push({ path: file.path, change: "modify", oldBlobSha: previous.blobSha, newBlobSha: file.blobSha });
+    }
+  }
+  for (const file of deleted) {
+    if (!renamedOldPaths.has(file.path)) changes.push({ path: file.path, change: "delete", oldBlobSha: file.blobSha });
+  }
+  return changes.sort((a, b) => a.path.localeCompare(b.path) || a.change.localeCompare(b.change));
+}
+
 /** Pure normalizer from an immutable model observation to proposed assertion intents. */
 export function assertionsFromGeneratedOntology(
   generated: GeneratedOntology,
@@ -291,8 +332,12 @@ export function assertionsFromGeneratedOntology(
 }
 
 function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: string): string {
-  if (node.kind === "Repository") return repository;
-  if ((node.kind === "File" || node.kind === "Document") && node.path) return node.path;
+  if (node.kind === "Repository") return `github:repo:${repository}`;
+  if ((node.kind === "File" || node.kind === "Document") && node.path) return `repo:${repository}:path:${node.path}`;
+  if (node.kind === "Symbol") return `repo:${repository}:moniker:${node.id}`;
+  if (node.kind === "Commit") return `repo:${repository}:sha:${node.id}`;
+  if (node.kind === "PullRequest") return `github:pr:${repository}#${node.id.replace(/^#/, "")}`;
+  if (node.kind === "Issue") return `github:issue:${repository}#${node.id.replace(/^#/, "")}`;
   return node.id;
 }
 

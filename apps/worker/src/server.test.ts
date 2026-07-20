@@ -7,6 +7,7 @@ import { test } from "node:test";
 test("worker reviews pull requests and incrementally ingests ontology source blobs", async (context) => {
   let claimCount = 0;
   let renewals = 0;
+  let projectionDrains = 0;
   const completions: Record<string, unknown>[] = [];
   let resolveCompletion!: () => void;
   const completed = new Promise<void>((resolve) => { resolveCompletion = resolve; });
@@ -65,8 +66,16 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
         discoveredBlobCount: 1,
         reusedBlobCount: 0,
         changedPaths: ["src/index.ts"],
+        changes: [{ path: "src/index.ts", change: "add", newBlobSha: "c".repeat(40) }],
         missingBlobs: [{ blobSha: "c".repeat(40), path: "src/index.ts", size: 42 }]
       });
+    }
+    if (request.url === "/internal/ontology/ingest/known") {
+      return json(response, 200, { knownCommitShas: [] });
+    }
+    if (request.url === "/internal/ontology/outbox/drain") {
+      projectionDrains += 1;
+      return json(response, 200, { processedEventCount: 0, rebuiltRepositories: [] });
     }
     if (request.url === "/internal/ontology/ingest/blobs") {
       const analyses = (body as { analyses: Array<{ symbols: unknown[] }> }).analyses;
@@ -80,6 +89,15 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
         commit: { tree: { sha: "b".repeat(40) } },
         parents: []
       });
+    }
+    if (request.url === "/github/repos/omlabs/example") {
+      return json(response, 200, { default_branch: "main" });
+    }
+    if (request.url === `/github/repos/omlabs/example/commits?sha=${"a".repeat(40)}&per_page=50`) {
+      return json(response, 200, [{ sha: "a".repeat(40) }]);
+    }
+    if (request.url === `/github/repos/omlabs/example/commits/${"a".repeat(40)}/pulls`) {
+      return json(response, 200, []);
     }
     if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
       return json(response, 200, {
@@ -157,6 +175,7 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
   assert.equal(ingestionResult.parsedBlobCount, 1);
   assert.equal(ingestionResult.reusedBlobCount, 0);
+  assert.equal(projectionDrains > 0, true);
 });
 
 async function readJson(request: import("node:http").IncomingMessage): Promise<unknown> {

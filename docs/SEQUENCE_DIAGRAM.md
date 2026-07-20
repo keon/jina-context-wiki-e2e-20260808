@@ -1,6 +1,6 @@
 # Current Sequence Diagrams
 
-These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-19. They intentionally exclude the Trigger.dev and normalized-storage target designs in [ARCHITECTURE.md](ARCHITECTURE.md).
+These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-20. They intentionally exclude the Trigger.dev and normalized-board-storage target designs in [ARCHITECTURE.md](ARCHITECTURE.md); the Ontology Repository Context path is current implementation.
 
 The board reducer is the orchestrator. Workers never mutate board state directly: they claim a durable outbox lease through the API, perform external work outside the API mutation lock, renew the lease while active, and complete through the API.
 
@@ -85,13 +85,16 @@ sequenceDiagram
     User->>API: POST /ontology/build repository, ref
     API->>DB: Create aggregate + ingest, assert, project children
     Worker->>API: Claim run-ontology-ingest lease
-    Worker->>GitHub: Resolve ref and read recursive Git tree
-    Worker->>API: Record immutable snapshot and request cache misses
-    API->>DB: Upsert commit, ref, manifest, and blob identities
+    Worker->>GitHub: Resolve ref and walk the commit DAG
+    Worker->>API: Ask which commit SHAs are already canonical
+    API-->>Worker: Known-parent boundary
+    Worker->>GitHub: Read only unseen commit trees (or head on replay)
+    Worker->>API: Record immutable observations and request blob cache misses
+    API->>DB: Write commits, refs, tree state, first-parent changes, entities, identities, outbox
     DB-->>Worker: Previously unseen blob SHAs only
-    Worker->>GitHub: Read and parse only missing blobs
-    Worker->>API: Store versioned symbols/imports and complete ingestion
-    API->>DB: Queue assertion task with commit and first-parent changed paths
+    Worker->>GitHub: Read missing blobs plus PR/issue/CODEOWNERS sources
+    Worker->>API: Store versioned symbols/typed edges and normalized explicit facts
+    API->>DB: Queue assertion task with added/modified/renamed current paths
     Worker->>API: Claim run-ontology-assert and check generation cache
     alt assertion input already processed
         API-->>Worker: Reuse checkpoint
@@ -101,16 +104,49 @@ sequenceDiagram
         Codex-->>Worker: Cited semantic relationships
         Worker->>Daytona: Validate every cited file and line range
         Worker->>API: Complete with model-output observation
-        API->>DB: Apply registry validation and store assertions
+        API->>DB: Store registry-validated model assertions as proposed
     end
     Worker->>API: Claim run-ontology-project
+    API->>DB: Claim repository/ref canonical outbox rows with SKIP LOCKED
+    alt unchanged head with no pending scoped events
+        API-->>Worker: Reuse manifest/search checkpoint
+    else projection work pending
+        API->>DB: Rebuild ref manifest + lexical/vector search; reconcile redirects; apply retention
+    end
     API->>DB: Join manifest, cached code facts, and active current-evidence assertions
     API->>DB: Store immutable rebuildable graph projection
     API->>DB: Complete projection and aggregate tasks
     API-->>Worker: accepted + graph ID
+    loop idle steady-state drain
+        Worker->>API: Drain canonical projection events
+        API->>DB: Fan global events across repos; rebuild then ack
+    end
 ```
 
-Graph identity includes the task generation, so a later projection cannot rewrite a graph referenced by an older task. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation is cached by repository commit and generator version, and projections carry forward assertions only while every cited path still resolves to the same blob.
+Graph identity includes the task generation, so a later projection cannot rewrite a graph referenced by an older task. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation is cached by repository commit and generator version; model facts stay proposed until an audited command accepts them. Projections carry forward accepted assertions only while every cited path still resolves to the same blob.
+
+## Cited repository question
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Browser
+    participant Dashboard
+    participant API
+    participant DB as Cloud SQL
+
+    Browser->>Dashboard: Ask repository question
+    Dashboard->>API: POST /ontology/ask + service credential + verified IAP principal
+    API->>DB: Resolve principal repository scope
+    API->>API: Classify into structure/change/intent/ownership templates
+    loop selected fixed templates
+        API->>DB: Execute bounded typed query with redirect resolution
+        DB-->>API: Structured rows + citations + truncation
+    end
+    API->>API: Re-check repository scope at context assembly
+    API-->>Dashboard: Template calls and citations (never free-form SQL/prose)
+    Dashboard-->>Browser: Cited result cards
+```
 
 ## PR epoch supersession
 
@@ -147,12 +183,12 @@ sequenceDiagram
 
     Browser->>IAP: Open dashboard URL
     IAP->>IAP: Google sign-in and access policy
-    IAP->>Dashboard: Authenticated request
+    IAP->>Dashboard: Authenticated request + verified email header
     Dashboard-->>Browser: Board, task types, or Ontology page
     Browser->>Dashboard: GET /api/board, /events, /task-types, or /ontology
-    Dashboard->>API: Proxy allowlisted read + internal bearer token
-    API->>API: Resolve canonical omlabs tenant
-    API->>DB: Tenant-scoped query
+    Dashboard->>API: Proxy allowlisted read + bearer + user principal
+    API->>API: Resolve omlabs tenant + tenant-admin/repository relationship
+    API->>DB: Tenant- and repository-scoped query
     API-->>Dashboard: Read model
     Dashboard-->>Browser: JSON
 ```

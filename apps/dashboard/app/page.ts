@@ -95,6 +95,15 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .plane-key { display: flex; gap: .8rem; align-items: center; color: #7f8ca2; font-size: .66rem; }
   .plane-key span::before { content: ""; display: inline-block; width: 1.4rem; margin-right: .35rem; border-top: 2px solid #6495ed; vertical-align: middle; }
   .plane-key .knowledge::before { border-top-color: #d88fff; border-top-style: dashed; }
+  .context-query { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; padding: .85rem; border: 1px solid #252d40; border-radius: .85rem; background: #10151f; }
+  .context-query input { min-width: 0; border: 1px solid #303a50; border-radius: .55rem; background: #0d1119; color: #eef1f6; padding: .65rem .75rem; }
+  .context-query button { border: 1px solid #52668f; border-radius: .55rem; background: #283a68; padding: .6rem .9rem; cursor: pointer; }
+  .context-results { display: grid; gap: .55rem; }
+  .context-call { border: 1px solid #283149; border-radius: .7rem; background: #111722; padding: .75rem; }
+  .context-call h3 { margin: 0 0 .5rem; color: #aeb9cd; font-size: .72rem; text-transform: uppercase; letter-spacing: .08em; }
+  .context-result { padding: .45rem 0; border-top: 1px solid #252d40; }
+  .context-result strong { display: block; font-size: .74rem; }
+  .context-result span { display: block; margin-top: .25rem; color: #7f8ca2; font: .64rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
 
   dialog { width: min(760px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 0; border: 1px solid #30394e; border-radius: 1rem; background: #10141d; color: #f3f5f8; box-shadow: 0 2rem 6rem rgb(0 0 0 / 55%); }
   dialog::backdrop { background: rgb(3 5 9 / 72%); backdrop-filter: blur(5px); }
@@ -169,6 +178,12 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   <section id="ontology-page" hidden>
     <div class="ontology-shell">
       <section class="ontology-summary" id="ontology-summary"></section>
+      <form class="context-query" id="context-query">
+        <label class="sr-only" for="context-question">Ask repository context</label>
+        <input id="context-question" name="question" placeholder="What changed, what might break, and who owns it?" required>
+        <button type="submit">Ask with citations</button>
+      </form>
+      <section class="context-results" id="context-results" aria-live="polite"></section>
       <section class="ontology-card">
         <header>
           <div><h2 id="ontology-title">Repository graph</h2><p id="ontology-description">Waiting for an Ontology worker result.</p></div>
@@ -196,6 +211,7 @@ let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
 let ontologyState = { latest: null, graphs: [] };
+let contextState = null;
 let nextPr = 100;
 let nextIssue = 200;
 
@@ -209,6 +225,7 @@ const detailBody = document.getElementById("detail-body");
 const ontologyGraph = document.getElementById("ontology-graph");
 const ontologySummary = document.getElementById("ontology-summary");
 const ontologyDetails = document.getElementById("ontology-details");
+const contextResults = document.getElementById("context-results");
 
 async function refresh() {
   try {
@@ -263,6 +280,7 @@ function renderOntology() {
   ontologyGraph.replaceChildren();
   ontologySummary.replaceChildren();
   ontologyDetails.replaceChildren();
+  renderContextResults();
   const graph = ontologyState.latest;
   if (!graph) {
     ontologySummary.append(ontologyStat("Status", "No graph yet"));
@@ -317,6 +335,31 @@ function renderOntology() {
       textElement("span", "", "Evidence: " + (node.evidence.join(", ") || "none"))
     );
     ontologyDetails.append(item);
+  }
+}
+
+function renderContextResults() {
+  contextResults.replaceChildren();
+  if (!contextState) return;
+  if (contextState.error) {
+    contextResults.append(textElement("p", "empty-detail", contextState.error));
+    return;
+  }
+  for (const call of contextState.calls || []) {
+    const section = element("article", "context-call");
+    section.append(textElement("h3", "", call.template + (call.truncated ? " · truncated" : "")));
+    if (!call.items.length) section.append(textElement("p", "empty-detail", "No cited results."));
+    for (const item of call.items) {
+      const row = element("div", "context-result");
+      row.append(
+        textElement("strong", "", item.title),
+        textElement("span", "", item.citations.map(function(citation) {
+          return citation.path ? citation.path + (citation.startLine ? ":" + citation.startLine : "") : citation.kind + ":" + citation.id;
+        }).join(" · "))
+      );
+      section.append(row);
+    }
+    contextResults.append(section);
   }
 }
 
@@ -559,6 +602,24 @@ document.getElementById("toolbar").addEventListener("click", function(event) {
   if (action === "pr") postDemo({ repository: "omlabs/example", pullRequestNumber: ++nextPr, headSha: "sha-" + nextPr + "-1" });
   if (action === "issue") postDemo({ repository: "omlabs/example", issueNumber: ++nextIssue, title: "Demo issue " + nextIssue });
   if (action === "push") postDemo({ repository: "omlabs/example", pullRequestNumber: 42, headSha: "sha-42-" + Date.now().toString(36) });
+});
+document.getElementById("context-query").addEventListener("submit", async function(event) {
+  event.preventDefault();
+  const graph = ontologyState.latest;
+  if (!graph) return;
+  const question = document.getElementById("context-question").value.trim();
+  contextResults.replaceChildren(textElement("p", "empty-detail", "Loading cited context…"));
+  try {
+    const response = await fetch(API + "/ontology/ask", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: graph.repository, ref: graph.ref, question: question })
+    });
+    if (!response.ok) throw new Error("Context query failed with " + response.status);
+    contextState = await response.json();
+  } catch (error) {
+    contextState = { error: error instanceof Error ? error.message : String(error) };
+  }
+  renderContextResults();
 });
 async function postDemo(body) {
   await fetch(API + "/dev/webhooks/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

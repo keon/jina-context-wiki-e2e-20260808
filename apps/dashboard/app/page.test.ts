@@ -16,6 +16,9 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /function renderOntology/);
   assert.match(html, /if \(showingOntology\)/);
   assert.match(html, /aria-label="Repository ontology graph"/);
+  assert.match(html, /Ask with citations/);
+  assert.match(html, /\/ontology\/ask/);
+  assert.match(html, /function renderContextResults/);
   assert.doesNotMatch(html, /function renderTaskList/);
   assert.match(html, /Dependencies & relationships/);
   assert.match(html, /Comments & activity/);

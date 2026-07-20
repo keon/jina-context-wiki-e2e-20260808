@@ -7,10 +7,16 @@ import {
   type OntologyGraphSummary,
   type OntologyNode
 } from "./model.js";
+import type { OntologyCommand, OntologyCommandResult, RepositoryContextOperations } from "./operations.js";
+import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
+import { normalizeGitHubSourceObservation, type GitHubSourceObservation } from "./normalizers.js";
+import { predicateDefinition } from "./registry.js";
+import type { RetrievalRequest, RetrievalResult } from "./retrieval.js";
 import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_PROJECTION_VERSION,
   assertionObservationId,
+  computeCommitChanges,
   entityKey,
   knowledgeCheckpoint,
   normalizeAssertionBatchLenient,
@@ -25,7 +31,7 @@ import {
   type StoredAssertion
 } from "./pipeline.js";
 
-export interface OntologyGraphStore extends OntologyPipelineStore {
+export interface OntologyGraphStore extends OntologyPipelineStore, RepositoryContextOperations {
   save(graph: OntologyGraph): Promise<void>;
   latest(tenantId: string): Promise<OntologyGraph | undefined>;
   get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
@@ -40,6 +46,8 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   private readonly snapshots = new Map<string, RepositorySnapshot>();
   private readonly blobAnalyses = new Map<string, BlobAnalysis>();
   private readonly assertionBatches = new Map<string, { readonly batch: OntologyAssertionBatch; readonly assertions: readonly StoredAssertion[] }>();
+  private readonly repositoryAcl = new Map<string, Set<string>>();
+  private readonly memoryAudit: OntologyCommandResult[] = [];
 
   async save(graph: OntologyGraph): Promise<void> {
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
@@ -64,6 +72,10 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return (await this.list(tenantId)).map(summarizeOntologyGraph);
   }
 
+  async knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]> {
+    return commitShas.filter((sha) => this.snapshots.has(snapshotKey(tenantId, repository, sha)));
+  }
+
   async planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan> {
     const key = snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.commitSha);
     if (!this.snapshots.has(key)) this.snapshots.set(key, structuredClone(snapshot));
@@ -77,11 +89,8 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     const parent = snapshot.parents[0]
       ? this.snapshots.get(snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.parents[0]))
       : undefined;
-    const parentFiles = new Map(parent?.files.map((file) => [file.path, file.blobSha]) ?? []);
-    const changedPaths = snapshot.files
-      .filter((file) => parentFiles.get(file.path) !== file.blobSha)
-      .map((file) => file.path)
-      .sort();
+    const changes = computeCommitChanges(snapshot.files, parent?.files);
+    const changedPaths = changes.filter((change) => change.change !== "delete").map((change) => change.path);
     return {
       observationId: sourceObservationId(snapshot),
       commitSha: snapshot.commitSha,
@@ -89,6 +98,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       discoveredBlobCount: firstPathByBlob.size,
       reusedBlobCount: firstPathByBlob.size - missingBlobs.length,
       changedPaths,
+      changes,
       missingBlobs
     };
   }
@@ -105,6 +115,13 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       const key = blobKey(scope.tenantId, analysis.blobSha, analysis.parserVersion);
       if (!this.blobAnalyses.has(key)) this.blobAnalyses.set(key, structuredClone(analysis));
     }
+  }
+
+  async applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<{ readonly observationCount: number; readonly assertionCount: number }> {
+    return {
+      observationCount: observations.length,
+      assertionCount: observations.reduce((count, observation) => count + normalizeGitHubSourceObservation(observation).assertions.length, 0)
+    };
   }
 
   async hasAssertionGeneration(
@@ -150,6 +167,146 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async close(): Promise<void> {}
+
+  async executeCommand(tenantId: string, actorId: string, command: OntologyCommand, now: string, actorIsTenantAdmin = false): Promise<OntologyCommandResult> {
+    if (!actorId.startsWith("svc:") && !actorIsTenantAdmin) {
+      const repository = "repository" in command ? command.repository : undefined;
+      if (!repository || !this.repositoryAcl.get(`${tenantId}:${actorId}`)?.has(repository)) {
+        throw new Error("ontology command access denied");
+      }
+    }
+    const affectedIds: string[] = [];
+    if (command.type === "review_assertion") {
+      let found = false;
+      for (const [key, stored] of this.assertionBatches) {
+        const current = stored.assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.assertionId);
+        if (!current) continue;
+        const status: StoredAssertion["status"] = command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
+        const assertions = stored.assertions.map((assertion) => assertion.id === current.id
+          ? { ...assertion, status, ...(status === "retracted" ? { validTo: now } : {}) }
+          : assertion
+        );
+        this.assertionBatches.set(key, { ...stored, assertions });
+        affectedIds.push(current.id);
+        found = true;
+      }
+      if (!found) throw new Error("assertion not found");
+    } else if (command.type === "grant_repository_access") {
+      const key = `${tenantId}:${command.principalId}`;
+      const repositories = this.repositoryAcl.get(key) ?? new Set<string>();
+      repositories.add(command.repository);
+      this.repositoryAcl.set(key, repositories);
+      affectedIds.push(command.repository);
+    } else if (command.type === "tombstone_repository") {
+      for (const [key, snapshot] of this.snapshots) if (snapshot.tenantId === tenantId && snapshot.repository === command.repository) this.snapshots.delete(key);
+      affectedIds.push(command.repository);
+    } else if (command.type === "redact_observation") {
+      affectedIds.push(command.observationId);
+    } else if (command.type === "erase_person") {
+      affectedIds.push(command.entityId);
+    } else if (command.type === "merge_entities" || command.type === "unmerge_entities") {
+      affectedIds.push(command.fromEntityId, command.toEntityId);
+    } else if (command.type === "assign_relationship") {
+      const definition = predicateDefinition(command.predicate);
+      if (definition.review === "none") throw new Error("explicit-source predicates must enter through intake, not an internal assignment");
+      affectedIds.push(stableId("assertion", `${tenantId}:${command.subject.key}:${definition.name}:${command.object.key}:${now}`));
+    }
+    const result = {
+      auditId: stableId("audit", `${tenantId}:${actorId}:${command.type}:${now}:${JSON.stringify(command)}`),
+      action: command.type, affectedIds, outboxEventIds: affectedIds.map((id) => stableId("outbox", `${tenantId}:${command.type}:${id}:${now}`))
+    };
+    this.memoryAudit.push(result);
+    return result;
+  }
+
+  async rebuildDerivedProjections(tenantId: string, repository: string, ref: string, now: string): Promise<ProjectionRebuildResult> {
+    const snapshot = [...this.snapshots.values()]
+      .filter((value) => value.tenantId === tenantId && value.repository === repository && value.ref === ref && value.updateRef !== false)
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
+    return {
+      manifestFileCount: snapshot?.files.length ?? 0,
+      searchDocumentCount: snapshot ? 1 : 0,
+      reconciledAssertionCount: 0,
+      rebuilt: true,
+      processedEventCount: 0,
+      projectedAt: now
+    };
+  }
+
+  async drainDerivedProjectionEvents(): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
+    return { processedEventCount: 0, rebuiltRepositories: [] };
+  }
+
+  async operationalMetrics(tenantId: string): Promise<OntologyOperationalMetrics> {
+    return {
+      outboxDepth: {}, oldestOutboxAgeSeconds: 0,
+      unparsedBlobCount: [...this.snapshots.values()].filter((snapshot) => snapshot.tenantId === tenantId)
+        .flatMap((snapshot) => snapshot.files).filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION))).length,
+      manifestStalenessSeconds: 0, searchStalenessSeconds: 0,
+      proposedAssertionCount: [...this.assertionBatches.values()].flatMap((stored) => stored.assertions)
+        .filter((assertion) => assertion.tenantId === tenantId && assertion.status === "proposed").length,
+      acceptanceRates: []
+    };
+  }
+
+  async repositoriesForPrincipal(tenantId: string, principalId: string): Promise<readonly string[]> {
+    if (principalId.startsWith("svc:")) {
+      return [...new Set([
+        ...[...this.snapshots.values()].filter((snapshot) => snapshot.tenantId === tenantId).map((snapshot) => snapshot.repository),
+        ...[...this.graphs.values()].filter((graph) => graph.tenantId === tenantId).map((graph) => graph.repository)
+      ])].sort();
+    }
+    return [...(this.repositoryAcl.get(`${tenantId}:${principalId}`) ?? [])].sort();
+  }
+
+  async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
+    if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
+    const limit = Math.max(1, Math.min(request.limit ?? 50, 200));
+    const snapshot = [...this.snapshots.values()]
+      .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && (!request.ref || value.ref === request.ref))
+      .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
+    const items = snapshot ? memoryRetrievalItems(request, snapshot, this.blobAnalyses, [...this.assertionBatches.values()].flatMap((stored) => stored.assertions)) : [];
+    return {
+      template: request.template, repository: request.repository, ref: request.ref ?? snapshot?.ref ?? "main",
+      items: items.slice(0, limit), truncated: items.length > limit, totalBeforeLimit: items.length, limit
+    };
+  }
+}
+
+function memoryRetrievalItems(
+  request: RetrievalRequest,
+  snapshot: RepositorySnapshot,
+  analyses: ReadonlyMap<string, BlobAnalysis>,
+  assertions: readonly StoredAssertion[]
+): RetrievalResult["items"] {
+  if (request.template === "structure") {
+    return snapshot.files.flatMap((file) => {
+      const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION));
+      return (analysis?.edges ?? []).filter((edge) => !request.symbol || edge.fromMoniker.includes(request.symbol) || edge.toMoniker.includes(request.symbol)).map((edge) => ({
+        kind: edge.kind, title: `${edge.fromMoniker} ${edge.kind} ${edge.toMoniker}`,
+        data: { fromMoniker: edge.fromMoniker, toMoniker: edge.toMoniker, path: file.path }, score: 1,
+        citations: [{ kind: "code" as const, id: `${file.blobSha}:${edge.startLine}`, repository: request.repository, commitSha: snapshot.commitSha, path: file.path, startLine: edge.startLine, endLine: edge.endLine }]
+      }));
+    });
+  }
+  if (request.template === "change") {
+    return computeCommitChanges(snapshot.files, []).map((change) => ({
+      kind: "commit_change", title: `${change.change} ${change.path}`, data: { ...change }, score: 1,
+      citations: [{ kind: "commit_change" as const, id: `${snapshot.commitSha}:${change.path}`, repository: request.repository, commitSha: snapshot.commitSha, path: change.path }]
+    }));
+  }
+  if (request.template === "ownership") {
+    return assertions.filter((assertion) => assertion.tenantId === request.tenantId && assertion.predicate === "OWNED_BY" && assertion.status === "active").map((assertion) => ({
+      kind: "ownership", title: `${assertion.subject.label} owned by ${assertion.object.label}`,
+      data: { subject: assertion.subject, object: assertion.object, qualifiers: assertion.qualifiers ?? {} }, score: 1,
+      citations: [{ kind: "assertion" as const, id: assertion.id, repository: request.repository, commitSha: assertion.commitSha }]
+    }));
+  }
+  return assertions.filter((assertion) => assertion.tenantId === request.tenantId && assertion.status === "active").map((assertion) => ({
+    kind: "intent", title: `${assertion.subject.label} ${assertion.predicate} ${assertion.object.label}`,
+    data: { predicate: assertion.predicate }, score: assertion.confidence,
+    citations: [{ kind: "assertion" as const, id: assertion.id, repository: request.repository, commitSha: assertion.commitSha }]
+  }));
 }
 
 export function createOntologyProjection(
@@ -165,6 +322,8 @@ export function createOntologyProjection(
   const fallbackEvidence = `${files[0]!.path}:1`;
   const nodes = new Map<string, OntologyNode>();
   const edges: Omit<OntologyEdge, "id">[] = [];
+  const symbolByScopedName = new Map<string, string>();
+  const symbolsByName = new Map<string, string[]>();
   nodes.set("repo", {
     id: "repo",
     kind: "Repository",
@@ -195,6 +354,8 @@ export function createOntologyProjection(
         path: file.path,
         evidence: [`${file.path}:${symbol.startLine}-${symbol.endLine}`]
       });
+      symbolByScopedName.set(`${file.path}:${symbol.name}`, symbolId);
+      symbolsByName.set(symbol.name, [...(symbolsByName.get(symbol.name) ?? []), symbolId]);
       edges.push({ source: fileId, target: symbolId, predicate: "DECLARES", plane: "code", evidence: [`${file.path}:${symbol.startLine}`] });
     }
   }
@@ -210,6 +371,27 @@ export function createOntologyProjection(
         predicate: "IMPORTS",
         plane: "code",
         evidence: [`${file.path}:${item.line}`]
+      });
+    }
+    for (const item of analysis?.edges ?? []) {
+      if (item.kind === "imports") continue;
+      const fromName = item.fromMoniker.split(/[.#]/).filter(Boolean).at(-1) ?? item.fromMoniker;
+      const targetName = item.toMoniker.split(/[.(#]/).filter(Boolean).at(-1) ?? item.toMoniker;
+      const sourceId = item.fromMoniker.includes("<module>")
+        ? `file:${file.path}`
+        : symbolByScopedName.get(`${file.path}:${fromName}`) ?? symbolsByName.get(fromName)?.[0] ?? `file:${file.path}`;
+      let targetId = symbolByScopedName.get(`${file.path}:${targetName}`) ?? symbolsByName.get(targetName)?.[0];
+      if (!targetId && nodes.size < 200) {
+        targetId = `external:${stableId("moniker", item.toMoniker)}`;
+        nodes.set(targetId, {
+          id: targetId, kind: "Symbol", label: item.toMoniker, description: "Unresolved external or cross-file moniker",
+          evidence: [`${file.path}:${item.startLine}-${item.endLine}`]
+        });
+      }
+      if (!targetId) continue;
+      edges.push({
+        source: sourceId, target: targetId, predicate: item.kind.toUpperCase(), plane: "code",
+        evidence: [`${file.path}:${item.startLine}-${item.endLine}`]
       });
     }
   }
@@ -243,14 +425,20 @@ export function createOntologyProjection(
 
 function ensureAssertionNode(nodes: Map<string, OntologyNode>, id: string, entity: StoredAssertion["subject"], evidence: readonly string[]): void {
   if (nodes.has(id)) return;
-  const path = entity.kind === "File" || entity.kind === "Document" ? entity.naturalKey : undefined;
+  const path = entity.kind === "File" || entity.kind === "Document" ? entityPath(entity.naturalKey) : undefined;
   nodes.set(id, { id, kind: entity.kind, label: entity.label, description: entity.naturalKey, ...(path ? { path } : {}), evidence });
 }
 
 function projectionEntityId(entity: StoredAssertion["subject"]): string {
   if (entity.kind === "Repository") return "repo";
-  if (entity.kind === "File" || entity.kind === "Document") return `file:${entity.naturalKey}`;
+  if (entity.kind === "File" || entity.kind === "Document") return `file:${entityPath(entity.naturalKey)}`;
   return `entity:${stableId("node", entityKey(entity))}`;
+}
+
+function entityPath(naturalKey: string): string {
+  const marker = ":path:";
+  const index = naturalKey.indexOf(marker);
+  return index >= 0 ? naturalKey.slice(index + marker.length) : naturalKey;
 }
 
 function assertionResult(

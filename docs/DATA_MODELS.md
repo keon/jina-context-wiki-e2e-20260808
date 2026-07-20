@@ -1,6 +1,6 @@
 # Data Models
 
-> **Implementation status (2026-07-19):** Most of this document is the normalized target schema. Production currently persists a JSONB board snapshot in `jina_runtime.api_state`, unique GitHub delivery IDs in `jina_runtime.github_deliveries`, and immutable Ontology graphs in `jina_ontology.graphs`, `nodes`, and `edges`. Ontology graph creation and board completion share one PostgreSQL transaction. Tables described below for normalized tasks, runs, findings, gates, usage, billing, and artifacts are not yet migrations in this repository.
+> **Implementation status (2026-07-20):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.1 schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; and immutable graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
 
 This document defines the core Postgres data model for Jina. It is the schema-oriented companion to [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -10,6 +10,21 @@ Deliberately deferred tables — introduced only when a second concrete use exis
 
 - `work_orders` (normalized intake) — when a second intake provider or configurable intake workflow ships. GitHub PRs and issues currently map directly to their subject rows/tasks.
 - a pipeline/stage-template table — when tenants can configure pipelines. Until then the PR review pipeline is versioned code, and root tasks record `pipeline_slug`/`pipeline_version`.
+
+## Implemented Ontology schema
+
+Ontology is deliberately separate from the normalized board target below. Its implemented PostgreSQL tables are:
+
+```text
+intake       observations, model_outputs
+code         commits, refs, commit_files, commit_changes, blobs,
+             blob_analyses, blob_symbols, blob_imports, symbol_edges
+knowledge    entities, identities, entity_redirects, assertions, audit_log
+infra        outbox, erasure_filters, repository_acl
+projections  ref_manifest, search_documents, graphs, nodes, edges
+```
+
+`commit_files` is immutable tree state by commit; `commit_changes` is the first-parent delta. `ref_manifest` is a rebuildable hot-ref projection. Repository, file, symbol, commit, PR, and issue natural keys include their repository scope. Assertions contain typed object/literal values, qualifier JSON plus a canonical hash, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version. Search-document identity and uniqueness include repository scope. See [ONTOLOGY.md](ONTOLOGY.md) for invariants and writer behavior; the executable migration is `ONTOLOGY_SCHEMA_SQL` in `packages/db/src/postgres-ontology-graph-store.ts`.
 
 ## Conventions
 

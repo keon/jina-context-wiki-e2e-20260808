@@ -1,17 +1,17 @@
 # Jina Architecture
 
-> **Documentation status (2026-07-19):** The "Current implementation" section is authoritative for the runtime implemented in this repository. The remainder of this document is the target architecture and intentionally describes capabilities and normalized tables that have not shipped. Trigger.dev, normalized task/run/finding tables, Daytona PR-review checkouts, external GitHub publication, and the expanded gate model are targets, not current production behavior.
+> **Documentation status (2026-07-20):** The "Current implementation" section and [ONTOLOGY.md](ONTOLOGY.md) are authoritative for the runtime in this repository. The remainder describes the broader board/review target. Trigger.dev, normalized board task/run/finding tables, external GitHub publication, and the expanded gate model are targets; the Repository Context v5.1 Ontology path is implemented.
 
 ## Current implementation
 
 The current repository implementation is configured to run as four Cloud Run services backed by one Cloud SQL PostgreSQL 17 instance:
 
 - `jina-api` verifies GitHub webhooks, applies board commands, runs the readiness reducer, and owns short lease/completion transactions.
-- `jina-dashboard` serves the board, task-type catalog, task details, and Ontology visualization. Direct Cloud Run IAP authenticates browser users; the server-side proxy adds the API service credential.
+- `jina-dashboard` serves the board, task-type catalog, task details, Ontology visualization, and fixed-template cited context queries. Direct Cloud Run IAP authenticates browser users; the server-side proxy forwards the verified email as the application principal and adds the API service credential.
 - `jina-task-worker` polls for `run-review`, `run-research`, `run-publish`, and `run-cleanup` messages. Review fetches the PR diff from GitHub and calls OpenAI with a strict findings schema. Publish currently records an internal idempotent publication only.
-- `jina-ontology-worker` runs three board-visible chunks: raw-data aggregation, assertion derivation, and projection. Aggregation records an immutable Git snapshot and applies the versioned structural parser only to unseen tenant/blob SHA pairs. Assertion generation checks out the pinned commit in Daytona, focuses Codex on paths added or modified relative to the first parent, validates citations, and records model output before registry-validated assertions. Projection deterministically combines the selected commit manifest with active assertions whose cited blobs remain current. Legacy Ontology topics remain consumable only to drain pre-migration outbox rows.
+- `jina-ontology-worker` runs three board-visible chunks: raw-data aggregation, assertion derivation, and projection. Aggregation walks only the previously unseen commit-DAG portion, records immutable GitHub/Git observations, computes first-parent deltas, normalizes PR/issue/CODEOWNERS facts, and applies the tree-sitter structural parser only to unseen tenant/blob/parser pairs. Assertion generation checks out the pinned commit in Daytona, validates citations, records model output, and stores inference as proposed knowledge. Projection claims repository-scoped canonical events, rebuilds ref/search projections, reconciles redirects, applies retention, and creates the cited graph shown on the dashboard; the same worker continuously drains global and steady-state projection events while idle.
 
-The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Ontology metadata, nodes, and edges use `jina_ontology` relational tables. Ontology completion writes the graph and completed board snapshot in one transaction.
+The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Ontology uses relational canonical intake, code-plane, knowledge, audit, outbox, ACL, lifecycle, manifest, search, and graph tables in `jina_ontology`. Canonical operations and board completion are independently idempotent and lease-fenced, so a retry converges after a crash between their transactions.
 
 ```text
 GitHub webhook -> API -> PostgreSQL board snapshot/outbox
@@ -27,7 +27,7 @@ Browser -> Cloud Run IAP -> dashboard proxy -> authenticated API reads
 
 Production is scoped to the canonical `omlabs` tenant. Startup migration rewrites configured legacy tenant aliases. The API is public only where required for health and signed webhook intake; tenant reads and worker mutations require the internal bearer credential.
 
-## Target architecture and purpose
+## Broader target architecture and purpose
 
 Jina's target is a multi-tenant agent platform for software work. It receives GitHub events, represents work as tasks on a Postgres-backed **board**, schedules specialized AI agents as stateless durable runs, publishes feedback or artifacts to developer systems, and stores durable dashboard read models.
 
