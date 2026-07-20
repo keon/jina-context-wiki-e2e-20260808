@@ -256,7 +256,7 @@ jobs:
           current_policy="$(mktemp)"
           updated_policy="$(mktemp)"
           trap 'rm -f "${current_policy}" "${updated_policy}"' EXIT
-          curl --fail --silent --show-error --header "Authorization: Bearer ${access_token}" "${iap_resource}:getIamPolicy" > "${current_policy}"
+          curl --fail-with-body --silent --show-error --request POST --header "Authorization: Bearer ${access_token}" --header "Content-Type: application/json" --data '{}' "${iap_resource}:getIamPolicy" > "${current_policy}"
           jq --arg member "user:keon@omlabs.xyz" '
             .bindings = (
               [(.bindings // [])[] | select(.role != "roles/iap.httpsResourceAccessor")] +
@@ -274,7 +274,7 @@ jobs:
           gcloud run services describe "${DASHBOARD_SERVICE}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format=json | jq -e '.metadata.annotations["run.googleapis.com/iap-enabled"] == "true"'
           iap_resource="https://iap.googleapis.com/v1/projects/${GCP_PROJECT_NUMBER}/iap_web/cloud_run-${GCP_REGION}/services/${DASHBOARD_SERVICE}"
           access_token="$(gcloud auth print-access-token)"
-          curl --fail --silent --show-error --header "Authorization: Bearer ${access_token}" "${iap_resource}:getIamPolicy" | jq -e --arg member "user:keon@omlabs.xyz" 'any(.bindings[]?; .role == "roles/iap.httpsResourceAccessor" and any(.members[]?; . == $member))'
+          curl --fail-with-body --silent --show-error --request POST --header "Authorization: Bearer ${access_token}" --header "Content-Type: application/json" --data '{}' "${iap_resource}:getIamPolicy" | jq -e --arg member "user:keon@omlabs.xyz" 'any(.bindings[]?; .role == "roles/iap.httpsResourceAccessor" and any(.members[]?; . == $member))'
 
       - name: Publish deployment summary
         run: |
