@@ -276,6 +276,78 @@ jobs:
           access_token="$(gcloud auth print-access-token)"
           curl --fail-with-body --silent --show-error --request POST --header "Authorization: Bearer ${access_token}" --header "Content-Type: application/json" --data '{}' "${iap_resource}:getIamPolicy" | jq -e --arg member "user:keon@omlabs.xyz" 'any(.bindings[]?; .role == "roles/iap.httpsResourceAccessor" and any(.members[]?; . == $member))'
 
+      - name: Verify production ontology workflow
+        env:
+          API_URL: ${{ steps.deploy-api.outputs.url }}
+        run: |
+          acceptance_token="$(gcloud secrets versions access latest --project="${GCP_PROJECT_ID}" --secret=jina-internal-api-token)"
+          echo "::add-mask::${acceptance_token}"
+          acceptance_dir="$(mktemp -d)"
+          trap 'rm -rf "${acceptance_dir}"' EXIT
+          request_key="deploy-${GITHUB_SHA}"
+
+          curl --fail-with-body --silent --show-error --request POST \
+            --header "Authorization: Bearer ${acceptance_token}" \
+            --header "x-jina-principal-id: user:keon@omlabs.xyz" \
+            --header "Content-Type: application/json" \
+            --data "{\"repository\":\"omxyz/jina-ontology-e2e\",\"ref\":\"main\",\"requestKey\":\"${request_key}\"}" \
+            "${API_URL}/ontology/build" > "${acceptance_dir}/build.json"
+          task_id="$(jq -er '.task.id' "${acceptance_dir}/build.json")"
+
+          task_status=""
+          for attempt in $(seq 1 120); do
+            curl --fail-with-body --silent --show-error \
+              --header "Authorization: Bearer ${acceptance_token}" \
+              --header "x-jina-principal-id: user:keon@omlabs.xyz" \
+              "${API_URL}/board" > "${acceptance_dir}/board.json"
+            task_status="$(jq -er --arg task_id "${task_id}" '.tasks[] | select(.id == $task_id) | .status' "${acceptance_dir}/board.json")"
+            case "${task_status}" in
+              done) break ;;
+              failed|canceled|superseded)
+                jq --arg task_id "${task_id}" '.tasks[] | select(.id == $task_id)' "${acceptance_dir}/board.json"
+                exit 1
+                ;;
+            esac
+            if (( attempt % 6 == 0 )); then
+              echo "Ontology acceptance task is ${task_status} after $((attempt * 10)) seconds"
+            fi
+            sleep 10
+          done
+          test "${task_status}" = "done"
+
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer ${acceptance_token}" \
+            --header "x-jina-principal-id: user:keon@omlabs.xyz" \
+            "${API_URL}/ontology" > "${acceptance_dir}/ontology.json"
+          jq -e '
+            .latest.repository == "omxyz/jina-ontology-e2e" and
+            .latest.ref == "main" and
+            (.latest.nodes | length) > 0 and
+            (.latest.edges | length) > 0 and
+            ([.latest.nodes[].evidence | length] | all(. > 0)) and
+            ([.latest.edges[].evidence | length] | all(. > 0))
+          ' "${acceptance_dir}/ontology.json"
+
+          curl --fail-with-body --silent --show-error --request POST \
+            --header "Authorization: Bearer ${acceptance_token}" \
+            --header "x-jina-principal-id: user:keon@omlabs.xyz" \
+            --header "Content-Type: application/json" \
+            --data '{"repository":"omxyz/jina-ontology-e2e","ref":"main","question":"What changed, why, and who owns the access policy?"}' \
+            "${API_URL}/ontology/ask" > "${acceptance_dir}/ask.json"
+          jq -e '
+            (.calls | length) >= 3 and
+            (.citations | length) > 0 and
+            all(.calls[]; (.items | length) > 0) and
+            ([.calls[].items[]? | .citations | length] | all(. > 0))
+          ' "${acceptance_dir}/ask.json"
+
+          curl --fail-with-body --silent --show-error \
+            --header "Authorization: Bearer ${acceptance_token}" \
+            --header "x-jina-principal-id: user:keon@omlabs.xyz" \
+            "${API_URL}/ontology/metrics" > "${acceptance_dir}/metrics.json"
+          jq -e '([.outboxDepth[]] | add // 0) == 0 and .unparsedBlobCount == 0' "${acceptance_dir}/metrics.json"
+          jq -r '"Production ontology accepted: \(.latest.nodes | length) nodes, \(.latest.edges | length) edges, commit \(.latest.commitSha)"' "${acceptance_dir}/ontology.json"
+
       - name: Publish deployment summary
         run: |
           {
