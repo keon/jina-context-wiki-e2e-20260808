@@ -27,6 +27,14 @@ they are merged and the protected deployment job succeeds.
 GitHub Actions exchanges its GitHub OIDC token for short-lived Google Cloud
 credentials. No service-account key is stored in GitHub.
 
+The production deploy supports a one-time clone-token rotation through the
+protected repository secret `JINA_GITHUB_CLONE_TOKEN`. When that secret is
+present, the main-only deploy streams it directly into a new Secret Manager
+version before rolling out workers; it is never written to the checkout or a
+Cloud Run environment variable. Remove the repository secret after the first
+successful deployment. Later deploys skip rotation and continue consuming
+`jina-github-clone-token:latest` from Secret Manager.
+
 ## Current runtime boundary
 
 The API owns only short board state transitions and persists outbox leases in

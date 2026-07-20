@@ -98,6 +98,18 @@ jobs:
       - name: Set up Google Cloud CLI
         uses: google-github-actions/setup-gcloud@v3
 
+      - name: Rotate GitHub clone credential when supplied
+        env:
+          CLONE_TOKEN_ROTATION: ${{ secrets.JINA_GITHUB_CLONE_TOKEN }}
+        run: |
+          if [[ -z "${CLONE_TOKEN_ROTATION}" ]]; then
+            exit 0
+          fi
+          printf '%s' "${CLONE_TOKEN_ROTATION}" | gcloud secrets versions add jina-github-clone-token \
+            --project="${GCP_PROJECT_ID}" \
+            --data-file=- \
+            --quiet
+
       - name: Configure Artifact Registry authentication
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
