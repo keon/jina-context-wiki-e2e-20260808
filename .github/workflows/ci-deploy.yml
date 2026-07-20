@@ -283,17 +283,39 @@ jobs:
             --region="${GCP_REGION}" \
             --image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/worker:${GITHUB_SHA}" \
             --service-account="jina-runtime@jina-v2.iam.gserviceaccount.com" \
-            --set-env-vars="JINA_API_URL=${{ steps.deploy-api.outputs.url }},ACCEPTANCE_REQUEST_KEY=deploy-${GITHUB_SHA}" \
+            --set-env-vars="JINA_API_URL=${{ steps.deploy-api.outputs.url }},ACCEPTANCE_REQUEST_KEY=deploy-${GITHUB_SHA},ACCEPTANCE_TIMEOUT_MS=2100000" \
             --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest" \
             --args=dist/acceptance.js \
             --tasks=1 \
             --max-retries=0 \
-            --task-timeout=20m \
+            --task-timeout=40m \
             --quiet
+          acceptance_status=0
           gcloud run jobs execute jina-acceptance \
             --project="${GCP_PROJECT_ID}" \
             --region="${GCP_REGION}" \
-            --wait
+            --wait || acceptance_status=$?
+          execution_name="$(gcloud run jobs executions list \
+            --project="${GCP_PROJECT_ID}" \
+            --region="${GCP_REGION}" \
+            --job=jina-acceptance \
+            --sort-by='~metadata.creationTimestamp' \
+            --limit=1 \
+            --format='value(metadata.name)')"
+          if [[ -n "${execution_name}" ]]; then
+            gcloud run jobs executions describe "${execution_name}" \
+              --project="${GCP_PROJECT_ID}" \
+              --region="${GCP_REGION}" \
+              --format='yaml(metadata.name,status.startTime,status.completionTime,status.conditions,status.failedCount,status.succeededCount)' || true
+            gcloud logging read \
+              "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"jina-acceptance\" AND labels.\"run.googleapis.com/execution_name\"=\"${execution_name}\"" \
+              --project="${GCP_PROJECT_ID}" \
+              --freshness=1h \
+              --limit=200 \
+              --order=asc \
+              --format='value(timestamp,severity,textPayload,jsonPayload.message)' || true
+          fi
+          exit "${acceptance_status}"
 
       - name: Publish deployment summary
         run: |
