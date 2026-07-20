@@ -9,7 +9,7 @@ The implementation follows Repository Context Architecture v5.1 with three board
 | Task type | Internal responsibilities | Durable completion |
 | --- | --- | --- |
 | `ontology_ingest` | Immutable GitHub/Git intake, new reachable commits, first-parent deltas, content-addressed parsing, PR/issue/CODEOWNERS normalization | Observations, code-plane rows, explicit source facts, and code checkpoint are durable |
-| `ontology_assert` | Daytona checkout, Codex semantic analysis, citation validation, model observation, registry validation | Model output is recorded and every supported inference is stored as `proposed` |
+| `ontology_assert` | Daytona checkout, Codex semantic analysis, citation validation, model observation, registry validation, including derived Issues and explicit-evidence Feature candidates | Model output is recorded and every supported inference is stored as `proposed` |
 | `ontology_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest/search rebuild, incremental issue-trace materialization, graph rendering, retention | Projection checkpoint and immutable graph generation are durable |
 
 `ontology_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
@@ -79,6 +79,8 @@ The assertion worker checks out the immutable commit in Daytona and normally ask
 
 An Issue is a provider-neutral knowledge entity. A GitHub issue uses a `github:issue:<repository>#<number>` natural key; when a PR has no explicit resolving issue and the evidence clearly describes a bug, regression, or incorrect behavior, the model may emit one PR-anchored derived Issue candidate. The host normalizer, not the model, assigns its durable natural key, converts `PullRequest RESOLVES Issue` into a proposed assertion, and deterministically derives the proposed `Issue RESOLVED_BY PullRequest` inverse. Refactors, dependency updates, documentation, chores, and feature-only work do not qualify. A model cannot mint a GitHub number, create more than one candidate for a PR, change the candidate's PR anchor, or create one when intake found an explicit resolution. As with all model knowledge, nothing becomes active before assertion review. A later real issue can be joined through the existing entity-redirect mechanism without changing either entity's history.
 
+A Feature is a repository-scoped, model-inferred identity for a named externally observable capability, never a synonym for a file, component, or task. Its host-validated natural key is `repo:<repository>:feature:<stable-slug>`. Explicit repository evidence may propose `File | Symbol IMPLEMENTS Feature`, `Feature DOCUMENTED_BY Document`, or `Commit | PullRequest | Issue LIKELY_AFFECTS Feature`. These predicates remain manual-review inferences. Acceptance makes them canonical knowledge; the existing project task renders them in the disposable dashboard graph without adding another board task.
+
 Models never activate knowledge. All model relationships, including `INTRODUCED_BY`, enter as `proposed`. Causality requires a valid Issue identity, a full commit SHA, a nonempty reason, and checked repository evidence explicitly naming the mechanism; temporal proximity or membership in a resolving PR is insufficient. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row. `GET /ontology/assertions` exposes repository-scoped summaries for review and production verification.
 
 ### Projection
@@ -119,7 +121,7 @@ All tables are in PostgreSQL under `jina_ontology`, and every row is tenant-scop
 | Infrastructure | `outbox`, `erasure_filters`, `repository_acl` |
 | Rebuildable projections | `ref_manifest`, `search_documents`, `issue_traces`, `graphs`, `nodes`, `edges` |
 
-`commit_files` is the persisted commit manifest in the current implementation. `ref_manifest` is the hot-ref projection. Graph rows include the board task generation in their ID, so reruns never overwrite a graph referenced by an older task.
+`commit_files` is the persisted commit manifest in the current implementation. `ref_manifest` is the hot-ref projection. Graph rows are immutable and content-addressed by commit, projection version, and canonical graph content, so an unchanged rebuild reuses the existing generation.
 
 ### Assertions
 
@@ -159,11 +161,12 @@ Unmerge cancels the matching redirect but does not silently restore facts supers
 
 ## Retrieval
 
-Models cannot compose database queries. The API exposes five deterministic templates:
+Models cannot compose database queries. The API exposes six deterministic templates:
 
 | Template | Answer path |
 | --- | --- |
 | `issue_trace` | issue title/body phrase, issue number, PR, or commit → materialized issue → resolving and introducing PRs/commits → causal reason/evidence and changes |
+| `feature_trace` | extracted feature phrase → active reviewed Feature relationships → implementing files/symbols, documentation, and reviewed likely-impact sources |
 | `structure` | validated name/moniker/path → definitions and typed edges inside the selected ref manifest |
 | `change` | PR → included commits → first-parent changes → changed symbols → inbound affected surface |
 | `intent` | file history → commits → PRs → resolved/referenced issues → raw observation text |
@@ -171,7 +174,7 @@ Models cannot compose database queries. The API exposes five deterministic templ
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` composes only these five tools. Its conservative planner extracts issue numbers, quoted or unquoted causal issue descriptions, PRs, commits, repository paths, and identifier-shaped symbols, then passes typed parameters instead of the whole English question to structural/change/ownership retrieval. PR change questions route to `change`; only causal or resolution traversal routes to `issue_trace`. Query-time synthesis returns `answer`, `citedClaims`, `calls`, `unresolvedAmbiguities`, and `coverageGaps`. Unsupported or uncovered questions say so instead of treating arbitrary nonempty search rows as an answer. This first planner remains deterministic; bounded model-based candidate selection is still required for ambiguous natural-language entities that cannot be extracted conservatively.
+`POST /ontology/ask` composes only these six tools. Its conservative planner extracts issue numbers, quoted or unquoted causal issue descriptions, feature phrases, PRs, commits, repository paths, and identifier-shaped symbols, then passes typed parameters instead of the whole English question to retrieval. Feature implementation, documentation, and impact questions route to `feature_trace`; PR change questions route to `change`; only causal or resolution traversal routes to `issue_trace`. Multiple matching Feature identities are returned as an ambiguity instead of being merged by label. Query-time synthesis returns `answer`, `citedClaims`, `calls`, `unresolvedAmbiguities`, and `coverageGaps`. Unsupported or uncovered questions say so instead of treating arbitrary nonempty search rows as an answer. This first planner remains deterministic; bounded model-based candidate selection is still required for ambiguous natural-language entities that cannot be extracted conservatively.
 
 The dashboard renders the direct answer and cited claims before the underlying retrieval calls. It also renders ambiguities and coverage gaps explicitly. Causation questions lead with the introducing PR and commit plus dedicated **Why** and **Evidence** fields; any later resolving PR is shown afterward as a later fix. An absent reviewed causal assertion is reported as unavailable rather than inferred from the later fix.
 
@@ -243,8 +246,8 @@ The test suite proves:
 - provenance XOR, review transitions, cardinality, redirects, reconciliation, and acceptance labels;
 - GitHub work-item and CODEOWNERS normalization;
 - explicit resolution/merge assertions and review-gated issue causality;
-- fixed-template orchestration and citations;
-- real PostgreSQL intake → knowledge → incremental issue projection → retrieval → graph flow;
+- fixed-template orchestration and citations, including reviewed Feature implementation lookup;
+- real PostgreSQL intake → knowledge → incremental issue projection → Feature/issue retrieval → graph flow;
 - repository ACL denial, redaction, and personal erasure;
 - board/API/worker lease behavior and dashboard rendering.
 

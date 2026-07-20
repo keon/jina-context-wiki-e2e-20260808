@@ -9,7 +9,8 @@ export const ontologyNodeKinds = [
   "Issue",
   "Engineer",
   "Team",
-  "Document"
+  "Document",
+  "Feature"
 ] as const;
 
 export type OntologyNodeKind = (typeof ontologyNodeKinds)[number];

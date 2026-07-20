@@ -1,6 +1,6 @@
 import type { OntologyNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.3";
+export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.4";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -61,12 +61,12 @@ export const predicateRegistry = {
   },
   REFERENCES: {
     name: "REFERENCES", class: "relationship", subjectKinds: ["Issue", "PullRequest"],
-    objectKinds: ["File", "Symbol", "Commit", "Issue", "PullRequest"], cardinality: "many",
+    objectKinds: ["File", "Symbol", "Commit", "Issue", "PullRequest", "Feature"], cardinality: "many",
     review: "none", bitemporal: false
   },
   LIKELY_AFFECTS: {
     name: "LIKELY_AFFECTS", class: "inference", subjectKinds: ["Commit", "PullRequest", "Issue"],
-    objectKinds: ["File", "Symbol", "Issue"], cardinality: "many", qualifierKeys: ["branch"],
+    objectKinds: ["File", "Symbol", "Issue", "Feature"], cardinality: "many", qualifierKeys: ["branch"],
     review: "manual", bitemporal: false
   },
   MOVED_FROM: {
@@ -75,10 +75,10 @@ export const predicateRegistry = {
   },
   IMPLEMENTS: {
     name: "IMPLEMENTS", class: "inference", subjectKinds: ["File", "Symbol"],
-    objectKinds: ["Issue", "Document"], cardinality: "many", review: "manual", bitemporal: false
+    objectKinds: ["Issue", "Document", "Feature"], cardinality: "many", review: "manual", bitemporal: false
   },
   DOCUMENTED_BY: {
-    name: "DOCUMENTED_BY", class: "inference", subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest"],
+    name: "DOCUMENTED_BY", class: "inference", subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest", "Feature"],
     objectKinds: ["Document"], cardinality: "many", review: "manual", bitemporal: false
   }
 } as const satisfies Readonly<Record<string, PredicateDefinition>>;

@@ -123,6 +123,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .kind-File circle { fill: #163f3b; stroke: #59d7bf; }
   .kind-Symbol circle { fill: #45321c; stroke: #efb964; }
   .kind-Document circle { fill: #3f244e; stroke: #cf89e9; }
+  .kind-Feature circle { fill: #173b50; stroke: #5fd3f3; }
   .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { fill: #3c2830; stroke: #ef879f; }
   .kind-Engineer circle, .kind-Team circle { fill: #283248; stroke: #91a7d4; }
   .ontology-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: .7rem; padding: 1rem; }
@@ -520,7 +521,7 @@ function renderIssueTrace(trace, citations, question) {
   const sections = issueTraceSections(trace, question);
   const causalQuestion = isCausationQuestion(question);
   if (!sections.length) {
-    container.append(externalLink("Issue #" + issue.number + " · " + issue.title, issue.url));
+    container.append(issueTraceEntity(issue, true));
     container.append(textElement("p", "trace-empty", "No verified pull request or commit relationship has been asserted."));
     appendTraceCitations(container, citations);
     return container;
@@ -534,10 +535,16 @@ function renderIssueTrace(trace, citations, question) {
   return container;
 }
 
+function issueTraceEntity(issue, includeTitle) {
+  const identity = issue.number ? "Issue #" + issue.number : issue.title || issue.displayId || "Derived issue";
+  const label = includeTitle && issue.number && issue.title ? identity + " · " + issue.title : identity;
+  return issue.url ? externalLink(label, issue.url) : textElement("span", "trace-node", label);
+}
+
 function renderCauseTrace(issue, commit) {
   const chain = element("div", "trace-chain trace-cause");
   chain.append(textElement("span", "trace-answer-label trace-answer-label-cause", "Cause"));
-  chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "was caused by"));
+  chain.append(issueTraceEntity(issue, false), textElement("span", "trace-arrow", "was caused by"));
   for (const pullRequest of Array.isArray(commit.pullRequests) ? commit.pullRequests : []) {
     chain.append(externalLink("PR #" + pullRequest.number + " · " + pullRequest.title, pullRequest.url), textElement("span", "trace-arrow", "containing"));
   }
@@ -553,7 +560,7 @@ function renderCauseTrace(issue, commit) {
 function renderResolutionTrace(issue, resolution, followsCause) {
   const chain = element("div", "trace-chain");
   chain.append(textElement("span", "trace-answer-label", followsCause ? "Later fix" : "Resolution"));
-  chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "→"));
+  chain.append(issueTraceEntity(issue, false), textElement("span", "trace-arrow", "→"));
   chain.append(externalLink("PR #" + resolution.pullRequestNumber + " · " + resolution.title, resolution.url));
   for (const commit of Array.isArray(resolution.commits) ? resolution.commits : []) {
     chain.append(textElement("span", "trace-arrow", "→"));

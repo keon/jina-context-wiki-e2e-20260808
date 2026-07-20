@@ -134,7 +134,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
 });
 
-test("ontology retrieval forwards generalized Issue entity identity", async () => {
+test("ontology retrieval forwards generalized Issue identity and Feature text", async () => {
   class CapturingOntologyStore extends MemoryOntologyGraphStore {
     request?: RetrievalRequest;
 
@@ -166,6 +166,17 @@ test("ontology retrieval forwards generalized Issue entity identity", async () =
     });
     assert.equal(response.status, 200);
     assert.equal(ontologyStore.request?.issueEntityId, "entity_virtual_issue");
+    const featureResponse = await fetch(`${baseUrl}/ontology/retrieve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "omxyz/ontology-fixture",
+        template: "feature_trace",
+        featureText: "administrator deletion"
+      })
+    });
+    assert.equal(featureResponse.status, 200);
+    assert.equal(ontologyStore.request?.featureText, "administrator deletion");
   } finally {
     await close(server);
   }

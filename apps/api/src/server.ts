@@ -304,6 +304,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.issueEntityId === "string" ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
+        ...(typeof body.featureText === "string" ? { featureText: requiredFeatureText(body.featureText, "featureText") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
@@ -324,6 +325,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.issueEntityId === "string" ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
+        ...(typeof body.featureText === "string" ? { featureText: requiredFeatureText(body.featureText, "featureText") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.tokenBudget === "number" ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") } : {})
       }));
@@ -1255,6 +1257,12 @@ function requiredRepositoryPath(value: unknown, field: string): string {
 function requiredIssueText(value: unknown, field: string): string {
   const text = requiredString(value, field).replace(/\s+/g, " ");
   if (text.length > 500) throw new Error(`${field} must not exceed 500 characters`);
+  return text;
+}
+
+function requiredFeatureText(value: unknown, field: string): string {
+  const text = requiredString(value, field).replace(/\s+/g, " ");
+  if (text.length > 200) throw new Error(`${field} must not exceed 200 characters`);
   return text;
 }
 

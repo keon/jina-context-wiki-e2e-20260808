@@ -18,7 +18,7 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v5";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v6";
 export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
 
 export interface RepositoryTreeEntry {
@@ -444,12 +444,19 @@ export function derivedIssueNaturalKey(repository: string, pullRequestNumber: nu
   return `derived:issue:${repository}:${stableId("candidate", `${pullRequestKey}:${slot}`)}`;
 }
 
+export function featureNaturalKey(repository: string, featureId: string): string {
+  const slug = /^feature:([a-z0-9]+(?:[-_][a-z0-9]+)*)$/i.exec(featureId.trim())?.[1];
+  if (!slug) throw new Error(`Feature id must use feature:<stable-kebab-slug>: ${featureId}`);
+  return `repo:${repository}:feature:${slug.toLowerCase().replaceAll("_", "-")}`;
+}
+
 function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: string): string {
   if (node.kind === "Repository") return `github:repo:${repository}`;
   if ((node.kind === "File" || node.kind === "Document") && node.path) return `repo:${repository}:path:${node.path}`;
   if (node.kind === "Symbol") return `repo:${repository}:moniker:${node.id}`;
   if (node.kind === "Commit") return `repo:${repository}:sha:${canonicalCommitId(node.id)}`;
   if (node.kind === "PullRequest") return `github:pr:${repository}#${canonicalWorkItemId(node.id, "PullRequest")}`;
+  if (node.kind === "Feature") return featureNaturalKey(repository, node.id);
   if (node.kind === "Issue") {
     const virtualAnchor = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
     if (virtualAnchor) return derivedIssueNaturalKey(repository, Number.parseInt(virtualAnchor, 10));

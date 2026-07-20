@@ -4,8 +4,10 @@ import {
   ONTOLOGY_GENERATOR_VERSION,
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
+  RepositoryContextOrchestrator,
   createOntologyGraph,
   derivedIssueNaturalKey,
+  featureNaturalKey,
   stableId
 } from "@jina/ontology";
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
@@ -297,6 +299,111 @@ test("Postgres projects an accepted virtual issue by entity identity", {
     await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:05:00.000Z");
     const confirmed = await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:06:00.000Z");
     assert.equal(confirmed.rebuilt, false, "active non-trace Issue assertions do not force perpetual rebuilds");
+  } finally {
+    await store.close();
+  }
+});
+
+test("Postgres projects and retrieves a reviewed Feature", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const suffix = Date.now().toString(36);
+  const tenantId = `feature-${suffix}`;
+  const repository = `omlabs/feature-${suffix}`;
+  const commitSha = "6".repeat(40);
+  const featureKey = featureNaturalKey(repository, "feature:administrator-deletion");
+  try {
+    await store.planIngestion({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha,
+      treeSha: "5".repeat(40),
+      parents: [],
+      isDefaultRef: true,
+      updateRef: true,
+      recordedAt: "2026-07-20T00:00:00.000Z",
+      taskId: `feature-ingest-${suffix}`,
+      files: [
+        { path: "README.md", blobSha: "4".repeat(40), size: 20 },
+        { path: "src/auth.ts", blobSha: "3".repeat(40), size: 40 }
+      ]
+    });
+    await store.saveAssertionBatch({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha,
+      taskId: `feature-assert-${suffix}`,
+      generatedAt: "2026-07-20T00:01:00.000Z",
+      generatorVersion: ONTOLOGY_GENERATOR_VERSION,
+      registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      evidenceFingerprint: `feature-evidence-${suffix}`,
+      evidenceObservationIds: [],
+      model: "fixture",
+      summary: "Administrator deletion is a named product capability",
+      rawOutput: {
+        summary: "Administrator deletion is a named product capability",
+        nodes: [
+          { id: "repo", kind: "Repository", label: repository, description: "repo", evidence: ["README.md:1"] },
+          {
+            id: "feature:administrator-deletion", kind: "Feature", label: "Administrator deletion",
+            description: "Administrators can delete resources.", evidence: ["README.md:2"]
+          },
+          {
+            id: "auth-file", kind: "File", label: "src/auth.ts", description: "authorization",
+            path: "src/auth.ts", evidence: ["src/auth.ts:1"]
+          }
+        ],
+        edges: [{
+          source: "auth-file", target: "feature:administrator-deletion", predicate: "IMPLEMENTS",
+          plane: "knowledge", confidence: 0.96, evidence: ["src/auth.ts:1"]
+        }]
+      },
+      assertions: [{
+        subject: { kind: "File", naturalKey: `repo:${repository}:path:src/auth.ts`, label: "src/auth.ts" },
+        predicate: "IMPLEMENTS",
+        object: { kind: "Feature", naturalKey: featureKey, label: "Administrator deletion" },
+        confidence: 0.96,
+        evidence: ["src/auth.ts:1"]
+      }]
+    });
+    const proposal = (await store.listAssertions(tenantId, repository, { status: "proposed", predicate: "IMPLEMENTS" }))[0];
+    assert.ok(proposal);
+    await store.executeCommand(tenantId, "svc:test", {
+      type: "review_assertion", assertionId: proposal.id, decision: "accept"
+    }, "2026-07-20T00:02:00.000Z");
+    const graph = await store.project({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha,
+      taskId: `feature-project-${suffix}`,
+      generatedAt: "2026-07-20T00:03:00.000Z"
+    });
+    assert.equal(graph.nodes.some((node) => node.kind === "Feature" && node.label === "Administrator deletion"), true);
+    assert.equal(graph.edges.some((edge) => edge.predicate === "IMPLEMENTS"), true);
+
+    const result = await store.retrieve({
+      tenantId,
+      allowedRepositories: [repository],
+      repository,
+      ref: "main",
+      template: "feature_trace",
+      featureText: "administrator deletion"
+    });
+    assert.equal(result.items[0]?.title, "src/auth.ts implements Administrator deletion");
+    assert.equal(result.items[0]?.citations.some((citation) => citation.kind === "code" && citation.path === "src/auth.ts"), true);
+    const answer = await new RepositoryContextOrchestrator(store).answer({
+      tenantId,
+      allowedRepositories: [repository],
+      repository,
+      ref: "main",
+      question: 'Which files implement "administrator deletion"?'
+    });
+    assert.match(answer.answer, /src\/auth\.ts implements Administrator deletion/);
   } finally {
     await store.close();
   }

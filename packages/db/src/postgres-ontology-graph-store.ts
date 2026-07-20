@@ -1356,6 +1356,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     if (!ref) throw new Error("repository ref not found");
     const items = request.template === "issue_trace"
       ? await retrieveIssueTrace(this.pool, request, ref.ref_name, limit + 1)
+      : request.template === "feature_trace"
+        ? await retrieveFeatureTrace(this.pool, request, limit + 1)
       : request.template === "structure"
         ? await retrieveStructure(this.pool, request, ref.ref_name, limit + 1)
         : request.template === "change"
@@ -2504,6 +2506,80 @@ async function retrieveIssueTrace(
       data: payload as unknown as Readonly<Record<string, unknown>>,
       citations: payload.citations,
       score: firstResolution ? 3 : payload.introducedBy.length > 0 ? 2 : 1
+    };
+  });
+}
+
+async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, limit: number): Promise<RetrievalItem[]> {
+  const featureText = request.featureText?.trim() ?? "";
+  if (!featureText) return [];
+  const result = await pool.query<{
+    id: string;
+    commit_sha: string;
+    subject_kind: string;
+    subject_natural_key: string;
+    subject_label: string;
+    predicate: string;
+    object_kind: string;
+    object_natural_key: string;
+    object_label: string;
+    confidence: number;
+    evidence: string[];
+    source_observation_id: string | null;
+  }>(
+    `select id,commit_sha,subject_kind,subject_natural_key,subject_label,predicate,
+            object_kind,object_natural_key,object_label,confidence,evidence,source_observation_id
+     from jina_ontology.assertions
+     where tenant_id=$1 and repository=$2 and status='active'
+       and predicate in ('IMPLEMENTS','DOCUMENTED_BY','LIKELY_AFFECTS','REFERENCES')
+       and (subject_kind='Feature' or object_kind='Feature')
+       and (
+         (subject_kind='Feature' and (
+           position(lower($3) in lower(subject_label)) > 0 or position(lower($3) in lower(subject_natural_key)) > 0
+         )) or
+         (object_kind='Feature' and (
+           position(lower($3) in lower(object_label)) > 0 or position(lower($3) in lower(object_natural_key)) > 0
+         ))
+       )
+     order by case predicate when 'IMPLEMENTS' then 0 when 'DOCUMENTED_BY' then 1 when 'LIKELY_AFFECTS' then 2 else 3 end,
+              confidence desc,id
+     limit $4`,
+    [request.tenantId, request.repository, featureText, limit]
+  );
+  return result.rows.map((row) => {
+    const featureIsSubject = row.subject_kind === "Feature";
+    const feature = featureIsSubject
+      ? { kind: row.subject_kind, naturalKey: row.subject_natural_key, label: row.subject_label }
+      : { kind: row.object_kind, naturalKey: row.object_natural_key, label: row.object_label };
+    const related = featureIsSubject
+      ? { kind: row.object_kind, naturalKey: row.object_natural_key, label: row.object_label }
+      : { kind: row.subject_kind, naturalKey: row.subject_natural_key, label: row.subject_label };
+    const title = row.predicate === "IMPLEMENTS"
+      ? `${related.label} implements ${feature.label}`
+      : row.predicate === "DOCUMENTED_BY"
+        ? `${feature.label} is documented by ${related.label}`
+        : row.predicate === "LIKELY_AFFECTS"
+          ? `${related.label} may affect ${feature.label}`
+          : `${related.label} references ${feature.label}`;
+    const citations: RetrievalCitation[] = [{
+      kind: "assertion", id: row.id, repository: request.repository,
+      ...(/^[a-f0-9]{40}$/i.test(row.commit_sha) ? { commitSha: row.commit_sha } : {})
+    }];
+    if (row.source_observation_id) citations.push({
+      kind: "observation", id: row.source_observation_id, repository: request.repository
+    });
+    if (/^[a-f0-9]{40}$/i.test(row.commit_sha)) {
+      for (const value of row.evidence) {
+        const citation = retrievalCitationFromEvidence(request.repository, row.commit_sha, value);
+        if (citation) citations.push(citation);
+      }
+    }
+    return {
+      kind: "feature_relationship",
+      title,
+      data: { feature, related, predicate: row.predicate },
+      citations: dedupeRetrievalCitations(citations),
+      score: row.confidence
     };
   });
 }

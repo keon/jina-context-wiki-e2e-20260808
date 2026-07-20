@@ -37,8 +37,10 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /function renderOntology/);
   assert.match(html, /if \(showingOntology\)/);
   assert.match(html, /aria-label="Repository ontology graph"/);
+  assert.match(html, /\.kind-Feature circle/);
   assert.match(html, /Ask with citations/);
   assert.match(html, /function renderIssueTrace/);
+  assert.match(html, /function issueTraceEntity/);
   assert.match(html, /function issueTraceSections/);
   assert.match(html, /function renderCauseTrace/);
   assert.match(html, /function traceEvidence/);

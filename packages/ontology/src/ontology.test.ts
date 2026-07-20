@@ -9,7 +9,8 @@ import {
   assertionEvidenceFingerprint,
   assertionsFromGeneratedOntology,
   computeCommitChanges,
-  derivedIssueNaturalKey
+  derivedIssueNaturalKey,
+  featureNaturalKey
 } from "./pipeline.js";
 import { analyzeSourceBlob } from "./parser.js";
 import { predicateDefinition, validatePredicateEndpoints, validateQualifiers } from "./registry.js";
@@ -27,6 +28,7 @@ import {
 import {
   RepositoryContextOrchestrator,
   classifyTemplates,
+  extractFeatureText,
   extractIssueText,
   extractRepositoryPath,
   extractSymbol,
@@ -660,6 +662,131 @@ test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () 
     }),
     /already explicitly resolves an issue/
   );
+});
+
+test("infers a reviewed Feature and answers from its projected relationships", async () => {
+  const tenantId = "feature-tenant";
+  const repository = "omxyz/feature-fixture";
+  const commitSha = "f".repeat(40);
+  const store = new MemoryOntologyGraphStore();
+  assert.equal(extractFeatureText("What implements the administrator deletion feature?"), "administrator deletion");
+  assert.deepEqual(classifyTemplates('Which files implement "administrator deletion"?'), ["feature_trace"]);
+  await store.planIngestion({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha,
+    treeSha: "e".repeat(40),
+    parents: [],
+    recordedAt: "2026-07-20T00:00:00.000Z",
+    taskId: "feature-ingest",
+    files: [
+      { path: "README.md", blobSha: "a".repeat(40), size: 20 },
+      { path: "src/auth.ts", blobSha: "b".repeat(40), size: 40 },
+      { path: "src/audit.ts", blobSha: "c".repeat(40), size: 40 }
+    ]
+  });
+  const rawOutput = {
+    summary: "Administrator deletion is a product capability",
+    nodes: [
+      { id: "repo", kind: "Repository" as const, label: repository, description: "repo", evidence: ["README.md:1"] },
+      {
+        id: "feature:administrator-deletion",
+        kind: "Feature" as const,
+        label: "Administrator deletion",
+        description: "Administrators can delete resources.",
+        evidence: ["README.md:2"]
+      },
+      {
+        id: "feature:administrator-audit",
+        kind: "Feature" as const,
+        label: "Administrator audit",
+        description: "Administrators can export audit events.",
+        evidence: ["README.md:3"]
+      },
+      {
+        id: "auth-file", kind: "File" as const, label: "src/auth.ts", description: "authorization",
+        path: "src/auth.ts", evidence: ["src/auth.ts:1"]
+      },
+      {
+        id: "readme", kind: "Document" as const, label: "README", description: "product docs",
+        path: "README.md", evidence: ["README.md:2"]
+      },
+      {
+        id: "audit-file", kind: "File" as const, label: "src/audit.ts", description: "audit export",
+        path: "src/audit.ts", evidence: ["src/audit.ts:1"]
+      }
+    ],
+    edges: [{
+      source: "auth-file", target: "feature:administrator-deletion", predicate: "IMPLEMENTS",
+      plane: "knowledge" as const, confidence: 0.96, evidence: ["src/auth.ts:1"]
+    }, {
+      source: "feature:administrator-deletion", target: "readme", predicate: "DOCUMENTED_BY",
+      plane: "knowledge" as const, confidence: 0.98, evidence: ["README.md:2"]
+    }, {
+      source: "audit-file", target: "feature:administrator-audit", predicate: "IMPLEMENTS",
+      plane: "knowledge" as const, confidence: 0.95, evidence: ["src/audit.ts:1"]
+    }]
+  };
+  const generatedAssertions = assertionsFromGeneratedOntology(rawOutput, repository);
+  assert.equal(generatedAssertions[0]?.object.naturalKey, featureNaturalKey(repository, "feature:administrator-deletion"));
+  assert.throws(
+    () => featureNaturalKey(repository, "administrator deletion"),
+    /Feature id must use feature/
+  );
+  await store.saveAssertionBatch({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha,
+    taskId: "feature-assert",
+    generatedAt: "2026-07-20T00:01:00.000Z",
+    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
+    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    evidenceFingerprint: "feature-evidence",
+    evidenceObservationIds: [],
+    model: "fixture",
+    summary: rawOutput.summary,
+    rawOutput,
+    assertions: generatedAssertions
+  });
+  const proposals = await store.listAssertions(tenantId, repository, { status: "proposed" });
+  assert.equal(proposals.length, 3);
+  for (const [index, proposal] of proposals.entries()) {
+    await store.executeCommand(tenantId, "svc:test", {
+      type: "review_assertion", assertionId: proposal.id, decision: "accept"
+    }, `2026-07-20T00:02:0${index}.000Z`);
+  }
+  const graph = await store.project({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha,
+    taskId: "feature-project",
+    generatedAt: "2026-07-20T00:03:00.000Z"
+  });
+  assert.equal(graph.nodes.some((node) => node.kind === "Feature" && node.label === "Administrator deletion"), true);
+  assert.equal(graph.edges.some((edge) => edge.predicate === "IMPLEMENTS"), true);
+
+  const answer = await new RepositoryContextOrchestrator(store).answer({
+    tenantId,
+    allowedRepositories: [repository],
+    repository,
+    ref: "main",
+    question: 'Which files implement "administrator deletion"?'
+  });
+  assert.match(answer.answer, /src\/auth\.ts implements Administrator deletion/);
+  assert.equal(answer.calls[0]?.template, "feature_trace");
+  assert.equal(answer.citedClaims[0]?.citations.some((citation) => citation.kind === "assertion"), true);
+  assert.equal(answer.citedClaims[0]?.citations.some((citation) => citation.kind === "code" && citation.path === "src/auth.ts"), true);
+  const ambiguous = await new RepositoryContextOrchestrator(store).answer({
+    tenantId,
+    allowedRepositories: [repository],
+    repository,
+    ref: "main",
+    question: 'Which files implement "administrator"?'
+  });
+  assert.match(ambiguous.unresolvedAmbiguities[0] ?? "", /Multiple features matched/);
 });
 
 function generatedVirtualIssue(repository: string, pullRequestNumber: number) {

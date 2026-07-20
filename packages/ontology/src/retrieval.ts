@@ -1,4 +1,4 @@
-export const retrievalTemplateNames = ["issue_trace", "structure", "change", "intent", "ownership"] as const;
+export const retrievalTemplateNames = ["issue_trace", "feature_trace", "structure", "change", "intent", "ownership"] as const;
 export type RetrievalTemplateName = (typeof retrievalTemplateNames)[number];
 
 export interface RetrievalCitation {
@@ -34,6 +34,8 @@ export interface RetrievalRequest {
   readonly issueNumber?: number;
   /** Exact phrase used to resolve an issue by its ingested title or body. */
   readonly issueText?: string;
+  /** Exact phrase used to resolve an inferred Feature by label or natural key. */
+  readonly featureText?: string;
   readonly commitSha?: string;
   readonly limit?: number;
 }
@@ -129,6 +131,7 @@ export class RepositoryContextOrchestrator {
     const issueEntityId = input.issueEntityId;
     const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
     const issueText = issueNumber ? undefined : input.issueText ?? extractIssueText(input.question);
+    const featureText = input.featureText ?? extractFeatureText(input.question);
     const pullRequestNumber = input.pullRequestNumber ?? extractPullRequestNumber(input.question);
     const commitSha = input.commitSha ?? extractCommitSha(input.question);
     const path = input.path ?? extractRepositoryPath(input.question);
@@ -140,6 +143,7 @@ export class RepositoryContextOrchestrator {
         ...(template === "intent" ? { query: input.query ?? input.question } : {}),
         ...(issueNumber ? { issueNumber } : {}),
         ...(issueText ? { issueText } : {}),
+        ...(featureText ? { featureText } : {}),
         ...(pullRequestNumber ? { pullRequestNumber } : {}),
         ...(commitSha ? { commitSha } : {}),
         ...(path ? { path } : {}),
@@ -152,6 +156,7 @@ export class RepositoryContextOrchestrator {
       ...(issueEntityId ? { issueEntityId } : {}),
       ...(issueNumber ? { issueNumber } : {}),
       ...(issueText ? { issueText } : {}),
+      ...(featureText ? { featureText } : {}),
       ...(pullRequestNumber ? { pullRequestNumber } : {}),
       ...(commitSha ? { commitSha } : {}),
       ...(path ? { path } : {}),
@@ -171,12 +176,14 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   const value = question.toLowerCase();
   const issueNumber = extractIssueNumber(question);
   const issueText = extractIssueText(question);
+  const featureText = extractFeatureText(question);
   const pullRequestNumber = extractPullRequestNumber(question);
   const commitSha = extractCommitSha(question);
   const causal = /caus|introduc|root cause/.test(value);
   const resolution = /resolv|fix(?:ed|es|ing)?|clos(?:e|ed|es|ing)/.test(value);
   if ((issueNumber || issueText) && (causal || resolution)) return ["issue_trace"];
   if ((pullRequestNumber || commitSha) && causal) return ["issue_trace"];
+  if (featureText) return ["feature_trace"];
   const selected: RetrievalTemplateName[] = [];
   if (issueNumber || issueText) selected.push("issue_trace");
   if (/depend|call|import|structure|where|symbol|implement|define|test(?:s|ed|ing)? cover/.test(value)) selected.push("structure");
@@ -220,6 +227,17 @@ export function extractIssueText(question: string): string | undefined {
   return value || undefined;
 }
 
+export function extractFeatureText(question: string): string | undefined {
+  if (!/feature|capabilit|implement|affect|impact|break|document/i.test(question)) return undefined;
+  const quoted = /["“]([^"”\n]{2,200})["”]/.exec(question)?.[1];
+  const named = /\b(?:feature|capabilit(?:y|ies))\s+(?:called\s+|named\s+)(.+?)(?:\?|$)/i.exec(question)?.[1];
+  const beforeKind = /(.+?)\s+(?:feature|capability)\b/i.exec(question)?.[1]
+    ?.replace(/^.*\b(?:implements?|affects?|impacts?|breaks?|documents?)\s+(?:the\s+)?/i, "")
+    .replace(/^(?:what|which|where|how|could|would|might|does|do|is|are|show|describe)\s+(?:the\s+)?/i, "");
+  const value = (quoted ?? named ?? beforeKind)?.trim().replace(/[?.!,]+$/g, "").replace(/\s+/g, " ");
+  return value || undefined;
+}
+
 export function extractRepositoryPath(question: string): string | undefined {
   const candidates = question.match(/(?:\.\.?\/)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)*/g) ?? [];
   const rootFiles = /^(?:Dockerfile|Makefile|LICENSE|NOTICE|CODEOWNERS|Jenkinsfile|Procfile)$/i;
@@ -256,6 +274,7 @@ function synthesizeContextAnswer(
     readonly issueEntityId?: string;
     readonly issueNumber?: number;
     readonly issueText?: string;
+    readonly featureText?: string;
     readonly pullRequestNumber?: number;
     readonly commitSha?: string;
     readonly path?: string;
@@ -276,6 +295,9 @@ function synthesizeContextAnswer(
   }
   if (templates.has("issue_trace") && !extracted.issueEntityId && !extracted.issueNumber && !extracted.issueText && !extracted.pullRequestNumber && !extracted.commitSha) {
     unresolvedAmbiguities.push("No issue, pull request, commit, or issue description could be resolved from the question.");
+  }
+  if (templates.has("feature_trace") && !extracted.featureText) {
+    unresolvedAmbiguities.push("No exact feature description could be resolved from the question.");
   }
 
   for (const call of calls) {
@@ -302,6 +324,17 @@ function synthesizeContextAnswer(
       if (issueAnswer.coverageGap) coverageGaps.push({ capability: "issue_trace", message: issueAnswer.coverageGap });
       continue;
     }
+    if (call.template === "feature_trace") {
+      const featureAnswer = synthesizeFeatureTrace(question, call.items);
+      if (featureAnswer.ambiguity) {
+        unresolvedAmbiguities.push(featureAnswer.ambiguity);
+        answers.push(featureAnswer.ambiguity);
+      } else {
+        answers.push(featureAnswer.answer);
+        citedClaims.push(...featureAnswer.claims);
+      }
+      continue;
+    }
     const selected = call.items.slice(0, 6);
     citedClaims.push(...selected.map((item) => ({ text: item.title, citations: item.citations })));
     if (call.template === "structure") {
@@ -319,6 +352,54 @@ function synthesizeContextAnswer(
     ? answers.join(" ")
     : "I could not produce a supported answer from the currently indexed repository evidence.";
   return { answer, citedClaims: dedupeClaims(citedClaims), unresolvedAmbiguities: [...new Set(unresolvedAmbiguities)], coverageGaps };
+}
+
+function synthesizeFeatureTrace(
+  question: string,
+  items: readonly RetrievalItem[]
+): {
+  readonly answer: string;
+  readonly claims: readonly { readonly text: string; readonly citations: readonly RetrievalCitation[] }[];
+  readonly ambiguity?: string;
+} {
+  const featureKeys = new Set(items.flatMap((item) => {
+    const feature = item.data.feature;
+    return isRecord(feature) && typeof feature.naturalKey === "string" ? [feature.naturalKey] : [];
+  }));
+  if (featureKeys.size > 1) {
+    const labels = [...new Set(items.flatMap((item) => {
+      const feature = item.data.feature;
+      return isRecord(feature) && typeof feature.label === "string" ? [feature.label] : [];
+    }))];
+    return {
+      answer: "",
+      claims: [],
+      ambiguity: `Multiple features matched this question: ${labels.join("; ")}. Refine the feature description before treating the result as fact.`
+    };
+  }
+  const feature = items.map((item) => item.data.feature).find(isRecord);
+  const featureLabel = typeof feature?.label === "string" ? feature.label : "The feature";
+  const implementations = items.filter((item) => item.data.predicate === "IMPLEMENTS");
+  const impacts = items.filter((item) => item.data.predicate === "LIKELY_AFFECTS");
+  const documents = items.filter((item) => item.data.predicate === "DOCUMENTED_BY");
+  const references = items.filter((item) => item.data.predicate === "REFERENCES");
+  const selected = /affect|impact|break/i.test(question)
+    ? impacts
+    : /document|docs?/i.test(question)
+      ? documents
+      : /implement|where|code|symbol|file/i.test(question)
+        ? implementations
+        : [...implementations, ...documents, ...impacts, ...references];
+  const relationships = selected.length > 0 ? selected : items;
+  const claims = relationships.slice(0, 8).map((item) => ({ text: item.title, citations: item.citations }));
+  const answer = claims.length > 0
+    ? `${featureLabel}: ${claims.map((claim) => claim.text).join("; ")}.`
+    : `${featureLabel} has no active reviewed relationship matching this question.`;
+  return { answer, claims };
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
 }
 
 function synthesizeIssueTrace(

@@ -381,6 +381,8 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
           this.allAssertions(),
           [...this.assertionBatches.values()].map((stored) => stored.batch)
         )
+      : request.template === "feature_trace"
+        ? memoryFeatureTraceItems(request, this.allAssertions())
       : memoryRetrievalItems(request, snapshot, this.blobAnalyses, this.allAssertions());
     return {
       template: request.template, repository: request.repository, ref: request.ref ?? snapshot?.ref ?? "main",
@@ -635,6 +637,68 @@ function derivedIssueDescriptionFromBatch(batch: OntologyAssertionBatch, issueNa
 
 function shaFromEntityNaturalKey(naturalKey: string): string | undefined {
   return /:sha:([a-f0-9]{40})$/i.exec(naturalKey)?.[1]?.toLowerCase();
+}
+
+function memoryFeatureTraceItems(
+  request: RetrievalRequest,
+  assertions: readonly StoredAssertion[]
+): RetrievalResult["items"] {
+  const query = request.featureText?.trim().toLowerCase() ?? "";
+  if (!query) return [];
+  return assertions.filter((assertion) => {
+    if (
+      assertion.tenantId !== request.tenantId || assertion.repository !== request.repository || assertion.status !== "active" ||
+      !["IMPLEMENTS", "DOCUMENTED_BY", "LIKELY_AFFECTS", "REFERENCES"].includes(assertion.predicate)
+    ) return false;
+    const feature = assertion.subject.kind === "Feature"
+      ? assertion.subject
+      : assertion.object.kind === "Feature"
+        ? assertion.object
+        : undefined;
+    return Boolean(feature && (feature.label.toLowerCase().includes(query) || feature.naturalKey.toLowerCase().includes(query)));
+  }).map((assertion) => featureRelationshipItem(assertion));
+}
+
+function featureRelationshipItem(assertion: StoredAssertion): RetrievalResult["items"][number] {
+  const featureIsSubject = assertion.subject.kind === "Feature";
+  const feature = featureIsSubject ? assertion.subject : assertion.object;
+  const related = featureIsSubject ? assertion.object : assertion.subject;
+  const title = assertion.predicate === "IMPLEMENTS"
+    ? `${related.label} implements ${feature.label}`
+    : assertion.predicate === "DOCUMENTED_BY"
+      ? `${feature.label} is documented by ${related.label}`
+      : assertion.predicate === "LIKELY_AFFECTS"
+        ? `${related.label} may affect ${feature.label}`
+        : `${related.label} references ${feature.label}`;
+  const citations: RetrievalResult["items"][number]["citations"][number][] = [{
+    kind: "assertion", id: assertion.id, repository: assertion.repository,
+    ...(/^[a-f0-9]{40}$/i.test(assertion.commitSha) ? { commitSha: assertion.commitSha } : {})
+  }];
+  if (assertion.sourceObservationId) citations.push({
+    kind: "observation", id: assertion.sourceObservationId, repository: assertion.repository
+  });
+  if (/^[a-f0-9]{40}$/i.test(assertion.commitSha)) {
+    for (const value of assertion.evidence) {
+      const match = /^(.*):(\d+)(?:-(\d+))?$/.exec(value);
+      if (!match?.[1] || !match[2]) continue;
+      citations.push({
+        kind: "code", id: `${assertion.commitSha}:${value}`, repository: assertion.repository,
+        commitSha: assertion.commitSha, path: match[1], startLine: Number.parseInt(match[2], 10),
+        endLine: Number.parseInt(match[3] ?? match[2], 10)
+      });
+    }
+  }
+  return {
+    kind: "feature_relationship",
+    title,
+    data: {
+      feature: { kind: feature.kind, naturalKey: feature.naturalKey, label: feature.label },
+      related: { kind: related.kind, naturalKey: related.naturalKey, label: related.label },
+      predicate: assertion.predicate
+    },
+    citations,
+    score: assertion.confidence
+  };
 }
 
 function latestMemorySourceObservations(observations: readonly GitHubSourceObservation[]): GitHubSourceObservation[] {
