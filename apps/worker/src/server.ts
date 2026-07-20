@@ -89,7 +89,7 @@ let lastWork: {
 const server = createServer((request, response) => {
   if (request.url === "/health" || request.url === "/healthz") {
     response.writeHead(lastApiSuccessAt ? 200 : 503, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: Boolean(lastApiSuccessAt), workerId, topics, active, lastApiSuccessAt, lastApiError, lastWork }));
+    response.end(JSON.stringify({ ok: Boolean(lastApiSuccessAt), workerId, topics, active, lastApiSuccessAt, lastWork }));
     return;
   }
   response.writeHead(404, { "content-type": "application/json" });
