@@ -57,8 +57,10 @@ Production dashboard ingress uses Cloud Run's direct IAP integration. The IAP
 service agent alone receives Cloud Run invoker access, while
 `keon@omlabs.xyz` receives `roles/iap.httpsResourceAccessor`. Opening the service
 URL in a browser therefore presents Google sign-in and enforces user access at
-the edge. Health checks, task type definitions, and signed GitHub webhooks on the
-API remain public; tenant data does not.
+the edge. The workflow manages the service-level IAP policy through its numeric
+IAP REST resource, preserving existing bindings without requiring the Cloud
+Resource Manager API. Health checks, task type definitions, and signed GitHub
+webhooks on the API remain public; tenant data does not.
 
 CI typechecks and tests the workspace, audits production dependencies at high
 severity, and builds all three container images on every pull request. A deploy
@@ -94,6 +96,6 @@ Useful production checks:
 ```sh
 gcloud run services list --project=jina-v2 --region=us-central1
 gcloud run services describe jina-dashboard --project=jina-v2 --region=us-central1 --format=json
-gcloud iap web get-iam-policy --project=jina-v2 --region=us-central1 \
-  --resource-type=cloud-run --service=jina-dashboard
+curl --fail --header "Authorization: Bearer $(gcloud auth print-access-token)" \
+  "https://iap.googleapis.com/v1/projects/749416389045/iap_web/cloud_run-us-central1/services/jina-dashboard:getIamPolicy"
 ```
