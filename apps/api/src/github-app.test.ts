@@ -78,7 +78,13 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
 
   const taskTypes = await fetch(`${baseUrl}/task-types`).then(
-    (response) => response.json() as Promise<Array<{ type: string; kind: string; description: string }>>
+    (response) => response.json() as Promise<Array<{
+      type: string;
+      kind: string;
+      description: string;
+      dependsOn: Array<{ taskType: string; relationships: string[]; conditions: string[] }>;
+      requiredBy: Array<{ taskType: string; relationships: string[] }>;
+    }>>
   );
   assert.equal(taskTypes.length, 11);
   assert.deepEqual(
@@ -89,6 +95,24 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
     ]
   );
   assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
+  assert.deepEqual(
+    taskTypes.find((definition) => definition.type === "ontology_project")?.dependsOn,
+    [{ taskType: "ontology_assert", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }]
+  );
+  assert.deepEqual(
+    taskTypes.find((definition) => definition.type === "review_pass")?.dependsOn,
+    [{
+      taskType: "context",
+      relationships: ["context_for"],
+      workflows: ["pr_review"],
+      required: true,
+      conditions: ["when external context is requested"]
+    }]
+  );
+  assert.deepEqual(
+    taskTypes.find((definition) => definition.type === "review_pass")?.requiredBy.map((dependency) => dependency.taskType),
+    ["pr_review", "publish"]
+  );
 });
 
 test("ontology pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {

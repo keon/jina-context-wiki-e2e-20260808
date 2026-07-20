@@ -14,6 +14,8 @@ The implementation follows Repository Context Architecture v5.1 with three board
 
 `ontology_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
 
+The Task types page shows this declared topology in both directions: build depends on ingest/assert/project, assertion depends on ingest, and projection depends on assertion. This catalog view is workflow metadata and does not read or infer dependencies from live board task instances.
+
 ## Separation of concerns
 
 ```mermaid

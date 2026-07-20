@@ -53,14 +53,23 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .task-count { color: #748198; font-size: .7rem; }
   .task-list { display: grid; }
   .type-row {
-    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 1rem; width: 100%;
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 1rem; width: 100%;
     border-bottom: 1px solid #202738; padding: .9rem 1rem;
   }
   .type-row:last-child { border-bottom: 0; }
+  .type-copy { min-width: 0; }
   .type-name { display: block; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #dce2ed; }
   .type-description { display: block; margin-top: .35rem; color: #8793a8; font-size: .72rem; line-height: 1.45; }
   .type-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; color: #8b97ac; font-size: .65rem; }
   .type-chip { border: 1px solid #30394d; border-radius: 99px; padding: .18rem .42rem; white-space: nowrap; }
+  .type-dependency-groups { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; margin-top: .75rem; }
+  .type-dependency-group { min-width: 0; border: 1px solid #252d40; border-radius: .6rem; background: #111620; padding: .55rem .6rem; }
+  .type-dependency-label { display: block; margin-bottom: .38rem; color: #6f7d94; font-size: .58rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
+  .type-dependency-list { display: grid; gap: .38rem; }
+  .type-dependency { min-width: 0; }
+  .type-dependency-name { display: block; color: #cbd3e1; font: .68rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 650; }
+  .type-dependency-detail { display: block; margin-top: .1rem; color: #76839a; font-size: .6rem; line-height: 1.4; overflow-wrap: anywhere; }
+  .type-dependency-empty { color: #59667c; font-size: .63rem; }
   .superseded { opacity: .48; }
   .empty { padding: 1.5rem .5rem; color: #586277; text-align: center; font-size: .72rem; }
   .feed { margin-top: 1.4rem; border-top: 1px solid #1f2534; padding-top: 1rem; }
@@ -153,7 +162,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .event-payload { margin: .35rem 0 0; color: #7e8aa0; font: .64rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .empty-detail { color: #68758c; font-size: .72rem; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .type-row { grid-template-columns: 1fr; } .type-meta { justify-content: flex-start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
+  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .type-row, .type-dependency-groups { grid-template-columns: 1fr; } .type-meta { justify-content: flex-start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
 </style>
 </head>
 <body>
@@ -548,8 +557,12 @@ function renderTaskTypes() {
   document.getElementById("task-type-count").textContent = taskTypes.length + " types";
   for (const definition of taskTypes) {
     const row = element("article", "type-row");
-    const copy = element("div");
-    copy.append(textElement("span", "type-name", definition.type), textElement("span", "type-description", definition.description));
+    const copy = element("div", "type-copy");
+    copy.append(
+      textElement("span", "type-name", definition.type),
+      textElement("span", "type-description", definition.description),
+      taskTypeDependencyGroups(definition)
+    );
     const meta = element("div", "type-meta");
     meta.append(
       textElement("span", "type-chip", humanize(definition.kind)),
@@ -559,6 +572,37 @@ function renderTaskTypes() {
     row.append(copy, meta);
     taskTypeList.append(row);
   }
+}
+
+function taskTypeDependencyGroups(definition) {
+  const groups = element("div", "type-dependency-groups");
+  groups.append(
+    taskTypeDependencyGroup("Depends on", definition.dependsOn || [], "No declared dependencies"),
+    taskTypeDependencyGroup("Required by", definition.requiredBy || [], "Does not unlock another type")
+  );
+  return groups;
+}
+
+function taskTypeDependencyGroup(label, dependencies, emptyMessage) {
+  const group = element("section", "type-dependency-group");
+  group.append(textElement("span", "type-dependency-label", label));
+  const list = element("div", "type-dependency-list");
+  if (dependencies.length === 0) list.append(textElement("span", "type-dependency-empty", emptyMessage));
+  for (const dependency of dependencies) {
+    const item = element("div", "type-dependency");
+    const details = [];
+    details.push((dependency.relationships || []).map(humanize).join(" + "));
+    if (dependency.required) details.push("required");
+    if ((dependency.workflows || []).length) details.push("workflow: " + dependency.workflows.map(humanize).join(", "));
+    if ((dependency.conditions || []).length) details.push(dependency.conditions.join("; "));
+    item.append(
+      textElement("span", "type-dependency-name", dependency.taskType),
+      textElement("span", "type-dependency-detail", details.filter(Boolean).join(" · "))
+    );
+    list.append(item);
+  }
+  group.append(list);
+  return group;
 }
 
 function renderSelectedTask() {

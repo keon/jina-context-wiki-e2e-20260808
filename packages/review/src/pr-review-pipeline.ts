@@ -27,6 +27,49 @@ export interface PlannedTaskDependency {
   readonly blocksParentCompletion: boolean;
 }
 
+/**
+ * Workflow-level dependency rules used by catalog/read-model consumers. Runtime
+ * task dependencies are still materialized by the planner and board commands.
+ */
+export const prReviewTaskTypeDependencies = [
+  {
+    workflow: "pr_review",
+    taskType: "pr_review",
+    dependsOnTaskType: "review_pass",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "pr_review",
+    taskType: "pr_review",
+    dependsOnTaskType: "publish",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "pr_review",
+    taskType: "pr_review",
+    dependsOnTaskType: "publish",
+    relationship: "publishes",
+    required: true
+  },
+  {
+    workflow: "pr_review",
+    taskType: "publish",
+    dependsOnTaskType: "review_pass",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "pr_review",
+    taskType: "review_pass",
+    dependsOnTaskType: "context",
+    relationship: "context_for",
+    required: true,
+    condition: "when external context is requested"
+  }
+] as const;
+
 export interface PrReviewInput {
   readonly tenantId: string;
   readonly repository: string;

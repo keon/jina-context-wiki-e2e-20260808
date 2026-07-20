@@ -27,3 +27,42 @@ export const ontologyTaskTypeDefinitions = [
     description: "Builds a disposable dashboard graph from canonical code facts and active assertions."
   }
 ] as const;
+
+/** Static topology of the board-visible Ontology workflow chunks. */
+export const ontologyTaskTypeDependencies = [
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_build",
+    dependsOnTaskType: "ontology_ingest",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_build",
+    dependsOnTaskType: "ontology_assert",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_build",
+    dependsOnTaskType: "ontology_project",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_assert",
+    dependsOnTaskType: "ontology_ingest",
+    relationship: "blocks",
+    required: true
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_project",
+    dependsOnTaskType: "ontology_assert",
+    relationship: "blocks",
+    required: true
+  }
+] as const;

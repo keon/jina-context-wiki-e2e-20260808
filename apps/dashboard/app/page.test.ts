@@ -17,6 +17,10 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /latestRequestByScope/);
   assert.match(html, /showingHistory \? partition\.history : partition\.current/);
   assert.match(html, /function renderTaskTypes/);
+  assert.match(html, /function taskTypeDependencyGroups/);
+  assert.match(html, /Depends on/);
+  assert.match(html, /Required by/);
+  assert.match(html, /workflow: /);
   assert.match(html, /function renderOntology/);
   assert.match(html, /if \(showingOntology\)/);
   assert.match(html, /aria-label="Repository ontology graph"/);

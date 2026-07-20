@@ -25,6 +25,7 @@ import {
   ONTOLOGY_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
   retrievalTemplateNames,
+  ontologyTaskTypeDependencies,
   ontologyTaskTypeDefinitions,
   parseGeneratedOntology,
   type BlobAnalysis,
@@ -36,9 +37,11 @@ import {
   type RepositorySnapshot
 } from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
+import { prReviewTaskTypeDependencies } from "@jina/review";
 import { entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
+import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_ONTOLOGY_SNAPSHOT_BYTES = 25 * 1024 * 1024;
@@ -221,7 +224,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/task-types") {
-      json(response, 200, [...taskTypeDefinitions, ...ontologyTaskTypeDefinitions]);
+      json(response, 200, buildTaskTypeCatalog(
+        [...taskTypeDefinitions, ...ontologyTaskTypeDefinitions],
+        [...prReviewTaskTypeDependencies, ...ontologyTaskTypeDependencies]
+      ));
       return;
     }
     if (request.method === "POST" && url.pathname === "/webhooks/github") {

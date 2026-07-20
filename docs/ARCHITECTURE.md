@@ -363,6 +363,8 @@ Every task type has a declared **kind** that fixes how the reducer treats it:
 
 A pipeline is a versioned planner: trigger in, tasks + dependencies + gates + harness version out.
 
+Each workflow also exports its task-type dependency rules as catalog metadata. `GET /task-types` projects those rules into `dependsOn` and `requiredBy` summaries for the dashboard. These are type-level workflow rules only; the board remains the authority for dependency edges between actual task instances.
+
 ```text
 PR review (MVP)
   intake -> policy_snapshot -> checkout -> review_passes -> finding_grouping -> publish -> close
