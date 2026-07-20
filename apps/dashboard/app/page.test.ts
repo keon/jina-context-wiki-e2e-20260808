@@ -38,6 +38,17 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /if \(showingOntology\)/);
   assert.match(html, /aria-label="Repository ontology graph"/);
   assert.match(html, /\.kind-Feature circle/);
+  assert.match(html, /aria-label="Graph visibility controls"/);
+  assert.match(html, /function filterOntologyGraph/);
+  assert.match(html, /function renderGraphControls/);
+  assert.match(html, /function toggleGraphFilter/);
+  assert.match(html, /function makeGraphItemInteractive/);
+  assert.match(html, /function renderOntologyInspector/);
+  assert.match(html, /data-filter-group/);
+  assert.match(html, /Select a node or relationship/);
+  assert.match(html, /Visible relationships/);
+  assert.match(html, /No rationale provided/);
+  assert.match(html, /Show all/);
   assert.match(html, /Ask with citations/);
   assert.match(html, /function renderIssueTrace/);
   assert.match(html, /function issueTraceEntity/);
@@ -67,6 +78,40 @@ test("dashboard page renders clickable task detail affordances", () => {
   const script = html.match(/<script>([\s\S]+)<\/script>/)?.[1];
   assert.ok(script);
   assert.doesNotThrow(() => new Function(script));
+
+  const filterSource = script.match(/function filterOntologyGraph\(graph, hiddenNodeKinds, hiddenEdgePredicates\) \{[\s\S]+?\n\}\n\nfunction selectionIsVisible/)?.[0]
+    .replace(/\n\nfunction selectionIsVisible$/, "");
+  assert.ok(filterSource);
+  const filterOntologyGraph = new Function(`${filterSource}; return filterOntologyGraph;`)() as (
+    graph: { nodes: Array<{ id: string; kind: string }>; edges: Array<{ id: string; source: string; target: string; predicate: string }> },
+    hiddenNodeKinds: Set<string>,
+    hiddenEdgePredicates: Set<string>
+  ) => { nodes: Array<{ id: string }>; edges: Array<{ id: string }> };
+  const graph = {
+    nodes: [
+      { id: "repo", kind: "Repository" },
+      { id: "file", kind: "File" },
+      { id: "issue", kind: "Issue" }
+    ],
+    edges: [
+      { id: "contains", source: "repo", target: "file", predicate: "CONTAINS" },
+      { id: "tracks", source: "repo", target: "issue", predicate: "TRACKS" }
+    ]
+  };
+  assert.deepEqual(
+    filterOntologyGraph(graph, new Set(["File"]), new Set()).nodes.map((node) => node.id),
+    ["repo", "issue"]
+  );
+  assert.deepEqual(
+    filterOntologyGraph(graph, new Set(["File"]), new Set()).edges.map((edge) => edge.id),
+    ["tracks"],
+    "edges connected to hidden nodes are also hidden"
+  );
+  assert.deepEqual(
+    filterOntologyGraph(graph, new Set(), new Set(["TRACKS"])).edges.map((edge) => edge.id),
+    ["contains"],
+    "edge relationship types can be hidden independently"
+  );
 
   const partitionSource = script.match(/function partitionBoardTasks\(tasks\) \{[\s\S]+?\n\}\n\nfunction renderColumns/)?.[0]
     .replace(/\n\nfunction renderColumns$/, "");
