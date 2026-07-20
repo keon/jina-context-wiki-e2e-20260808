@@ -33,7 +33,10 @@ export async function runProductionOntologyAcceptance(
   const ref = config.ref ?? "main";
   const principalId = config.principalId ?? "user:keon@omlabs.xyz";
   const pollIntervalMs = positiveInteger(config.pollIntervalMs ?? 10_000, "pollIntervalMs");
-  const timeoutMs = positiveInteger(config.timeoutMs ?? 20 * 60_000, "timeoutMs");
+  // Daytona setup plus the Codex run may legitimately consume the worker's
+  // 30-minute execution budget. Keep acceptance outside that envelope so it
+  // observes the durable task's terminal state instead of killing itself first.
+  const timeoutMs = positiveInteger(config.timeoutMs ?? 35 * 60_000, "timeoutMs");
   const log = config.log ?? console.log;
   const headers = {
     authorization: `Bearer ${config.token}`,
@@ -48,6 +51,7 @@ export async function runProductionOntologyAcceptance(
   const taskId = requiredNestedString(created, "task", "id");
   const deadline = Date.now() + timeoutMs;
   let lastStatus = "";
+  let lastTaskSummary = "";
 
   while (Date.now() < deadline) {
     const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
@@ -55,15 +59,23 @@ export async function runProductionOntologyAcceptance(
     const task = tasks.find((value) => isRecord(value) && value.id === taskId);
     if (!isRecord(task)) throw new Error(`acceptance task ${taskId} is missing from the board`);
     const status = requiredString(task.status, "task.status");
+    const taskSummary = summarizeWorkflowTasks(tasks, taskId);
+    if (taskSummary !== lastTaskSummary) {
+      log(`Production ontology task ${taskId}: ${taskSummary}`);
+      lastTaskSummary = taskSummary;
+    }
     if (status !== lastStatus) {
-      log(`Production ontology task ${taskId} is ${status}`);
       lastStatus = status;
     }
     if (status === "done") break;
-    if (TERMINAL_FAILURES.has(status)) throw new Error(`production ontology task ${taskId} ended as ${status}`);
+    if (TERMINAL_FAILURES.has(status)) {
+      throw new Error(`production ontology task ${taskId} ended as ${status} (${taskSummary})`);
+    }
     await delay(pollIntervalMs);
   }
-  if (lastStatus !== "done") throw new Error(`production ontology task ${taskId} timed out as ${lastStatus || "unknown"}`);
+  if (lastStatus !== "done") {
+    throw new Error(`production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"})`);
+  }
 
   const ontology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
   const latest = requiredRecord(ontology.latest, "ontology.latest");
@@ -168,10 +180,12 @@ function delay(ms: number): Promise<void> {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
+    const configuredTimeout = optionalPositiveIntegerEnv("ACCEPTANCE_TIMEOUT_MS");
     const summary = await runProductionOntologyAcceptance({
       apiUrl: requiredEnv("JINA_API_URL"),
       token: requiredEnv("INTERNAL_API_TOKEN"),
-      requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY")
+      requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
+      ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout })
     });
     console.log(`Production ontology accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`);
   } catch (error) {
@@ -184,4 +198,33 @@ function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function optionalPositiveIntegerEnv(name: string): number | undefined {
+  const value = process.env[name]?.trim();
+  if (!value) return undefined;
+  const parsed = Number(value);
+  return positiveInteger(parsed, name);
+}
+
+function summarizeWorkflowTasks(tasks: readonly unknown[], rootTaskId: string): string {
+  const related = tasks
+    .filter((value): value is Record<string, unknown> => isRecord(value) && (value.id === rootTaskId || value.parentTaskId === rootTaskId))
+    .sort((left, right) => taskSortKey(left, rootTaskId).localeCompare(taskSortKey(right, rootTaskId)));
+  if (related.length === 0) return "no related tasks";
+  return related.map((task) => {
+    const label = task.id === rootTaskId ? "root" : typeof task.type === "string" && task.type ? task.type : "child";
+    const status = typeof task.status === "string" && task.status ? task.status : "unknown";
+    return `${label}=${status}`;
+  }).join(", ");
+}
+
+function taskSortKey(task: Record<string, unknown>, rootTaskId: string): string {
+  if (task.id === rootTaskId) return "0-root";
+  const order: Record<string, string> = {
+    ontology_ingest: "1-ingest",
+    ontology_assert: "2-assert",
+    ontology_project: "3-project"
+  };
+  return typeof task.type === "string" ? order[task.type] ?? `9-${task.type}` : "9-child";
 }

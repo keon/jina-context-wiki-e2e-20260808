@@ -99,6 +99,13 @@ The acceptance check fails the deployment unless the graph has cited nodes and
 edges, the fixed retrieval orchestrator returns cited results, and the canonical
 outbox and parser backlog are empty. Repeated deployments deliberately exercise
 the unchanged-head cache path instead of rebuilding repository facts.
+The acceptance poll window is 35 minutes and its Cloud Run task limit is 40
+minutes, which deliberately exceeds the ontology worker's 30-minute
+Daytona/Codex execution budget. It reports the root, ingest, assertion, and
+projection statuses whenever they change. The deployment step also prints the
+Cloud Run execution condition and available container logs on both success and
+failure, so a stalled chunk is diagnosable from the Actions run without exposing
+the internal API credential to GitHub.
 
 Useful production checks:
 
