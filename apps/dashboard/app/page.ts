@@ -105,6 +105,13 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .context-result { padding: .45rem 0; border-top: 1px solid #252d40; }
   .context-result strong { display: block; font-size: .74rem; }
   .context-result span { display: block; margin-top: .25rem; color: #7f8ca2; font: .64rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .issue-trace { display: grid; gap: .6rem; padding: .7rem 0 .2rem; }
+  .trace-chain { display: flex; flex-wrap: wrap; align-items: center; gap: .42rem; padding: .58rem .65rem; border: 1px solid #2d3851; border-radius: .58rem; background: #0e141e; }
+  .trace-chain a { color: #91afff; font-size: .72rem; font-weight: 650; text-decoration: none; }
+  .trace-chain a:hover { text-decoration: underline; }
+  .trace-arrow { color: #697993; font-size: .7rem; }
+  .trace-changes { flex-basis: 100%; color: #7f8ca2; font: .62rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .trace-empty { color: #8b98ad; font-size: .7rem; }
 
   dialog { width: min(760px, calc(100vw - 2rem)); max-height: calc(100vh - 2rem); padding: 0; border: 1px solid #30394e; border-radius: 1rem; background: #10141d; color: #f3f5f8; box-shadow: 0 2rem 6rem rgb(0 0 0 / 55%); }
   dialog::backdrop { background: rgb(3 5 9 / 72%); backdrop-filter: blur(5px); }
@@ -359,6 +366,10 @@ function renderContextResults() {
     section.append(textElement("h3", "", call.template + (call.truncated ? " · truncated" : "")));
     if (!call.items.length) section.append(textElement("p", "empty-detail", "No cited results."));
     for (const item of call.items) {
+      if (item.kind === "issue_trace" && item.data && item.data.issue) {
+        section.append(renderIssueTrace(item.data));
+        continue;
+      }
       const row = element("div", "context-result");
       row.append(
         textElement("strong", "", item.title),
@@ -370,6 +381,53 @@ function renderContextResults() {
     }
     contextResults.append(section);
   }
+}
+
+function renderIssueTrace(trace) {
+  const container = element("div", "issue-trace");
+  const issue = trace.issue;
+  const resolutions = Array.isArray(trace.resolutions) ? trace.resolutions : [];
+  const introducedBy = Array.isArray(trace.introducedBy) ? trace.introducedBy : [];
+  if (!resolutions.length && !introducedBy.length) {
+    container.append(externalLink("Issue #" + issue.number + " · " + issue.title, issue.url));
+    container.append(textElement("p", "trace-empty", "No verified pull request or commit relationship has been asserted."));
+    return container;
+  }
+  for (const resolution of resolutions) {
+    const chain = element("div", "trace-chain");
+    chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "→"));
+    chain.append(externalLink("PR #" + resolution.pullRequestNumber + " · " + resolution.title, resolution.url));
+    for (const commit of Array.isArray(resolution.commits) ? resolution.commits : []) {
+      chain.append(textElement("span", "trace-arrow", "→"));
+      chain.append(externalLink((commit.role === "merge" ? "merge " : "commit ") + commit.sha.slice(0, 12), commit.url));
+      const changes = Array.isArray(commit.changes) ? commit.changes : [];
+      if (changes.length) {
+        chain.append(textElement("div", "trace-changes", changes.length + " changed file" + (changes.length === 1 ? "" : "s") + ": " + changes.map(function(change) { return change.path; }).join(", ")));
+      }
+    }
+    container.append(chain);
+  }
+  for (const commit of introducedBy) {
+    const chain = element("div", "trace-chain");
+    chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "was introduced by"));
+    chain.append(externalLink("commit " + commit.sha.slice(0, 12), commit.url));
+    container.append(chain);
+  }
+  return container;
+}
+
+function externalLink(label, url) {
+  let safeUrl;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === "https:" && parsed.hostname === "github.com") safeUrl = parsed.href;
+  } catch {}
+  if (!safeUrl) return textElement("span", "", label);
+  const link = textElement("a", "", label);
+  link.href = safeUrl;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
 }
 
 function ontologyStat(label, value) {

@@ -131,6 +131,26 @@ export async function runProductionOntologyAcceptance(
   if (calls.length < 3 || citations.length === 0 || !calls.every(hasCitedItems)) {
     throw new Error("production context retrieval did not return cited change, intent, and ownership results");
   }
+  const issueContext = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ repository, ref, question: "Which PR and commit resolved issue #1?" })
+  });
+  const issueCalls = requiredArray(issueContext.calls, "issue context.calls");
+  const issueTrace = issueCalls.find((call) => isRecord(call) && call.template === "issue_trace");
+  const issueItems = isRecord(issueTrace) ? requiredArray(issueTrace.items, "issue trace.items") : [];
+  const firstIssueItem = issueItems[0];
+  const issueData = isRecord(firstIssueItem) ? requiredRecord(firstIssueItem.data, "issue trace.data") : {};
+  const resolutions = requiredArray(issueData.resolutions, "issue trace.resolutions");
+  const firstResolution = resolutions[0];
+  const commits = isRecord(firstResolution) ? requiredArray(firstResolution.commits, "issue trace.commits") : [];
+  if (
+    !isRecord(firstResolution) || firstResolution.pullRequestNumber !== 2 || commits.length === 0 ||
+    !commits.every((commit) => isRecord(commit) && typeof commit.sha === "string" && commit.sha.length === 40) ||
+    !isRecord(firstIssueItem) || !Array.isArray(firstIssueItem.citations) || firstIssueItem.citations.length === 0
+  ) {
+    throw new Error("production context retrieval did not project issue #1 to PR #2 and its commits");
+  }
 
   const metrics = await apiJson(fetchImpl, `${apiUrl}/ontology/metrics`, { headers });
   const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");

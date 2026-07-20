@@ -1,6 +1,6 @@
 # Data Models
 
-> **Implementation status (2026-07-20):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.1 schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; and immutable graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
+> **Implementation status (2026-07-20):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.1 schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; issue-centric trace projections; and immutable graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
 
 This document defines the core Postgres data model for Jina. It is the schema-oriented companion to [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -21,10 +21,10 @@ code         commits, refs, commit_files, commit_changes, blobs,
              blob_analyses, blob_symbols, blob_imports, symbol_edges
 knowledge    entities, identities, entity_redirects, assertions, audit_log
 infra        outbox, erasure_filters, repository_acl
-projections  ref_manifest, search_documents, graphs, nodes, edges
+projections  ref_manifest, search_documents, issue_traces, graphs, nodes, edges
 ```
 
-`commit_files` is immutable tree state by commit; `commit_changes` is the first-parent delta. `ref_manifest` is a rebuildable hot-ref projection. Repository, file, symbol, commit, PR, and issue natural keys include their repository scope. Assertions contain typed object/literal values, qualifier JSON plus a canonical hash, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version. Search-document identity and uniqueness include repository scope. See [ONTOLOGY.md](ONTOLOGY.md) for invariants and writer behavior; the executable migration is `ONTOLOGY_SCHEMA_SQL` in `packages/db/src/postgres-ontology-graph-store.ts`.
+`commit_files` is immutable tree state by commit; `commit_changes` is the first-parent delta. `ref_manifest` is a rebuildable hot-ref projection. `issue_traces` is keyed by tenant, repository, ref, and issue number; its JSON payload is a denormalized, cited Issue → PR → commit/change view rebuilt from canonical assertions. Repository, file, symbol, commit, PR, and issue natural keys include their repository scope. Assertions contain typed object/literal values, qualifier JSON plus a canonical hash, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version. Search-document identity and uniqueness include repository scope. See [ONTOLOGY.md](ONTOLOGY.md) for invariants and writer behavior; the executable migration is `ONTOLOGY_SCHEMA_SQL` in `packages/db/src/postgres-ontology-graph-store.ts`.
 
 ## Conventions
 

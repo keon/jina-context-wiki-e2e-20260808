@@ -26,6 +26,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   let boardReads = 0;
   const requests: string[] = [];
   const logs: string[] = [];
+  let askReads = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     requests.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
@@ -40,6 +41,17 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
       ] });
     }
     if (url.endsWith("/ontology/ask")) {
+      askReads += 1;
+      if (askReads === 2) return json({
+        calls: [{
+          template: "issue_trace",
+          items: [{
+            data: { resolutions: [{ pullRequestNumber: 2, commits: [{ sha: "b".repeat(40) }] }] },
+            citations: [{ kind: "assertion", id: "resolves" }]
+          }]
+        }],
+        citations: [{ kind: "assertion", id: "resolves" }]
+      });
       return json({
         calls: ["change", "intent", "ownership"].map((template) => ({ template, items: [{ citations: [{ kind: "assertion", id: template }] }] })),
         citations: [{ kind: "assertion", id: "change" }, { kind: "assertion", id: "intent" }, { kind: "assertion", id: "ownership" }]
@@ -65,7 +77,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     nodeCount: 1, edgeCount: 1, citationCount: 3
   });
   assert.deepEqual(requests, [
-    "POST /ontology/build", "GET /board", "GET /board", "GET /ontology", "POST /ontology/ask", "GET /ontology/metrics"
+    "POST /ontology/build", "GET /board", "GET /board", "GET /ontology", "POST /ontology/ask", "POST /ontology/ask", "GET /ontology/metrics"
   ]);
   assert.deepEqual(logs, [
     "Production ontology task ontology-root: root=in_progress, ontology_ingest=done, ontology_assert=in_progress, ontology_project=triage",

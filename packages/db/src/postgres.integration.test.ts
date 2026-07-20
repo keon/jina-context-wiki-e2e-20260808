@@ -202,6 +202,7 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
         tenantId, repository, kind: "pull_request", number: 3, title: "Update app", body: "Fixes #7",
         state: "closed", url: `https://github.com/${repository}/pull/3`, authorLogin: "alice",
         occurredAt: "2026-07-19T00:00:00.000Z", recordedAt: "2026-07-20T00:02:00.000Z",
+        mergedAt: "2026-07-19T00:00:00.000Z", mergeCommitSha: headSha,
         commitShas: [headSha], resolvesIssueNumbers: [7], referencesIssueNumbers: []
       },
       {
@@ -266,6 +267,15 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     const intent = await store.retrieve({ tenantId, allowedRepositories, repository, template: "intent", path: "src/app.ts", query: "fixes app" });
     assert.equal(intent.items.some((item) => item.citations[0]?.kind === "commit_change"), true);
     assert.equal(intent.items.some((item) => item.kind === "work_intent" && item.title.includes("Issue #7")), true);
+    const issueTrace = await store.retrieve({ tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7 });
+    assert.equal(issueTrace.items.length, 1);
+    const trace = issueTrace.items[0]?.data as {
+      resolutions?: readonly { pullRequestNumber: number; commits: readonly { sha: string; role: string; changes: readonly { path: string }[] }[] }[];
+    };
+    assert.equal(trace.resolutions?.[0]?.pullRequestNumber, 3);
+    assert.equal(trace.resolutions?.[0]?.commits[0]?.sha, headSha);
+    assert.equal(trace.resolutions?.[0]?.commits[0]?.role, "merge");
+    assert.equal(trace.resolutions?.[0]?.commits[0]?.changes.some((change) => change.path === "src/app.ts"), true);
     const ownership = await store.retrieve({ tenantId, allowedRepositories, repository, template: "ownership", path: "src/app.ts" });
     assert.equal(ownership.items.some((item) => item.title.includes("Platform")), true);
     assert.equal(ownership.items.some((item) => item.title.includes("@omlabs/owners") && item.data.authority === "codeowners"), true);
@@ -322,6 +332,12 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
       type: "redact_observation", observationId: githubObservationId, reason: "fixture redaction", commitShas: [headSha]
     }, "2026-07-20T00:09:00.000Z", true);
     assert.equal(redaction.affectedIds.includes(githubObservationId), true);
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:30.000Z");
+    const redactedTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7
+    });
+    const redactedTraceData = redactedTrace.items[0]?.data as { resolutions?: readonly unknown[] };
+    assert.equal(redactedTraceData.resolutions?.length, 0, "redacted source assertions leave no stale resolution projection");
     const engineerId = stableId("entity", `${tenantId}:Engineer:github:user:alice`);
     const erased = await store.executeCommand(tenantId, "user:privacy", {
       type: "erase_person", entityId: engineerId, reason: "fixture erasure"

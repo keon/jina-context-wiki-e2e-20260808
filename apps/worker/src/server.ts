@@ -419,6 +419,10 @@ async function githubWorkItemObservations(
       url: requiredString(item.html_url, "GitHub pull request URL"),
       ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
       ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
+      ...(typeof item.merged_at === "string" && item.merged_at ? { mergedAt: item.merged_at } : {}),
+      ...(typeof item.merged_at === "string" && item.merged_at && typeof item.merge_commit_sha === "string"
+        ? { mergeCommitSha: requiredGitSha(item.merge_commit_sha, "GitHub merge commit SHA") }
+        : {}),
       recordedAt, commitShas: [...value.commitShas], resolvesIssueNumbers: links.resolves, referencesIssueNumbers: links.references
     });
   }

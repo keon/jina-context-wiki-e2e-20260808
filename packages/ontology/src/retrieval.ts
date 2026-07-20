@@ -1,4 +1,4 @@
-export const retrievalTemplateNames = ["structure", "change", "intent", "ownership"] as const;
+export const retrievalTemplateNames = ["issue_trace", "structure", "change", "intent", "ownership"] as const;
 export type RetrievalTemplateName = (typeof retrievalTemplateNames)[number];
 
 export interface RetrievalCitation {
@@ -30,7 +30,44 @@ export interface RetrievalRequest {
   readonly symbol?: string;
   readonly path?: string;
   readonly pullRequestNumber?: number;
+  readonly issueNumber?: number;
   readonly limit?: number;
+}
+
+export interface IssueTraceChange {
+  readonly commitSha: string;
+  readonly path: string;
+  readonly change: string;
+  readonly oldPath?: string;
+}
+
+export interface IssueTraceCommit {
+  readonly sha: string;
+  readonly url: string;
+  readonly role: "merge" | "included" | "introduced";
+  readonly changes: readonly IssueTraceChange[];
+}
+
+export interface IssueTraceResolution {
+  readonly pullRequestNumber: number;
+  readonly title: string;
+  readonly url: string;
+  readonly commits: readonly IssueTraceCommit[];
+  readonly assertionIds: readonly string[];
+  readonly observationIds: readonly string[];
+}
+
+/** Materialized issue-centric read model. Canonical assertions remain the source of truth. */
+export interface IssueTraceProjection {
+  readonly issue: {
+    readonly number: number;
+    readonly title: string;
+    readonly url: string;
+    readonly state?: string;
+  };
+  readonly resolutions: readonly IssueTraceResolution[];
+  readonly introducedBy: readonly IssueTraceCommit[];
+  readonly citations: readonly RetrievalCitation[];
 }
 
 export interface RetrievalResult {
@@ -62,8 +99,15 @@ export class RepositoryContextOrchestrator {
     const templates = classifyTemplates(input.question);
     const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
     const calls: RetrievalResult[] = [];
+    const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
     for (const template of templates) {
-      calls.push(await this.executor.retrieve({ ...input, template, query: input.query ?? input.question, limit: perCallLimit }));
+      calls.push(await this.executor.retrieve({
+        ...input,
+        template,
+        query: input.query ?? input.question,
+        ...(issueNumber ? { issueNumber } : {}),
+        limit: perCallLimit
+      }));
     }
     const citations = dedupeCitations(calls.flatMap((call) => call.items.flatMap((item) => item.citations)));
     return { question: input.question, calls, citations, truncated: calls.some((call) => call.truncated) };
@@ -72,12 +116,22 @@ export class RepositoryContextOrchestrator {
 
 export function classifyTemplates(question: string): readonly RetrievalTemplateName[] {
   const value = question.toLowerCase();
+  const issueNumber = extractIssueNumber(question);
+  if (issueNumber && /resolv|fix|clos|caus|introduc|pull request|\bpr\b|commit/.test(value)) return ["issue_trace"];
   const selected: RetrievalTemplateName[] = [];
+  if (issueNumber) selected.push("issue_trace");
   if (/depend|call|import|structure|where|symbol/.test(value)) selected.push("structure");
   if (/change|break|impact|diff|pull request|\bpr\b/.test(value)) selected.push("change");
   if (/why|intent|issue|introduced|history|exist/.test(value)) selected.push("intent");
   if (/who|owner|own|maintain|worked|author/.test(value)) selected.push("ownership");
   return selected.length > 0 ? [...new Set(selected)] : ["structure", "intent"];
+}
+
+export function extractIssueNumber(question: string): number | undefined {
+  const match = /\b(?:issue|bug|ticket)\s*#?\s*(\d+)\b/i.exec(question) ?? /(?:^|\s)#(\d+)\b/.exec(question);
+  if (!match?.[1]) return undefined;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
 }
 
 function dedupeCitations(citations: readonly RetrievalCitation[]): readonly RetrievalCitation[] {

@@ -42,7 +42,7 @@ commit DAG rows, first-parent changes, content-addressed blob analyses, source
 facts, and model-output proposals survive worker retries. Before fetching trees,
 the worker asks which commits are known, so a repeat build reads only the head
 tree and a new head stops at known parents. With an unchanged head, blob parsing and Daytona/Codex generation are reused and manifest/search projection returns a no-op checkpoint when there are no pending scoped events. The project task claims repository-scoped canonical
-outbox rows and rebuilds ref manifests, lexical/vector search, redirect
+outbox rows and rebuilds ref manifests, lexical/vector search, affected issue traces, redirect
 reconciliation, retention, and the immutable graph. The ontology worker continuously drains remaining events while idle; global redirect/identity changes fan out across repositories and events are acknowledged only after affected projections succeed. Ontology list polling loads
 the newest full graph plus graph summaries; it does not hydrate historical node
 and edge collections.
@@ -94,7 +94,7 @@ docker build -f apps/dashboard/Dockerfile .
 
 CI supplies PostgreSQL 17 through a service container, so the `@jina/db`
 integration test exercises commit deltas, parsing caches, GitHub normalization,
-knowledge review, outbox projection, all four cited templates, ACL denial,
+knowledge review, outbox projection, all five cited templates, ACL denial,
 redaction, erasure, and graph creation. After a `main` deployment, the workflow verifies API health,
 worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
 policy for `keon@omlabs.xyz`. It then executes the short-lived
@@ -103,7 +103,7 @@ internal credential directly into that job, so the GitHub deployer can never
 read it. The job submits `omxyz/jina-ontology-e2e` to the production three-chunk
 workflow and waits for the aggregate to finish.
 The acceptance check fails the deployment unless the graph has cited nodes and
-edges, the fixed retrieval orchestrator returns cited results, and the canonical
+edges, the fixed retrieval orchestrator returns cited results, Issue #1 projects to PR #2 and its commit SHAs, and the canonical
 outbox and parser backlog are empty. It also rejects any blocked ontology task
 left for the accepted repository and ref; older active attempts must have been
 superseded, while their terminal records remain available on the History page.

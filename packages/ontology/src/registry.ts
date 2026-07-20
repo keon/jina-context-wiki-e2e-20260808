@@ -1,6 +1,6 @@
 import type { OntologyNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.1";
+export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.2";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -42,9 +42,22 @@ export const predicateRegistry = {
     name: "INCLUDES", class: "relationship", subjectKinds: ["PullRequest"], objectKinds: ["Commit"],
     cardinality: "many", review: "none", bitemporal: false
   },
+  MERGED_AS: {
+    name: "MERGED_AS", class: "relationship", subjectKinds: ["PullRequest"], objectKinds: ["Commit"],
+    cardinality: "one", review: "none", bitemporal: false
+  },
   RESOLVES: {
     name: "RESOLVES", class: "relationship", subjectKinds: ["PullRequest"], objectKinds: ["Issue"],
     cardinality: "many", review: "none", bitemporal: false
+  },
+  RESOLVED_BY: {
+    name: "RESOLVED_BY", class: "relationship", subjectKinds: ["Issue"], objectKinds: ["PullRequest"],
+    cardinality: "many", review: "none", bitemporal: false
+  },
+  INTRODUCED_BY: {
+    name: "INTRODUCED_BY", class: "inference", subjectKinds: ["Issue"], objectKinds: ["Commit"],
+    cardinality: "many", review: "manual", bitemporal: false,
+    authority: ["human", "model"]
   },
   REFERENCES: {
     name: "REFERENCES", class: "relationship", subjectKinds: ["Issue", "PullRequest"],

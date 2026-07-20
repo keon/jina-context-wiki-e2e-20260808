@@ -9,9 +9,13 @@ import {
 } from "./model.js";
 import type { OntologyCommand, OntologyCommandResult, RepositoryContextOperations } from "./operations.js";
 import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
-import { normalizeGitHubSourceObservation, type GitHubSourceObservation } from "./normalizers.js";
+import {
+  normalizeGitHubSourceObservation,
+  type GitHubSourceObservation,
+  type GitHubWorkItemObservation
+} from "./normalizers.js";
 import { predicateDefinition } from "./registry.js";
-import type { RetrievalRequest, RetrievalResult } from "./retrieval.js";
+import type { IssueTraceProjection, RetrievalRequest, RetrievalResult } from "./retrieval.js";
 import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_PROJECTION_VERSION,
@@ -48,6 +52,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   private readonly assertionBatches = new Map<string, { readonly batch: OntologyAssertionBatch; readonly assertions: readonly StoredAssertion[] }>();
   private readonly repositoryAcl = new Map<string, Set<string>>();
   private readonly memoryAudit: OntologyCommandResult[] = [];
+  private readonly githubObservations: GitHubSourceObservation[] = [];
 
   async save(graph: OntologyGraph): Promise<void> {
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
@@ -118,6 +123,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<{ readonly observationCount: number; readonly assertionCount: number }> {
+    for (const observation of observations) this.githubObservations.push(structuredClone(observation));
     return {
       observationCount: observations.length,
       assertionCount: observations.reduce((count, observation) => count + normalizeGitHubSourceObservation(observation).assertions.length, 0)
@@ -265,12 +271,86 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     const snapshot = [...this.snapshots.values()]
       .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && (!request.ref || value.ref === request.ref))
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
-    const items = snapshot ? memoryRetrievalItems(request, snapshot, this.blobAnalyses, [...this.assertionBatches.values()].flatMap((stored) => stored.assertions)) : [];
+    const items = request.template === "issue_trace"
+      ? memoryIssueTraceItems(request, this.githubObservations, this.snapshots)
+      : snapshot
+        ? memoryRetrievalItems(request, snapshot, this.blobAnalyses, [...this.assertionBatches.values()].flatMap((stored) => stored.assertions))
+        : [];
     return {
       template: request.template, repository: request.repository, ref: request.ref ?? snapshot?.ref ?? "main",
       items: items.slice(0, limit), truncated: items.length > limit, totalBeforeLimit: items.length, limit
     };
   }
+}
+
+function memoryIssueTraceItems(
+  request: RetrievalRequest,
+  observations: readonly GitHubSourceObservation[],
+  snapshots: ReadonlyMap<string, RepositorySnapshot>
+): RetrievalResult["items"] {
+  if (!request.issueNumber) return [];
+  const scoped = observations.filter((observation) =>
+    observation.tenantId === request.tenantId && observation.repository === request.repository && observation.kind !== "codeowners"
+  );
+  const issue = [...scoped].reverse().find((observation) => observation.kind === "issue" && observation.number === request.issueNumber);
+  if (!issue || issue.kind !== "issue") return [];
+  const pullRequests = scoped.filter((observation): observation is GitHubWorkItemObservation =>
+    observation.kind === "pull_request" && observation.resolvesIssueNumbers?.includes(request.issueNumber!) === true
+  );
+  const citations: IssueTraceProjection["citations"][number][] = [{
+    kind: "observation", id: sourceGitHubObservationId(issue), repository: request.repository
+  }];
+  const resolutions = pullRequests.map((pullRequest) => {
+    const observationId = sourceGitHubObservationId(pullRequest);
+    citations.push({ kind: "observation", id: observationId, repository: request.repository });
+    const shas = new Set(pullRequest.commitShas ?? []);
+    if (pullRequest.mergedAt && pullRequest.mergeCommitSha) shas.add(pullRequest.mergeCommitSha);
+    const commits = [...shas].map((sha) => {
+      const snapshot = snapshots.get(snapshotKey(request.tenantId, request.repository, sha));
+      const parent = snapshot?.parents[0] ? snapshots.get(snapshotKey(request.tenantId, request.repository, snapshot.parents[0]!)) : undefined;
+      const changes = snapshot ? computeCommitChanges(snapshot.files, parent?.files).map((change) => ({
+        commitSha: sha, path: change.path, change: change.change, ...(change.oldPath ? { oldPath: change.oldPath } : {})
+      })) : [];
+      for (const change of changes) citations.push({
+        kind: "commit_change", id: `${sha}:${change.path}`, repository: request.repository, commitSha: sha, path: change.path
+      });
+      return {
+        sha,
+        url: `https://github.com/${request.repository}/commit/${sha}`,
+        role: pullRequest.mergeCommitSha === sha ? "merge" as const : "included" as const,
+        changes
+      };
+    });
+    return {
+      pullRequestNumber: pullRequest.number,
+      title: pullRequest.title,
+      url: pullRequest.url,
+      commits,
+      assertionIds: [],
+      observationIds: [observationId]
+    };
+  });
+  const payload: IssueTraceProjection = {
+    issue: { number: issue.number, title: issue.title, url: issue.url, state: issue.state },
+    resolutions,
+    introducedBy: [],
+    citations
+  };
+  const first = resolutions[0];
+  return [{
+    kind: "issue_trace",
+    title: first
+      ? `Issue #${issue.number} → PR #${first.pullRequestNumber}${first.commits[0] ? ` → ${first.commits[0].sha.slice(0, 12)}` : ""}`
+      : `Issue #${issue.number} has no verified commit relationship`,
+    data: payload as unknown as Readonly<Record<string, unknown>>,
+    citations,
+    score: first ? 3 : 1
+  }];
+}
+
+function sourceGitHubObservationId(observation: GitHubWorkItemObservation): string {
+  const externalId = `${observation.repository}:${observation.kind}:${observation.number}:${observation.occurredAt ?? observation.recordedAt}`;
+  return stableId("observation", `${observation.tenantId}:github:${externalId}`);
 }
 
 function memoryRetrievalItems(

@@ -293,6 +293,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
+        ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
       json(response, 200, result);
@@ -309,6 +310,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
+        ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.tokenBudget === "number" ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") } : {})
       }));
       return;
@@ -1025,6 +1027,8 @@ function parseGitHubWorkItemObservation(value: unknown, tenantId: string): GitHu
     url: requiredString(value.url, "observation.url"),
     ...(typeof value.authorLogin === "string" && value.authorLogin.trim() ? { authorLogin: value.authorLogin.trim() } : {}),
     ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
+    ...(typeof value.mergedAt === "string" && value.mergedAt ? { mergedAt: value.mergedAt } : {}),
+    ...(typeof value.mergeCommitSha === "string" ? { mergeCommitSha: requiredGitSha(value.mergeCommitSha, "observation.mergeCommitSha") } : {}),
     recordedAt: requiredString(value.recordedAt, "observation.recordedAt"),
     commitShas: Array.isArray(value.commitShas) ? value.commitShas.map((sha) => requiredGitSha(sha, "observation.commitSha")) : [],
     resolvesIssueNumbers: positiveIntegerArray(value.resolvesIssueNumbers, "observation.resolvesIssueNumber"),

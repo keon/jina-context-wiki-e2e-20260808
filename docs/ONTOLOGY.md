@@ -10,7 +10,7 @@ The implementation follows Repository Context Architecture v5.1 with three board
 | --- | --- | --- |
 | `ontology_ingest` | Immutable GitHub/Git intake, new reachable commits, first-parent deltas, content-addressed parsing, PR/issue/CODEOWNERS normalization | Observations, code-plane rows, explicit source facts, and code checkpoint are durable |
 | `ontology_assert` | Daytona checkout, Codex semantic analysis, citation validation, model observation, registry validation | Model output is recorded and every supported inference is stored as `proposed` |
-| `ontology_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest rebuild, lexical/vector search rebuild, graph rendering, retention | Projection checkpoint and immutable graph generation are durable |
+| `ontology_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest/search rebuild, incremental issue-trace materialization, graph rendering, retention | Projection checkpoint and immutable graph generation are durable |
 
 `ontology_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
 
@@ -28,7 +28,7 @@ flowchart LR
       C[Content-addressed code plane]
       K[Knowledge service]
       O[Canonical outbox]
-      P[Manifest + search projections]
+      P[Manifest + search + issue-trace projections]
       R[Fixed cited retrieval templates]
       G[Dashboard graph]
       I --> C
@@ -62,7 +62,9 @@ GitHub PRs and issues remain raw observations. Pure normalizers derive only expl
 
 - `AUTHORED_BY` from the GitHub actor;
 - `INCLUDES` from PR-to-commit membership;
+- `MERGED_AS` from GitHub's merge commit, only after the PR is merged;
 - `RESOLVES` from explicit close/fix/resolve syntax;
+- `RESOLVED_BY` as the issue-centric inverse of an explicit `RESOLVES` fact;
 - `REFERENCES` from explicit issue mentions;
 - pattern-qualified `OWNED_BY` from CODEOWNERS.
 
@@ -72,7 +74,7 @@ Commit authorship is derived from commits plus accepted identities and is not du
 
 The assertion worker checks out the immutable commit in Daytona and asks Codex only about added, modified, or renamed current paths. Every citation is checked against the checkout before completion. Raw model JSON is stored as a `model_output` observation before normalization.
 
-Models never activate knowledge. All model relationships, including `IMPLEMENTS`, `DOCUMENTED_BY`, `MOVED_FROM`, `LIKELY_AFFECTS`, and model ownership, enter as `proposed`. An authenticated `review_assertion` command accepts, rejects, or retracts them and appends an audit row. The current registry intentionally keeps inference predicates manual until a generator/predicate pair has measured labels; no confidence threshold is guessed.
+Models never activate knowledge. All model relationships, including `IMPLEMENTS`, `DOCUMENTED_BY`, `MOVED_FROM`, `LIKELY_AFFECTS`, `INTRODUCED_BY`, and model ownership, enter as `proposed`. `INTRODUCED_BY` represents the stronger causal claim that an issue was caused by a commit and is never inferred merely because the commit appears in the resolving PR. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row. The current registry intentionally keeps inference predicates manual until a generator/predicate pair has measured labels; no confidence threshold is guessed.
 
 ### Projection
 
@@ -80,10 +82,13 @@ The project task uses queue-claim semantics (`FOR UPDATE SKIP LOCKED`) for canon
 
 1. materializes `ref_manifest` directly from the current ref's commit tree;
 2. rebuilds repo-scoped lexical and 64-dimensional vector search documents;
-3. folds append-only entity redirects and reconciles logical assertion collisions;
-4. performs reachability/recent-window code-plane GC and bounded rejected-model payload retention;
-5. acknowledges claimed outbox events;
-6. creates a new immutable dashboard graph generation.
+3. traverses only the assertion/observation subgraph touched by claimed events and upserts the affected issue-centric `issue_traces` rows; a missing projection triggers a one-time full backfill;
+4. folds append-only entity redirects and reconciles logical assertion collisions;
+5. performs reachability/recent-window code-plane GC and bounded rejected-model payload retention;
+6. acknowledges claimed outbox events;
+7. creates a new immutable dashboard graph generation.
+
+An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus any separately reviewed `INTRODUCED_BY` commits. It retains the assertion, observation, entity, and commit-change citations needed to explain every hop. Rebuilding a trace never creates an assertion.
 
 Every projected graph item carries evidence. Code and accepted model facts keep
 their checkout-validated `path:line` citations. Deterministic GitHub facts that
@@ -107,7 +112,7 @@ All tables are in PostgreSQL under `jina_ontology`, and every row is tenant-scop
 | Code | `commits`, `refs`, `commit_files`, `commit_changes`, `blobs`, `blob_analyses`, `blob_symbols`, `blob_imports`, `symbol_edges` |
 | Knowledge | `entities`, `identities`, `entity_redirects`, `assertions`, `audit_log` |
 | Infrastructure | `outbox`, `erasure_filters`, `repository_acl` |
-| Rebuildable projections | `ref_manifest`, `search_documents`, `graphs`, `nodes`, `edges` |
+| Rebuildable projections | `ref_manifest`, `search_documents`, `issue_traces`, `graphs`, `nodes`, `edges` |
 
 `commit_files` is the persisted commit manifest in the current implementation. `ref_manifest` is the hot-ref projection. Graph rows include the board task generation in their ID, so reruns never overwrite a graph referenced by an older task.
 
@@ -128,7 +133,8 @@ The typed registry is [registry.ts](../packages/ontology/src/registry.ts). It de
 The implemented predicate set is:
 
 ```text
-AUTHORED_BY  OWNED_BY  MEMBER_OF  INCLUDES  RESOLVES  REFERENCES
+AUTHORED_BY  OWNED_BY  MEMBER_OF  INCLUDES  MERGED_AS
+RESOLVES  RESOLVED_BY  REFERENCES  INTRODUCED_BY
 LIKELY_AFFECTS  MOVED_FROM  IMPLEMENTS  DOCUMENTED_BY
 ```
 
@@ -148,10 +154,11 @@ Unmerge cancels the matching redirect but does not silently restore facts supers
 
 ## Retrieval
 
-Models cannot compose database queries. The API exposes four deterministic templates:
+Models cannot compose database queries. The API exposes five deterministic templates:
 
 | Template | Answer path |
 | --- | --- |
+| `issue_trace` | issue number → materialized issue → resolving PR → merge/included commits → changes, plus reviewed causal commits |
 | `structure` | name/moniker → typed edges inside the selected ref manifest |
 | `change` | PR → included commits → first-parent changes → changed symbols → inbound affected surface |
 | `intent` | file history → commits → PRs → resolved/referenced issues → raw observation text |
@@ -159,7 +166,7 @@ Models cannot compose database queries. The API exposes four deterministic templ
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` is a thin classifier/composer over these four tools. It returns structured calls and citations, never uncited prose. The dashboard exposes this as “Ask with citations” above the graph.
+`POST /ontology/ask` is a thin classifier/composer over these five tools. It extracts an issue number and routes resolution/causality questions directly to `issue_trace`; it does not reconstruct that path with query-time assertion joins or an LLM. It returns structured calls and citations, never uncited prose. The dashboard renders the Issue → PR → commit chain as GitHub links above the graph.
 
 ## Security
 
@@ -177,7 +184,7 @@ The current modular-monolith API is the sole database client for intake, code, k
 
 Four operations are distinct and audited:
 
-- **Tombstone repository** retracts live assertions, retires scoped entities, purges code-plane rows, graphs, search, manifests, and ACLs, and persists a durable repository filter.
+- **Tombstone repository** retracts live assertions, retires scoped entities, purges code-plane rows, graphs, search, manifests, issue traces, and ACLs, and persists a durable repository filter.
 - **Redact observation** destroys payload content, retains digest/reason/time, masks named commit messages, retracts dependent assertions, and purges search.
 - **Erase person** marks identities erased, retires the Engineer, retracts facts about it, removes search documents, masks matching commit authors, and redacts observations containing erased external IDs.
 - **Retention/GC** keeps commits reachable from refs, PR-linked commits, and a 90-day recent window; orphan blobs and parse rows are deleted. Rejected model payloads are removed after 30 days.
@@ -228,8 +235,9 @@ The test suite proves:
 - registry endpoint/qualifier validation;
 - provenance XOR, review transitions, cardinality, redirects, reconciliation, and acceptance labels;
 - GitHub work-item and CODEOWNERS normalization;
+- explicit resolution/merge assertions and review-gated issue causality;
 - fixed-template orchestration and citations;
-- real PostgreSQL intake → knowledge → outbox projection → retrieval → graph flow;
+- real PostgreSQL intake → knowledge → incremental issue projection → retrieval → graph flow;
 - repository ACL denial, redaction, and personal erasure;
 - board/API/worker lease behavior and dashboard rendering.
 

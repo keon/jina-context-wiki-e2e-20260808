@@ -144,6 +144,7 @@ test("identity redirects resolve without rewriting assertions and reconciliation
 
 test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates("What changed in this PR, what might break, and who owns it?"), ["change", "ownership"]);
+  assert.deepEqual(classifyTemplates("Which PR and commit resolved issue #7?"), ["issue_trace"]);
   const called: string[] = [];
   const orchestrator = new RepositoryContextOrchestrator({
     async retrieve(request) {
@@ -163,6 +164,13 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   });
   assert.deepEqual(called, ["change", "ownership"]);
   assert.equal(context.citations.length, 2);
+
+  called.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "Which PR and commit resolved issue #7?"
+  });
+  assert.deepEqual(called, ["issue_trace"]);
 });
 
 test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNERS facts", () => {
@@ -177,6 +185,17 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
     object: { kind: "Team", key: "github:team:org/platform", displayName: "@org/platform" },
     qualifiers: { pattern: "src/**" }
   }]);
+  const mergeSha = "b".repeat(40);
+  const workItem = normalizeGitHubSourceObservation({
+    tenantId: "t", repository: "org/repo", kind: "pull_request", number: 4,
+    title: "Fix access", body: "Fixes #12", state: "closed", url: "https://github.com/org/repo/pull/4",
+    recordedAt: "2026-01-02T00:00:00Z", mergedAt: "2026-01-02T00:00:00Z", mergeCommitSha: mergeSha,
+    commitShas: [mergeSha], resolvesIssueNumbers: [12]
+  });
+  assert.deepEqual(workItem.assertions.map((assertion) => assertion.predicate), [
+    "INCLUDES", "MERGED_AS", "RESOLVES", "RESOLVED_BY"
+  ]);
+  assert.equal(predicateDefinition("INTRODUCED_BY").review, "manual");
 });
 
 test("normalizes model output into distinct semantic entity identities", () => {

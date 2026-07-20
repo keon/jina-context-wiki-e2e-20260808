@@ -13,6 +13,9 @@ export interface GitHubWorkItemObservation {
   readonly occurredAt?: string;
   readonly recordedAt: string;
   readonly commitShas?: readonly string[];
+  /** GitHub's merge commit is authoritative only when mergedAt is present. */
+  readonly mergeCommitSha?: string;
+  readonly mergedAt?: string;
   readonly resolvesIssueNumbers?: readonly number[];
   readonly referencesIssueNumbers?: readonly number[];
 }
@@ -37,7 +40,7 @@ export interface SourceEntityIntent {
 
 export interface SourceAssertionIntent {
   readonly subject: SourceEntityIntent;
-  readonly predicate: "AUTHORED_BY" | "INCLUDES" | "RESOLVES" | "REFERENCES" | "OWNED_BY";
+  readonly predicate: "AUTHORED_BY" | "INCLUDES" | "MERGED_AS" | "RESOLVES" | "RESOLVED_BY" | "REFERENCES" | "OWNED_BY";
   readonly object: SourceEntityIntent;
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
 }
@@ -72,11 +75,21 @@ export function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation):
       entities.push(commit);
       assertions.push({ subject, predicate: "INCLUDES", object: commit });
     }
+    if (observation.mergedAt && observation.mergeCommitSha) {
+      const mergeCommit: SourceEntityIntent = {
+        kind: "Commit",
+        key: `repo:${observation.repository}:sha:${observation.mergeCommitSha}`,
+        displayName: observation.mergeCommitSha.slice(0, 12)
+      };
+      entities.push(mergeCommit);
+      assertions.push({ subject, predicate: "MERGED_AS", object: mergeCommit });
+    }
     const resolved = new Set(observation.resolvesIssueNumbers ?? []);
     for (const number of new Set([...(observation.referencesIssueNumbers ?? []), ...resolved])) {
       const issue: SourceEntityIntent = { kind: "Issue", key: `github:issue:${observation.repository}#${number}`, displayName: `Issue #${number}` };
       entities.push(issue);
       assertions.push({ subject, predicate: resolved.has(number) ? "RESOLVES" : "REFERENCES", object: issue });
+      if (resolved.has(number)) assertions.push({ subject: issue, predicate: "RESOLVED_BY", object: subject });
     }
   }
   return { entities: dedupe(entities, (entity) => `${entity.kind}:${entity.key}`), assertions: dedupe(assertions, (item) => `${item.subject.key}:${item.predicate}:${item.object.key}`), ...(githubIdentity ? { githubIdentity } : {}) };
