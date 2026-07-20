@@ -118,7 +118,9 @@ a truncated dispatcher configuration cannot pass health checks again.
 Worker health also reports the most recent topic, outcome, timestamp, and a
 coarse failure category. It never includes the task, repository, raw exception,
 or provider response; detailed redacted reasons stay in authenticated board
-events and Cloud Logging.
+events and Cloud Logging. GitHub failures distinguish authentication,
+authorization, not-found, rate-limit, timeout, response-shape, and checkout
+boundaries without returning the upstream response body.
 
 Useful production checks:
 
