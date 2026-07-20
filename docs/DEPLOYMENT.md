@@ -18,6 +18,7 @@ they are merged and the protected deployment job succeeds.
 - Dashboard service: `jina-dashboard`
 - Ontology worker service: `jina-ontology-worker`
 - Review/task worker service: `jina-task-worker`
+- Post-deploy acceptance job: `jina-acceptance`
 - Cloud SQL instance: `jina-postgres` (PostgreSQL 17)
 - Database: `jina`
 - GitHub deployer: `github-deployer@jina-v2.iam.gserviceaccount.com`
@@ -89,9 +90,11 @@ integration test exercises commit deltas, parsing caches, GitHub normalization,
 knowledge review, outbox projection, all four cited templates, ACL denial,
 redaction, erasure, and graph creation. After a `main` deployment, the workflow verifies API health,
 worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
-policy for `keon@omlabs.xyz`. It then reads the internal credential directly from
-Secret Manager into a masked runner variable, submits `omxyz/jina-ontology-e2e`
-to the production three-chunk workflow, and waits for the aggregate to finish.
+policy for `keon@omlabs.xyz`. It then executes the short-lived
+`jina-acceptance` Cloud Run Job as `jina-runtime`; Secret Manager injects the
+internal credential directly into that job, so the GitHub deployer can never
+read it. The job submits `omxyz/jina-ontology-e2e` to the production three-chunk
+workflow and waits for the aggregate to finish.
 The acceptance check fails the deployment unless the graph has cited nodes and
 edges, the fixed retrieval orchestrator returns cited results, and the canonical
 outbox and parser backlog are empty. Repeated deployments deliberately exercise
