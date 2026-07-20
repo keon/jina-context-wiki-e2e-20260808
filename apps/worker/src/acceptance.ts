@@ -1,3 +1,4 @@
+import { writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const TERMINAL_FAILURES = new Set(["failed", "canceled", "superseded"]);
@@ -187,9 +188,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
       ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout })
     });
-    console.log(`Production ontology accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`);
+    const message = `Production ontology accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`;
+    await writeTerminationMessage(message);
+    console.log(message);
   } catch (error) {
-    console.error(error instanceof Error ? error.message : String(error));
+    const message = error instanceof Error ? error.message : String(error);
+    await writeTerminationMessage(message);
+    console.error(message);
     process.exitCode = 1;
   }
 }
@@ -205,6 +210,12 @@ function optionalPositiveIntegerEnv(name: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return positiveInteger(parsed, name);
+}
+
+async function writeTerminationMessage(message: string): Promise<void> {
+  // Cloud Run projects this file into the task status. It keeps acceptance
+  // diagnostics available to the deployer without granting broad log access.
+  await writeFile("/dev/termination-log", message.slice(0, 4_000), "utf8").catch(() => undefined);
 }
 
 function summarizeWorkflowTasks(tasks: readonly unknown[], rootTaskId: string): string {
