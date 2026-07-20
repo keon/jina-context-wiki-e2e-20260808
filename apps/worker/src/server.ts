@@ -26,6 +26,7 @@ import {
   type OntologyIngestPlan,
   type RepositorySnapshot
 } from "@jina/ontology";
+import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 
 const SUPPORTED_TOPICS = [
   "run-review",
@@ -78,11 +79,17 @@ let stopping = false;
 let active = false;
 let lastApiSuccessAt: string | undefined;
 let lastApiError: string | undefined;
+let lastWork: {
+  readonly topic: WorkerTopic;
+  readonly outcome: WorkResult["outcome"];
+  readonly finishedAt: string;
+  readonly failureCategory?: WorkerFailureCategory;
+} | undefined;
 
 const server = createServer((request, response) => {
   if (request.url === "/health" || request.url === "/healthz") {
     response.writeHead(lastApiSuccessAt ? 200 : 503, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: Boolean(lastApiSuccessAt), workerId, topics, active, lastApiSuccessAt, lastApiError }));
+    response.end(JSON.stringify({ ok: Boolean(lastApiSuccessAt), workerId, topics, active, lastApiSuccessAt, lastApiError, lastWork }));
     return;
   }
   response.writeHead(404, { "content-type": "application/json" });
@@ -142,6 +149,13 @@ async function execute(work: ClaimedWork): Promise<void> {
   } finally {
     clearInterval(heartbeat);
   }
+
+  lastWork = {
+    topic: work.message.topic,
+    outcome: result.outcome,
+    finishedAt: new Date().toISOString(),
+    ...(result.outcome === "failed" ? { failureCategory: workerFailureCategory(result.reason) } : {})
+  };
 
   try {
     await complete(work, result);
