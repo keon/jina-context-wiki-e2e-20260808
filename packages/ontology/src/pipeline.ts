@@ -11,7 +11,7 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v3";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v4";
 export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
 
 export interface RepositoryTreeEntry {
@@ -326,7 +326,10 @@ export function assertionsFromGeneratedOntology(
         label: object.label
       },
       confidence: edge.confidence ?? 0,
-      evidence: edge.evidence
+      evidence: edge.evidence,
+      ...(edge.predicate === "INTRODUCED_BY"
+        ? { qualifiers: { reason: requiredCausalReason(edge.why) } }
+        : {})
     }];
   });
 }
@@ -335,10 +338,30 @@ function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: 
   if (node.kind === "Repository") return `github:repo:${repository}`;
   if ((node.kind === "File" || node.kind === "Document") && node.path) return `repo:${repository}:path:${node.path}`;
   if (node.kind === "Symbol") return `repo:${repository}:moniker:${node.id}`;
-  if (node.kind === "Commit") return `repo:${repository}:sha:${node.id}`;
-  if (node.kind === "PullRequest") return `github:pr:${repository}#${node.id.replace(/^#/, "")}`;
-  if (node.kind === "Issue") return `github:issue:${repository}#${node.id.replace(/^#/, "")}`;
+  if (node.kind === "Commit") return `repo:${repository}:sha:${canonicalCommitId(node.id)}`;
+  if (node.kind === "PullRequest") return `github:pr:${repository}#${canonicalWorkItemId(node.id, "PullRequest")}`;
+  if (node.kind === "Issue") return `github:issue:${repository}#${canonicalWorkItemId(node.id, "Issue")}`;
   return node.id;
+}
+
+function canonicalCommitId(value: string): string {
+  const match = /^(?:(?:commit|sha):)?([a-f0-9]{40})$/i.exec(value.trim());
+  if (!match?.[1]) throw new Error(`Commit node id must be a full Git SHA: ${value}`);
+  return match[1].toLowerCase();
+}
+
+function canonicalWorkItemId(value: string, kind: "Issue" | "PullRequest"): string {
+  const prefix = kind === "Issue" ? "issue" : "(?:pr|pull_request|pullrequest)";
+  const match = new RegExp(`^(?:${prefix}:)?#?(\\d+)$`, "i").exec(value.trim());
+  if (!match?.[1] || Number.parseInt(match[1], 10) < 1) {
+    throw new Error(`${kind} node id must be a positive GitHub number: ${value}`);
+  }
+  return match[1];
+}
+
+function requiredCausalReason(value: string | undefined): string {
+  if (!value?.trim()) throw new Error("INTRODUCED_BY must explain why the commit caused the issue");
+  return value.trim();
 }
 
 function normalizePredicate(value: string): string {

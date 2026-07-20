@@ -72,13 +72,14 @@ export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
       items: {
         type: "object",
         additionalProperties: false,
-        required: ["source", "target", "predicate", "plane", "confidence", "evidence"],
+        required: ["source", "target", "predicate", "plane", "confidence", "why", "evidence"],
         properties: {
           source: { type: "string" },
           target: { type: "string" },
           predicate: { type: "string", enum: ["IMPLEMENTS", "DOCUMENTED_BY", "REFERENCES", "OWNED_BY", "MOVED_FROM", "LIKELY_AFFECTS", "INTRODUCED_BY"] },
           plane: { type: "string", enum: ["knowledge"] },
           confidence: { type: "number", minimum: 0, maximum: 1 },
+          why: { type: ["string", "null"] },
           evidence: { type: "array", minItems: 1, items: { type: "string" } }
         }
       }
@@ -110,7 +111,9 @@ The structural code plane is built separately by deterministic parsers. Do not e
 Rules:
 - Include exactly one Repository node and the File, Symbol, Document, Issue, PullRequest, Engineer, or Team nodes needed by assertions.
 - Use only IMPLEMENTS, DOCUMENTED_BY, REFERENCES, OWNED_BY, MOVED_FROM, LIKELY_AFFECTS, or INTRODUCED_BY.
-- INTRODUCED_BY means an Issue was caused by a Commit. Emit it only when the checked-out repository contains explicit evidence naming both; it always requires human review before projection.
+- Use bare positive GitHub numbers for Issue and PullRequest node IDs and the bare full 40-character SHA for Commit node IDs.
+- Every edge must include a why field; use null for non-causal relationships. INTRODUCED_BY means an Issue was caused by a Commit, and its why must concisely explain the causal mechanism. Emit it only when the checked-out repository contains explicit evidence naming the issue, full commit SHA, and reason; it always requires human review before projection.
+- When a changed root-cause or incident document explicitly names that issue, full commit SHA, and causal mechanism, emit the supported INTRODUCED_BY assertion instead of reducing it to a generic reference.
 - Every edge must use plane knowledge and include a calibrated confidence from 0 to 1.
 - Every node and edge needs repository-relative file:line evidence.
 - Prefer explicit README/design documentation, configuration, ownership files, and tests over guesses.

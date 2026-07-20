@@ -31,6 +31,7 @@ export interface RetrievalRequest {
   readonly path?: string;
   readonly pullRequestNumber?: number;
   readonly issueNumber?: number;
+  readonly commitSha?: string;
   readonly limit?: number;
 }
 
@@ -46,6 +47,15 @@ export interface IssueTraceCommit {
   readonly url: string;
   readonly role: "merge" | "included" | "introduced";
   readonly changes: readonly IssueTraceChange[];
+  readonly why?: string;
+  readonly evidence?: readonly string[];
+  readonly evidenceCommitSha?: string;
+  readonly assertionIds?: readonly string[];
+  readonly pullRequests?: readonly {
+    readonly number: number;
+    readonly title: string;
+    readonly url: string;
+  }[];
 }
 
 export interface IssueTraceResolution {
@@ -100,12 +110,16 @@ export class RepositoryContextOrchestrator {
     const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
     const calls: RetrievalResult[] = [];
     const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
+    const pullRequestNumber = input.pullRequestNumber ?? extractPullRequestNumber(input.question);
+    const commitSha = input.commitSha ?? extractCommitSha(input.question);
     for (const template of templates) {
       calls.push(await this.executor.retrieve({
         ...input,
         template,
         query: input.query ?? input.question,
         ...(issueNumber ? { issueNumber } : {}),
+        ...(pullRequestNumber ? { pullRequestNumber } : {}),
+        ...(commitSha ? { commitSha } : {}),
         limit: perCallLimit
       }));
     }
@@ -117,7 +131,9 @@ export class RepositoryContextOrchestrator {
 export function classifyTemplates(question: string): readonly RetrievalTemplateName[] {
   const value = question.toLowerCase();
   const issueNumber = extractIssueNumber(question);
-  if (issueNumber && /resolv|fix|clos|caus|introduc|pull request|\bpr\b|commit/.test(value)) return ["issue_trace"];
+  const pullRequestNumber = extractPullRequestNumber(question);
+  const commitSha = extractCommitSha(question);
+  if ((issueNumber || pullRequestNumber || commitSha) && /resolv|fix|clos|caus|introduc|root cause|pull request|\bpr\b|commit/.test(value)) return ["issue_trace"];
   const selected: RetrievalTemplateName[] = [];
   if (issueNumber) selected.push("issue_trace");
   if (/depend|call|import|structure|where|symbol/.test(value)) selected.push("structure");
@@ -125,6 +141,19 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   if (/why|intent|issue|introduced|history|exist/.test(value)) selected.push("intent");
   if (/who|owner|own|maintain|worked|author/.test(value)) selected.push("ownership");
   return selected.length > 0 ? [...new Set(selected)] : ["structure", "intent"];
+}
+
+export function extractPullRequestNumber(question: string): number | undefined {
+  const match = /\b(?:pull request|pr)\s*#?\s*(\d+)\b/i.exec(question);
+  if (!match?.[1]) return undefined;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+export function extractCommitSha(question: string): string | undefined {
+  const labeled = /\b(?:commit|sha)\s*[:#]?\s*([a-f0-9]{7,40})\b/i.exec(question)?.[1];
+  const value = labeled ?? /\b[a-f0-9]{40}\b/i.exec(question)?.[0];
+  return value?.toLowerCase();
 }
 
 export function extractIssueNumber(question: string): number | undefined {

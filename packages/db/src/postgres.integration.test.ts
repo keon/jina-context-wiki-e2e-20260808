@@ -222,29 +222,45 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     const batch = {
       tenantId, repository, ref: "main", commitSha: headSha, taskId: `assert-${suffix}`,
       generatedAt: "2026-07-20T00:03:00.000Z", generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-      registryVersion: ONTOLOGY_REGISTRY_VERSION, model: "fixture", summary: "README documents the repository",
+      registryVersion: ONTOLOGY_REGISTRY_VERSION, model: "fixture", summary: "README documents the repository and records a root cause",
       rawOutput: {
-        summary: "README documents the repository",
+        summary: "README documents the repository and records a root cause",
         nodes: [
           { id: "repo", kind: "Repository" as const, label: repository, description: "repo", evidence: ["README.md:1"] },
-          { id: "readme", kind: "Document" as const, label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
+          { id: "readme", kind: "Document" as const, label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] },
+          { id: "7", kind: "Issue" as const, label: "Issue #7", description: "app regression", evidence: ["src/app.ts:1"] },
+          { id: headSha, kind: "Commit" as const, label: headSha.slice(0, 12), description: "introduced the regression", evidence: ["src/app.ts:1"] }
         ],
-        edges: [{ source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge" as const, confidence: 0.99, evidence: ["README.md:1"] }]
+        edges: [
+          { source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge" as const, confidence: 0.99, evidence: ["README.md:1"] },
+          { source: "7", target: headSha, predicate: "INTRODUCED_BY", plane: "knowledge" as const, confidence: 0.99, why: "The commit bypassed the app guard.", evidence: ["src/app.ts:1"] }
+        ]
       },
-      assertions: [{
-        subject: { kind: "Repository" as const, naturalKey: `github:repo:${repository}`, label: repository }, predicate: "DOCUMENTED_BY",
-        object: { kind: "Document" as const, naturalKey: `repo:${repository}:path:README.md`, label: "README" }, confidence: 0.99, evidence: ["README.md:1"]
-      }]
+      assertions: [
+        {
+          subject: { kind: "Repository" as const, naturalKey: `github:repo:${repository}`, label: repository }, predicate: "DOCUMENTED_BY",
+          object: { kind: "Document" as const, naturalKey: `repo:${repository}:path:README.md`, label: "README" }, confidence: 0.99, evidence: ["README.md:1"]
+        },
+        {
+          subject: { kind: "Issue" as const, naturalKey: `github:issue:${repository}#7`, label: "Issue #7" }, predicate: "INTRODUCED_BY",
+          object: { kind: "Commit" as const, naturalKey: `repo:${repository}:sha:${headSha}`, label: headSha.slice(0, 12) },
+          confidence: 0.99, evidence: ["src/app.ts:1"], qualifiers: { reason: "The commit bypassed the app guard." }
+        }
+      ]
     };
     const proposed = await store.saveAssertionBatch(batch);
-    assert.equal(proposed.proposedCount, 1);
+    assert.equal(proposed.proposedCount, 2);
     const assertionId = stableId("assertion", `${tenantId}:${repository}:${headSha}:Repository:github:repo:${repository}:DOCUMENTED_BY:Document:repo:${repository}:path:README.md:{}`);
+    const causalAssertionId = stableId("assertion", `${tenantId}:${repository}:${headSha}:Issue:github:issue:${repository}#7:INTRODUCED_BY:Commit:repo:${repository}:sha:${headSha}:{"reason":"The commit bypassed the app guard."}`);
     await store.executeCommand(tenantId, "svc:api", {
       type: "grant_repository_access", repository, principalId: "user:curator", role: "writer"
     }, "2026-07-20T00:03:30.000Z");
     await store.executeCommand(tenantId, "user:curator", {
       type: "review_assertion", assertionId, decision: "accept", reason: "verified against README"
     }, "2026-07-20T00:04:00.000Z");
+    await store.executeCommand(tenantId, "user:curator", {
+      type: "review_assertion", assertionId: causalAssertionId, decision: "accept", reason: "verified against root-cause evidence"
+    }, "2026-07-20T00:04:10.000Z");
     await store.executeCommand(tenantId, "user:curator", {
       type: "assign_relationship", repository,
       subject: { kind: "File", key: `repo:${repository}:path:src/app.ts`, displayName: "src/app.ts" },
@@ -255,6 +271,13 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
       type: "grant_repository_access", repository, principalId: "user:reader", role: "reader"
     }, "2026-07-20T00:05:30.000Z");
     assert.deepEqual(await store.repositoriesForPrincipal(tenantId, "user:reader"), [repository]);
+    await store.planIngestion({
+      ...head,
+      ref: "release",
+      isDefaultRef: false,
+      taskId: `release-${suffix}`,
+      recordedAt: "2026-07-20T00:05:40.000Z"
+    });
 
     const rebuilt = await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:06:00.000Z");
     assert.equal(rebuilt.manifestFileCount, 4);
@@ -276,6 +299,29 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     assert.equal(trace.resolutions?.[0]?.commits[0]?.sha, headSha);
     assert.equal(trace.resolutions?.[0]?.commits[0]?.role, "merge");
     assert.equal(trace.resolutions?.[0]?.commits[0]?.changes.some((change) => change.path === "src/app.ts"), true);
+    const causal = issueTrace.items[0]?.data as {
+      introducedBy?: readonly { sha: string; why?: string; evidence?: readonly string[]; evidenceCommitSha?: string; pullRequests?: readonly { number: number }[] }[];
+    };
+    assert.equal(causal.introducedBy?.[0]?.sha, headSha);
+    assert.match(causal.introducedBy?.[0]?.why ?? "", /bypassed the app guard/);
+    assert.deepEqual(causal.introducedBy?.[0]?.evidence, ["src/app.ts:1"]);
+    assert.equal(causal.introducedBy?.[0]?.evidenceCommitSha, headSha);
+    assert.equal(causal.introducedBy?.[0]?.pullRequests?.some((pullRequest) => pullRequest.number === 3), true);
+    const reverseCommitTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace",
+      commitSha: headSha, query: `Which issue did commit ${headSha} cause, and why?`
+    });
+    assert.equal((reverseCommitTrace.items[0]?.data as { issue?: { number: number } }).issue?.number, 7);
+    const reversePullRequestTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace",
+      pullRequestNumber: 3, query: "Which issue did PR #3 cause, and why?"
+    });
+    assert.equal((reversePullRequestTrace.items[0]?.data as { issue?: { number: number } }).issue?.number, 7);
+    const releaseTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "release", template: "issue_trace", issueNumber: 7
+    });
+    assert.equal((releaseTrace.items[0]?.data as { introducedBy?: readonly unknown[] }).introducedBy?.length, 1,
+      "repository-wide assertion events fan out to every ref projection");
     const ownership = await store.retrieve({ tenantId, allowedRepositories, repository, template: "ownership", path: "src/app.ts" });
     assert.equal(ownership.items.some((item) => item.title.includes("Platform")), true);
     assert.equal(ownership.items.some((item) => item.title.includes("@omlabs/owners") && item.data.authority === "codeowners"), true);
@@ -292,6 +338,10 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     });
     assert.equal(graph.edges.some((edge) => edge.predicate === "CALLS"), true);
     assert.equal(graph.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"), true);
+    assert.equal(graph.edges.some((edge) => edge.predicate === "INTRODUCED_BY" && edge.evidence.includes("src/app.ts:1") && edge.why === "The commit bypassed the app guard."), true);
+    assert.equal((await store.get(graph.id, tenantId))?.edges.some((edge) =>
+      edge.predicate === "INTRODUCED_BY" && edge.why === "The commit bypassed the app guard."
+    ), true, "the persisted graph retains the causal reason");
     const sourceOwnership = graph.edges.find((edge) => edge.predicate === "OWNED_BY");
     assert.equal(sourceOwnership?.evidence[0]?.startsWith("observation:"), true);
     assert.equal([...graph.nodes, ...graph.edges].every((item) => item.evidence.length > 0), true);
@@ -324,25 +374,70 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     });
     assert.equal(otherStructure.repository, otherRepository);
 
-    const githubObservationId = stableId(
-      "observation",
-      `${tenantId}:github:${repository}:pull_request:3:2026-07-19T00:00:00.000Z`
-    );
+    const updatedPullRequest = (occurredAt: string, resolvesIssueNumbers: readonly number[]) => ({
+      tenantId, repository, kind: "pull_request" as const, number: 3, title: "Update app",
+      body: resolvesIssueNumbers.length ? "Fixes #7" : "No longer closes the issue",
+      state: "closed", url: `https://github.com/${repository}/pull/3`, authorLogin: "alice",
+      occurredAt, recordedAt: occurredAt, mergedAt: "2026-07-19T00:00:00.000Z", mergeCommitSha: headSha,
+      commitShas: [headSha], resolvesIssueNumbers, referencesIssueNumbers: []
+    });
+    await store.applyGitHubObservations([updatedPullRequest("2026-07-20T00:09:00.000Z", [])]);
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:05.000Z");
+    const removedTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7
+    });
+    assert.equal((removedTrace.items[0]?.data as { resolutions?: readonly unknown[] }).resolutions?.length, 0,
+      "a newer GitHub snapshot retracts source relationships it no longer contains");
+    const removedReleaseTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "release", template: "issue_trace", issueNumber: 7
+    });
+    assert.equal((removedReleaseTrace.items[0]?.data as { resolutions?: readonly unknown[] }).resolutions?.length, 0,
+      "source retractions fan out to secondary refs");
+
+    const restoredAt = "2026-07-20T00:09:10.000Z";
+    await store.applyGitHubObservations([updatedPullRequest(restoredAt, [7])]);
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:15.000Z");
+    const restoredTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7
+    });
+    assert.equal((restoredTrace.items[0]?.data as { resolutions?: readonly unknown[] }).resolutions?.length, 1);
+
+    await store.applyGitHubObservations([{
+      ...updatedPullRequest("2026-07-20T00:09:05.000Z", []),
+      recordedAt: "2026-07-20T00:09:16.000Z"
+    }]);
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:17.000Z");
+    const afterDelayedSnapshot = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7
+    });
+    assert.equal((afterDelayedSnapshot.items[0]?.data as { resolutions?: readonly unknown[] }).resolutions?.length, 1,
+      "a delayed older GitHub snapshot cannot retract or replace newer source facts");
+
+    const githubObservationId = stableId("observation", `${tenantId}:github:${repository}:pull_request:3:${restoredAt}`);
     const redaction = await store.executeCommand(tenantId, "user:privacy", {
       type: "redact_observation", observationId: githubObservationId, reason: "fixture redaction", commitShas: [headSha]
-    }, "2026-07-20T00:09:00.000Z", true);
+    }, "2026-07-20T00:09:20.000Z", true);
     assert.equal(redaction.affectedIds.includes(githubObservationId), true);
-    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:30.000Z");
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:25.000Z");
     const redactedTrace = await store.retrieve({
       tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7
     });
     const redactedTraceData = redactedTrace.items[0]?.data as { resolutions?: readonly unknown[] };
     assert.equal(redactedTraceData.resolutions?.length, 0, "redacted source assertions leave no stale resolution projection");
+
+    await store.applyGitHubObservations([updatedPullRequest("2026-07-20T00:09:30.000Z", [7])]);
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:35.000Z");
     const engineerId = stableId("entity", `${tenantId}:Engineer:github:user:alice`);
     const erased = await store.executeCommand(tenantId, "user:privacy", {
       type: "erase_person", entityId: engineerId, reason: "fixture erasure"
-    }, "2026-07-20T00:10:00.000Z", true);
+    }, "2026-07-20T00:09:40.000Z", true);
     assert.equal(erased.affectedIds.includes(engineerId), true);
+    await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:09:45.000Z");
+    const erasedTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace", issueNumber: 7
+    });
+    assert.equal((erasedTrace.items[0]?.data as { resolutions?: readonly unknown[] }).resolutions?.length, 0,
+      "person erasure retracts assertions sourced from every destroyed personal observation");
   } finally {
     await store.close();
   }

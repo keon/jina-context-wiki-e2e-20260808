@@ -7,7 +7,7 @@ import {
   type OntologyGraphSummary,
   type OntologyNode
 } from "./model.js";
-import type { OntologyCommand, OntologyCommandResult, RepositoryContextOperations } from "./operations.js";
+import type { OntologyAssertionSummary, OntologyCommand, OntologyCommandResult, RepositoryContextOperations } from "./operations.js";
 import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
 import {
   normalizeGitHubSourceObservation,
@@ -265,6 +265,35 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return [...(this.repositoryAcl.get(`${tenantId}:${principalId}`) ?? [])].sort();
   }
 
+  async listAssertions(
+    tenantId: string,
+    repository: string,
+    filter: { readonly status?: StoredAssertion["status"]; readonly predicate?: string } = {}
+  ): Promise<readonly OntologyAssertionSummary[]> {
+    return [...this.assertionBatches.values()].flatMap(({ assertions }) => assertions)
+      .filter((assertion) => assertion.tenantId === tenantId && assertion.repository === repository)
+      .filter((assertion) => !filter.status || assertion.status === filter.status)
+      .filter((assertion) => !filter.predicate || assertion.predicate === filter.predicate)
+      .map((assertion) => ({
+        id: assertion.id,
+        repository: assertion.repository,
+        commitSha: assertion.commitSha,
+        subjectKind: assertion.subject.kind,
+        subjectNaturalKey: assertion.subject.naturalKey,
+        subjectLabel: assertion.subject.label,
+        predicate: assertion.predicate,
+        objectKind: assertion.object.kind,
+        objectNaturalKey: assertion.object.naturalKey,
+        objectLabel: assertion.object.label,
+        status: assertion.status,
+        ...(assertion.confidence !== undefined ? { confidence: assertion.confidence } : {}),
+        evidence: assertion.evidence,
+        qualifiers: assertion.qualifiers ?? {},
+        generator: `model:${assertion.generatorVersion}`,
+        registryVersion: assertion.registryVersion
+      }));
+  }
+
   async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
     if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
     const limit = Math.max(1, Math.min(request.limit ?? 50, 200));
@@ -487,6 +516,9 @@ export function createOntologyProjection(
       predicate: assertion.predicate,
       plane: "knowledge",
       confidence: assertion.confidence,
+      ...(assertion.predicate === "INTRODUCED_BY" && typeof assertion.qualifiers?.reason === "string"
+        ? { why: assertion.qualifiers.reason }
+        : {}),
       evidence
     });
   }

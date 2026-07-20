@@ -85,6 +85,95 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   ]);
 });
 
+test("production acceptance reviews causality, queries it in both directions, and verifies the graph edge", async () => {
+  const causingCommitSha = "c".repeat(40);
+  let buildCount = 0;
+  let ontologyReads = 0;
+  let reviewed = false;
+  const causalQuestions: string[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/ontology/build") return json({ task: { id: `ontology-${++buildCount}` } }, 202);
+    if (url.pathname === "/board") {
+      const taskId = buildCount === 1 ? "ontology-1" : "ontology-2";
+      return json({ tasks: [
+        { id: taskId, type: "ontology_build", status: "done" },
+        { id: `${taskId}-ingest`, parentTaskId: taskId, type: "ontology_ingest", status: "done" },
+        { id: `${taskId}-assert`, parentTaskId: taskId, type: "ontology_assert", status: "done" },
+        { id: `${taskId}-project`, parentTaskId: taskId, type: "ontology_project", status: "done" }
+      ] });
+    }
+    if (url.pathname === "/ontology") {
+      ontologyReads += 1;
+      return json({ latest: {
+        repository: "omxyz/jina-ontology-e2e", ref: "main", commitSha: "a".repeat(40),
+        nodes: ontologyReads === 1
+          ? [{ id: "repo", kind: "Repository", evidence: ["README.md:1"] }]
+          : [
+              { id: "issue", kind: "Issue", description: "github:issue:omxyz/jina-ontology-e2e#7", evidence: ["ROOT_CAUSE.md:2"] },
+              { id: "commit", kind: "Commit", description: `repo:omxyz/jina-ontology-e2e:sha:${causingCommitSha}`, evidence: ["ROOT_CAUSE.md:2"] }
+            ],
+        edges: ontologyReads === 1
+          ? [{ source: "repo", target: "repo", predicate: "CONTAINS", evidence: ["README.md:1"] }]
+          : [{ source: "issue", target: "commit", predicate: "INTRODUCED_BY", why: "The guard was bypassed.", evidence: ["ROOT_CAUSE.md:2"] }]
+      } });
+    }
+    if (url.pathname === "/ontology/assertions") return json({ assertions: [{
+      id: "cause-assertion", status: "proposed",
+      subjectNaturalKey: "github:issue:omxyz/jina-ontology-e2e#7",
+      objectNaturalKey: `repo:omxyz/jina-ontology-e2e:sha:${causingCommitSha}`,
+      evidence: ["ROOT_CAUSE.md:2"], qualifiers: { reason: "The guard was bypassed." }
+    }] });
+    if (url.pathname === "/ontology/commands") {
+      reviewed = true;
+      return json({ affectedIds: ["cause-assertion"] });
+    }
+    if (url.pathname === "/ontology/ask") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { question?: string };
+      if (body.question?.includes("resolved issue")) return json({ calls: [{
+        template: "issue_trace", items: [{
+          data: { resolutions: [{ pullRequestNumber: 8, commits: [{ sha: "b".repeat(40) }] }] },
+          citations: [{ kind: "assertion", id: "resolves" }]
+        }]
+      }], citations: [{ kind: "assertion", id: "resolves" }] });
+      if (body.question?.includes("caused") || body.question?.includes("cause")) {
+        causalQuestions.push(body.question);
+        return json({ calls: [{ template: "issue_trace", items: [{
+          data: {
+            issue: { number: 7 },
+            introducedBy: [{
+              sha: causingCommitSha, why: "The guard was bypassed.", evidence: ["ROOT_CAUSE.md:2"], evidenceCommitSha: "a".repeat(40),
+              pullRequests: [{ number: 6, title: "Introduce regression", url: "https://github.com/omxyz/jina-ontology-e2e/pull/6" }]
+            }]
+          },
+          citations: [
+            { kind: "assertion", id: "cause-assertion" },
+            { kind: "code", id: "evidence", commitSha: "a".repeat(40) }
+          ]
+        }] }], citations: [{ kind: "assertion", id: "cause-assertion" }] });
+      }
+      return json({
+        calls: ["change", "intent", "ownership"].map((template) => ({ template, items: [{ citations: [{ kind: "assertion", id: template }] }] })),
+        citations: [{ kind: "assertion", id: "change" }]
+      });
+    }
+    if (url.pathname === "/ontology/metrics") return json({ outboxDepth: {}, unparsedBlobCount: 0 });
+    return json({ error: "not found" }, 404);
+  };
+
+  const result = await runProductionOntologyAcceptance({
+    apiUrl: "https://api.example.test", token: "secret", requestKey: "deploy-causal",
+    expectedIssueNumber: 7, expectedResolutionPullRequestNumber: 8,
+    causality: { causingCommitSha, causingPullRequestNumber: 6, reasonIncludes: "guard" },
+    pollIntervalMs: 1, timeoutMs: 1_000, log: () => undefined
+  }, fetchImpl);
+
+  assert.equal(reviewed, true);
+  assert.equal(buildCount, 2);
+  assert.equal(causalQuestions.length, 3);
+  assert.equal(result.edgeCount, 1);
+});
+
 test("production acceptance fails on a terminal task failure", async () => {
   const fetchImpl: typeof fetch = async (input) => {
     const url = String(input);

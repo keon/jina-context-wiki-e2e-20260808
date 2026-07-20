@@ -57,6 +57,9 @@ test("registry validates endpoints and qualifier keys and keeps model inferences
   validatePredicateEndpoints(ownership, "File", "Team");
   validateQualifiers(ownership, { pattern: "src/**" });
   assert.equal(ownership.review, "manual");
+  const causality = predicateDefinition("INTRODUCED_BY");
+  validateQualifiers(causality, { reason: "the null branch bypassed authorization" });
+  assert.throws(() => validateQualifiers(causality), /requires a nonempty causal reason/);
   assert.throws(() => validateQualifiers(ownership, { branch: "main" }), /does not declare qualifier branch/);
   assert.throws(() => validatePredicateEndpoints(predicateDefinition("INCLUDES"), "Issue", "Commit"), /subject kind Issue/);
 });
@@ -145,6 +148,8 @@ test("identity redirects resolve without rewriting assertions and reconciliation
 test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates("What changed in this PR, what might break, and who owns it?"), ["change", "ownership"]);
   assert.deepEqual(classifyTemplates("Which PR and commit resolved issue #7?"), ["issue_trace"]);
+  assert.deepEqual(classifyTemplates(`Which issue did commit ${"a".repeat(40)} cause, and why?`), ["issue_trace"]);
+  assert.deepEqual(classifyTemplates("Which issue did PR #42 introduce?"), ["issue_trace"]);
   const called: string[] = [];
   const orchestrator = new RepositoryContextOrchestrator({
     async retrieve(request) {
@@ -216,6 +221,38 @@ test("normalizes model output into distinct semantic entity identities", () => {
     "repo:omxyz/demo:moniker:symbol:src/app.ts:first",
     "repo:omxyz/demo:moniker:symbol:src/app.ts:second"
   ]);
+});
+
+test("canonicalizes cited causal model assertions and rejects ambiguous entity ids", () => {
+  const sha = "a".repeat(40);
+  const generated = {
+    summary: "explicit root cause",
+    nodes: [
+      { id: "repo", kind: "Repository" as const, label: "demo", description: "repo", evidence: ["ROOT_CAUSE.md:1"] },
+      { id: "issue:7", kind: "Issue" as const, label: "Issue #7", description: "authorization regression", evidence: ["ROOT_CAUSE.md:2"] },
+      { id: `commit:${sha}`, kind: "Commit" as const, label: sha.slice(0, 12), description: "bypassed the guard", evidence: ["ROOT_CAUSE.md:2"] }
+    ],
+    edges: [{
+      source: "issue:7", target: `commit:${sha}`, predicate: "INTRODUCED_BY", plane: "knowledge" as const,
+      confidence: 0.99, why: "The commit bypassed the authorization guard.", evidence: ["ROOT_CAUSE.md:2"]
+    }]
+  };
+  const [assertion] = assertionsFromGeneratedOntology(generated, "omxyz/demo");
+  assert.equal(assertion?.subject.naturalKey, "github:issue:omxyz/demo#7");
+  assert.equal(assertion?.object.naturalKey, `repo:omxyz/demo:sha:${sha}`);
+  assert.deepEqual(assertion?.qualifiers, { reason: "The commit bypassed the authorization guard." });
+  assert.throws(() => assertionsFromGeneratedOntology({
+    ...generated,
+    nodes: generated.nodes.map((node) => node.kind === "Commit" ? { ...node, id: "commit:short" } : node),
+    edges: [{ ...generated.edges[0]!, target: "commit:short" }]
+  }, "omxyz/demo"), /full Git SHA/);
+  assert.throws(() => assertionsFromGeneratedOntology({
+    ...generated,
+    edges: [{
+      source: "issue:7", target: `commit:${sha}`, predicate: "INTRODUCED_BY", plane: "knowledge" as const,
+      confidence: 0.99, evidence: ["ROOT_CAUSE.md:2"]
+    }]
+  }, "omxyz/demo"), /must explain why/);
 });
 
 test("creates a stable graph and removes dangling edges", () => {
@@ -308,6 +345,28 @@ test("validates citations against repository files", async () => {
       edges: []
     }),
     /must include evidence/
+  );
+});
+
+test("requires causal evidence to name the issue and offending commit", async () => {
+  const sha = "3".repeat(40);
+  const generated = parseGeneratedOntology({
+    summary: "root cause",
+    nodes: [
+      { id: "4", kind: "Issue", label: "Issue #4", description: "regression", evidence: ["docs/root-cause.md:1"] },
+      { id: sha, kind: "Commit", label: sha.slice(0, 12), description: "offending change", evidence: ["docs/root-cause.md:1"] }
+    ],
+    edges: [{
+      source: "4", target: sha, predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.99,
+      why: "The commit removed the administrator bypass.", evidence: ["docs/root-cause.md:1-2"]
+    }]
+  });
+  await validateOntologyEvidence(generated, async () =>
+    `Issue #4 was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
+  );
+  await assert.rejects(
+    validateOntologyEvidence(generated, async () => "Issue #4 was caused by an earlier change.\nThe administrator bypass was removed."),
+    /explicitly name Issue #4 and commit/
   );
 });
 

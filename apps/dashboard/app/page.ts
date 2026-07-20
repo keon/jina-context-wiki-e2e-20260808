@@ -367,7 +367,7 @@ function renderContextResults() {
     if (!call.items.length) section.append(textElement("p", "empty-detail", "No cited results."));
     for (const item of call.items) {
       if (item.kind === "issue_trace" && item.data && item.data.issue) {
-        section.append(renderIssueTrace(item.data));
+        section.append(renderIssueTrace(item.data, item.citations));
         continue;
       }
       const row = element("div", "context-result");
@@ -383,7 +383,7 @@ function renderContextResults() {
   }
 }
 
-function renderIssueTrace(trace) {
+function renderIssueTrace(trace, citations) {
   const container = element("div", "issue-trace");
   const issue = trace.issue;
   const resolutions = Array.isArray(trace.resolutions) ? trace.resolutions : [];
@@ -391,6 +391,7 @@ function renderIssueTrace(trace) {
   if (!resolutions.length && !introducedBy.length) {
     container.append(externalLink("Issue #" + issue.number + " · " + issue.title, issue.url));
     container.append(textElement("p", "trace-empty", "No verified pull request or commit relationship has been asserted."));
+    appendTraceCitations(container, citations);
     return container;
   }
   for (const resolution of resolutions) {
@@ -409,11 +410,28 @@ function renderIssueTrace(trace) {
   }
   for (const commit of introducedBy) {
     const chain = element("div", "trace-chain");
-    chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "was introduced by"));
+    chain.append(externalLink("Issue #" + issue.number, issue.url), textElement("span", "trace-arrow", "was caused by"));
+    for (const pullRequest of Array.isArray(commit.pullRequests) ? commit.pullRequests : []) {
+      chain.append(externalLink("PR #" + pullRequest.number + " · " + pullRequest.title, pullRequest.url), textElement("span", "trace-arrow", "containing"));
+    }
     chain.append(externalLink("commit " + commit.sha.slice(0, 12), commit.url));
+    if (commit.why) chain.append(textElement("div", "trace-changes", "Why: " + commit.why));
+    if (Array.isArray(commit.evidence) && commit.evidence.length) {
+      chain.append(textElement("div", "trace-changes", "Causal evidence: " + commit.evidence.join(", ")));
+    }
     container.append(chain);
   }
+  appendTraceCitations(container, citations);
   return container;
+}
+
+function appendTraceCitations(container, citations) {
+  const provenance = Array.isArray(citations) ? citations : [];
+  if (provenance.length) {
+    container.append(textElement("div", "trace-changes", "Citations: " + provenance.map(function(citation) {
+      return citation.path ? citation.path + (citation.startLine ? ":" + citation.startLine : "") : citation.kind + ":" + citation.id;
+    }).join(" · ")));
+  }
 }
 
 function externalLink(label, url) {

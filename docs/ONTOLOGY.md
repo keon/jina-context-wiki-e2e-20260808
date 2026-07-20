@@ -72,9 +72,9 @@ Commit authorship is derived from commits plus accepted identities and is not du
 
 ### Semantic assertion generation
 
-The assertion worker checks out the immutable commit in Daytona and asks Codex only about added, modified, or renamed current paths. Every citation is checked against the checkout before completion. Raw model JSON is stored as a `model_output` observation before normalization.
+The assertion worker checks out the immutable commit in Daytona and normally asks Codex only about added, modified, or renamed current paths. A generator/schema version change with an unchanged head intentionally performs one full semantic scan, then caches that generation. Every citation is checked against the checkout before completion. Raw model JSON is stored as a `model_output` observation before normalization.
 
-Models never activate knowledge. All model relationships, including `IMPLEMENTS`, `DOCUMENTED_BY`, `MOVED_FROM`, `LIKELY_AFFECTS`, `INTRODUCED_BY`, and model ownership, enter as `proposed`. `INTRODUCED_BY` represents the stronger causal claim that an issue was caused by a commit and is never inferred merely because the commit appears in the resolving PR. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row. The current registry intentionally keeps inference predicates manual until a generator/predicate pair has measured labels; no confidence threshold is guessed.
+Models never activate knowledge. All model relationships, including `INTRODUCED_BY`, enter as `proposed`. Causality requires a positive GitHub issue ID, a full commit SHA, a nonempty reason, and checked repository evidence explicitly naming the mechanism; temporal proximity or membership in a resolving PR is insufficient. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row. `GET /ontology/assertions` exposes repository-scoped summaries for review and production verification.
 
 ### Projection
 
@@ -82,13 +82,13 @@ The project task uses queue-claim semantics (`FOR UPDATE SKIP LOCKED`) for canon
 
 1. materializes `ref_manifest` directly from the current ref's commit tree;
 2. rebuilds repo-scoped lexical and 64-dimensional vector search documents;
-3. traverses only the assertion/observation subgraph touched by claimed events and upserts the affected issue-centric `issue_traces` rows; a missing projection triggers a one-time full backfill;
+3. traverses only the assertion/observation subgraph touched by claimed events and upserts the affected issue-centric `issue_traces` rows on every ref before acknowledging a repository-wide event; a missing projection triggers a one-time full backfill;
 4. folds append-only entity redirects and reconciles logical assertion collisions;
 5. performs reachability/recent-window code-plane GC and bounded rejected-model payload retention;
 6. acknowledges claimed outbox events;
 7. creates a new immutable dashboard graph generation.
 
-An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus any separately reviewed `INTRODUCED_BY` commits. It retains the assertion, observation, entity, and commit-change citations needed to explain every hop. Rebuilding a trace never creates an assertion.
+An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus reviewed `INTRODUCED_BY` commits, their associated introducing PRs, causal reason, evidence-generation commit, and checkout-validated evidence. It supports lookup by issue number, PR number, or commit SHA prefix and retains the citations needed to explain every hop. The graph persists the same Issue → Commit edge, reason, and evidence. Rebuilding a trace never creates an assertion.
 
 Every projected graph item carries evidence. Code and accepted model facts keep
 their checkout-validated `path:line` citations. Deterministic GitHub facts that
@@ -98,7 +98,7 @@ that provenance is excluded instead of relying on an empty-evidence shortcut.
 
 Bulk history ingestion bypasses per-blob outbox fan-out; the final project rebuild is the bulk recovery path. Steady-state canonical changes emit aggregate events transactionally.
 
-The ontology worker also drains canonical events while idle. Repository events lease and rebuild only that repository/ref; tenant-global identity or redirect events fan out across current repositories and are acknowledged only after every affected projection succeeds. Tombstones with no remaining ref are acknowledged after their command transaction has purged the projections. A repository rebuild can never acknowledge another repository's pending event.
+The ontology worker also drains canonical events while idle. Repository events lease only that repository and fan affected repository-wide issue facts across all of its refs before acknowledgment; tenant-global identity or redirect events fan out across current repositories. Tombstones with no remaining ref are acknowledged after their command transaction has purged the projections. A repository rebuild can never acknowledge another repository's pending event.
 
 An unchanged ref is a no-op through the expensive path: the head tree is checked once, every blob analysis is reused, the generator checkpoint returns cached proposals without starting Daytona, and manifest/search rebuilding is skipped when no scoped canonical event is pending. The project task still writes a small immutable graph generation so its board result remains independently inspectable; its event reports `rebuilt: false` and `processedEventCount: 0`.
 
@@ -158,7 +158,7 @@ Models cannot compose database queries. The API exposes five deterministic templ
 
 | Template | Answer path |
 | --- | --- |
-| `issue_trace` | issue number → materialized issue → resolving PR → merge/included commits → changes, plus reviewed causal commits |
+| `issue_trace` | issue, PR, or commit → materialized issue → resolving and introducing PRs/commits → causal reason/evidence and changes |
 | `structure` | name/moniker → typed edges inside the selected ref manifest |
 | `change` | PR → included commits → first-parent changes → changed symbols → inbound affected surface |
 | `intent` | file history → commits → PRs → resolved/referenced issues → raw observation text |
@@ -166,7 +166,7 @@ Models cannot compose database queries. The API exposes five deterministic templ
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` is a thin classifier/composer over these five tools. It extracts an issue number and routes resolution/causality questions directly to `issue_trace`; it does not reconstruct that path with query-time assertion joins or an LLM. It returns structured calls and citations, never uncited prose. The dashboard renders the Issue → PR → commit chain as GitHub links above the graph.
+`POST /ontology/ask` is a thin classifier/composer over these five tools. It extracts issue, PR, and commit identifiers and routes resolution/causality questions directly to `issue_trace`; it does not reconstruct that path with query-time assertion joins or an LLM. The dashboard renders resolution and causality chains, reasons, evidence, and provenance citations above the graph.
 
 ## Security
 
@@ -186,7 +186,7 @@ Four operations are distinct and audited:
 
 - **Tombstone repository** retracts live assertions, retires scoped entities, purges code-plane rows, graphs, search, manifests, issue traces, and ACLs, and persists a durable repository filter.
 - **Redact observation** destroys payload content, retains digest/reason/time, masks named commit messages, retracts dependent assertions, and purges search.
-- **Erase person** marks identities erased, retires the Engineer, retracts facts about it, removes search documents, masks matching commit authors, and redacts observations containing erased external IDs.
+- **Erase person** marks identities erased, retires the Engineer, retracts facts about it and every assertion sourced from a destroyed personal observation, removes search documents, masks matching commit authors, and redacts observations containing erased external IDs.
 - **Retention/GC** keeps commits reachable from refs, PR-linked commits, and a 90-day recent window; orphan blobs and parse rows are deleted. Rejected model payloads are removed after 30 days.
 
 Ingest and rebuild consult `erasure_filters`, so replay cannot resurrect removed data.

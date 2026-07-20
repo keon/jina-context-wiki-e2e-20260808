@@ -1,6 +1,6 @@
 import type { OntologyNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.2";
+export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.3";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -56,7 +56,7 @@ export const predicateRegistry = {
   },
   INTRODUCED_BY: {
     name: "INTRODUCED_BY", class: "inference", subjectKinds: ["Issue"], objectKinds: ["Commit"],
-    cardinality: "many", review: "manual", bitemporal: false,
+    cardinality: "many", qualifierKeys: ["reason"], review: "manual", bitemporal: false,
     authority: ["human", "model"]
   },
   REFERENCES: {
@@ -122,5 +122,8 @@ export function validateQualifiers(definition: PredicateDefinition, qualifiers: 
     if (!["string", "number", "boolean"].includes(typeof value)) {
       throw new Error(`${definition.name} qualifier ${key} must be a string, number, or boolean`);
     }
+  }
+  if (definition.name === "INTRODUCED_BY" && (typeof qualifiers.reason !== "string" || !qualifiers.reason.trim())) {
+    throw new Error("INTRODUCED_BY requires a nonempty causal reason qualifier");
   }
 }

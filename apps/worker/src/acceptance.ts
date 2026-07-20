@@ -12,6 +12,13 @@ export interface ProductionAcceptanceConfig {
   readonly principalId?: string;
   readonly pollIntervalMs?: number;
   readonly timeoutMs?: number;
+  readonly expectedIssueNumber?: number;
+  readonly expectedResolutionPullRequestNumber?: number;
+  readonly causality?: {
+    readonly causingCommitSha: string;
+    readonly causingPullRequestNumber?: number;
+    readonly reasonIncludes?: string;
+  };
   readonly log?: (message: string) => void;
 }
 
@@ -36,7 +43,7 @@ export function productionAcceptanceExitCode(error: unknown): number {
   if (/latest ontology graph|ontology\.latest/.test(message)) return 21;
   if (/ontology graph is empty/.test(message)) return 22;
   if (/ontology graph contains uncited/.test(message)) return 23;
-  if (/context retrieval/.test(message)) return 24;
+  if (/context retrieval|causal context|causality assertion|INTRODUCED_BY/.test(message)) return 24;
   if (/ontology backlog/.test(message)) return 25;
   return 26;
 }
@@ -55,6 +62,11 @@ export async function runProductionOntologyAcceptance(
   // 30-minute execution budget. Keep acceptance outside that envelope so it
   // observes the durable task's terminal state instead of killing itself first.
   const timeoutMs = positiveInteger(config.timeoutMs ?? 35 * 60_000, "timeoutMs");
+  const expectedIssueNumber = positiveInteger(config.expectedIssueNumber ?? 1, "expectedIssueNumber");
+  const expectedResolutionPullRequestNumber = positiveInteger(
+    config.expectedResolutionPullRequestNumber ?? 2,
+    "expectedResolutionPullRequestNumber"
+  );
   const log = config.log ?? console.log;
   const headers = {
     authorization: `Bearer ${config.token}`,
@@ -108,12 +120,12 @@ export async function runProductionOntologyAcceptance(
   }
 
   const ontology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
-  const latest = requiredRecord(ontology.latest, "ontology.latest");
+  let latest = requiredRecord(ontology.latest, "ontology.latest");
   if (latest.repository !== repository || latest.ref !== ref) {
     throw new Error("latest ontology graph does not match the acceptance repository and ref");
   }
-  const nodes = requiredArray(latest.nodes, "ontology.latest.nodes");
-  const edges = requiredArray(latest.edges, "ontology.latest.edges");
+  let nodes = requiredArray(latest.nodes, "ontology.latest.nodes");
+  let edges = requiredArray(latest.edges, "ontology.latest.edges");
   if (nodes.length === 0 || edges.length === 0) throw new Error("production ontology graph is empty");
   if (![...nodes, ...edges].every(hasEvidence)) throw new Error("production ontology graph contains uncited items");
 
@@ -134,7 +146,7 @@ export async function runProductionOntologyAcceptance(
   const issueContext = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, question: "Which PR and commit resolved issue #1?" })
+    body: JSON.stringify({ repository, ref, question: `Which PR and commit resolved issue #${expectedIssueNumber}?` })
   });
   const issueCalls = requiredArray(issueContext.calls, "issue context.calls");
   const issueTrace = issueCalls.find((call) => isRecord(call) && call.template === "issue_trace");
@@ -145,11 +157,100 @@ export async function runProductionOntologyAcceptance(
   const firstResolution = resolutions[0];
   const commits = isRecord(firstResolution) ? requiredArray(firstResolution.commits, "issue trace.commits") : [];
   if (
-    !isRecord(firstResolution) || firstResolution.pullRequestNumber !== 2 || commits.length === 0 ||
+    !isRecord(firstResolution) || firstResolution.pullRequestNumber !== expectedResolutionPullRequestNumber || commits.length === 0 ||
     !commits.every((commit) => isRecord(commit) && typeof commit.sha === "string" && commit.sha.length === 40) ||
     !isRecord(firstIssueItem) || !Array.isArray(firstIssueItem.citations) || firstIssueItem.citations.length === 0
   ) {
-    throw new Error("production context retrieval did not project issue #1 to PR #2 and its commits");
+    throw new Error(`production context retrieval did not project issue #${expectedIssueNumber} to PR #${expectedResolutionPullRequestNumber} and its commits`);
+  }
+
+  if (config.causality) {
+    const causingCommitSha = requiredFullGitSha(config.causality.causingCommitSha, "causality.causingCommitSha");
+    const assertionResponse = await apiJson(
+      fetchImpl,
+      `${apiUrl}/ontology/assertions?repository=${encodeURIComponent(repository)}&predicate=INTRODUCED_BY`,
+      { headers }
+    );
+    const assertions = requiredArray(assertionResponse.assertions, "ontology assertions");
+    const causalAssertion = assertions.find((value) => isRecord(value) &&
+      value.subjectNaturalKey === `github:issue:${repository}#${expectedIssueNumber}` &&
+      value.objectNaturalKey === `repo:${repository}:sha:${causingCommitSha}`
+    );
+    if (!isRecord(causalAssertion)) {
+      throw new Error(`production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`);
+    }
+    const causalEvidence = requiredArray(causalAssertion.evidence, "causality assertion evidence");
+    const causalQualifiers = requiredRecord(causalAssertion.qualifiers, "causality assertion qualifiers");
+    const causalReason = requiredString(causalQualifiers.reason, "causality assertion reason");
+    if (causalEvidence.length === 0 ||
+      (config.causality.reasonIncludes && !causalReason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase()))) {
+      throw new Error("production causality assertion is missing its expected reason or evidence");
+    }
+    if (causalAssertion.status === "proposed") {
+      await apiJson(fetchImpl, `${apiUrl}/ontology/commands`, {
+        method: "POST",
+        headers: { ...headers, "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "review_assertion",
+          assertionId: requiredString(causalAssertion.id, "causality assertion id"),
+          decision: "accept",
+          reason: "production fixture causal evidence verified"
+        })
+      });
+    } else if (causalAssertion.status !== "active") {
+      throw new Error(`production causality assertion is ${String(causalAssertion.status)}, not reviewable`);
+    }
+
+    const questions = [
+      `Which PR or commit caused issue #${expectedIssueNumber}, and why?`,
+      `Which issue did commit ${causingCommitSha} cause, and why?`,
+      ...(config.causality.causingPullRequestNumber
+        ? [`Which issue did PR #${config.causality.causingPullRequestNumber} cause, and why?`]
+        : [])
+    ];
+    for (const question of questions) {
+      await waitForCausalTrace(fetchImpl, apiUrl, headers, repository, ref, question, {
+        issueNumber: expectedIssueNumber,
+        causingCommitSha,
+        ...(config.causality.causingPullRequestNumber === undefined ? {} : { causingPullRequestNumber: config.causality.causingPullRequestNumber }),
+        ...(config.causality.reasonIncludes === undefined ? {} : { reasonIncludes: config.causality.reasonIncludes }),
+        deadline,
+        pollIntervalMs
+      });
+    }
+
+    await runFollowupOntologyBuild(
+      fetchImpl,
+      apiUrl,
+      headers,
+      repository,
+      ref,
+      `${config.requestKey}:causal`,
+      deadline,
+      pollIntervalMs,
+      log
+    );
+    const causalOntology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
+    latest = requiredRecord(causalOntology.latest, "causal ontology.latest");
+    if (latest.repository !== repository || latest.ref !== ref) {
+      throw new Error("latest causal ontology graph does not match the acceptance repository and ref");
+    }
+    nodes = requiredArray(latest.nodes, "causal ontology.latest.nodes");
+    edges = requiredArray(latest.edges, "causal ontology.latest.edges");
+    const nodeById = new Map(nodes.flatMap((node) =>
+      isRecord(node) && typeof node.id === "string" ? [[node.id, node] as const] : []
+    ));
+    const causalEdge = edges.find((edge) => {
+      if (!isRecord(edge) || edge.predicate !== "INTRODUCED_BY" || typeof edge.source !== "string" || typeof edge.target !== "string") return false;
+      const issueNode = nodeById.get(edge.source);
+      const commitNode = nodeById.get(edge.target);
+      return issueNode?.kind === "Issue" && issueNode.description === `github:issue:${repository}#${expectedIssueNumber}` &&
+        commitNode?.kind === "Commit" && commitNode.description === `repo:${repository}:sha:${causingCommitSha}` &&
+        typeof edge.why === "string" && edge.why.trim().length > 0 &&
+        (!config.causality?.reasonIncludes || edge.why.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())) &&
+        hasEvidence(edge);
+    });
+    if (!causalEdge) throw new Error("production ontology graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason");
   }
 
   const metrics = await apiJson(fetchImpl, `${apiUrl}/ontology/metrics`, { headers });
@@ -175,6 +276,99 @@ export function blockedOntologyTaskIds(tasks: readonly unknown[], repository: st
     const metadata = isRecord(task.metadata) ? task.metadata : {};
     return metadata.repository === repository && metadata.ref === ref && typeof task.id === "string" ? [task.id] : [];
   });
+}
+
+async function waitForCausalTrace(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  repository: string,
+  ref: string,
+  question: string,
+  expected: {
+    readonly issueNumber: number;
+    readonly causingCommitSha: string;
+    readonly causingPullRequestNumber?: number;
+    readonly reasonIncludes?: string;
+    readonly deadline: number;
+    readonly pollIntervalMs: number;
+  }
+): Promise<void> {
+  while (Date.now() < expected.deadline) {
+    const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ repository, ref, question })
+    });
+    const calls = requiredArray(context.calls, "causal context.calls");
+    const traceCall = calls.find((call) => isRecord(call) && call.template === "issue_trace");
+    const items = isRecord(traceCall) ? requiredArray(traceCall.items, "causal trace.items") : [];
+    const matched = items.some((item) => {
+      if (!isRecord(item) || !isRecord(item.data)) return false;
+      const issue = isRecord(item.data.issue) ? item.data.issue : {};
+      if (issue.number !== expected.issueNumber) return false;
+      const causes = Array.isArray(item.data.introducedBy) ? item.data.introducedBy : [];
+      const cause = causes.find((value) => isRecord(value) && value.sha === expected.causingCommitSha);
+      if (!isRecord(cause)) return false;
+      if (typeof cause.why !== "string" || !cause.why.trim()) return false;
+      if (expected.reasonIncludes && !cause.why.toLowerCase().includes(expected.reasonIncludes.toLowerCase())) return false;
+      if (!Array.isArray(cause.evidence) || cause.evidence.length === 0) return false;
+      if (typeof cause.evidenceCommitSha !== "string" || !/^[a-f0-9]{40}$/i.test(cause.evidenceCommitSha)) return false;
+      if (expected.causingPullRequestNumber) {
+        const pullRequests = Array.isArray(cause.pullRequests) ? cause.pullRequests : [];
+        if (!pullRequests.some((pullRequest) => isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber)) return false;
+      }
+      const citations = Array.isArray(item.citations) ? item.citations : [];
+      return citations.some((citation) => isRecord(citation) && citation.kind === "assertion") &&
+        citations.some((citation) => isRecord(citation) && citation.kind === "code" && citation.commitSha === cause.evidenceCommitSha);
+    });
+    if (matched) return;
+    await delay(expected.pollIntervalMs);
+  }
+  throw new Error(`production causal context retrieval timed out for: ${question}`);
+}
+
+async function runFollowupOntologyBuild(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  repository: string,
+  ref: string,
+  requestKey: string,
+  deadline: number,
+  pollIntervalMs: number,
+  log: (message: string) => void
+): Promise<void> {
+  const created = await apiJson(fetchImpl, `${apiUrl}/ontology/build`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ repository, ref, requestKey })
+  });
+  const taskId = requiredNestedString(created, "task", "id");
+  let lastSummary = "";
+  while (Date.now() < deadline) {
+    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
+    const tasks = requiredArray(board.tasks, "board.tasks");
+    const task = tasks.find((value) => isRecord(value) && value.id === taskId);
+    if (!isRecord(task)) throw new Error(`causal projection task ${taskId} is missing from the board`);
+    const status = requiredString(task.status, "causal projection task.status");
+    const summary = summarizeWorkflowTasks(tasks, taskId);
+    if (summary !== lastSummary) {
+      log(`Production causal projection task ${taskId}: ${summary}`);
+      lastSummary = summary;
+    }
+    if (status === "done") {
+      const blocked = blockedOntologyTaskIds(tasks, repository, ref);
+      if (blocked.length > 0) throw new Error(`production board retains blocked ontology tasks for ${repository}@${ref}: ${blocked.join(", ")}`);
+      return;
+    }
+    if (TERMINAL_FAILURES.has(status)) {
+      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
+      throw new Error(`production causal projection task ${taskId} ended as ${status} (${summary}${failureSummary})`);
+    }
+    await delay(pollIntervalMs);
+  }
+  throw new Error(`production causal projection task ${taskId} timed out`);
 }
 
 async function apiJson(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {
@@ -262,6 +456,12 @@ function positiveInteger(value: number, field: string): number {
   return value;
 }
 
+function requiredFullGitSha(value: string, field: string): string {
+  const sha = value.trim().toLowerCase();
+  if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error(`${field} must be a full Git SHA`);
+  return sha;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -273,11 +473,25 @@ function delay(ms: number): Promise<void> {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const configuredTimeout = optionalPositiveIntegerEnv("ACCEPTANCE_TIMEOUT_MS");
+    const expectedIssueNumber = optionalPositiveIntegerEnv("ACCEPTANCE_ISSUE_NUMBER");
+    const expectedResolutionPullRequestNumber = optionalPositiveIntegerEnv("ACCEPTANCE_RESOLUTION_PR_NUMBER");
+    const causingCommitSha = process.env.ACCEPTANCE_CAUSING_COMMIT_SHA?.trim();
+    const causingPullRequestNumber = optionalPositiveIntegerEnv("ACCEPTANCE_CAUSING_PR_NUMBER");
+    const reasonIncludes = process.env.ACCEPTANCE_CAUSAL_REASON_INCLUDES?.trim();
     const summary = await runProductionOntologyAcceptance({
       apiUrl: requiredEnv("JINA_API_URL"),
       token: requiredEnv("INTERNAL_API_TOKEN"),
       requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
-      ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout })
+      ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout }),
+      ...(expectedIssueNumber === undefined ? {} : { expectedIssueNumber }),
+      ...(expectedResolutionPullRequestNumber === undefined ? {} : { expectedResolutionPullRequestNumber }),
+      ...(causingCommitSha ? {
+        causality: {
+          causingCommitSha,
+          ...(causingPullRequestNumber === undefined ? {} : { causingPullRequestNumber }),
+          ...(reasonIncludes ? { reasonIncludes } : {})
+        }
+      } : {})
     });
     const message = `Production ontology accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`;
     await writeTerminationMessage(message);

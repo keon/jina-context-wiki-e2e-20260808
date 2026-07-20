@@ -294,6 +294,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
+        ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
       json(response, 200, result);
@@ -311,8 +312,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
+        ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.tokenBudget === "number" ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") } : {})
       }));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/ontology/assertions") {
+      const repository = requiredString(url.searchParams.get("repository"), "repository");
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      if (!allowedRepositories.includes(repository)) throw new Error("repository access denied");
+      const statusValue = url.searchParams.get("status");
+      const status = statusValue === null ? undefined : requiredAssertionStatus(statusValue);
+      const predicate = url.searchParams.get("predicate")?.trim().toUpperCase() || undefined;
+      json(response, 200, { assertions: await ontologyStore.listAssertions(tenantId, repository, { ...(status ? { status } : {}), ...(predicate ? { predicate } : {}) }) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/ontology/commands") {
@@ -1173,6 +1185,17 @@ function requiredRepositoryPath(value: unknown, field: string): string {
   const path = requiredString(value, field);
   if (path.startsWith("/") || path.split("/").includes("..")) throw new Error(`${field} must be repository-relative`);
   return path;
+}
+
+function requiredGitShaPrefix(value: unknown, field: string): string {
+  const sha = requiredString(value, field).toLowerCase();
+  if (!/^[a-f0-9]{7,40}$/.test(sha)) throw new Error(`${field} must be a 7-40 character Git SHA`);
+  return sha;
+}
+
+function requiredAssertionStatus(value: string): "proposed" | "active" | "rejected" | "superseded" | "retracted" {
+  if (value === "proposed" || value === "active" || value === "rejected" || value === "superseded" || value === "retracted") return value;
+  throw new Error("unsupported assertion status");
 }
 
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {

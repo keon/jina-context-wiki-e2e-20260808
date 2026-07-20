@@ -31,6 +31,8 @@ export interface OntologyEdge {
   readonly predicate: string;
   readonly plane: OntologyPlane;
   readonly confidence?: number;
+  /** Human-readable semantic rationale. Required for causal model assertions. */
+  readonly why?: string;
   readonly evidence: readonly string[];
 }
 
@@ -175,6 +177,33 @@ export async function validateOntologyEvidence(
       throw new Error(`ontology evidence is outside ${citation.path}: ${citation.value}`);
     }
   }
+  validateCausalEvidenceContents(generated, files);
+}
+
+function validateCausalEvidenceContents(generated: GeneratedOntology, files: ReadonlyMap<string, string>): void {
+  const nodes = new Map(generated.nodes.map((node) => [node.id, node]));
+  for (const edge of generated.edges) {
+    if (edge.predicate !== "INTRODUCED_BY") continue;
+    const issue = nodes.get(edge.source);
+    const commit = nodes.get(edge.target);
+    if (issue?.kind !== "Issue" || commit?.kind !== "Commit") {
+      throw new Error("INTRODUCED_BY evidence must connect an Issue to a Commit");
+    }
+    const issueNumber = /^(?:issue:)?#?(\d+)$/i.exec(issue.id.trim())?.[1];
+    const commitSha = /^(?:(?:commit|sha):)?([a-f0-9]{40})$/i.exec(commit.id.trim())?.[1]?.toLowerCase();
+    if (!issueNumber || !commitSha) {
+      throw new Error("INTRODUCED_BY evidence requires a positive issue number and full commit SHA");
+    }
+    const citedText = edge.evidence.map((value) => {
+      const citation = parseEvidenceCitation(value);
+      const lines = files.get(citation.path)?.split(/\r?\n/) ?? [];
+      return lines.slice(citation.startLine - 1, citation.endLine).join("\n");
+    }).join("\n");
+    const namesIssue = new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(citedText);
+    if (!namesIssue || !citedText.toLowerCase().includes(commitSha)) {
+      throw new Error(`INTRODUCED_BY evidence must explicitly name Issue #${issueNumber} and commit ${commitSha}`);
+    }
+  }
 }
 
 function parseNode(value: unknown): OntologyNode {
@@ -214,6 +243,7 @@ function parseEdge(value: unknown): Omit<OntologyEdge, "id"> {
     predicate: normalizePredicate(requiredString(value.predicate, "edge.predicate")),
     plane,
     ...(confidence !== undefined ? { confidence } : {}),
+    ...(typeof value.why === "string" && value.why.trim() ? { why: value.why.trim() } : {}),
     evidence: requiredEvidence(value.evidence, "edge")
   };
 }

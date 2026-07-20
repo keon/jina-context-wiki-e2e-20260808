@@ -285,7 +285,7 @@ jobs:
             --region="${GCP_REGION}" \
             --image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/worker:${GITHUB_SHA}" \
             --service-account="jina-runtime@jina-v2.iam.gserviceaccount.com" \
-            --set-env-vars="JINA_API_URL=${{ steps.deploy-api.outputs.url }},ACCEPTANCE_REQUEST_KEY=deploy-${GITHUB_SHA},ACCEPTANCE_TIMEOUT_MS=3000000" \
+            --set-env-vars="JINA_API_URL=${{ steps.deploy-api.outputs.url }},ACCEPTANCE_REQUEST_KEY=deploy-${GITHUB_SHA},ACCEPTANCE_TIMEOUT_MS=3000000,ACCEPTANCE_ISSUE_NUMBER=4,ACCEPTANCE_RESOLUTION_PR_NUMBER=5,ACCEPTANCE_CAUSING_PR_NUMBER=3,ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2,ACCEPTANCE_CAUSAL_REASON_INCLUDES=administrator" \
             --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest" \
             --args=dist/acceptance.js \
             --tasks=1 \

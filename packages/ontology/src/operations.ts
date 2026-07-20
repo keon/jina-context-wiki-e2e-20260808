@@ -1,4 +1,5 @@
 import type { OntologyNodeKind } from "./model.js";
+import type { AssertionStatus } from "./knowledge.js";
 import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
 import type { RetrievalExecutor } from "./retrieval.js";
 
@@ -26,10 +27,34 @@ export interface OntologyCommandResult {
   readonly outboxEventIds: readonly string[];
 }
 
+export interface OntologyAssertionSummary {
+  readonly id: string;
+  readonly repository: string;
+  readonly commitSha: string;
+  readonly subjectKind: OntologyNodeKind;
+  readonly subjectNaturalKey: string;
+  readonly subjectLabel: string;
+  readonly predicate: string;
+  readonly objectKind: OntologyNodeKind;
+  readonly objectNaturalKey: string;
+  readonly objectLabel: string;
+  readonly status: AssertionStatus;
+  readonly confidence?: number;
+  readonly evidence: readonly string[];
+  readonly qualifiers: Readonly<Record<string, string | number | boolean>>;
+  readonly generator: string;
+  readonly registryVersion: string;
+}
+
 export interface RepositoryContextOperations extends RetrievalExecutor {
   executeCommand(tenantId: string, actorId: string, command: OntologyCommand, now: string, actorIsTenantAdmin?: boolean): Promise<OntologyCommandResult>;
   rebuildDerivedProjections(tenantId: string, repository: string, ref: string, now: string): Promise<ProjectionRebuildResult>;
   drainDerivedProjectionEvents(tenantId: string, now: string): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }>;
   operationalMetrics(tenantId: string, now: string): Promise<OntologyOperationalMetrics>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<readonly string[]>;
+  listAssertions(
+    tenantId: string,
+    repository: string,
+    filter?: { readonly status?: AssertionStatus; readonly predicate?: string }
+  ): Promise<readonly OntologyAssertionSummary[]>;
 }

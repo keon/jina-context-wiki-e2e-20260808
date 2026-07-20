@@ -15,7 +15,6 @@ import {
   analyzeSourceBlob,
   assertionsFromGeneratedOntology,
   codeCheckpoint,
-  knowledgeCheckpoint,
   languageForPath,
   linkedIssueNumbers,
   type BlobAnalysis,
@@ -455,21 +454,9 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
     { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitSha }
   );
   if (cache.cached) return { outcome: "done", result: { cached: cache.cached } };
-  if (focusPaths.length === 0) {
-    return {
-      outcome: "done",
-      result: {
-        cached: {
-          observationId: "none",
-          assertionCount: 0,
-          activeCount: 0,
-          proposedCount: 0,
-          knowledgeCheckpoint: knowledgeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_GENERATOR_VERSION),
-          cached: true
-        }
-      }
-    };
-  }
+  // A generator/schema version change intentionally performs one full semantic
+  // scan for an unchanged head. The resulting generation is cached, so routine
+  // retries and subsequent builds still avoid Daytona entirely.
   const graph = await ontologyExecutor.buildAssertions({ tenantId, repository, ref, commitSha, focusPaths, taskId: work.task.id });
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   const assertions = assertionsFromGeneratedOntology(rawOutput, repository);
