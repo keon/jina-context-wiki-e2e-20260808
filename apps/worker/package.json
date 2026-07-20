@@ -6,7 +6,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
-    "test": "pnpm build && node --test dist/server.test.js",
+    "test": "pnpm build && node --test dist/*.test.js",
     "start": "node dist/server.js"
   },
   "dependencies": {
