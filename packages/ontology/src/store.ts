@@ -317,14 +317,21 @@ function memoryIssueTraceItems(
   observations: readonly GitHubSourceObservation[],
   snapshots: ReadonlyMap<string, RepositorySnapshot>
 ): RetrievalResult["items"] {
-  if (!request.issueNumber) return [];
   const scoped = observations.filter((observation) =>
     observation.tenantId === request.tenantId && observation.repository === request.repository && observation.kind !== "codeowners"
   );
-  const issue = [...scoped].reverse().find((observation) => observation.kind === "issue" && observation.number === request.issueNumber);
+  const issueText = request.issueText?.trim().toLowerCase();
+  const issue = [...scoped].reverse().find((observation) => observation.kind === "issue" && (
+    request.issueNumber
+      ? observation.number === request.issueNumber
+      : issueText
+        ? observation.title.toLowerCase().includes(issueText) || observation.body?.toLowerCase().includes(issueText) === true
+        : false
+  ));
   if (!issue || issue.kind !== "issue") return [];
+  const issueNumber = issue.number;
   const pullRequests = scoped.filter((observation): observation is GitHubWorkItemObservation =>
-    observation.kind === "pull_request" && observation.resolvesIssueNumbers?.includes(request.issueNumber!) === true
+    observation.kind === "pull_request" && observation.resolvesIssueNumbers?.includes(issueNumber) === true
   );
   const citations: IssueTraceProjection["citations"][number][] = [{
     kind: "observation", id: sourceGitHubObservationId(issue), repository: request.repository

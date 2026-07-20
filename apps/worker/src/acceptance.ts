@@ -153,6 +153,8 @@ export async function runProductionOntologyAcceptance(
   const issueItems = isRecord(issueTrace) ? requiredArray(issueTrace.items, "issue trace.items") : [];
   const firstIssueItem = issueItems[0];
   const issueData = isRecord(firstIssueItem) ? requiredRecord(firstIssueItem.data, "issue trace.data") : {};
+  const issue = requiredRecord(issueData.issue, "issue trace.issue");
+  const expectedIssueTitle = requiredString(issue.title, "issue trace.issue.title");
   const resolutions = requiredArray(issueData.resolutions, "issue trace.resolutions");
   const firstResolution = resolutions[0];
   const commits = isRecord(firstResolution) ? requiredArray(firstResolution.commits, "issue trace.commits") : [];
@@ -203,6 +205,7 @@ export async function runProductionOntologyAcceptance(
 
     const questions = [
       `Which PR or commit caused issue #${expectedIssueNumber}, and why?`,
+      `Which PR or commit caused "${expectedIssueTitle}", and why?`,
       `Which issue did commit ${causingCommitSha} cause, and why?`,
       ...(config.causality.causingPullRequestNumber
         ? [`Which issue did PR #${config.causality.causingPullRequestNumber} cause, and why?`]

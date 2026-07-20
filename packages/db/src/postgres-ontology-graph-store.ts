@@ -2257,13 +2257,30 @@ async function retrieveIssueTrace(
   ref: string,
   limit: number
 ): Promise<RetrievalItem[]> {
-  if (!request.issueNumber && !request.pullRequestNumber && !request.commitSha) return [];
+  if (!request.issueNumber && !request.issueText && !request.pullRequestNumber && !request.commitSha) return [];
   const commitPrefix = request.commitSha?.toLowerCase() ?? "";
+  const issueText = request.issueText?.trim() ?? "";
   const result = await pool.query<{ payload: IssueTraceProjection }>(
     `select payload from jina_ontology.issue_traces
      where tenant_id=$1 and repository=$2 and ref_name=$3
        and (
          ($4::int is not null and issue_number=$4) or
+         ($4::int is null and $7<>'' and (
+           position(lower($7) in lower(coalesce(payload->'issue'->>'title',''))) > 0 or
+           exists (
+             select 1 from jina_ontology.observations observation
+             where observation.tenant_id=$1
+               and observation.repository=$2
+               and observation.source='github'
+               and observation.redacted_at is null
+               and observation.payload->>'kind'='issue'
+               and (observation.payload->>'number')::int=issue_number
+               and (
+                 position(lower($7) in lower(coalesce(observation.payload->>'title',''))) > 0 or
+                 position(lower($7) in lower(coalesce(observation.payload->>'body',''))) > 0
+               )
+           )
+         )) or
          ($5<>'' and (
            exists (select 1 from jsonb_array_elements(coalesce(payload->'introducedBy','[]'::jsonb)) cause where cause->>'sha' like $5 || '%') or
            exists (
@@ -2284,8 +2301,15 @@ async function retrieveIssueTrace(
            )
          ))
        )
-     order by issue_number limit $7`,
-    [request.tenantId, request.repository, ref, request.issueNumber ?? null, commitPrefix, request.pullRequestNumber ?? null, limit]
+     order by
+       case
+         when $7<>'' and lower(coalesce(payload->'issue'->>'title',''))=lower($7) then 0
+         when $7<>'' and position(lower($7) in lower(coalesce(payload->'issue'->>'title',''))) > 0 then 1
+         else 2
+       end,
+       issue_number
+     limit $8`,
+    [request.tenantId, request.repository, ref, request.issueNumber ?? null, commitPrefix, request.pullRequestNumber ?? null, issueText, limit]
   );
   return result.rows.map(({ payload }) => {
     const firstResolution = payload.resolutions[0];

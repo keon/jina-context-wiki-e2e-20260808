@@ -206,7 +206,8 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
         commitShas: [headSha], resolvesIssueNumbers: [7], referencesIssueNumbers: []
       },
       {
-        tenantId, repository, kind: "issue", number: 7, title: "App is outdated", state: "closed",
+        tenantId, repository, kind: "issue", number: 7, title: "App is outdated",
+        body: "The outdated access policy bypasses the application guard.", state: "closed",
         url: `https://github.com/${repository}/issues/7`, authorLogin: "alice",
         occurredAt: "2026-07-19T00:00:00.000Z", recordedAt: "2026-07-20T00:02:00.000Z"
       },
@@ -307,6 +308,16 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     assert.deepEqual(causal.introducedBy?.[0]?.evidence, ["src/app.ts:1"]);
     assert.equal(causal.introducedBy?.[0]?.evidenceCommitSha, headSha);
     assert.equal(causal.introducedBy?.[0]?.pullRequests?.some((pullRequest) => pullRequest.number === 3), true);
+    const titleTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace",
+      issueText: "App is outdated", query: 'What caused "App is outdated"?'
+    });
+    assert.equal((titleTrace.items[0]?.data as { issue?: { number: number } }).issue?.number, 7);
+    const bodyTrace = await store.retrieve({
+      tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace",
+      issueText: "bypasses the application guard", query: 'What caused "bypasses the application guard"?'
+    });
+    assert.equal((bodyTrace.items[0]?.data as { issue?: { number: number } }).issue?.number, 7);
     const reverseCommitTrace = await store.retrieve({
       tenantId, allowedRepositories, repository, ref: "main", template: "issue_trace",
       commitSha: headSha, query: `Which issue did commit ${headSha} cause, and why?`

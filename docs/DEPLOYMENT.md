@@ -103,7 +103,7 @@ internal credential directly into that job, so the GitHub deployer can never
 read it. The job submits `omxyz/jina-ontology-e2e` to the production three-chunk
 workflow and waits for the aggregate to finish.
 The acceptance check fails the deployment unless the graph has cited nodes and
-edges, the fixed retrieval orchestrator returns cited results, Issue #4 resolves through PR #5, and Codex proposes the documented Issue #4 → PR #3 / commit causality with a reason and checked evidence. The job reviews that fixture assertion, queries causality by issue, PR, and commit, starts a cached projection build, and requires a cited `INTRODUCED_BY` graph edge. The canonical outbox and parser backlog must also be empty. It rejects any blocked ontology task
+edges, the fixed retrieval orchestrator returns cited results, Issue #4 resolves through PR #5, and Codex proposes the documented Issue #4 → PR #3 / commit causality with a reason and checked evidence. The job reviews that fixture assertion, queries causality by issue number, quoted issue title, PR, and commit, starts a cached projection build, and requires a cited `INTRODUCED_BY` graph edge. The canonical outbox and parser backlog must also be empty. It rejects any blocked ontology task
 left for the accepted repository and ref; older active attempts must have been
 superseded, while their terminal records remain available on the History page.
 Repeated deployments deliberately exercise the unchanged-head cache path; a generator-contract version change performs one full semantic backfill and then returns to cached execution.

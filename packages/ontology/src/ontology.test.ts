@@ -22,7 +22,7 @@ import {
   reviewAssertion,
   upsertIdentity
 } from "./knowledge.js";
-import { RepositoryContextOrchestrator, classifyTemplates } from "./retrieval.js";
+import { RepositoryContextOrchestrator, classifyTemplates, extractIssueText } from "./retrieval.js";
 import { linkedIssueNumbers, normalizeGitHubSourceObservation } from "./normalizers.js";
 
 test("pure structural parsing produces versioned symbols and imports", () => {
@@ -150,10 +150,14 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates("Which PR and commit resolved issue #7?"), ["issue_trace"]);
   assert.deepEqual(classifyTemplates(`Which issue did commit ${"a".repeat(40)} cause, and why?`), ["issue_trace"]);
   assert.deepEqual(classifyTemplates("Which issue did PR #42 introduce?"), ["issue_trace"]);
+  assert.deepEqual(classifyTemplates('Which PR or commit caused "Administrators cannot delete resources"?'), ["issue_trace"]);
+  assert.equal(extractIssueText('What caused “Administrators   cannot delete resources”?'), "Administrators cannot delete resources");
   const called: string[] = [];
+  const issueTexts: Array<string | undefined> = [];
   const orchestrator = new RepositoryContextOrchestrator({
     async retrieve(request) {
       called.push(request.template);
+      issueTexts.push(request.issueText);
       return {
         template: request.template, repository: request.repository, ref: request.ref ?? "main", truncated: false,
         totalBeforeLimit: 1, limit: request.limit ?? 50,
@@ -176,6 +180,15 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
     question: "Which PR and commit resolved issue #7?"
   });
   assert.deepEqual(called, ["issue_trace"]);
+
+  called.length = 0;
+  issueTexts.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: 'Which PR or commit caused "Administrators cannot delete resources"?'
+  });
+  assert.deepEqual(called, ["issue_trace"]);
+  assert.deepEqual(issueTexts, ["Administrators cannot delete resources"]);
 });
 
 test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNERS facts", () => {

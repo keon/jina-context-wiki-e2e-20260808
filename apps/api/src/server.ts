@@ -294,6 +294,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
+        ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
@@ -312,6 +313,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
         ...(typeof body.pullRequestNumber === "number" ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") } : {}),
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
+        ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.tokenBudget === "number" ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") } : {})
       }));
@@ -1185,6 +1187,12 @@ function requiredRepositoryPath(value: unknown, field: string): string {
   const path = requiredString(value, field);
   if (path.startsWith("/") || path.split("/").includes("..")) throw new Error(`${field} must be repository-relative`);
   return path;
+}
+
+function requiredIssueText(value: unknown, field: string): string {
+  const text = requiredString(value, field).replace(/\s+/g, " ");
+  if (text.length > 500) throw new Error(`${field} must not exceed 500 characters`);
+  return text;
 }
 
 function requiredGitShaPrefix(value: unknown, field: string): string {

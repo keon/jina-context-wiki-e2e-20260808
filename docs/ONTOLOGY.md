@@ -88,7 +88,7 @@ The project task uses queue-claim semantics (`FOR UPDATE SKIP LOCKED`) for canon
 6. acknowledges claimed outbox events;
 7. creates a new immutable dashboard graph generation.
 
-An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus reviewed `INTRODUCED_BY` commits, their associated introducing PRs, causal reason, evidence-generation commit, and checkout-validated evidence. It supports lookup by issue number, PR number, or commit SHA prefix and retains the citations needed to explain every hop. The graph persists the same Issue → Commit edge, reason, and evidence. Rebuilding a trace never creates an assertion.
+An issue trace is a read model, not new canonical knowledge. It contains the Issue → resolving PR → merge/included commits → first-parent file changes path, plus reviewed `INTRODUCED_BY` commits, their associated introducing PRs, causal reason, evidence-generation commit, and checkout-validated evidence. It supports repository-scoped lookup by exact quoted text from an ingested issue title/body, issue number, PR number, or commit SHA prefix and retains the citations needed to explain every hop. Text first resolves to the canonical issue; causal traversal still follows accepted assertions rather than inferring from lexical similarity. The graph persists the same Issue → Commit edge, reason, and evidence. Rebuilding a trace never creates an assertion.
 
 Every projected graph item carries evidence. Code and accepted model facts keep
 their checkout-validated `path:line` citations. Deterministic GitHub facts that
@@ -158,7 +158,7 @@ Models cannot compose database queries. The API exposes five deterministic templ
 
 | Template | Answer path |
 | --- | --- |
-| `issue_trace` | issue, PR, or commit → materialized issue → resolving and introducing PRs/commits → causal reason/evidence and changes |
+| `issue_trace` | issue title/body phrase, issue number, PR, or commit → materialized issue → resolving and introducing PRs/commits → causal reason/evidence and changes |
 | `structure` | name/moniker → typed edges inside the selected ref manifest |
 | `change` | PR → included commits → first-parent changes → changed symbols → inbound affected surface |
 | `intent` | file history → commits → PRs → resolved/referenced issues → raw observation text |
@@ -166,7 +166,7 @@ Models cannot compose database queries. The API exposes five deterministic templ
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` is a thin classifier/composer over these five tools. It extracts issue, PR, and commit identifiers and routes resolution/causality questions directly to `issue_trace`; it does not reconstruct that path with query-time assertion joins or an LLM. The dashboard renders resolution and causality chains, reasons, evidence, and provenance citations above the graph.
+`POST /ontology/ask` is a thin classifier/composer over these five tools. It extracts issue numbers, exact quoted issue phrases, PRs, and commits and routes resolution/causality questions directly to `issue_trace`; it does not reconstruct that path with query-time assertion joins or an LLM. A quoted phrase is matched case-insensitively against ingested issue titles and bodies inside the authorized repository. The dashboard renders resolution and causality chains, reasons, evidence, and provenance citations above the graph.
 
 ## Security
 

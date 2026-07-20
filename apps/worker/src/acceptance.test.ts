@@ -46,7 +46,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
         calls: [{
           template: "issue_trace",
           items: [{
-            data: { resolutions: [{ pullRequestNumber: 2, commits: [{ sha: "b".repeat(40) }] }] },
+            data: { issue: { number: 1, title: "Document guest access denial semantics" }, resolutions: [{ pullRequestNumber: 2, commits: [{ sha: "b".repeat(40) }] }] },
             citations: [{ kind: "assertion", id: "resolves" }]
           }]
         }],
@@ -132,7 +132,7 @@ test("production acceptance reviews causality, queries it in both directions, an
       const body = JSON.parse(String(init?.body ?? "{}")) as { question?: string };
       if (body.question?.includes("resolved issue")) return json({ calls: [{
         template: "issue_trace", items: [{
-          data: { resolutions: [{ pullRequestNumber: 8, commits: [{ sha: "b".repeat(40) }] }] },
+          data: { issue: { number: 7, title: "Application guard bypassed" }, resolutions: [{ pullRequestNumber: 8, commits: [{ sha: "b".repeat(40) }] }] },
           citations: [{ kind: "assertion", id: "resolves" }]
         }]
       }], citations: [{ kind: "assertion", id: "resolves" }] });
@@ -170,7 +170,8 @@ test("production acceptance reviews causality, queries it in both directions, an
 
   assert.equal(reviewed, true);
   assert.equal(buildCount, 2);
-  assert.equal(causalQuestions.length, 3);
+  assert.equal(causalQuestions.length, 4);
+  assert.equal(causalQuestions.some((question) => question.includes('"Application guard bypassed"')), true);
   assert.equal(result.edgeCount, 1);
 });
 

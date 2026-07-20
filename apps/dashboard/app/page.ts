@@ -190,7 +190,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
       <section class="ontology-summary" id="ontology-summary"></section>
       <form class="context-query" id="context-query">
         <label class="sr-only" for="context-question">Ask repository context</label>
-        <input id="context-question" name="question" placeholder="What changed, what might break, and who owns it?" required>
+        <input id="context-question" name="question" placeholder='Ask by issue # or title, e.g. what caused "Administrators cannot delete resources"?' required>
         <button type="submit">Ask with citations</button>
       </form>
       <section class="context-results" id="context-results" aria-live="polite"></section>
@@ -364,7 +364,13 @@ function renderContextResults() {
   for (const call of contextState.calls || []) {
     const section = element("article", "context-call");
     section.append(textElement("h3", "", call.template + (call.truncated ? " · truncated" : "")));
-    if (!call.items.length) section.append(textElement("p", "empty-detail", "No cited results."));
+    if (!call.items.length) section.append(textElement(
+      "p",
+      "empty-detail",
+      call.template === "issue_trace"
+        ? "No matching ingested issue or cited relationship. Try an exact quoted issue title or issue number."
+        : "No cited results."
+    ));
     for (const item of call.items) {
       if (item.kind === "issue_trace" && item.data && item.data.issue) {
         section.append(renderIssueTrace(item.data, item.citations));

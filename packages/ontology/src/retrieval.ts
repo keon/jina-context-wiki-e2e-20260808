@@ -31,6 +31,8 @@ export interface RetrievalRequest {
   readonly path?: string;
   readonly pullRequestNumber?: number;
   readonly issueNumber?: number;
+  /** Exact phrase used to resolve an issue by its ingested title or body. */
+  readonly issueText?: string;
   readonly commitSha?: string;
   readonly limit?: number;
 }
@@ -110,6 +112,7 @@ export class RepositoryContextOrchestrator {
     const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
     const calls: RetrievalResult[] = [];
     const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
+    const issueText = issueNumber ? undefined : input.issueText ?? extractIssueText(input.question);
     const pullRequestNumber = input.pullRequestNumber ?? extractPullRequestNumber(input.question);
     const commitSha = input.commitSha ?? extractCommitSha(input.question);
     for (const template of templates) {
@@ -118,6 +121,7 @@ export class RepositoryContextOrchestrator {
         template,
         query: input.query ?? input.question,
         ...(issueNumber ? { issueNumber } : {}),
+        ...(issueText ? { issueText } : {}),
         ...(pullRequestNumber ? { pullRequestNumber } : {}),
         ...(commitSha ? { commitSha } : {}),
         limit: perCallLimit
@@ -131,11 +135,12 @@ export class RepositoryContextOrchestrator {
 export function classifyTemplates(question: string): readonly RetrievalTemplateName[] {
   const value = question.toLowerCase();
   const issueNumber = extractIssueNumber(question);
+  const issueText = extractIssueText(question);
   const pullRequestNumber = extractPullRequestNumber(question);
   const commitSha = extractCommitSha(question);
-  if ((issueNumber || pullRequestNumber || commitSha) && /resolv|fix|clos|caus|introduc|root cause|pull request|\bpr\b|commit/.test(value)) return ["issue_trace"];
+  if ((issueNumber || issueText || pullRequestNumber || commitSha) && /resolv|fix|clos|caus|introduc|root cause|pull request|\bpr\b|commit/.test(value)) return ["issue_trace"];
   const selected: RetrievalTemplateName[] = [];
-  if (issueNumber) selected.push("issue_trace");
+  if (issueNumber || issueText) selected.push("issue_trace");
   if (/depend|call|import|structure|where|symbol/.test(value)) selected.push("structure");
   if (/change|break|impact|diff|pull request|\bpr\b/.test(value)) selected.push("change");
   if (/why|intent|issue|introduced|history|exist/.test(value)) selected.push("intent");
@@ -161,6 +166,17 @@ export function extractIssueNumber(question: string): number | undefined {
   if (!match?.[1]) return undefined;
   const value = Number.parseInt(match[1], 10);
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * Pulls the user-supplied issue phrase from quotes. The phrase is only an
+ * identifier candidate; retrieval still resolves it inside the authorized
+ * repository and returns canonical, cited issue traces.
+ */
+export function extractIssueText(question: string): string | undefined {
+  const match = /["“]([^"”\n]{2,500})["”]/.exec(question);
+  const value = match?.[1]?.trim().replace(/\s+/g, " ");
+  return value || undefined;
 }
 
 function dedupeCitations(citations: readonly RetrievalCitation[]): readonly RetrievalCitation[] {
