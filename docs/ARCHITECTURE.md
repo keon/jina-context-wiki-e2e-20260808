@@ -155,103 +155,26 @@ boundaries are described in the README and the current-implementation section
 above.
 
 ```text
-apps/
-  api/
-    src/server.ts
-    src/routes/github-webhooks.ts
-    src/routes/dashboard.ts
-    src/routes/commands.ts
-    src/auth/github-identity.ts
-
-  dashboard/
-    app/
-    components/
-    lib/api-client.ts
-
-  workflows/
-    src/relay/outbox-relay.ts
-    src/tasks/run-review.ts
-    src/tasks/run-research.ts
-    src/tasks/run-publish.ts
-    src/tasks/run-cleanup.ts
-
-packages/
-  board/
-    src/commands.ts
-    src/reducer.ts
-    src/task-status.ts
-    src/tasks.ts
-    src/dependencies.ts
-    src/gates.ts
-
-  review/
-    src/pr-review-pipeline.ts
-    src/review-decision.ts
-    src/review-profiles.ts
-    src/findings.ts
-    src/finding-dedupe.ts
-    src/review-artifacts.ts
-
-  context/
-    src/context-handoff.ts
-    src/context-items.ts
-    src/source-policy.ts
-    src/source-citations.ts
-
-  publication/
-    src/publication-plan.ts
-    src/publication-keys.ts
-    src/publication-results.ts
-
-  policy/
-    src/review-policy.ts
-    src/capability-policy.ts
-    src/budget-policy.ts
-
-  db/
-    src/schema/
-    src/repositories/
-    migrations/
-
-  github/
-    src/webhooks.ts
-    src/publications.ts
-    src/permissions.ts
-
-  daytona/
-    src/checkout-broker.ts
-    src/credentials.ts
-
-  ai/
-    src/harnesses/
-    src/models/
-    src/tools/
-
-  shared-kernel/
-    src/ids.ts
-    src/env.ts
-    src/result.ts
-    src/logger.ts
-    src/time.ts
-    src/errors.ts
+apps/{api,dashboard,worker,workflows}
+packages/{ai,board,context,daytona,db,github,ontology,policy,publication,review,shared-kernel}
 ```
 
 Boundaries:
 
-- `apps/api` owns HTTP, webhook verification, dashboard routes, identity resolution, and calling generic commands.
+- `apps/api` owns HTTP, webhook verification, identity resolution, and command dispatch.
 - `apps/dashboard` owns UI state and calls only API endpoints; it never imports database repositories.
 - `apps/workflows` owns Trigger.dev task definitions and the outbox relay. It can call domain packages and adapters, but task implementations remain thin.
 - Domain packages (`board`, `review`, `context`, `publication`, `policy`) are pure business logic. They do not import HTTP frameworks, Trigger.dev, GitHub, Daytona, model SDKs, or database clients.
-- `packages/db` owns schema, migrations, repositories, and transactions.
+- `packages/db` owns persistence, migrations, and transactions.
 - Adapter packages (`github`, `daytona`, `ai`) isolate provider SDKs and translate provider payloads into domain inputs/outputs.
-- `packages/shared-kernel` is intentionally small: shared IDs, env parsing, result/error helpers, time helpers, and logging primitives. Domain behavior belongs in bounded domain packages, not in `shared-kernel`.
+- `packages/shared-kernel` is intentionally small: shared IDs and time helpers only. Domain behavior belongs in bounded domain packages.
 
 Import direction:
 
 ```text
-apps/* -> packages/{board,review,context,publication,policy,db,github,daytona,ai}
-packages/{github,daytona,ai,db} -> packages/shared-kernel
-packages/{board,review,context,publication,policy} -> packages/shared-kernel
+apps/* -> packages/{ai,board,context,daytona,db,github,ontology,policy,publication,review,shared-kernel}
+packages/{ai,board,review} -> packages/shared-kernel
+packages/{daytona,db} -> packages/ontology
 packages/shared-kernel -> no Jina package imports
 ```
 
@@ -262,7 +185,7 @@ Package rule:
 - Start with the listed packages only; do not create a package just to hold a folder.
 - Keep single-consumer code inside the owning app or domain package.
 - Promote code into a package only when it has a stable public API, tests, and either multiple consumers or a boundary worth enforcing.
-- Keep `policy` narrow: reusable capability, budget, and review-policy predicates. Domain-specific policy stays with its domain package.
+- Keep `policy` narrow: reusable billing and budget predicates. Domain-specific policy stays with its domain package.
 - Keep `shared-kernel` smaller than every domain package. If a file needs domain nouns like task, review, finding, publication, or checkout, it does not belong in `shared-kernel`.
 
 Workspace tooling:

@@ -17,7 +17,6 @@
   },
   "dependencies": {
     "@jina/ontology": "workspace:*",
-    "@jina/shared-kernel": "workspace:*",
     "pg": "^8.22.0"
   },
   "devDependencies": {

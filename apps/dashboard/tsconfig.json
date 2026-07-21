@@ -7,8 +7,5 @@
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["app/**/*.ts", "components/**/*.ts", "lib/**/*.ts", "server/**/*.ts"],
-  "references": [
-    { "path": "../../packages/shared-kernel" }
-  ]
+  "include": ["app/**/*.ts", "components/**/*.ts", "lib/**/*.ts", "server/**/*.ts"]
 }

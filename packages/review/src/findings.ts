@@ -1,11 +1,3 @@
-export type FindingSeverity = "low" | "medium" | "high" | "critical";
-
-export interface FindingDraft {
-  readonly title: string;
-  readonly severity: FindingSeverity;
-  readonly confidence: number;
-}
-
 /** Durable cross-run identity for a finding, deduped by fingerprint across PR epochs. */
 export interface FindingThread {
   readonly fingerprint: string;

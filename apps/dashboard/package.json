@@ -10,8 +10,7 @@
     "dev": "pnpm build && node dist/server/dev-server.js"
   },
   "dependencies": {
-    "@cosmos.gl/graph": "^3.3.0",
-    "@jina/shared-kernel": "workspace:*"
+    "@cosmos.gl/graph": "^3.3.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",

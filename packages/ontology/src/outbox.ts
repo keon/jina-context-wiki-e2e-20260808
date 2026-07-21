@@ -4,22 +4,6 @@ export const canonicalEventTypes = [
 ] as const;
 export type CanonicalEventType = (typeof canonicalEventTypes)[number];
 
-export interface CanonicalOutboxEvent {
-  readonly id: string;
-  readonly tenantId: string;
-  readonly eventType: CanonicalEventType;
-  readonly aggregateId: string;
-  readonly payload: Readonly<Record<string, unknown>>;
-  readonly createdAt: string;
-  readonly availableAt: string;
-  readonly claimedBy?: string;
-  readonly claimedAt?: string;
-  readonly claimExpiresAt?: string;
-  readonly processedAt?: string;
-  readonly attempts: number;
-  readonly lastError?: string;
-}
-
 export interface ProjectionRebuildResult {
   readonly manifestFileCount: number;
   readonly searchDocumentCount: number;

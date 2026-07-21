@@ -5,4 +5,3 @@ export * from "./transitions.js";
 export * from "./commands.js";
 export * from "./reducer.js";
 export * from "./supersession.js";
-export * from "./gates.js";

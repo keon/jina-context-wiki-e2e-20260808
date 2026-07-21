@@ -14,9 +14,6 @@
     "lint": "eslint . --max-warnings 0",
     "test": "pnpm build && node --test dist/webhooks.test.js"
   },
-  "dependencies": {
-    "@jina/shared-kernel": "workspace:*"
-  },
   "devDependencies": {
     "@types/node": "^26.1.0"
   }

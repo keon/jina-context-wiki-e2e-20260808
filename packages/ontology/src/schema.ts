@@ -1,5 +1,14 @@
 import { ontologyNodeKinds } from "./model.js";
 
+const ontologyNodeProperties = {
+  id: { type: "string" },
+  kind: { type: "string", enum: ontologyNodeKinds },
+  label: { type: "string" },
+  description: { type: "string" },
+  path: { type: ["string", "null"] },
+  evidence: { type: "array", minItems: 1, items: { type: "string" } }
+} as const;
+
 export const ONTOLOGY_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -13,14 +22,7 @@ export const ONTOLOGY_OUTPUT_SCHEMA = {
         type: "object",
         additionalProperties: false,
         required: ["id", "kind", "label", "description", "path", "evidence"],
-        properties: {
-          id: { type: "string" },
-          kind: { type: "string", enum: ontologyNodeKinds },
-          label: { type: "string" },
-          description: { type: "string" },
-          path: { type: ["string", "null"] },
-          evidence: { type: "array", minItems: 1, items: { type: "string" } }
-        }
+        properties: ontologyNodeProperties
       }
     },
     edges: {
@@ -56,14 +58,7 @@ export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
         type: "object",
         additionalProperties: false,
         required: ["id", "kind", "label", "description", "path", "evidence"],
-        properties: {
-          id: { type: "string" },
-          kind: { type: "string", enum: ontologyNodeKinds },
-          label: { type: "string" },
-          description: { type: "string" },
-          path: { type: ["string", "null"] },
-          evidence: { type: "array", minItems: 1, items: { type: "string" } }
-        }
+        properties: ontologyNodeProperties
       }
     },
     edges: {

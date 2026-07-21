@@ -9,7 +9,6 @@
     "skipLibCheck": true,
     "paths": {
       "@jina/board": ["./packages/board/src/index.ts"],
-      "@jina/factory": ["./packages/factory/src/index.ts"],
       "@jina/review": ["./packages/review/src/index.ts"],
       "@jina/context": ["./packages/context/src/index.ts"],
       "@jina/publication": ["./packages/publication/src/index.ts"],

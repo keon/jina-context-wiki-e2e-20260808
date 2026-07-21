@@ -12,8 +12,6 @@
     { "path": "../../packages/ai" },
     { "path": "../../packages/board" },
     { "path": "../../packages/context" },
-    { "path": "../../packages/daytona" },
-    { "path": "../../packages/db" },
     { "path": "../../packages/github" },
     { "path": "../../packages/policy" },
     { "path": "../../packages/publication" },

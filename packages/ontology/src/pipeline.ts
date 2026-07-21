@@ -97,12 +97,6 @@ export interface OntologyIngestPlan {
   readonly missingBlobs: readonly { readonly blobSha: string; readonly path: string; readonly size: number }[];
 }
 
-export interface OntologyIngestResult extends Omit<OntologyIngestPlan, "missingBlobs"> {
-  readonly parsedBlobCount: number;
-  readonly parserVersion: string;
-  readonly codeCheckpoint: string;
-}
-
 export interface OntologySourceIngestResult {
   readonly observationCount: number;
   readonly observationIds: readonly string[];

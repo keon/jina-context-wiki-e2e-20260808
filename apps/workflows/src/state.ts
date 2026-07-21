@@ -50,10 +50,6 @@ export function createWorkflowState(): WorkflowState {
   };
 }
 
-export function replaceBoard(state: WorkflowState, board: BoardState): WorkflowState {
-  return { ...state, board };
-}
-
 export function findPullRequest(
   state: WorkflowState,
   repository: string,

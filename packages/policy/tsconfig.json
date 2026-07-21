@@ -6,8 +6,5 @@
     "rootDir": "src",
     "outDir": "dist"
   },
-  "include": ["src/**/*.ts"],
-  "references": [
-    { "path": "../shared-kernel" }
-  ]
+  "include": ["src/**/*.ts"]
 }

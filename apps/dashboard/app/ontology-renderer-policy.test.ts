@@ -4,14 +4,8 @@ import {
   CANVAS_EDGE_LIMIT,
   CANVAS_NODE_LIMIT,
   canvasFallbackStatus,
-  canvasGraphSlice,
-  chooseRendererMode
+  canvasGraphSlice
 } from "./ontology-renderer-policy.js";
-
-test("large graphs keep the WebGL renderer when GPU support exists", () => {
-  assert.equal(chooseRendererMode(true), "webgl");
-  assert.equal(chooseRendererMode(false), "canvas");
-});
 
 test("Canvas fallback deterministically bounds a large graph without dangling edges", () => {
   const nodes = Array.from({ length: 5_000 }, (_, index) => ({ id: `node-${index}` }));

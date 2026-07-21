@@ -60,9 +60,6 @@ importers:
       '@cosmos.gl/graph':
         specifier: ^3.3.0
         version: 3.3.0
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../../packages/shared-kernel
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -98,12 +95,6 @@ importers:
       '@jina/context':
         specifier: workspace:*
         version: link:../../packages/context
-      '@jina/daytona':
-        specifier: workspace:*
-        version: link:../../packages/daytona
-      '@jina/db':
-        specifier: workspace:*
-        version: link:../../packages/db
       '@jina/github':
         specifier: workspace:*
         version: link:../../packages/github
@@ -144,11 +135,7 @@ importers:
         specifier: ^26.1.0
         version: 26.1.0
 
-  packages/context:
-    dependencies:
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
+  packages/context: {}
 
   packages/daytona:
     dependencies:
@@ -158,12 +145,6 @@ importers:
       '@jina/ontology':
         specifier: workspace:*
         version: link:../ontology
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
-      ws:
-        specifier: ^8.21.1
-        version: 8.21.1
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -174,9 +155,6 @@ importers:
       '@jina/ontology':
         specifier: workspace:*
         version: link:../ontology
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
       pg:
         specifier: ^8.22.0
         version: 8.22.0
@@ -186,10 +164,6 @@ importers:
         version: 8.20.0
 
   packages/github:
-    dependencies:
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -200,25 +174,14 @@ importers:
       '@ast-grep/napi':
         specifier: ^0.44.1
         version: 0.44.1
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
         version: 26.1.0
 
-  packages/policy:
-    dependencies:
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
+  packages/policy: {}
 
-  packages/publication:
-    dependencies:
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
+  packages/publication: {}
 
   packages/review:
     dependencies:

@@ -16,9 +16,7 @@
   },
   "dependencies": {
     "@daytona/sdk": "^0.199.0",
-    "@jina/ontology": "workspace:*",
-    "@jina/shared-kernel": "workspace:*",
-    "ws": "^8.21.1"
+    "@jina/ontology": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.0"

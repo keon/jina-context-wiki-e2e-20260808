@@ -12,15 +12,6 @@ import type { TaskStatus } from "./task-status.js";
 import { createBoardTask, type BoardTask, type CreateBoardTaskInput } from "./tasks.js";
 import { canTransition, type TransitionActorType } from "./transitions.js";
 
-export type BoardCommand =
-  | "CreateTask"
-  | "UpdateTask"
-  | "TransitionTask"
-  | "CommentTask"
-  | "LinkTask"
-  | "AssignTask"
-  | "AttachArtifact";
-
 export interface CommandActor {
   readonly type: TransitionActorType;
   readonly id: string;
