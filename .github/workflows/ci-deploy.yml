@@ -327,6 +327,15 @@ jobs:
                 --region="${GCP_REGION}" \
                 --format=yaml || true
             fi
+            if [[ "${acceptance_status}" -ne 0 ]]; then
+              echo "::group::Acceptance execution logs"
+              gcloud beta run jobs executions logs read "${execution_name}" \
+                --project="${GCP_PROJECT_ID}" \
+                --region="${GCP_REGION}" \
+                --order=asc \
+                --limit=500 || true
+              echo "::endgroup::"
+            fi
           fi
           exit "${acceptance_status}"
 
