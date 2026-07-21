@@ -6,6 +6,7 @@ Jina accepts real GitHub App webhook deliveries at `POST /webhooks/github`. The 
 
 | GitHub event | Action | Board result |
 | --- | --- | --- |
+| Push | non-deleted branch head | Creates the existing `ontology_build`/ingest/assert/project tree; an unchanged latest head deduplicates redelivery, while every real ref transition supersedes stale work |
 | Pull request | `opened` | Creates the existing root review, review-pass, and publication tasks |
 | Pull request | `synchronize` | Supersedes the old head epoch and creates the next review task graph |
 | Issues | `opened` | Creates one manual `issue_triage` card |
@@ -45,7 +46,7 @@ Create a private GitHub App under the account or organization that owns the repo
 - Repository permission: **Contents — Read-only**
 - Optional repository permission: **Deployments — Read-only**
 - Optional repository permission: **Actions — Read-only**
-- Subscribe to events: **Pull request** and **Issues**
+- Subscribe to events: **Push**, **Pull request**, and **Issues**
 
 Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Production sets the canonical `JINA_TENANT_ID=omlabs`; configured aliases are migrated at API startup so historical tasks remain visible.
 
@@ -55,7 +56,7 @@ GitHub documents the registration flow in [Registering a GitHub App](https://doc
 
 ## 3. Verify delivery
 
-Open an issue or pull request in an installed repository, then inspect:
+Push a branch, or open an issue or pull request in an installed repository, then inspect:
 
 ```sh
 curl http://localhost:4000/board

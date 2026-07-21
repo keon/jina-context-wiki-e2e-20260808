@@ -39,7 +39,7 @@ export interface OntologyEdge {
   readonly confidence?: number;
   /** Canonical assertion qualifiers retained by materialized knowledge projections. */
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
-  /** Human-readable semantic rationale. Required for causal model assertions. */
+  /** Human-readable semantic rationale. Required for model-generated knowledge assertions. */
   readonly why?: string;
   readonly evidence: readonly string[];
 }

@@ -57,6 +57,7 @@ export interface KnowledgeAssertion {
   readonly qualifiers: Readonly<Record<string, QualifierValue>>;
   readonly qualifiersHash: string;
   readonly status: AssertionStatus;
+  readonly explanation: string;
   readonly confidence?: number;
   readonly sourceObservationId?: string;
   readonly assertedBy?: string;
@@ -102,6 +103,7 @@ export interface AssertionInput {
   readonly literalType?: LiteralType;
   readonly literalValue?: unknown;
   readonly qualifiers?: Readonly<Record<string, QualifierValue>>;
+  readonly explanation: string;
   readonly confidence?: number;
   readonly sourceObservationId?: string;
   readonly assertedBy?: string;
@@ -222,7 +224,7 @@ export function applyAssertion(
     ...(input.repoId ? { repoId: input.repoId } : {}), subjectId: input.subjectId, predicate: definition.name,
     ...(input.objectId ? { objectId: input.objectId } : {}),
     ...(input.literalType ? { literalType: input.literalType, literalValue: input.literalValue } : {}),
-    qualifiers, qualifiersHash, status,
+    qualifiers, qualifiersHash, status, explanation: input.explanation.replace(/\s+/g, " ").trim(),
     ...(input.confidence !== undefined ? { confidence: input.confidence } : {}),
     ...(input.sourceObservationId ? { sourceObservationId: input.sourceObservationId } : {}),
     ...(input.assertedBy ? { assertedBy: input.assertedBy } : {}),
@@ -239,8 +241,15 @@ export function applyAssertion(
 
 export function reviewAssertion(
   state: KnowledgeState,
-  input: { readonly tenantId: string; readonly assertionId: string; readonly decision: "accept" | "reject" | "retract"; readonly actorId: string; readonly now: string; readonly reason?: string }
+  input: {
+    readonly tenantId: string; readonly assertionId: string; readonly decision: "accept" | "reject" | "retract";
+    readonly actorId: string; readonly now: string; readonly reason?: string;
+    readonly rejectionCode?: "incorrect_relationship" | "insufficient_evidence" | "unsupported_explanation" | "other";
+  }
 ): { readonly state: KnowledgeState; readonly assertion: KnowledgeAssertion; readonly audit: AuditEntry } {
+  if (input.decision === "reject" && (!input.reason || !input.rejectionCode)) {
+    throw new Error("assertion rejection requires a reason and rejection code");
+  }
   const current = state.assertions.find((assertion) => assertion.tenantId === input.tenantId && assertion.id === input.assertionId);
   if (!current) throw new Error("assertion not found");
   const allowed = input.decision === "accept" ? current.status === "proposed"
@@ -256,7 +265,8 @@ export function reviewAssertion(
   const base = state.assertions.map((assertion) => assertion.id === current.id ? next : assertion);
   const assertions = nextStatus === "active" ? supersedeCardinalityOne(base, next, definition, input.now) : base;
   const audit = auditEntry(input.tenantId, input.actorId, `${input.decision}_assertion`, {
-    assertionId: current.id, generator: current.generator, predicate: current.predicate
+    assertionId: current.id, generator: current.generator, predicate: current.predicate,
+    ...(input.rejectionCode ? { rejectionCode: input.rejectionCode } : {})
   }, input.now, input.reason);
   return { state: { ...state, assertions, auditLog: [...state.auditLog, audit] }, assertion: next, audit };
 }
@@ -373,6 +383,8 @@ function validateAssertionInput(state: KnowledgeState, input: AssertionInput): v
   const object = input.objectId ? requireEntity(state, input.tenantId, input.objectId) : undefined;
   const provenanceCount = Number(Boolean(input.sourceObservationId)) + Number(Boolean(input.assertedBy));
   if (provenanceCount !== 1) throw new Error("assertion provenance requires sourceObservationId XOR assertedBy");
+  if (!input.explanation.trim()) throw new Error("assertion explanation is required");
+  if (input.explanation.length > 1_000) throw new Error("assertion explanation must not exceed 1000 characters");
   if (input.confidence !== undefined && (!Number.isFinite(input.confidence) || input.confidence < 0 || input.confidence > 1)) {
     throw new Error("assertion confidence must be between 0 and 1");
   }

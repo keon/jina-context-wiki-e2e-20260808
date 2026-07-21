@@ -108,12 +108,20 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
   assert.deepEqual(
     taskTypes.find((definition) => definition.type === "ontology_ingest")?.triggeredBy,
-    [{
-      source: "POST /ontology/build",
-      description: "Creates and queues the first executable Ontology task.",
-      workflows: ["ontology_build"],
-      conditions: []
-    }]
+    [
+      {
+        source: "POST /ontology/build",
+        description: "Creates and queues the first executable Ontology task.",
+        workflows: ["ontology_build"],
+        conditions: []
+      },
+      {
+        source: "GitHub push webhook",
+        description: "Queues repository intake for a pushed branch head.",
+        workflows: ["ontology_build"],
+        conditions: []
+      }
+    ]
   );
   assert.equal(taskTypes.find((definition) => definition.type === "ontology_assert")?.triggeredBy[0]?.source, "POST /ontology/build");
   assert.equal(taskTypes.find((definition) => definition.type === "ontology_project")?.triggeredBy[0]?.source, "POST /ontology/build");
@@ -136,6 +144,33 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
     taskTypes.find((definition) => definition.type === "review_pass")?.requiredBy.map((dependency) => dependency.taskType),
     ["pr_review", "publish"]
   );
+});
+
+test("branch pushes create and supersede the existing ontology workflow", async (context) => {
+  const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(() => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const first = await deliver(baseUrl, "push", "push-1", pushPayload("a".repeat(40)));
+  assert.equal(first.status, 202);
+  assert.equal((await first.json() as { createdTaskIds: string[] }).createdTaskIds.length, 4);
+  const repeatedHead = await deliver(baseUrl, "push", "push-2", pushPayload("a".repeat(40)));
+  assert.equal((await repeatedHead.json() as { outcome: string }).outcome, "duplicate");
+  const second = await deliver(baseUrl, "push", "push-3", pushPayload("b".repeat(40)));
+  assert.equal((await second.json() as { createdTaskIds: string[] }).createdTaskIds.length, 4);
+  const returned = await deliver(baseUrl, "push", "push-4", pushPayload("a".repeat(40)));
+  assert.equal((await returned.json() as { createdTaskIds: string[] }).createdTaskIds.length, 4,
+    "moving a branch back to an earlier SHA is a new ref transition, not a redelivery");
+
+  const board = await authenticatedFetch(`${baseUrl}/board`).then((response) => response.json() as Promise<{
+    tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
+  }>);
+  const current = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-4");
+  const old = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-3");
+  assert.deepEqual(current.map((task) => task.type).sort(), ["ontology_assert", "ontology_build", "ontology_ingest", "ontology_project"]);
+  assert.equal(current.find((task) => task.type === "ontology_ingest")?.status, "queued");
+  assert.equal(old.every((task) => task.status === "superseded"), true);
 });
 
 test("ontology retrieval forwards generalized Issue identity and Feature text", async () => {
@@ -437,7 +472,10 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
               { id: "repo", kind: "Repository", label: "fixture", description: "repo", evidence: ["README.md:1"] },
               { id: "readme", kind: "Document", label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
             ],
-            edges: [{ source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95, evidence: ["README.md:1"] }]
+            edges: [{
+              source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95,
+              why: "The README explicitly documents this repository.", evidence: ["README.md:1"]
+            }]
           }
         }
       })
@@ -883,6 +921,18 @@ function pullRequestPayload(number: number, headSha: string, action = "opened"):
       user: { login: "octocat" },
       head: { sha: headSha }
     },
+    repository: { id: 10, full_name: "omlabs/example" },
+    installation: { id: 99 },
+    sender: { login: "octocat" }
+  };
+}
+
+function pushPayload(headSha: string): unknown {
+  return {
+    ref: "refs/heads/main",
+    before: "0".repeat(40),
+    after: headSha,
+    deleted: false,
     repository: { id: 10, full_name: "omlabs/example" },
     installation: { id: 99 },
     sender: { login: "octocat" }

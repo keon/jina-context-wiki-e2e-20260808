@@ -4,7 +4,13 @@ import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outb
 import type { RetrievalExecutor } from "./retrieval.js";
 
 export type OntologyCommand =
-  | { readonly type: "review_assertion"; readonly assertionId: string; readonly decision: "accept" | "reject" | "retract"; readonly reason?: string }
+  | {
+      readonly type: "review_assertion";
+      readonly assertionId: string;
+      readonly decision: "accept" | "reject" | "retract";
+      readonly reason?: string;
+      readonly rejectionCode?: "incorrect_relationship" | "insufficient_evidence" | "unsupported_explanation" | "other";
+    }
   | { readonly type: "relate_assertions"; readonly sourceAssertionId: string; readonly relation: "supports" | "contradicts"; readonly targetAssertionId: string; readonly evidenceObservationId: string; readonly reason?: string }
   | { readonly type: "merge_entities" | "unmerge_entities"; readonly fromEntityId: string; readonly toEntityId: string; readonly reason?: string }
   | { readonly type: "redact_observation"; readonly observationId: string; readonly reason: string; readonly commitShas?: readonly string[] }
@@ -18,7 +24,7 @@ export type OntologyCommand =
       readonly predicate: string;
       readonly object: { readonly kind: OntologyNodeKind; readonly key: string; readonly displayName?: string };
       readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
-      readonly reason?: string;
+      readonly reason: string;
     };
 
 export interface OntologyCommandResult {
@@ -41,6 +47,8 @@ export interface OntologyAssertionSummary {
   readonly objectLabel: string;
   readonly status: AssertionStatus;
   readonly confidence?: number;
+  /** Missing only on assertions created before the explanation migration. */
+  readonly explanation?: string;
   readonly evidence: readonly string[];
   readonly qualifiers: Readonly<Record<string, string | number | boolean>>;
   readonly generator: string;

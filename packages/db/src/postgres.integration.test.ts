@@ -21,6 +21,10 @@ test("Postgres schema preserves unknown commit timestamps", () => {
   assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /committed_at\s*=\s*now\(\)/i);
 });
 
+test("Postgres schema backfills projection graph heads without replacing current pointers", () => {
+  assert.match(ONTOLOGY_SCHEMA_SQL, /insert into jina_ontology\.graph_heads[\s\S]+candidate\.executor='projection'[\s\S]+on conflict \(tenant_id,repository,ref_name\) do nothing/);
+});
+
 test("Postgres atomically stores board completion and an immutable graph", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
@@ -66,6 +70,153 @@ test("Postgres atomically stores board completion and an immutable graph", {
   }
 });
 
+test("Postgres causal retrieval follows the current graph head and migrations backfill missing heads", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const suffix = Date.now().toString(36);
+  const tenantId = `graph-head-${suffix}`;
+  const repository = `omlabs/graph-head-${suffix}`;
+  const commitSha = "a".repeat(40);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const graph = (deploymentId: string, deploymentLabel: string, generatedAt: string) => createOntologyGraph({
+    request: { tenantId, repository, ref: "main", taskId: `project-${deploymentId}` },
+    commitSha,
+    generatedAt,
+    executor: "projection",
+    model: "current-graph-v1",
+    contentAddressed: true,
+    generated: {
+      summary: `${deploymentLabel} caused the outage`,
+      nodes: [
+        { id: "repo", kind: "Repository", label: repository, description: "Repository", evidence: ["README.md:1"] },
+        { id: "incident", kind: "Incident", label: "Checkout outage", description: "Checkout failed", evidence: ["README.md:2"] },
+        { id: deploymentId, kind: "Deployment", label: deploymentLabel, description: "Production deployment", evidence: ["README.md:3"] }
+      ],
+      edges: [{
+        source: "incident", target: deploymentId, predicate: "INTRODUCED_BY", plane: "knowledge",
+        why: `${deploymentLabel} introduced the outage.`, evidence: ["README.md:3"]
+      }]
+    }
+  });
+  const first = graph("deployment-a", "Deployment A", "2026-07-21T01:00:00.000Z");
+  const second = graph("deployment-b", "Deployment B", "2026-07-21T01:01:00.000Z");
+  const request = {
+    tenantId, allowedRepositories: [repository], repository, ref: "main", template: "causal_trace" as const,
+    rootText: "Checkout outage"
+  };
+  try {
+    await store.planIngestion({
+      tenantId, repository, ref: "main", commitSha, treeSha: "b".repeat(40), parents: [],
+      recordedAt: "2026-07-21T00:59:00.000Z", updateRef: true, taskId: `ingest-${suffix}`, files: []
+    });
+    await store.save(first);
+    await store.save(second);
+    await store.save(first);
+    const current = await store.retrieve(request);
+    const currentTrace = current.items[0]?.data as { causes?: readonly { nodes: readonly { label: string }[] }[] };
+    assert.equal(currentTrace.causes?.[0]?.nodes[1]?.label, "Deployment A",
+      "retrieval follows graph_heads when an immutable graph is reused");
+
+    const pool = new Pool({ connectionString });
+    try {
+      await pool.query(
+        "delete from jina_ontology.graph_heads where tenant_id=$1 and repository=$2 and ref_name='main'",
+        [tenantId, repository]
+      );
+    } finally {
+      await pool.end();
+    }
+    const migratedStore = new PostgresOntologyGraphStore({ connectionString });
+    try {
+      const migrated = await migratedStore.retrieve(request);
+      assert.equal(migrated.items.length, 1, "schema initialization backfills a missing legacy graph head");
+    } finally {
+      await migratedStore.close();
+    }
+  } finally {
+    await store.close();
+  }
+});
+
+test("Postgres feature retrieval filters the complete canonical assertion set", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const suffix = Date.now().toString(36);
+  const tenantId = `feature-limit-${suffix}`;
+  const repository = `omlabs/feature-limit-${suffix}`;
+  const commitSha = "c".repeat(40);
+  const now = "2026-07-21T02:00:00.000Z";
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  try {
+    await store.planIngestion({
+      tenantId, repository, ref: "main", commitSha, treeSha: "d".repeat(40), parents: [],
+      recordedAt: now, updateRef: true, taskId: `ingest-${suffix}`, files: []
+    });
+    await store.save(createOntologyGraph({
+      request: { tenantId, repository, ref: "main", taskId: `project-${suffix}` },
+      commitSha, generatedAt: now, executor: "projection", model: "current-graph-v1", contentAddressed: true,
+      generated: {
+        summary: "Repository projection",
+        nodes: [
+          { id: "repo", kind: "Repository", label: repository, description: "Repository", evidence: ["README.md:1"] },
+          { id: "file", kind: "File", label: "src/index.ts", description: "Source", path: "src/index.ts", evidence: ["src/index.ts:1"] }
+        ],
+        edges: [{ source: "repo", target: "file", predicate: "CONTAINS", plane: "code", evidence: ["src/index.ts:1"] }]
+      }
+    }));
+    const pool = new Pool({ connectionString });
+    try {
+      const observation = await pool.query<{ id: string }>(
+        "select id from jina_ontology.observations where tenant_id=$1 and repository=$2 limit 1",
+        [tenantId, repository]
+      );
+      assert.ok(observation.rows[0]);
+      const fileId = `feature-limit-file-${suffix}`;
+      await pool.query(
+        `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+         values ($1,$2,'File',$3,'src/index.ts')`,
+        [fileId, tenantId, `repo:${repository}:path:src/index.ts`]
+      );
+      await pool.query(
+        `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+         select $1 || candidate.index,$2,'Feature',$3 || candidate.index,
+                case when candidate.index=1600 then 'Needle capability' else 'Unrelated capability ' || candidate.index end
+         from generate_series(0,1600) candidate(index)`,
+        [`feature-limit-entity-${suffix}-`, tenantId, `feature:${repository}:`]
+      );
+      await pool.query(
+        `insert into jina_ontology.assertions
+          (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
+           object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,source_observation_id,
+           generator_version,registry_version,recorded_at)
+         select case when candidate.index=1600 then $1 else $2 || lpad(candidate.index::text,4,'0') end,
+                $3,$4,'source',$5,'File',$6,'src/index.ts','IMPLEMENTS',
+                $7 || candidate.index,'Feature',$8 || candidate.index,
+                case when candidate.index=1600 then 'Needle capability' else 'Unrelated capability ' || candidate.index end,
+                'active',0.9,'The source file implements this capability.','[]'::jsonb,$9,$10,$11,$12
+         from generate_series(0,1600) candidate(index)`,
+        [
+          `z-feature-limit-target-${suffix}`, `a-feature-limit-${suffix}-`, tenantId, repository, fileId,
+          `repo:${repository}:path:src/index.ts`, `feature-limit-entity-${suffix}-`, `feature:${repository}:`,
+          observation.rows[0].id, ONTOLOGY_GENERATOR_VERSION, ONTOLOGY_REGISTRY_VERSION, now
+        ]
+      );
+    } finally {
+      await pool.end();
+    }
+    const result = await store.retrieve({
+      tenantId, allowedRepositories: [repository], repository, ref: "main", template: "feature_trace",
+      featureText: "Needle capability"
+    });
+    assert.equal(result.items[0]?.title, "src/index.ts implements Needle capability",
+      "matching happens before the result limit can discard a valid feature");
+  } finally {
+    await store.close();
+  }
+});
+
 test("Postgres ontology roles separate reads and runtime writes from schema ownership", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
@@ -76,6 +227,26 @@ test("Postgres ontology roles separate reads and runtime writes from schema owne
     await store.list("role-fixture");
     await pool.query(ONTOLOGY_ROLES_SQL);
 
+    const privileges = await pool.query<{
+      manifest_writes_manifest: boolean; manifest_writes_blobs: boolean;
+      graph_writes_graphs: boolean; graph_writes_assertions: boolean;
+      query_writes_metrics: boolean; query_writes_assertions: boolean;
+      knowledge_writes_assertion_relations: boolean;
+    }>(`select
+      has_table_privilege('jina_ontology_manifest','jina_ontology.ref_manifest','INSERT') as manifest_writes_manifest,
+      has_table_privilege('jina_ontology_manifest','jina_ontology.blobs','INSERT') as manifest_writes_blobs,
+      has_table_privilege('jina_ontology_graph','jina_ontology.graphs','INSERT') as graph_writes_graphs,
+      has_table_privilege('jina_ontology_graph','jina_ontology.assertions','INSERT') as graph_writes_assertions,
+      has_table_privilege('jina_ontology_query','jina_ontology.retrieval_metrics','INSERT') as query_writes_metrics,
+      has_table_privilege('jina_ontology_query','jina_ontology.assertions','INSERT') as query_writes_assertions,
+      has_table_privilege('jina_ontology_knowledge','jina_ontology.assertion_relations','INSERT') as knowledge_writes_assertion_relations`);
+    assert.deepEqual(privileges.rows[0], {
+      manifest_writes_manifest: true, manifest_writes_blobs: false,
+      graph_writes_graphs: true, graph_writes_assertions: false,
+      query_writes_metrics: true, query_writes_assertions: false,
+      knowledge_writes_assertion_relations: true
+    });
+
     const client = await pool.connect();
     try {
       await client.query("begin");
@@ -83,6 +254,22 @@ test("Postgres ontology roles separate reads and runtime writes from schema owne
       await client.query("select count(*) from jina_ontology.graphs");
       await assert.rejects(
         client.query("insert into jina_ontology.blobs (tenant_id,blob_sha,byte_size) values ('role-fixture','reader-write',1)"),
+        /permission denied/
+      );
+      await client.query("rollback");
+
+      await client.query("begin");
+      await client.query("set local role jina_ontology_query");
+      await client.query(
+        `insert into jina_ontology.retrieval_metrics (tenant_id,repository,template,duration_ms,truncated,recorded_at)
+         values ('role-fixture','omlabs/role-fixture','structure',1,false,now())`
+      );
+      await assert.rejects(
+        client.query(`insert into jina_ontology.assertions
+          (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
+           object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,generator_version,registry_version,recorded_at)
+          values ('denied','role-fixture','omlabs/role-fixture','source','none','File','none','none','REFERENCES',
+                  'none','File','none','none','active',1,'denied','[]','none','none',now())`),
         /permission denied/
       );
       await client.query("rollback");
@@ -132,9 +319,9 @@ test("Postgres projections retain reviewed RESOLVED_BY relationships after an up
       `insert into jina_ontology.assertions
         (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
          predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
-         source_observation_id,asserted_by,generator_version,registry_version,recorded_at)
+         explanation,source_observation_id,asserted_by,generator_version,registry_version,recorded_at)
        values ($1,$2,$3,$4,$5,'Issue',$6,'Legacy issue','RESOLVED_BY',$7,'PullRequest',$8,'PR #2',
-               'active',1,'[]'::jsonb,null,'legacy:migration','legacy','repository-context-v5.4',$9)`,
+               'active',1,'[]'::jsonb,'Legacy inverse assertion retained for migration compatibility.',null,'legacy:migration','legacy','repository-context-v5.4',$9)`,
       [stableId("assertion", `${tenantId}:legacy-resolved-by`), tenantId, repository, commitSha, issueId,
         `github:issue:${repository}#1`, pullRequestId, `github:pr:${repository}#2`, "2026-07-21T00:00:00.000Z"]
     );
@@ -215,6 +402,7 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
         predicate: "DOCUMENTED_BY",
         object: { kind: "Document", naturalKey: `repo:${snapshot.repository}:path:README.md`, label: "README" },
         confidence: 0.95,
+        explanation: "The README explicitly documents this repository.",
         evidence: ["README.md:1"]
       }]
     });
@@ -268,15 +456,26 @@ test("Postgres materializes source-backed services, packages, deployments, incid
       { tenantId, repository, kind: "incident", source: "github", externalId: `${repository}#99`, title: "Deletion outage", issueNumber: 99, recordedAt: now }
     ]);
     const relationships = [
-      { predicate: "INCIDENT_IMPACTS", object: { kind: "Service" as const, key: `service:compose:${repository}:api`, displayName: "api" }, qualifiers: undefined },
-      { predicate: "INTRODUCED_BY", object: { kind: "Deployment" as const, key: `deployment:github:${repository}:deployment-17`, displayName: "production deployment 17" }, qualifiers: { reason: "the deployment removed the administrator deletion guard" } }
+      {
+        predicate: "INCIDENT_IMPACTS",
+        object: { kind: "Service" as const, key: `service:compose:${repository}:api`, displayName: "api" },
+        qualifiers: undefined,
+        reason: "The incident record identifies the API service as impacted."
+      },
+      {
+        predicate: "INTRODUCED_BY",
+        object: { kind: "Deployment" as const, key: `deployment:github:${repository}:deployment-17`, displayName: "production deployment 17" },
+        qualifiers: { reason: "the deployment removed the administrator deletion guard" },
+        reason: "The deployment removed the administrator deletion guard and introduced the incident."
+      }
     ];
     for (const [index, relationship] of relationships.entries()) {
       await store.executeCommand(tenantId, "svc:test", {
         type: "assign_relationship", repository,
         subject: { kind: "Incident", key: `incident:github:${repository}#99`, displayName: "Deletion outage" },
         predicate: relationship.predicate, object: relationship.object,
-        ...(relationship.qualifiers ? { qualifiers: relationship.qualifiers } : {})
+        ...(relationship.qualifiers ? { qualifiers: relationship.qualifiers } : {}),
+        reason: relationship.reason
       }, `2026-07-21T01:00:0${index + 1}.000Z`);
     }
     for (const assertion of await store.listAssertions(tenantId, repository, { status: "proposed" })) {
@@ -336,7 +535,7 @@ test("Postgres scopes live assertions by repository and preserves qualifier-dist
       subject: { kind: "Issue" as const, naturalKey: "external:issue:1", label: "Issue" },
       predicate: "INTRODUCED_BY",
       object: { kind: "Commit" as const, naturalKey: `repo:shared:sha:${commitSha}`, label: commitSha.slice(0, 12) },
-      confidence: 0.9, evidence: ["docs/root-cause.md:1"], qualifiers: { reason }
+      confidence: 0.9, explanation: reason, evidence: ["docs/root-cause.md:1"], qualifiers: { reason }
     }))
   });
   try {
@@ -372,7 +571,7 @@ test("Postgres scopes live assertions by repository and preserves qualifier-dist
   }
 });
 
-test("Postgres stores commit churn and reconstructs historical manifests", {
+test("Postgres stores commit churn while manifests come directly from recorded trees", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
   assert.ok(connectionString);
@@ -437,6 +636,13 @@ test("Postgres stores commit churn and reconstructs historical manifests", {
       ["README.md", readmeBlob], ["src/app.ts", newAppBlob], ["src/new.ts", sourceBlob]
     ]);
     assert.deepEqual(await manifest(headSha), [["README.md", readmeBlob], ["src/app.ts", newAppBlob]]);
+    await pool.query(
+      `delete from jina_ontology.commit_changes where tenant_id=$1 and repository=$2 and commit_sha=$3`,
+      [tenantId, repository, childSha]
+    );
+    assert.deepEqual(await manifest(childSha), [
+      ["README.md", readmeBlob], ["src/app.ts", newAppBlob], ["src/new.ts", sourceBlob]
+    ], "tree state remains correct even when delta rows are unavailable");
   } finally {
     await pool.end();
     await store.close();
@@ -467,6 +673,7 @@ test("Postgres preserves review and provenance when a new model contract confirm
       predicate: "DOCUMENTED_BY",
       object: { kind: "Document" as const, naturalKey: `repo:${repository}:path:README.md`, label: "README" },
       confidence: 0.95,
+      explanation: "The README explicitly documents this repository.",
       evidence: ["README.md:1"]
     }]
   };
@@ -474,6 +681,9 @@ test("Postgres preserves review and provenance when a new model contract confirm
     await store.saveAssertionBatch({ ...common, taskId: `v1-${suffix}`, generatedAt: "2026-07-20T00:00:00Z", generatorVersion: "model-v1" });
     const [proposal] = await store.listAssertions(tenantId, repository);
     assert.ok(proposal);
+    await assert.rejects(store.executeCommand(tenantId, "svc:reviewer", {
+      type: "review_assertion", assertionId: proposal.id, decision: "reject", reason: "not supported"
+    }, "2026-07-20T00:00:20Z"), /rejection.*code/);
     await store.executeCommand(tenantId, "svc:reviewer", {
       type: "review_assertion", assertionId: proposal.id, decision: "accept"
     }, "2026-07-20T00:00:30Z");
@@ -485,6 +695,12 @@ test("Postgres preserves review and provenance when a new model contract confirm
     assert.equal(assertions.length, 1);
     assert.equal(assertions[0]?.generator, "model:model-v1");
     assert.equal(assertions[0]?.status, "active");
+    const guardPool = new Pool({ connectionString });
+    await assert.rejects(
+      guardPool.query(`update jina_ontology.assertions set explanation='rewritten' where tenant_id=$1 and id=$2`, [tenantId, proposal.id]),
+      /explanation is immutable/
+    );
+    await guardPool.end();
 
     const concurrentRepository = `${repository}-concurrent`;
     const concurrent = {
@@ -528,6 +744,7 @@ test("Postgres preserves review and provenance when a new model contract confirm
         predicate: "OWNED_BY",
         object: { kind: "Team" as const, naturalKey: "github:team:omlabs/platform", label: "@omlabs/platform" },
         confidence: 0.9,
+        explanation: "The CODEOWNERS rule assigns src paths to the platform team.",
         evidence: ["CODEOWNERS:1"],
         qualifiers: { pattern: "src/**" }
       }]
@@ -565,7 +782,8 @@ test("Postgres preserves review and provenance when a new model contract confirm
         type: "assign_relationship", repository: commandRepository,
         subject: { kind: "Repository", key: `github:repo:${commandRepository}`, displayName: commandRepository },
         predicate: "DOCUMENTED_BY",
-        object: { kind: "Document", key: `repo:${commandRepository}:path:README.md`, displayName: "README" }
+        object: { kind: "Document", key: `repo:${commandRepository}:path:README.md`, displayName: "README" },
+        reason: "The README explicitly documents this repository."
       }, "2026-07-20T00:04:01Z")
     ]);
     const liveDocumentation = (await store.listAssertions(tenantId, commandRepository, { predicate: "DOCUMENTED_BY" }))
@@ -584,7 +802,8 @@ test("Postgres preserves review and provenance when a new model contract confirm
       },
       predicate: "OWNED_BY",
       object: { kind: "Team" as const, key: `github:team:omlabs/${team}`, displayName: `@omlabs/${team}` },
-      qualifiers: { pattern: "src/**" }
+      qualifiers: { pattern: "src/**" },
+      reason: `The src CODEOWNERS rule assigns paths to the ${team} team.`
     }, now);
     await Promise.all([
       assignOwner("platform", "2026-07-20T00:05:00Z"),
@@ -607,10 +826,10 @@ test("Postgres preserves review and provenance when a new model contract confirm
           `insert into jina_ontology.assertions
             (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
              predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
-             asserted_by,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at)
+             explanation,asserted_by,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at)
            select $1,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
                   predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
-                  asserted_by,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at
+                  explanation,asserted_by,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at
            from jina_ontology.assertions where tenant_id=$2 and id=$3`,
           [stableId("assertion", `${tenantId}:duplicate-active`), tenantId, active.rows[0]?.id]
         ),
@@ -723,6 +942,7 @@ test("Postgres projects an accepted virtual issue by entity identity", {
         predicate: "RESOLVES",
         object: { kind: "Issue", naturalKey: issueKey, label: "Administrators encounter an authorization error" },
         confidence: 0.95,
+        explanation: "The pull request fixes the authorization error represented by this derived issue.",
         evidence: ["src/auth.ts:1"]
       }, {
         subject: { kind: "PullRequest", naturalKey: `github:pr:${repository}#43`, label: "PR #43" },
@@ -732,6 +952,7 @@ test("Postgres projects an accepted virtual issue by entity identity", {
           label: "Administrators encounter an authorization error"
         },
         confidence: 0.95,
+        explanation: "The pull request fixes the authorization error represented by this derived issue.",
         evidence: ["src/auth.ts:1"]
       }]
     });
@@ -880,6 +1101,7 @@ test("Postgres projects and retrieves a reviewed Feature", {
         predicate: "IMPLEMENTS",
         object: { kind: "Feature", naturalKey: featureKey, label: "Administrator deletion" },
         confidence: 0.96,
+        explanation: "The authorization file implements administrator deletion behavior.",
         evidence: ["src/auth.ts:1"]
       }]
     });
@@ -1060,12 +1282,14 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
       assertions: [
         {
           subject: { kind: "Repository" as const, naturalKey: `github:repo:${repository}`, label: repository }, predicate: "DOCUMENTED_BY",
-          object: { kind: "Document" as const, naturalKey: `repo:${repository}:path:README.md`, label: "README" }, confidence: 0.99, evidence: ["README.md:1"]
+          object: { kind: "Document" as const, naturalKey: `repo:${repository}:path:README.md`, label: "README" },
+          confidence: 0.99, explanation: "The README explicitly documents this repository.", evidence: ["README.md:1"]
         },
         {
           subject: { kind: "Issue" as const, naturalKey: `github:issue:${repository}#7`, label: "Issue #7" }, predicate: "INTRODUCED_BY",
           object: { kind: "Commit" as const, naturalKey: `repo:${repository}:sha:${headSha}`, label: headSha.slice(0, 12) },
-          confidence: 0.99, evidence: ["src/app.ts:1"], qualifiers: { reason: "The commit bypassed the app guard." }
+          confidence: 0.99, explanation: "The commit bypassed the app guard.", evidence: ["src/app.ts:1"],
+          qualifiers: { reason: "The commit bypassed the app guard." }
         }
       ]
     };
@@ -1214,6 +1438,21 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     assert.equal(sourceOwnership?.evidence.some((value) => value.startsWith("observation:")), true);
     assert.equal([...graph.nodes, ...graph.edges].every((item) => item.evidence.length > 0), true);
 
+    const platformId = stableId("entity", `${tenantId}:Team:team:platform`);
+    const ownersId = stableId("entity", `${tenantId}:Team:github:team:omlabs/owners`);
+    await store.executeCommand(tenantId, "svc:identity", {
+      type: "merge_entities", fromEntityId: platformId, toEntityId: ownersId, reason: "The curated and GitHub teams are the same team."
+    }, "2026-07-20T00:08:10.000Z");
+    const mergedOwnership = (await store.listAssertions(tenantId, repository, { predicate: "OWNED_BY" }))
+      .find((assertion) => assertion.subjectNaturalKey.endsWith("path:src/app.ts"));
+    assert.equal(mergedOwnership?.objectNaturalKey, "github:team:omlabs/owners", "assertion reads follow redirects without rewriting provenance");
+    await store.executeCommand(tenantId, "svc:identity", {
+      type: "unmerge_entities", fromEntityId: platformId, toEntityId: ownersId, reason: "Undo the fixture identity merge."
+    }, "2026-07-20T00:08:20.000Z");
+    const unmergedOwnership = (await store.listAssertions(tenantId, repository, { predicate: "OWNED_BY" }))
+      .find((assertion) => assertion.subjectNaturalKey.endsWith("path:src/app.ts"));
+    assert.equal(unmergedOwnership?.objectNaturalKey, "team:platform");
+
     const otherRepository = `${repository}-other`;
     await store.planIngestion({
       tenantId, repository: otherRepository, ref: "main", commitSha: "9".repeat(40), treeSha: "8".repeat(40),
@@ -1224,6 +1463,9 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:08:40.000Z");
     const beforeDrain = await store.operationalMetrics(tenantId, "2026-07-20T00:08:45.000Z");
     assert.equal(Object.values(beforeDrain.outboxDepth).reduce((sum, count) => sum + count, 0) > 0, true);
+    assert.equal((beforeDrain.outboxDepthByConsumer.graph ?? 0) > 0, true);
+    assert.equal(beforeDrain.parsedBlobCountLastHour > 0, true);
+    assert.equal(beforeDrain.retrievalTemplates.some((metric) => metric.template === "structure" && metric.requests > 0), true);
     const drained = await store.drainDerivedProjectionEvents(tenantId, "2026-07-20T00:08:50.000Z");
     assert.equal(drained.processedEventCount > 0, true);
     assert.equal(drained.rebuiltRepositories.includes(otherRepository), true);

@@ -2,6 +2,13 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 
 export type GitHubWebhookEvent =
   | {
+      readonly type: "push";
+      readonly ref: string;
+      readonly headSha: string;
+      readonly beforeSha?: string;
+      readonly deleted: boolean;
+    }
+  | {
       readonly type: "pull_request.opened";
       readonly pullRequestNumber: number;
       readonly headSha: string;
@@ -34,6 +41,7 @@ export type GitHubReviewTriggerEvent = Extract<
 >;
 
 export type GitHubIssueTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "issue.opened" }>;
+export type GitHubOntologyTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "push" }>;
 
 export interface ParsedGitHubWebhook {
   readonly event: GitHubWebhookEvent;
@@ -58,6 +66,10 @@ export function isIssueTrigger(event: GitHubWebhookEvent): event is GitHubIssueT
   return event.type === "issue.opened";
 }
 
+export function isOntologyTrigger(event: GitHubWebhookEvent): event is GitHubOntologyTriggerEvent {
+  return event.type === "push" && !event.deleted && event.ref.startsWith("refs/heads/");
+}
+
 /** Verify the exact raw request bytes against GitHub's X-Hub-Signature-256 header. */
 export function verifyGitHubWebhookSignature(
   secret: string,
@@ -79,7 +91,7 @@ export function verifyGitHubWebhookSignature(
  * Unsupported event/action pairs return undefined and are acknowledged without work.
  */
 export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): ParsedGitHubWebhook | undefined {
-  if (eventName !== "pull_request" && eventName !== "issues") {
+  if (eventName !== "pull_request" && eventName !== "issues" && eventName !== "push") {
     return undefined;
   }
 
@@ -91,7 +103,6 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
   }
 
   const root = requiredRecord(payload, "payload");
-  const action = requiredString(root.action, "action");
   const repository = requiredRecord(root.repository, "repository");
   const repositoryFullName = requiredString(repository.full_name, "repository.full_name");
   const common = {
@@ -100,6 +111,22 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
     ...optionalNestedNumberProperty("installationId", root.installation, "id"),
     ...optionalNestedStringProperty("senderLogin", root.sender, "login")
   };
+
+  if (eventName === "push") {
+    const deleted = root.deleted === true;
+    return {
+      ...common,
+      event: {
+        type: "push",
+        ref: requiredString(root.ref, "ref"),
+        headSha: requiredString(root.after, "after"),
+        ...optionalStringProperty("beforeSha", root.before),
+        deleted
+      }
+    };
+  }
+
+  const action = requiredString(root.action, "action");
 
   if (eventName === "pull_request") {
     if (action !== "opened" && action !== "synchronize" && action !== "closed") {

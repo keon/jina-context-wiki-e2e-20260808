@@ -252,6 +252,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     }
     const affectedIds: string[] = [];
     if (command.type === "review_assertion") {
+      if (command.decision === "reject" && (!command.reason || !command.rejectionCode)) {
+        throw new Error("assertion rejection requires a reason and rejection code");
+      }
       let found = false;
       const human = this.humanAssertions.get(command.assertionId);
       if (human?.tenantId === tenantId) {
@@ -353,12 +356,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
 
   async operationalMetrics(tenantId: string): Promise<OntologyOperationalMetrics> {
     return {
-      outboxDepth: {}, oldestOutboxAgeSeconds: 0,
+      outboxDepth: {}, outboxDepthByConsumer: {}, oldestOutboxAgeSeconds: 0, reconciliationLagSeconds: 0,
       unparsedBlobCount: [...this.snapshots.values()].filter((snapshot) => snapshot.tenantId === tenantId)
         .flatMap((snapshot) => snapshot.files).filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION))).length,
+      parsedBlobCountLastHour: 0,
       manifestStalenessSeconds: 0, searchStalenessSeconds: 0,
       proposedAssertionCount: this.allAssertions()
         .filter((assertion) => assertion.tenantId === tenantId && assertion.status === "proposed").length,
+      unexplainedAssertionCount: this.allAssertions()
+        .filter((assertion) => assertion.tenantId === tenantId && !assertion.explanation).length,
+      pendingErasureEventCount: 0, retrievalTemplates: [],
       acceptanceRates: []
     };
   }
@@ -396,7 +403,10 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         objectLabel: assertion.object.label,
         status: assertion.status,
         ...(assertion.confidence !== undefined ? { confidence: assertion.confidence } : {}),
-        evidence: assertion.evidence,
+        ...(assertion.explanation ? { explanation: assertion.explanation } : {}),
+        evidence: assertion.evidence.length > 0
+          ? assertion.evidence
+          : assertion.sourceObservationId ? [`observation:${assertion.sourceObservationId}`] : [],
         qualifiers: assertion.qualifiers ?? {},
         generator: assertion.commitSha === "source"
           ? `source:${assertion.generatorVersion.replace(/-normalizer-v1$/, "")}`
@@ -470,7 +480,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         const qualifiers = intent.qualifiers ?? {};
         const assertionId = stableId(
           "assertion",
-          `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${stableId("q", canonicalJson(qualifiers))}`
+          `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${stableId("q", canonicalJson(qualifiers))}:${observationId}`
         );
         this.sourceAssertions.set(assertionId, {
           id: assertionId,
@@ -482,6 +492,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
           object: { kind: intent.object.kind, naturalKey: intent.object.key, label: intent.object.displayName },
           status: "active",
           confidence: 1,
+          explanation: intent.explanation,
           evidence: [],
           sourceObservationId: observationId,
           qualifiers,
@@ -643,7 +654,7 @@ function memoryIssueTraceItems(
     const changes = snapshot ? computeCommitChanges(snapshot.files, parent?.files).map((change) => ({
       commitSha: sha, path: change.path, change: change.change, ...(change.oldPath ? { oldPath: change.oldPath } : {})
     })) : [];
-    const reason = typeof assertion.qualifiers?.reason === "string" ? assertion.qualifiers.reason : undefined;
+    const reason = assertion.explanation ?? (typeof assertion.qualifiers?.reason === "string" ? assertion.qualifiers.reason : undefined);
     return [{
       sha,
       url: `https://github.com/${request.repository}/commit/${sha}`,
@@ -987,9 +998,11 @@ export function createOntologyProjection(
       plane: "knowledge",
       confidence: assertion.confidence,
       ...(Object.keys(assertion.qualifiers ?? {}).length > 0 ? { qualifiers: assertion.qualifiers } : {}),
-      ...(assertion.predicate === "INTRODUCED_BY" && typeof assertion.qualifiers?.reason === "string"
-        ? { why: assertion.qualifiers.reason }
-        : {}),
+      ...(assertion.explanation
+        ? { why: assertion.explanation }
+        : assertion.predicate === "INTRODUCED_BY" && typeof assertion.qualifiers?.reason === "string"
+          ? { why: assertion.qualifiers.reason }
+          : {}),
       evidence
     });
   }

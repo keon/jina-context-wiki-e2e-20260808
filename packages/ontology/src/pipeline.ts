@@ -17,8 +17,8 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v12-causal";
-export const ONTOLOGY_PROJECTION_VERSION = "causal-graph-v2";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v13-causal";
+export const ONTOLOGY_PROJECTION_VERSION = "causal-graph-v3";
 
 export interface RepositoryTreeEntry {
   readonly path: string;
@@ -160,6 +160,8 @@ export interface GeneratedAssertion {
   readonly predicate: string;
   readonly object: OntologyEntityRef;
   readonly confidence: number;
+  /** Why the cited evidence supports this semantic relationship. */
+  readonly explanation: string;
   readonly evidence: readonly string[];
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
 }
@@ -185,7 +187,9 @@ export interface OntologyAssertionBatch {
   readonly assertions: readonly GeneratedAssertion[];
 }
 
-export interface StoredAssertion extends GeneratedAssertion {
+export interface StoredAssertion extends Omit<GeneratedAssertion, "explanation"> {
+  /** Optional only while reading assertions created before the explanation migration. */
+  readonly explanation?: string;
   readonly id: string;
   readonly tenantId: string;
   readonly repository: string;
@@ -258,6 +262,7 @@ export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly
     if (!Number.isFinite(assertion.confidence) || assertion.confidence < 0 || assertion.confidence > 1) {
       throw new Error(`${predicate} confidence must be between 0 and 1`);
     }
+    const explanation = requiredAssertionExplanation(predicate, assertion.explanation);
     if (assertion.evidence.length === 0) throw new Error(`${predicate} must include evidence`);
     const evidence = assertion.evidence.map((value) => validateEvidence(value).value);
     const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
@@ -266,6 +271,7 @@ export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly
     return {
       ...assertion,
       predicate,
+      explanation,
       evidence,
       id: stableId(
         "assertion",
@@ -474,6 +480,7 @@ export function assertionsFromGeneratedOntology(
         label: object.label
       },
       confidence: edge.confidence ?? 0,
+      explanation: requiredAssertionExplanation(edge.predicate, edge.why),
       evidence: edge.evidence,
       ...(edge.predicate === "INTRODUCED_BY"
         ? { qualifiers: { reason: requiredCausalReason(edge.why) } }
@@ -579,6 +586,13 @@ function canonicalWorkItemId(value: string, kind: "Issue" | "PullRequest"): stri
 function requiredCausalReason(value: string | undefined): string {
   if (!value?.trim()) throw new Error("INTRODUCED_BY must explain why the commit caused the issue");
   return value.trim();
+}
+
+function requiredAssertionExplanation(predicate: string, value: string | undefined): string {
+  const explanation = value?.replace(/\s+/g, " ").trim();
+  if (!explanation) throw new Error(`${predicate} must explain why the evidence supports the relationship`);
+  if (explanation.length > 1_000) throw new Error(`${predicate} explanation must not exceed 1000 characters`);
+  return explanation;
 }
 
 function validateEvidence(value: string): EvidenceCitation {

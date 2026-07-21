@@ -1352,7 +1352,22 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
   if (type === "review_assertion") {
     const decision = requiredString(value.decision, "command.decision");
     if (decision !== "accept" && decision !== "reject" && decision !== "retract") throw new Error("unsupported assertion review decision");
-    return { type, assertionId: requiredString(value.assertionId, "command.assertionId"), decision, ...(reason ? { reason } : {}) };
+    const rejectionCode = typeof value.rejectionCode === "string" ? value.rejectionCode : undefined;
+    if (decision === "reject") {
+      if (!reason) throw new Error("assertion rejection reason is required");
+      if (!rejectionCode || !["incorrect_relationship", "insufficient_evidence", "unsupported_explanation", "other"].includes(rejectionCode)) {
+        throw new Error("assertion rejection code is required");
+      }
+    } else if (rejectionCode) {
+      throw new Error("assertion rejection code is only valid for rejection decisions");
+    }
+    return {
+      type,
+      assertionId: requiredString(value.assertionId, "command.assertionId"),
+      decision,
+      ...(reason ? { reason } : {}),
+      ...(rejectionCode ? { rejectionCode: rejectionCode as "incorrect_relationship" | "insufficient_evidence" | "unsupported_explanation" | "other" } : {})
+    };
   }
   if (type === "relate_assertions") {
     const relation = requiredString(value.relation, "command.relation");
@@ -1395,6 +1410,7 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     };
   }
   if (type === "assign_relationship") {
+    if (!reason) throw new Error("relationship explanation is required");
     const entity = (input: unknown, name: string) => {
       if (!isRecord(input)) throw new Error(`${name} must be an object`);
       const kind = requiredString(input.kind, `${name}.kind`);
@@ -1416,7 +1432,7 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     return {
       type, ...(typeof value.repository === "string" ? { repository: value.repository } : {}),
       subject: entity(value.subject, "command.subject"), predicate: requiredString(value.predicate, "command.predicate"),
-      object: entity(value.object, "command.object"), ...(qualifiers ? { qualifiers } : {}), ...(reason ? { reason } : {})
+      object: entity(value.object, "command.object"), ...(qualifiers ? { qualifiers } : {}), reason
     };
   }
   throw new Error("unsupported ontology command");

@@ -149,6 +149,8 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /id="assertion-predicate-filter"/);
   assert.match(html, /id="assertion-kind-filter"/);
   assert.match(html, /function renderAssertionReview/);
+  assert.match(html, /function assertionRejectionFields/);
+  assert.match(html, /await reviewAssertion\(button\.dataset\.assertionId, decision, rejectionCode, reason\)/);
   assert.match(html, /supportingAssertionIds/);
   assert.match(html, /contradictingAssertionIds/);
   for (const kind of ["Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"]) {
