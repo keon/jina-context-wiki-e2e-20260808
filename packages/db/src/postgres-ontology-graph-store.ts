@@ -238,28 +238,23 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void> {
     await this.initialize();
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
-      await client.query(
-        `delete from jina_ontology.repository_acl where tenant_id=$1 and principal_id=$2`,
-        [tenantId, principalId]
-      );
-      if (repositories.length > 0) {
-        await client.query(
-          `insert into jina_ontology.repository_acl (tenant_id,repository,principal_id,role,created_at)
-           select $1, repository, $2, 'reader', now()
-             from unnest($3::text[]) as repository`,
-          [tenantId, principalId, repositories]
-        );
-      }
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
+    await this.pool.query(
+      `with desired(repository) as materialized (
+         select distinct repository from unnest($3::text[]) as repository
+       ), removed as (
+         delete from jina_ontology.repository_acl acl
+          where acl.tenant_id=$1 and acl.principal_id=$2
+            and not exists (select 1 from desired where desired.repository=acl.repository)
+         returning acl.repository
+       )
+       insert into jina_ontology.repository_acl (tenant_id,repository,principal_id,role,created_at)
+       select $1, desired.repository, $2, 'reader', now()
+         from desired
+       on conflict (tenant_id,repository,principal_id) do update
+         set role=excluded.role
+       where jina_ontology.repository_acl.role is distinct from excluded.role`,
+      [tenantId, principalId, repositories]
+    );
   }
 
   async latest(tenantId: string): Promise<OntologyGraph | undefined> {
