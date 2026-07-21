@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
@@ -1269,6 +1270,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await client.query("begin");
       await assertRepositoryWritable(client, tenantId, repository);
       if (consumers.length === 3) await client.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [tenantId, repository]);
+      const claimToken = `projection:${repository}:${randomUUID()}`;
       const claimed = await client.query<{ id: string; event_type: string; consumer: string; payload: Record<string, unknown> }>(
         `with candidates as (
            select id from jina_ontology.outbox
@@ -1279,9 +1281,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              and payload->>'refName'=$4
            order by created_at,id for update skip locked limit 1000
          )
-         update jina_ontology.outbox o set claimed_by='projection:' || $3,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
+         update jina_ontology.outbox o set claimed_by=$6,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
          from candidates where o.id=candidates.id returning o.id,o.event_type,o.consumer,o.payload`,
-        [tenantId, now, repository, ref, consumers]
+        [tenantId, now, repository, ref, consumers, claimToken]
       );
       const head = await client.query<{ commit_sha: string }>(
         `select commit_sha from jina_ontology.refs where tenant_id=$1 and repository=$2 and ref_name=$3`,
@@ -1380,8 +1382,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       if (claimed.rows.length) {
         await client.query(
           `update jina_ontology.outbox set processed_at=$2,claimed_by=null,claimed_at=null,claim_expires_at=null
-           where id=any($1::text[])`,
-          [claimed.rows.map((row) => row.id), now]
+           where id=any($1::text[]) and claimed_by=$3`,
+          [claimed.rows.map((row) => row.id), now, claimToken]
         );
       }
       await client.query("commit");
@@ -1410,7 +1412,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     let processedEventCount = 0;
     const consumers = ["legacy", "manifest", "search", "reconciliation", "graph"] as const;
     for (const consumer of consumers) {
-      const claimOwner = `projection:${consumer}`;
+      const claimOwner = `projection:${consumer}:${randomUUID()}`;
       const claimed = await this.pool.query<{ id: string; repository: string | null }>(
         `with candidates as (
            select id,coalesce(payload->>'repoId',payload#>>'{scope,repository}') as repository
@@ -3599,10 +3601,11 @@ export const ONTOLOGY_SCHEMA_SQL = `
         blob_sha text not null,
         parser_version text not null,
         language text,
+        parsed_at timestamptz not null default now(),
         primary key (tenant_id,blob_sha,parser_version),
         foreign key (tenant_id,blob_sha) references jina_ontology.blobs(tenant_id,blob_sha)
       );
-      alter table jina_ontology.blob_analyses drop column if exists parsed_at;
+      alter table jina_ontology.blob_analyses add column if not exists parsed_at timestamptz not null default now();
       create table if not exists jina_ontology.blob_symbols (
         tenant_id text not null,
         blob_sha text not null,

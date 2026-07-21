@@ -63,6 +63,7 @@ const WORKER_TOPICS = [
   "run-ontology-assert",
   "run-ontology-project"
 ] as const;
+const LEGACY_ONTOLOGY_TOPICS = new Set(["run-ontology", "run-ontology-prepare", "run-ontology-generate"]);
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -170,7 +171,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       publications = migrated.snapshot.publications;
       devDeliverySequence = migrated.snapshot.devDeliverySequence;
       pendingOntologyCompletions = migrated.snapshot.pendingOntologyCompletions ?? [];
-      if (migrated.changed) await persist();
+      const retiredIntakeState = retireLegacyOntologyWork(intakeState, nowIso());
+      const retiredLegacyWork = retiredIntakeState !== intakeState;
+      intakeState = retiredIntakeState;
+      if (migrated.changed || retiredLegacyWork) await persist();
       if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
       return;
     }
@@ -319,7 +323,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
     await synchronize();
-    await reconcilePendingOntologyCompletions();
     const url = new URL(request.url ?? "/", "http://localhost");
 
     if (request.method === "OPTIONS") {
@@ -600,6 +603,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
+      await reconcilePendingOntologyCompletions();
       await claimWork(request, response, tenantId);
       return;
     }
@@ -699,11 +703,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function planOntologyIngestion(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
     const snapshot = parseRepositorySnapshot(body.snapshot, tenantId);
-    const task = requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "ontology_ingest");
-    if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
-      throw invalidRequest("repository snapshot does not match ontology task");
-    }
-    const plan = await ontologyStore.planIngestion(snapshot);
+    const plan = await mutate(async () => {
+      const task = requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "ontology_ingest");
+      if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
+        throw invalidRequest("repository snapshot does not match ontology task");
+      }
+      return ontologyStore.planIngestion(snapshot);
+    });
     json(response, 200, plan);
   }
 
@@ -721,28 +727,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function applyOntologyBlobAnalyses(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
     const commitSha = requiredGitSha(body.commitSha, "commitSha");
     const analyses = parseBlobAnalyses(body.analyses);
-    await ontologyStore.applyBlobAnalyses({
-      tenantId,
-      repository: requiredString(task.metadata.repository, "task.repository"),
-      commitSha
-    }, analyses);
+    await mutate(async () => {
+      const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+      await ontologyStore.applyBlobAnalyses({
+        tenantId,
+        repository: requiredString(task.metadata.repository, "task.repository"),
+        commitSha
+      }, analyses);
+    });
     json(response, 200, { accepted: true, count: analyses.length });
   }
 
   async function applyOntologyGitHubObservations(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
     if (!Array.isArray(body.observations)) throw invalidRequest("observations must be an array");
     const observations = body.observations.map((value) => parseRepositorySourceObservation(value, tenantId));
-    const repository = requiredString(task.metadata.repository, "task.repository");
-    if (observations.some((observation) => observation.repository !== repository)) {
-      throw invalidRequest("GitHub observation repository does not match task");
-    }
-    json(response, 200, await ontologyStore.applyGitHubObservations(observations));
+    const result = await mutate(async () => {
+      const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+      const repository = requiredString(task.metadata.repository, "task.repository");
+      if (observations.some((observation) => observation.repository !== repository)) {
+        throw invalidRequest("GitHub observation repository does not match task");
+      }
+      return ontologyStore.applyGitHubObservations(observations);
+    });
+    json(response, 200, result);
   }
 
   async function findCachedOntologyAssertions(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -1251,6 +1262,23 @@ function migrateSnapshotTenantAliases(
         }
       }
     : { snapshot, changed };
+}
+
+function retireLegacyOntologyWork(state: GitHubIntakeState, now: string): GitHubIntakeState {
+  const messages = state.board.outbox.filter((message) =>
+    message.status !== "dispatched" && LEGACY_ONTOLOGY_TOPICS.has(message.topic)
+  );
+  if (messages.length === 0) return state;
+  const workflowRootIds = new Set<TaskId>();
+  for (const message of messages) {
+    let task = findTask(state.board, message.taskId);
+    while (task?.parentTaskId) task = findTask(state.board, task.parentTaskId);
+    if (task) workflowRootIds.add(task.id);
+  }
+  let board = state.board;
+  for (const message of messages) board = markOutboxDispatched(board, message.id, now);
+  board = supersedeTaskTree(board, now, (task) => workflowRootIds.has(task.id));
+  return { ...state, board: reduceBoard(board, now) };
 }
 
 function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySnapshot {

@@ -282,6 +282,41 @@ test("worker rejects malformed topic metadata before dispatch", async (context) 
   assert.equal(completions, 0);
 });
 
+test("legacy ontology worker configuration expands to the staged topics", async (context) => {
+  let resolveClaim!: (topics: unknown) => void;
+  const claimed = new Promise<unknown>((resolve) => { resolveClaim = resolve; });
+  const mock = createServer(async (request, response) => {
+    const body = await readJson(request) as { topics?: unknown };
+    if (request.url === "/internal/worker/claim") {
+      resolveClaim(body.topics);
+      return json(response, 204, {});
+    }
+    if (request.url === "/internal/ontology/outbox/drain") return json(response, 200, { processedEventCount: 0 });
+    json(response, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  const address = mock.address() as AddressInfo;
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: "0",
+      JINA_API_URL: `http://127.0.0.1:${address.port}`,
+      INTERNAL_API_TOKEN: "test-token",
+      WORKER_TOPICS: "run-ontology",
+      WORKER_POLL_INTERVAL_MS: "10"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await stopWorker(worker);
+    const closed = new Promise<void>((resolve, reject) => mock.close((error) => error ? reject(error) : resolve()));
+    mock.closeAllConnections();
+    await closed;
+  });
+
+  assert.deepEqual(await claimed, ["run-ontology-ingest", "run-ontology-assert", "run-ontology-project"]);
+});
+
 test("worker aborts active work and never completes after lease renewal is rejected", async (context) => {
   let claims = 0;
   let completions = 0;

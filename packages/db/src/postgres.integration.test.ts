@@ -5,6 +5,7 @@ import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
+  createOntologyGraph,
   derivedIssueNaturalKey,
   featureNaturalKey,
   stableId
@@ -29,13 +30,11 @@ test("Postgres schema removes retired persistence surfaces", () => {
     assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`drop table if exists jina_ontology\\.${table}`));
     assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, new RegExp(`create table if not exists jina_ontology\\.${table}`));
   }
-  for (const [table, column] of [
-    ["observations", "supersedes_id"],
-    ["blob_analyses", "parsed_at"]
-  ]) {
+  for (const [table, column] of [["observations", "supersedes_id"]]) {
     assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`alter table jina_ontology\\.${table} drop column if exists ${column}`));
   }
-  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /supersedes_id text|parsed_at timestamptz/);
+  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /supersedes_id text/);
+  assert.match(ONTOLOGY_SCHEMA_SQL, /parsed_at timestamptz not null default now\(\)/);
 });
 
 test("Postgres serializes snapshot updates across store instances", {

@@ -10,6 +10,7 @@ import {
   createOntologyGraph,
   MemoryOntologyGraphStore,
   ONTOLOGY_PARSER_VERSION,
+  type BlobAnalysis,
   type RetrievalRequest,
   type RetrievalResult
 } from "@jina/ontology";
@@ -796,6 +797,48 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("startup terminalizes legacy ontology outbox work instead of stranding it", async () => {
+  const stateStore = new MemoryStateStore();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const firstUrl = await listen(first);
+  const created = await fetch(`${firstUrl}/ontology/build`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repository: "omxyz/legacy", ref: "main", requestKey: "legacy" })
+  });
+  assert.equal(created.status, 202);
+  await close(first);
+
+  const snapshot = stateStore.current();
+  assert.ok(snapshot);
+  const legacyMessage = snapshot.intakeState.board.outbox.find((message) => message.topic === "run-ontology-ingest");
+  assert.ok(legacyMessage);
+  stateStore.replace({
+    ...snapshot,
+    intakeState: {
+      ...snapshot.intakeState,
+      board: {
+        ...snapshot.intakeState.board,
+        outbox: snapshot.intakeState.board.outbox.map((message) =>
+          message.id === legacyMessage.id ? { ...message, topic: "run-ontology" } : message
+        )
+      }
+    }
+  });
+
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const secondUrl = await listen(second);
+  try {
+    const board = await fetch(`${secondUrl}/board`).then((response) => response.json() as Promise<{
+      tasks: Array<{ status: string; metadata: Record<string, unknown> }>;
+      outbox: Array<{ id: string; status: string }>;
+    }>);
+    assert.equal(board.outbox.find((message) => message.id === legacyMessage.id)?.status, "dispatched");
+    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").every((task) => task.status === "superseded"), true);
+  } finally {
+    await close(second);
+  }
+});
+
 test("concurrent API instances mutate the latest durable snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
@@ -828,6 +871,73 @@ test("concurrent API instances mutate the latest durable snapshot", async () => 
     assert.equal(board.tasks.length, 6);
   } finally {
     await close(restarted);
+  }
+});
+
+test("repository ingestion writes retain lease ownership until their durable mutation commits", async () => {
+  class GatedOntologyStore extends MemoryOntologyGraphStore {
+    private signalEntered!: () => void;
+    readonly entered = new Promise<void>((resolve) => { this.signalEntered = resolve; });
+    private releaseWrite!: () => void;
+    private readonly released = new Promise<void>((resolve) => { this.releaseWrite = resolve; });
+
+    release(): void { this.releaseWrite(); }
+
+    override async applyBlobAnalyses(
+      scope: { readonly tenantId: string; readonly repository: string; readonly commitSha: string },
+      analyses: readonly BlobAnalysis[]
+    ): Promise<void> {
+      this.signalEntered();
+      await this.released;
+      await super.applyBlobAnalyses(scope, analyses);
+    }
+  }
+
+  const stateStore = new MemoryStateStore();
+  const ontologyStore = new GatedOntologyStore();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
+  try {
+    const build = await fetch(`${firstUrl}/ontology/build`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "first" })
+    });
+    assert.equal(build.status, 202);
+    const ingestion = await claimTopic(firstUrl, "run-ontology-ingest");
+    const commitSha = "a".repeat(40);
+    const blobSha = "b".repeat(40);
+    await postJson(firstUrl, "/internal/ontology/ingest/plan", {
+      messageId: ingestion.message.id,
+      leaseId: ingestion.message.leaseId,
+      snapshot: {
+        repository: "omxyz/fenced", ref: "main", commitSha, treeSha: "c".repeat(40), parents: [],
+        recordedAt: "2026-07-20T00:00:00.000Z", taskId: ingestion.task.id,
+        files: [{ path: "src/index.ts", blobSha, size: 10 }]
+      }
+    });
+
+    const write = fetch(`${firstUrl}/internal/ontology/ingest/blobs`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messageId: ingestion.message.id, leaseId: ingestion.message.leaseId, taskId: ingestion.task.id, commitSha,
+        analyses: [{ blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, language: "typescript", symbols: [], imports: [], edges: [] }]
+      })
+    });
+    await ontologyStore.entered;
+    let replacementSettled = false;
+    const replacement = fetch(`${secondUrl}/ontology/build`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "second" })
+    }).then((response) => { replacementSettled = true; return response; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(replacementSettled, false, "supersession waits for the lease-fenced ontology write");
+
+    ontologyStore.release();
+    assert.equal((await write).status, 200);
+    assert.equal((await replacement).status, 202);
+  } finally {
+    await Promise.all([close(first), close(second)]);
   }
 });
 
@@ -879,7 +989,10 @@ test("ontology completion resumes from a durable intent when final board persist
               { id: "repo", kind: "Repository", label: "resumable", description: "repository", evidence: ["README.md:1"] },
               { id: "readme", kind: "Document", label: "README", description: "documentation", path: "README.md", evidence: ["README.md:1"] }
             ],
-            edges: [{ source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95, evidence: ["README.md:1"] }]
+            edges: [{
+              source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95,
+              why: "The README explicitly documents this repository.", evidence: ["README.md:1"]
+            }]
           }
         }
       })
@@ -887,6 +1000,12 @@ test("ontology completion resumes from a durable intent when final board persist
     assert.equal(firstCompletion.status, 500);
     assert.equal(stateStore.current()?.pendingOntologyCompletions?.length, 1);
 
+    const recoveryPoll = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "recovery", topics: ["run-review"] })
+    });
+    assert.equal(recoveryPoll.status, 204);
     const board = await fetch(`${baseUrl}/board`).then(
       (response) => response.json() as Promise<{ tasks: Array<{ id: string; status: string }> }>
     );
@@ -960,6 +1079,10 @@ class MemoryStateStore implements ApiStateStore {
 
   current(): ApiSnapshot | undefined {
     return this.snapshot ? structuredClone(this.snapshot) : undefined;
+  }
+
+  replace(snapshot: ApiSnapshot): void {
+    this.snapshot = structuredClone(snapshot);
   }
 
   async load(): Promise<ApiSnapshot | undefined> {

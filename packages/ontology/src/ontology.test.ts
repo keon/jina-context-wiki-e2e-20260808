@@ -921,7 +921,8 @@ test("memory administration applies supported commands and rejects unsupported c
   const assigned = await store.executeCommand("t", "svc:test", {
     type: "assign_relationship", repository: "org/repo",
     subject: { kind: "File", key: "repo:org/repo:path:src/app.ts" }, predicate: "IMPLEMENTS",
-    object: { kind: "Feature", key: "repo:org/repo:feature:example" }
+    object: { kind: "Feature", key: "repo:org/repo:feature:example" },
+    reason: "exercise relationship administration"
   }, "2026-07-20T00:02:00.000Z");
   assert.equal(assigned.affectedIds.length, 1);
   assert.equal((await store.listAssertions("t", "org/repo", { status: "proposed", predicate: "IMPLEMENTS" })).length, 1);
@@ -953,7 +954,8 @@ test("memory repository roles enforce administration boundaries and tombstones b
     repository,
     subject: { kind: "File" as const, key: `repo:${repository}:path:src/app.ts` },
     predicate: "IMPLEMENTS",
-    object: { kind: "Feature" as const, key: `repo:${repository}:feature:example` }
+    object: { kind: "Feature" as const, key: `repo:${repository}:feature:example` },
+    reason: "exercise repository role enforcement"
   };
   await assert.rejects(
     store.executeCommand(tenantId, "user:reader@example.com", assignment, now),

@@ -46,6 +46,11 @@ const SUPPORTED_TOPICS = [
   "run-ontology-project"
 ] as const;
 type WorkerTopic = typeof SUPPORTED_TOPICS[number];
+const LEGACY_TOPIC_REPLACEMENTS: Readonly<Record<string, readonly WorkerTopic[]>> = {
+  "run-ontology": ["run-ontology-ingest", "run-ontology-assert", "run-ontology-project"],
+  "run-ontology-prepare": ["run-ontology-ingest"],
+  "run-ontology-generate": ["run-ontology-assert", "run-ontology-project"]
+};
 
 interface WorkMetadataByTopic {
   readonly "run-review": { readonly repository: string; readonly pullRequestNumber: number };
@@ -1046,10 +1051,14 @@ function configuredTopics(value: string | undefined): WorkerTopic[] {
     .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
-  const selected = requested.filter((topic): topic is WorkerTopic => SUPPORTED_TOPICS.includes(topic as WorkerTopic));
-  if (selected.length === 0 || selected.length !== requested.length) {
-    throw new Error(`WORKER_TOPICS must contain only: ${SUPPORTED_TOPICS.join(", ")}`);
-  }
+  const unknown = requested.filter((topic) =>
+    !SUPPORTED_TOPICS.includes(topic as WorkerTopic) && !LEGACY_TOPIC_REPLACEMENTS[topic]
+  );
+  if (unknown.length > 0) throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
+  const selected = requested.flatMap((topic) =>
+    SUPPORTED_TOPICS.includes(topic as WorkerTopic) ? [topic as WorkerTopic] : LEGACY_TOPIC_REPLACEMENTS[topic] ?? []
+  );
+  if (selected.length === 0) throw new Error(`WORKER_TOPICS must contain at least one topic`);
   return [...new Set(selected)];
 }
 
