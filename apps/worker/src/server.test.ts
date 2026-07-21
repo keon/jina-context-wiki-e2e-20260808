@@ -29,7 +29,7 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
           },
           task: {
             id: "task-2",
-            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main" }
+            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main", pipelinePhase: "snapshot" }
           }
         });
       }
@@ -214,14 +214,14 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
   const ingestionResult = completions[1]?.result as Record<string, unknown>;
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
   assert.equal(ingestionResult.effect, "changed");
-  assert.equal(ingestionResult.ingestedCommitCount, 0);
-  assert.equal(ingestionResult.newCommitCount, 0);
-  assert.equal(ingestionResult.confirmedCommitCount, 1);
+  assert.equal(ingestionResult.ingestedCommitCount, 1);
+  assert.equal(ingestionResult.newCommitCount, 1);
+  assert.equal(ingestionResult.confirmedCommitCount, 0);
   assert.equal(ingestionResult.parsedBlobCount, 1);
   assert.equal(ingestionResult.reusedBlobCount, 0);
-  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, [11]);
-  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [11]);
-  assert.deepEqual(ingestedPullRequestNumbers, [11]);
+  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, []);
+  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, []);
+  assert.deepEqual(ingestedPullRequestNumbers, []);
   assert.equal(projectionDrains > 0, true);
 });
 
@@ -282,7 +282,7 @@ test("worker rejects malformed topic metadata before dispatch", async (context) 
   assert.equal(completions, 0);
 });
 
-test("legacy ontology worker configuration expands to the staged topics", async (context) => {
+test("ontology worker configuration preserves the explicit staged topics", async (context) => {
   let resolveClaim!: (topics: unknown) => void;
   const claimed = new Promise<unknown>((resolve) => { resolveClaim = resolve; });
   const mock = createServer(async (request, response) => {
@@ -302,7 +302,7 @@ test("legacy ontology worker configuration expands to the staged topics", async 
       PORT: "0",
       JINA_API_URL: `http://127.0.0.1:${address.port}`,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-ontology",
+      WORKER_TOPICS: "run-ontology-ingest|run-ontology-assert|run-ontology-project",
       WORKER_POLL_INTERVAL_MS: "10"
     },
     stdio: ["ignore", "pipe", "pipe"]

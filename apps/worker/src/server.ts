@@ -46,11 +46,6 @@ const SUPPORTED_TOPICS = [
   "run-ontology-project"
 ] as const;
 type WorkerTopic = typeof SUPPORTED_TOPICS[number];
-const LEGACY_TOPIC_REPLACEMENTS: Readonly<Record<string, readonly WorkerTopic[]>> = {
-  "run-ontology": ["run-ontology-ingest", "run-ontology-assert", "run-ontology-project"],
-  "run-ontology-prepare": ["run-ontology-ingest"],
-  "run-ontology-generate": ["run-ontology-assert", "run-ontology-project"]
-};
 
 interface WorkMetadataByTopic {
   readonly "run-review": { readonly repository: string; readonly pullRequestNumber: number };
@@ -61,7 +56,7 @@ interface WorkMetadataByTopic {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
-    readonly historyMode?: "snapshot";
+    readonly pipelinePhase: "snapshot" | "history";
   };
   readonly "run-ontology-assert": {
     readonly tenantId: string;
@@ -266,7 +261,7 @@ async function runOntologyIngest(work: ClaimedWork<"run-ontology-ingest">): Prom
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
   const historyLimit = positiveInt(process.env.ONTOLOGY_HISTORY_LIMIT, 10_000);
-  const discovery = work.task.metadata.historyMode === "snapshot"
+  const discovery = work.task.metadata.pipelinePhase === "snapshot"
     ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
     : await discoverNewCommits(work, repository, head, historyLimit);
   const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
@@ -1063,12 +1058,10 @@ function configuredTopics(value: string | undefined): WorkerTopic[] {
     .map((topic) => topic.trim())
     .filter(Boolean);
   const unknown = requested.filter((topic) =>
-    !SUPPORTED_TOPICS.includes(topic as WorkerTopic) && !LEGACY_TOPIC_REPLACEMENTS[topic]
+    !SUPPORTED_TOPICS.includes(topic as WorkerTopic)
   );
   if (unknown.length > 0) throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
-  const selected = requested.flatMap((topic) =>
-    SUPPORTED_TOPICS.includes(topic as WorkerTopic) ? [topic as WorkerTopic] : LEGACY_TOPIC_REPLACEMENTS[topic] ?? []
-  );
+  const selected = requested as WorkerTopic[];
   if (selected.length === 0) throw new Error(`WORKER_TOPICS must contain at least one topic`);
   return [...new Set(selected)];
 }
@@ -1160,9 +1153,9 @@ function repositoryMetadata(metadata: Record<string, unknown>): {
 
 function ontologyIngestMetadata(metadata: Record<string, unknown>): WorkMetadataByTopic["run-ontology-ingest"] {
   const repository = repositoryMetadata(metadata);
-  if (metadata.historyMode === undefined) return repository;
-  if (metadata.historyMode !== "snapshot") throw new Error("task historyMode must be snapshot when provided");
-  return { ...repository, historyMode: "snapshot" };
+  const pipelinePhase = requiredString(metadata.pipelinePhase, "task pipelinePhase");
+  if (pipelinePhase !== "snapshot" && pipelinePhase !== "history") throw new Error("task pipelinePhase is invalid");
+  return { ...repository, pipelinePhase };
 }
 
 function requiredStringArray(value: unknown, name: string): readonly string[] {

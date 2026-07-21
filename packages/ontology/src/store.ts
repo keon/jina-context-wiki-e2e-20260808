@@ -38,13 +38,14 @@ import {
   type OntologyPipelineStore,
   type OntologyProjectionRequest,
   type OntologySourceIngestResult,
+  type OntologyWriteFence,
   type RepositorySnapshot,
   type StoredAssertion
 } from "./pipeline.js";
 import { DomainError } from "@jina/shared-kernel";
 
 export interface OntologyGraphStore extends OntologyPipelineStore, RepositoryContextOperations {
-  save(graph: OntologyGraph): Promise<void>;
+  save(graph: OntologyGraph, writeFence?: OntologyWriteFence): Promise<void>;
   latest(tenantId: string): Promise<OntologyGraph | undefined>;
   get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
   list(tenantId: string): Promise<readonly OntologyGraph[]>;

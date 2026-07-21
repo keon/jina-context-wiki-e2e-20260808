@@ -8,7 +8,6 @@ import {
   markOutboxDispatched,
   renewOutboxLease,
   reduceBoard,
-  supersedeTaskTree,
   taskTypeDefinitions,
   type BoardTask,
   type BoardOutboxMessageId,
@@ -16,9 +15,11 @@ import {
   type CommandActor
 } from "@jina/board";
 import type { ParsedGitHubWebhook } from "@jina/github";
+import { isOntologyTrigger } from "@jina/github";
 import {
   createOntologyGraph,
   assertionsFromGeneratedOntology,
+  MemoryOntologyPipelineCoordinator,
   MemoryOntologyGraphStore,
   ONTOLOGY_GENERATOR_VERSION,
   ONTOLOGY_PARSER_VERSION,
@@ -29,14 +30,18 @@ import {
   ontologyTaskTypeDependencies,
   ontologyTaskTypeDefinitions,
   ontologyTaskTypeTriggers,
-  planOntologyBuild,
   parseGeneratedOntology,
   type BlobAnalysis,
   type RepositorySourceObservation,
   type OntologyCommand,
   type OntologyAssertionBatch,
+  type OntologyBuildRecord,
   type OntologyGraph,
   type OntologyGraphStore,
+  type OntologyPipelineCoordinator,
+  type OntologyStageLease,
+  type OntologyStageRecord,
+  type OntologyWorkerTopic,
   type OntologyNodeKind,
   type RepositoryContextOperation,
   type RepositorySnapshot
@@ -66,7 +71,6 @@ const WORKER_TOPICS = [
   "run-ontology-assert",
   "run-ontology-project"
 ] as const;
-const LEGACY_ONTOLOGY_TOPICS = new Set(["run-ontology", "run-ontology-prepare", "run-ontology-generate"]);
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -78,6 +82,7 @@ export interface ApiServerConfig {
   readonly deliveryCacheSize?: number;
   readonly stateStore?: ApiStateStore;
   readonly ontologyStore?: OntologyGraphStore;
+  readonly ontologyCoordinator?: OntologyPipelineCoordinator;
   readonly internalApiToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
@@ -91,18 +96,6 @@ export interface ApiSnapshot {
   readonly intakeState: GitHubIntakeState;
   readonly publications: readonly PublicationRecord[];
   readonly devDeliverySequence: number;
-  readonly pendingOntologyCompletions?: readonly PendingOntologyCompletion[];
-}
-
-interface PendingOntologyCompletion {
-  readonly id: string;
-  readonly tenantId: string;
-  readonly messageId: string;
-  readonly leaseId: string;
-  readonly taskId: string;
-  readonly topic: "run-ontology-assert" | "run-ontology-project";
-  readonly body: Readonly<Record<string, unknown>>;
-  readonly createdAt: string;
 }
 
 export interface ApiStateStore {
@@ -122,9 +115,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let intakeState: GitHubIntakeState = createGitHubIntakeState();
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
-  let pendingOntologyCompletions: readonly PendingOntologyCompletion[] = [];
   const deliveries = new DeliveryCache(config.deliveryCacheSize ?? 10_000);
   const ontologyStore = config.ontologyStore ?? new MemoryOntologyGraphStore();
+  const ontologyCoordinator = config.ontologyCoordinator ?? new MemoryOntologyPipelineCoordinator();
   const ready = initializeState();
   let mutations = Promise.resolve();
   let transactionActive = false;
@@ -158,7 +151,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     intakeState = stored.intakeState;
     publications = stored.publications;
     devDeliverySequence = stored.devDeliverySequence;
-    pendingOntologyCompletions = stored.pendingOntologyCompletions ?? [];
   }
 
   async function synchronize(): Promise<void> {
@@ -175,11 +167,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       intakeState = migrated.snapshot.intakeState;
       publications = migrated.snapshot.publications;
       devDeliverySequence = migrated.snapshot.devDeliverySequence;
-      pendingOntologyCompletions = migrated.snapshot.pendingOntologyCompletions ?? [];
-      const retiredIntakeState = retireLegacyOntologyWork(intakeState, nowIso());
-      const retiredLegacyWork = retiredIntakeState !== intakeState;
-      intakeState = retiredIntakeState;
-      if (migrated.changed || retiredLegacyWork) await persist();
+      if (migrated.changed) await persist();
       if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
       return;
     }
@@ -249,7 +237,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   function snapshot(): ApiSnapshot {
-    return { intakeState, publications, devDeliverySequence, pendingOntologyCompletions };
+    return { intakeState, publications, devDeliverySequence };
   }
 
   async function persist(deliveryId?: string): Promise<boolean> {
@@ -327,15 +315,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
-    await synchronize();
     const url = new URL(request.url ?? "/", "http://localhost");
+    // Published Ontology generations and repository ACLs live in their own
+    // relational store. Reads must never queue behind board/control-plane
+    // mutations; they serve the last atomically published graph head.
+    if (!isDirectOntologyRead(request.method, url.pathname)) await synchronize();
 
     if (request.method === "OPTIONS") {
       json(response, 204, {});
       return;
     }
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await config.stateStore?.ping();
+      await Promise.all([config.stateStore?.ping(), ontologyCoordinator.ping()]);
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
@@ -487,7 +478,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "GET" && url.pathname === "/board") {
       const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
-      json(response, 200, tenantBoardView(intakeState, publications, tenantId, allowedRepositories));
+      const board = tenantBoardView(intakeState, publications, tenantId, allowedRepositories);
+      const pipeline = await ontologyCoordinator.list(tenantId);
+      json(response, 200, mergePipelineBoardView(board, pipeline, allowedRepositories));
       return;
     }
     if (request.method === "GET" && url.pathname === "/ontology") {
@@ -597,7 +590,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/events") {
       const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
       const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
-      json(response, 200, intakeState.board.events.filter((event) => event.taskId && taskIds.has(event.taskId)));
+      const workflows = (await ontologyCoordinator.list(tenantId))
+        .filter(({ build }) => !allowedRepositories || allowedRepositories.has(build.repository));
+      const pipelineTaskIds = new Set(workflows.flatMap(({ build, stages }) => [build.id, ...stages.map((stage) => stage.id)]));
+      const pipelineEvents = (await ontologyCoordinator.listEvents(tenantId))
+        .filter((event) => pipelineTaskIds.has(event.taskId))
+        .map((event, index) => ({ ...event, seq: index + 1 }));
+      json(response, 200, [
+        ...intakeState.board.events.filter((event) => event.taskId && taskIds.has(event.taskId)),
+        ...pipelineEvents
+      ].sort((left, right) => left.at.localeCompare(right.at)));
       return;
     }
     if (request.method === "POST" && url.pathname === "/ontology/build") {
@@ -635,7 +637,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
-      await reconcilePendingOntologyCompletions();
       await claimWork(request, response, tenantId);
       return;
     }
@@ -666,6 +667,44 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (await hasDelivery(result.deliveryId)) {
       json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
+      return;
+    }
+    if (result.webhook && isOntologyTrigger(result.webhook.event)) {
+      const event = result.webhook.event;
+      const ref = event.ref.slice("refs/heads/".length);
+      const builds = await ontologyCoordinator.list(config.tenantId ?? "default");
+      const latest = builds
+        .filter(({ build }) => build.repository === result.webhook!.repository && build.ref === ref)
+        .sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt))[0];
+      const duplicateHead = latest?.build.metadata.githubHeadSha === event.headSha;
+      let createdTaskIds: readonly string[] = [];
+      if (!duplicateHead) {
+        const build = await ontologyCoordinator.createBuild({
+          tenantId: config.tenantId ?? "default",
+          repository: result.webhook.repository,
+          ref,
+          requestKey: `push:${event.headSha}:delivery:${result.deliveryId}`,
+          snapshotFirst: true,
+          createdAt: nowIso(),
+          metadata: {
+            githubDeliveryId: result.deliveryId,
+            githubHeadSha: event.headSha,
+            ...(result.webhook.repositoryId !== undefined ? { githubRepositoryId: result.webhook.repositoryId } : {}),
+            ...(result.webhook.installationId !== undefined ? { githubInstallationId: result.webhook.installationId } : {})
+          }
+        });
+        const workflow = (await ontologyCoordinator.list(build.tenantId)).find((candidate) => candidate.build.id === build.id);
+        createdTaskIds = [build.id, ...(workflow?.stages.map((stage) => stage.id) ?? [])];
+      }
+      await mutate(async () => {
+        if (!config.stateStore) await persist(result.deliveryId!);
+      }, result.deliveryId);
+      json(response, result.statusCode, {
+        accepted: true,
+        deliveryId: result.deliveryId,
+        outcome: duplicateHead ? "duplicate" : "created",
+        createdTaskIds
+      });
       return;
     }
     const committed = await mutate(async () => {
@@ -700,63 +739,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
     const suppliedRequestKey = typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
-    const historyMode = body.historyMode;
-    if (historyMode !== undefined && historyMode !== "snapshot") {
-      throw invalidRequest("historyMode must be snapshot when provided");
-    }
-    const created = await mutate(async () => {
-      devDeliverySequence += 1;
-      const nonce = suppliedRequestKey ?? `${Date.now()}-${devDeliverySequence}`;
-      const plan = planOntologyBuild({ tenantId, repository, ref, requestKey: nonce });
-      const createdAt = nowIso();
-      let board = supersedeTaskTree(intakeState.board, createdAt, (task) =>
-        task.type.startsWith("ontology_") &&
-        task.metadata.tenantId === tenantId &&
-        task.metadata.repository === repository &&
-        task.metadata.ref === ref &&
-        task.metadata.requestKey !== nonce
-      );
-      for (const task of plan.tasks) {
-        board = applyCommand(board, {
-          command: "CreateTask",
-          task: {
-            ...task,
-            required: true,
-            ...(historyMode ? { metadata: { ...task.metadata, historyMode } } : {})
-          },
-          ...(task.id === plan.rootTaskId ? { blocksParentCompletion: false } : {})
-        }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
-      }
-      for (const dependency of plan.dependencies) {
-        board = applyCommand(board, { command: "LinkTask", dependency }, {
-          actor: { type: "user", id: "ontology-api" }, now: createdAt
-        }).state;
-      }
-      board = reduceBoard(board, createdAt);
-      intakeState = { ...intakeState, board };
-      await persist();
-      return findTask(board, plan.rootTaskId);
+    const requestKey = suppliedRequestKey ?? randomUUID();
+    const created = await ontologyCoordinator.createBuild({
+      tenantId,
+      repository,
+      ref,
+      requestKey,
+      snapshotFirst: body.snapshotFirst !== false,
+      createdAt: nowIso()
     });
-    json(response, 202, { accepted: true, task: created });
+    json(response, 202, { accepted: true, task: pipelineBuildTask(created) });
   }
 
   async function planOntologyIngestion(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
     const snapshot = parseRepositorySnapshot(body.snapshot, tenantId);
-    const plan = await mutate(async () => {
-      const task = requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "ontology_ingest");
-      if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
-        throw invalidRequest("repository snapshot does not match ontology task");
-      }
-      return ontologyStore.planIngestion(snapshot);
-    });
+    const task = await requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "run-ontology-ingest");
+    if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
+      throw invalidRequest("repository snapshot does not match ontology task");
+    }
+    const plan = await ontologyStore.planIngestion(snapshot, { stageId: task.stageId, leaseId: task.leaseId });
     json(response, 200, plan);
   }
 
   async function findKnownOntologyCommits(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-ingest");
     if (!Array.isArray(body.commitShas)) throw invalidRequest("commitShas must be an array");
     const commitShas = body.commitShas.map((sha) => requiredGitSha(sha, "commitSha"));
     json(response, 200, {
@@ -769,14 +778,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const taskId = requiredString(body.taskId, "taskId");
     const commitSha = requiredGitSha(body.commitSha, "commitSha");
     const analyses = parseBlobAnalyses(body.analyses);
-    await mutate(async () => {
-      const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
-      await ontologyStore.applyBlobAnalyses({
-        tenantId,
-        repository: requiredString(task.metadata.repository, "task.repository"),
-        commitSha
-      }, analyses);
-    });
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-ingest");
+    await ontologyStore.applyBlobAnalyses({
+      tenantId,
+      repository: requiredString(task.metadata.repository, "task.repository"),
+      commitSha
+    }, analyses, { stageId: task.stageId, leaseId: task.leaseId });
     json(response, 200, { accepted: true, count: analyses.length });
   }
 
@@ -785,21 +792,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const taskId = requiredString(body.taskId, "taskId");
     if (!Array.isArray(body.observations)) throw invalidRequest("observations must be an array");
     const observations = body.observations.map((value) => parseRepositorySourceObservation(value, tenantId));
-    const result = await mutate(async () => {
-      const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
-      const repository = requiredString(task.metadata.repository, "task.repository");
-      if (observations.some((observation) => observation.repository !== repository)) {
-        throw invalidRequest("GitHub observation repository does not match task");
-      }
-      return ontologyStore.applyGitHubObservations(observations);
-    });
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-ingest");
+    const repository = requiredString(task.metadata.repository, "task.repository");
+    if (observations.some((observation) => observation.repository !== repository)) {
+      throw invalidRequest("GitHub observation repository does not match task");
+    }
+    const result = await ontologyStore.applyGitHubObservations(
+      observations,
+      { stageId: task.stageId, leaseId: task.leaseId }
+    );
     json(response, 200, result);
   }
 
   async function findCachedOntologyAssertions(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_assert");
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
     const cached = await ontologyStore.hasAssertionGeneration(
       tenantId,
       requiredString(task.metadata.repository, "task.repository"),
@@ -814,7 +822,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function loadOntologyAssertionEvidence(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_assert");
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
     const repository = requiredString(task.metadata.repository, "task.repository");
     const observationIds = Array.isArray(task.metadata.sourceObservationIds)
       ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
@@ -823,31 +831,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { evidence });
   }
 
-  function requireOntologyTask(taskId: string, tenantId: string, type: string): BoardTask {
-    const task = findTask(intakeState.board, entityId<"task">(taskId) as TaskId);
-    if (!task || task.metadata.tenantId !== tenantId || task.type !== type) {
-      throw new ApiError(404, "not_found", "ontology task not found");
-    }
-    return task;
-  }
-
-  function requireLeasedOntologyTask(
+  async function requireLeasedOntologyTask(
     body: Record<string, unknown>,
     taskId: string,
     tenantId: string,
-    type: string
-  ): BoardTask {
-    const task = requireOntologyTask(taskId, tenantId, type);
-    const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
-    const message = findOutboxMessage(intakeState.board, messageId);
+    topic: OntologyWorkerTopic
+  ): Promise<OntologyStageLease & { readonly id: string }> {
+    const messageId = requiredString(body.messageId, "messageId");
+    if (messageId !== taskId) throw new ApiError(409, "stale_lease", "stale ontology worker lease");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    if (
-      !message || message.taskId !== task.id || message.status !== "leased" || message.leaseId !== leaseId ||
-      !message.leaseExpiresAt || message.leaseExpiresAt <= nowIso() || task.status !== "in_progress"
-    ) {
-      throw new ApiError(409, "stale_lease", "stale ontology worker lease");
-    }
-    return task;
+    const stage = await ontologyCoordinator.leasedStage({ tenantId, stageId: taskId, leaseId, topic, now: nowIso() });
+    if (!stage) throw new ApiError(409, "stale_lease", "stale ontology worker lease");
+    return { ...stage, id: stage.stageId };
   }
 
   async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -858,6 +853,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const unsupportedTopics = topics.filter((topic) => !WORKER_TOPICS.includes(topic as typeof WORKER_TOPICS[number]));
     if (unsupportedTopics.length > 0) throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
     const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
+    const ontologyTopics = requestedTopics.filter(isOntologyWorkerTopic);
+    if (ontologyTopics.length > 0) {
+      const now = nowIso();
+      const claimed = await ontologyCoordinator.claim({
+        tenantId,
+        workerId,
+        topics: ontologyTopics,
+        now,
+        leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+      });
+      if (claimed || ontologyTopics.length === requestedTopics.length) {
+        json(response, claimed ? 200 : 204, claimed ?? {});
+        return;
+      }
+    }
     const claimed = await mutate(async () => {
       const taskIds = intakeState.board.tasks
         .filter((task) => task.metadata.tenantId === tenantId && (task.status === "queued" || task.status === "in_progress"))
@@ -890,8 +900,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function renewWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
+    const rawMessageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
+    if (rawMessageId.startsWith("ontology-stage_")) {
+      const now = nowIso();
+      const renewed = await ontologyCoordinator.renew({
+        tenantId,
+        stageId: rawMessageId,
+        leaseId,
+        now,
+        leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+      });
+      if (!renewed) throw staleLease();
+      json(response, 200, { accepted: true });
+      return;
+    }
+    const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
     const renewed = await mutate(async () => {
       const message = findOutboxMessage(intakeState.board, messageId);
       const task = message ? findTask(intakeState.board, message.taskId) : undefined;
@@ -915,24 +939,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
+    const rawMessageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
     const outcome = body.outcome;
     if (outcome !== "done" && outcome !== "failed") throw invalidRequest("outcome must be done or failed");
-    const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
+    const rawTaskId = requiredString(body.taskId, "taskId");
+    if (rawMessageId.startsWith("ontology-stage_") || rawTaskId.startsWith("ontology-stage_")) {
+      if (rawMessageId !== rawTaskId) throw staleLease();
+      const graph = await completeOntologyStage(body, tenantId, rawTaskId, leaseId, outcome);
+      json(response, 200, { accepted: true, graphId: graph?.id });
+      return;
+    }
+    const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
+    const taskId = entityId<"task">(rawTaskId) as TaskId;
     const task = findTask(intakeState.board, taskId);
     if (!task || task.metadata.tenantId !== tenantId) {
       throw new ApiError(404, "not_found", "task not found");
     }
-    if (outcome === "done") {
-      const pending = await stageOntologyCompletion(body, messageId, leaseId, taskId, tenantId);
-      if (pending) {
-        const completedGraph = await processPendingOntologyCompletion(pending);
-        json(response, 200, { accepted: true, graphId: completedGraph?.id });
-        return;
-      }
-    }
-    let graph: OntologyGraph | undefined;
     const result = await mutate(async () => {
       const message = findOutboxMessage(intakeState.board, messageId);
       const currentTask = findTask(intakeState.board, taskId);
@@ -947,94 +970,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const previousIntakeState = intakeState;
       const previousPublications = publications;
       let board = markOutboxDispatched(intakeState.board, message.id, now);
-      if (outcome === "done" && message.topic === "run-ontology-ingest") {
-        const resultPayload = isRecord(body.result) ? body.result : {};
-        const commitSha = requiredGitSha(resultPayload.commitSha, "result.commitSha");
-        const analysisPaths = Array.isArray(resultPayload.analysisPaths)
-          ? resultPayload.analysisPaths.map((path) => requiredRepositoryPath(path, "result.analysisPaths"))
-          : [];
-        const sourceObservationIds = Array.isArray(resultPayload.sourceObservationIds)
-          ? resultPayload.sourceObservationIds.map((id) => requiredString(id, "result.sourceObservationIds"))
-          : [];
-        const problemEvidencePullRequestNumbers = Array.isArray(resultPayload.problemEvidencePullRequestNumbers)
-          ? resultPayload.problemEvidencePullRequestNumbers.map((number) =>
-              requiredPositiveInteger(number, "result.problemEvidencePullRequestNumber")
-            )
-          : [];
-        const sourcePullRequestNumbers = Array.isArray(resultPayload.sourcePullRequestNumbers)
-          ? resultPayload.sourcePullRequestNumbers.map((number) => requiredPositiveInteger(number, "result.sourcePullRequestNumber"))
-          : [];
-        const resolvedPullRequestNumbers = Array.isArray(resultPayload.resolvedPullRequestNumbers)
-          ? resultPayload.resolvedPullRequestNumbers.map((number) => requiredPositiveInteger(number, "result.resolvedPullRequestNumber"))
-          : [];
-        const children = board.tasks.filter((candidate) => candidate.parentTaskId === currentTask.parentTaskId);
-        for (const childType of ["ontology_assert", "ontology_project"] as const) {
-          const child = children.find((candidate) => candidate.type === childType);
-          if (!child) throw new Error(`${childType} task not found`);
-          board = applyCommand(board, {
-            command: "UpdateTask",
-            taskId: child.id,
-            metadata: {
-              commitSha,
-              codeCheckpoint: requiredString(resultPayload.codeCheckpoint, "result.codeCheckpoint"),
-              evidenceFingerprint: requiredString(resultPayload.evidenceFingerprint, "result.evidenceFingerprint"),
-              ...(childType === "ontology_assert"
-                ? { analysisPaths, problemEvidencePullRequestNumbers, sourceObservationIds, sourcePullRequestNumbers, resolvedPullRequestNumbers }
-                : {})
-            }
-          }, { actor: RUN_ACTOR, now }).state;
-        }
-      }
-      let eventPayload = safeResultPayload(body.result);
-      if (outcome === "done" && message.topic === "run-ontology-assert") {
-        const cached = isRecord(body.result) && isRecord(body.result.cached) ? body.result.cached : undefined;
-        const assertionResult = cached
-          ? safeResultPayload(cached)
-          : await ontologyStore.saveAssertionBatch(parseOntologyAssertionBatch(body.assertionBatch, currentTask, tenantId));
-        eventPayload = {
-          ...safeResultPayload(assertionResult),
-          effect: assertionResult.cached ? "confirmed" : "changed"
-        };
-        const projectionTask = board.tasks.find((candidate) =>
-          candidate.parentTaskId === currentTask.parentTaskId && candidate.type === "ontology_project"
-        );
-        if (!projectionTask) throw new Error("ontology_project task not found");
-        board = applyCommand(board, {
-          command: "UpdateTask",
-          taskId: projectionTask.id,
-          metadata: { knowledgeCheckpoint: requiredString(assertionResult.knowledgeCheckpoint, "knowledgeCheckpoint") }
-        }, { actor: RUN_ACTOR, now }).state;
-      }
-      if (outcome === "done" && message.topic === "run-ontology-project") {
-        const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
-        // Repository-wide assertion and source events can affect every tracked ref.
-        // Drain them through the all-ref fanout before completing this ref's task;
-        // otherwise the first per-ref rebuild would acknowledge the event early.
-        const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
-        eventPayload = { ...await ontologyStore.rebuildDerivedProjections(
-          tenantId,
-          requiredString(currentTask.metadata.repository, "task.repository"),
-          requiredString(currentTask.metadata.ref, "task.ref"),
-          now
-        ), drainedEventCount: drained.processedEventCount, rebuiltRepositories: drained.rebuiltRepositories };
-        graph = await ontologyStore.project({
-          tenantId,
-          repository: requiredString(currentTask.metadata.repository, "task.repository"),
-          ref: requiredString(currentTask.metadata.ref, "task.ref"),
-          commitSha: requiredGitSha(currentTask.metadata.commitSha, "task.commitSha"),
-          taskId: currentTask.id,
-          generatedAt: now
-        });
-        eventPayload = { ...eventPayload, effect: eventPayload.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop" };
-      }
+      const eventPayload = safeResultPayload(body.result);
       board = applyCommand(board, {
         command: "CommentTask",
         taskId,
         eventType: outcome === "failed" ? `${message.topic}.failed` : completionEventType(message.topic),
         payload: outcome === "failed"
           ? { reason: String(body.reason ?? "worker failed").slice(0, 2000) }
-          : graph
-          ? { ...eventPayload, graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
           : eventPayload
       }, { actor: RUN_ACTOR, now }).state;
       if (outcome === "done" && message.topic === "run-publish") {
@@ -1060,118 +1002,80 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return true;
     });
     if (!result) throw staleLease();
-    json(response, 200, { accepted: true, graphId: graph?.id });
+    json(response, 200, { accepted: true });
   }
 
-  async function stageOntologyCompletion(
+  async function completeOntologyStage(
     body: Readonly<Record<string, unknown>>,
-    messageId: BoardOutboxMessageId,
+    tenantId: string,
+    stageId: string,
     leaseId: string,
-    taskId: TaskId,
-    tenantId: string
-  ): Promise<PendingOntologyCompletion | undefined> {
-    return mutate(async () => {
-      const message = findOutboxMessage(intakeState.board, messageId);
-      const currentTask = findTask(intakeState.board, taskId);
-      const now = nowIso();
-      if (!message || !currentTask || message.taskId !== taskId || message.status !== "leased" ||
-        message.leaseId !== leaseId || !message.leaseExpiresAt || message.leaseExpiresAt <= now ||
-        currentTask.status !== "in_progress" || currentTask.metadata.tenantId !== tenantId) {
-        throw staleLease();
-      }
-      if (message.topic !== "run-ontology-assert" && message.topic !== "run-ontology-project") return undefined;
-      const id = `${message.id}:${leaseId}:${taskId}`;
-      const existing = pendingOntologyCompletions.find((candidate) => candidate.id === id);
-      if (existing) return existing;
-      const pending: PendingOntologyCompletion = {
-        id,
-        tenantId,
-        messageId: message.id,
-        leaseId,
-        taskId,
-        topic: message.topic,
-        body: structuredClone(body),
-        createdAt: now
-      };
-      intakeState = { ...intakeState, board: markOutboxDispatched(intakeState.board, message.id, now) };
-      pendingOntologyCompletions = [...pendingOntologyCompletions, pending];
-      await persist();
-      return pending;
-    });
-  }
-
-  async function reconcilePendingOntologyCompletions(): Promise<void> {
-    for (const pending of [...pendingOntologyCompletions]) await processPendingOntologyCompletion(pending);
-  }
-
-  async function processPendingOntologyCompletion(pending: PendingOntologyCompletion): Promise<OntologyGraph | undefined> {
-    if (!pendingOntologyCompletions.some((candidate) => candidate.id === pending.id)) return undefined;
-    const currentTask = findTask(intakeState.board, entityId<"task">(pending.taskId) as TaskId);
-    if (!currentTask || currentTask.metadata.tenantId !== pending.tenantId) {
-      throw new ApiError(404, "not_found", "pending ontology completion task not found");
-    }
+    outcome: "done" | "failed"
+  ): Promise<OntologyGraph | undefined> {
     const now = nowIso();
+    const stage = await ontologyCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
+    if (!stage) throw staleLease();
+    if (outcome === "failed") {
+      const completed = await ontologyCoordinator.complete({
+        tenantId, stageId, leaseId, outcome, now, reason: String(body.reason ?? "worker failed").slice(0, 2_000)
+      });
+      if (!completed) throw staleLease();
+      return undefined;
+    }
+
+    const rawResult = isRecord(body.result) ? body.result : {};
+    let result: Record<string, unknown> = safeResultPayload(rawResult);
+    let nextMetadata: Record<string, unknown> = {};
     let graph: OntologyGraph | undefined;
-    let eventPayload: Record<string, unknown>;
-    if (pending.topic === "run-ontology-assert") {
-      const cached = isRecord(pending.body.result) && isRecord(pending.body.result.cached) ? pending.body.result.cached : undefined;
+    if (stage.topic === "run-ontology-ingest") {
+      nextMetadata = ontologyIngestCompletionMetadata(rawResult);
+      result = { ...result, ...nextMetadata };
+    } else if (stage.topic === "run-ontology-assert") {
+      const cached = isRecord(rawResult.cached) ? rawResult.cached : undefined;
       const assertionResult = cached
         ? safeResultPayload(cached)
-        : await ontologyStore.saveAssertionBatch(parseOntologyAssertionBatch(pending.body.assertionBatch, currentTask, pending.tenantId));
-      eventPayload = {
-        ...safeResultPayload(assertionResult),
-        effect: assertionResult.cached ? "confirmed" : "changed"
+        : await ontologyStore.saveAssertionBatch(
+          parseOntologyAssertionBatch(body.assertionBatch, { id: stage.stageId, metadata: stage.metadata }, tenantId),
+          { stageId, leaseId }
+        );
+      result = { ...safeResultPayload(assertionResult), effect: assertionResult.cached ? "confirmed" : "changed" };
+      nextMetadata = {
+        commitSha: requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
+        knowledgeCheckpoint: requiredString(assertionResult.knowledgeCheckpoint, "knowledgeCheckpoint")
       };
     } else {
-      const existingGraphIds = new Set((await ontologyStore.listSummaries(pending.tenantId)).map((summary) => summary.id));
-      const drained = await ontologyStore.drainDerivedProjectionEvents(pending.tenantId, now);
-      eventPayload = { ...await ontologyStore.rebuildDerivedProjections(
-        pending.tenantId,
-        requiredString(currentTask.metadata.repository, "task.repository"),
-        requiredString(currentTask.metadata.ref, "task.ref"),
+      const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
+      const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
+      const rebuilt = await ontologyStore.rebuildDerivedProjections(
+        tenantId,
+        stage.repository,
+        stage.ref,
         now
-      ), drainedEventCount: drained.processedEventCount, rebuiltRepositories: drained.rebuiltRepositories };
+      );
       graph = await ontologyStore.project({
-        tenantId: pending.tenantId,
-        repository: requiredString(currentTask.metadata.repository, "task.repository"),
-        ref: requiredString(currentTask.metadata.ref, "task.ref"),
-        commitSha: requiredGitSha(currentTask.metadata.commitSha, "task.commitSha"),
-        taskId: currentTask.id,
-        generatedAt: now
+        tenantId,
+        repository: stage.repository,
+        ref: stage.ref,
+        commitSha: requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
+        taskId: stage.stageId,
+        generatedAt: now,
+        writeFence: { stageId, leaseId }
       });
-      eventPayload = { ...eventPayload, effect: eventPayload.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop" };
+      result = {
+        ...rebuilt,
+        drainedEventCount: drained.processedEventCount,
+        rebuiltRepositories: drained.rebuiltRepositories,
+        effect: rebuilt.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop",
+        graphId: graph.id,
+        nodeCount: graph.nodes.length,
+        edgeCount: graph.edges.length,
+        commitSha: graph.commitSha
+      };
     }
-
-    await mutate(async () => {
-      if (!pendingOntologyCompletions.some((candidate) => candidate.id === pending.id)) return;
-      const taskId = entityId<"task">(pending.taskId) as TaskId;
-      const task = findTask(intakeState.board, taskId);
-      if (!task || task.status !== "in_progress") throw new DomainError("pending ontology completion is no longer applicable", "conflict");
-      let board = intakeState.board;
-      if (pending.topic === "run-ontology-assert") {
-        const projectionTask = board.tasks.find((candidate) =>
-          candidate.parentTaskId === task.parentTaskId && candidate.type === "ontology_project"
-        );
-        if (!projectionTask) throw new Error("ontology_project task not found");
-        board = applyCommand(board, {
-          command: "UpdateTask",
-          taskId: projectionTask.id,
-          metadata: { knowledgeCheckpoint: requiredString(eventPayload.knowledgeCheckpoint, "knowledgeCheckpoint") }
-        }, { actor: RUN_ACTOR, now }).state;
-      }
-      board = applyCommand(board, {
-        command: "CommentTask",
-        taskId,
-        eventType: completionEventType(pending.topic),
-        payload: graph
-          ? { ...eventPayload, graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
-          : eventPayload
-      }, { actor: RUN_ACTOR, now }).state;
-      board = applyCommand(board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now }).state;
-      intakeState = { ...intakeState, board: reduceBoard(board, now) };
-      pendingOntologyCompletions = pendingOntologyCompletions.filter((candidate) => candidate.id !== pending.id);
-      await persist();
+    const completed = await ontologyCoordinator.complete({
+      tenantId, stageId, leaseId, outcome: "done", now: nowIso(), result, nextMetadata
     });
+    if (!completed) throw staleLease();
     return graph;
   }
 
@@ -1192,6 +1096,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     server.once("close", () => clearInterval(timer));
   }
   if (config.stateStore) server.once("close", () => void config.stateStore?.close());
+  server.once("close", () => void ontologyCoordinator.close());
   server.once("close", () => void ontologyStore.close());
   return server;
 }
@@ -1242,6 +1147,18 @@ function isPublicGraphRoute(pathname: string): boolean {
   return pathname === "/mcp" || pathname === "/v1/graphs" || pathname.startsWith("/v1/graphs/") || pathname === "/v1/graph/query";
 }
 
+function isDirectOntologyRead(method: string | undefined, pathname: string): boolean {
+  if (method === "OPTIONS" || (method === "GET" && (pathname === "/health" || pathname === "/healthz" || pathname === "/task-types"))) {
+    return true;
+  }
+  if (isPublicGraphRoute(pathname)) return true;
+  if (method === "GET" && (
+    pathname === "/ontology" || pathname === "/ontology/metrics" || pathname === "/ontology/assertions" ||
+    pathname.startsWith("/ontology/graphs/")
+  )) return true;
+  return method === "POST" && (pathname === "/ontology/retrieve" || pathname === "/ontology/ask");
+}
+
 function tenantTaskIds(
   state: GitHubIntakeState,
   tenantId: string,
@@ -1273,15 +1190,136 @@ function tenantBoardView(
   };
 }
 
+function mergePipelineBoardView(
+  board: ReturnType<typeof tenantBoardView>,
+  pipeline: readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[],
+  allowedRepositories?: ReadonlySet<string>
+) {
+  const visible = pipeline.filter(({ build }) => !allowedRepositories || allowedRepositories.has(build.repository));
+  const pipelineTasks = visible.flatMap(({ build, stages }) => [
+    pipelineBuildTask(build),
+    ...stages.map((stage) => pipelineStageTask(build, stage))
+  ]);
+  const dependencies = visible.flatMap(({ build, stages }) => stages.slice(1).map((stage, index) => ({
+    taskId: stage.id,
+    dependsOnTaskId: stages[index]!.id,
+    relationship: "blocks",
+    required: stage.phase === "snapshot" || !build.snapshotFirst,
+    blocksParentCompletion: stage.phase === "snapshot" || !build.snapshotFirst
+  })));
+  return {
+    ...board,
+    tasks: [...board.tasks.filter((task) => !task.type.startsWith("ontology_")), ...pipelineTasks],
+    dependencies: [...board.dependencies.filter((dependency) =>
+      !board.tasks.some((task) => task.id === dependency.taskId && task.type.startsWith("ontology_"))
+    ), ...dependencies],
+    outbox: [
+      ...board.outbox.filter((message) => !board.tasks.some((task) => task.id === message.taskId && task.type.startsWith("ontology_"))),
+      ...visible.flatMap(({ stages }) => stages.filter((stage) => stage.status !== "triage").map((stage) => ({
+        id: stage.id,
+        taskId: stage.id,
+        topic: stage.topic,
+        idempotencyKey: `${stage.id}:${stage.attempt}`,
+        status: stage.status === "queued" ? "pending" : stage.status === "in_progress" ? "leased" : "dispatched",
+        payload: { taskId: stage.id, attempt: stage.attempt },
+        createdAt: stage.createdAt,
+        ...(stage.leaseId ? { leaseId: stage.leaseId, leasedAt: stage.updatedAt } : {}),
+        ...(stage.leaseExpiresAt ? { leaseExpiresAt: stage.leaseExpiresAt } : {}),
+        ...(["done", "failed", "canceled", "superseded"].includes(stage.status) ? { dispatchedAt: stage.updatedAt } : {})
+      })))
+    ]
+  };
+}
+
+function pipelineBuildTask(build: OntologyBuildRecord): BoardTask {
+  return {
+    id: entityId<"task">(build.id) as TaskId,
+    type: "ontology_build",
+    title: `Build repository graph for ${build.repository}@${build.ref}`,
+    status: pipelineBuildBoardStatus(build.status),
+    assigneeRole: "system",
+    dedupeKey: `ontology:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}:root`,
+    required: true,
+    attempt: 0,
+    metadata: {
+      ...build.metadata,
+      tenantId: build.tenantId,
+      repository: build.repository,
+      ref: build.ref,
+      requestKey: build.requestKey,
+      snapshotFirst: build.snapshotFirst
+    },
+    kind: "aggregate",
+    createdAt: build.createdAt,
+    updatedAt: build.updatedAt
+  };
+}
+
+function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecord): BoardTask {
+  return {
+    id: entityId<"task">(stage.id) as TaskId,
+    parentTaskId: entityId<"task">(build.id) as TaskId,
+    type: `ontology_${stage.stage}`,
+    title: `${stage.stage === "ingest" ? "Ingest" : stage.stage === "assert" ? "Derive assertions for" : "Project graph for"} ${stage.repository}@${stage.ref} (${stage.phase})`,
+    status: pipelineStageBoardStatus(stage.status),
+    assigneeRole: "ontology_worker",
+    dedupeKey: `ontology:${stage.buildId}:${stage.phase}:${stage.stage}`,
+    required: stage.phase === "snapshot" || !build.snapshotFirst,
+    attempt: stage.attempt,
+    metadata: { ...stage.metadata },
+    kind: "dispatchable",
+    dispatchTopic: stage.topic,
+    createdAt: stage.createdAt,
+    updatedAt: stage.updatedAt
+  };
+}
+
+function pipelineBuildBoardStatus(status: OntologyBuildRecord["status"]): BoardTask["status"] {
+  if (status === "queued") return "queued";
+  if (status === "done" || status === "failed") return status;
+  if (status === "superseded") return "superseded";
+  if (status === "enriching") return "done";
+  return "in_progress";
+}
+
+function pipelineStageBoardStatus(status: OntologyStageRecord["status"]): BoardTask["status"] {
+  return status;
+}
+
+function isOntologyWorkerTopic(topic: string): topic is OntologyWorkerTopic {
+  return topic === "run-ontology-ingest" || topic === "run-ontology-assert" || topic === "run-ontology-project";
+}
+
+function ontologyIngestCompletionMetadata(result: Record<string, unknown>): Record<string, unknown> {
+  const positiveIntegers = (value: unknown, field: string) => Array.isArray(value)
+    ? value.map((item) => requiredPositiveInteger(item, field))
+    : [];
+  const strings = (value: unknown, field: string) => Array.isArray(value)
+    ? value.map((item) => requiredString(item, field))
+    : [];
+  return {
+    commitSha: requiredGitSha(result.commitSha, "result.commitSha"),
+    codeCheckpoint: requiredString(result.codeCheckpoint, "result.codeCheckpoint"),
+    evidenceFingerprint: requiredString(result.evidenceFingerprint, "result.evidenceFingerprint"),
+    analysisPaths: Array.isArray(result.analysisPaths)
+      ? result.analysisPaths.map((path) => requiredRepositoryPath(path, "result.analysisPath"))
+      : [],
+    sourceObservationIds: strings(result.sourceObservationIds, "result.sourceObservationId"),
+    problemEvidencePullRequestNumbers: positiveIntegers(
+      result.problemEvidencePullRequestNumbers,
+      "result.problemEvidencePullRequestNumber"
+    ),
+    sourcePullRequestNumbers: positiveIntegers(result.sourcePullRequestNumbers, "result.sourcePullRequestNumber"),
+    resolvedPullRequestNumbers: positiveIntegers(result.resolvedPullRequestNumbers, "result.resolvedPullRequestNumber")
+  };
+}
+
 function completionEventType(topic: string): string {
   switch (topic) {
     case "run-review": return "review.completed";
     case "run-research": return "context.collected";
     case "run-publish": return "publish.completed";
     case "run-cleanup": return "cleanup.completed";
-    case "run-ontology-ingest": return "ontology.code_ingested";
-    case "run-ontology-assert": return "ontology.assertions_recorded";
-    case "run-ontology-project": return "ontology.graph_projected";
     default: return "worker.completed";
   }
 }
@@ -1314,11 +1352,6 @@ function migrateSnapshotTenantAliases(
     changed = true;
     return { ...pullRequest, tenantId };
   });
-  const pendingOntologyCompletions = snapshot.pendingOntologyCompletions?.map((pending) => {
-    if (!aliasSet.has(pending.tenantId)) return pending;
-    changed = true;
-    return { ...pending, tenantId };
-  });
   return changed
     ? {
         changed,
@@ -1327,28 +1360,10 @@ function migrateSnapshotTenantAliases(
           intakeState: {
             board: { ...snapshot.intakeState.board, tasks },
             pullRequests
-          },
-          ...(pendingOntologyCompletions ? { pendingOntologyCompletions } : {})
+          }
         }
       }
     : { snapshot, changed };
-}
-
-function retireLegacyOntologyWork(state: GitHubIntakeState, now: string): GitHubIntakeState {
-  const messages = state.board.outbox.filter((message) =>
-    message.status !== "dispatched" && LEGACY_ONTOLOGY_TOPICS.has(message.topic)
-  );
-  if (messages.length === 0) return state;
-  const workflowRootIds = new Set<TaskId>();
-  for (const message of messages) {
-    let task = findTask(state.board, message.taskId);
-    while (task?.parentTaskId) task = findTask(state.board, task.parentTaskId);
-    if (task) workflowRootIds.add(task.id);
-  }
-  let board = state.board;
-  for (const message of messages) board = markOutboxDispatched(board, message.id, now);
-  board = supersedeTaskTree(board, now, (task) => workflowRootIds.has(task.id));
-  return { ...state, board: reduceBoard(board, now) };
 }
 
 function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySnapshot {
@@ -1654,7 +1669,11 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
   });
 }
 
-function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: string): OntologyAssertionBatch {
+function parseOntologyAssertionBatch(
+  value: unknown,
+  task: { readonly id: string; readonly metadata: Readonly<Record<string, unknown>> },
+  tenantId: string
+): OntologyAssertionBatch {
   if (!isRecord(value)) throw invalidRequest("assertionBatch must be an object");
   const commitSha = requiredGitSha(value.commitSha, "assertionBatch.commitSha");
   if (commitSha !== task.metadata.commitSha) throw invalidRequest("assertion batch commit does not match task source");

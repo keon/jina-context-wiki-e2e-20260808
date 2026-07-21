@@ -50,6 +50,80 @@ import {
 } from "./retrieval.js";
 import { linkedIssueNumbers, normalizeGitHubSourceObservation, normalizeSourceObservation, parseIncidentDocument, parsePackageManifest, parseServiceDefinitions } from "./normalizers.js";
 import { buildCausalTrace, evaluateCounterfactual } from "./causal.js";
+import { MemoryOntologyPipelineCoordinator } from "./pipeline-coordinator.js";
+
+test("snapshot-first ontology builds publish before low-priority history enrichment", async () => {
+  const coordinator = new MemoryOntologyPipelineCoordinator();
+  const createdAt = "2026-07-21T00:00:00.000Z";
+  await coordinator.createBuild({
+    tenantId: "tenant",
+    repository: "omxyz/jina",
+    ref: "main",
+    requestKey: "build-1",
+    snapshotFirst: true,
+    createdAt
+  });
+  const metadata = {
+    commitSha: "a".repeat(40),
+    codeCheckpoint: "code",
+    evidenceFingerprint: "evidence"
+  };
+  const claim = async (topic: "run-ontology-ingest" | "run-ontology-assert" | "run-ontology-project", now: string) => {
+    const value = await coordinator.claim({
+      tenantId: "tenant",
+      workerId: "worker",
+      topics: [topic],
+      now,
+      leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+    });
+    assert.ok(value);
+    return value;
+  };
+  const ingest = await claim("run-ontology-ingest", "2026-07-21T00:01:00.000Z");
+  assert.equal(ingest.task.metadata.pipelinePhase, "snapshot");
+  assert.equal(await coordinator.complete({
+    tenantId: "tenant", stageId: ingest.task.id, leaseId: ingest.message.leaseId,
+    outcome: "done", now: "2026-07-21T00:02:00.000Z", nextMetadata: metadata
+  }), true);
+  const assertion = await claim("run-ontology-assert", "2026-07-21T00:03:00.000Z");
+  assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
+  assert.equal(await coordinator.complete({
+    tenantId: "tenant", stageId: assertion.task.id, leaseId: assertion.message.leaseId,
+    outcome: "done", now: "2026-07-21T00:04:00.000Z", nextMetadata: metadata
+  }), true);
+  const projection = await claim("run-ontology-project", "2026-07-21T00:05:00.000Z");
+  assert.equal(projection.task.metadata.pipelinePhase, "snapshot");
+  assert.equal(await coordinator.complete({
+    tenantId: "tenant", stageId: projection.task.id, leaseId: projection.message.leaseId,
+    outcome: "done", now: "2026-07-21T00:06:00.000Z"
+  }), true);
+  const history = await claim("run-ontology-ingest", "2026-07-21T00:07:00.000Z");
+  assert.equal(history.task.metadata.pipelinePhase, "history");
+});
+
+test("new repository builds fence leases from superseded builds", async () => {
+  const coordinator = new MemoryOntologyPipelineCoordinator();
+  const request = {
+    tenantId: "tenant", repository: "omxyz/jina", ref: "main", snapshotFirst: false,
+    createdAt: "2026-07-21T00:00:00.000Z"
+  } as const;
+  await coordinator.createBuild({ ...request, requestKey: "old" });
+  const old = await coordinator.claim({
+    tenantId: "tenant", workerId: "old-worker", topics: ["run-ontology-ingest"],
+    now: "2026-07-21T00:01:00.000Z", leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+  });
+  assert.ok(old);
+  await coordinator.createBuild({ ...request, requestKey: "new", createdAt: "2026-07-21T00:02:00.000Z" });
+  assert.equal(await coordinator.leasedStage({
+    tenantId: "tenant", stageId: old.task.id, leaseId: old.message.leaseId, now: "2026-07-21T00:03:00.000Z"
+  }), undefined);
+  const next = await coordinator.claim({
+    tenantId: "tenant", workerId: "new-worker", topics: ["run-ontology-ingest"],
+    now: "2026-07-21T00:03:00.000Z", leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+  });
+  assert.ok(next);
+  assert.notEqual(next.task.id, old.task.id);
+});
 
 test("pure structural parsing produces versioned symbols and imports", () => {
   const analysis = analyzeSourceBlob("a".repeat(40), "typescript", 'import { helper } from "./helper";\nexport function main() {}\n');

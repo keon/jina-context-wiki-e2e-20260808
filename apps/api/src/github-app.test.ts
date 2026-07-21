@@ -9,6 +9,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   createOntologyGraph,
   MemoryOntologyGraphStore,
+  MemoryOntologyPipelineCoordinator,
   ONTOLOGY_PARSER_VERSION,
   type BlobAnalysis,
   type RetrievalRequest,
@@ -156,13 +157,13 @@ test("branch pushes create and supersede the existing ontology workflow", async 
 
   const first = await deliver(baseUrl, "push", "push-1", pushPayload("a".repeat(40)));
   assert.equal(first.status, 202);
-  assert.equal((await first.json() as { createdTaskIds: string[] }).createdTaskIds.length, 4);
+  assert.equal((await first.json() as { createdTaskIds: string[] }).createdTaskIds.length, 7);
   const repeatedHead = await deliver(baseUrl, "push", "push-2", pushPayload("a".repeat(40)));
   assert.equal((await repeatedHead.json() as { outcome: string }).outcome, "duplicate");
   const second = await deliver(baseUrl, "push", "push-3", pushPayload("b".repeat(40)));
-  assert.equal((await second.json() as { createdTaskIds: string[] }).createdTaskIds.length, 4);
+  assert.equal((await second.json() as { createdTaskIds: string[] }).createdTaskIds.length, 7);
   const returned = await deliver(baseUrl, "push", "push-4", pushPayload("a".repeat(40)));
-  assert.equal((await returned.json() as { createdTaskIds: string[] }).createdTaskIds.length, 4,
+  assert.equal((await returned.json() as { createdTaskIds: string[] }).createdTaskIds.length, 7,
     "moving a branch back to an earlier SHA is a new ref transition, not a redelivery");
 
   const board = await authenticatedFetch(`${baseUrl}/board`).then((response) => response.json() as Promise<{
@@ -170,7 +171,9 @@ test("branch pushes create and supersede the existing ontology workflow", async 
   }>);
   const current = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-4");
   const old = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-3");
-  assert.deepEqual(current.map((task) => task.type).sort(), ["ontology_assert", "ontology_build", "ontology_ingest", "ontology_project"]);
+  assert.deepEqual(current.map((task) => task.type).sort(), [
+    "ontology_assert", "ontology_assert", "ontology_build", "ontology_ingest", "ontology_ingest", "ontology_project", "ontology_project"
+  ]);
   assert.equal(current.find((task) => task.type === "ontology_ingest")?.status, "queued");
   assert.equal(old.every((task) => task.status === "superseded"), true);
 });
@@ -390,7 +393,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test", historyMode: "snapshot"
+        repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test", snapshotFirst: true
       })
     });
     assert.equal(created.status, 202);
@@ -401,7 +404,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     const sourceSha = "d".repeat(40);
     const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
     assert.equal(ingestion.message.topic, "run-ontology-ingest");
-    assert.equal(ingestion.task.metadata?.historyMode, "snapshot");
+    assert.equal(ingestion.task.metadata?.pipelinePhase, "snapshot");
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
@@ -568,9 +571,9 @@ test("a new ontology attempt supersedes older active work for the same repositor
     }>);
     const first = board.tasks.filter((task) => task.metadata.requestKey === "first");
     const second = board.tasks.filter((task) => task.metadata.requestKey === "second");
-    assert.equal(first.length, 4);
+    assert.equal(first.length, 7);
     assert.equal(first.every((task) => task.status === "superseded"), true);
-    assert.equal(second.length, 4, "an idempotent request key does not duplicate the attempt");
+    assert.equal(second.length, 7, "an idempotent request key does not duplicate the attempt");
     assert.equal(second.find((task) => task.type === "ontology_ingest")?.status, "queued");
     assert.equal(second.some((task) => task.status === "blocked"), false);
   } finally {
@@ -869,9 +872,10 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
-test("startup terminalizes legacy ontology outbox work instead of stranding it", async () => {
+test("ontology task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
-  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const ontologyCoordinator = new MemoryOntologyPipelineCoordinator();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyCoordinator });
   const firstUrl = await listen(first);
   const created = await fetch(`${firstUrl}/ontology/build`, {
     method: "POST", headers: { "content-type": "application/json" },
@@ -880,32 +884,17 @@ test("startup terminalizes legacy ontology outbox work instead of stranding it",
   assert.equal(created.status, 202);
   await close(first);
 
-  const snapshot = stateStore.current();
-  assert.ok(snapshot);
-  const legacyMessage = snapshot.intakeState.board.outbox.find((message) => message.topic === "run-ontology-ingest");
-  assert.ok(legacyMessage);
-  stateStore.replace({
-    ...snapshot,
-    intakeState: {
-      ...snapshot.intakeState,
-      board: {
-        ...snapshot.intakeState.board,
-        outbox: snapshot.intakeState.board.outbox.map((message) =>
-          message.id === legacyMessage.id ? { ...message, topic: "run-ontology" } : message
-        )
-      }
-    }
-  });
+  assert.equal(stateStore.current(), undefined);
 
-  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyCoordinator });
   const secondUrl = await listen(second);
   try {
     const board = await fetch(`${secondUrl}/board`).then((response) => response.json() as Promise<{
       tasks: Array<{ status: string; metadata: Record<string, unknown> }>;
-      outbox: Array<{ id: string; status: string }>;
+      outbox: Array<{ id: string; status: string; topic: string }>;
     }>);
-    assert.equal(board.outbox.find((message) => message.id === legacyMessage.id)?.status, "dispatched");
-    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").every((task) => task.status === "superseded"), true);
+    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 7);
+    assert.equal(board.outbox.some((message) => message.topic === "run-ontology-ingest" && message.status === "pending"), true);
   } finally {
     await close(second);
   }
@@ -946,7 +935,7 @@ test("concurrent API instances mutate the latest durable snapshot", async () => 
   }
 });
 
-test("repository ingestion writes retain lease ownership until their durable mutation commits", async () => {
+test("repository builds supersede immediately without waiting for an ingestion data write", async () => {
   class GatedOntologyStore extends MemoryOntologyGraphStore {
     private signalEntered!: () => void;
     readonly entered = new Promise<void>((resolve) => { this.signalEntered = resolve; });
@@ -967,8 +956,9 @@ test("repository ingestion writes retain lease ownership until their durable mut
 
   const stateStore = new MemoryStateStore();
   const ontologyStore = new GatedOntologyStore();
-  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
-  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const ontologyCoordinator = new MemoryOntologyPipelineCoordinator();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore, ontologyCoordinator });
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore, ontologyCoordinator });
   const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
   try {
     const build = await fetch(`${firstUrl}/ontology/build`, {
@@ -1003,17 +993,22 @@ test("repository ingestion writes retain lease ownership until their durable mut
       body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "second" })
     }).then((response) => { replacementSettled = true; return response; });
     await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(replacementSettled, false, "supersession waits for the lease-fenced ontology write");
+    assert.equal(replacementSettled, true, "repository-scoped supersession is independent of the data write");
 
     ontologyStore.release();
     assert.equal((await write).status, 200);
     assert.equal((await replacement).status, 202);
+    assert.equal(await completeClaim(firstUrl, ingestion, {
+      commitSha,
+      codeCheckpoint: "stale",
+      evidenceFingerprint: "stale"
+    }), 409);
   } finally {
     await Promise.all([close(first), close(second)]);
   }
 });
 
-test("ontology completion resumes from a durable intent when final board persistence fails", async () => {
+test("ontology completion does not depend on the legacy board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const ontologyStore = new MemoryOntologyGraphStore();
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
@@ -1033,7 +1028,6 @@ test("ontology completion resumes from a durable intent when final board persist
       evidenceFingerprint: "evidence-fingerprint"
     }), 200);
     const assertion = await claimTopic(baseUrl, "run-ontology-assert");
-    stateStore.failUpdateAfter(1);
     const firstCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1069,20 +1063,11 @@ test("ontology completion resumes from a durable intent when final board persist
         }
       })
     });
-    assert.equal(firstCompletion.status, 500);
-    assert.equal(stateStore.current()?.pendingOntologyCompletions?.length, 1);
-
-    const recoveryPoll = await fetch(`${baseUrl}/internal/worker/claim`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ workerId: "recovery", topics: ["run-review"] })
-    });
-    assert.equal(recoveryPoll.status, 204);
+    assert.equal(firstCompletion.status, 200);
     const board = await fetch(`${baseUrl}/board`).then(
       (response) => response.json() as Promise<{ tasks: Array<{ id: string; status: string }> }>
     );
     assert.equal(board.tasks.find((task) => task.id === assertion.task.id)?.status, "done");
-    assert.equal(stateStore.current()?.pendingOntologyCompletions?.length, 0);
     assert.equal((await ontologyStore.listAssertions("default", "omxyz/resumable")).length > 0, true);
   } finally {
     await close(server);

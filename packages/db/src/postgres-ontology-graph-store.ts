@@ -33,6 +33,8 @@ import {
   type OntologyProjectionRequest,
   type OntologySourceEvidence,
   type OntologySourceIngestResult,
+  type OntologyWriteFence,
+  type OntologyWorkerTopic,
   type OntologyOperationalMetrics,
   type ProjectionRebuildResult,
   type RepositorySnapshot,
@@ -206,11 +208,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     this.pool = new Pool({ ...poolConfig, application_name: "jina-ontology", max: poolConfig.max ?? 5 });
   }
 
-  async save(graph: OntologyGraph): Promise<void> {
+  async save(graph: OntologyGraph, writeFence?: OntologyWriteFence): Promise<void> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertPipelineWriteFence(client, graph.tenantId, graph.repository, "run-ontology-project", writeFence);
       await assertRepositoryWritable(client, graph.tenantId, graph.repository);
       await insertOntologyGraph(client, graph);
       if (graph.generator.executor === "projection") {
@@ -267,7 +270,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   async get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined> {
     await this.initialize();
     const result = await this.pool.query<GraphRow>(
-      "select * from jina_ontology.graphs where id = $1 and tenant_id = $2",
+      `select graph.* from jina_ontology.graphs graph
+       where graph.id=$1 and graph.tenant_id=$2
+         and exists (select 1 from jina_ontology.graph_heads head
+                     where head.tenant_id=$2 and head.graph_id=graph.id)`,
       [graphId, tenantId]
     );
     return result.rows[0] ? this.hydrate(result.rows[0]) : undefined;
@@ -283,10 +289,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       `select g.*,
          (select count(*) from jina_ontology.nodes n where n.graph_id = g.id) as node_count,
          (select count(*) from jina_ontology.edges e where e.graph_id = g.id) as edge_count
-       from jina_ontology.graphs g
-       where g.tenant_id = $1
-       order by g.generated_at desc
-       limit 50`,
+       from jina_ontology.graph_heads head
+       join jina_ontology.graphs g on g.id=head.graph_id and g.tenant_id=head.tenant_id
+       where head.tenant_id=$1
+       order by g.generated_at desc,head.repository,head.ref_name
+       limit 5000`,
       [tenantId]
     );
     return result.rows.map((row) => ({
@@ -306,11 +313,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     return result.rows.map((row) => row.sha);
   }
 
-  async planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan> {
+  async planIngestion(snapshot: RepositorySnapshot, writeFence?: OntologyWriteFence): Promise<OntologyIngestPlan> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertPipelineWriteFence(client, snapshot.tenantId, snapshot.repository, "run-ontology-ingest", writeFence);
       await assertRepositoryWritable(client, snapshot.tenantId, snapshot.repository);
       const filtered = await client.query<{ kind: string; value: string }>(
         `select kind,value from jina_ontology.erasure_filters
@@ -451,12 +459,14 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
 
   async applyBlobAnalyses(
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
-    analyses: readonly BlobAnalysis[]
+    analyses: readonly BlobAnalysis[],
+    writeFence?: OntologyWriteFence
   ): Promise<void> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertPipelineWriteFence(client, scope.tenantId, scope.repository, "run-ontology-ingest", writeFence);
       await assertRepositoryWritable(client, scope.tenantId, scope.repository);
       for (const analysis of analyses) {
         const known = await client.query(
@@ -507,7 +517,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
-  async applyGitHubObservations(observations: readonly RepositorySourceObservation[]): Promise<OntologySourceIngestResult> {
+  async applyGitHubObservations(
+    observations: readonly RepositorySourceObservation[],
+    writeFence?: OntologyWriteFence
+  ): Promise<OntologySourceIngestResult> {
     await this.initialize();
     const client = await this.pool.connect();
     let assertionCount = 0;
@@ -517,6 +530,15 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const observationIds: string[] = [];
     try {
       await client.query("begin");
+      if (observations[0]) {
+        await assertPipelineWriteFence(
+          client,
+          observations[0].tenantId,
+          observations[0].repository,
+          "run-ontology-ingest",
+          writeFence
+        );
+      }
       const scopes = [...new Set(observations.map((observation) => `${observation.tenantId}\0${observation.repository}`))].sort();
       for (const scope of scopes) {
         const [tenantId, repository] = scope.split("\0");
@@ -773,7 +795,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     );
   }
 
-  async saveAssertionBatch(batch: OntologyAssertionBatch): Promise<OntologyAssertionResult> {
+  async saveAssertionBatch(batch: OntologyAssertionBatch, writeFence?: OntologyWriteFence): Promise<OntologyAssertionResult> {
     await this.initialize();
     const normalized = normalizeAssertionBatchLenient(batch);
     const assertions = normalized.assertions;
@@ -781,6 +803,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertPipelineWriteFence(client, batch.tenantId, batch.repository, "run-ontology-assert", writeFence);
       await assertRepositoryWritable(client, batch.tenantId, batch.repository);
       const inserted = await client.query(
         `insert into jina_ontology.observations
@@ -939,7 +962,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       ),
       request
     );
-    await this.save(graph);
+    await this.save(graph, request.writeFence);
     return graph;
   }
 
@@ -2221,6 +2244,24 @@ async function assertRepositoryWritable(client: PoolClient, tenantId: string, re
     [tenantId, repository]
   );
   if (tombstone.rowCount) throw new DomainError("repository is tombstoned", "conflict");
+}
+
+async function assertPipelineWriteFence(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  topic: OntologyWorkerTopic,
+  writeFence?: OntologyWriteFence
+): Promise<void> {
+  if (!writeFence) return;
+  const result = await client.query(
+    `select 1 from jina_board.tasks
+     where id=$1 and tenant_id=$2 and repository=$3 and topic=$4
+       and lease_id=$5 and status='in_progress' and lease_expires_at>now()
+     for update`,
+    [writeFence.stageId, tenantId, repository, topic, writeFence.leaseId]
+  );
+  if (result.rowCount !== 1) throw new DomainError("stale ontology worker lease", "conflict");
 }
 
 async function insertAudit(client: PoolClient, input: {

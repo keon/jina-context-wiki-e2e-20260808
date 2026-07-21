@@ -1,9 +1,15 @@
 import {
   PostgresJsonStateStore,
   PostgresOntologyGraphStore,
+  PostgresOntologyPipelineCoordinator,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
-import { MemoryOntologyGraphStore, type OntologyGraphStore } from "@jina/ontology";
+import {
+  MemoryOntologyGraphStore,
+  MemoryOntologyPipelineCoordinator,
+  type OntologyGraphStore,
+  type OntologyPipelineCoordinator
+} from "@jina/ontology";
 import { createApiServer } from "./server.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
@@ -11,6 +17,7 @@ const port = Number(process.env.PORT ?? 4000);
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const stateStore = createStateStore();
 const ontologyStore = createOntologyStore();
+const ontologyCoordinator = createOntologyCoordinator();
 if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_TENANT_ID)) {
   throw new Error("INTERNAL_API_TOKEN, GRAPH_API_TOKEN, and JINA_TENANT_ID are required in production");
 }
@@ -24,6 +31,7 @@ const server = createApiServer({
   seedDemo: enableDevEndpoints && process.env.JINA_SEED_DEMO !== "false",
   ...(stateStore ? { stateStore } : {}),
   ontologyStore,
+  ontologyCoordinator,
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
   ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
@@ -67,6 +75,14 @@ function createOntologyStore(): OntologyGraphStore {
     ...config,
     manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
   }) : new MemoryOntologyGraphStore();
+}
+
+function createOntologyCoordinator(): OntologyPipelineCoordinator {
+  const config = databaseConfig();
+  return config ? new PostgresOntologyPipelineCoordinator({
+    ...config,
+    manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
+  }) : new MemoryOntologyPipelineCoordinator();
 }
 
 function databaseConfig(): PostgresJsonStateStoreConfig | undefined {

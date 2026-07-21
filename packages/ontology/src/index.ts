@@ -5,6 +5,7 @@ export * from "./knowledge.js";
 export * from "./outbox.js";
 export * from "./operations.js";
 export * from "./pipeline.js";
+export * from "./pipeline-coordinator.js";
 export * from "./parser.js";
 export * from "./registry.js";
 export * from "./retrieval.js";

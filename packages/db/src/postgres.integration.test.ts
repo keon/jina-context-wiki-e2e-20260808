@@ -13,12 +13,71 @@ import {
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
 import { ONTOLOGY_SCHEMA_SQL, PostgresOntologyGraphStore } from "./postgres-ontology-graph-store.js";
 import { ONTOLOGY_ROLES_SQL } from "./ontology-roles.js";
+import { PostgresOntologyPipelineCoordinator } from "./postgres-ontology-pipeline-coordinator.js";
 import { Pool } from "pg";
 
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test("Postgres schema preserves unknown commit timestamps", () => {
   assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /committed_at\s*=\s*now\(\)/i);
+});
+
+test("Postgres ontology pipeline claims once and fences superseded leases", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const suffix = Date.now().toString(36);
+  const tenantId = `pipeline-${suffix}`;
+  const repository = `omxyz/pipeline-${suffix}`;
+  const first = new PostgresOntologyPipelineCoordinator({ connectionString });
+  const second = new PostgresOntologyPipelineCoordinator({ connectionString });
+  const graphStore = new PostgresOntologyGraphStore({ connectionString });
+  const cleanup = new Pool({ connectionString });
+  try {
+    await first.createBuild({
+      tenantId, repository, ref: "main", requestKey: "old", snapshotFirst: true,
+      createdAt: "2026-07-21T00:00:00.000Z"
+    });
+    const claims = await Promise.all([first, second].map((coordinator, index) => coordinator.claim({
+      tenantId,
+      workerId: `worker-${index}`,
+      topics: ["run-ontology-ingest"],
+      now: "2026-07-21T00:01:00.000Z",
+      leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+    })));
+    assert.equal(claims.filter(Boolean).length, 1);
+    const claimed = claims.find(Boolean)!;
+    assert.equal(await first.checkpoint({
+      tenantId, stageId: claimed.task.id, leaseId: claimed.message.leaseId,
+      name: "blob-batch", value: { offset: 50 }, now: "2026-07-21T00:02:00.000Z"
+    }), true);
+    await second.createBuild({
+      tenantId, repository, ref: "main", requestKey: "new", snapshotFirst: false,
+      createdAt: "2026-07-21T00:03:00.000Z"
+    });
+    assert.equal(await first.renew({
+      tenantId, stageId: claimed.task.id, leaseId: claimed.message.leaseId,
+      now: "2026-07-21T00:04:00.000Z", leaseExpiresAt: "2026-07-21T01:04:00.000Z"
+    }), false);
+    await assert.rejects(
+      graphStore.planIngestion({
+        tenantId,
+        repository,
+        ref: "main",
+        commitSha: "a".repeat(40),
+        treeSha: "b".repeat(40),
+        parents: [],
+        recordedAt: "2026-07-21T00:04:00.000Z",
+        taskId: claimed.task.id,
+        files: []
+      }, { stageId: claimed.task.id, leaseId: claimed.message.leaseId }),
+      /stale ontology worker lease/
+    );
+  } finally {
+    await cleanup.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]);
+    await cleanup.end();
+    await Promise.all([first.close(), second.close(), graphStore.close()]);
+  }
 });
 
 test("Postgres schema backfills projection graph heads without replacing current pointers", () => {

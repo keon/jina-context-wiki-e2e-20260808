@@ -224,16 +224,26 @@ export interface OntologyProjectionRequest {
   readonly commitSha: string;
   readonly taskId: string;
   readonly generatedAt: string;
+  readonly writeFence?: OntologyWriteFence;
+}
+
+export interface OntologyWriteFence {
+  readonly stageId: string;
+  readonly leaseId: string;
 }
 
 export interface OntologyPipelineStore {
   knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]>;
-  planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan>;
+  planIngestion(snapshot: RepositorySnapshot, writeFence?: OntologyWriteFence): Promise<OntologyIngestPlan>;
   applyBlobAnalyses(
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
-    analyses: readonly BlobAnalysis[]
+    analyses: readonly BlobAnalysis[],
+    writeFence?: OntologyWriteFence
   ): Promise<void>;
-  applyGitHubObservations(observations: readonly RepositorySourceObservation[]): Promise<OntologySourceIngestResult>;
+  applyGitHubObservations(
+    observations: readonly RepositorySourceObservation[],
+    writeFence?: OntologyWriteFence
+  ): Promise<OntologySourceIngestResult>;
   loadAssertionEvidence(
     tenantId: string,
     repository: string,
@@ -247,7 +257,7 @@ export interface OntologyPipelineStore {
     registryVersion: string,
     evidenceFingerprint: string
   ): Promise<OntologyAssertionResult | undefined>;
-  saveAssertionBatch(batch: OntologyAssertionBatch): Promise<OntologyAssertionResult>;
+  saveAssertionBatch(batch: OntologyAssertionBatch, writeFence?: OntologyWriteFence): Promise<OntologyAssertionResult>;
   project(request: OntologyProjectionRequest): Promise<OntologyGraph>;
 }
 
