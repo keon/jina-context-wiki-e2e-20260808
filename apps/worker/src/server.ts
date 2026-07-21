@@ -112,6 +112,7 @@ const token = requiredEnv("INTERNAL_API_TOKEN");
 const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
+const ontologyApiTimeoutMs = positiveInt(process.env.ONTOLOGY_API_TIMEOUT_MS, 120_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsOntologyProjections = topics.some((topic) => topic.startsWith("run-ontology"));
 const ontologyExecutor = topics.includes("run-ontology-assert")
@@ -847,7 +848,10 @@ async function submitBlobAnalyses(work: ClaimedWork, commitSha: string, analyses
 }
 
 async function internalApiJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
-  const response = await apiRequest(path, body);
+  // Ontology mutations can persist large content-addressed blob batches. Keep
+  // lease-control calls on the short default timeout, but allow these durable
+  // data calls to use the API service's longer processing window.
+  const response = await apiRequest(path, body, ontologyApiTimeoutMs);
   if (!response.ok) throw new Error(`Ontology API ${path} failed with ${response.status}: ${await response.text()}`);
   return await response.json() as T;
 }
@@ -931,13 +935,13 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   recordApiSuccess(!drainsOntologyProjections);
 }
 
-function apiRequest(path: string, body: unknown): Promise<Response> {
+function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Response> {
   assertLeaseOwned();
   return fetch(`${apiUrl}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: requestSignal(30_000)
+    signal: requestSignal(timeoutMs)
   });
 }
 
