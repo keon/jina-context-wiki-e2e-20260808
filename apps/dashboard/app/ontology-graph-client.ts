@@ -67,6 +67,8 @@ const NODE_COLORS: Record<string, [number, number, number, number]> = {
 const DEFAULT_NODE_COLOR: [number, number, number, number] = [0.58, 0.62, 0.69, 0.94];
 const CODE_LINK_COLOR: [number, number, number, number] = [0.36, 0.49, 0.73, 0.42];
 const KNOWLEDGE_LINK_COLOR: [number, number, number, number] = [0.58, 0.43, 0.73, 0.48];
+const GRAPH_SPACE_SIZE = 4096;
+const GRAPH_SPACE_CENTER = GRAPH_SPACE_SIZE / 2;
 
 class OntologyGraphRenderer implements PublicRenderer {
   private readonly options: RendererOptions;
@@ -79,13 +81,16 @@ class OntologyGraphRenderer implements PublicRenderer {
   private edgeIndex = new Map<string, number>();
   private degree: number[] = [];
   private labelFrame: number | null = null;
-  private fitTimers: number[] = [];
+  private searchFitTimer: number | null = null;
+  private settleTimer: number | null = null;
   private hoveredNode: number | null = null;
   private hoveredEdge: number | null = null;
   private physics = true;
   private ready = false;
   private userAdjustedView = false;
-  private lastAutoFit = 0;
+  private settling = false;
+  private viewportGeneration = 0;
+  private destroyed = false;
   private resizeObserver: ResizeObserver;
   private readonly edgeDragStart = (event: PointerEvent) => this.beginEdgeDrag(event);
   private edgeDrag: {
@@ -99,25 +104,25 @@ class OntologyGraphRenderer implements PublicRenderer {
   constructor(options: RendererOptions, onUnavailable: () => void) {
     this.options = options;
     this.graph = new Graph(options.container, {
+      spaceSize: GRAPH_SPACE_SIZE,
       backgroundColor: [0.035, 0.039, 0.039, 0],
       enableSimulation: true,
-      fitViewOnInit: true,
-      fitViewDelay: 250,
+      fitViewOnInit: false,
       fitViewPadding: 0.14,
       fitViewDuration: 500,
       enableDrag: true,
       enableZoom: true,
-      simulationGravity: 0.08,
-      simulationCenter: 0.03,
-      simulationRepulsion: 0.76,
+      simulationGravity: 0.012,
+      simulationCenter: 0.065,
+      simulationRepulsion: 1.6,
       simulationRepulsionTheta: 1.35,
-      simulationLinkSpring: 0.68,
-      simulationLinkDistance: 5.4,
-      simulationLinkDistRandomVariationRange: [0.85, 1.4],
-      simulationCollision: 0.7,
-      simulationCollisionPadding: 1.7,
-      simulationFriction: 0.88,
-      simulationDecay: 6500,
+      simulationLinkSpring: 0.45,
+      simulationLinkDistance: 64,
+      simulationLinkDistRandomVariationRange: [0.9, 1.2],
+      simulationCollision: 0.9,
+      simulationCollisionPadding: 3.2,
+      simulationFriction: 0.45,
+      simulationDecay: 150,
       renderLinks: true,
       curvedLinks: false,
       linkDefaultWidth: 0.72,
@@ -170,18 +175,10 @@ class OntologyGraphRenderer implements PublicRenderer {
       },
       onSimulationStart: () => this.setStatus("Organizing topology…", true),
       onSimulationTick: () => {
-        const now = Date.now();
-        if (!this.userAdjustedView && now - this.lastAutoFit > 450) {
-          this.lastAutoFit = now;
-          this.graph.fitView(0, 0.14, false);
-        }
         this.queueLabels();
       },
       onSimulationEnd: () => {
-        this.setStatus(this.data.nodes.length.toLocaleString() + " nodes · settled", false);
-        this.graph.fitView(400, 0.14, false);
-        this.queueLabels();
-        this.drawMinimap();
+        this.finishSettling();
       },
       onZoom: (_event, userDriven) => {
         if (userDriven) this.stopAutoFit();
@@ -209,6 +206,7 @@ class OntologyGraphRenderer implements PublicRenderer {
     window.addEventListener("pointerup", this.finishEdgeDrag);
     window.addEventListener("pointercancel", this.finishEdgeDrag);
     void this.graph.ready.then(() => {
+      if (this.destroyed) return;
       this.ready = true;
       this.setStatus("GPU renderer ready", false);
       const pendingData = this.data;
@@ -233,10 +231,15 @@ class OntologyGraphRenderer implements PublicRenderer {
       return;
     }
 
+    this.clearDeferredViewportWork();
+    this.settling = false;
+    this.graph.stop();
+    this.clearSettleTimer();
     const previousPositions = this.positionsById();
     this.data = data;
     this.userAdjustedView = false;
     this.dataKey = nextKey;
+    this.graph.setConfigPartial({ simulationLinkDistance: topologyLinkDistance(data.nodes.length) } as Parameters<Graph["setConfigPartial"]>[0]);
     this.nodeIndex = new Map(data.nodes.map((node, index) => [node.id, index]));
     this.edgeIndex = new Map(data.edges.map((edge, index) => [edge.id, index]));
     this.degree = new Array(data.nodes.length).fill(0);
@@ -261,8 +264,10 @@ class OntologyGraphRenderer implements PublicRenderer {
     const pointColors = new Float32Array(data.nodes.length * 4);
     const pointSizes = new Float32Array(data.nodes.length);
     const pointShapes = new Float32Array(data.nodes.length);
+    let reusedPositionCount = 0;
     data.nodes.forEach((node, index) => {
       const previous = previousPositions.get(node.id);
+      if (previous) reusedPositionCount += 1;
       const seeded = previous ?? seedPosition(node.id, index, data.nodes.length);
       positions[index * 2] = seeded[0];
       positions[index * 2 + 1] = seeded[1];
@@ -270,6 +275,7 @@ class OntologyGraphRenderer implements PublicRenderer {
       pointSizes[index] = Math.min(14, 4.4 + Math.sqrt(this.degree[index] ?? 0) * 1.8);
       pointShapes[index] = node.kind === "Repository" ? 5 : node.kind === "Issue" ? 3 : 0;
     });
+    if (reusedPositionCount === 0) centerPositions(positions);
 
     this.graph.setPointPositions(positions, true);
     this.graph.setPointColors(pointColors);
@@ -280,11 +286,17 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.graph.setLinkWidths(linkWidths);
     this.graph.setLinkStyles(linkStyles);
     this.graph.setLinkArrows(new Array(data.edges.length).fill(false));
-    this.graph.render(0.9, 0);
-    if (this.physics) this.graph.start(0.9);
-    this.setStatus(data.nodes.length ? "Organizing topology…" : "No visible nodes", Boolean(data.nodes.length));
+    this.graph.render(0.65, 0);
+    if (data.nodes.length) {
+      this.graph.fitView(0, initialFitPadding(data.nodes.length), true);
+      this.startSettling(0.65, settleDuration(data.nodes.length));
+    } else {
+      this.settling = false;
+      this.graph.stop();
+      this.clearSettleTimer();
+      this.setStatus("No visible nodes", false);
+    }
     this.setSelection(this.selection);
-    this.scheduleFitSequence();
   }
 
   setSelection(selection: GraphSelection): void {
@@ -299,7 +311,15 @@ class OntologyGraphRenderer implements PublicRenderer {
     const nextKey = matches.map((match) => match.kind + ":" + match.id).join("|");
     this.searchMatches = matches;
     if (!this.ready) return;
-    this.applyHighlights(false, previousKey !== nextKey);
+    const searchChanged = previousKey !== nextKey;
+    if (searchChanged) this.clearDeferredViewportWork();
+    if (nextKey && searchChanged) {
+      this.settling = false;
+      this.clearSettleTimer();
+      this.graph.stop();
+      this.setStatus("Layout settled", false);
+    }
+    this.applyHighlights(false, searchChanged);
   }
 
   private applyHighlights(selectionChanged: boolean, searchChanged: boolean): void {
@@ -361,7 +381,14 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.graph.render(undefined, 140);
     if (searchChanged && this.searchMatches.length && highlightedPoints?.length) {
       this.stopAutoFit();
+      const viewportGeneration = this.viewportGeneration;
       this.graph.fitViewByPointIndices(highlightedPoints, 360, 0.2, false);
+      this.searchFitTimer = window.setTimeout(() => {
+        this.searchFitTimer = null;
+        if (this.destroyed || viewportGeneration !== this.viewportGeneration || !this.searchMatches.length) return;
+        if (this.graph.getZoomLevel() > 5.5) this.graph.zoom(5.5, 180, false);
+        this.queueLabels();
+      }, 380);
     } else if (selectionChanged && !this.searchMatches.length) {
       this.stopAutoFit();
       if (highlightedPoints?.length) this.graph.fitViewByPointIndices(highlightedPoints, 420, 0.24, false);
@@ -372,41 +399,54 @@ class OntologyGraphRenderer implements PublicRenderer {
 
   fit(): void {
     this.stopAutoFit();
-    this.graph.fitView(450, 0.14, this.physics);
+    this.graph.fitView(450, 0.14, false);
   }
 
   zoomBy(factor: number): void {
     this.stopAutoFit();
-    this.graph.zoom(Math.max(0.05, Math.min(12, this.graph.getZoomLevel() * factor)), 180, this.physics);
+    this.graph.zoom(Math.max(0.05, Math.min(12, this.graph.getZoomLevel() * factor)), 180, false);
   }
 
   reset(): void {
+    this.clearDeferredViewportWork();
     this.userAdjustedView = false;
+    this.settling = false;
+    this.graph.stop();
+    this.clearSettleTimer();
     const positions = new Float32Array(this.data.nodes.length * 2);
     this.data.nodes.forEach((node, index) => {
       const seeded = seedPosition(node.id, index, this.data.nodes.length);
       positions[index * 2] = seeded[0];
       positions[index * 2 + 1] = seeded[1];
     });
+    centerPositions(positions);
     this.graph.setPinnedPoints([]);
     this.graph.setPointPositions(positions, true);
-    this.graph.render(1, 220);
-    if (this.physics) this.graph.start(1);
-    window.setTimeout(() => this.graph.fitView(450, 0.14, this.physics), 180);
+    this.graph.render(0.65, 0);
+    this.graph.fitView(0, initialFitPadding(this.data.nodes.length), true);
+    this.startSettling(0.65, settleDuration(this.data.nodes.length));
   }
 
   setPhysics(enabled: boolean): void {
     if (this.physics === enabled) return;
     this.physics = enabled;
     this.graph.setConfigPartial({ enableSimulation: enabled });
-    if (enabled) this.graph.start(0.55);
-    else this.graph.pause();
-    this.setStatus(enabled ? "Physics on" : "Physics paused", enabled);
+    if (enabled && this.data.nodes.length) {
+      this.startSettling(0.3, Math.min(700, settleDuration(this.data.nodes.length)));
+      return;
+    }
+    this.settling = false;
+    this.clearSettleTimer();
+    this.graph.pause();
+    this.setStatus("Layout settled", false);
   }
 
   destroy(): void {
+    this.destroyed = true;
+    this.settling = false;
     if (this.labelFrame !== null) cancelAnimationFrame(this.labelFrame);
-    this.fitTimers.forEach((timer) => clearTimeout(timer));
+    this.clearDeferredViewportWork();
+    this.clearSettleTimer();
     this.resizeObserver.disconnect();
     this.options.labels.removeEventListener("pointerdown", this.edgeDragStart);
     window.removeEventListener("pointermove", this.moveEdgeDrag);
@@ -629,7 +669,7 @@ class OntologyGraphRenderer implements PublicRenderer {
     if (!this.edgeDrag || this.edgeDrag.pointerId !== event.pointerId) return;
     this.edgeDrag = null;
     this.graph.setPinnedPoints([]);
-    if (this.physics) this.graph.start(0.3);
+    this.startSettling(0.25, Math.min(700, settleDuration(this.data.nodes.length)));
     this.queueLabels();
     this.drawMinimap();
   };
@@ -639,19 +679,63 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.options.status.classList.toggle("active", active);
   }
 
-  private scheduleFitSequence(): void {
-    this.fitTimers.forEach((timer) => clearTimeout(timer));
-    this.fitTimers = [180, 650, 1450, 2800].map((delay) => window.setTimeout(() => {
-      this.graph.fitView(360, 0.14, this.physics);
-      this.queueLabels();
-    }, delay));
-  }
-
   private stopAutoFit(): void {
     this.userAdjustedView = true;
-    this.fitTimers.forEach((timer) => clearTimeout(timer));
-    this.fitTimers = [];
+    this.clearDeferredViewportWork();
   }
+
+  private clearDeferredViewportWork(): void {
+    this.viewportGeneration += 1;
+    if (this.searchFitTimer !== null) window.clearTimeout(this.searchFitTimer);
+    this.searchFitTimer = null;
+  }
+
+  private startSettling(alpha: number, duration = 8000): void {
+    this.clearSettleTimer();
+    this.settling = true;
+    this.setStatus("Organizing topology…", true);
+    this.graph.start(alpha);
+    this.settleTimer = window.setTimeout(() => {
+      this.settleTimer = null;
+      this.graph.stop();
+      this.finishSettling();
+    }, duration);
+  }
+
+  private finishSettling(): void {
+    if (!this.settling) return;
+    this.settling = false;
+    this.clearSettleTimer();
+    this.setStatus("Layout settled", false);
+    this.queueLabels();
+    this.drawMinimap();
+  }
+
+  private clearSettleTimer(): void {
+    if (this.settleTimer !== null) window.clearTimeout(this.settleTimer);
+    this.settleTimer = null;
+  }
+}
+
+function settleDuration(nodeCount: number): number {
+  if (nodeCount >= 5000) return 2400;
+  if (nodeCount >= 1000) return 2000;
+  if (nodeCount >= 250) return 1700;
+  return 1400;
+}
+
+function initialFitPadding(nodeCount: number): number {
+  if (nodeCount >= 5000) return 0.3;
+  if (nodeCount >= 1000) return 0.26;
+  if (nodeCount >= 250) return 0.22;
+  return 0.16;
+}
+
+function topologyLinkDistance(nodeCount: number): number {
+  if (nodeCount >= 5000) return 18;
+  if (nodeCount >= 1000) return 28;
+  if (nodeCount >= 250) return 42;
+  return 64;
 }
 
 class CanvasOntologyGraphRenderer implements PublicRenderer {
@@ -966,6 +1050,23 @@ function seedPosition(id: string, index: number, total: number): [number, number
   const radius = 12 + Math.sqrt(index + 1) * Math.max(4.5, 120 / Math.sqrt(Math.max(1, total)));
   const jitter = ((hash >>> 8) % 1000) / 1000;
   return [Math.cos(angle) * radius * (0.85 + jitter * 0.3), Math.sin(angle) * radius * (0.85 + (1 - jitter) * 0.3)];
+}
+
+function centerPositions(positions: Float32Array): void {
+  const pointCount = positions.length / 2;
+  if (!pointCount) return;
+  let centerX = 0;
+  let centerY = 0;
+  for (let index = 0; index < pointCount; index += 1) {
+    centerX += positions[index * 2] ?? 0;
+    centerY += positions[index * 2 + 1] ?? 0;
+  }
+  centerX /= pointCount;
+  centerY /= pointCount;
+  for (let index = 0; index < pointCount; index += 1) {
+    positions[index * 2] = (positions[index * 2] ?? 0) - centerX + GRAPH_SPACE_CENTER;
+    positions[index * 2 + 1] = (positions[index * 2 + 1] ?? 0) - centerY + GRAPH_SPACE_CENTER;
+  }
 }
 
 function hashString(value: string): number {

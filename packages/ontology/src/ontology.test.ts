@@ -336,10 +336,12 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates("Which issue did PR #42 introduce?"), ["issue_trace"]);
   assert.deepEqual(classifyTemplates("Which issue did PR #11 resolve?"), ["issue_trace"]);
   assert.deepEqual(classifyTemplates('Which PR or commit caused "Administrators cannot delete resources"?'), ["issue_trace"]);
+  assert.deepEqual(classifyTemplates("When did the problem Administrators cannot delete resources first start?"), ["issue_trace"]);
   assert.deepEqual(classifyTemplates("What changed in PR #5?"), ["change"]);
   assert.deepEqual(classifyTemplates("Which PR explains why src/auth.ts exists?"), ["intent"]);
   assert.equal(extractIssueText('What caused “Administrators   cannot delete resources”?'), "Administrators cannot delete resources");
   assert.equal(extractIssueText("Which PR or commit caused Administrators cannot delete resources, and why?"), "Administrators cannot delete resources");
+  assert.equal(extractIssueText("When did the problem Administrators cannot delete resources first start?"), "Administrators cannot delete resources");
   assert.equal(extractRepositoryPath("Why was src/access-policy.ts changed?"), "src/access-policy.ts");
   assert.equal(extractSymbol("Where is authorize implemented and what calls it?"), "authorize");
   const called: string[] = [];
@@ -488,11 +490,13 @@ test("orchestrator produces a direct cited causal answer and withholds unreviewe
 
   const reviewed = await answerWith([{
     sha: "3".repeat(40),
+    committedAt: "2026-02-03T10:30:00.000Z",
     why: "the administrator bypass was removed",
     assertionIds: ["assertion-cause"],
     pullRequests: [{ number: 3 }]
   }]);
   assert.match(reviewed.answer, /PR #3.*commit 333333333333.*because the administrator bypass was removed/);
+  assert.match(reviewed.answer, /first introduced on 2026-02-03/);
   assert.equal(reviewed.citedClaims.length, 2);
   assert.deepEqual(reviewed.citedClaims[0]?.citations, citations);
   assert.deepEqual(reviewed.coverageGaps, []);
@@ -697,6 +701,32 @@ test("source ingestion distinguishes new, updated, and confirmed GitHub observat
     assertionEvidenceFingerprint("code-checkpoint", [issue]),
     assertionEvidenceFingerprint("code-checkpoint", [{ ...issue, title: "Changed evidence" }])
   );
+});
+
+test("memory issue traces preserve ambiguous partial title matches", async () => {
+  const store = new MemoryOntologyGraphStore();
+  const repository = "org/repo";
+  const observedAt = "2026-07-20T00:00:00.000Z";
+  await store.applyGitHubObservations([101, 102].map((number) => ({
+    tenantId: "t",
+    repository,
+    kind: "issue" as const,
+    number,
+    title: number === 101 ? "Administrators cannot delete resources" : "Guests cannot delete resources",
+    state: "open",
+    url: `https://github.com/${repository}/issues/${number}`,
+    occurredAt: observedAt,
+    recordedAt: observedAt
+  })));
+  const trace = await store.retrieve({
+    tenantId: "t",
+    allowedRepositories: [repository],
+    repository,
+    ref: "main",
+    template: "issue_trace",
+    issueText: "cannot delete resources"
+  });
+  assert.deepEqual(trace.items.map((item) => (item.data as { issue?: { number?: number } }).issue?.number), [101, 102]);
 });
 
 test("reviews and retrieves a virtual issue through the generalized Issue assertion", async () => {

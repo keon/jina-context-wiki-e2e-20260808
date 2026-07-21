@@ -11,11 +11,15 @@ import {
   stableId
 } from "@jina/ontology";
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
-import { PostgresOntologyGraphStore } from "./postgres-ontology-graph-store.js";
+import { ONTOLOGY_SCHEMA_SQL, PostgresOntologyGraphStore } from "./postgres-ontology-graph-store.js";
 import { ONTOLOGY_ROLES_SQL } from "./ontology-roles.js";
 import { Pool } from "pg";
 
 const connectionString = process.env.TEST_DATABASE_URL;
+
+test("Postgres schema preserves unknown commit timestamps", () => {
+  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /committed_at\s*=\s*now\(\)/i);
+});
 
 test("Postgres atomically stores board completion and an immutable graph", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"

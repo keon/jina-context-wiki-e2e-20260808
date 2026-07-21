@@ -1,20 +1,149 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { renderDashboardPage } from "./page.js";
 
-test("dashboard page renders its navigation and keeps embedded behavior executable", () => {
+test("dashboard page renders clickable task detail affordances", () => {
   const html = renderDashboardPage("https://api.example.test");
 
   assert.match(html, /data-task-id/);
-  for (const page of ["board", "history", "task-types", "ontology"]) {
-    assert.match(html, new RegExp(`data-page="${page}"`));
-  }
+  assert.match(html, /href="\/" data-page="board"/);
+  assert.match(html, /href="\/history" data-page="history"/);
+  assert.match(html, /href="\/tasks" data-page="task-types"/);
+  assert.match(html, /href="\/ontology" data-page="ontology"/);
   assert.match(html, /aria-label="Task board"/);
   assert.match(html, /aria-label="Task type list"/);
+  assert.match(html, /class="app-header"/);
+  assert.match(html, /class="brand-mark"/);
+  assert.match(html, /--accent: #8b7cf6/);
+  assert.match(html, /background-image: radial-gradient\(circle, #292929 1px/);
+  assert.match(html, /function renderColumns/);
+  assert.match(html, /function partitionBoardTasks/);
+  assert.match(html, /latestRequestByScope/);
+  assert.match(html, /id="history-list"/);
+  assert.match(html, /id="history-details"/);
+  assert.match(html, /function renderHistory/);
+  assert.match(html, /function renderHistoryInspector/);
+  assert.match(html, /function renderTaskTypes/);
+  assert.match(html, /id="task-type-details"/);
+  assert.match(html, /function renderTaskTypeInspector/);
+  assert.match(html, /Workflow dependency trees/);
+  assert.match(html, /completing a prerequisite unblocks/);
+  assert.match(html, /aria-label="Task dependency trees"/);
+  assert.match(html, /function buildWorkflowTrees/);
+  assert.match(html, /function renderWorkflowTrees/);
+  assert.match(html, /function renderWorkflowBranch/);
+  assert.match(html, /function workflowTrigger/);
+  assert.match(html, /function taskTypeTriggerGroup/);
+  assert.match(html, /Triggered by/);
+  assert.match(html, /Prerequisite tasks/);
+  assert.match(html, /No prerequisite task/);
+  assert.match(html, /↓ unblocks/);
+  assert.match(html, /Also directly waits for:/);
+  assert.match(html, /function taskTypeDependencyGroups/);
+  assert.match(html, /Depends on/);
+  assert.match(html, /Required by/);
+  assert.match(html, /workflow: /);
+  assert.match(html, /function renderOntology/);
+  assert.match(html, /class="ontology-workspace"/);
+  assert.match(html, /assets\/ontology-graph-client\.js/);
+  assert.match(html, /function ensureOntologyRenderer/);
+  assert.match(html, /if \(showingOntology\)/);
   assert.match(html, /aria-label="Repository ontology graph"/);
+  assert.match(html, /id="ontology-label-layer"/);
+  assert.match(html, /id="ontology-minimap"/);
+  assert.match(html, /id="graph-runtime-status"/);
   assert.match(html, /aria-label="Graph visibility controls"/);
-  assert.match(html, /id="ontology-search"/);
-  assert.match(html, /Ask with citations/);
+  assert.match(html, /function filterOntologyGraph/);
+  assert.match(html, /function renderGraphControls/);
+  assert.match(html, /filterMenuOpen: false/);
+  assert.match(html, /filters\.open = ontologyViewState\.filterMenuOpen/);
+  assert.match(html, /ontologyViewState\.filterMenuOpen = Boolean\(menu\?\.open\)/);
+  assert.match(html, /function ontologyGraphIdentity/);
+  assert.match(html, /function resetOntologyViewForGraph/);
+  assert.match(html, /function friendlyNodeLabel/);
+  assert.match(html, /function friendlyNodeExplanation/);
+  assert.match(html, /ontologyRefreshSequence/);
+  assert.match(html, /requestSequence !== ontologyRefreshSequence/);
+  assert.match(html, /touch-action: none/);
+  assert.match(html, /cosmos-node-label/);
+  assert.match(html, /cosmos-edge-label/);
+  assert.match(html, /ontology-workspace:not\(.has-selection\)/);
+  assert.match(html, /function toggleGraphFilter/);
+  assert.match(html, /function renderOntologyInspector/);
+  assert.match(html, /button\.disabled = true/);
+  assert.match(html, /edit\.disabled = run\.disabled = true/);
+  assert.match(html, /function ontologyExplanation/);
+  assert.match(html, /function connectedConfidenceSummary/);
+  assert.match(html, /function ontologyConfidence/);
+  assert.match(html, /function ontologyEvidenceSection/);
+  assert.match(html, /function ontologyRelationshipSection/);
+  assert.match(html, /data-filter-group/);
+  assert.match(html, /Select a node or relationship/);
+  assert.match(html, /Visible relationships/);
+  assert.match(html, /Connected relationship confidence/);
+  assert.match(html, /Nodes do not carry a direct confidence score/);
+  assert.match(html, /Direct confidence score stored on this relationship/);
+  assert.match(html, /"Explanation"/);
+  assert.match(html, /No relationship explanation provided/);
+  assert.match(html, /Evidence · /);
+  assert.match(html, /Show all/);
+  assert.match(html, /Remove all/);
+  assert.match(html, /for \(const entry of nodeKinds\) ontologyViewState\.hiddenNodeKinds\.add\(entry\[0\]\)/);
+  assert.match(html, /for \(const entry of edgePredicates\) ontologyViewState\.hiddenEdgePredicates\.add\(entry\[0\]\)/);
+  assert.match(html, /graph-reset", "Reset"/);
+  assert.doesNotMatch(html, /graph-physics-control/);
+  assert.doesNotMatch(html, /ontology-description/);
+  assert.doesNotMatch(html, /view-switch ontology-view/);
+  assert.match(html, /id="context-query"/);
+  assert.doesNotMatch(html, /Search your repository/);
+  assert.match(html, /placeholder="Ask anything about this repository…"/);
+  assert.match(html, /aria-label="Search with citations"/);
+  assert.match(html, />↵<\/button>/);
+  assert.match(html, /id="context-search-results"/);
+  assert.match(html, /function contextGraphMatches/);
+  assert.match(html, /function renderContextPrimary/);
+  assert.match(html, /function contextMatchConfidence/);
+  assert.match(html, /View full evidence/);
+  assert.match(html, /let contextEvidenceExpanded = false/);
+  assert.match(html, /evidence\.open = contextEvidenceExpanded/);
+  assert.match(html, /contextEvidenceExpanded = evidence\.open/);
+  assert.match(html, /if \(contextEvidenceExpanded\) return/);
+  assert.match(html, /event\.stopPropagation\(\)/);
+  assert.match(html, /contextSearchResults\.scrollTop \+= event\.deltaY/);
+  assert.match(html, /overscroll-behavior: contain/);
+  assert.match(html, /let contextRequestSequence = 0/);
+  assert.match(html, /function invalidateContextRequest/);
+  assert.match(html, /signal: abortController\.signal/);
+  assert.match(html, /ontologyGraphIdentity\(ontologyState\.latest\) !== graphKey/);
+  assert.match(html, /ontologyRenderer\.setSearchMatches\(contextGraphMatches/);
+  assert.ok(html.indexOf('id="context-query"') < html.indexOf('class="ontology-workspace"'));
+  assert.doesNotMatch(html, /id="ontology-search"/);
+  assert.doesNotMatch(html, /Search graph…/);
+  assert.doesNotMatch(html, /context-drawer/);
+  assert.doesNotMatch(html, /ontologyRenderer\.find/);
+  assert.doesNotMatch(html, /Grouped layout/);
+  assert.match(html, /Cited repository answer/);
+  assert.match(html, /function renderIssueTrace/);
+  assert.match(html, /function issueTraceEntity/);
+  assert.match(html, /function issueTraceSections/);
+  assert.match(html, /function renderCauseTrace/);
+  assert.match(html, /function traceEvidence/);
+  assert.match(html, /function appendTraceCitations/);
+  assert.match(html, /trace-fact-label/);
+  assert.match(html, /"Why"/);
+  assert.match(html, /"Evidence"/);
+  assert.match(html, /"Later fix"/);
+  assert.match(html, /was caused by/);
+  assert.match(html, /No verified pull request or commit relationship has been asserted/);
+  assert.match(html, /\/ontology\/ask/);
+  assert.match(html, /function renderContextResults/);
+  assert.match(html, /function renderContextAnswer/);
+  assert.match(html, /function renderContextNotices/);
+  assert.match(html, /Cited claims/);
+  assert.match(html, /Coverage gap/);
+  assert.match(html, /item\.data\.excerpt/);
+  assert.doesNotMatch(html, /function renderTaskList/);
   assert.match(html, /Dependencies & relationships/);
   assert.match(html, /Comments & activity/);
   assert.match(html, /#task=/);
@@ -58,41 +187,56 @@ test("dashboard page renders its navigation and keeps embedded behavior executab
     "edge relationship types can be hidden independently"
   );
 
-  const searchSource = script.match(/function ontologySearchMatches\(graph, visibleGraph, labels, query, limit\) \{[\s\S]+?\n\}\n\nfunction renderOntologySearchResults/)?.[0]
-    .replace(/\n\nfunction renderOntologySearchResults$/, "");
-  assert.ok(searchSource);
-  const ontologySearchMatches = new Function("humanize", `${searchSource}; return ontologySearchMatches;`)(
-    (value: string) => value.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase())
-  ) as (
-    graph: { nodes: Array<Record<string, string>>; edges: Array<Record<string, string>> },
-    visibleGraph: { nodes: Array<Record<string, string>>; edges: Array<Record<string, string>> },
-    labels: Record<string, string>,
-    query: string,
-    limit: number
-  ) => Array<{ kind: string; id: string; label: string }>;
+  const contextMatchSource = script.match(/function contextGraphMatches\(state, graph\) \{[\s\S]+?\n\}\n\nfunction friendlyNodeExplanation/)?.[0]
+    .replace(/\n\nfunction friendlyNodeExplanation$/, "");
+  assert.ok(contextMatchSource);
+  const contextGraphMatches = new Function(`${contextMatchSource}; return contextGraphMatches;`)() as (
+    state: Record<string, unknown>,
+    graph: { nodes: Array<Record<string, unknown>>; edges: Array<Record<string, unknown>> }
+  ) => Array<{ kind: string; id: string }>;
   const searchableGraph = {
     nodes: [
-      { id: "repo", kind: "Repository", label: "omxyz/jina", description: "repo:omxyz/jina" },
-      { id: "file", kind: "File", label: "page.ts", path: "apps/dashboard/app/page.ts" },
-      { id: "issue", kind: "Issue", label: "Guest denial semantics" }
+      { id: "repo", kind: "Repository", label: "omxyz/jina", description: "repo:omxyz/jina", evidence: ["README.md:1"] },
+      { id: "file", kind: "File", label: "page.ts", description: "apps/dashboard/app/page.ts", path: "apps/dashboard/app/page.ts", evidence: ["apps/dashboard/app/page.ts:1"] },
+      { id: "symbol", kind: "Symbol", label: "renderOntology", description: "function in page.ts", path: "apps/dashboard/app/page.ts", evidence: ["apps/dashboard/app/page.ts:1001"] },
+      { id: "issue", kind: "Issue", label: "Guest denial semantics", description: "github issue", evidence: ["observation:observation-1"] },
+      { id: "pr", kind: "PullRequest", label: "#5 Fix guest denial semantics", description: "pull request", evidence: ["observation:observation-2"] },
+      { id: "commit", kind: "Commit", label: "d80aa666dd41", description: "repo:omxyz/jina:sha:d80aa666dd41a423d2775b8c0c47ba20d53facef", evidence: ["ROOT_CAUSE.md:2"] },
+      { id: "unrelated", kind: "Document", label: "denial", description: "unrelated document", evidence: ["UNRELATED.md:1"] },
+      { id: "range-source", kind: "Team", label: "Range source", description: "range source", evidence: [] },
+      { id: "range-target", kind: "Engineer", label: "Range target", description: "range target", evidence: [] }
     ],
     edges: [
-      { id: "contains", source: "repo", target: "file", predicate: "CONTAINS", plane: "code" },
-      { id: "tracks", source: "repo", target: "issue", predicate: "TRACKS", plane: "knowledge" }
+      { id: "declares", source: "file", target: "symbol", predicate: "DECLARES", plane: "code", evidence: ["apps/dashboard/app/page.ts:1001"] },
+      { id: "tracks", source: "repo", target: "issue", predicate: "TRACKS", plane: "knowledge", evidence: ["observation:observation-1"] },
+      { id: "resolves", source: "pr", target: "issue", predicate: "RESOLVES", plane: "knowledge", evidence: ["observation:observation-2"] },
+      { id: "merged", source: "pr", target: "commit", predicate: "MERGED_AS", plane: "knowledge", evidence: ["ROOT_CAUSE.md:2"] },
+      { id: "range-only", source: "range-source", target: "range-target", predicate: "AUTHORED_BY", plane: "knowledge", evidence: ["apps/dashboard/app/page.ts:1001"] }
     ]
   };
-  const labels = { repo: "omxyz/jina", file: "Dashboard page", issue: "Guest denial semantics" };
-  assert.deepEqual(
-    ontologySearchMatches(searchableGraph, searchableGraph, labels, "guest denial", 10).map((result) => [result.kind, result.id]),
-    [["node", "issue"], ["edge", "tracks"]],
-    "search covers friendly node labels and relationship endpoints"
-  );
-  const withoutFiles = filterOntologyGraph(searchableGraph, new Set(["File"]), new Set()) as typeof searchableGraph;
-  assert.deepEqual(
-    ontologySearchMatches(searchableGraph, withoutFiles, labels, "dashboard page", 10),
-    [],
-    "search respects active graph visibility filters"
-  );
+  const citedState = {
+    citations: [
+      { kind: "observation", id: "observation-1", repository: "omxyz/jina" },
+      { kind: "code", id: "code-1", repository: "omxyz/jina", path: "apps/dashboard/app/page.ts", startLine: 1001, endLine: 1001, commitSha: "d80aa666dd41a423d2775b8c0c47ba20d53facef" }
+    ],
+    citedClaims: [],
+    calls: [{
+      items: [{
+        title: "#5 Fix guest denial semantics resolves Guest denial semantics",
+        data: { predicate: "RESOLVES", issue: { title: "Guest denial semantics" }, commitSha: "d80aa666dd41a423d2775b8c0c47ba20d53facef" },
+        citations: [{ kind: "assertion", id: "assertion-1", repository: "omxyz/jina" }]
+      }]
+    }]
+  };
+  const citedMatches = new Set(contextGraphMatches(citedState, searchableGraph).map((match) => `${match.kind}:${match.id}`));
+  for (const expected of ["node:file", "node:symbol", "node:issue", "node:pr", "node:commit", "edge:declares", "edge:tracks", "edge:resolves", "edge:merged", "edge:range-only"]) {
+    assert.ok(citedMatches.has(expected), `cited evidence maps to ${expected}`);
+  }
+  assert.equal(citedMatches.has("node:unrelated"), false, "retrieval-title substrings do not create unsupported graph matches");
+  const withoutFiles = filterOntologyGraph(searchableGraph, new Set(["File", "Symbol"]), new Set()) as typeof searchableGraph;
+  const filteredMatches = new Set(contextGraphMatches(citedState, withoutFiles).map((match) => `${match.kind}:${match.id}`));
+  assert.equal(filteredMatches.has("node:file"), false, "citation highlights respect active graph visibility filters");
+  assert.equal(filteredMatches.has("edge:declares"), false, "hidden graph relationships are not highlighted");
 
   const graphIdentitySource = script.match(/function ontologyGraphIdentity\(graph\) \{[\s\S]+?\n\}\n\nfunction resetOntologyViewForGraph/)?.[0]
     .replace(/\n\nfunction resetOntologyViewForGraph$/, "");
@@ -266,5 +410,52 @@ test("dashboard page renders its navigation and keeps embedded behavior executab
       .map((section) => section.kind),
     ["cause", "resolution"]
   );
+  assert.equal(issueTraceSections(issueTrace, "When did the problem first start?")[0]?.value.sha, "334234bffedc");
   assert.equal(issueTraceSections(issueTrace, "Which PR fixed the issue?")[0]?.value.pullRequestNumber, 5);
+});
+
+test("ontology graph settles quickly without continuous camera fitting", () => {
+  const source = readFileSync(new URL("../../app/ontology-graph-client.ts", import.meta.url), "utf8");
+
+  assert.match(source, /simulationFriction: 0\.45/);
+  assert.match(source, /simulationDecay: 150/);
+  assert.match(source, /simulationGravity: 0\.012/);
+  assert.match(source, /simulationRepulsion: 1\.6/);
+  assert.match(source, /simulationLinkDistance: 64/);
+  assert.match(source, /simulationLinkDistance: topologyLinkDistance\(data\.nodes\.length\)/);
+  assert.doesNotMatch(source, /lastAutoFit/);
+  assert.doesNotMatch(source, /now - this\.lastAutoFit/);
+  assert.doesNotMatch(source, /scheduleFitSequence/);
+  assert.doesNotMatch(source, /fitTimers/);
+  assert.doesNotMatch(source, /warmupSteps/);
+  assert.match(source, /this\.graph\.fitView\(0, initialFitPadding\(data\.nodes\.length\), true\);\n\s+this\.startSettling\(0\.65/);
+  assert.match(source, /if \(reusedPositionCount === 0\) centerPositions\(positions\)/);
+  assert.match(source, /function centerPositions\(positions: Float32Array\): void/);
+  assert.match(source, /const GRAPH_SPACE_CENTER = GRAPH_SPACE_SIZE \/ 2/);
+  assert.match(source, /spaceSize: GRAPH_SPACE_SIZE/);
+  assert.match(source, /- centerX \+ GRAPH_SPACE_CENTER/);
+
+  const settleDurationSource = source.match(/function settleDuration\(nodeCount: number\): number \{[\s\S]+?\n\}/)?.[0];
+  assert.ok(settleDurationSource);
+  const settleDuration = new Function(`${settleDurationSource.replace(/: number/g, "")}; return settleDuration;`)() as (nodeCount: number) => number;
+  assert.equal(settleDuration(120), 1400);
+  assert.equal(settleDuration(500), 1700);
+  assert.equal(settleDuration(2000), 2000);
+  assert.equal(settleDuration(6000), 2400);
+
+  const topologyLinkDistanceSource = source.match(/function topologyLinkDistance\(nodeCount: number\): number \{[\s\S]+?\n\}/)?.[0];
+  assert.ok(topologyLinkDistanceSource);
+  const topologyLinkDistance = new Function(`${topologyLinkDistanceSource.replace(/: number/g, "")}; return topologyLinkDistance;`)() as (nodeCount: number) => number;
+  assert.equal(topologyLinkDistance(120), 64);
+  assert.equal(topologyLinkDistance(500), 42);
+  assert.equal(topologyLinkDistance(2000), 28);
+  assert.equal(topologyLinkDistance(6000), 18);
+
+  const initialFitPaddingSource = source.match(/function initialFitPadding\(nodeCount: number\): number \{[\s\S]+?\n\}/)?.[0];
+  assert.ok(initialFitPaddingSource);
+  const initialFitPadding = new Function(`${initialFitPaddingSource.replace(/: number/g, "")}; return initialFitPadding;`)() as (nodeCount: number) => number;
+  assert.equal(initialFitPadding(120), 0.16);
+  assert.equal(initialFitPadding(500), 0.22);
+  assert.equal(initialFitPadding(2000), 0.26);
+  assert.equal(initialFitPadding(6000), 0.3);
 });

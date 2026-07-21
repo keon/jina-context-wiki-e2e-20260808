@@ -479,7 +479,7 @@ function memoryIssueTraceItems(
   }
   const issueText = request.issueText?.trim().toLowerCase();
   const commitPrefix = request.commitSha?.toLowerCase();
-  const selected = [...candidates.values()].find((candidate) => {
+  const selectedCandidates = [...candidates.values()].filter((candidate) => {
     const entityId = stableId("entity", `${request.tenantId}:Issue:${candidate.naturalKey}`);
     const number = /^github:issue:.*#(\d+)$/.exec(candidate.naturalKey)?.[1];
     if (request.issueEntityId) return entityId === request.issueEntityId;
@@ -509,7 +509,8 @@ function memoryIssueTraceItems(
     }
     return false;
   });
-  if (!selected) return [];
+  if (!selectedCandidates.length) return [];
+  return selectedCandidates.map((selected) => {
   const issueNumberText = /^github:issue:.*#(\d+)$/.exec(selected.naturalKey)?.[1];
   const issueNumber = issueNumberText ? Number.parseInt(issueNumberText, 10) : undefined;
   const issueEntityId = stableId("entity", `${request.tenantId}:Issue:${selected.naturalKey}`);
@@ -548,6 +549,7 @@ function memoryIssueTraceItems(
         sha: commitSha,
         url: `https://github.com/${request.repository}/commit/${commitSha}`,
         role,
+        ...(snapshot?.committedAt ? { committedAt: snapshot.committedAt } : {}),
         changes
       };
     });
@@ -592,6 +594,7 @@ function memoryIssueTraceItems(
       sha,
       url: `https://github.com/${request.repository}/commit/${sha}`,
       role: "introduced" as const,
+      ...(snapshot?.committedAt ? { committedAt: snapshot.committedAt } : {}),
       changes,
       ...(reason ? { why: reason } : {}),
       evidence: assertion.evidence,
@@ -617,7 +620,7 @@ function memoryIssueTraceItems(
   };
   const first = resolutions[0];
   const issueLabel = payload.issue.displayId ? `Issue ${payload.issue.displayId}` : payload.issue.title;
-  return [{
+  return {
     kind: "issue_trace",
     title: first
       ? `${issueLabel} → PR #${first.pullRequestNumber}${first.commits[0] ? ` → ${first.commits[0].sha.slice(0, 12)}` : ""}`
@@ -625,7 +628,8 @@ function memoryIssueTraceItems(
     data: payload as unknown as Readonly<Record<string, unknown>>,
     citations,
     score: first ? 3 : 1
-  }];
+  };
+  });
 }
 
 function numberFromEntityNaturalKey(naturalKey: string): number | undefined {

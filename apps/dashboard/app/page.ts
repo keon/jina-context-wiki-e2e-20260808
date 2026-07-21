@@ -624,35 +624,55 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
 
   /* Ontology graph explorer */
   body[data-page="ontology"] .app-header { margin-bottom: 14px; }
-  .ontology-toolbar { display: grid; grid-template-columns: 210px 300px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-height: 36px; margin-bottom: 12px; }
-  .repository-button { display: flex; align-items: center; width: 100%; height: 36px; min-height: 36px; color: #ddd; line-height: 1; text-align: left; }
-  .graph-search { width: 100%; height: 36px; min-height: 36px; box-sizing: border-box; }
-  .graph-search-shell { position: relative; width: 100%; height: 36px; }
-  .graph-search-shell .graph-search { width: 100%; }
-  .graph-search > span { position: relative; display: block; flex: 0 0 14px; width: 14px; height: 14px; font-size: 0; transform: none; }
-  .graph-search > span::before { content: ""; position: absolute; top: 1px; left: 1px; width: 7px; height: 7px; border: 1.5px solid #727272; border-radius: 50%; }
-  .graph-search > span::after { content: ""; position: absolute; top: 9px; left: 9px; width: 5px; height: 1.5px; border-radius: 999px; background: #727272; transform: rotate(45deg); transform-origin: left center; }
-  .graph-search input { height: 34px; line-height: 34px; }
-  .graph-search-clear { display: none; flex: 0 0 22px; width: 22px; height: 22px; border: 0; background: transparent; padding: 0; color: #777; cursor: pointer; line-height: 1; }
-  .graph-search-shell.has-query .graph-search-clear { display: grid; place-items: center; }
-  .graph-search-results { position: absolute; z-index: 40; top: calc(100% + 7px); right: 0; left: 0; max-height: min(420px, 60vh); overflow-y: auto; border: 1px solid #303030; border-radius: 7px; background: #101111; padding: 5px; box-shadow: 0 18px 60px rgb(0 0 0 / 70%); }
-  .graph-search-results[hidden] { display: none; }
-  .graph-search-result { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; width: 100%; border: 0; border-radius: 5px; background: transparent; padding: 8px 9px; color: #d8d8d8; cursor: pointer; text-align: left; }
-  .graph-search-result:hover, .graph-search-result.active { background: #1a1a1b; }
-  .graph-search-result strong { overflow: hidden; font-size: 10px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
-  .graph-search-result small { grid-column: 1; overflow: hidden; color: #727272; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
-  .graph-search-result-kind { grid-column: 2; grid-row: 1 / span 2; align-self: center; color: #8f82bd; font-size: 8px; }
-  .graph-search-empty { margin: 0; padding: 13px 10px; color: #6f6f6f; font-size: 9px; text-align: center; }
-  .ontology-description { display: flex; align-items: center; min-width: 0; height: 36px; overflow: hidden; color: #5f5f5f; font-size: 9px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
-  .ontology-view { align-items: center; height: 36px; box-sizing: border-box; margin-left: 0; }
-  .ontology-view button { display: inline-flex; align-items: center; justify-content: center; height: 28px; min-height: 28px; line-height: 1; }
+  .ontology-toolbar { display: grid; gap: 6px; margin-bottom: 10px; }
+  .ontology-toolbar-meta { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
+  .repository-button { display: flex; align-items: center; width: auto; min-width: 200px; max-width: min(420px, 44vw); height: 32px; min-height: 32px; border-color: transparent; background: transparent; padding: 0 8px; color: #999; line-height: 1; text-align: left; }
+  .repository-button::after { content: "⌄"; margin-left: auto; color: #5f5f5f; }
+  .repository-button:hover { border-color: transparent; background: #111; }
+  .ontology-search-hero { display: grid; justify-items: center; padding: 0 16px 2px; }
+  .context-search-shell { position: relative; z-index: 30; width: min(680px, 100%); height: 44px; margin: 0 auto; text-align: left; }
+  .context-search { display: flex; align-items: center; width: 100%; height: 44px; min-height: 44px; box-sizing: border-box; border: 1px solid #303136; border-radius: 7px; background: #101114; padding: 0 8px; overflow: visible; transition: border-color 120ms ease, background 120ms ease; }
+  .context-search:hover { border-color: #3b3c42; background: #121317; }
+  .context-search:focus-within { border-color: #5f568f; background: #121317; box-shadow: 0 0 0 2px rgb(139 124 246 / 8%); }
+  .context-search-icon { position: relative; display: block; flex: 0 0 28px; width: 15px; height: 15px; margin-left: 2px; font-size: 0; }
+  .context-search-icon::before { content: ""; position: absolute; top: 1px; left: 1px; width: 8px; height: 8px; border: 1.25px solid #777; border-radius: 50%; }
+  .context-search-icon::after { content: ""; position: absolute; top: 10px; left: 10px; width: 5px; height: 1.25px; border-radius: 999px; background: #777; transform: rotate(45deg); transform-origin: left center; }
+  .context-search input { flex: 1; height: 42px; min-width: 0; border: 0; background: transparent; padding: 0 8px 0 2px; color: var(--text); font-size: 11px; line-height: 42px; outline: 0; }
+  .context-search input::placeholder { color: #747474; }
+  .context-search input:focus { box-shadow: none; }
+  .context-search-clear, .context-search-submit { flex: 0 0 auto; width: 26px; height: 30px; border: 0; background: transparent; padding: 0; color: #696969; cursor: pointer; }
+  .context-search-clear { display: none; font-size: 14px; }
+  .context-search-shell.has-query .context-search-clear { display: block; }
+  .context-search-submit { margin-left: 2px; border-left: 1px solid #28292d; color: #888; font-size: 13px; }
+  .context-search-submit:hover, .context-search-clear:hover { color: #ddd; }
+  .context-search-submit:disabled { color: #4b4b4b; cursor: wait; }
+  .context-search-results { position: absolute; z-index: 40; top: calc(100% + 9px); left: 50%; width: min(900px, calc(100vw - 48px)); max-height: min(520px, 62vh); overflow-y: auto; overscroll-behavior: contain; border: 1px solid #303136; border-radius: 8px; background: #101114; padding: 0; box-shadow: 0 18px 60px rgb(0 0 0 / 68%); transform: translateX(-50%); }
+  .context-search-results[hidden] { display: none; }
+  .context-result-primary { display: grid; gap: 10px; padding: 15px 17px 14px; }
+  .context-result-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+  .context-result-spark { color: #988af5; font-size: 13px; }
+  .context-result-heading strong { min-width: 0; overflow: hidden; color: #e8e8e8; font-size: 11px; font-weight: 610; text-overflow: ellipsis; white-space: nowrap; }
+  .context-result-confidence { margin-left: auto; color: #9a8ef0; font-size: 9px; white-space: nowrap; }
+  .context-result-answer { margin: 0; color: #b9b9bc; font-size: 10px; line-height: 1.5; }
+  .context-causal-trace { display: flex; align-items: center; gap: 9px; min-width: 0; color: #b9b9bc; font-size: 9px; }
+  .context-causal-step { display: inline-flex; align-items: center; min-width: 0; }
+  .context-causal-step::before { content: ""; flex: 0 0 auto; width: 7px; height: 7px; margin-right: 7px; border-radius: 50%; background: #8b7cf6; }
+  .context-causal-arrow { flex: 1 1 34px; max-width: 70px; height: 1px; background: #3a3a40; }
+  .context-result-resolution { margin: 0; color: #858589; font-size: 9px; }
+  .context-result-footer { display: flex; align-items: center; gap: 6px; min-width: 0; }
+  .context-citation-chip { max-width: 220px; overflow: hidden; border: 1px solid #303136; border-radius: 4px; background: #121317; padding: 5px 7px; color: #9a9a9d; font: 8px/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+  .context-graph-match-count { margin-left: auto; color: #77777c; font-size: 9px; white-space: nowrap; }
+  .context-full-evidence { border-top: 1px solid #25262a; }
+  .context-full-evidence > summary { padding: 9px 17px; color: #747478; cursor: pointer; font-size: 9px; list-style: none; }
+  .context-full-evidence > summary::-webkit-details-marker { display: none; }
+  .context-full-evidence[open] > summary { border-bottom: 1px solid #25262a; }
+  .context-full-evidence-body { display: grid; gap: 8px; padding: 12px 17px 16px; }
   .ontology-workspace { grid-template-columns: minmax(0, 1fr) 365px; gap: 10px; }
   .ontology-card { min-width: 0; border-radius: 7px; }
-  .graph-controls { position: relative; z-index: 8; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 51px; padding: 7px 10px; }
-  .graph-control-toolbar { display: flex; align-items: center; gap: 7px; min-height: 36px; }
-  .graph-control-help { margin-left: auto; max-width: 340px; text-align: right; }
-  .graph-filter-menu { position: relative; height: 36px; margin: 0; }
-  .graph-filter-menu > summary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 36px; box-sizing: border-box; padding: 0 10px; cursor: pointer; line-height: 1; list-style: none; }
+  .ontology-toolbar-meta > .graph-controls { position: relative; z-index: 8; display: flex; align-items: center; min-height: 32px; border: 0; background: transparent; padding: 0; }
+  .graph-control-toolbar { display: flex; align-items: center; gap: 2px; min-height: 32px; }
+  .graph-filter-menu { position: relative; height: 32px; margin: 0; }
+  .graph-filter-menu > summary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; box-sizing: border-box; border-color: transparent; background: transparent; padding: 0 9px; cursor: pointer; line-height: 1; list-style: none; }
   .graph-filter-menu > summary::-webkit-details-marker { display: none; }
   .graph-filter-menu > summary::before { content: ""; width: 6px; height: 6px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: translateY(-1px) rotate(45deg); }
   .graph-filter-popover { position: absolute; z-index: 20; top: calc(100% + 7px); left: 0; width: 410px; padding: 12px; border: 1px solid #303030; border-radius: 7px; background: #101111; box-shadow: 0 18px 60px rgb(0 0 0 / 65%); }
@@ -663,34 +683,28 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip { border: 0; background: transparent; padding: 5px 6px; text-align: left; }
   .graph-filter-chip:hover { background: #191919; }
   .graph-popover-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-  .graph-control-button, .graph-reset, .graph-zoom, .graph-toggle { display: inline-flex; align-items: center; justify-content: center; height: 36px; min-height: 36px; box-sizing: border-box; margin: 0; line-height: 1; }
-  .graph-control-button { padding: 0 10px; cursor: pointer; }
-  .graph-reset { padding: 0 11px; }
+  .graph-control-button, .graph-reset, .graph-zoom, .graph-toggle { display: inline-flex; align-items: center; justify-content: center; height: 32px; min-height: 32px; box-sizing: border-box; margin: 0; border-color: transparent; background: transparent; color: #777; line-height: 1; }
+  .graph-control-button { padding: 0 9px; cursor: pointer; }
+  .graph-control-button:hover, .graph-control-toolbar > .graph-reset:hover { border-color: transparent; background: #141414; color: #c7c7c7; }
+  .graph-reset { padding: 0 9px; }
   .graph-control-toolbar > .graph-reset { font-size: 10px; }
-  .graph-control-button[aria-label="Zoom out"], .graph-control-button[aria-label="Zoom in"] { width: 36px; padding: 0; font-size: 13px; }
-  .graph-zoom { min-width: 58px; padding: 0 10px; font-variant-numeric: tabular-nums; }
-  .graph-physics-control { gap: 7px; }
-  .graph-physics-control::before { content: ""; width: 8px; height: 8px; border: 1px solid #888; border-radius: 50%; box-sizing: border-box; }
-  .graph-physics-control[aria-pressed="true"]::before { border-color: #c4c4c4; background: #c4c4c4; }
+  .graph-zoom-group { display: inline-flex; align-items: center; height: 32px; margin-left: 5px; border-left: 1px solid #242424; padding-left: 5px; }
+  .graph-control-button[aria-label="Zoom out"], .graph-control-button[aria-label="Zoom in"] { width: 30px; padding: 0; font-size: 13px; }
+  .graph-zoom { min-width: 48px; padding: 0 5px; font-variant-numeric: tabular-nums; }
   .graph-toggle { padding: 0 10px; }
-  .ontology-toolbar > .repository-button,
-  .ontology-toolbar > .graph-search-shell,
-  .ontology-toolbar .graph-search,
-  .ontology-toolbar > .ontology-description,
-  .ontology-toolbar > .ontology-view,
+  .ontology-toolbar-meta > .repository-button,
   .graph-control-toolbar > .graph-filter-menu,
   .graph-control-toolbar > .graph-filter-menu > summary,
   .graph-control-toolbar > .graph-reset,
-  .graph-control-toolbar > .graph-control-button,
-  .graph-control-toolbar > .graph-zoom {
+  .graph-control-toolbar > .graph-control-button {
     box-sizing: border-box;
-    block-size: 36px;
-    min-block-size: 36px;
-    max-block-size: 36px;
+    block-size: 32px;
+    min-block-size: 32px;
+    max-block-size: 32px;
   }
   .graph-toggle { color: #b8b8b8; }
   .graph-toggle::first-letter { color: var(--accent); }
-  .graph-wrap { position: relative; height: calc(100vh - 143px); min-height: 590px; overflow: hidden; background-color: #090a0a; background-image: radial-gradient(circle, #202222 1px, transparent 1px); background-size: 24px 24px; }
+  .graph-wrap { position: relative; height: calc(100vh - 164px); min-height: 560px; overflow: hidden; background-color: #090a0a; background-image: radial-gradient(circle, #202222 1px, transparent 1px); background-size: 24px 24px; }
   #ontology-graph { position: absolute; inset: 0; min-width: 0; height: 100%; overflow: hidden; touch-action: none; }
   #ontology-graph canvas { position: absolute; inset: 0; display: block; }
   .ontology-label-layer { position: absolute; z-index: 4; inset: 0; overflow: hidden; pointer-events: none; }
@@ -710,6 +724,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-empty-state { position: absolute; z-index: 3; inset: 0; display: grid; place-items: center; color: #666; font-size: 10px; pointer-events: none; }
   .graph-empty-state[hidden] { display: none; }
   .ontology-summary { position: absolute; right: 12px; bottom: 12px; left: 12px; display: flex; gap: 6px; pointer-events: none; }
+  .ontology-summary[hidden] { display: none; }
   .ontology-stat { flex: 0 1 145px; border-color: #222; background: rgb(10 11 11 / 82%); padding: 7px 9px; backdrop-filter: blur(10px); }
   .ontology-stat strong { margin-top: 3px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .plane-key { position: absolute; z-index: 5; bottom: 69px; left: 12px; padding: 8px 10px; border: 1px solid #222; border-radius: 5px; background: rgb(10 11 11 / 84%); backdrop-filter: blur(10px); pointer-events: none; }
@@ -742,10 +757,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .ontology-endpoint .ontology-item-type { position: absolute; right: 12px; bottom: 12px; }
   .ontology-inspector-actions { flex-wrap: wrap; }
   .ontology-inspector-actions button { flex: 1 1 auto; min-height: 30px; }
-  .context-drawer { margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; background: #0b0c0c; }
-  .context-drawer > summary { padding: 11px 13px; color: #8a8a8a; cursor: pointer; font-size: 10px; }
-  .context-drawer .context-query { margin: 0 10px 10px; }
-  .context-results { margin: 0 10px 10px; }
+  .context-search-results .context-results { margin: 0; }
 
   /* Rectangular, human-readable graph nodes */
   .graph-edge { stroke-width: 1.2; opacity: .3; }
@@ -800,10 +812,16 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     .type-row > .type-steps { display: block; }
     .graph-control-help, .graph-zoom, .graph-toggle { display: none; }
     .graph-filter-popover { width: min(410px, calc(100vw - 44px)); }
-    .ontology-toolbar .ontology-description { display: none; }
-    .ontology-toolbar { grid-template-columns: minmax(150px, 1fr); }
+    .ontology-toolbar-meta { align-items: flex-start; flex-direction: column; gap: 5px; }
+    .ontology-toolbar-meta > .graph-controls { align-self: stretch; overflow-x: auto; }
     .repository-button { min-width: 150px; }
-    .graph-search-shell { display: none; }
+    .ontology-search-hero { padding-inline: 0; }
+    .context-search-shell { display: block; }
+    .context-search-results { width: calc(100vw - 28px); }
+    .context-causal-trace { align-items: flex-start; flex-direction: column; }
+    .context-causal-arrow { width: 1px; height: 12px; margin-left: 3px; }
+    .context-result-footer { flex-wrap: wrap; }
+    .context-graph-match-count { width: 100%; margin-left: 0; }
   }
 </style>
 </head>
@@ -870,15 +888,13 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   </section>
   <section id="ontology-page" hidden>
     <div class="ontology-shell">
-      <header class="ontology-toolbar"><button type="button" class="repository-button" id="ontology-title">Repository graph</button><div class="graph-search-shell" id="ontology-search-shell"><div class="search-control graph-search"><span aria-hidden="true">⌕</span><input id="ontology-search" placeholder="Search nodes and edges…" aria-label="Search nodes and relationships" aria-controls="ontology-search-results" aria-expanded="false" autocomplete="off"><button type="button" class="graph-search-clear" id="ontology-search-clear" aria-label="Clear ontology search">×</button></div><div class="graph-search-results" id="ontology-search-results" role="listbox" aria-label="Ontology search results" hidden></div></div><span class="ontology-description" id="ontology-description">Waiting for an Ontology worker result.</span><div class="view-switch ontology-view"><button type="button" class="active">▣&nbsp; Graph</button><button type="button">☷&nbsp; Table</button></div></header>
+      <header class="ontology-toolbar"><div class="ontology-toolbar-meta"><button type="button" class="repository-button" id="ontology-title">Repository graph</button><div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div></div><section class="ontology-search-hero"><div class="context-search-shell" id="context-search-shell"><form class="context-search" id="context-query"><span class="context-search-icon" aria-hidden="true">⌕</span><label class="sr-only" for="context-question">Search this repository with citations</label><input id="context-question" name="question" placeholder="Ask anything about this repository…" aria-label="Search this repository with citations" aria-controls="context-search-results" aria-expanded="false" autocomplete="off" required><button type="button" class="context-search-clear" id="context-search-clear" aria-label="Clear cited search">×</button><button type="submit" class="context-search-submit" id="context-search-submit" aria-label="Search with citations" title="Search with citations">↵</button></form><div class="context-search-results" id="context-search-results" hidden><section class="context-results" id="context-results" aria-live="polite"></section></div></div></section></header>
       <section class="ontology-workspace" id="ontology-workspace">
         <section class="ontology-card">
-          <div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div>
-          <div class="graph-wrap"><div id="ontology-graph" role="application" aria-label="Repository ontology graph"><div class="ontology-label-layer" id="ontology-label-layer"></div></div><div class="graph-empty-state" id="ontology-graph-empty" hidden></div><canvas class="ontology-minimap" id="ontology-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading graph renderer…</span><section class="ontology-summary" id="ontology-summary"></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
+          <div class="graph-wrap"><div id="ontology-graph" role="application" aria-label="Repository ontology graph"><div class="ontology-label-layer" id="ontology-label-layer"></div></div><div class="graph-empty-state" id="ontology-graph-empty" hidden></div><canvas class="ontology-minimap" id="ontology-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="ontology-summary" id="ontology-summary" hidden></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
         </section>
         <aside class="ontology-details side-inspector" id="ontology-details" aria-live="polite"></aside>
       </section>
-      <details class="context-drawer"><summary>Ask this repository with cited evidence</summary><form class="context-query" id="context-query"><label class="sr-only" for="context-question">Ask repository context</label><input id="context-question" name="question" placeholder='Ask by issue # or title, e.g. what caused "Administrators cannot delete resources"?' required><button type="submit">Ask with citations</button></form><section class="context-results" id="context-results" aria-live="polite"></section></details>
     </div>
   </section>
 </main>
@@ -891,7 +907,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   <div class="detail-body" id="detail-body"></div>
 </dialog>
 
-<script src="/assets/ontology-graph-client.js?v=adaptive-1"></script>
+<script src="/assets/ontology-graph-client.js?v=freeform-1"></script>
 <script>
 const API = ${JSON.stringify(apiUrl)};
 const API_LABEL = ${JSON.stringify(apiLabel)};
@@ -905,15 +921,18 @@ let ontologyViewState = {
   hiddenNodeKinds: new Set(),
   hiddenEdgePredicates: new Set(),
   filterMenuOpen: false,
-  physicsEnabled: true,
   zoomPercent: 100,
   rendererLabelKey: null,
   rendererLabels: {}
 };
 let ontologyRenderer = null;
-let ontologySearchState = { results: [], activeIndex: 0, open: false };
 let ontologyRefreshSequence = 0;
 let contextState = null;
+let contextSearchOpen = false;
+let contextSearchLoading = false;
+let contextEvidenceExpanded = false;
+let contextRequestSequence = 0;
+let contextAbortController = null;
 let selectedHistoryEventId = null;
 let selectedTaskType = null;
 let nextPr = 100;
@@ -935,14 +954,15 @@ const ontologyLabelLayer = document.getElementById("ontology-label-layer");
 const ontologyMinimap = document.getElementById("ontology-minimap");
 const ontologyGraphEmpty = document.getElementById("ontology-graph-empty");
 const graphRuntimeStatus = document.getElementById("graph-runtime-status");
-const ontologySearch = document.getElementById("ontology-search");
-const ontologySearchShell = document.getElementById("ontology-search-shell");
-const ontologySearchResults = document.getElementById("ontology-search-results");
 const ontologySummary = document.getElementById("ontology-summary");
 const ontologyDetails = document.getElementById("ontology-details");
 const ontologyWorkspace = document.getElementById("ontology-workspace");
 const graphControls = document.getElementById("graph-controls");
 const contextResults = document.getElementById("context-results");
+const contextSearchShell = document.getElementById("context-search-shell");
+const contextSearchResults = document.getElementById("context-search-results");
+const contextQuestion = document.getElementById("context-question");
+const contextSearchSubmit = document.getElementById("context-search-submit");
 
 async function refresh() {
   try {
@@ -1009,29 +1029,28 @@ function renderOntology() {
   ontologySummary.replaceChildren();
   ontologyDetails.replaceChildren();
   graphControls.replaceChildren();
-  renderContextResults();
   const graph = ontologyState.latest;
   const graphKey = graph ? ontologyGraphIdentity(graph) : null;
   if (graphKey !== ontologyViewState.graphKey) resetOntologyViewForGraph(graphKey);
+  renderContextResults();
   if (!graph) {
     ontologyGraphEmpty.hidden = false;
     ontologyGraphEmpty.textContent = "Run an ontology build to create the first graph.";
     if (ontologyRenderer) ontologyRenderer.setData({ key: "empty", nodes: [], edges: [], labels: {} });
     ontologySummary.append(ontologyStat("Status", "No graph yet"));
     ontologyDetails.append(textElement("p", "empty-detail", "Run an ontology_build task to create the first graph."));
-    renderOntologySearchResults();
+    if (ontologyRenderer) ontologyRenderer.setSearchMatches([]);
     return;
   }
 
   document.getElementById("ontology-title").textContent = graph.repository + " @ " + graph.ref;
-  document.getElementById("ontology-description").textContent = graph.summary;
   const visibleGraph = filterOntologyGraph(graph, ontologyViewState.hiddenNodeKinds, ontologyViewState.hiddenEdgePredicates);
   if (!selectionIsVisible(ontologyViewState.selected, visibleGraph)) ontologyViewState.selected = null;
   ontologyWorkspace.classList.toggle("has-selection", Boolean(ontologyViewState.selected));
   ontologySummary.append(
     ontologyStat("Repository", graph.repository),
-    ontologyStat("Visible nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
-    ontologyStat("Visible edges", visibleCount(visibleGraph.edges.length, graph.edges.length)),
+    ontologyStat("Nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
+    ontologyStat("Edges", visibleCount(visibleGraph.edges.length, graph.edges.length)),
     ontologyStat("Commit", graph.commitSha.slice(0, 12)),
     ontologyStat("Generated", formatTime(graph.generatedAt)),
     ontologyStat("Executor", graph.generator.executor + " · " + graph.generator.model)
@@ -1048,9 +1067,8 @@ function renderOntology() {
     const rendererKey = graphKey + "|nodes:" + Array.from(ontologyViewState.hiddenNodeKinds).sort().join(",") + "|edges:" + Array.from(ontologyViewState.hiddenEdgePredicates).sort().join(",");
     ontologyRenderer.setData({ key: rendererKey, nodes: visibleGraph.nodes, edges: visibleGraph.edges, labels: ontologyViewState.rendererLabels });
     ontologyRenderer.setSelection(ontologyViewState.selected);
-    ontologyRenderer.setPhysics(ontologyViewState.physicsEnabled);
+    ontologyRenderer.setSearchMatches(contextGraphMatches(contextState, visibleGraph));
   }
-  renderOntologySearchResults();
   renderOntologyInspector(graph, visibleGraph);
 }
 
@@ -1101,13 +1119,23 @@ function ontologyGraphIdentity(graph) {
 }
 
 function resetOntologyViewForGraph(graphKey) {
+  invalidateContextRequest();
   ontologyViewState.graphKey = graphKey;
   ontologyViewState.selected = null;
   ontologyViewState.filterMenuOpen = false;
   ontologyViewState.rendererLabelKey = null;
   ontologyViewState.rendererLabels = {};
-  ontologySearchState = { results: [], activeIndex: 0, open: false };
-  if (ontologySearch) ontologySearch.value = "";
+  contextState = null;
+  contextSearchOpen = false;
+  contextEvidenceExpanded = false;
+  if (contextQuestion) contextQuestion.value = "";
+}
+
+function invalidateContextRequest() {
+  contextRequestSequence += 1;
+  if (contextAbortController) contextAbortController.abort();
+  contextAbortController = null;
+  contextSearchLoading = false;
 }
 
 function mergePullRequestsForCommit(node, graph) {
@@ -1186,108 +1214,101 @@ function friendlyNodeLabels(graph) {
   return labels;
 }
 
-function ontologySearchMatches(graph, visibleGraph, labels, query, limit) {
-  const normalized = String(query || "").trim().toLocaleLowerCase();
-  if (!normalized) return [];
-  const tokens = normalized.split(/\\s+/).filter(Boolean);
-  const matches = [];
-  const visibleNodeIds = new Set(visibleGraph.nodes.map(function(node) { return node.id; }));
-  const nodesById = new Map(graph.nodes.map(function(node) { return [node.id, node]; }));
-  for (const node of visibleGraph.nodes) {
-    const label = labels[node.id] || node.label;
-    const fields = [label, node.label, node.kind, node.id, node.path, node.description].filter(Boolean).map(function(value) { return String(value).toLocaleLowerCase(); });
-    const haystack = fields.join(" ");
-    if (!tokens.every(function(token) { return haystack.includes(token); })) continue;
-    matches.push({
-      kind: "node",
-      id: node.id,
-      label: label,
-      meta: humanize(node.kind) + (node.path ? " · " + node.path : ""),
-      score: searchMatchScore(label, node.id, normalized)
+function contextGraphMatches(state, graph) {
+  if (!state || state.error || !graph) return [];
+  const identifiers = new Set();
+  const observations = new Set();
+  const paths = new Set();
+  const pathRanges = new Map();
+  const shas = new Set();
+  const labels = new Set();
+  const predicates = new Set();
+  const normalized = function(value) { return String(value || "").trim().toLocaleLowerCase(); };
+  const addIdentifier = function(value) { if (typeof value === "string" && value.trim()) identifiers.add(value.trim()); };
+  const addPath = function(value) { if (typeof value === "string" && value.trim()) paths.add(value.trim()); };
+  const addSha = function(value) { if (typeof value === "string" && /^[a-f0-9]{7,40}$/i.test(value.trim())) shas.add(value.trim().toLocaleLowerCase()); };
+  const addCitation = function(citation) {
+    if (!citation || typeof citation !== "object") return;
+    addIdentifier(citation.id);
+    if (citation.kind === "observation" && typeof citation.id === "string") observations.add(citation.id);
+    addPath(citation.path);
+    if (typeof citation.path === "string" && Number.isFinite(citation.startLine)) {
+      if (!pathRanges.has(citation.path)) pathRanges.set(citation.path, []);
+      pathRanges.get(citation.path).push({ start: citation.startLine, end: Number.isFinite(citation.endLine) ? citation.endLine : citation.startLine });
+    }
+    addSha(citation.commitSha);
+  };
+  const walk = function(value, key) {
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, key);
+      return;
+    }
+    if (!value || typeof value !== "object") {
+      if (typeof value !== "string") return;
+      if (/^(?:entityId|assertionId|assertionIds|observationId|observationIds)$/i.test(key || "")) addIdentifier(value);
+      if (/^(?:path|oldPath)$/i.test(key || "")) addPath(value);
+      if (/^(?:sha|commitSha|evidenceCommitSha)$/i.test(key || "")) addSha(value);
+      if (/^(?:label|name|title|naturalKey)$/i.test(key || "")) labels.add(normalized(value));
+      if (/^predicate$/i.test(key || "")) predicates.add(String(value).trim().toUpperCase());
+      return;
+    }
+    for (const entry of Object.entries(value)) walk(entry[1], entry[0]);
+  };
+  for (const citation of state.citations || []) addCitation(citation);
+  for (const claim of state.citedClaims || []) for (const citation of claim.citations || []) addCitation(citation);
+  for (const call of state.calls || []) {
+    for (const item of call.items || []) {
+      walk(item.data, "data");
+      for (const citation of item.citations || []) addCitation(citation);
+    }
+  }
+
+  const observationList = Array.from(observations);
+  const shaList = Array.from(shas);
+  const labelList = Array.from(labels);
+
+  const evidenceMatches = function(evidence) {
+    return (Array.isArray(evidence) ? evidence : []).some(function(value) {
+      const text = String(value);
+      if (identifiers.has(text) || observationList.some(function(id) { return text === id || text === "observation:" + id; })) return true;
+      const range = /^(.*):([0-9]+)(?:-([0-9]+))?$/.exec(text);
+      if (!range || !pathRanges.has(range[1])) return false;
+      const start = Number.parseInt(range[2], 10);
+      const end = Number.parseInt(range[3] || range[2], 10);
+      return pathRanges.get(range[1]).some(function(citation) { return start <= citation.end && end >= citation.start; });
     });
-  }
-  for (const edge of visibleGraph.edges) {
-    if (!visibleNodeIds.has(edge.source) || !visibleNodeIds.has(edge.target)) continue;
-    const source = nodesById.get(edge.source);
-    const target = nodesById.get(edge.target);
-    const sourceLabel = source ? labels[source.id] || source.label : edge.source;
-    const targetLabel = target ? labels[target.id] || target.label : edge.target;
-    const label = humanize(edge.predicate);
-    const meta = sourceLabel + " → " + targetLabel;
-    const haystack = [label, edge.predicate, edge.id, edge.plane, sourceLabel, targetLabel].join(" ").toLocaleLowerCase();
-    if (!tokens.every(function(token) { return haystack.includes(token); })) continue;
-    matches.push({ kind: "edge", id: edge.id, label: label, meta: meta, score: searchMatchScore(label, edge.id, normalized) + 1 });
-  }
-  return matches.sort(function(left, right) {
-    return left.score - right.score || left.label.localeCompare(right.label) || left.id.localeCompare(right.id);
-  }).slice(0, limit || 10);
-}
-
-function searchMatchScore(label, id, query) {
-  const normalizedLabel = String(label).toLocaleLowerCase();
-  const normalizedId = String(id).toLocaleLowerCase();
-  if (normalizedLabel === query || normalizedId === query) return 0;
-  if (normalizedLabel.startsWith(query)) return 1;
-  if (normalizedLabel.includes(query)) return 2;
-  return 3;
-}
-
-function renderOntologySearchResults() {
-  const query = ontologySearch.value.trim();
-  ontologySearchShell.classList.toggle("has-query", Boolean(query));
-  if (!query || !ontologyState.latest) {
-    closeOntologySearchResults();
-    return;
-  }
-  const graph = ontologyState.latest;
-  const visibleGraph = filterOntologyGraph(graph, ontologyViewState.hiddenNodeKinds, ontologyViewState.hiddenEdgePredicates);
-  if (ontologyViewState.rendererLabelKey !== ontologyViewState.graphKey) {
-    ontologyViewState.rendererLabelKey = ontologyViewState.graphKey;
-    ontologyViewState.rendererLabels = friendlyNodeLabels(graph);
-  }
-  ontologySearchState.results = ontologySearchMatches(graph, visibleGraph, ontologyViewState.rendererLabels, query, 10);
-  ontologySearchState.activeIndex = Math.max(0, Math.min(ontologySearchState.activeIndex, Math.max(0, ontologySearchState.results.length - 1)));
-  ontologySearchResults.replaceChildren();
-  if (!ontologySearchState.results.length) {
-    ontologySearchResults.append(textElement("p", "graph-search-empty", "No visible nodes or relationships match “" + query + "”."));
-  } else {
-    ontologySearchState.results.forEach(function(result, index) {
-      const button = element("button", "graph-search-result" + (index === ontologySearchState.activeIndex ? " active" : ""));
-      button.type = "button";
-      button.id = "ontology-search-option-" + index;
-      button.dataset.searchResultIndex = String(index);
-      button.setAttribute("role", "option");
-      button.setAttribute("aria-selected", String(index === ontologySearchState.activeIndex));
-      button.append(
-        textElement("strong", "", result.label),
-        textElement("small", "", result.meta),
-        textElement("span", "graph-search-result-kind", result.kind === "node" ? "Node" : "Edge")
-      );
-      ontologySearchResults.append(button);
+  };
+  const nodeIds = new Set();
+  for (const node of graph.nodes || []) {
+    const nodeLabel = normalized(node.label);
+    const description = normalized(node.description);
+    const pathMatch = typeof node.path === "string" && paths.has(node.path) && (node.kind === "File" || node.kind === "Document");
+    const shaMatch = shaList.some(function(sha) {
+      return [node.id, node.label, node.description].some(function(value) {
+        const candidate = normalized(value);
+        return candidate.length >= 7 && (candidate.includes(sha) || sha.includes(candidate));
+      });
     });
+    const semanticMatch = labelList.some(function(label) {
+      return label.length >= 4 && (nodeLabel === label || description === label || (label.length >= 8 && nodeLabel.includes(label)));
+    });
+    if (identifiers.has(node.id) || pathMatch || shaMatch || semanticMatch || evidenceMatches(node.evidence)) nodeIds.add(node.id);
   }
-  ontologySearchResults.hidden = !ontologySearchState.open;
-  ontologySearch.setAttribute("aria-expanded", String(ontologySearchState.open));
-  if (ontologyRenderer) ontologyRenderer.setSearchMatches(ontologySearchState.open ? ontologySearchState.results.map(function(result) { return { kind: result.kind, id: result.id }; }) : []);
-  if (ontologySearchState.open && ontologySearchState.results.length) ontologySearch.setAttribute("aria-activedescendant", "ontology-search-option-" + ontologySearchState.activeIndex);
-  else ontologySearch.removeAttribute("aria-activedescendant");
-}
 
-function closeOntologySearchResults() {
-  ontologySearchState.open = false;
-  ontologySearchResults.hidden = true;
-  ontologySearch.setAttribute("aria-expanded", "false");
-  ontologySearch.removeAttribute("aria-activedescendant");
-  if (ontologyRenderer) ontologyRenderer.setSearchMatches([]);
-}
-
-function selectOntologySearchResult(index) {
-  const result = ontologySearchState.results[index];
-  if (!result) return;
-  ontologySearch.value = result.label;
-  ontologySearchShell.classList.add("has-query");
-  closeOntologySearchResults();
-  selectGraphItem(result.kind, result.id);
+  const edgeIds = new Set();
+  for (const edge of graph.edges || []) {
+    const endpointsMatch = nodeIds.has(edge.source) && nodeIds.has(edge.target);
+    const predicateMatch = predicates.has(String(edge.predicate).toUpperCase()) && (nodeIds.has(edge.source) || nodeIds.has(edge.target));
+    if (identifiers.has(edge.id) || evidenceMatches(edge.evidence) || endpointsMatch || predicateMatch) {
+      edgeIds.add(edge.id);
+      nodeIds.add(edge.source);
+      nodeIds.add(edge.target);
+    }
+  }
+  return [
+    ...Array.from(nodeIds, function(id) { return { kind: "node", id: id }; }),
+    ...Array.from(edgeIds, function(id) { return { kind: "edge", id: id }; })
+  ];
 }
 
 function friendlyNodeExplanation(node, graph) {
@@ -1326,13 +1347,22 @@ function renderGraphControls(graph) {
     ontologyViewState.hiddenEdgePredicates.clear();
     renderOntology();
   });
-  const resetLayout = textElement("button", "graph-reset", "Reset layout");
+  const removeAll = textElement("button", "graph-reset", "Remove all");
+  removeAll.type = "button";
+  removeAll.disabled = nodeKinds.every(function(entry) { return ontologyViewState.hiddenNodeKinds.has(entry[0]); }) &&
+    edgePredicates.every(function(entry) { return ontologyViewState.hiddenEdgePredicates.has(entry[0]); });
+  removeAll.addEventListener("click", function() {
+    for (const entry of nodeKinds) ontologyViewState.hiddenNodeKinds.add(entry[0]);
+    for (const entry of edgePredicates) ontologyViewState.hiddenEdgePredicates.add(entry[0]);
+    renderOntology();
+  });
+  const resetLayout = textElement("button", "graph-reset", "Reset");
   resetLayout.type = "button";
   resetLayout.addEventListener("click", function() {
     if (ontologyRenderer) ontologyRenderer.reset();
   });
   const popoverActions = element("div", "graph-popover-actions");
-  popoverActions.append(showAll, resetLayout);
+  popoverActions.append(showAll, removeAll, resetLayout);
   popover.append(popoverActions);
   filters.append(filterSummary, popover);
   const fit = textElement("button", "graph-control-button", "Fit");
@@ -1348,16 +1378,10 @@ function renderGraphControls(graph) {
   zoomIn.type = "button";
   zoomIn.setAttribute("aria-label", "Zoom in");
   zoomIn.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.zoomBy(1.28); });
-  const physics = textElement("button", "graph-control-button graph-physics-control", "Physics");
-  physics.type = "button";
-  physics.setAttribute("aria-pressed", String(ontologyViewState.physicsEnabled));
-  physics.addEventListener("click", function() {
-    ontologyViewState.physicsEnabled = !ontologyViewState.physicsEnabled;
-    if (ontologyRenderer) ontologyRenderer.setPhysics(ontologyViewState.physicsEnabled);
-    renderOntology();
-  });
-  toolbar.append(filters, resetLayout, fit, zoomOut, zoomPercent, zoomIn, physics);
-  graphControls.append(toolbar, textElement("p", "graph-control-help", "Scroll to zoom · drag the canvas to pan · drag nodes to pin · select an edge label to drag the relationship."));
+  const zoomGroup = element("div", "graph-zoom-group");
+  zoomGroup.append(zoomOut, zoomPercent, zoomIn);
+  toolbar.append(filters, resetLayout, fit, zoomGroup);
+  graphControls.append(toolbar);
 }
 
 function countGraphTypes(items, property) {
@@ -1589,15 +1613,34 @@ function ontologyRelationshipSection(node, edges, graph) {
 }
 
 function renderContextResults() {
+  const query = contextQuestion.value.trim();
+  contextSearchShell.classList.toggle("has-query", Boolean(query));
+  contextSearchSubmit.disabled = contextSearchLoading;
+  contextSearchSubmit.textContent = contextSearchLoading ? "…" : "↵";
+  contextSearchResults.hidden = !contextSearchOpen || (!contextState && !contextSearchLoading);
+  contextQuestion.setAttribute("aria-expanded", String(!contextSearchResults.hidden));
   contextResults.replaceChildren();
+  if (contextSearchLoading) {
+    contextResults.append(textElement("p", "empty-detail", "Searching repository evidence…"));
+    return;
+  }
   if (!contextState) return;
+  const graphMatches = contextGraphMatches(contextState, ontologyState.latest);
   if (contextState.error) {
     contextResults.append(textElement("p", "empty-detail", contextState.error));
     return;
   }
-  if (contextState.answer) contextResults.append(renderContextAnswer(contextState));
+  contextResults.append(renderContextPrimary(contextState, graphMatches, ontologyState.latest));
+  const evidence = element("details", "context-full-evidence");
+  evidence.open = contextEvidenceExpanded;
+  evidence.addEventListener("toggle", function() {
+    contextEvidenceExpanded = evidence.open;
+  });
+  evidence.append(textElement("summary", "", "View full evidence"));
+  const evidenceBody = element("div", "context-full-evidence-body");
   const notices = renderContextNotices(contextState);
-  if (notices) contextResults.append(notices);
+  if (notices) evidenceBody.append(notices);
+  if (contextState.answer) evidenceBody.append(renderContextAnswer(contextState));
   for (const call of contextState.calls || []) {
     const section = element("article", "context-call");
     section.append(textElement("h3", "", call.template + (call.truncated ? " · truncated" : "")));
@@ -1619,8 +1662,102 @@ function renderContextResults() {
       row.append(textElement("span", "", citationLabels(item.citations).join(" · ")));
       section.append(row);
     }
-    contextResults.append(section);
+    evidenceBody.append(section);
   }
+  if (!evidenceBody.childElementCount) evidenceBody.append(textElement("p", "empty-detail", "No additional evidence was returned."));
+  evidence.append(evidenceBody);
+  contextResults.append(evidence);
+}
+
+function contextIssueTraceItem(state) {
+  for (const call of state.calls || []) {
+    for (const item of call.items || []) {
+      if (item.kind === "issue_trace" && item.data && item.data.issue) return item;
+    }
+  }
+  return null;
+}
+
+function contextMatchConfidence(matches, graph) {
+  if (!graph) return undefined;
+  const edgeIds = new Set(matches.filter(function(match) { return match.kind === "edge"; }).map(function(match) { return match.id; }));
+  const scores = (graph.edges || []).filter(function(edge) { return edgeIds.has(edge.id); }).map(function(edge) {
+    return edge.confidence;
+  }).filter(function(value) { return typeof value === "number" && Number.isFinite(value); });
+  return scores.length ? scores.reduce(function(total, value) { return total + value; }, 0) / scores.length : undefined;
+}
+
+function contextPrimaryCitations(state, item, trace) {
+  const citations = [];
+  const seen = new Set();
+  const push = function(label) {
+    if (!label || seen.has(label) || citations.length >= 3) return;
+    seen.add(label);
+    citations.push(label);
+  };
+  const cause = trace && Array.isArray(trace.introducedBy) ? trace.introducedBy[0] : null;
+  const resolution = trace && Array.isArray(trace.resolutions) ? trace.resolutions[0] : null;
+  if (cause && cause.sha) push("commit " + cause.sha.slice(0, 12));
+  if (cause && Array.isArray(cause.changes) && cause.changes[0]) push(cause.changes[0].path);
+  if (resolution && resolution.pullRequestNumber) push("PR #" + resolution.pullRequestNumber);
+  for (const label of citationLabels([...(item?.citations || []), ...(state.citations || [])])) push(label);
+  return citations;
+}
+
+function contextDateLabel(value) {
+  if (!value) return "First known change";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "First known change";
+  return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" });
+}
+
+function contextPathLabel(path) {
+  if (!path) return "Code changed";
+  const parts = String(path).split("/");
+  return parts[parts.length - 1] || path;
+}
+
+function renderContextPrimary(state, graphMatches, graph) {
+  const item = contextIssueTraceItem(state);
+  const trace = item?.data;
+  const issue = trace?.issue;
+  const cause = Array.isArray(trace?.introducedBy) ? trace.introducedBy[0] : null;
+  const resolution = Array.isArray(trace?.resolutions) ? trace.resolutions[0] : null;
+  const primary = element("article", "context-result-primary");
+  const heading = element("div", "context-result-heading");
+  const title = issue
+    ? (issue.number ? "Issue #" + issue.number + (issue.title ? " · " + issue.title : "") : issue.title || issue.displayId || "Repository answer")
+    : "Cited repository answer";
+  const confidence = contextMatchConfidence(graphMatches, graph);
+  heading.append(
+    textElement("span", "context-result-spark", "✦"),
+    textElement("strong", "", title),
+    textElement("span", "context-result-confidence", confidence === undefined ? "Cited answer" : Math.round(clampConfidence(confidence) * 100) + "% confidence")
+  );
+  primary.append(heading, textElement("p", "context-result-answer", state.answer || "No cited answer was returned."));
+  if (issue && cause) {
+    const changes = Array.isArray(cause.changes) ? cause.changes : [];
+    const traceRow = element("div", "context-causal-trace");
+    traceRow.append(
+      textElement("span", "context-causal-step", contextDateLabel(cause.committedAt) + (cause.sha ? " · " + cause.sha.slice(0, 8) : "")),
+      textElement("span", "context-causal-arrow", ""),
+      textElement("span", "context-causal-step", contextPathLabel(changes[0]?.path)),
+      textElement("span", "context-causal-arrow", ""),
+      textElement("span", "context-causal-step", "Issue #" + (issue.number || issue.displayId || "observed"))
+    );
+    primary.append(traceRow);
+  }
+  if (resolution) {
+    const resolutionCommit = Array.isArray(resolution.commits) ? resolution.commits[0] : null;
+    const resolutionText = "Resolved by PR #" + resolution.pullRequestNumber + (resolution.title ? " · " + resolution.title : "") +
+      (resolutionCommit?.committedAt ? " · " + contextDateLabel(resolutionCommit.committedAt) : "");
+    primary.append(textElement("p", "context-result-resolution", resolutionText));
+  }
+  const footer = element("footer", "context-result-footer");
+  for (const citation of contextPrimaryCitations(state, item, trace)) footer.append(textElement("span", "context-citation-chip", citation));
+  footer.append(textElement("span", "context-graph-match-count", graphMatches.length + (graphMatches.length === 1 ? " graph match" : " graph matches")));
+  primary.append(footer);
+  return primary;
 }
 
 function renderContextAnswer(state) {
@@ -1671,7 +1808,7 @@ function citationLabels(citations) {
 }
 
 function isCausationQuestion(question) {
-  return /\\b(caus(?:e|ed|ation|al)|introduc(?:e|ed|ing)|root cause)\\b/i.test(String(question || ""));
+  return /\\b(caus(?:e|ed|ation|al)|introduc(?:e|ed|ing)|root cause|first (?:start|begin|appear))\\b|when did[\\s\\S]{0,200}\\b(?:start|begin|appear)/i.test(String(question || ""));
 }
 
 function issueTraceSections(trace, question) {
@@ -2526,55 +2663,58 @@ historyList.addEventListener("click", function(event) {
   renderHistory();
 });
 document.getElementById("task-type-search").addEventListener("input", renderTaskTypes);
-ontologySearch.addEventListener("input", function() {
-  ontologySearchState.activeIndex = 0;
-  ontologySearchState.open = true;
-  renderOntologySearchResults();
-});
-ontologySearch.addEventListener("focus", function() {
-  if (ontologySearch.value.trim()) {
-    ontologySearchState.open = true;
-    renderOntologySearchResults();
+contextQuestion.addEventListener("input", function() {
+  if (contextSearchLoading) {
+    invalidateContextRequest();
+    contextState = null;
+    contextSearchOpen = false;
+    contextEvidenceExpanded = false;
+  }
+  contextSearchShell.classList.toggle("has-query", Boolean(contextQuestion.value.trim()));
+  if (!contextQuestion.value.trim() && !contextSearchLoading) {
+    contextState = null;
+    contextSearchOpen = false;
+    renderOntology();
   }
 });
-ontologySearch.addEventListener("keydown", function(event) {
-  if (event.key === "Escape") {
-    event.preventDefault();
-    closeOntologySearchResults();
-    return;
-  }
-  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
-    if (!ontologySearchState.open) {
-      ontologySearchState.open = true;
-      renderOntologySearchResults();
-    }
-    if (!ontologySearchState.results.length) return;
-    event.preventDefault();
-    const direction = event.key === "ArrowDown" ? 1 : -1;
-    ontologySearchState.activeIndex = (ontologySearchState.activeIndex + direction + ontologySearchState.results.length) % ontologySearchState.results.length;
-    renderOntologySearchResults();
-    document.getElementById("ontology-search-option-" + ontologySearchState.activeIndex)?.scrollIntoView({ block: "nearest" });
-    return;
-  }
-  if (event.key === "Enter" && ontologySearchState.open) {
-    event.preventDefault();
-    selectOntologySearchResult(ontologySearchState.activeIndex);
+contextQuestion.addEventListener("focus", function() {
+  if (contextState || contextSearchLoading) {
+    contextSearchOpen = true;
+    renderContextResults();
   }
 });
-document.getElementById("ontology-search-clear").addEventListener("click", function() {
-  ontologySearch.value = "";
-  ontologySearchState = { results: [], activeIndex: 0, open: false };
-  ontologySearchShell.classList.remove("has-query");
-  closeOntologySearchResults();
-  ontologySearch.focus();
+contextQuestion.addEventListener("keydown", function(event) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  invalidateContextRequest();
+  contextSearchOpen = false;
+  contextEvidenceExpanded = false;
+  renderContextResults();
 });
-ontologySearchResults.addEventListener("click", function(event) {
-  const result = event.target.closest("[data-search-result-index]");
-  if (result) selectOntologySearchResult(Number(result.dataset.searchResultIndex));
+document.getElementById("context-search-clear").addEventListener("click", function() {
+  invalidateContextRequest();
+  contextQuestion.value = "";
+  contextState = null;
+  contextSearchOpen = false;
+  contextEvidenceExpanded = false;
+  renderOntology();
+  contextQuestion.focus();
 });
 document.addEventListener("pointerdown", function(event) {
-  if (!ontologySearchShell.contains(event.target)) closeOntologySearchResults();
+  if (!contextSearchShell.contains(event.target) && contextSearchOpen) {
+    if (contextEvidenceExpanded) return;
+    invalidateContextRequest();
+    contextSearchOpen = false;
+    renderContextResults();
+  }
 });
+document.addEventListener("wheel", function(event) {
+  if (!contextEvidenceExpanded || !contextSearchOpen || contextSearchResults.hidden || contextSearchResults.contains(event.target)) return;
+  if (contextSearchResults.scrollHeight <= contextSearchResults.clientHeight) return;
+  event.preventDefault();
+  event.stopPropagation();
+  contextSearchResults.scrollTop += event.deltaY;
+}, { passive: false, capture: true });
 taskTypeList.addEventListener("click", function(event) {
   const row = event.target.closest("[data-task-type]");
   if (!row) return;
@@ -2612,19 +2752,38 @@ document.getElementById("context-query").addEventListener("submit", async functi
   event.preventDefault();
   const graph = ontologyState.latest;
   if (!graph) return;
-  const question = document.getElementById("context-question").value.trim();
-  contextResults.replaceChildren(textElement("p", "empty-detail", "Loading cited context…"));
+  const question = contextQuestion.value.trim();
+  if (!question || contextSearchLoading) return;
+  invalidateContextRequest();
+  contextEvidenceExpanded = false;
+  const requestSequence = contextRequestSequence;
+  const graphKey = ontologyGraphIdentity(graph);
+  const abortController = new AbortController();
+  contextAbortController = abortController;
+  contextSearchOpen = true;
+  contextSearchLoading = true;
+  contextState = null;
+  renderContextResults();
   try {
     const response = await fetch(API + "/ontology/ask", {
       method: "POST", headers: { "content-type": "application/json" },
+      signal: abortController.signal,
       body: JSON.stringify({ repository: graph.repository, ref: graph.ref, question: question })
     });
     if (!response.ok) throw new Error("Context query failed with " + response.status);
-    contextState = await response.json();
+    const nextContextState = await response.json();
+    if (requestSequence !== contextRequestSequence || contextQuestion.value.trim() !== question || !ontologyState.latest ||
+      ontologyGraphIdentity(ontologyState.latest) !== graphKey) return;
+    contextState = nextContextState;
   } catch (error) {
+    if (requestSequence !== contextRequestSequence || error?.name === "AbortError") return;
     contextState = { error: error instanceof Error ? error.message : String(error) };
   }
-  renderContextResults();
+  if (requestSequence !== contextRequestSequence) return;
+  contextAbortController = null;
+  contextSearchLoading = false;
+  contextSearchOpen = true;
+  renderOntology();
 });
 async function postDemo(body) {
   await fetch(API + "/dev/webhooks/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

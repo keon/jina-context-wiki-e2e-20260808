@@ -52,6 +52,7 @@ export interface IssueTraceCommit {
   readonly sha: string;
   readonly url: string;
   readonly role: "merge" | "included" | "introduced";
+  readonly committedAt?: string;
   readonly changes: readonly IssueTraceChange[];
   readonly why?: string;
   readonly evidence?: readonly string[];
@@ -210,7 +211,7 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   const featureText = extractFeatureText(question);
   const pullRequestNumber = extractPullRequestNumber(question);
   const commitSha = extractCommitSha(question);
-  const causal = /caus|introduc|root cause/.test(value);
+  const causal = isCausalIssueQuestion(question);
   const resolution = /resolv|fix(?:ed|es|ing)?|clos(?:e|ed|es|ing)/.test(value);
   if ((issueNumber || issueText) && (causal || resolution)) return ["issue_trace"];
   if ((pullRequestNumber || commitSha) && causal) return ["issue_trace"];
@@ -252,11 +253,16 @@ export function extractIssueNumber(question: string): number | undefined {
  * repository and returns canonical, cited issue traces.
  */
 export function extractIssueText(question: string): string | undefined {
-  if (!/issue|bug|ticket|caus|introduc|root cause|resolv|fix|clos/i.test(question)) return undefined;
+  if (!/issue|bug|ticket|problem|caus|introduc|root cause|resolv|fix|clos|first\s+(?:start|begin|appear)/i.test(question)) return undefined;
   const quoted = /["“]([^"”\n]{2,500})["”]/.exec(question)?.[1];
+  const temporal = /\bwhen\s+did\s+(?:the\s+)?(?:problem|issue|bug|ticket)?\s*(.+?)\s+first\s+(?:start|begin|appear)\b/i.exec(question)?.[1];
   const unquoted = /\b(?:what|which\s+(?:pr|pull request|commit))?\s*(?:caused|causes|introduced|introduces|root cause of)\s+(.+?)(?:,\s*(?:and\s+)?why\b|\?|$)/i.exec(question)?.[1];
-  const value = (quoted ?? unquoted)?.trim().replace(/["”]$/g, "").replace(/\s+/g, " ");
+  const value = (quoted ?? temporal ?? unquoted)?.trim().replace(/["”]$/g, "").replace(/\s+/g, " ");
   return value || undefined;
+}
+
+function isCausalIssueQuestion(question: string): boolean {
+  return /caus|introduc|root cause|first\s+(?:start|begin|appear)|when\s+did[\s\S]{0,200}\b(?:start|begin|appear)/i.test(question);
 }
 
 export function extractFeatureText(question: string): string | undefined {
@@ -638,7 +644,7 @@ function synthesizeIssueTrace(
 ): { readonly answer: string; readonly claims: readonly { text: string; citations: readonly RetrievalCitation[] }[]; readonly coverageGap?: string } {
   const trace = item.data as unknown as IssueTraceProjection;
   const issue = trace.issue;
-  const causal = /caus|introduc|root cause/i.test(question);
+  const causal = isCausalIssueQuestion(question);
   const introduced = extracted.commitSha
     ? trace.introducedBy?.find((cause) => cause.sha?.startsWith(extracted.commitSha!))
     : extracted.pullRequestNumber
@@ -654,7 +660,8 @@ function synthesizeIssueTrace(
     : issue?.title || "The issue";
   if (causal && introduced?.sha) {
     const pr = introduced.pullRequests?.[0]?.number;
-    const cause = `${issueLabel} was introduced${pr ? ` by PR #${pr}` : ""} in commit ${introduced.sha.slice(0, 12)}`;
+    const committedOn = formatIssueTraceDate(introduced.committedAt);
+    const cause = `${issueLabel} was first introduced${committedOn ? ` on ${committedOn}` : ""}${pr ? ` by PR #${pr}` : ""} in commit ${introduced.sha.slice(0, 12)}`;
     const why = introduced.why ? ` because ${introduced.why}` : ".";
     return {
       answer: `${cause}${why.endsWith(".") ? why : `${why}.`}`,
@@ -682,6 +689,12 @@ function synthesizeIssueTrace(
     claims: [],
     coverageGap: "No active deterministic resolution relationship is available for this issue."
   };
+}
+
+function formatIssueTraceDate(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString().slice(0, 10);
 }
 
 function selectIssueTrace(

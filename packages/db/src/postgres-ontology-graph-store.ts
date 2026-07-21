@@ -299,7 +299,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           (tenant_id,repository,sha,tree_sha,parents,author_external_id,committed_at,message,source_observation_id)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing`,
         [snapshot.tenantId, snapshot.repository, snapshot.commitSha, snapshot.treeSha, snapshot.parents,
-          authorExternalId ?? null, snapshot.committedAt ?? snapshot.recordedAt, message ?? null, observationId]
+          authorExternalId ?? null, snapshot.committedAt ?? null, message ?? null, observationId]
       );
       const steadyStateEventAt = snapshot.updateRef !== false ? snapshot.recordedAt : undefined;
       const repositoryEntityId = await ensureEntity(client, snapshot.tenantId, {
@@ -2968,16 +2968,16 @@ async function retrieveIntent(pool: Pool, request: RetrievalRequest, limit: numb
   const items: RetrievalItem[] = [];
   const historyCommitShas: string[] = [];
   if (request.path) {
-    const history = await pool.query<{ commit_sha: string; path: string; change: string; message: string | null; committed_at: Date }>(
+    const history = await pool.query<{ commit_sha: string; path: string; change: string; message: string | null; committed_at: Date | null }>(
       `select c.commit_sha,c.path,c.change,m.message,m.committed_at from jina_ontology.commit_changes c
        join jina_ontology.commits m on m.tenant_id=c.tenant_id and m.repository=c.repository and m.sha=c.commit_sha
        where c.tenant_id=$1 and c.repository=$2 and (c.path=$3 or c.old_path=$3)
-       order by m.committed_at desc limit $4`, [request.tenantId, request.repository, request.path, limit]
+       order by m.committed_at desc nulls last limit $4`, [request.tenantId, request.repository, request.path, limit]
     );
     historyCommitShas.push(...history.rows.map((row) => row.commit_sha));
     items.push(...history.rows.map((row): RetrievalItem => ({
       kind: "history", title: row.message ?? `${row.change} ${row.path}`,
-      data: { change: row.change, committedAt: row.committed_at.toISOString() }, score: 1,
+      data: { change: row.change, ...(row.committed_at ? { committedAt: row.committed_at.toISOString() } : {}) }, score: 1,
       citations: [{ kind: "commit_change", id: `${row.commit_sha}:${row.path}`, repository: request.repository, commitSha: row.commit_sha, path: row.path }]
     })));
   }
@@ -3064,14 +3064,14 @@ async function retrieveOwnership(pool: Pool, request: RetrievalRequest, limit: n
     };
   });
   if (request.path && items.length < limit) {
-    const authors = await pool.query<{ sha: string; author_external_id: string; committed_at: Date; entity_id: string | null; display_name: string | null }>(
+    const authors = await pool.query<{ sha: string; author_external_id: string; committed_at: Date | null; entity_id: string | null; display_name: string | null }>(
       `select c.sha,c.author_external_id,c.committed_at,i.entity_id,e.display_name
        from jina_ontology.commit_changes ch
        join jina_ontology.commits c on c.tenant_id=ch.tenant_id and c.repository=ch.repository and c.sha=ch.commit_sha
        left join jina_ontology.identities i on i.tenant_id=c.tenant_id and i.source='git-email' and i.external_id=c.author_external_id and i.status='accepted'
        left join jina_ontology.entities e on e.id=i.entity_id
        where ch.tenant_id=$1 and ch.repository=$2 and (ch.path=$3 or ch.old_path=$3) and c.author_external_id is not null
-       order by c.committed_at desc limit $4`, [request.tenantId, request.repository, request.path, limit - items.length]
+       order by c.committed_at desc nulls last limit $4`, [request.tenantId, request.repository, request.path, limit - items.length]
     );
     const seenAuthors = new Set<string>();
     const uniqueAuthors = authors.rows.filter((row) => {
@@ -3080,7 +3080,7 @@ async function retrieveOwnership(pool: Pool, request: RetrievalRequest, limit: n
     });
     items.push(...uniqueAuthors.map((row, index): RetrievalItem => ({
       kind: "recent_author", title: row.display_name ?? row.author_external_id,
-      data: { authorExternalId: row.author_external_id, committedAt: row.committed_at.toISOString() }, score: 1 / (index + 1),
+      data: { authorExternalId: row.author_external_id, ...(row.committed_at ? { committedAt: row.committed_at.toISOString() } : {}) }, score: 1 / (index + 1),
       citations: [{ kind: "commit_change", id: `${row.sha}:${request.path}`, repository: request.repository, commitSha: row.sha, path: request.path! }]
     })));
   }
@@ -3217,7 +3217,6 @@ export const ONTOLOGY_SCHEMA_SQL = `
       alter table jina_ontology.commits add column if not exists author_external_id text;
       alter table jina_ontology.commits add column if not exists committed_at timestamptz;
       alter table jina_ontology.commits add column if not exists message text;
-      update jina_ontology.commits set committed_at=now() where committed_at is null;
       create table if not exists jina_ontology.refs (
         tenant_id text not null,
         repository text not null,
