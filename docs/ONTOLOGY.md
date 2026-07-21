@@ -184,6 +184,11 @@ Every item carries code, commit-change, assertion, entity, or observation citati
 
 `POST /ontology/ask` chooses only those fixed templates. Its conservative planner extracts issue/root text, features, PRs, commits, packages, deployments, repository paths, and identifier-shaped symbols. Counterfactual phrasing selects the fixed `counterfactual` template, loads a materialized causal trace, removes every path containing the resolved intervention, and recomputes the known paths in memory. The response includes `basis: graph-derived`, intervention, outcome, removed/remaining paths, cited claims, ambiguities, and coverage gaps. It says that all *currently known reviewed* paths disappear; it never claims an outcome was impossible through an unknown path. The endpoint remains synchronous and read-only and creates no board task or stored counterfactual fact.
 
+The external MCP contract intentionally hides those internal templates. `POST /mcp`
+advertises only `query_graph(repository, query, ref?)` and returns an answer, cited
+claims, and whether coverage was incomplete. It has no mutation, raw graph,
+generation, or free-form query surface.
+
 The dashboard renders the direct answer and cited claims before the underlying retrieval calls. It also renders ambiguities and coverage gaps explicitly. Causation questions lead with the introducing PR and commit plus dedicated **Why** and **Evidence** fields; any later resolving PR is shown afterward as a later fix. An absent reviewed causal assertion is reported as unavailable rather than inferred from the later fix.
 
 The interactive graph prefers the Cosmos WebGL renderer, including for large graphs. GPU capability is checked before startup and asynchronous WebGL initialization failures are caught. Either case switches to a deterministic Canvas 2D renderer instead of leaving an empty panel. To keep that compatibility path responsive, Canvas ranks nodes by connectivity and caps rendering at 1,200 nodes and 3,000 non-dangling edges. Its status reports rendered and source totals for both nodes and edges, while the summary labels the post-filter graph totals as visible nodes and edges; cited data and the table view remain complete. The renderer policy has a synthetic 5,000-node/20,000-edge regression test, and `?renderer=canvas` provides a deterministic browser-diagnostic path.

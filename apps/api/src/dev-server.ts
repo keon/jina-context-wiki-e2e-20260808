@@ -25,13 +25,15 @@ const server = createApiServer({
   ...(stateStore ? { stateStore } : {}),
   ontologyStore,
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
-  tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS")
+  tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
+  mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")
 });
 
 server.listen(port, () => {
   console.log(`jina api server: http://localhost:${port}`);
   console.log(`  storage: ${stateStore ? "postgres" : "memory"}`);
   console.log("  GET  /board  /events  /ontology  /health");
+  console.log("  POST /mcp  (query_graph MCP tool)");
   console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
   if (enableDevEndpoints) {
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");

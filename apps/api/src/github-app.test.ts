@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
   createOntologyGraph,
   MemoryOntologyGraphStore,
@@ -178,6 +182,142 @@ test("ontology retrieval forwards generalized Issue identity and Feature text", 
     assert.equal(featureResponse.status, 200);
     assert.equal(ontologyStore.request?.featureText, "administrator deletion");
   } finally {
+    await close(server);
+  }
+});
+
+test("MCP exposes one authorized graph query with cited structured output", async () => {
+  class QueryOntologyStore extends MemoryOntologyGraphStore {
+    override async repositoriesForPrincipal(_tenantId: string, principalId: string): Promise<readonly string[]> {
+      return principalId === "user:reader@example.com" ? ["omxyz/ontology-fixture"] : [];
+    }
+
+    override async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
+      if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
+      return {
+        template: request.template,
+        repository: request.repository,
+        ref: request.ref ?? "main",
+        items: [{
+          kind: "symbol_definition",
+          title: "main is defined in src/index.ts",
+          data: { symbol: "main", path: "src/index.ts" },
+          citations: [{
+            kind: "code",
+            id: "blob-main:1-3",
+            repository: request.repository,
+            commitSha: "a".repeat(40),
+            path: "src/index.ts",
+            startLine: 1,
+            endLine: 3
+          }],
+          score: 1
+        }],
+        truncated: false,
+        totalBeforeLimit: 1,
+        limit: request.limit ?? 50
+      };
+    }
+  }
+
+  const server = createApiServer({
+    ontologyStore: new QueryOntologyStore(),
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: "tenant-a"
+  });
+  const baseUrl = await listen(server);
+  const client = new Client({ name: "jina-api-test", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+    requestInit: { headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "x-jina-principal-id": "user:reader@example.com"
+    } }
+  });
+  const strangerClient = new Client({ name: "jina-api-stranger-test", version: "1.0.0" });
+  const strangerTransport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+    requestInit: { headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "x-jina-principal-id": "user:stranger@example.com"
+    } }
+  });
+  try {
+    assert.equal((await fetch(`${baseUrl}/mcp`, { method: "POST" })).status, 401);
+    assert.equal((await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
+    })).status, 401);
+    assert.equal((await fetch(`${baseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": "user:reader@example.com",
+        origin: "https://untrusted.example"
+      }
+    })).status, 403);
+
+    await client.connect(transport as unknown as Transport);
+    const tools = await client.listTools();
+    assert.deepEqual(tools.tools.map((tool) => tool.name), ["query_graph"]);
+    assert.equal(JSON.stringify(tools).includes("project"), false);
+
+    const result = await client.callTool({
+      name: "query_graph",
+      arguments: {
+        repository: "omxyz/ontology-fixture",
+        query: "Where is main implemented?"
+      }
+    }) as CallToolResult;
+    assert.equal(result.isError, undefined);
+    assert.match(String(result.content[0]?.type === "text" ? result.content[0].text : ""), /src\/index\.ts/);
+    assert.deepEqual(result.structuredContent, {
+      answer: "Found 1 cited structural fact for main: main is defined in src/index.ts.",
+      claims: [{
+        text: "main is defined in src/index.ts",
+        citations: [{
+          kind: "code",
+          id: "blob-main:1-3",
+          repository: "omxyz/ontology-fixture",
+          commitSha: "a".repeat(40),
+          path: "src/index.ts",
+          startLine: 1,
+          endLine: 3
+        }]
+      }],
+      incomplete: false,
+      notes: []
+    });
+
+    await strangerClient.connect(strangerTransport as unknown as Transport);
+    const denied = await strangerClient.callTool({
+      name: "query_graph",
+      arguments: { repository: "omxyz/ontology-fixture", query: "Where is main implemented?" }
+    }) as CallToolResult;
+    assert.equal(denied.isError, true);
+  } finally {
+    await strangerClient.close().catch(() => undefined);
+    await client.close().catch(() => undefined);
+    await close(server);
+  }
+});
+
+test("development seed supports an interactive MCP graph query without credentials", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, seedDemo: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  const client = new Client({ name: "jina-dev-mcp-test", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`));
+  try {
+    await client.connect(transport as unknown as Transport);
+    const result = await client.callTool({
+      name: "query_graph",
+      arguments: {
+        repository: "omlabs/example",
+        query: "Where is handleWebhook implemented?"
+      }
+    }) as CallToolResult;
+    assert.equal(result.isError, undefined);
+    assert.match(String(result.content[0]?.type === "text" ? result.content[0].text : ""), /handleWebhook is function in src\/server\.ts/);
+  } finally {
+    await client.close().catch(() => undefined);
     await close(server);
   }
 });
@@ -455,6 +595,67 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
       method: "POST", headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
     });
     assert.equal(drained.status, 200);
+  } finally {
+    await close(server);
+  }
+});
+
+test("public graph REST API exposes authorized topology and cited queries without internal metadata", async () => {
+  const ontologyStore = new MemoryOntologyGraphStore();
+  const graph = fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "refs/heads/main", taskId: "public-graph" });
+  await ontologyStore.save(graph);
+  await ontologyStore.executeCommand("tenant-a", "svc:test", {
+    type: "grant_repository_access", repository: "omxyz/a", principalId: "user:reader@example.com", role: "reader"
+  }, "2026-07-20T00:00:00.000Z");
+  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
+  const baseUrl = await listen(server);
+  try {
+    assert.equal((await fetch(`${baseUrl}/v1/graphs`)).status, 401);
+    const listResponse = await authenticatedFetch(`${baseUrl}/v1/graphs`, "user:reader@example.com");
+    assert.equal(listResponse.status, 200);
+    const list = await listResponse.json() as { graphs: Array<Record<string, unknown>> };
+    assert.equal(list.graphs.length, 1);
+    assert.deepEqual(list.graphs[0], {
+      id: graph.id,
+      repository: "omxyz/a",
+      versionLabel: "main",
+      sourceCommit: "fixture-sha",
+      generatedAt: graph.generatedAt,
+      summary: "Fixture repository",
+      nodeCount: 2,
+      edgeCount: 1
+    });
+    assert.equal("tenantId" in list.graphs[0]!, false);
+    assert.equal("generator" in list.graphs[0]!, false);
+
+    const detailResponse = await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`, "user:reader@example.com");
+    assert.equal(detailResponse.status, 200);
+    const detail = await detailResponse.json() as Record<string, unknown>;
+    assert.equal(Array.isArray(detail.nodes), true);
+    assert.equal(Array.isArray(detail.edges), true);
+    assert.equal("rawModelOutput" in detail, false);
+
+    const queryResponse = await fetch(`${baseUrl}/v1/graph/query`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": "user:reader@example.com",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ graphId: graph.id, query: "Where is the repository documentation?" })
+    });
+    assert.equal(queryResponse.status, 200, await queryResponse.clone().text());
+    const query = await queryResponse.json() as Record<string, unknown>;
+    assert.equal(query.graphId, graph.id);
+    assert.equal(typeof query.answer, "string");
+    assert.equal(Array.isArray(query.claims), true);
+    assert.equal(Array.isArray(query.highlightedNodeIds), true);
+    assert.equal(Array.isArray(query.highlightedEdgeIds), true);
+
+    assert.equal(
+      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`, "user:stranger@example.com")).status,
+      404
+    );
   } finally {
     await close(server);
   }

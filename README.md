@@ -50,6 +50,10 @@ Local execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and either `OP
 
 The API accepts signed GitHub App deliveries at `POST /webhooks/github`. A newly opened pull request creates the review task graph; a newly opened issue creates one manual triage card. Configure the App with read-only Pull requests and Issues permissions. See [GitHub App Setup](docs/GITHUB_APP.md).
 
+Repository knowledge is available over stateless MCP at `POST /mcp`. Its complete public surface is one read-only tool, `query_graph`, which accepts a repository, a natural-language query, and an optional ref. Jina selects the graph traversal internally and returns a cited answer; callers do not choose storage, generation, or retrieval details. Production requests require the service credential plus a bound application principal, and repository ACLs are applied to every query.
+
+For a credential-free local MCP smoke test, start `pnpm --filter @jina/api dev`. The development server seeds a small cited `omlabs/example` graph specifically for `query_graph`; it does not represent production data.
+
 ## Repo Layout
 
 ```text
