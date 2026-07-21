@@ -3,6 +3,7 @@ import { request as httpsRequest } from "node:https";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { renderDashboardPage } from "../app/page.js";
+import { isAllowedDashboardApiRequest } from "./proxy-policy.js";
 
 const port = Number(process.env.PORT ?? 3000);
 const apiUrl = process.env.JINA_API_URL ?? "http://localhost:4000";
@@ -36,18 +37,7 @@ server.listen(port, () => {
 
 function proxyApiRequest(request: IncomingMessage, response: ServerResponse): void {
   const incoming = new URL(request.url ?? "/api/", "http://dashboard.internal");
-  const allowedRead = request.method === "GET" && (
-    incoming.pathname === "/api/board" ||
-    incoming.pathname === "/api/events" ||
-    incoming.pathname === "/api/task-types" ||
-    incoming.pathname === "/api/ontology" ||
-    incoming.pathname.startsWith("/api/ontology/graphs/")
-  );
-  const allowedLocalDemo = !internalApiToken && request.method === "POST" && incoming.pathname === "/api/dev/webhooks/github";
-  const allowedOntologyQuery = request.method === "POST" && (
-    incoming.pathname === "/api/ontology/ask" || incoming.pathname === "/api/ontology/retrieve"
-  );
-  if (!allowedRead && !allowedLocalDemo && !allowedOntologyQuery) {
+  if (!isAllowedDashboardApiRequest(request.method, incoming.pathname, Boolean(internalApiToken))) {
     response.writeHead(404, { "content-type": "application/json; charset=utf-8" });
     response.end('{"error":"not found"}');
     return;
