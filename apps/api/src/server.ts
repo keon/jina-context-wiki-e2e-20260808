@@ -402,7 +402,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const { tenantId } = principal;
 
-    if (isPublicGraphRoute(url.pathname) && !config.enableDevEndpoints && !config.principalId &&
+    const usesGraphCredential = hasGraphApiCredential(request, config);
+    const requiresBoundGraphPrincipal = isPublicGraphRoute(url.pathname) ||
+      (url.pathname === "/ontology/build" && usesGraphCredential);
+    if (requiresBoundGraphPrincipal && !config.enableDevEndpoints && !config.principalId &&
       !normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))) {
       json(response, 401, { error: "a bound principal is required" });
       return;
@@ -1195,7 +1198,11 @@ function authenticatedPrincipal(
   }
   const authorization = firstHeader(request.headers.authorization);
   const hasInternalAccess = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
-  const hasGraphAccess = Boolean(config.graphApiToken && authorization === `Bearer ${config.graphApiToken}` && isPublicGraphRoute(pathname));
+  const hasGraphAccess = Boolean(
+    config.graphApiToken &&
+    authorization === `Bearer ${config.graphApiToken}` &&
+    (isPublicGraphRoute(pathname) || pathname === "/ontology/build")
+  );
   if (!hasInternalAccess && !hasGraphAccess) return undefined;
   if (!config.tenantId) return undefined;
   const principalId = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))
@@ -1211,6 +1218,13 @@ function normalizedForwardedPrincipal(value: string | undefined): string | undef
     return value.toLowerCase();
   }
   return undefined;
+}
+
+function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
+  return Boolean(
+    config.graphApiToken &&
+    firstHeader(request.headers.authorization) === `Bearer ${config.graphApiToken}`
+  );
 }
 
 function isPublicGraphRoute(pathname: string): boolean {

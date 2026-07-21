@@ -800,6 +800,19 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
     assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphB.id)}`, principalA)).status, 404);
     assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphA.id)}`, principalB)).status, 404);
 
+    const build = (principalId: string | undefined, repository: string) => fetch(`${baseUrl}/ontology/build`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${GRAPH_TOKEN}`,
+        "content-type": "application/json",
+        ...(principalId ? { "x-jina-principal-id": principalId } : {})
+      },
+      body: JSON.stringify({ repository, ref: "main", requestKey: `graph-client-${repository}` })
+    });
+    assert.equal((await build(undefined, "omxyz/a")).status, 401);
+    assert.equal((await build(principalA, "omxyz/a")).status, 202);
+    assert.equal((await build(principalA, "other/b")).status, 403);
+
     const crossTenantQuery = await fetch(`${baseUrl}/v1/graph/query`, {
       method: "POST",
       headers: {
