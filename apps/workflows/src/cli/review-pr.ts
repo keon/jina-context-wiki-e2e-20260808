@@ -50,7 +50,6 @@ async function main(): Promise<void> {
   console.log(`PR: ${pr.title}`);
   console.log(`Head: ${pr.headRefOid}  Diff: ${diff.length} chars  Harness: ${options.harness}`);
 
-  // Webhook ingest: plan the pipeline on the board.
   let state = ingestPullRequestReview(
     createWorkflowState(),
     {
@@ -63,7 +62,6 @@ async function main(): Promise<void> {
     nowIso()
   );
 
-  // This process is the relay + runtime: drain the outbox, execute each run.
   let review: ReviewResult | undefined;
   for (;;) {
     const message = nextPendingOutboxMessage(state.board);
@@ -121,7 +119,6 @@ async function runReview(
 
   console.log(`Review complete (${review.harnessType}): ${review.findings.length} finding(s)`);
 
-  // Observability: every harness step lands on the task timeline as run.step.
   for (const step of review.steps) {
     board = applyCommand(
       board,
@@ -271,7 +268,6 @@ function printRunReport(review: ReviewResult): void {
     );
   }
 
-  // The CLI always runs on the developer's own key: own-harness rates.
   const infra = infraCreditsForRun(defaultBillingPolicy, "included");
   console.log(`Credits (own-harness, included rates): ${infra} infra + 0 AI = ${infra}`);
   if (costKnown) {
@@ -296,7 +292,7 @@ function dryRunReview(harness: HarnessType, title: string): ReviewResult {
       }
     ],
     steps: [
-      { seq: 1, at: nowIso(), type: "note", detail: "dry run: harness not invoked" }
+      { seq: 1, type: "note", detail: "dry run: harness not invoked" }
     ],
     usage: []
   };

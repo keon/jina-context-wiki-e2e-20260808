@@ -95,7 +95,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
       type: string;
       kind: string;
       description: string;
-      triggeredBy: Array<{ source: string; description: string; workflows: string[]; conditions: string[] }>;
+      triggeredBy: Array<{ source: string; description: string; conditions: string[] }>;
       dependsOn: Array<{ taskType: string; relationships: string[]; conditions: string[] }>;
       requiredBy: Array<{ taskType: string; relationships: string[] }>;
     }>>
@@ -115,13 +115,11 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
       {
         source: "POST /ontology/build",
         description: "Creates and queues the first executable Ontology task.",
-        workflows: ["ontology_build"],
         conditions: []
       },
       {
         source: "GitHub push webhook",
         description: "Queues repository intake for a pushed branch head.",
-        workflows: ["ontology_build"],
         conditions: []
       }
     ]
@@ -669,6 +667,38 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
     assert.equal((await invalidKind.json() as { code?: string }).code, "invalid_request");
   } finally {
     await close(server);
+  }
+});
+
+test("ontology commands require a forwarded principal identity", async () => {
+  const ontologyStore = new MemoryOntologyGraphStore();
+  const server = createApiServer({
+    ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a",
+    tenantAdminPrincipalIds: ["user:admin@example.com"]
+  });
+  const baseUrl = await listen(server);
+  try {
+    const command = JSON.stringify({
+      type: "grant_repository_access", repository: "omxyz/a", principalId: "user:reader@example.com", role: "reader"
+    });
+    const withoutIdentity = await fetch(`${baseUrl}/ontology/commands`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+      body: command
+    });
+    assert.equal(withoutIdentity.status, 401, "the svc:api fallback must not execute ontology commands");
+    const withIdentity = await fetch(`${baseUrl}/ontology/commands`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": "user:admin@example.com",
+        "content-type": "application/json"
+      },
+      body: command
+    });
+    assert.equal(withIdentity.status, 200);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
 

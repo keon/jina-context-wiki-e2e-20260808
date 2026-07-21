@@ -12,7 +12,7 @@ export interface TrackedPullRequest {
   readonly spend: BudgetSpend;
 }
 
-export interface StoredContextItem {
+interface StoredContextItem {
   readonly taskId: string;
   readonly targetTaskId: string;
   readonly item: ContextItemDraft;

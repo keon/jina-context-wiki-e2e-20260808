@@ -81,14 +81,12 @@ export interface ApiServerConfig {
   readonly enableDevEndpoints?: boolean;
   readonly simulateRuns?: boolean;
   readonly seedDemo?: boolean;
-  readonly deliveryCacheSize?: number;
   readonly stateStore?: ApiStateStore;
   readonly ontologyStore?: OntologyGraphStore;
   readonly ontologyCoordinator?: OntologyPipelineCoordinator;
   readonly internalApiToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
-  readonly principalId?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   /** Browser origins allowed to call the MCP endpoint. Non-browser clients normally omit Origin. */
   readonly mcpAllowedOrigins?: readonly string[];
@@ -117,7 +115,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let intakeState: GitHubIntakeState = createGitHubIntakeState();
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
-  const deliveries = new DeliveryCache(config.deliveryCacheSize ?? 10_000);
+  const deliveries = new DeliveryCache(10_000);
   const ontologyStore = config.ontologyStore ?? new MemoryOntologyGraphStore();
   const ontologyCoordinator = config.ontologyCoordinator ?? new MemoryOntologyPipelineCoordinator();
   const ready = initializeState();
@@ -406,7 +404,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const usesGraphCredential = hasGraphApiCredential(request, config);
     const requiresBoundGraphPrincipal = isPublicGraphRoute(url.pathname) ||
       (url.pathname === "/ontology/build" && usesGraphCredential);
-    if (requiresBoundGraphPrincipal && !config.enableDevEndpoints && !config.principalId &&
+    if (requiresBoundGraphPrincipal && !config.enableDevEndpoints &&
       !normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))) {
       json(response, 401, { error: "a bound principal is required" });
       return;
@@ -585,6 +583,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/ontology/commands") {
+      // The svc:api fallback is a tenant admin; state-changing ontology commands
+      // must carry an explicitly forwarded principal identity.
+      if (!principal.forwarded) {
+        json(response, 401, { accepted: false, error: "a bound principal is required" });
+        return;
+      }
       const body = parseJsonObject(await readRawBody(request));
       json(response, 200, await ontologyStore.executeCommand(
         tenantId,
@@ -704,6 +708,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           repository: result.webhook.repository,
           ref,
           requestKey: `push:${event.headSha}:delivery:${result.deliveryId}`,
+          dedupeHeadSha: event.headSha,
           snapshotFirst: true,
           createdAt: nowIso(),
           metadata: {
@@ -880,6 +885,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
     const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
+    // Generations are content-addressed by (commit, generator, registry, evidence
+    // fingerprint), so a batch persisted by a worker that later lost its lease is
+    // byte-identical to what a retry would produce; serving it here is safe reuse.
     const cached = await ontologyStore.hasAssertionGeneration(
       tenantId,
       requiredString(task.metadata.repository, "task.repository"),
@@ -1221,11 +1229,12 @@ function authenticatedPrincipal(
   request: IncomingMessage,
   config: ApiServerConfig,
   pathname: string
-): { readonly tenantId: string; readonly principalId: string } | undefined {
+): { readonly tenantId: string; readonly principalId: string; readonly forwarded: boolean } | undefined {
   if (config.enableDevEndpoints) {
     return {
       tenantId: firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default",
-      principalId: config.principalId ?? "svc:dev"
+      principalId: "svc:dev",
+      forwarded: true
     };
   }
   const authorization = firstHeader(request.headers.authorization);
@@ -1237,10 +1246,8 @@ function authenticatedPrincipal(
   );
   if (!hasInternalAccess && !hasGraphAccess) return undefined;
   if (!config.tenantId) return undefined;
-  const principalId = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))
-    ?? config.principalId
-    ?? "svc:api";
-  return { tenantId: config.tenantId, principalId };
+  const forwarded = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]));
+  return { tenantId: config.tenantId, principalId: forwarded ?? "svc:api", forwarded: forwarded !== undefined };
 }
 
 function normalizedForwardedPrincipal(value: string | undefined): string | undefined {
@@ -1400,7 +1407,7 @@ function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecor
     parentTaskId: entityId<"task">(build.id) as TaskId,
     type: `ontology_${stage.stage}`,
     title: `${stage.stage === "ingest" ? "Ingest" : stage.stage === "assert" ? "Derive assertions for" : "Project graph for"} ${stage.repository}@${stage.ref} (${stage.phase})`,
-    status: pipelineStageBoardStatus(stage.status),
+    status: stage.status,
     assigneeRole: "ontology_worker",
     dedupeKey: `ontology:${stage.buildId}:${stage.phase}:${stage.stage}`,
     required: ontologyStageRequired(stage),
@@ -1419,10 +1426,6 @@ function pipelineBuildBoardStatus(status: OntologyBuildRecord["status"]): BoardT
   if (status === "superseded") return "superseded";
   if (status === "enriching") return "done";
   return "in_progress";
-}
-
-function pipelineStageBoardStatus(status: OntologyStageRecord["status"]): BoardTask["status"] {
-  return status;
 }
 
 function isOntologyWorkerTopic(topic: string): topic is OntologyWorkerTopic {

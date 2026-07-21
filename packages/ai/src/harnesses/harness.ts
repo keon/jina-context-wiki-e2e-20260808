@@ -18,7 +18,6 @@ export interface ReviewFinding {
 /** One observable step a harness took; persisted as a run.step task event. */
 export interface HarnessStep {
   readonly seq: number;
-  readonly at: string;
   readonly type: "model_call" | "tool_call" | "note";
   readonly detail: string;
   readonly model?: string;

@@ -9,8 +9,6 @@ const componentRoles = [
   "jina_ontology_query"
 ] as const;
 
-export const ONTOLOGY_COMPONENT_ROLES = componentRoles;
-
 export const ONTOLOGY_ROLES_SQL = `
 do $roles$
 declare role_name text;

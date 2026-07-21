@@ -26,21 +26,6 @@ export function supersedeEpochTasks(
   return next;
 }
 
-/** Supersedes a complete active task tree selected by a workflow-owned predicate. */
-export function supersedeTaskTree(
-  state: BoardState,
-  now: IsoTimestamp,
-  belongsToWorkflow: (task: BoardTask) => boolean
-): BoardState {
-  let next = state;
-  for (const task of state.tasks) {
-    if (taskOrAncestorMatches(state, task, belongsToWorkflow) && !isTerminalTaskStatus(task.status)) {
-      next = transitionBoardTask(next, task.id, "superseded", now);
-    }
-  }
-  return next;
-}
-
 function taskOrAncestorMatches(
   state: BoardState,
   task: BoardTask,

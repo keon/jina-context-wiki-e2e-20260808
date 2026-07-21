@@ -2,11 +2,9 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { nowIso } from "@jina/shared-kernel";
 import type { HarnessStep, ModelUsageRecord, ReviewHarness, ReviewRequest, ReviewResult } from "./harness.js";
-import { buildReviewPrompt, parseReviewOutput, prepareDiff, REVIEW_FINDINGS_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-spec.js";
+import { buildReviewPrompt, DEFAULT_OPENROUTER_MODEL, parseReviewOutput, prepareDiff, REVIEW_FINDINGS_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-spec.js";
 
-const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4.8";
 const MAX_STEP_EVENTS = 20;
 
 /**
@@ -58,7 +56,6 @@ ${buildReviewPrompt(request, prepared)}`;
     const steps: HarnessStep[] = [
       {
         seq: 1,
-        at: nowIso(),
         type: "note",
         detail: `codex exec started (${useOpenRouter ? "via openrouter" : "native codex auth"}${model ? `, model ${model}` : ""}); diff ${prepared.diff.length} chars${prepared.truncated ? " (truncated)" : ""}`
       }
@@ -87,7 +84,7 @@ ${buildReviewPrompt(request, prepared)}`;
         const detail = describeCodexEvent(event);
         if (detail && seq < MAX_STEP_EVENTS) {
           seq += 1;
-          steps.push({ seq, at: nowIso(), type: detail.type, detail: detail.text });
+          steps.push({ seq, type: detail.type, detail: detail.text });
         }
       }
 
@@ -95,7 +92,6 @@ ${buildReviewPrompt(request, prepared)}`;
       const parsed = parseReviewOutput(readFileSync(lastMessageFile, "utf8"));
       steps.push({
         seq: steps.length + 1,
-        at: nowIso(),
         type: "model_call",
         detail: `review completed: ${parsed.findings.length} finding(s), ${tokens.prompt} in / ${tokens.completion} out tokens (from codex event stream)`,
         ...(model ? { model } : {})

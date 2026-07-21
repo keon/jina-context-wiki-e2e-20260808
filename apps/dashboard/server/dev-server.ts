@@ -52,9 +52,17 @@ function proxyApiRequest(request: IncomingMessage, response: ServerResponse): vo
   delete headers["x-jina-tenant-id"];
   delete headers["x-jina-principal-id"];
   delete headers["x-goog-authenticated-user-email"];
-  if (internalApiToken) headers.authorization = `Bearer ${internalApiToken}`;
-  if (internalApiToken && iapEmail && /^[^\s@]+@[^\s@]+$/.test(iapEmail)) {
-    headers["x-jina-principal-id"] = `user:${iapEmail}`;
+  const validIapEmail = iapEmail && /^[^\s@]+@[^\s@]+$/.test(iapEmail) ? iapEmail : undefined;
+  if (internalApiToken && !validIapEmail) {
+    // The internal token authorizes as a tenant-admin service principal; never
+    // attach it to a request that lacks a validated IAP identity.
+    response.writeHead(401, { "content-type": "application/json; charset=utf-8" });
+    response.end('{"error":"unauthenticated"}');
+    return;
+  }
+  if (internalApiToken) {
+    headers.authorization = `Bearer ${internalApiToken}`;
+    headers["x-jina-principal-id"] = `user:${validIapEmail}`;
   }
   const upstreamRequest = (upstreamUrl.protocol === "https:" ? httpsRequest : httpRequest)(
     upstreamUrl,

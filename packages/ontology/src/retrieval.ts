@@ -160,7 +160,7 @@ export class RepositoryContextOrchestrator {
       ...(symbol ? { symbol } : {})
     };
     const templates = operation === "counterfactual"
-      ? counterfactualTemplates(extracted)
+      ? ["counterfactual" as const]
       : issueEntityId ? ["issue_trace" as const] : classifyTemplates(input.question);
     const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
     const calls: RetrievalResult[] = [];
@@ -196,21 +196,6 @@ export class RepositoryContextOrchestrator {
 export function isCounterfactualQuestion(question: string): boolean {
   return /\b(?:if|without|counterfactual|had\s+not|hadn't|did\s+not|didn't|never\s+(?:merged|landed|happened)|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?|exclude[ds]?|excluding)\b/i.test(question) &&
     /\b(?:would|could|might|still|exist|happen|break|fail|remain|work|affect|impact|disappear|merged|landed|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?|exclude[ds]?|excluding)\b/i.test(question);
-}
-
-function counterfactualTemplates(extracted: {
-  readonly issueEntityId?: string;
-  readonly issueNumber?: number;
-  readonly issueText?: string;
-  readonly featureText?: string;
-  readonly pullRequestNumber?: number;
-  readonly commitSha?: string;
-}): readonly RetrievalTemplateName[] {
-  if (extracted.featureText) return ["counterfactual"];
-  if (extracted.issueEntityId || extracted.issueNumber || extracted.issueText || extracted.pullRequestNumber || extracted.commitSha) {
-    return ["counterfactual"];
-  }
-  return ["counterfactual"];
 }
 
 export function classifyTemplates(question: string): readonly RetrievalTemplateName[] {

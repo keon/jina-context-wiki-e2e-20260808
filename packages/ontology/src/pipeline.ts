@@ -1,6 +1,6 @@
 import {
+  parseEvidenceCitation,
   stableId,
-  type EvidenceCitation,
   type GeneratedOntology,
   type OntologyGraph,
   type OntologyNodeKind,
@@ -275,7 +275,7 @@ export interface OntologyPipelineStore {
   project(request: OntologyProjectionRequest): Promise<OntologyGraph>;
 }
 
-export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly StoredAssertion[] {
+function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly StoredAssertion[] {
   const observationId = assertionObservationId(batch);
   const seen = new Set<string>();
   return batch.assertions.map((assertion) => {
@@ -288,7 +288,7 @@ export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly
     }
     const explanation = requiredAssertionExplanation(predicate, assertion.explanation);
     if (assertion.evidence.length === 0) throw new Error(`${predicate} must include evidence`);
-    const evidence = assertion.evidence.map((value) => validateEvidence(value).value);
+    const evidence = assertion.evidence.map((value) => parseEvidenceCitation(value).value);
     const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
     if (seen.has(key)) throw new Error(`duplicate ontology assertion: ${key}`);
     seen.add(key);
@@ -304,8 +304,6 @@ export function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly
       tenantId: batch.tenantId,
       repository: batch.repository,
       commitSha: batch.commitSha,
-      // Models only create proposals. Threshold activation is allowed only after
-      // calibration data is measured and installed by the knowledge service.
       status: "proposed",
       sourceObservationId: observationId,
       lastConfirmedAt: batch.generatedAt,
@@ -610,17 +608,4 @@ function requiredAssertionExplanation(predicate: string, value: string | undefin
   if (!explanation) throw new Error(`${predicate} must explain why the evidence supports the relationship`);
   if (explanation.length > 1_000) throw new Error(`${predicate} explanation must not exceed 1000 characters`);
   return explanation;
-}
-
-function validateEvidence(value: string): EvidenceCitation {
-  const match = /^(.*):(\d+)(?:-(\d+))?$/.exec(value);
-  if (!match?.[1] || !match[2]) throw new Error(`invalid ontology evidence citation: ${value}`);
-  const path = match[1];
-  if (path.startsWith("/") || path.split("/").includes("..")) {
-    throw new Error(`ontology evidence path must be repository-relative: ${value}`);
-  }
-  const startLine = Number.parseInt(match[2], 10);
-  const endLine = match[3] ? Number.parseInt(match[3], 10) : startLine;
-  if (startLine < 1 || endLine < startLine) throw new Error(`invalid ontology evidence range: ${value}`);
-  return { value, path, startLine, endLine };
 }

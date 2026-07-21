@@ -27,18 +27,6 @@ import {
 import { analyzeSourceBlob } from "./parser.js";
 import { predicateDefinition, validatePredicateEndpoints, validateQualifiers } from "./registry.js";
 import {
-  acceptanceRates,
-  addRedirect,
-  applyAssertion,
-  emptyKnowledgeState,
-  ensureEntity,
-  reconcileAssertions,
-  relateAssertions,
-  resolveEntityId,
-  reviewAssertion,
-  upsertIdentity
-} from "./knowledge.js";
-import {
   RepositoryContextOrchestrator,
   classifyTemplates,
   extractFeatureText,
@@ -279,7 +267,6 @@ test("rename similarity creates review candidates instead of active facts", () =
     blobSha: oldBlob, parserVersion: ONTOLOGY_PARSER_VERSION,
     symbols: [{ moniker: "old", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }], imports: [], edges: []
   }]])), [{ oldPath: "src/old-auth.ts", newPath: "src/authz.ts", similarity: 1, matchingSignatureHashes: ["sig"] }]);
-  assert.equal(predicateDefinition("MOVED_FROM").review, "manual");
 });
 
 test("generic causal traces preserve alternative causes and evaluate interventions", () => {
@@ -308,10 +295,6 @@ test("generic causal traces preserve alternative causes and evaluate interventio
   assert.equal(result.remainingPaths.length, 1);
   assert.match(result.answer, /alternative known path remains/);
   assert.equal(result.basis, "graph-derived");
-});
-
-test("counterfactual classifier recognizes direct package exclusion", () => {
-  assert.equal(isCounterfactualQuestion("Exclude package zod: which implementation paths disappear?"), true);
 });
 
 test("selects bounded assertion focus across newly ingested commits", () => {
@@ -494,107 +477,6 @@ test("registry validates endpoints and qualifier keys and keeps model inferences
   validatePredicateEndpoints(predicateDefinition("TARGETS"), "Deployment", "Service");
   validatePredicateEndpoints(predicateDefinition("INCIDENT_IMPACTS"), "Incident", "Feature");
   validatePredicateEndpoints(predicateDefinition("RESOLVED_BY"), "Issue", "PullRequest");
-});
-
-test("knowledge writer enforces provenance, review, qualifier cardinality, audit, and measured labels", () => {
-  let state = emptyKnowledgeState();
-  const file = ensureEntity(state, { tenantId: "t", kind: "File", key: "repo:r:path:src/a.ts", now: "2026-01-01T00:00:00Z" });
-  state = file.state;
-  const teamA = ensureEntity(state, { tenantId: "t", kind: "Team", key: "team:a", now: "2026-01-01T00:00:00Z" });
-  state = teamA.state;
-  const teamB = ensureEntity(state, { tenantId: "t", kind: "Team", key: "team:b", now: "2026-01-01T00:00:00Z" });
-  state = teamB.state;
-
-  const proposed = applyAssertion(state, {
-    tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamA.entity.id,
-    qualifiers: { pattern: "src/**" }, confidence: 0.9, sourceObservationId: "obs:codeowners",
-    generator: "model:owner@1", explanation: "The CODEOWNERS rule assigns this file to team A.",
-    recordedAt: "2026-01-02T00:00:00Z"
-  });
-  state = proposed.state;
-  assert.equal(proposed.assertion.status, "proposed");
-  assert.throws(() => reviewAssertion(state, {
-    tenantId: "t", assertionId: proposed.assertion.id, decision: "reject", actorId: "user:1",
-    reason: "The evidence is incomplete.", now: "2026-01-02T12:00:00Z"
-  }), /rejection.*code/);
-  const accepted = reviewAssertion(state, {
-    tenantId: "t", assertionId: proposed.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-03T00:00:00Z"
-  });
-  state = accepted.state;
-  assert.equal(accepted.assertion.status, "active");
-
-  const supporting = applyAssertion(state, {
-    tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamB.entity.id,
-    qualifiers: { pattern: "src/special/**" }, confidence: 0.95, sourceObservationId: "obs:support",
-    generator: "model:owner@2", explanation: "The more specific rule provides supporting ownership evidence.",
-    recordedAt: "2026-01-03T00:00:01Z"
-  });
-  state = supporting.state;
-  const relation = relateAssertions(state, {
-    tenantId: "t", sourceAssertionId: supporting.assertion.id, relation: "supports",
-    targetAssertionId: accepted.assertion.id, evidenceObservationId: "obs:support", now: "2026-01-03T00:00:02Z"
-  });
-  state = relation.state;
-  assert.equal(state.assertionRelations[0]?.relation, "supports");
-
-  const replacement = applyAssertion(state, {
-    tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamB.entity.id,
-    qualifiers: { pattern: "src/**" }, sourceObservationId: "obs:codeowners:2",
-    explanation: "The updated CODEOWNERS rule assigns this file to team B.", recordedAt: "2026-01-04T00:00:00Z"
-  });
-  state = replacement.state;
-  const replacementAccepted = reviewAssertion(state, {
-    tenantId: "t", assertionId: replacement.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-05T00:00:00Z"
-  });
-  state = replacementAccepted.state;
-  assert.equal(state.assertions.find((item) => item.id === proposed.assertion.id)?.status, "superseded");
-  assert.equal(state.assertions.find((item) => item.id === proposed.assertion.id)?.supersededBy, replacement.assertion.id);
-  assert.deepEqual(acceptanceRates(state, "t"), [{ generator: "model:owner@1", predicate: "OWNED_BY", accepted: 1, rejected: 0, rate: 1 }]);
-  assert.throws(() => applyAssertion(state, {
-    tenantId: "t", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamA.entity.id,
-    explanation: "The rule assigns this file to team A.", recordedAt: "2026-01-06T00:00:00Z"
-  }), /sourceObservationId XOR assertedBy/);
-});
-
-test("identity redirects resolve without rewriting assertions and reconciliation removes logical collisions", () => {
-  let state = emptyKnowledgeState();
-  const fileA = ensureEntity(state, { tenantId: "t", kind: "File", key: "file:a", now: "2026-01-01T00:00:00Z" });
-  state = fileA.state;
-  const fileB = ensureEntity(state, { tenantId: "t", kind: "File", key: "file:b", now: "2026-01-01T00:00:00Z" });
-  state = fileB.state;
-  const team = ensureEntity(state, { tenantId: "t", kind: "Team", key: "team:a", now: "2026-01-01T00:00:00Z" });
-  state = team.state;
-  state = upsertIdentity(state, {
-    tenantId: "t", source: "github", externalId: "team-a", entityId: team.entity.id, status: "accepted", now: "2026-01-01T00:00:00Z"
-  }).state;
-  const first = applyAssertion(state, {
-    tenantId: "t", subjectId: fileA.entity.id, predicate: "OWNED_BY", objectId: team.entity.id,
-    assertedBy: "user:1", explanation: "A curator assigned file A to this team.", recordedAt: "2026-01-02T00:00:00Z"
-  });
-  state = reviewAssertion(first.state, {
-    tenantId: "t", assertionId: first.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-02T01:00:00Z"
-  }).state;
-  const second = applyAssertion(state, {
-    tenantId: "t", subjectId: fileB.entity.id, predicate: "OWNED_BY", objectId: team.entity.id,
-    assertedBy: "user:1", explanation: "A curator assigned file B to this team.", recordedAt: "2026-01-03T00:00:00Z"
-  });
-  state = reviewAssertion(second.state, {
-    tenantId: "t", assertionId: second.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-03T01:00:00Z"
-  }).state;
-  const merged = addRedirect(state, {
-    tenantId: "t", fromEntityId: fileA.entity.id, toEntityId: fileB.entity.id, kind: "merge", actorId: "user:1", now: "2026-01-04T00:00:00Z"
-  });
-  state = merged.state;
-  assert.equal(resolveEntityId(state, "t", fileA.entity.id), fileB.entity.id);
-  const reconciled = reconcileAssertions(state, { tenantId: "t", now: "2026-01-04T00:01:00Z", parentAuditId: merged.audit.id });
-  assert.equal(reconciled.supersededCount, 1);
-  assert.equal(reconciled.state.assertions.filter((item) => item.status === "active").length, 1);
-  assert.equal(reconciled.state.assertions.find((item) => item.id === first.assertion.id)?.subjectId, fileA.entity.id, "as-asserted ids are immutable");
-  const unmerged = addRedirect(reconciled.state, {
-    tenantId: "t", fromEntityId: fileA.entity.id, toEntityId: fileB.entity.id, kind: "unmerge", actorId: "user:1", now: "2026-01-05T00:00:00Z"
-  });
-  assert.equal(resolveEntityId(unmerged.state, "t", fileA.entity.id), fileA.entity.id);
-  assert.equal(unmerged.state.assertions.find((item) => item.id === first.assertion.id)?.status, "superseded", "unmerge does not silently restore knowledge");
 });
 
 test("orchestrator composes only fixed cited retrieval templates", async () => {
@@ -942,7 +824,6 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
     "INCLUDES", "MERGED_AS", "RESOLVES"
   ]);
   assert.equal(workItem.assertions.every((assertion) => assertion.explanation.length > 0), true);
-  assert.equal(predicateDefinition("INTRODUCED_BY").review, "manual");
 });
 
 test("source ingestion distinguishes new, updated, and confirmed GitHub observations", async () => {

@@ -70,7 +70,7 @@ export const taskTypeDefinitions: readonly TaskTypeDefinition[] = [
   }
 ];
 
-export function taskKind(type: TaskType): TaskKind {
+function taskKind(type: TaskType): TaskKind {
   switch (type) {
     case "pr_review":
       return "aggregate";

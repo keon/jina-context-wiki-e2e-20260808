@@ -240,7 +240,7 @@ export function findTasksByType(state: BoardState, type: BoardTask["type"]): rea
   return state.tasks.filter((task) => task.type === type);
 }
 
-export function requiredDependenciesSatisfied(state: BoardState, taskId: TaskId): boolean {
+function requiredDependenciesSatisfied(state: BoardState, taskId: TaskId): boolean {
   const requiredDependencies = state.dependencies.filter((dependency) => dependency.taskId === taskId && dependency.required);
 
   return requiredDependencies.every((dependency) => {

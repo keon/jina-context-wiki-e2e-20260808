@@ -1,9 +1,8 @@
 import { nowIso } from "@jina/shared-kernel";
 import type { HarnessStep, ReviewHarness, ReviewRequest, ReviewResult } from "./harness.js";
-import { buildReviewPrompt, parseReviewOutput, prepareDiff, REVIEW_FINDINGS_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-spec.js";
+import { buildReviewPrompt, DEFAULT_OPENROUTER_MODEL, parseReviewOutput, prepareDiff, REVIEW_FINDINGS_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-spec.js";
 
 const BASE_URL = "https://openrouter.ai/api/v1";
-const DEFAULT_MODEL = "anthropic/claude-opus-4.8";
 
 interface OpenRouterUsage {
   readonly prompt_tokens?: number;
@@ -33,13 +32,12 @@ export class OpenRouterReviewHarness implements ReviewHarness {
     if (!apiKey) {
       throw new Error("openrouter-chat harness requires OPENROUTER_API_KEY.");
     }
-    const model = request.model ?? DEFAULT_MODEL;
+    const model = request.model ?? DEFAULT_OPENROUTER_MODEL;
 
     const prepared = prepareDiff(request.diff);
     const steps: HarnessStep[] = [
       {
         seq: 1,
-        at: nowIso(),
         type: "note",
         detail: `prepared diff: ${prepared.diff.length} chars${prepared.truncated ? " (truncated)" : ""}`
       }
@@ -84,7 +82,6 @@ export class OpenRouterReviewHarness implements ReviewHarness {
 
     steps.push({
       seq: 2,
-      at: nowIso(),
       type: "model_call",
       detail: `review completed: ${parsed.findings.length} finding(s), ${usage.prompt_tokens ?? 0} in / ${usage.completion_tokens ?? 0} out tokens${usage.cost !== undefined ? `, $${usage.cost.toFixed(4)}` : ""}`,
       model: servedModel

@@ -23,17 +23,10 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   #connection { display: flex; align-items: center; gap: .5rem; color: #9aa4b7; font-size: .78rem; }
   .pulse { width: .5rem; height: .5rem; border-radius: 50%; background: #3ddc97; box-shadow: 0 0 0 .25rem rgb(61 220 151 / 12%); }
   .pulse.offline { background: #ff6b6b; box-shadow: 0 0 0 .25rem rgb(255 107 107 / 12%); }
-  .toolbar { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
-  .toolbar button, .ghost-button {
-    border: 1px solid #293044; border-radius: .55rem; background: #121722; padding: .48rem .72rem; cursor: pointer; font-size: .75rem;
-  }
-  .toolbar button:hover, .ghost-button:hover { border-color: #56627c; background: #181f2d; }
-  .toolbar-label { color: #77839a; font-size: .72rem; margin-right: .15rem; }
   .page-nav { display: flex; gap: .35rem; margin-bottom: 1.25rem; border-bottom: 1px solid #202637; }
   .page-nav a { padding: .65rem .15rem .6rem; margin-right: 1rem; color: #78849a; text-decoration: none; font-size: .76rem; font-weight: 650; border-bottom: 2px solid transparent; }
   .page-nav a:hover { color: #c5ccda; }
   .page-nav a.active { color: #f1f3f7; border-bottom-color: #809cff; }
-  .page-note { margin: 0 0 1rem; color: #77839a; font-size: .72rem; }
   .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: .85rem; align-items: start; }
   .column { border: 1px solid #202637; border-radius: .8rem; background: rgb(15 19 28 / 78%); padding: .65rem; min-height: 10rem; }
   .column h2 { display: flex; justify-content: space-between; margin: .15rem .15rem .65rem; color: #8e99ad; font-size: .7rem; letter-spacing: .09em; text-transform: uppercase; }
@@ -87,21 +80,8 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .type-copy { min-width: 0; }
   .type-name { display: block; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 700; color: #dce2ed; }
   .type-description { display: block; margin-top: .35rem; color: #8793a8; font-size: .72rem; line-height: 1.45; }
-  .type-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .35rem; color: #8b97ac; font-size: .65rem; }
-  .type-chip { border: 1px solid #30394d; border-radius: 99px; padding: .18rem .42rem; white-space: nowrap; }
-  .type-dependency-groups { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .55rem; margin-top: .75rem; }
-  .type-dependency-group { min-width: 0; border: 1px solid #252d40; border-radius: .6rem; background: #111620; padding: .55rem .6rem; }
-  .type-dependency-label { display: block; margin-bottom: .38rem; color: #6f7d94; font-size: .58rem; font-weight: 750; letter-spacing: .09em; text-transform: uppercase; }
-  .type-dependency-list { display: grid; gap: .38rem; }
-  .type-dependency { min-width: 0; }
-  .type-dependency-name { display: block; color: #cbd3e1; font: .68rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 650; }
-  .type-dependency-detail { display: block; margin-top: .1rem; color: #76839a; font-size: .6rem; line-height: 1.4; overflow-wrap: anywhere; }
-  .type-dependency-empty { color: #59667c; font-size: .63rem; }
   .superseded { opacity: .48; }
   .empty { padding: 1.5rem .5rem; color: #586277; text-align: center; font-size: .72rem; }
-  .feed { margin-top: 1.4rem; border-top: 1px solid #1f2534; padding-top: 1rem; }
-  .feed h2 { margin: 0 0 .6rem; font-size: .78rem; color: #8f9aaf; }
-  #log { color: #68748a; font: .68rem/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
   .ontology-shell { display: grid; gap: 1rem; }
   .ontology-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .65rem; }
   .ontology-stat { border: 1px solid #283149; border-radius: .8rem; background: linear-gradient(145deg, #151b29, #10151f); padding: .8rem; }
@@ -122,46 +102,14 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip[aria-pressed="false"] { border-color: #293143; background: #111620; color: #68758b; text-decoration: line-through; }
   .graph-filter-chip[aria-pressed="false"]::before { background: #465166; }
   .graph-filter-chip:hover, .graph-reset:hover { border-color: #7184aa; background: #202b40; }
-  .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .graph-node:focus-visible, .graph-edge-label-button:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
+  .graph-filter-chip:focus-visible, .graph-reset:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
   .graph-reset { align-self: start; border-radius: .5rem; background: #151c29; }
   .graph-reset:disabled { opacity: .42; cursor: default; }
-  .graph-control-help { margin: 0; color: #738097; font-size: .64rem; line-height: 1.45; }
-  .graph-control-actions { display: flex; align-items: center; gap: .38rem; }
   .graph-wrap { min-height: 590px; overflow: auto; background: radial-gradient(circle at 50% 50%, #182036, #0d1119 66%); }
   #ontology-graph { display: block; width: 100%; min-width: 900px; height: 590px; touch-action: pan-x pan-y pinch-zoom; user-select: none; }
-  .graph-edge { fill: none; stroke-width: 1.5; opacity: .62; }
-  .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 16; }
-  .graph-edge-group, .graph-edge-label-button, .graph-node { cursor: grab; transition: opacity 140ms ease; }
-  .graph-edge-group:active, .graph-edge-label-button:active, .graph-node:active { cursor: grabbing; }
-  .graph-edge-group:hover .graph-edge, .graph-edge-group.hovered .graph-edge, .graph-edge-group.selected .graph-edge { stroke-width: 3.5; opacity: 1; }
-  .graph-edge-group.connected:not(.selected) .graph-edge { stroke-width: 2.5; opacity: .94; }
-  .graph-edge-code { stroke: #6495ed; }
-  .graph-edge-knowledge { stroke: #d88fff; stroke-dasharray: 5 4; }
-  .graph-edge-label-bg { fill: #111824; stroke: #34415a; stroke-width: 1; }
-  .graph-edge-label { fill: #95a2b8; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-anchor: middle; pointer-events: none; }
-  .graph-edge-label-button:hover .graph-edge-label-bg, .graph-edge-label-button.selected .graph-edge-label-bg { fill: #1b2639; stroke: #829bd0; }
-  .graph-edge-label-button:hover .graph-edge-label, .graph-edge-label-button.selected .graph-edge-label { fill: #f2f5fa; font-weight: 750; }
-  .graph-node circle { stroke-width: 2; filter: drop-shadow(0 5px 8px rgb(0 0 0 / 35%)); transition: stroke-width 120ms ease, filter 120ms ease; }
-  .graph-node:hover circle, .graph-node.selected circle { stroke-width: 4; filter: drop-shadow(0 0 10px rgb(142 168 255 / 65%)); }
-  .graph-node.connected:not(.selected) circle { stroke-width: 3; filter: drop-shadow(0 0 8px rgb(142 168 255 / 48%)); }
-  .graph-node.dimmed, .graph-edge-group.dimmed, .graph-edge-label-button.dimmed { opacity: .12; }
-  .graph-node text { fill: #e8ecf4; font-size: 11px; font-weight: 650; text-anchor: middle; pointer-events: none; }
-  .graph-node .node-kind { fill: #8794aa; font-size: 9px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
-  .kind-Repository circle { fill: #263d78; stroke: #8ba9ff; }
-  .kind-File circle { fill: #163f3b; stroke: #59d7bf; }
-  .kind-Symbol circle { fill: #45321c; stroke: #efb964; }
-  .kind-Document circle { fill: #3f244e; stroke: #cf89e9; }
-  .kind-Feature circle { fill: #173b50; stroke: #5fd3f3; }
-  .kind-Package circle { fill: #173253; stroke: #66aef4; }
-  .kind-Service circle { fill: #163f3b; stroke: #51d7c9; }
-  .kind-Deployment circle { fill: #213d2c; stroke: #63cf87; }
-  .kind-Incident circle { fill: #4e2021; stroke: #f2615d; }
-  .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { fill: #3c2830; stroke: #ef879f; }
-  .kind-Engineer circle, .kind-Team circle { fill: #283248; stroke: #91a7d4; }
   .assertion-review { border: 1px solid #252d40; border-radius: .85rem; background: #10151f; overflow: hidden; }
   .assertion-review > summary { padding: .8rem 1rem; color: #cbd3e1; cursor: pointer; font-size: .72rem; font-weight: 700; }
   .assertion-review-toolbar { display: flex; gap: .55rem; flex-wrap: wrap; padding: .8rem 1rem; }
-  .assertion-review-list { display: grid; gap: .65rem; padding: 0 1rem 1rem; }
   .assertion-review-item { border: 1px solid #2a3449; border-radius: .65rem; background: #111823; padding: .72rem; }
   .assertion-review-item header, .assertion-actions { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; }
   .assertion-review-item p { color: #aeb8c9; font-size: .7rem; }
@@ -203,13 +151,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .assertion-review-fields select, .assertion-review-fields input { min-width: 0; border: 1px solid #303030; border-radius: .35rem; background: #0b0b0b; color: #bbb; padding: .45rem; font-size: .62rem; }
   .assertion-review-actions { display: flex; gap: .4rem; }
   .ontology-item .ontology-item-type, .ontology-item .ontology-confidence span, .ontology-item .ontology-relationship span { margin-top: 0; }
-  .graph-empty { fill: #6f7d94; font-size: 14px; text-anchor: middle; }
   .plane-key { display: flex; gap: .8rem; align-items: center; color: #7f8ca2; font-size: .66rem; }
   .plane-key span::before { content: ""; display: inline-block; width: 1.4rem; margin-right: .35rem; border-top: 2px solid #6495ed; vertical-align: middle; }
   .plane-key .knowledge::before { border-top-color: #d88fff; border-top-style: dashed; }
-  .context-query { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .55rem; padding: .85rem; border: 1px solid #252d40; border-radius: .85rem; background: #10151f; }
-  .context-query input { min-width: 0; border: 1px solid #303a50; border-radius: .55rem; background: #0d1119; color: #eef1f6; padding: .65rem .75rem; }
-  .context-query button { border: 1px solid #52668f; border-radius: .55rem; background: #283a68; padding: .6rem .9rem; cursor: pointer; }
   .context-results { display: grid; gap: .55rem; }
   .context-answer { border: 1px solid #465d88; border-radius: .75rem; background: linear-gradient(135deg, #121d30, #101722 72%); padding: .85rem; }
   .context-answer-label { display: block; margin-bottom: .4rem; color: #a9c1ff; font-size: .6rem; font-weight: 780; letter-spacing: .1em; text-transform: uppercase; }
@@ -284,7 +228,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .event-payload { margin: .35rem 0 0; color: #7e8aa0; font: .64rem/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
   .empty-detail { color: #68758c; font-size: .72rem; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
-  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .workflow-grid, .type-row, .type-dependency-groups, .graph-filter-row { grid-template-columns: 1fr; } .workflow-grid { padding: .7rem; } .type-meta { justify-content: flex-start; } .graph-filter-label { padding-top: 0; } .graph-reset { justify-self: start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
+  @media (max-width: 640px) { .shell { padding: 1rem; } .topbar { flex-direction: column; } .workflow-grid, .type-row, .graph-filter-row { grid-template-columns: 1fr; } .workflow-grid { padding: .7rem; } .graph-filter-label { padding-top: 0; } .graph-reset { justify-self: start; } .detail-body, .detail-header { padding-left: 1rem; padding-right: 1rem; } }
 </style>
 <style>
   :root {
@@ -327,11 +271,8 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .page-nav a { margin: 0; padding: 6px 9px; border: 1px solid transparent; border-radius: 6px; color: #777; font-size: 11px; font-weight: 520; line-height: 1; }
   .page-nav a:hover { background: #111; color: #c7c7c7; }
   .page-nav a.active { border-color: var(--border); background: #141414; color: #f1f1f1; }
-  .page-note { margin: 0 0 14px; color: var(--muted); font-size: 11px; }
-  .toolbar { justify-content: flex-end; gap: 6px; margin: 0 0 14px; }
-  .toolbar-label { color: var(--subtle); font-size: 10px; }
-  .toolbar button, .ghost-button, .graph-reset { border: 1px solid var(--border); border-radius: 6px; background: #0d0d0d; padding: 6px 9px; color: #a5a5a5; font-size: 10px; }
-  .toolbar button:hover, .ghost-button:hover, .graph-reset:hover { border-color: var(--border-strong); background: #151515; color: var(--text); }
+  .graph-reset { border: 1px solid var(--border); border-radius: 6px; background: #0d0d0d; padding: 6px 9px; color: #a5a5a5; font-size: 10px; }
+  .graph-reset:hover { border-color: var(--border-strong); background: #151515; color: var(--text); }
 
   .columns { grid-template-columns: repeat(auto-fit, minmax(235px, 1fr)); gap: 12px; }
   .column { min-height: 180px; border-color: var(--border); border-radius: var(--radius); background: var(--panel); padding: 7px; }
@@ -339,15 +280,12 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .count { min-width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; background: #111; color: #777; font-size: 9px; }
   .card { margin-bottom: 6px; border-color: var(--border); border-radius: 6px; background: var(--surface); padding: 10px; box-shadow: none; }
   .card:hover { transform: none; border-color: #3b3b3b; background: var(--surface-hover); }
-  .card:focus-visible, .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .graph-node:focus-visible, .graph-edge-label-button:focus-visible, .ontology-relationship:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card:focus-visible, .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .ontology-relationship:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .card-title { color: #d8d8d8; font-size: 12px; font-weight: 540; line-height: 1.4; }
   .card-meta { gap: 6px; margin-top: 8px; color: #6f6f6f; font-size: 9px; }
-  .chip, .type-chip, .workflow-node-badge { border-color: #292929; border-radius: 4px; background: #0e0e0e; padding: 2px 5px; }
+  .chip, .workflow-node-badge { border-color: #292929; border-radius: 4px; background: #0e0e0e; padding: 2px 5px; }
   .superseded { opacity: .4; }
   .empty { color: #4f4f4f; font-size: 11px; }
-  .feed { margin-top: 24px; border-color: var(--border); padding-top: 14px; }
-  .feed h2 { color: #787878; font-size: 11px; font-weight: 560; }
-  #log { color: #666; font-size: 10px; line-height: 1.7; }
 
   .task-panel, .workflow-panel { border-color: var(--border); border-radius: var(--radius); background: var(--panel); }
   .workflow-panel { margin-bottom: 12px; }
@@ -379,12 +317,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .type-row { border-color: var(--border); padding: 13px 14px; }
   .type-name { color: #d3d3d3; font-size: 11px; }
   .type-description { color: #797979; font-size: 10px; }
-  .type-meta { color: #777; font-size: 9px; }
-  .type-dependency-groups { gap: 7px; margin-top: 10px; }
-  .type-dependency-group { border-color: var(--border); border-radius: 5px; background: #0b0b0b; padding: 8px; }
-  .type-dependency-label { color: #5e5e5e; font-size: 8px; }
-  .type-dependency-name { color: #bababa; font-size: 9px; }
-  .type-dependency-detail, .type-dependency-empty { color: #626262; font-size: 9px; }
 
   .ontology-shell { gap: 12px; }
   .ontology-summary { gap: 8px; }
@@ -399,10 +331,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .plane-key span::before { width: 14px; border-color: #7485bf; }
   .plane-key .knowledge::before { border-color: #9b83bc; }
   .graph-controls { gap: 8px; padding: 10px 14px; border-color: var(--border); background: #0a0a0a; }
-  .graph-control-help { color: #626262; font-size: 9px; }
   .graph-filter-row { grid-template-columns: 72px minmax(0, 1fr) auto; gap: 8px; }
   .graph-filter-label { color: #656565; font-size: 8px; }
-  .graph-filter-list, .graph-control-actions { gap: 5px; }
+  .graph-filter-list { gap: 5px; }
   .graph-filter-chip { border-color: #292929; border-radius: 5px; background: #111; padding: 4px 7px; color: #9b9b9b; font-size: 9px; }
   .graph-filter-chip::before { width: 5px; height: 5px; margin-right: 5px; background: #7a89bd; }
   .graph-filter-chip[data-filter-group="edge"]::before { background: #9d82b8; }
@@ -410,23 +341,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip:hover { border-color: #3b3b3b; background: #171717; color: #d0d0d0; }
   .graph-reset { font-size: 9px; }
   .graph-wrap { min-height: 590px; background-color: #0a0a0a; background-image: radial-gradient(circle, #292929 1px, transparent 1px); background-size: 20px 20px; }
-  .graph-edge { opacity: .48; }
-  .graph-edge-code { stroke: #6e7daf; }
-  .graph-edge-knowledge { stroke: #9b83b5; }
-  .graph-edge-label-bg { fill: #101010; stroke: #303030; }
-  .graph-edge-label { fill: #777; }
-  .graph-edge-label-button:hover .graph-edge-label-bg, .graph-edge-label-button.selected .graph-edge-label-bg { fill: #171717; stroke: #777; }
-  .graph-node circle { fill: #141414 !important; stroke-width: 1.5; filter: drop-shadow(0 4px 9px rgb(0 0 0 / 45%)); }
-  .graph-node:hover circle, .graph-node.selected circle { stroke-width: 3; filter: drop-shadow(0 0 11px rgb(139 124 246 / 30%)); }
-  .graph-node.connected:not(.selected) circle { stroke-width: 2; filter: none; }
-  .graph-node text { fill: #d8d8d8; font-size: 10px; font-weight: 560; }
-  .graph-node .node-kind { fill: #666; font-size: 8px; }
-  .kind-Repository circle { stroke: #9d91f0; }
-  .kind-File circle, .kind-Symbol circle { stroke: #668f85; }
-  .kind-Document circle, .kind-Feature circle, .kind-Package circle, .kind-Service circle, .kind-Deployment circle, .kind-Incident circle { stroke: #88749f; }
-  .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { stroke: #a8787e; }
-  .kind-Engineer circle, .kind-Team circle { stroke: #74809a; }
-  .graph-node.dimmed, .graph-edge-group.dimmed, .graph-edge-label-button.dimmed { opacity: .1; }
   .ontology-details { gap: 8px; padding: 12px 14px; border-color: var(--border); background: #0b0b0b; }
   .ontology-item { border-color: var(--border); border-radius: 6px; background: #101010; padding: 11px; }
   .ontology-item strong { font-size: 11px; font-weight: 560; }
@@ -447,11 +361,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .ontology-relationship-title { color: #c7c7c7; font-size: 9px; }
   .ontology-relationship-meta, .ontology-relationship-explanation { color: #6d6d6d; font-size: 9px; }
 
-  .context-query { gap: 0; padding: 0; border-color: var(--border); border-radius: 6px; background: var(--panel); overflow: hidden; }
-  .context-query input { border: 0; border-radius: 0; background: transparent; color: var(--text); padding: 11px 12px; font-size: 11px; outline: 0; }
-  .context-query input:focus { box-shadow: inset 0 0 0 1px var(--accent); }
-  .context-query button { border: 0; border-left: 1px solid var(--border); border-radius: 0; background: #ededed; color: #0a0a0a; padding: 0 14px; font-size: 10px; font-weight: 620; }
-  .context-query button:hover { background: #d7d7d7; }
   .context-answer, .context-call, .trace-chain, .trace-fact { border-color: var(--border); border-radius: 6px; background: var(--panel); }
   .context-answer-label, .trace-answer-label-cause, .trace-fact-label { color: #9e94ec; }
   .context-answer-text { color: #cfcfcf; font-size: 11px; }
@@ -501,12 +410,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     .topbar { min-height: 52px; flex-direction: row; }
     .page-nav { padding-left: 0; overflow-x: auto; }
     #connection-text { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .toolbar { justify-content: flex-start; }
-    .workflow-grid, .type-row, .type-dependency-groups, .graph-filter-row { grid-template-columns: 1fr; }
+    .workflow-grid, .type-row, .graph-filter-row { grid-template-columns: 1fr; }
     .graph-filter-label { padding-top: 0; }
     .ontology-card header { align-items: flex-start; flex-direction: column; }
-    .context-query { grid-template-columns: 1fr; }
-    .context-query button { min-height: 38px; border-top: 1px solid var(--border); border-left: 0; }
   }
 </style>
 <style>
@@ -540,7 +446,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .primary-button:disabled:hover, .secondary-button:disabled:hover, .danger-button:disabled:hover { border-color: #272727; background: #101010; color: #5f5f5f; }
 
   .page-filters { display: flex; align-items: center; gap: 8px; margin: 0 0 18px; padding: 0 2px; }
-  .page-filters select, .search-control, .demo-menu > summary, .graph-control-button, .graph-zoom, .graph-toggle {
+  .page-filters select, .search-control, .demo-menu > summary, .graph-control-button, .graph-zoom {
     min-height: 36px; border: 1px solid var(--border); border-radius: 6px; background: #0d0d0d; color: #aaa; font-size: 10px;
   }
   .page-filters select { appearance: none; min-width: 126px; padding: 0 30px 0 11px; background-image: linear-gradient(45deg, transparent 50%, #777 50%), linear-gradient(135deg, #777 50%, transparent 50%); background-position: calc(100% - 14px) 15px, calc(100% - 10px) 15px; background-size: 4px 4px; background-repeat: no-repeat; }
@@ -553,9 +459,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .demo-actions { position: absolute; z-index: 12; top: calc(100% + 6px); right: 0; display: grid; width: 160px; padding: 5px; border: 1px solid var(--border); border-radius: 7px; background: #111; box-shadow: 0 16px 48px rgb(0 0 0 / 55%); }
   .demo-actions button { border: 0; border-radius: 4px; background: transparent; padding: 8px; color: #aaa; text-align: left; font-size: 10px; }
   .demo-actions button:hover { background: #1a1a1a; color: #eee; }
-  .view-switch { display: flex; padding: 3px; border: 1px solid var(--border); border-radius: 6px; background: #0c0c0c; }
-  .view-switch button { min-height: 27px; border: 0; border-radius: 4px; background: transparent; padding: 0 10px; color: #747474; font-size: 10px; }
-  .view-switch button.active { border: 1px solid #272727; background: #171717; color: #d8d8d8; }
 
   .columns { grid-template-columns: repeat(4, minmax(215px, 1fr)); gap: 10px; align-items: stretch; overflow-x: auto; padding-bottom: 6px; }
   .column { min-height: calc(100vh - 205px); background: #0b0c0c; padding: 11px; }
@@ -568,14 +471,12 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .card-meta { align-items: center; margin-top: 12px; color: #767676; }
   .chip { background: #0b0c0c; }
   .card-meta::after { content: "Open details"; margin-left: auto; color: #555; }
-  .feed { display: none; }
 
   /* Right-side task details */
   dialog { position: fixed; top: 70px; right: 14px; bottom: 14px; left: auto; width: 390px; max-height: none; margin: 0; border-radius: 7px; }
   dialog::backdrop { display: none; }
   .has-task-inspector[data-page="board"] .columns { margin-right: 402px; }
   .detail-header { padding: 17px 18px; }
-  .detail-eyebrow { text-transform: none; }
   .detail-body { overflow-y: auto; max-height: calc(100vh - 145px); }
 
   /* History */
@@ -702,7 +603,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip { border: 0; background: transparent; padding: 5px 6px; text-align: left; }
   .graph-filter-chip:hover { background: #191919; }
   .graph-popover-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-  .graph-control-button, .graph-reset, .graph-zoom, .graph-toggle { display: inline-flex; align-items: center; justify-content: center; height: 32px; min-height: 32px; box-sizing: border-box; margin: 0; border-color: transparent; background: transparent; color: #777; line-height: 1; }
+  .graph-control-button, .graph-reset, .graph-zoom { display: inline-flex; align-items: center; justify-content: center; height: 32px; min-height: 32px; box-sizing: border-box; margin: 0; border-color: transparent; background: transparent; color: #777; line-height: 1; }
   .graph-control-button { padding: 0 9px; cursor: pointer; }
   .graph-control-button:hover, .graph-control-toolbar > .graph-reset:hover { border-color: transparent; background: #141414; color: #c7c7c7; }
   .graph-reset { padding: 0 9px; }
@@ -710,7 +611,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-zoom-group { display: inline-flex; align-items: center; height: 32px; margin-left: 5px; border-left: 1px solid #242424; padding-left: 5px; }
   .graph-control-button[aria-label="Zoom out"], .graph-control-button[aria-label="Zoom in"] { width: 30px; padding: 0; font-size: 13px; }
   .graph-zoom { min-width: 48px; padding: 0 5px; font-variant-numeric: tabular-nums; }
-  .graph-toggle { padding: 0 10px; }
   .ontology-toolbar-meta > .repository-button,
   .graph-control-toolbar > .graph-filter-menu,
   .graph-control-toolbar > .graph-filter-menu > summary,
@@ -721,8 +621,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     min-block-size: 32px;
     max-block-size: 32px;
   }
-  .graph-toggle { color: #b8b8b8; }
-  .graph-toggle::first-letter { color: var(--accent); }
   .graph-wrap { position: relative; height: calc(100vh - 164px); min-height: 560px; overflow: hidden; background-color: #090a0a; background-image: radial-gradient(circle, #202222 1px, transparent 1px); background-size: 24px 24px; }
   #ontology-graph { position: absolute; inset: 0; min-width: 0; height: 100%; overflow: hidden; touch-action: none; }
   #ontology-graph canvas { position: absolute; inset: 0; display: block; }
@@ -778,30 +676,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .ontology-inspector-actions button { flex: 1 1 auto; min-height: 30px; }
   .context-search-results .context-results { margin: 0; }
 
-  /* Rectangular, human-readable graph nodes */
-  .graph-edge { stroke-width: 1.2; opacity: .3; }
-  .graph-edge-group.connected .graph-edge { stroke: #9c8eff; stroke-width: 2.2; opacity: 1; }
-  .graph-edge-group.selected .graph-edge { stroke: #9c8eff; stroke-width: 3; }
-  .graph-edge-label-button.contextual { opacity: 0; pointer-events: none; }
-  .graph-edge-label-button.contextual.revealed,
-  .graph-edge-label-button.contextual.connected,
-  .graph-edge-label-button.contextual.selected { opacity: 1; pointer-events: auto; }
-  .graph-arrow { fill: #686868; }
-  .graph-edge-group.connected .graph-arrow, .graph-edge-group.selected .graph-arrow { fill: #9c8eff; }
-  .graph-node .node-card { fill: #0f1111; stroke: #303232; stroke-width: 1; filter: drop-shadow(0 8px 18px rgb(0 0 0 / 45%)); }
-  .graph-node:hover .node-card, .graph-node.connected .node-card { stroke: #57595a; }
-  .graph-node.selected .node-card { stroke: var(--accent); stroke-width: 2; filter: drop-shadow(0 0 12px rgb(139 124 246 / 22%)); }
-  .graph-node .node-icon { fill: #151717 !important; stroke-width: 1.2; }
-  .graph-node .node-icon-text { fill: #c7c7c7; font-size: 10px; font-weight: 650; text-anchor: middle; pointer-events: none; }
-  .graph-node .node-label { fill: #e4e4e4; font-size: 10px; font-weight: 570; text-anchor: start; }
-  .graph-node .node-kind { fill: #747474; font-size: 8px; letter-spacing: 0; text-anchor: start; text-transform: none; }
-  .kind-Repository .node-icon { stroke: #9d91f0; }
-  .kind-File .node-icon, .kind-Symbol .node-icon { stroke: #6ea398; }
-  .kind-Document .node-icon, .kind-Feature .node-icon, .kind-Package .node-icon, .kind-Service .node-icon, .kind-Deployment .node-icon, .kind-Incident .node-icon { stroke: #9479ad; }
-  .kind-Commit .node-icon, .kind-PullRequest .node-icon, .kind-Issue .node-icon { stroke: #78bf8b; }
-  .kind-Engineer .node-icon, .kind-Team .node-icon { stroke: #7890bb; }
-  .graph-kind-label { fill: #666; font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
-  .graph-kind-rule { stroke: #242626; stroke-width: 1; }
 
   @media (max-width: 1100px) {
     .page-filters { overflow-x: auto; padding-bottom: 4px; }
@@ -821,7 +695,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     .page-nav a { padding: 0 7px; font-size: 10px; }
     #connection-text { display: none; }
     .page-heading { align-items: flex-start; margin-inline: 0; }
-    .view-switch { display: none; }
     .columns { grid-template-columns: repeat(4, 260px); }
     .has-task-inspector[data-page="board"] .columns { margin-right: 0; }
     dialog { top: 62px; right: 8px; bottom: 8px; left: 8px; width: auto; }
@@ -829,7 +702,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     .type-row { grid-template-columns: 1fr auto; }
     .type-row > .type-metric { display: none; }
     .type-row > .type-steps { display: block; }
-    .graph-control-help, .graph-zoom, .graph-toggle { display: none; }
+    .graph-zoom { display: none; }
     .graph-filter-popover { width: min(410px, calc(100vw - 44px)); }
     .ontology-toolbar-meta { align-items: flex-start; flex-direction: column; gap: 5px; }
     .ontology-toolbar-meta > .graph-controls { align-self: stretch; overflow-x: auto; }
@@ -860,8 +733,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   </header>
   <section id="board-page">
     <header class="page-heading">
-      <div><h1 id="page-title">Board</h1><p>Live operational work across repositories and workflows.</p></div>
-      <div class="view-switch" aria-label="Board density"><button type="button" class="active">▥&nbsp; Board</button><button type="button">☷&nbsp; Compact</button></div>
+      <div><h1>Board</h1><p>Live operational work across repositories and workflows.</p></div>
     </header>
     <div class="page-filters" id="toolbar">
       <label class="search-control"><span aria-hidden="true">⌕</span><input id="board-search" placeholder="Search tasks…" aria-label="Search tasks"></label>
@@ -872,10 +744,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
       <details class="demo-menu"><summary>Demo events</summary><div class="demo-actions"><button type="button" data-demo="pr">Open PR</button><button type="button" data-demo="issue">Open issue</button><button type="button" data-demo="push">Force-push PR #42</button></div></details>
     </div>
     <section class="columns" id="columns" aria-label="Task board"></section>
-    <section class="feed" id="activity-feed"><h2>Recent board activity</h2><div id="log"></div></section>
   </section>
   <section id="history-page" hidden>
-    <header class="page-heading"><div><h1>History</h1><p>A complete record of task activity.</p></div><button type="button" class="secondary-button">⇧&nbsp; Export</button></header>
+    <header class="page-heading"><div><h1>History</h1><p>A complete record of task activity.</p></div></header>
     <div class="page-filters history-filters">
       <label class="search-control"><span aria-hidden="true">⌕</span><input id="history-search" placeholder="Search events…" aria-label="Search events"></label>
       <select id="history-event-type" aria-label="Filter by event type"><option value="">Event type: All</option></select>
@@ -889,8 +760,8 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     </div>
   </section>
   <section id="task-types-page" hidden>
-    <header class="page-heading"><div><h1>Task types</h1><p>Reusable workflows for recurring work.</p></div><button type="button" class="primary-button">＋&nbsp; New task type</button></header>
-    <div class="page-filters task-type-filters"><label class="search-control"><span aria-hidden="true">⌕</span><input id="task-type-search" placeholder="Search task types…" aria-label="Search task types"></label><select id="task-type-status" aria-label="Filter task type status"><option>Enabled</option><option>All statuses</option></select></div>
+    <header class="page-heading"><div><h1>Task types</h1><p>Reusable workflows for recurring work.</p></div></header>
+    <div class="page-filters task-type-filters"><label class="search-control"><span aria-hidden="true">⌕</span><input id="task-type-search" placeholder="Search task types…" aria-label="Search task types"></label></div>
     <div class="task-type-layout">
       <section class="task-panel" aria-labelledby="task-types-heading">
         <header class="type-table-head"><span>Task type</span><span>Last run</span><span>Success rate</span><span>Steps</span></header>
@@ -934,7 +805,7 @@ const API_LABEL = ${JSON.stringify(apiLabel)};
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
-let ontologyState = { latest: null, graphs: [], assertions: [] };
+let ontologyState = { latest: null, assertions: [] };
 let assertionState = [];
 let ontologyViewState = {
   graphKey: null,
@@ -965,7 +836,6 @@ const taskTypeDetails = document.getElementById("task-type-details");
 const workflowTreeList = document.getElementById("workflow-tree-list");
 const historyList = document.getElementById("history-list");
 const historyDetails = document.getElementById("history-details");
-const log = document.getElementById("log");
 const dialog = document.getElementById("task-dialog");
 const detailTitle = document.getElementById("detail-title");
 const detailEyebrow = document.getElementById("detail-eyebrow");
@@ -1027,7 +897,6 @@ async function refresh() {
       const partition = partitionBoardTasks(boardState.tasks);
       populateBoardFilters(partition.current);
       renderColumns(filteredBoardTasks(partition.current));
-      renderLog(partition.current);
       renderSelectedTask();
     }
   } catch (error) {
@@ -1441,11 +1310,6 @@ function toggleGraphFilter(group, type) {
   const hiddenTypes = group === "node" ? ontologyViewState.hiddenNodeKinds : ontologyViewState.hiddenEdgePredicates;
   if (hiddenTypes.has(type)) hiddenTypes.delete(type);
   else hiddenTypes.add(type);
-  renderOntology();
-}
-
-function selectGraphItem(kind, id) {
-  ontologyViewState.selected = { kind: kind, id: id };
   renderOntology();
 }
 
@@ -2623,36 +2487,6 @@ function renderWorkflowBranch(node, incomingEdge) {
   return branch;
 }
 
-function taskTypeDependencyGroups(definition) {
-  const groups = element("div", "type-dependency-groups");
-  groups.append(
-    taskTypeTriggerGroup(definition.triggeredBy || []),
-    taskTypeDependencyGroup("Prerequisite tasks", definition.dependsOn || [], "No prerequisite task"),
-    taskTypeDependencyGroup("Required by", definition.requiredBy || [], "Does not unlock another type")
-  );
-  return groups;
-}
-
-function taskTypeTriggerGroup(triggers) {
-  const group = element("section", "type-dependency-group");
-  group.append(textElement("span", "type-dependency-label", "Triggered by"));
-  const list = element("div", "type-dependency-list");
-  if (!triggers.length) list.append(textElement("span", "type-dependency-empty", "No declared workflow trigger"));
-  for (const trigger of triggers) {
-    const item = element("div", "type-dependency");
-    const details = [];
-    if ((trigger.workflows || []).length) details.push("workflow: " + trigger.workflows.map(humanize).join(", "));
-    if ((trigger.conditions || []).length) details.push(trigger.conditions.join("; "));
-    item.append(
-      textElement("span", "type-dependency-name", trigger.source),
-      textElement("span", "type-dependency-detail", [trigger.description].concat(details).filter(Boolean).join(" · "))
-    );
-    list.append(item);
-  }
-  group.append(list);
-  return group;
-}
-
 function workflowTrigger(trigger) {
   const card = element("div", "workflow-trigger");
   card.append(
@@ -2664,28 +2498,6 @@ function workflowTrigger(trigger) {
     card.append(textElement("span", "workflow-connector-condition", trigger.conditions.join("; ")));
   }
   return card;
-}
-
-function taskTypeDependencyGroup(label, dependencies, emptyMessage) {
-  const group = element("section", "type-dependency-group");
-  group.append(textElement("span", "type-dependency-label", label));
-  const list = element("div", "type-dependency-list");
-  if (dependencies.length === 0) list.append(textElement("span", "type-dependency-empty", emptyMessage));
-  for (const dependency of dependencies) {
-    const item = element("div", "type-dependency");
-    const details = [];
-    details.push((dependency.relationships || []).map(humanize).join(" + "));
-    if (dependency.required) details.push("required");
-    if ((dependency.workflows || []).length) details.push("workflow: " + dependency.workflows.map(humanize).join(", "));
-    if ((dependency.conditions || []).length) details.push(dependency.conditions.join("; "));
-    item.append(
-      textElement("span", "type-dependency-name", dependency.taskType),
-      textElement("span", "type-dependency-detail", details.filter(Boolean).join(" · "))
-    );
-    list.append(item);
-  }
-  group.append(list);
-  return group;
 }
 
 function renderSelectedTask() {
@@ -2805,14 +2617,6 @@ function eventLabel(event) {
     ,"ontology.graph_created": "Ontology graph created", "ontology.failed": "Ontology build failed"
   };
   return labels[event.type] || humanize(event.type);
-}
-
-function renderLog(tasks) {
-  const taskIds = new Set(tasks.map(function(task) { return task.id; }));
-  log.textContent = boardEvents.filter(function(event) { return !event.taskId || taskIds.has(event.taskId); }).slice(-12).reverse().map(function(event) {
-    const task = event.taskId ? taskById(event.taskId) : null;
-    return formatTime(event.at) + "  " + event.type + (task ? "  " + task.title : "");
-  }).join("\\n");
 }
 
 function selectedTaskId() {

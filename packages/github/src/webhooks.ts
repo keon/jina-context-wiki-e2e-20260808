@@ -26,7 +26,6 @@ export type GitHubWebhookEvent =
       readonly authorLogin?: string;
       readonly draft?: boolean;
     }
-  | { readonly type: "pull_request.closed"; readonly pullRequestNumber: number; readonly merged: boolean }
   | {
       readonly type: "issue.opened";
       readonly issueNumber: number;
@@ -48,7 +47,6 @@ export interface ParsedGitHubWebhook {
   readonly repository: string;
   readonly repositoryId?: number;
   readonly installationId?: number;
-  readonly senderLogin?: string;
 }
 
 export class InvalidGitHubWebhookPayloadError extends Error {
@@ -108,8 +106,7 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
   const common = {
     repository: repositoryFullName,
     ...optionalNumberProperty("repositoryId", repository.id),
-    ...optionalNestedNumberProperty("installationId", root.installation, "id"),
-    ...optionalNestedStringProperty("senderLogin", root.sender, "login")
+    ...optionalNestedNumberProperty("installationId", root.installation, "id")
   };
 
   if (eventName === "push") {
@@ -129,23 +126,12 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
   const action = requiredString(root.action, "action");
 
   if (eventName === "pull_request") {
-    if (action !== "opened" && action !== "synchronize" && action !== "closed") {
+    if (action !== "opened" && action !== "synchronize") {
       return undefined;
     }
 
     const pullRequest = requiredRecord(root.pull_request, "pull_request");
     const pullRequestNumber = requiredPositiveInteger(root.number ?? pullRequest.number, "pull_request.number");
-
-    if (action === "closed") {
-      return {
-        ...common,
-        event: {
-          type: "pull_request.closed",
-          pullRequestNumber,
-          merged: pullRequest.merged === true
-        }
-      };
-    }
 
     const head = requiredRecord(pullRequest.head, "pull_request.head");
     const event = {

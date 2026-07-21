@@ -204,6 +204,9 @@ importers:
 
   packages/review:
     dependencies:
+      '@jina/board':
+        specifier: workspace:*
+        version: link:../board
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../shared-kernel

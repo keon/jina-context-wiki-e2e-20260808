@@ -1018,7 +1018,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
       `select * from jina_ontology.assertions
-       where tenant_id=$1 and repository=$2 and status in ('active','proposed')
+       where tenant_id=$1 and repository=$2 and status in ('active','proposed') and object_id is not null
        order by recorded_at,id`,
       [request.tenantId, request.repository]
       ),
@@ -1028,8 +1028,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          cross join lateral jina_ontology.commit_manifest($1,$2,candidate.commit_sha) manifest`,
         [request.tenantId, request.repository]
       ),
-      this.pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge"; created_at: Date; id: string }>(
-        `select from_entity_id,to_entity_id,kind,created_at,id from jina_ontology.entity_redirects
+      this.pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
+        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
          where tenant_id=$1 order by created_at,id`, [request.tenantId]
       ),
       this.pool.query<{ id: string; kind: StoredAssertion["subject"]["kind"]; natural_key: string; display_name: string }>(
@@ -1178,8 +1178,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         if (command.fromEntityId === command.toEntityId) throw new Error("cannot redirect an entity to itself");
         const kind = command.type === "merge_entities" ? "merge" : "unmerge";
         if (kind === "merge") {
-          const redirects = await client.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge"; created_at: Date; id: string }>(
-            `select from_entity_id,to_entity_id,kind,created_at,id from jina_ontology.entity_redirects
+          const redirects = await client.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
+            `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
              where tenant_id=$1 order by created_at,id`, [tenantId]
           );
           const mapping = redirectMap(redirects.rows);
@@ -1415,7 +1415,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await assertRepositoryWritable(client, tenantId, repository);
       if (consumers.length === 3) await client.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [tenantId, repository]);
       const claimToken = `projection:${repository}:${randomUUID()}`;
-      const claimed = await client.query<{ id: string; event_type: string; consumer: string; payload: Record<string, unknown> }>(
+      const claimed = await client.query<{ id: string }>(
         `with candidates as (
            select id from jina_ontology.outbox
          where tenant_id=$1 and processed_at is null and available_at<=now()
@@ -1426,7 +1426,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            order by created_at,id for update skip locked limit 1000
          )
          update jina_ontology.outbox o set claimed_by=$6,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
-         from candidates where o.id=candidates.id returning o.id,o.event_type,o.consumer,o.payload`,
+         from candidates where o.id=candidates.id returning o.id`,
         [tenantId, now, repository, ref, consumers, claimToken]
       );
       const head = await client.query<{ commit_sha: string }>(
@@ -1468,8 +1468,6 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           [tenantId, repository, ref, commitSha, now]
         );
         manifestFileCount = manifest.rowCount ?? 0;
-      } else {
-        manifestFileCount = 0;
       }
 
       let searchDocumentCount = 0;
@@ -1520,8 +1518,6 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           );
         }
         searchDocumentCount = projected.length;
-      } else {
-        searchDocumentCount = 0;
       }
       const reconciledAssertionCount = consumers.includes("reconciliation")
         ? await reconcileRedirectCollisions(client, tenantId, now)
@@ -2164,7 +2160,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   }
 }
 
-export async function insertOntologyGraph(client: PoolClient, graph: OntologyGraph): Promise<void> {
+async function insertOntologyGraph(client: PoolClient, graph: OntologyGraph): Promise<void> {
   const inserted = await client.query(
     `insert into jina_ontology.graphs
       (id, tenant_id, repository, ref, commit_sha, generated_at, executor, model, sandbox_id, summary)
@@ -2571,19 +2567,19 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
        where tenant_id=$1 order by created_at,id`, [tenantId]
     ),
     client.query<{
-      id: string; subject_id: string; object_id: string | null; literal_type: string | null; literal_value: unknown;
+      id: string; subject_id: string; object_id: string;
       repository: string; predicate: string; qualifiers_hash: string; valid_from: Date | null; recorded_at: Date;
     }>(
-      `select id,repository,subject_id,object_id,literal_type,literal_value,predicate,qualifiers_hash,valid_from,recorded_at
+      `select id,repository,subject_id,object_id,predicate,qualifiers_hash,valid_from,recorded_at
        from jina_ontology.assertions
-       where tenant_id=$1 and status='active' for update`, [tenantId]
+       where tenant_id=$1 and status='active' and object_id is not null for update`, [tenantId]
     )
   ]);
   const mapping = redirectMap(redirectRows.rows);
   const groups = new Map<string, typeof assertionRows.rows>();
   for (const assertion of assertionRows.rows) {
     const subject = resolveRedirect(mapping, assertion.subject_id);
-    const object = assertion.object_id ? resolveRedirect(mapping, assertion.object_id) : `${assertion.literal_type}:${canonicalJson(assertion.literal_value)}`;
+    const object = resolveRedirect(mapping, assertion.object_id);
     const definition = predicateDefinition(assertion.predicate);
     const key = definition.cardinality === "one"
       ? `${assertion.repository}:${subject}:${assertion.predicate}:${assertion.qualifiers_hash}`
@@ -2634,25 +2630,7 @@ async function deleteCodePlaneRepository(client: PoolClient, tenantId: string, r
   await client.query(`delete from jina_ontology.commit_changes where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.refs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.commits where tenant_id=$1 and repository=$2`, [tenantId, repository]);
-  const candidates = [...new Set(removed.rows.map((row) => row.blob_sha))];
-  if (candidates.length) {
-    const orphaned = await client.query<{ blob_sha: string }>(
-      `select source.sha as blob_sha from unnest($2::text[]) source(sha)
-       where not exists (
-         select 1 from jina_ontology.commit_changes change
-         where change.tenant_id=$1 and (change.old_blob_sha=source.sha or change.new_blob_sha=source.sha)
-       )`,
-      [tenantId, candidates]
-    );
-    const shas = orphaned.rows.map((row) => row.blob_sha);
-    if (shas.length) {
-      await client.query(`delete from jina_ontology.symbol_edges where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-      await client.query(`delete from jina_ontology.blob_symbols where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-      await client.query(`delete from jina_ontology.blob_imports where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-      await client.query(`delete from jina_ontology.blob_analyses where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-      await client.query(`delete from jina_ontology.blobs where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-    }
-  }
+  await deleteOrphanBlobs(client, tenantId, [...new Set(removed.rows.map((row) => row.blob_sha))]);
   await client.query(`delete from jina_ontology.graphs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.repository_acl where tenant_id=$1 and repository=$2`, [tenantId, repository]);
 }
@@ -2707,9 +2685,12 @@ async function garbageCollectCodePlane(client: PoolClient, tenantId: string, now
      ) doomed where c.tenant_id=$1 and c.repository=doomed.repository and c.sha=doomed.sha`,
     [tenantId, garbage.rows.map((row) => row.repository), garbage.rows.map((row) => row.sha)]
   );
-  const candidates = [...new Set(removed.rows.map((row) => row.blob_sha))];
+  await deleteOrphanBlobs(client, tenantId, [...new Set(removed.rows.map((row) => row.blob_sha))]);
+}
+
+async function deleteOrphanBlobs(client: PoolClient, tenantId: string, candidates: readonly string[]): Promise<void> {
   if (candidates.length === 0) return;
-  const orphans = await client.query<{ blob_sha: string }>(
+  const orphaned = await client.query<{ blob_sha: string }>(
     `select source.sha as blob_sha from unnest($2::text[]) source(sha)
      where not exists (
        select 1 from jina_ontology.commit_changes change
@@ -2717,7 +2698,7 @@ async function garbageCollectCodePlane(client: PoolClient, tenantId: string, now
      )`,
     [tenantId, candidates]
   );
-  const shas = orphans.rows.map((row) => row.blob_sha);
+  const shas = orphaned.rows.map((row) => row.blob_sha);
   if (shas.length === 0) return;
   await client.query(`delete from jina_ontology.symbol_edges where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
   await client.query(`delete from jina_ontology.blob_symbols where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
@@ -3599,8 +3580,8 @@ async function retrieveOwnership(pool: Pool, request: RetrievalRequest, limit: n
      from jina_ontology.assertions where tenant_id=$1 and repository=$2 and predicate='OWNED_BY' and status='active'
      order by recorded_at desc limit $3`, [request.tenantId, request.repository, Math.min(800, limit * 4)]
   );
-  const redirects = await pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge"; created_at: Date; id: string }>(
-    `select from_entity_id,to_entity_id,kind,created_at,id from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`, [request.tenantId]
+  const redirects = await pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
+    `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`, [request.tenantId]
   );
   const mapping = redirectMap(redirects.rows);
   const resolved = await pool.query<{ id: string; display_name: string; natural_key: string }>(
@@ -4045,9 +4026,7 @@ export const ONTOLOGY_SCHEMA_SQL = `
       alter table jina_ontology.assertions alter column object_natural_key drop not null;
       alter table jina_ontology.assertions alter column object_label drop not null;
       alter table jina_ontology.assertions alter column confidence drop not null;
-      alter table jina_ontology.assertions add column if not exists literal_type text;
       alter table jina_ontology.assertions add column if not exists explanation text;
-      alter table jina_ontology.assertions add column if not exists literal_value jsonb;
       alter table jina_ontology.assertions add column if not exists qualifiers jsonb not null default '{}'::jsonb;
       update jina_ontology.assertions
         set explanation=qualifiers->>'reason'

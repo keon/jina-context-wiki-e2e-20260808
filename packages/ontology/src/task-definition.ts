@@ -1,22 +1,20 @@
-import { entityId, type EntityId } from "@jina/shared-kernel";
-
 const ontologyTaskSpecs = [
   {
-    type: "ontology_build", kind: "aggregate", defaultAssigneeRole: "system", keySuffix: "root",
+    type: "ontology_build", kind: "aggregate", defaultAssigneeRole: "system",
     description: "Coordinates raw-data aggregation, semantic assertion derivation, and graph projection."
   },
   {
-    type: "ontology_ingest", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "ingest",
+    type: "ontology_ingest", kind: "dispatchable", defaultAssigneeRole: "ontology_worker",
     dispatchTopic: "run-ontology-ingest",
     description: "Aggregates an immutable repository snapshot and reuses versioned, content-addressed structural facts."
   },
   {
-    type: "ontology_assert", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "assert",
+    type: "ontology_assert", kind: "dispatchable", defaultAssigneeRole: "ontology_worker",
     dispatchTopic: "run-ontology-assert", dependsOn: "ontology_ingest",
     description: "Records cited model output and applies registry-validated semantic assertions with provenance."
   },
   {
-    type: "ontology_project", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "project",
+    type: "ontology_project", kind: "dispatchable", defaultAssigneeRole: "ontology_worker",
     dispatchTopic: "run-ontology-project", dependsOn: "ontology_ingest",
     description: "Builds a disposable dashboard graph from canonical code facts and available assertions."
   }
@@ -96,65 +94,3 @@ export const ontologyTaskTypeDependencies = [
   }] : [])
 ];
 
-export type PlannedOntologyTaskId = EntityId<"task">;
-
-export interface PlannedOntologyTask {
-  readonly id: PlannedOntologyTaskId;
-  readonly type: typeof ontologyTaskSpecs[number]["type"];
-  readonly kind: "aggregate" | "dispatchable";
-  readonly title: string;
-  readonly assigneeRole: string;
-  readonly dedupeKey: string;
-  readonly dispatchTopic?: string;
-  readonly parentTaskId?: PlannedOntologyTaskId;
-  readonly metadata: Readonly<Record<string, unknown>>;
-}
-
-export interface OntologyBuildPlan {
-  readonly rootTaskId: PlannedOntologyTaskId;
-  readonly tasks: readonly PlannedOntologyTask[];
-  readonly dependencies: readonly {
-    readonly taskId: PlannedOntologyTaskId;
-    readonly dependsOnTaskId: PlannedOntologyTaskId;
-    readonly relationship: "blocks";
-    readonly required: true;
-    readonly blocksParentCompletion: boolean;
-  }[];
-}
-
-export function planOntologyBuild(input: {
-  readonly tenantId: string;
-  readonly repository: string;
-  readonly ref: string;
-  readonly requestKey: string;
-}): OntologyBuildPlan {
-  const prefix = `task_ontology:${input.tenantId}:${input.repository}:${input.ref}:${input.requestKey}`;
-  const ids = {
-    ontology_build: entityId<"task">(`${prefix}:root`),
-    ontology_ingest: entityId<"task">(`${prefix}:ingest`),
-    ontology_assert: entityId<"task">(`${prefix}:assert`),
-    ontology_project: entityId<"task">(`${prefix}:project`)
-  };
-  const titles = {
-    ontology_build: `Build Ontology for ${input.repository}@${input.ref}`,
-    ontology_ingest: `Aggregate raw repository data for ${input.repository}@${input.ref}`,
-    ontology_assert: `Derive assertions for ${input.repository}@${input.ref}`,
-    ontology_project: `Project Ontology for ${input.repository}@${input.ref}`
-  };
-  const metadata = { tenantId: input.tenantId, repository: input.repository, ref: input.ref, requestKey: input.requestKey };
-  return {
-    rootTaskId: ids.ontology_build,
-    tasks: ontologyTaskSpecs.map((spec) => ({
-      id: ids[spec.type], type: spec.type, kind: spec.kind, title: titles[spec.type],
-      assigneeRole: spec.defaultAssigneeRole,
-      dedupeKey: `ontology:${input.tenantId}:${input.repository}:${input.ref}:${input.requestKey}:${spec.keySuffix}`,
-      ...("dispatchTopic" in spec ? { dispatchTopic: spec.dispatchTopic } : {}),
-      ...(spec.type === "ontology_build" ? {} : { parentTaskId: ids.ontology_build }),
-      metadata
-    })),
-    dependencies: ontologyTaskSpecs.flatMap((spec) => "dependsOn" in spec ? [{
-      taskId: ids[spec.type], dependsOnTaskId: ids[spec.dependsOn], relationship: "blocks" as const,
-      required: true as const, blocksParentCompletion: spec.type !== "ontology_assert"
-    }] : [])
-  };
-}

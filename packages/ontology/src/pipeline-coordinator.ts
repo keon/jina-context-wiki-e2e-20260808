@@ -13,6 +13,8 @@ export interface OntologyPipelineBuildRequest {
   readonly snapshotFirst: boolean;
   readonly createdAt: string;
   readonly metadata?: Readonly<Record<string, unknown>>;
+  /** Return the latest build unchanged when its metadata.githubHeadSha matches, instead of superseding it. */
+  readonly dedupeHeadSha?: string;
 }
 
 export interface OntologyBuildRecord {
@@ -162,6 +164,13 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
   private readonly events: OntologyTaskBoardEvent[] = [];
 
   async createBuild(request: OntologyPipelineBuildRequest): Promise<OntologyBuildRecord> {
+    if (request.dedupeHeadSha) {
+      const latest = [...this.builds.values()]
+        .filter((build) => build.tenantId === request.tenantId && build.repository === request.repository && build.ref === request.ref)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .at(-1);
+      if (latest?.metadata.githubHeadSha === request.dedupeHeadSha) return structuredClone(latest);
+    }
     for (const build of this.builds.values()) {
       if (build.tenantId !== request.tenantId || build.repository !== request.repository || build.ref !== request.ref ||
           build.requestKey === request.requestKey || !["queued", "in_progress", "enriching"].includes(build.status)) continue;

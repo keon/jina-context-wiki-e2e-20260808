@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { entityId } from "@jina/shared-kernel";
 import { applyCommand } from "./commands.js";
-import { createEmptyBoardState, findTask, reduceBoard, transitionBoardTask } from "./reducer.js";
+import { createEmptyBoardState, findTask, leaseNextOutboxMessage, reduceBoard, renewOutboxLease, transitionBoardTask, type BoardState } from "./reducer.js";
 import { canTransition } from "./transitions.js";
-import { leaseNextOutboxMessage, renewOutboxLease, type BoardState } from "./reducer.js";
 
 test("transition policy follows task kind instead of an extension type name", () => {
   assert.equal(canTransition("aggregate", "triage", "in_progress", "run"), false);

@@ -110,7 +110,7 @@ export interface EvidenceCitation {
 }
 
 export interface OntologyExecutor {
-  build(request: OntologyBuildRequest): Promise<OntologyGraph>;
+  buildAssertions(request: OntologyBuildRequest): Promise<OntologyGraph>;
 }
 
 export function createOntologyGraph(input: {
@@ -139,7 +139,7 @@ export function createOntologyGraph(input: {
   if (!nodes.some((node) => node.kind === "Repository")) {
     throw new Error("generated ontology must contain a Repository node");
   }
-  if ((!input.allowEmptyEdges && (nodes.length < 2 || edges.length < 1)) || nodes.length < 1) {
+  if (!input.allowEmptyEdges && (nodes.length < 2 || edges.length < 1)) {
     throw new Error("generated ontology must contain at least two nodes and one valid edge");
   }
 
@@ -525,7 +525,7 @@ function requiredEvidence(value: unknown, owner: string): readonly string[] {
   return evidence;
 }
 
-function parseEvidenceCitation(value: string): EvidenceCitation {
+export function parseEvidenceCitation(value: string): EvidenceCitation {
   const match = /^(.*):(\d+)(?:-(\d+))?$/.exec(value);
   if (!match?.[1] || !match[2]) throw new Error(`invalid ontology evidence citation: ${value}`);
   const path = match[1];

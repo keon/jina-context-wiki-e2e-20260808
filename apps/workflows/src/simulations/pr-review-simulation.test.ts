@@ -11,6 +11,7 @@ import { ingestGitHubWebhook, type GitHubWebhookIngestContext } from "../ingest/
 import { ingestPullRequestReview } from "../ingest/pull-request.js";
 import { drainOneOutboxMessage, drainOutbox } from "../relay/outbox-relay.js";
 import { createWorkflowState, type WorkflowState } from "../state.js";
+import { deterministicClock } from "./deterministic-clock.js";
 
 const OPENED: GitHubWebhookEvent = { type: "pull_request.opened", pullRequestNumber: 42, headSha: "abc123" };
 const SYNCHRONIZED: GitHubWebhookEvent = { type: "pull_request.synchronize", pullRequestNumber: 42, headSha: "def456" };
@@ -243,15 +244,6 @@ function singleTask(state: WorkflowState, type: BoardTask["type"]): BoardTask {
   return task;
 }
 
-function deterministicClock(): () => string {
-  let tick = 0;
-  return () => {
-    const minutes = String(Math.floor(tick / 60)).padStart(2, "0");
-    const seconds = String(tick % 60).padStart(2, "0");
-    tick += 1;
-    return `2026-07-08T00:${minutes}:${seconds}.000Z`;
-  };
-}
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {

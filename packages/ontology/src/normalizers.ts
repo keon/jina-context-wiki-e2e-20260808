@@ -270,7 +270,7 @@ export interface NormalizedGitHubObservation {
 }
 
 /** Pure GitHub normalizer. It converts raw source records into idempotent intents and performs no I/O. */
-export function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation): NormalizedGitHubObservation {
+function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation): NormalizedGitHubObservation {
   const subject: SourceEntityIntent = observation.kind === "pull_request"
     ? { kind: "PullRequest", key: `github:pr:${observation.repository}#${observation.number}`, displayName: `#${observation.number} ${observation.title}` }
     : { kind: "Issue", key: `github:issue:${observation.repository}#${observation.number}`, displayName: `#${observation.number} ${observation.title}` };

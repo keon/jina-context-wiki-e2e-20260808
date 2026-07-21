@@ -28,7 +28,7 @@ const graphQueryResultSchema = {
   notes: z.array(z.string())
 };
 
-export interface GraphQuery {
+interface GraphQuery {
   readonly repository: string;
   readonly query: string;
   readonly ref?: string;
@@ -47,7 +47,7 @@ export interface GraphQueryResult {
 export type GraphQueryExecutor = (query: GraphQuery) => Promise<GraphQueryResult>;
 
 /** Creates the complete public MCP surface. Deliberately exposes one read-only graph query. */
-export function createGraphMcpServer(execute: GraphQueryExecutor): McpServer {
+function createGraphMcpServer(execute: GraphQueryExecutor): McpServer {
   const server = new McpServer({ name: "jina-graph", version: "1.0.0" }, {
     instructions: "Use query_graph for questions about a repository. Answers are bounded to cited graph evidence."
   });

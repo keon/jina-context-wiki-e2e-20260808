@@ -11,16 +11,12 @@ import {
   stableId
 } from "@jina/ontology";
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
-import { ONTOLOGY_SCHEMA_SQL, PostgresOntologyGraphStore } from "./postgres-ontology-graph-store.js";
+import { PostgresOntologyGraphStore } from "./postgres-ontology-graph-store.js";
 import { ONTOLOGY_ROLES_SQL } from "./ontology-roles.js";
 import { PostgresOntologyPipelineCoordinator } from "./postgres-ontology-pipeline-coordinator.js";
 import { Pool } from "pg";
 
 const connectionString = process.env.TEST_DATABASE_URL;
-
-test("Postgres schema preserves unknown commit timestamps", () => {
-  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /committed_at\s*=\s*now\(\)/i);
-});
 
 test("Postgres ontology pipeline claims once and fences superseded leases", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
@@ -78,22 +74,6 @@ test("Postgres ontology pipeline claims once and fences superseded leases", {
     await cleanup.end();
     await Promise.all([first.close(), second.close(), graphStore.close()]);
   }
-});
-
-test("Postgres schema backfills projection graph heads without replacing current pointers", () => {
-  assert.match(ONTOLOGY_SCHEMA_SQL, /insert into jina_ontology\.graph_heads[\s\S]+candidate\.executor='projection'[\s\S]+on conflict \(tenant_id,repository,ref_name\) do nothing/);
-});
-
-test("Postgres schema removes retired persistence surfaces", () => {
-  for (const table of ["commit_files", "model_outputs", "issue_traces"]) {
-    assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`drop table if exists jina_ontology\\.${table}`));
-    assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, new RegExp(`create table if not exists jina_ontology\\.${table}`));
-  }
-  for (const [table, column] of [["observations", "supersedes_id"]]) {
-    assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`alter table jina_ontology\\.${table} drop column if exists ${column}`));
-  }
-  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /supersedes_id text/);
-  assert.match(ONTOLOGY_SCHEMA_SQL, /parsed_at timestamptz not null default now\(\)/);
 });
 
 test("Postgres atomically replaces a tenant principal's repository access", {

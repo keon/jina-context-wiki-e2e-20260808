@@ -3,8 +3,6 @@ import type { Readable } from "node:stream";
 import {
   ONTOLOGY_ASSERTION_OUTPUT_SCHEMA,
   ONTOLOGY_ASSERTION_SYSTEM_PROMPT,
-  ONTOLOGY_OUTPUT_SCHEMA,
-  ONTOLOGY_SYSTEM_PROMPT,
   createOntologyGraph,
   parseGeneratedOntology,
   requiredCausalAnchors,
@@ -35,19 +33,14 @@ const PROXY_PATH = `${WORK_DIR}/openrouter-proxy.mjs`;
 const PROXY_PORT = 43123;
 
 export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
-  async build(request: OntologyBuildRequest): Promise<OntologyGraph> {
-    return this.execute(request, ONTOLOGY_OUTPUT_SCHEMA, ONTOLOGY_SYSTEM_PROMPT, false);
-  }
-
   async buildAssertions(request: OntologyBuildRequest): Promise<OntologyGraph> {
-    return this.execute(request, ONTOLOGY_ASSERTION_OUTPUT_SCHEMA, ONTOLOGY_ASSERTION_SYSTEM_PROMPT, true);
+    return this.execute(request, ONTOLOGY_ASSERTION_OUTPUT_SCHEMA, ONTOLOGY_ASSERTION_SYSTEM_PROMPT);
   }
 
   private async execute(
     request: OntologyBuildRequest,
     outputSchema: object,
-    systemPrompt: string,
-    allowEmptyEdges: boolean
+    systemPrompt: string
   ): Promise<OntologyGraph> {
     request.signal?.throwIfAborted();
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
@@ -234,7 +227,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
           model,
           sandboxId: sandbox.id,
           generated,
-          allowEmptyEdges
+          allowEmptyEdges: true
         }),
         rawModelOutput
       };

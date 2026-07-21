@@ -41,7 +41,6 @@ type PublicRenderer = {
   fit(): void;
   zoomBy(factor: number): void;
   reset(): void;
-  setPhysics(enabled: boolean): void;
   destroy(): void;
 };
 
@@ -89,9 +88,7 @@ class OntologyGraphRenderer implements PublicRenderer {
   private settleTimer: number | null = null;
   private hoveredNode: number | null = null;
   private hoveredEdge: number | null = null;
-  private physics = true;
   private ready = false;
-  private userAdjustedView = false;
   private settling = false;
   private viewportGeneration = 0;
   private destroyed = false;
@@ -241,7 +238,6 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.clearSettleTimer();
     const previousPositions = this.positionsById();
     this.data = data;
-    this.userAdjustedView = false;
     this.dataKey = nextKey;
     this.graph.setConfigPartial({ simulationLinkDistance: topologyLinkDistance(data.nodes.length) } as Parameters<Graph["setConfigPartial"]>[0]);
     this.nodeIndex = new Map(data.nodes.map((node, index) => [node.id, index]));
@@ -413,7 +409,6 @@ class OntologyGraphRenderer implements PublicRenderer {
 
   reset(): void {
     this.clearDeferredViewportWork();
-    this.userAdjustedView = false;
     this.settling = false;
     this.graph.stop();
     this.clearSettleTimer();
@@ -429,20 +424,6 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.graph.render(0.65, 0);
     this.graph.fitView(0, initialFitPadding(this.data.nodes.length), true);
     this.startSettling(0.65, settleDuration(this.data.nodes.length));
-  }
-
-  setPhysics(enabled: boolean): void {
-    if (this.physics === enabled) return;
-    this.physics = enabled;
-    this.graph.setConfigPartial({ enableSimulation: enabled });
-    if (enabled && this.data.nodes.length) {
-      this.startSettling(0.3, Math.min(700, settleDuration(this.data.nodes.length)));
-      return;
-    }
-    this.settling = false;
-    this.clearSettleTimer();
-    this.graph.pause();
-    this.setStatus("Layout settled", false);
   }
 
   destroy(): void {
@@ -684,7 +665,6 @@ class OntologyGraphRenderer implements PublicRenderer {
   }
 
   private stopAutoFit(): void {
-    this.userAdjustedView = true;
     this.clearDeferredViewportWork();
   }
 
@@ -798,10 +778,6 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
 
   reset(): void {
     this.fit();
-  }
-
-  setPhysics(_enabled: boolean): void {
-    // The deterministic fallback has no simulation; controls remain safe no-ops.
   }
 
   destroy(): void {
@@ -969,7 +945,6 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
   private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
   private selection: GraphSelection = null;
   private matches: Exclude<GraphSelection, null>[] = [];
-  private physics = true;
   private usingCanvas = false;
   private destroyed = false;
 
@@ -995,11 +970,6 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
   fit(): void { this.renderer.fit(); }
   zoomBy(factor: number): void { this.renderer.zoomBy(factor); }
   reset(): void { this.renderer.reset(); }
-
-  setPhysics(enabled: boolean): void {
-    this.physics = enabled;
-    this.renderer.setPhysics(enabled);
-  }
 
   destroy(): void {
     this.destroyed = true;
@@ -1027,7 +997,6 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
     this.renderer.setData(this.data);
     this.renderer.setSelection(this.selection);
     this.renderer.setSearchMatches(this.matches);
-    this.renderer.setPhysics(this.physics);
   }
 }
 

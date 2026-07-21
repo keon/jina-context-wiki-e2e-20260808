@@ -1,6 +1,7 @@
 import type { ReviewFinding, ReviewRequest } from "./harness.js";
 
 export const MAX_DIFF_CHARS = 180_000;
+export const DEFAULT_OPENROUTER_MODEL = "anthropic/claude-opus-4.8";
 
 export const REVIEW_SYSTEM_PROMPT = `You are a code reviewer producing advisory findings for a pull request.
 Report every issue you find, including ones you are uncertain about or consider low-severity.

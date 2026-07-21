@@ -28,7 +28,6 @@ export interface TaskTypeDependencySummary {
 export interface TaskTypeTriggerSummary {
   readonly source: string;
   readonly description: string;
-  readonly workflows: readonly string[];
   readonly conditions: readonly string[];
 }
 
@@ -60,7 +59,6 @@ export function buildTaskTypeCatalog(
     triggeredBy: triggers.filter((trigger) => trigger.taskType === definition.type).map((trigger) => ({
       source: trigger.source,
       description: trigger.description,
-      workflows: [trigger.workflow],
       conditions: trigger.condition ? [trigger.condition] : []
     })),
     dependsOn: summarizeRules(

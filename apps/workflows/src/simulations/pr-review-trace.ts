@@ -8,6 +8,7 @@ import type { GitHubWebhookEvent } from "@jina/github";
 import { ingestGitHubWebhook } from "../ingest/github-webhook.js";
 import { drainOneOutboxMessage } from "../relay/outbox-relay.js";
 import { createWorkflowState, type WorkflowState } from "../state.js";
+import { deterministicClock } from "./deterministic-clock.js";
 
 const clock = deterministicClock();
 const event: GitHubWebhookEvent = {
@@ -113,11 +114,3 @@ function isSingleTaskDone(current: WorkflowState, type: BoardTask["type"]): bool
   return tasks.length === 1 && tasks[0]?.status === "done";
 }
 
-function deterministicClock(): () => string {
-  let tick = 0;
-  return () => {
-    const seconds = String(tick).padStart(2, "0");
-    tick += 1;
-    return `2026-07-08T00:00:${seconds}.000Z`;
-  };
-}

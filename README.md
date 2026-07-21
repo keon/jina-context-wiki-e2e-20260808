@@ -70,13 +70,13 @@ packages/
   review/       PR review pipeline, review profiles, findings, dedupe
   context/      context handoff, source policy, citations, extracted context
   publication/  publication planning, keys, publish results
-  policy/       capabilities, budgets, review policy decisions
+  policy/       billing and budget policies
   db/           PostgreSQL state/graph stores and schema bootstrap
   github/       GitHub webhook signatures and payload parsing
   daytona/      Ontology sandbox executor
   ontology/     repository graph contract, task type, schema, and store port
   ai/           model clients and agent harnesses
-  shared-kernel/ small shared primitives: ids, result, time, env, logging
+  shared-kernel/ small shared primitives: ids, errors, time
 ```
 
 `apps/*` own runtime wiring. Domain packages own their bounded rules and do not import HTTP, GitHub, Daytona, or model SDKs. `shared-kernel` stays small and contains no business workflows.

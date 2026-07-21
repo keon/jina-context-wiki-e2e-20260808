@@ -1,13 +1,7 @@
-import {
-  applyCommand,
-  reduceBoard,
-  supersedeEpochTasks,
-  type BoardState,
-  type CommandActor
-} from "@jina/board";
+import { reduceBoard, supersedeEpochTasks, type CommandActor } from "@jina/board";
 import type { SourcePolicy } from "@jina/context";
 import type { BudgetLimits } from "@jina/policy";
-import { planPrReview, type PrReviewPlan } from "@jina/review";
+import { applyPrReviewPlan, planPrReview } from "@jina/review";
 import type { IsoTimestamp } from "@jina/shared-kernel";
 import { findPullRequest, newPullRequest, upsertPullRequest, type WorkflowState } from "../state.js";
 
@@ -54,7 +48,7 @@ export function ingestPullRequestReview(
     ...(input.needsExternalContext !== undefined ? { needsExternalContext: input.needsExternalContext } : {})
   });
 
-  board = applyPlan(board, plan, now);
+  board = applyPrReviewPlan(board, plan, { actor: GITHUB_ACTOR, now });
 
   let next: WorkflowState = {
     ...state,
@@ -75,51 +69,3 @@ export function ingestPullRequestReview(
   return next;
 }
 
-function applyPlan(board: BoardState, plan: PrReviewPlan, now: IsoTimestamp): BoardState {
-  let next = board;
-
-  for (const task of plan.tasks) {
-    next = applyCommand(
-      next,
-      {
-        command: "CreateTask",
-        task: {
-          id: task.id,
-          type: task.type,
-          title: task.title,
-          assigneeRole: task.assigneeRole,
-          dedupeKey: task.dedupeKey,
-          required: task.required,
-          metadata: {
-            ...task.metadata,
-            pipelineSlug: plan.pipeline.slug,
-            pipelineVersion: plan.pipeline.version
-          },
-          ...(task.dispatchTopic ? { dispatchTopic: task.dispatchTopic } : {}),
-          ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
-          epoch: plan.epoch
-        }
-      },
-      { actor: GITHUB_ACTOR, now }
-    ).state;
-  }
-
-  for (const dependency of plan.dependencies) {
-    next = applyCommand(
-      next,
-      {
-        command: "LinkTask",
-        dependency: {
-          taskId: dependency.taskId,
-          dependsOnTaskId: dependency.dependsOnTaskId,
-          relationship: dependency.relationship,
-          required: dependency.required,
-          blocksParentCompletion: dependency.blocksParentCompletion
-        }
-      },
-      { actor: GITHUB_ACTOR, now }
-    ).state;
-  }
-
-  return next;
-}

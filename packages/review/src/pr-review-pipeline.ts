@@ -1,4 +1,5 @@
-import { entityId, type EntityId } from "@jina/shared-kernel";
+import { applyCommand, type BoardState, type CommandActor } from "@jina/board";
+import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 
 export interface PipelineRef {
   readonly slug: "pr_review";
@@ -194,4 +195,42 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
       }
     ]
   };
+}
+
+export function applyPrReviewPlan(
+  board: BoardState,
+  plan: PrReviewPlan,
+  options: { readonly actor: CommandActor; readonly now: IsoTimestamp; readonly taskMetadata?: Record<string, unknown> }
+): BoardState {
+  let next = board;
+  for (const task of plan.tasks) {
+    next = applyCommand(
+      next,
+      {
+        command: "CreateTask",
+        task: {
+          id: task.id,
+          type: task.type,
+          title: task.title,
+          assigneeRole: task.assigneeRole,
+          dedupeKey: task.dedupeKey,
+          required: task.required,
+          metadata: {
+            ...task.metadata,
+            pipelineSlug: plan.pipeline.slug,
+            pipelineVersion: plan.pipeline.version,
+            ...options.taskMetadata
+          },
+          ...(task.dispatchTopic ? { dispatchTopic: task.dispatchTopic } : {}),
+          ...(task.parentTaskId ? { parentTaskId: task.parentTaskId } : {}),
+          epoch: plan.epoch
+        }
+      },
+      { actor: options.actor, now: options.now }
+    ).state;
+  }
+  for (const dependency of plan.dependencies) {
+    next = applyCommand(next, { command: "LinkTask", dependency }, { actor: options.actor, now: options.now }).state;
+  }
+  return next;
 }

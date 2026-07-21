@@ -88,6 +88,17 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         await client.query("commit");
         return buildRecord(existing.rows[0]);
       }
+      if (request.dedupeHeadSha) {
+        const latest = await client.query<BuildRow>(
+          `select * from jina_board.workflows where tenant_id=$1 and repository=$2 and ref_name=$3
+           order by created_at desc limit 1`,
+          [request.tenantId, request.repository, request.ref]
+        );
+        if (latest.rows[0] && (latest.rows[0].metadata as Record<string, unknown>).githubHeadSha === request.dedupeHeadSha) {
+          await client.query("commit");
+          return buildRecord(latest.rows[0]);
+        }
+      }
       const supersededBuilds = await client.query<{ id: string }>(
         `update jina_board.workflows
          set status='superseded',updated_at=$4
