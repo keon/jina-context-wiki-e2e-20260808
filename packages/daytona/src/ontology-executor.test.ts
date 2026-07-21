@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import type { Sandbox } from "@daytona/sdk";
-import { buildFocusEvidenceBundle } from "./ontology-executor.js";
+import { buildFocusEvidenceBundle, isTransientCodexExecutionFailure } from "./ontology-executor.js";
+
+test("classifies retryable provider execution failures", () => {
+  assert.equal(isTransientCodexExecutionFailure("stream disconnected before completion: Internal Server Error"), true);
+  assert.equal(isTransientCodexExecutionFailure("HTTP 429: rate limit exceeded"), true);
+  assert.equal(isTransientCodexExecutionFailure("ontology output failed schema validation"), false);
+  assert.equal(isTransientCodexExecutionFailure("model not found"), false);
+});
 
 test("focus evidence streaming stops at the configured byte budget", async () => {
   const previousMaximum = process.env.ONTOLOGY_FOCUS_BUNDLE_MAX_CHARS;
