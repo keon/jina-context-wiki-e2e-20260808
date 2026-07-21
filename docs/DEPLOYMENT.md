@@ -84,6 +84,10 @@ The ontology worker uses OpenRouter model `deepseek/deepseek-v4-flash` through t
 `jina-openrouter-api-key` Secret Manager secret. The provider and model are fixed
 as `ONTOLOGY_CODEX_PROVIDER=openrouter` and
 `ONTOLOGY_CODEX_MODEL=deepseek/deepseek-v4-flash` in the deployment workflow.
+Transient provider stream, timeout, rate-limit, and 5xx failures retry the Codex
+execution once inside the same Daytona checkout. Validation and schema failures
+remain terminal. Deployment acceptance keys include the GitHub run attempt, so
+an operator can rerun a failed release without colliding with the prior board task.
 
 ## Verification
 

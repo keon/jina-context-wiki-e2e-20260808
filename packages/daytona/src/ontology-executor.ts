@@ -108,8 +108,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
             120
           );
         }
-        const run = await sandbox.process.executeCommand(
-          [
+        const codexCommand = [
             `${WORK_DIR}/node_modules/.bin/codex`,
             "exec",
             "--json",
@@ -125,11 +124,25 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
             `-c model_reasoning_effort=${shellQuote(process.env.ONTOLOGY_CODEX_EFFORT?.trim() || "low")}`,
             "-c model_verbosity=low",
             `"$(cat ${shellQuote(PROMPT_PATH)})"`
-          ].join(" "),
+          ].join(" ");
+        let run = await sandbox.process.executeCommand(
+          codexCommand,
           REPO_DIR,
           providerEnvironment,
           positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
         );
+        const executionAttempts = positiveInt(process.env.ONTOLOGY_CODEX_EXECUTION_ATTEMPTS, 2);
+        for (let executionAttempt = 1; run.exitCode !== 0 && executionAttempt < executionAttempts; executionAttempt += 1) {
+          if (!isTransientCodexExecutionFailure(run.result)) break;
+          const delaySeconds = positiveInt(process.env.ONTOLOGY_CODEX_RETRY_DELAY_SECONDS, 10);
+          await sandbox.process.executeCommand(`sleep ${delaySeconds}`, REPO_DIR, undefined, delaySeconds + 5);
+          run = await sandbox.process.executeCommand(
+            codexCommand,
+            REPO_DIR,
+            providerEnvironment,
+            positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
+          );
+        }
         if (run.exitCode !== 0) {
           throw new Error(`Codex ontology build failed: ${redact(truncate(run.result), secrets)}`);
         }
@@ -207,6 +220,10 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       }
     }
   }
+}
+
+export function isTransientCodexExecutionFailure(output: string): boolean {
+  return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:429|500|502|503|504)|rate limit)/i.test(output);
 }
 
 function selectProvider(openaiKey?: string, openrouterKey?: string): "openai" | "openrouter" {
