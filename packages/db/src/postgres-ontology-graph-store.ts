@@ -3,19 +3,22 @@ import {
   ONTOLOGY_REGISTRY_VERSION,
   assertionObservationId,
   canonicalJson,
+  causalTraceItemsFromGraph,
   computeCommitChanges,
   createOntologyProjection,
   knowledgeCheckpoint,
   normalizeAssertionBatchLenient,
-  normalizeGitHubSourceObservation,
+  normalizeSourceObservation,
+  sourceObservationExternalId,
+  sourceObservationProvider,
   sourceObservationId,
   stableId,
   predicateDefinition,
   validatePredicateEndpoints,
   validateQualifiers,
   type BlobAnalysis,
-  type GitHubSourceObservation,
   type GitHubWorkItemObservation,
+  type RepositorySourceObservation,
   type OntologyAssertionBatch,
   type OntologyAssertionResult,
   type OntologyAssertionSummary,
@@ -460,7 +463,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
-  async applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<OntologySourceIngestResult> {
+  async applyGitHubObservations(observations: readonly RepositorySourceObservation[]): Promise<OntologySourceIngestResult> {
     await this.initialize();
     const client = await this.pool.connect();
     let assertionCount = 0;
@@ -471,26 +474,27 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     try {
       await client.query("begin");
       for (const observation of observations) {
-        const normalized = normalizeGitHubSourceObservation(observation);
-        const externalId = observation.kind === "codeowners"
-          ? `${observation.repository}:codeowners:${observation.commitSha}:${observation.path}`
-          : `${observation.repository}:${observation.kind}:${observation.number}:${observation.occurredAt ?? observation.recordedAt}`;
-        const observationId = stableId("observation", `${observation.tenantId}:github:${externalId}`);
+        const normalized = normalizeSourceObservation(observation);
+        const source = sourceObservationProvider(observation);
+        const externalId = sourceObservationExternalId(observation);
+        const observationId = stableId("observation", `${observation.tenantId}:${source}:${externalId}`);
+        const scope = repositoryObservationScope(observation);
         observationIds.push(observationId);
         const payload = JSON.stringify(observation);
         const priorVersion = await client.query(
           `select 1 from jina_ontology.observations
-           where tenant_id=$1 and repository=$2 and source='github' and payload->>'kind'=$3
-             and ($3='codeowners' or payload->>'number'=$4) limit 1`,
-          [observation.tenantId, observation.repository, observation.kind, observation.kind === "codeowners" ? "" : String(observation.number)]
+           where tenant_id=$1 and repository=$2 and source=$3 and payload->>'kind'=$4
+             and ($5::text is null or payload->>$5=$6) limit 1`,
+          [observation.tenantId, observation.repository, source, observation.kind, scope.field, scope.value]
         );
         const insertedObservation = await client.query(
           `insert into jina_ontology.observations
             (id,tenant_id,source,type,external_id,repository,occurred_at,recorded_at,payload,payload_sha)
-           values ($1,$2,'github','source_snapshot',$3,$4,$5,$6,$7::jsonb,$8)
+           values ($1,$2,$9,'source_snapshot',$3,$4,$5,$6,$7::jsonb,$8)
            on conflict (tenant_id,source,external_id) do nothing returning id`,
-          [observationId, observation.tenantId, externalId, observation.repository, observation.kind === "codeowners" ? null : observation.occurredAt ?? null,
-            observation.recordedAt, payload, stableId("sha", payload)]
+          [observationId, observation.tenantId, externalId, observation.repository,
+            "occurredAt" in observation ? observation.occurredAt ?? null : null,
+            observation.recordedAt, payload, stableId("sha", payload), source]
         );
         if (insertedObservation.rowCount === 1) {
           if (priorVersion.rowCount) updatedObservationCount += 1;
@@ -499,9 +503,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             observationId, repoId: observation.repository
           }, observation.recordedAt);
         } else confirmedObservationCount += 1;
-        const currentSourceSnapshot = observation.kind === "codeowners"
-          ? insertedObservation.rowCount === 1
-          : await isLatestGitHubWorkItemObservation(client, observation, observationId);
+        const currentSourceSnapshot = observation.kind === "pull_request" || observation.kind === "issue"
+          ? await isLatestGitHubWorkItemObservation(client, observation, observationId)
+          : insertedObservation.rowCount === 1;
         const shouldReconcile = insertedObservation.rowCount === 1 && currentSourceSnapshot;
         const entityIds = new Map<string, string>();
         for (const entity of normalized.entities) {
@@ -572,7 +576,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,generator,last_confirmed_at)
              values ($1,$2,$3,'source',$4,$5,$6,$7,$8,$9,$10,$11,$12,
                case when $19 and $20 then 'proposed' when $19 then 'active' else 'retracted' end,1,'[]'::jsonb,$13,
-               'github-normalizer-v1',$14,$15,$16::jsonb,$17,$18,$15)
+               $21,$14,$15,$16::jsonb,$17,$18,$15)
              on conflict (id) do update set
                last_confirmed_at=greatest(current.last_confirmed_at,excluded.last_confirmed_at),
                source_observation_id=case when $19 then excluded.source_observation_id else current.source_observation_id end,
@@ -583,8 +587,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             [assertionId, observation.tenantId, observation.repository, subjectId, intent.subject.kind, intent.subject.key,
               intent.subject.displayName, intent.predicate, objectId, intent.object.kind, intent.object.key,
               intent.object.displayName, observationId, ONTOLOGY_REGISTRY_VERSION, observation.recordedAt,
-              JSON.stringify(qualifiers), qualifiersHash, observation.kind === "codeowners" ? "source:codeowners" : "source:github",
-              shouldReconcile, definition.cardinality === "one"]
+              JSON.stringify(qualifiers), qualifiersHash, `source:${source}`,
+              shouldReconcile, definition.cardinality === "one", `${source}-normalizer-v1`]
           );
           assertionCount += 1;
           if (shouldReconcile) {
@@ -610,18 +614,20 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             }, observation.recordedAt);
           }
         }
-        if (observation.kind !== "codeowners" && shouldReconcile) {
+        if (shouldReconcile) {
           const retracted = await client.query<{ id: string }>(
-            `update jina_ontology.assertions a set status='retracted',valid_to=$6
-             where a.tenant_id=$1 and a.repository=$2 and a.generator='source:github'
-               and a.status in ('active','proposed') and not (a.id=any($5::text[]))
+            `update jina_ontology.assertions a set status='retracted',valid_to=$9
+             where a.tenant_id=$1 and a.repository=$2 and a.generator=any($3::text[])
+               and a.status in ('active','proposed') and not (a.id=any($7::text[]))
                and a.source_observation_id in (
                  select o.id from jina_ontology.observations o
-                 where o.tenant_id=$1 and o.repository=$2 and o.source='github'
-                   and o.payload->>'kind'=$3 and o.payload->>'number'=$4
+                 where o.tenant_id=$1 and o.repository=$2 and o.source=$4
+                   and o.payload->>'kind'=$5 and ($6::text is null or o.payload->>$6=$8)
                )
              returning a.id`,
-            [observation.tenantId, observation.repository, observation.kind, String(observation.number), desiredAssertionIds, observation.recordedAt]
+            [observation.tenantId, observation.repository,
+              observation.kind === "codeowners" ? ["source:codeowners", "source:github"] : [`source:${source}`], source, observation.kind,
+              scope.field, desiredAssertionIds, scope.value, observation.recordedAt]
           );
           for (const row of retracted.rows) {
             await insertOutbox(client, observation.tenantId, "assertion_changed", row.id, {
@@ -825,7 +831,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
       `select * from jina_ontology.assertions
-       where tenant_id=$1 and repository=$2 and status='active' and predicate<>'RESOLVED_BY'
+       where tenant_id=$1 and repository=$2 and status='active'
        order by recorded_at,id`,
       [request.tenantId, request.repository]
       ),
@@ -941,6 +947,34 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             assertionId: id, repoId: assertion.repository
           }, now));
         }
+      } else if (command.type === "relate_assertions") {
+        const assertions = await client.query<{ id: string; repository: string }>(
+          `select id,repository from jina_ontology.assertions where tenant_id=$1 and id=any($2::text[]) for update`,
+          [tenantId, [command.sourceAssertionId, command.targetAssertionId]]
+        );
+        if (assertions.rowCount !== 2 || command.sourceAssertionId === command.targetAssertionId) {
+          throw new Error("assertion relation endpoints are invalid");
+        }
+        const repositories = [...new Set(assertions.rows.map((assertion) => assertion.repository))];
+        if (repositories.length !== 1) throw new Error("assertion relations must stay within one repository");
+        const evidence = await client.query(
+          `select 1 from jina_ontology.observations
+           where tenant_id=$1 and id=$2 and repository=$3 and redacted_at is null`,
+          [tenantId, command.evidenceObservationId, repositories[0]]
+        );
+        if (evidence.rowCount !== 1) throw new Error("assertion relation evidence observation was not found");
+        const relationId = stableId("assertion_relation", `${tenantId}:${command.sourceAssertionId}:${command.relation}:${command.targetAssertionId}:${command.evidenceObservationId}`);
+        await client.query(
+          `insert into jina_ontology.assertion_relations
+            (id,tenant_id,source_assertion_id,relation,target_assertion_id,evidence_observation_id,created_at)
+           values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,
+          [relationId, tenantId, command.sourceAssertionId, command.relation, command.targetAssertionId, command.evidenceObservationId, now]
+        );
+        affectedIds.push(relationId, command.sourceAssertionId, command.targetAssertionId);
+        for (const repository of repositories) outboxEventIds.push(await insertOutbox(
+          client, tenantId, "assertion_relation_changed", relationId,
+          { relationId, repoId: repository, sourceAssertionId: command.sourceAssertionId, targetAssertionId: command.targetAssertionId }, now
+        ));
       } else if (command.type === "merge_entities" || command.type === "unmerge_entities") {
         const entities = await client.query<{ id: string }>(
           `select id from jina_ontology.entities where tenant_id=$1 and id=any($2::text[])`,
@@ -1492,7 +1526,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   async listAssertions(
     tenantId: string,
     repository: string,
-    filter: { readonly status?: StoredAssertion["status"]; readonly predicate?: string } = {}
+    filter: { readonly status?: StoredAssertion["status"]; readonly predicate?: string; readonly entityKind?: OntologyNode["kind"] } = {}
   ): Promise<readonly OntologyAssertionSummary[]> {
     await this.initialize();
     const result = await this.pool.query<{
@@ -1506,12 +1540,17 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
               object_kind,object_natural_key,object_label,status,confidence,evidence,qualifiers,coalesce(generator,'unknown') as generator,registry_version
        from jina_ontology.assertions
        where tenant_id=$1 and repository=$2
-         and predicate<>'RESOLVED_BY'
          and ($3::text is null or status=$3)
          and ($4::text is null or predicate=$4)
+         and ($5::text is null or subject_kind=$5 or object_kind=$5)
        order by recorded_at desc,id limit 500`,
-      [tenantId, repository, filter.status ?? null, filter.predicate ?? null]
+      [tenantId, repository, filter.status ?? null, filter.predicate ?? null, filter.entityKind ?? null]
     );
+    const relations = result.rows.length === 0 ? { rows: [] as { source_assertion_id: string; relation: "supports" | "contradicts"; target_assertion_id: string }[] }
+      : await this.pool.query<{ source_assertion_id: string; relation: "supports" | "contradicts"; target_assertion_id: string }>(
+          `select source_assertion_id,relation,target_assertion_id from jina_ontology.assertion_relations
+           where tenant_id=$1 and target_assertion_id=any($2::text[])`, [tenantId, result.rows.map((row) => row.id)]
+        );
     return result.rows.map((row) => ({
       id: row.id,
       repository: row.repository,
@@ -1528,7 +1567,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       evidence: row.evidence,
       qualifiers: row.qualifiers,
       generator: row.generator,
-      registryVersion: row.registry_version
+      registryVersion: row.registry_version,
+      supportingAssertionIds: relations.rows.filter((relation) => relation.target_assertion_id === row.id && relation.relation === "supports")
+        .map((relation) => relation.source_assertion_id),
+      contradictingAssertionIds: relations.rows.filter((relation) => relation.target_assertion_id === row.id && relation.relation === "contradicts")
+        .map((relation) => relation.source_assertion_id)
     }));
   }
 
@@ -1544,7 +1587,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     );
     const ref = refResult.rows[0];
     if (!ref) throw new Error("repository ref not found");
-    const items = request.template === "issue_trace"
+    const items = request.template === "causal_trace" || request.template === "counterfactual"
+      ? await this.retrieveCausalTrace(request, ref.ref_name, ref.commit_sha)
+      : request.template === "issue_trace"
       ? await retrieveIssueTrace(this.pool, request, ref.ref_name, limit + 1)
       : request.template === "feature_trace"
         ? await retrieveFeatureTrace(this.pool, request, ref.ref_name, limit + 1)
@@ -1578,6 +1623,16 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     await this.pool.end();
   }
 
+  private async retrieveCausalTrace(request: RetrievalRequest, ref: string, commitSha: string): Promise<readonly RetrievalItem[]> {
+    const graph = await this.pool.query<GraphRow>(
+      `select * from jina_ontology.graphs
+       where tenant_id=$1 and repository=$2 and ref=$3 and commit_sha=$4 and executor='projection'
+       order by generated_at desc limit 1`,
+      [request.tenantId, request.repository, ref, commitSha]
+    );
+    return graph.rows[0] ? causalTraceItemsFromGraph(await this.hydrate(graph.rows[0]), request) : [];
+  }
+
   private async assertionResult(
     tenantId: string,
     repository: string,
@@ -1609,7 +1664,6 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }>(
       `select status,subject_kind,subject_natural_key,predicate,object_kind,object_natural_key,qualifiers
        from jina_ontology.assertions where tenant_id=$1 and repository=$2
-         and predicate<>'RESOLVED_BY'
        order by case status when 'active' then 0 when 'proposed' then 1 else 2 end,recorded_at desc,id`,
       [tenantId, repository]
     );
@@ -1767,6 +1821,16 @@ export async function insertOntologyGraph(client: PoolClient, graph: OntologyGra
   }
 }
 
+function repositoryObservationScope(observation: RepositorySourceObservation): { readonly field: string | null; readonly value: string } {
+  if (observation.kind === "pull_request" || observation.kind === "issue") return { field: "number", value: String(observation.number) };
+  if (observation.kind === "package_manifest") return { field: "path", value: observation.path };
+  if (observation.kind === "move_candidate") return { field: "commitSha", value: observation.commitSha };
+  if (observation.kind === "service_definition" || observation.kind === "deployment" || observation.kind === "incident") {
+    return { field: "externalId", value: observation.externalId };
+  }
+  return { field: null, value: "" };
+}
+
 async function isLatestGitHubWorkItemObservation(
   client: PoolClient,
   observation: GitHubWorkItemObservation,
@@ -1861,6 +1925,13 @@ async function authorizeOntologyCommand(
       [tenantId, command.assertionId]
     );
     repository = result.rows[0]?.repository;
+  } else if (command.type === "relate_assertions") {
+    const result = await client.query<{ repository: string }>(
+      `select distinct repository from jina_ontology.assertions where tenant_id=$1 and id=any($2::text[])`,
+      [tenantId, [command.sourceAssertionId, command.targetAssertionId]]
+    );
+    if (result.rowCount !== 1) throw new Error("assertion relations must stay within one authorized repository");
+    repository = result.rows[0]?.repository;
   } else if (command.type === "redact_observation") {
     const result = await client.query<{ repository: string | null }>(
       `select repository from jina_ontology.observations where tenant_id=$1 and id=$2`,
@@ -1942,7 +2013,8 @@ function applicableAssertions(
   const selected = new Map<string, StoredAssertion>();
   for (const assertion of assertions) {
     const current = assertion.evidence.length === 0
-      ? assertion.commitSha === "source" && Boolean(assertion.sourceObservationId)
+      ? (assertion.commitSha === "source" && Boolean(assertion.sourceObservationId)) ||
+        (assertion.commitSha === "command" && Boolean(assertion.assertedBy))
       : assertion.evidence.every((citation) => {
           const path = citation.replace(/:\d+(?:-\d+)?$/, "");
           const sourceBlob = sourceMap.get(`${assertion.commitSha}:${path}`);
@@ -2045,7 +2117,7 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
     }>(
       `select id,repository,subject_id,object_id,literal_type,literal_value,predicate,qualifiers_hash,valid_from,recorded_at
        from jina_ontology.assertions
-       where tenant_id=$1 and status='active' and predicate<>'RESOLVED_BY' for update`, [tenantId]
+       where tenant_id=$1 and status='active' for update`, [tenantId]
     )
   ]);
   const mapping = redirectMap(redirectRows.rows);
@@ -3159,6 +3231,11 @@ export const ONTOLOGY_SCHEMA_SQL = `
         evidence jsonb not null,
         primary key (graph_id, node_id)
       );
+      alter table jina_ontology.nodes drop constraint if exists ontology_nodes_kind_check;
+      alter table jina_ontology.nodes add constraint ontology_nodes_kind_check check (kind in (
+        'Repository','File','Symbol','Commit','PullRequest','Issue','Engineer','Team','Document','Feature',
+        'Package','Service','Deployment','Incident','VirtualIssue'
+      ));
       create index if not exists ontology_nodes_graph_kind_description
         on jina_ontology.nodes (graph_id,kind,description);
       create table if not exists jina_ontology.edges (
@@ -3336,6 +3413,11 @@ export const ONTOLOGY_SCHEMA_SQL = `
         retired_at timestamptz,
         unique (tenant_id,kind,natural_key)
       );
+      alter table jina_ontology.entities drop constraint if exists ontology_entities_kind_check;
+      alter table jina_ontology.entities add constraint ontology_entities_kind_check check (kind in (
+        'Repository','File','Symbol','Commit','PullRequest','Issue','Engineer','Team','Document','Feature',
+        'Package','Service','Deployment','Incident','VirtualIssue'
+      ));
       create table if not exists jina_ontology.identities (
         id text primary key,
         tenant_id text not null,
@@ -3420,6 +3502,21 @@ export const ONTOLOGY_SCHEMA_SQL = `
         on jina_ontology.assertions (tenant_id,repository,subject_id,predicate) where status='active';
       create index if not exists ontology_assertions_active_object
         on jina_ontology.assertions (tenant_id,repository,object_id,predicate) where status='active';
+      create table if not exists jina_ontology.assertion_relations (
+        id text primary key,
+        tenant_id text not null,
+        source_assertion_id text not null references jina_ontology.assertions(id),
+        relation text not null check (relation in ('supports','contradicts')),
+        target_assertion_id text not null references jina_ontology.assertions(id),
+        evidence_observation_id text not null references jina_ontology.observations(id),
+        created_at timestamptz not null,
+        check (source_assertion_id <> target_assertion_id),
+        unique (tenant_id,source_assertion_id,relation,target_assertion_id,evidence_observation_id)
+      );
+      create index if not exists ontology_assertion_relations_source
+        on jina_ontology.assertion_relations (tenant_id,source_assertion_id,relation);
+      create index if not exists ontology_assertion_relations_target
+        on jina_ontology.assertion_relations (tenant_id,target_assertion_id,relation);
       create table if not exists jina_ontology.outbox (
         id text primary key,
         tenant_id text not null,
@@ -3563,6 +3660,18 @@ export const ONTOLOGY_SCHEMA_SQL = `
         if not exists (select 1 from pg_constraint where conname='assertions_audit_same_tenant') then
           alter table jina_ontology.assertions add constraint assertions_audit_same_tenant
             foreign key (tenant_id,audit_id) references jina_ontology.audit_log(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertion_relations_source_same_tenant') then
+          alter table jina_ontology.assertion_relations add constraint assertion_relations_source_same_tenant
+            foreign key (tenant_id,source_assertion_id) references jina_ontology.assertions(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertion_relations_target_same_tenant') then
+          alter table jina_ontology.assertion_relations add constraint assertion_relations_target_same_tenant
+            foreign key (tenant_id,target_assertion_id) references jina_ontology.assertions(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertion_relations_evidence_same_tenant') then
+          alter table jina_ontology.assertion_relations add constraint assertion_relations_evidence_same_tenant
+            foreign key (tenant_id,evidence_observation_id) references jina_ontology.observations(tenant_id,id) not valid;
         end if;
         if not exists (select 1 from pg_constraint where conname='erasure_audit_same_tenant') then
           alter table jina_ontology.erasure_filters add constraint erasure_audit_same_tenant

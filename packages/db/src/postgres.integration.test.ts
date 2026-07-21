@@ -104,7 +104,7 @@ test("Postgres ontology roles separate reads and runtime writes from schema owne
   }
 });
 
-test("Postgres projections ignore deprecated inverse assertions after an upgrade", {
+test("Postgres projections retain reviewed RESOLVED_BY relationships after an upgrade", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
   assert.ok(connectionString);
@@ -141,11 +141,13 @@ test("Postgres projections ignore deprecated inverse assertions after an upgrade
 
     const projected = await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-21T00:01:00.000Z");
     assert.equal(projected.rebuilt, true);
-    assert.deepEqual(await store.listAssertions(tenantId, repository), []);
+    const listed = await store.listAssertions(tenantId, repository);
+    assert.equal(listed.length, 1);
+    assert.equal(listed[0]?.predicate, "RESOLVED_BY");
     const legacy = await pool.query<{ status: string }>(
       `select status from jina_ontology.assertions where tenant_id=$1 and predicate='RESOLVED_BY'`, [tenantId]
     );
-    assert.equal(legacy.rows[0]?.status, "active", "legacy history is preserved but excluded from current reads");
+    assert.equal(legacy.rows[0]?.status, "active", "reviewed inverse relationships remain current causal knowledge");
   } finally {
     await pool.end();
     await store.close();
@@ -237,6 +239,78 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
     assert.equal(graph.generator.executor, "projection");
     assert.equal(graph.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"), false);
     assert.equal(graph.nodes.some((node) => node.kind === "Symbol"), true);
+  } finally {
+    await store.close();
+  }
+});
+
+test("Postgres materializes source-backed services, packages, deployments, incidents, and causal counterfactuals", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const suffix = Date.now().toString(36);
+  const tenantId = `causal-v56-${suffix}`;
+  const repository = `omlabs/causal-v56-${suffix}`;
+  const commitSha = "c".repeat(40);
+  const now = "2026-07-21T01:00:00.000Z";
+  try {
+    await store.planIngestion({
+      tenantId, repository, ref: "main", commitSha, treeSha: "d".repeat(40), parents: [],
+      committedAt: now, recordedAt: now, isDefaultRef: true, updateRef: true, taskId: `ingest-${suffix}`,
+      files: [{ path: "README.md", blobSha: "e".repeat(40), size: 1 }]
+    });
+    const sourceResult = await store.applyGitHubObservations([
+      { tenantId, repository, kind: "package_manifest", commitSha, path: "package.json", ecosystem: "npm", dependencies: [{ name: "pg", version: "8" }], recordedAt: now },
+      { tenantId, repository, kind: "service_definition", commitSha, path: "compose.yaml", source: "compose", externalId: `${repository}:api`, name: "api", recordedAt: now },
+      { tenantId, repository, kind: "deployment", source: "github", externalId: `${repository}:deployment-17`, commitSha,
+        environment: "production", status: "success", service: { source: "compose", externalId: `${repository}:api`, name: "api" }, recordedAt: now },
+      { tenantId, repository, kind: "incident", source: "github", externalId: `${repository}#99`, title: "Deletion outage", issueNumber: 99, recordedAt: now }
+    ]);
+    const relationships = [
+      { predicate: "INCIDENT_IMPACTS", object: { kind: "Service" as const, key: `service:compose:${repository}:api`, displayName: "api" }, qualifiers: undefined },
+      { predicate: "INTRODUCED_BY", object: { kind: "Deployment" as const, key: `deployment:github:${repository}:deployment-17`, displayName: "production deployment 17" }, qualifiers: { reason: "the deployment removed the administrator deletion guard" } }
+    ];
+    for (const [index, relationship] of relationships.entries()) {
+      await store.executeCommand(tenantId, "svc:test", {
+        type: "assign_relationship", repository,
+        subject: { kind: "Incident", key: `incident:github:${repository}#99`, displayName: "Deletion outage" },
+        predicate: relationship.predicate, object: relationship.object,
+        ...(relationship.qualifiers ? { qualifiers: relationship.qualifiers } : {})
+      }, `2026-07-21T01:00:0${index + 1}.000Z`);
+    }
+    for (const assertion of await store.listAssertions(tenantId, repository, { status: "proposed" })) {
+      await store.executeCommand(tenantId, "svc:test", {
+        type: "review_assertion", assertionId: assertion.id, decision: "accept"
+      }, "2026-07-21T01:00:10.000Z");
+    }
+    const reviewed = (await store.listAssertions(tenantId, repository, { status: "active" }))
+      .filter((assertion) => assertion.predicate === "INTRODUCED_BY" || assertion.predicate === "INCIDENT_IMPACTS");
+    assert.equal(reviewed.length, 2);
+    await store.executeCommand(tenantId, "svc:test", {
+      type: "relate_assertions", sourceAssertionId: reviewed[0]!.id, relation: "supports",
+      targetAssertionId: reviewed[1]!.id, evidenceObservationId: sourceResult.observationIds[0]!
+    }, "2026-07-21T01:00:15.000Z");
+    const relationTarget = (await store.listAssertions(tenantId, repository)).find((assertion) => assertion.id === reviewed[1]!.id);
+    assert.deepEqual(relationTarget?.supportingAssertionIds, [reviewed[0]!.id]);
+    const graph = await store.project({ tenantId, repository, ref: "main", commitSha, taskId: `project-${suffix}`, generatedAt: "2026-07-21T01:00:20.000Z" });
+    for (const kind of ["Package", "Service", "Deployment", "Incident"] as const) {
+      assert.equal(graph.nodes.some((node) => node.kind === kind), true, `${kind} is projected`);
+    }
+    const context = await new RepositoryContextOrchestrator(store).answer({
+      tenantId, allowedRepositories: [repository], repository, ref: "main", operation: "counterfactual",
+      question: `If deployment ${repository}:deployment-17 were removed, would incident "Deletion outage" remain?`
+    });
+    assert.equal(context.counterfactual?.basis, "graph-derived");
+    assert.equal((context.counterfactual?.removedPaths.length ?? 0) > 0, true, JSON.stringify(context.counterfactual));
+    assert.match(context.answer, /eliminates every currently known reviewed path/);
+    await store.applyGitHubObservations([{
+      tenantId, repository, kind: "package_manifest", commitSha: "f".repeat(40), path: "package.json",
+      ecosystem: "npm", dependencies: [], removed: true, recordedAt: "2026-07-21T01:01:00.000Z"
+    }]);
+    const livePackages = (await store.listAssertions(tenantId, repository, { status: "active", predicate: "DEPENDS_ON" }))
+      .filter((assertion) => assertion.objectKind === "Package");
+    assert.equal(livePackages.length, 0, "a deleted manifest retracts its direct package facts");
   } finally {
     await store.close();
   }
@@ -1075,7 +1149,8 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
     };
     assert.equal(causal.introducedBy?.[0]?.sha, headSha);
     assert.match(causal.introducedBy?.[0]?.why ?? "", /bypassed the app guard/);
-    assert.deepEqual(causal.introducedBy?.[0]?.evidence, ["src/app.ts:1"]);
+    assert.equal(causal.introducedBy?.[0]?.evidence?.includes("src/app.ts:1"), true);
+    assert.equal(causal.introducedBy?.[0]?.evidence?.some((value) => value.startsWith("assertion:")), true);
     assert.equal(causal.introducedBy?.[0]?.evidenceCommitSha, headSha);
     assert.equal(causal.introducedBy?.[0]?.pullRequests?.some((pullRequest) => pullRequest.number === 3), true);
     const titleTrace = await store.retrieve({
@@ -1136,7 +1211,7 @@ test("Postgres repository context runs intake, knowledge, outbox projections, AC
       edge.predicate === "INTRODUCED_BY" && edge.why === "The commit bypassed the app guard."
     ), true, "the persisted graph retains the causal reason");
     const sourceOwnership = graph.edges.find((edge) => edge.predicate === "OWNED_BY");
-    assert.equal(sourceOwnership?.evidence[0]?.startsWith("observation:"), true);
+    assert.equal(sourceOwnership?.evidence.some((value) => value.startsWith("observation:")), true);
     assert.equal([...graph.nodes, ...graph.edges].every((item) => item.evidence.length > 0), true);
 
     const otherRepository = `${repository}-other`;
