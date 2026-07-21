@@ -196,6 +196,13 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .ontology-relationship-title { color: #d6deeb; font-size: .67rem; font-weight: 700; }
   .ontology-relationship-meta { color: #8a99b1; font: .6rem ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
   .ontology-relationship-explanation { grid-column: 1 / -1; color: #74839b; font-size: .61rem; line-height: 1.42; }
+  .assertion-review-list { display: grid; gap: .65rem; padding: .8rem; }
+  .assertion-review-card { display: grid; gap: .55rem; border: 1px solid #292929; border-radius: .55rem; background: #101010; padding: .75rem; }
+  .assertion-review-card strong { color: #ddd; font-size: .7rem; }
+  .assertion-review-card p { margin: 0; color: #999; font-size: .63rem; line-height: 1.5; }
+  .assertion-review-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
+  .assertion-review-fields select, .assertion-review-fields input { min-width: 0; border: 1px solid #303030; border-radius: .35rem; background: #0b0b0b; color: #bbb; padding: .45rem; font-size: .62rem; }
+  .assertion-review-actions { display: flex; gap: .4rem; }
   .ontology-item .ontology-item-type, .ontology-item .ontology-confidence span, .ontology-item .ontology-relationship span { margin-top: 0; }
   .graph-empty { fill: #6f7d94; font-size: 14px; text-anchor: middle; }
   .plane-key { display: flex; gap: .8rem; align-items: center; color: #7f8ca2; font-size: .66rem; }
@@ -928,7 +935,7 @@ const API_LABEL = ${JSON.stringify(apiLabel)};
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
-let ontologyState = { latest: null, graphs: [] };
+let ontologyState = { latest: null, graphs: [], assertions: [] };
 let assertionState = [];
 let ontologyViewState = {
   graphKey: null,
@@ -991,10 +998,12 @@ async function refresh() {
       if (!response.ok) throw new Error("API request failed");
       const nextOntologyState = await response.json();
       let nextAssertions = [];
-      if (nextOntologyState.latest) {
+      if (nextOntologyState.latest?.repository) {
         const assertionResponse = await fetch(API + "/ontology/assertions?repository=" + encodeURIComponent(nextOntologyState.latest.repository));
-        if (assertionResponse.ok) nextAssertions = (await assertionResponse.json()).assertions || [];
+        if (!assertionResponse.ok) throw new Error("Assertion review request failed");
+        nextAssertions = (await assertionResponse.json()).assertions || [];
       }
+      nextOntologyState.assertions = nextAssertions.filter(function(assertion) { return assertion.status === "proposed"; });
       if (requestSequence !== ontologyRefreshSequence || location.pathname !== "/ontology") return;
       ontologyState = nextOntologyState;
       assertionState = nextAssertions;
@@ -1444,6 +1453,10 @@ function selectGraphItem(kind, id) {
 function renderOntologyInspector(graph, visibleGraph) {
   const selection = ontologyViewState.selected;
   if (!selection) {
+    if ((ontologyState.assertions || []).length) {
+      renderAssertionReviewQueue(ontologyState.assertions);
+      return;
+    }
     const message = visibleGraph.nodes.length
       ? "Select a node or relationship in the graph to inspect its metadata and evidence."
       : "No graph items are visible. Turn on a node type above to continue exploring.";
@@ -1500,6 +1513,61 @@ function renderOntologyInspector(graph, visibleGraph) {
   item.append(ontologyExplanation(edge.why || "This relationship states that " + sourceLabel + " " + humanize(edge.predicate) + " " + targetLabel + "."));
   item.append(ontologyInspectorActions(["⇄  Reverse direction", "⌁  Reconnect", "◌  Hide type", "⌫  Delete"]));
   ontologyDetails.append(item);
+}
+
+function renderAssertionReviewQueue(assertions) {
+  ontologyWorkspace.classList.add("has-selection");
+  const heading = element("div", "ontology-item-heading");
+  const copy = element("div", "ontology-heading-copy");
+  copy.append(textElement("strong", "", "Assertion review"), textElement("span", "ontology-item-type", assertions.length + " proposed"));
+  heading.append(copy);
+  const list = element("div", "assertion-review-list");
+  assertions.forEach(function(assertion) {
+    const card = element("article", "assertion-review-card");
+    card.append(
+      textElement("strong", "", assertion.subjectLabel + " · " + assertion.predicate + " · " + assertion.objectLabel),
+      textElement("p", "", assertion.explanation || "This legacy assertion has no explanation and should not be accepted without review."),
+      textElement("p", "", "Evidence: " + ((assertion.evidence || []).join(", ") || "none"))
+    );
+    const fields = element("div", "assertion-review-fields");
+    const code = document.createElement("select");
+    [
+      ["", "Rejection category"],
+      ["incorrect_relationship", "Incorrect relationship"],
+      ["insufficient_evidence", "Insufficient evidence"],
+      ["unsupported_explanation", "Unsupported explanation"],
+      ["other", "Other"]
+    ].forEach(function(entry) { const option = document.createElement("option"); option.value = entry[0]; option.textContent = entry[1]; code.append(option); });
+    const reason = document.createElement("input");
+    reason.placeholder = "Reason for rejection";
+    fields.append(code, reason);
+    const actions = element("div", "assertion-review-actions");
+    const accept = textElement("button", "secondary-button", "Accept");
+    accept.type = "button";
+    accept.addEventListener("click", function() { reviewAssertion(assertion.id, "accept"); });
+    const reject = textElement("button", "danger-button", "Reject");
+    reject.type = "button";
+    reject.addEventListener("click", function() {
+      if (!code.value || !reason.value.trim()) { reason.setCustomValidity("Choose a category and provide a reason."); reason.reportValidity(); return; }
+      reason.setCustomValidity("");
+      reviewAssertion(assertion.id, "reject", code.value, reason.value.trim());
+    });
+    actions.append(accept, reject);
+    card.append(fields, actions);
+    list.append(card);
+  });
+  ontologyDetails.append(heading, list);
+}
+
+async function reviewAssertion(assertionId, decision, rejectionCode, reason) {
+  const body = { type: "review_assertion", assertionId: assertionId, decision: decision };
+  if (rejectionCode) body.rejectionCode = rejectionCode;
+  if (reason) body.reason = reason;
+  const response = await fetch(API + "/ontology/commands", {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
+  });
+  if (!response.ok) throw new Error("Assertion review failed");
+  await refresh();
 }
 
 function ontologyInspectorItem(title, type) {

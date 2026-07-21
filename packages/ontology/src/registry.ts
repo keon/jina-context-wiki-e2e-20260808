@@ -1,6 +1,6 @@
 import type { OntologyNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.6-causal";
+export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.7-causal";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];

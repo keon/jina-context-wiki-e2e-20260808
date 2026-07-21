@@ -76,6 +76,25 @@ test("parses a newly opened issue and ignores non-open actions", () => {
   assert.equal(parseGitHubWebhook("ping", jsonBytes({ zen: "Keep it logically awesome." })), undefined);
 });
 
+test("parses branch pushes for ontology intake", () => {
+  const parsed = parseGitHubWebhook("push", jsonBytes({
+    ref: "refs/heads/main",
+    before: "a".repeat(40),
+    after: "b".repeat(40),
+    deleted: false,
+    repository: { id: 10, full_name: "omlabs/example" },
+    installation: { id: 99 },
+    sender: { login: "octocat" }
+  }));
+  assert.deepEqual(parsed?.event, {
+    type: "push",
+    ref: "refs/heads/main",
+    beforeSha: "a".repeat(40),
+    headSha: "b".repeat(40),
+    deleted: false
+  });
+});
+
 test("rejects malformed actionable payloads", () => {
   assert.throws(
     () => parseGitHubWebhook("issues", jsonBytes({ action: "opened", repository: { full_name: "omlabs/example" } })),

@@ -264,6 +264,7 @@ test("a new model contract confirms rather than overwrites a reviewed assertion"
       predicate: "DOCUMENTED_BY",
       object: { kind: "Document" as const, naturalKey: "repo:omxyz/demo:path:README.md", label: "README" },
       confidence: 0.95,
+      explanation: "The README explicitly documents this repository.",
       evidence: ["README.md:1"]
     }]
   };
@@ -295,7 +296,7 @@ test("does not reuse a live model assertion across repositories in the same tena
       subject: { kind: "Issue" as const, naturalKey: "external:issue:1", label: "Issue" },
       predicate: "INTRODUCED_BY",
       object: { kind: "Commit" as const, naturalKey: `repo:shared:sha:${"a".repeat(40)}`, label: "Commit" },
-      confidence: 0.9, evidence: ["src/app.ts:1"], qualifiers: { reason: "Same natural key" }
+      confidence: 0.9, explanation: "Same natural key", evidence: ["src/app.ts:1"], qualifiers: { reason: "Same natural key" }
     }]
   });
   await store.saveAssertionBatch(batch("org/one", "one"));
@@ -323,7 +324,7 @@ test("projects assertions with distinct qualifiers as distinct knowledge edges",
       subject: { kind: "Issue" as const, naturalKey: `github:issue:${repository}#1`, label: "Issue #1" },
       predicate: "INTRODUCED_BY",
       object: { kind: "Commit" as const, naturalKey: `repo:${repository}:sha:${commitSha}`, label: commitSha.slice(0, 12) },
-      confidence: 0.9, evidence: ["docs/root-cause.md:1"], qualifiers: { reason }
+      confidence: 0.9, explanation: reason, evidence: ["docs/root-cause.md:1"], qualifiers: { reason }
     }))
   });
   for (const assertion of await store.listAssertions(tenantId, repository, { status: "proposed" })) {
@@ -364,6 +365,7 @@ test("memory assertion dedup never reuses another tenant's assertion", async () 
         label: "README"
       },
       confidence: 0.95,
+      explanation: "The README explicitly documents this repository.",
       evidence: ["README.md:1"]
     }]
   });
@@ -407,10 +409,15 @@ test("knowledge writer enforces provenance, review, qualifier cardinality, audit
   const proposed = applyAssertion(state, {
     tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamA.entity.id,
     qualifiers: { pattern: "src/**" }, confidence: 0.9, sourceObservationId: "obs:codeowners",
-    generator: "model:owner@1", recordedAt: "2026-01-02T00:00:00Z"
+    generator: "model:owner@1", explanation: "The CODEOWNERS rule assigns this file to team A.",
+    recordedAt: "2026-01-02T00:00:00Z"
   });
   state = proposed.state;
   assert.equal(proposed.assertion.status, "proposed");
+  assert.throws(() => reviewAssertion(state, {
+    tenantId: "t", assertionId: proposed.assertion.id, decision: "reject", actorId: "user:1",
+    reason: "The evidence is incomplete.", now: "2026-01-02T12:00:00Z"
+  }), /rejection.*code/);
   const accepted = reviewAssertion(state, {
     tenantId: "t", assertionId: proposed.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-03T00:00:00Z"
   });
@@ -420,7 +427,8 @@ test("knowledge writer enforces provenance, review, qualifier cardinality, audit
   const supporting = applyAssertion(state, {
     tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamB.entity.id,
     qualifiers: { pattern: "src/special/**" }, confidence: 0.95, sourceObservationId: "obs:support",
-    generator: "model:owner@2", recordedAt: "2026-01-03T00:00:01Z"
+    generator: "model:owner@2", explanation: "The more specific rule provides supporting ownership evidence.",
+    recordedAt: "2026-01-03T00:00:01Z"
   });
   state = supporting.state;
   const relation = relateAssertions(state, {
@@ -432,7 +440,8 @@ test("knowledge writer enforces provenance, review, qualifier cardinality, audit
 
   const replacement = applyAssertion(state, {
     tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamB.entity.id,
-    qualifiers: { pattern: "src/**" }, sourceObservationId: "obs:codeowners:2", recordedAt: "2026-01-04T00:00:00Z"
+    qualifiers: { pattern: "src/**" }, sourceObservationId: "obs:codeowners:2",
+    explanation: "The updated CODEOWNERS rule assigns this file to team B.", recordedAt: "2026-01-04T00:00:00Z"
   });
   state = replacement.state;
   const replacementAccepted = reviewAssertion(state, {
@@ -444,7 +453,7 @@ test("knowledge writer enforces provenance, review, qualifier cardinality, audit
   assert.deepEqual(acceptanceRates(state, "t"), [{ generator: "model:owner@1", predicate: "OWNED_BY", accepted: 1, rejected: 0, rate: 1 }]);
   assert.throws(() => applyAssertion(state, {
     tenantId: "t", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamA.entity.id,
-    recordedAt: "2026-01-06T00:00:00Z"
+    explanation: "The rule assigns this file to team A.", recordedAt: "2026-01-06T00:00:00Z"
   }), /sourceObservationId XOR assertedBy/);
 });
 
@@ -461,14 +470,14 @@ test("identity redirects resolve without rewriting assertions and reconciliation
   }).state;
   const first = applyAssertion(state, {
     tenantId: "t", subjectId: fileA.entity.id, predicate: "OWNED_BY", objectId: team.entity.id,
-    assertedBy: "user:1", recordedAt: "2026-01-02T00:00:00Z"
+    assertedBy: "user:1", explanation: "A curator assigned file A to this team.", recordedAt: "2026-01-02T00:00:00Z"
   });
   state = reviewAssertion(first.state, {
     tenantId: "t", assertionId: first.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-02T01:00:00Z"
   }).state;
   const second = applyAssertion(state, {
     tenantId: "t", subjectId: fileB.entity.id, predicate: "OWNED_BY", objectId: team.entity.id,
-    assertedBy: "user:1", recordedAt: "2026-01-03T00:00:00Z"
+    assertedBy: "user:1", explanation: "A curator assigned file B to this team.", recordedAt: "2026-01-03T00:00:00Z"
   });
   state = reviewAssertion(second.state, {
     tenantId: "t", assertionId: second.assertion.id, decision: "accept", actorId: "user:1", now: "2026-01-03T01:00:00Z"
@@ -810,6 +819,7 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
     subject: { kind: "Repository", key: "github:repo:org/repo", displayName: "org/repo" },
     predicate: "OWNED_BY",
     object: { kind: "Team", key: "github:team:org/platform", displayName: "@org/platform" },
+    explanation: "The CODEOWNERS rule src/** assigns matching repository paths to @org/platform.",
     qualifiers: { pattern: "src/**" }
   }]);
   const mergeSha = "b".repeat(40);
@@ -822,6 +832,7 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
   assert.deepEqual(workItem.assertions.map((assertion) => assertion.predicate), [
     "INCLUDES", "MERGED_AS", "RESOLVES"
   ]);
+  assert.equal(workItem.assertions.every((assertion) => assertion.explanation.length > 0), true);
   assert.equal(predicateDefinition("INTRODUCED_BY").review, "manual");
 });
 
@@ -935,6 +946,7 @@ test("reviews and retrieves a virtual issue through the generalized Issue assert
       predicate: "RESOLVES",
       plane: "knowledge" as const,
       confidence: 0.94,
+      why: "The pull request fixes the administrator deletion regression represented by this issue.",
       evidence: ["src/auth.ts:10"]
     }]
   };
@@ -1035,7 +1047,9 @@ test("resolves derived issue descriptions by PR anchor when titles collide", asy
     ],
     edges: [42, 43].map((number) => ({
       source: String(number), target: `virtual:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
-      confidence: 0.94, evidence: [number === 42 ? "src/auth.ts:10" : "src/audit.ts:10"]
+      confidence: 0.94,
+      why: `Pull request #${number} fixes the corresponding authorization regression.`,
+      evidence: [number === 42 ? "src/auth.ts:10" : "src/audit.ts:10"]
     }))
   };
   await store.saveAssertionBatch({
@@ -1090,6 +1104,8 @@ test("memory source ingestion applies current deterministic assertions", async (
   const assertions = await store.listAssertions("t", "org/repo");
   assert.equal(assertions.some((assertion) => assertion.predicate === "RESOLVES" && assertion.commitSha === "source"), true);
   assert.equal(assertions.some((assertion) => assertion.predicate === "OWNED_BY" && assertion.commitSha === "source"), true);
+  assert.equal(assertions.every((assertion) => Boolean(assertion.explanation)), true);
+  assert.equal(assertions.every((assertion) => assertion.evidence.some((value) => value.startsWith("observation:"))), true);
   const ownership = await store.retrieve({
     tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo", template: "ownership", path: "README.md"
   });
@@ -1107,14 +1123,35 @@ test("normalizes model output into distinct semantic entity identities", () => {
       { id: "doc:first", kind: "Document", label: "first docs", description: "docs", path: "README.md", evidence: ["README.md:2"] }
     ],
     edges: [
-      { source: "symbol:src/app.ts:first", target: "doc:first", predicate: "IMPLEMENTS", plane: "knowledge", confidence: 0.91, evidence: ["src/app.ts:1"] },
-      { source: "symbol:src/app.ts:second", target: "doc:first", predicate: "IMPLEMENTS", plane: "knowledge", confidence: 0.92, evidence: ["src/app.ts:2"] }
+      {
+        source: "symbol:src/app.ts:first", target: "doc:first", predicate: "IMPLEMENTS", plane: "knowledge", confidence: 0.91,
+        why: "The first symbol implements the behavior described by the document.", evidence: ["src/app.ts:1"]
+      },
+      {
+        source: "symbol:src/app.ts:second", target: "doc:first", predicate: "IMPLEMENTS", plane: "knowledge", confidence: 0.92,
+        why: "The second symbol implements the behavior described by the document.", evidence: ["src/app.ts:2"]
+      }
     ]
   }, "omxyz/demo");
   assert.deepEqual(assertions.map((assertion) => assertion.subject.naturalKey), [
     "repo:omxyz/demo:moniker:symbol:src/app.ts:first",
     "repo:omxyz/demo:moniker:symbol:src/app.ts:second"
   ]);
+  assert.deepEqual(assertions.map((assertion) => assertion.explanation), [
+    "The first symbol implements the behavior described by the document.",
+    "The second symbol implements the behavior described by the document."
+  ]);
+  assert.throws(() => assertionsFromGeneratedOntology({
+    summary: "unexplained relationship",
+    nodes: [
+      { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
+      { id: "readme", kind: "Document", label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
+    ],
+    edges: [{
+      source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.9,
+      why: "", evidence: ["README.md:1"]
+    }]
+  }, "omxyz/demo"), /must explain why the evidence supports the relationship/);
 });
 
 test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () => {
@@ -1138,6 +1175,7 @@ test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () 
       predicate: "RESOLVES",
       plane: "knowledge",
       confidence: 0.94,
+      why: "The pull request fixes the administrator deletion regression represented by this issue.",
       evidence: ["src/auth.ts:10"]
     }]
   }, repository, { sourcePullRequestNumbers: [42] });
@@ -1184,7 +1222,7 @@ test("ignores model duplicates of deterministic GitHub issue resolutions", () =>
     ],
     edges: [{
       source: "5", target: "4", predicate: "RESOLVES", plane: "knowledge", confidence: 0.99,
-      evidence: ["ROOT_CAUSE.md:2"]
+      why: "The pull request resolves the reported administrator deletion regression.", evidence: ["ROOT_CAUSE.md:2"]
     }, {
       source: "4", target: sha, predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.99,
       why: "The commit bypassed the administrator authorization guard.", evidence: ["ROOT_CAUSE.md:2"]
@@ -1205,6 +1243,7 @@ test("keeps reviewed incident deployment resolution outside GitHub issue normali
       { id: "deployment:github:rollback-42", kind: "Deployment", label: "rollback-42", description: "deployment", evidence: ["docs/postmortems/INC-42.md:2"] }
     ],
     edges: [{ source: "incident:postmortem:INC-42", target: "deployment:github:rollback-42", predicate: "RESOLVED_BY", plane: "knowledge", confidence: 0.93,
+      why: "The postmortem identifies rollback deployment 42 as the action that restored service.",
       evidence: ["docs/postmortems/INC-42.md:1-2"] }]
   }, repository);
   assert.deepEqual(assertions.map((assertion) => assertion.predicate), ["RESOLVED_BY"]);
@@ -1275,13 +1314,16 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     ],
     edges: [{
       source: "auth-file", target: "feature:administrator-deletion", predicate: "IMPLEMENTS",
-      plane: "knowledge" as const, confidence: 0.96, evidence: ["src/auth.ts:1"]
+      plane: "knowledge" as const, confidence: 0.96,
+      why: "The authorization file implements administrator deletion behavior.", evidence: ["src/auth.ts:1"]
     }, {
       source: "feature:administrator-deletion", target: "readme", predicate: "DOCUMENTED_BY",
-      plane: "knowledge" as const, confidence: 0.98, evidence: ["README.md:2"]
+      plane: "knowledge" as const, confidence: 0.98,
+      why: "The README describes administrator deletion as a product capability.", evidence: ["README.md:2"]
     }, {
       source: "audit-file", target: "feature:administrator-audit", predicate: "IMPLEMENTS",
-      plane: "knowledge" as const, confidence: 0.95, evidence: ["src/audit.ts:1"]
+      plane: "knowledge" as const, confidence: 0.95,
+      why: "The audit file implements administrator audit export behavior.", evidence: ["src/audit.ts:1"]
     }]
   };
   const generatedAssertions = assertionsFromGeneratedOntology(rawOutput, repository);
@@ -1324,6 +1366,10 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   assert.equal(graph.nodes.some((node) => node.kind === "Feature" && node.label === "Administrator deletion"), true);
   assert.equal(graph.edges.some((edge) => edge.predicate === "IMPLEMENTS"), true);
   assert.equal(graph.edges.some((edge) => edge.predicate === "IMPORTS" && graph.nodes.find((node) => node.id === edge.target)?.kind === "Package"), true);
+  assert.equal(
+    graph.edges.find((edge) => edge.predicate === "IMPLEMENTS" && edge.source === "file:src/auth.ts")?.why,
+    "The authorization file implements administrator deletion behavior."
+  );
 
   const answer = await new RepositoryContextOrchestrator(store).answer({
     tenantId,
@@ -1394,7 +1440,9 @@ function generatedVirtualIssue(repository: string, pullRequestNumber: number) {
     ],
     edges: [{
       source: String(pullRequestNumber), target: `virtual:pr:${pullRequestNumber}`, predicate: "RESOLVES",
-      plane: "knowledge" as const, confidence: 0.94, evidence: ["src/auth.ts:10"]
+      plane: "knowledge" as const, confidence: 0.94,
+      why: "The pull request fixes the administrator deletion regression represented by this issue.",
+      evidence: ["src/auth.ts:10"]
     }]
   };
 }
@@ -1748,6 +1796,7 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
       predicate: "DOCUMENTED_BY",
       object: { kind: "Document", naturalKey: `repo:${snapshot.repository}:path:README.md`, label: "README" },
       confidence: 0.95,
+      explanation: "The README explicitly documents this repository.",
       evidence: ["README.md:1"]
     }]
   });

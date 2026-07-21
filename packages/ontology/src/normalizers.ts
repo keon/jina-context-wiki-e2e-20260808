@@ -113,6 +113,7 @@ export interface SourceAssertionIntent {
   readonly predicate: "AUTHORED_BY" | "INCLUDES" | "MERGED_AS" | "RESOLVES" | "REFERENCES" | "OWNED_BY" |
     "DEPENDS_ON" | "DEPLOYS" | "TARGETS" | "INCIDENT_IMPACTS";
   readonly object: SourceEntityIntent;
+  readonly explanation: string;
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
 }
 
@@ -279,14 +280,20 @@ export function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation):
   if (observation.authorLogin) {
     const engineer: SourceEntityIntent = { kind: "Engineer", key: `github:user:${observation.authorLogin}`, displayName: observation.authorLogin };
     entities.push(engineer);
-    assertions.push({ subject, predicate: "AUTHORED_BY", object: engineer });
+    assertions.push({
+      subject, predicate: "AUTHORED_BY", object: engineer,
+      explanation: `The GitHub ${observation.kind === "pull_request" ? "pull request" : "issue"} snapshot identifies ${observation.authorLogin} as the author.`
+    });
     githubIdentity = { externalId: observation.authorLogin, entity: engineer };
   }
   if (observation.kind === "pull_request") {
     for (const sha of new Set(observation.commitShas ?? [])) {
       const commit: SourceEntityIntent = { kind: "Commit", key: `repo:${observation.repository}:sha:${sha}`, displayName: sha.slice(0, 12) };
       entities.push(commit);
-      assertions.push({ subject, predicate: "INCLUDES", object: commit });
+      assertions.push({
+        subject, predicate: "INCLUDES", object: commit,
+        explanation: `The GitHub pull request snapshot includes commit ${sha}.`
+      });
     }
     if (observation.mergedAt && observation.mergeCommitSha) {
       const mergeCommit: SourceEntityIntent = {
@@ -295,13 +302,21 @@ export function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation):
         displayName: observation.mergeCommitSha.slice(0, 12)
       };
       entities.push(mergeCommit);
-      assertions.push({ subject, predicate: "MERGED_AS", object: mergeCommit });
+      assertions.push({
+        subject, predicate: "MERGED_AS", object: mergeCommit,
+        explanation: `The merged GitHub pull request snapshot records ${observation.mergeCommitSha} as its merge commit.`
+      });
     }
     const resolved = new Set(observation.resolvesIssueNumbers ?? []);
     for (const number of new Set([...(observation.referencesIssueNumbers ?? []), ...resolved])) {
       const issue: SourceEntityIntent = { kind: "Issue", key: `github:issue:${observation.repository}#${number}`, displayName: `Issue #${number}` };
       entities.push(issue);
-      assertions.push({ subject, predicate: resolved.has(number) ? "RESOLVES" : "REFERENCES", object: issue });
+      assertions.push({
+        subject, predicate: resolved.has(number) ? "RESOLVES" : "REFERENCES", object: issue,
+        explanation: resolved.has(number)
+          ? `The GitHub pull request snapshot explicitly records that it resolves issue #${number}.`
+          : `The GitHub pull request snapshot explicitly references issue #${number}.`
+      });
     }
   }
   return { entities: dedupe(entities, (entity) => `${entity.kind}:${entity.key}`), assertions: dedupe(assertions, (item) => `${item.subject.key}:${item.predicate}:${item.object.key}`), ...(githubIdentity ? { githubIdentity } : {}) };
@@ -323,7 +338,11 @@ function normalizeGitHubOwnership(observation: GitHubOwnershipObservation): Norm
           ? { kind: "Engineer", key: `github:user:${normalized}`, displayName: owner }
           : { kind: "Engineer", key: `email:${normalized.toLowerCase()}`, displayName: owner };
       entities.push(entity);
-      assertions.push({ subject: repository, predicate: "OWNED_BY", object: entity, qualifiers: { pattern: entry.pattern } });
+      assertions.push({
+        subject: repository, predicate: "OWNED_BY", object: entity,
+        explanation: `The CODEOWNERS rule ${entry.pattern} assigns matching repository paths to ${owner}.`,
+        qualifiers: { pattern: entry.pattern }
+      });
     }
   }
   return {
@@ -343,7 +362,12 @@ function normalizePackageManifest(observation: PackageManifestObservation): Norm
   }));
   return {
     entities: [repository, ...packages],
-    assertions: observation.removed ? [] : packages.map((dependency) => ({ subject: repository, predicate: "DEPENDS_ON", object: dependency }))
+    assertions: observation.removed ? [] : packages.map((dependency) => ({
+      subject: repository,
+      predicate: "DEPENDS_ON",
+      object: dependency,
+      explanation: `${observation.path} declares ${dependency.displayName} as a direct ${observation.ecosystem} dependency.`
+    }))
   };
 }
 
@@ -356,7 +380,12 @@ function normalizeServiceDefinition(observation: ServiceDefinitionObservation): 
   }));
   return {
     entities: [service, ...dependencies],
-    assertions: observation.removed ? [] : dependencies.map((dependency) => ({ subject: service, predicate: "DEPENDS_ON", object: dependency }))
+    assertions: observation.removed ? [] : dependencies.map((dependency) => ({
+      subject: service,
+      predicate: "DEPENDS_ON",
+      object: dependency,
+      explanation: `${observation.path} declares ${service.displayName} as depending on ${dependency.displayName}.`
+    }))
   };
 }
 
@@ -376,8 +405,14 @@ function normalizeDeployment(observation: DeploymentSourceObservation): Normaliz
   return {
     entities: [deployment, commit, ...(service ? [service] : [])],
     assertions: [
-      { subject: deployment, predicate: "DEPLOYS" as const, object: commit },
-      ...(service ? [{ subject: deployment, predicate: "TARGETS" as const, object: service }] : [])
+      {
+        subject: deployment, predicate: "DEPLOYS" as const, object: commit,
+        explanation: `Deployment ${observation.externalId} records commit ${observation.commitSha} for ${observation.environment}.`
+      },
+      ...(service ? [{
+        subject: deployment, predicate: "TARGETS" as const, object: service,
+        explanation: `Deployment ${observation.externalId} identifies ${service.displayName} as its target service.`
+      }] : [])
     ]
   };
 }
@@ -403,8 +438,14 @@ function normalizeIncident(observation: IncidentSourceObservation): NormalizedGi
   return {
     entities: [incident, ...(issue ? [issue] : []), ...(service ? [service] : [])],
     assertions: observation.removed ? [] : [
-      ...(issue ? [{ subject: incident, predicate: "REFERENCES" as const, object: issue }] : []),
-      ...(service ? [{ subject: incident, predicate: "INCIDENT_IMPACTS" as const, object: service }] : [])
+      ...(issue ? [{
+        subject: incident, predicate: "REFERENCES" as const, object: issue,
+        explanation: `Incident ${observation.externalId} explicitly references Issue #${observation.issueNumber}.`
+      }] : []),
+      ...(service ? [{
+        subject: incident, predicate: "INCIDENT_IMPACTS" as const, object: service,
+        explanation: `Incident ${observation.externalId} identifies ${service.displayName} as an impacted service.`
+      }] : [])
     ]
   };
 }

@@ -53,6 +53,30 @@ export const ontologyTaskTypeTriggers = [
     taskType: "ontology_project",
     source: "POST /ontology/build",
     description: "Creates the projection task in a waiting state; ontology_assert completion unblocks it."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_build",
+    source: "GitHub push webhook",
+    description: "Creates the aggregate workflow parent for a pushed branch head."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_ingest",
+    source: "GitHub push webhook",
+    description: "Queues repository intake for a pushed branch head."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_assert",
+    source: "GitHub push webhook",
+    description: "Creates the assertion stage for a pushed branch head."
+  },
+  {
+    workflow: "ontology_build",
+    taskType: "ontology_project",
+    source: "GitHub push webhook",
+    description: "Creates the projection stage for a pushed branch head."
   }
 ] as const;
 

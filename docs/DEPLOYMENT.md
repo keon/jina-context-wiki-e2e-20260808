@@ -38,11 +38,10 @@ one minimum instance and CPU always allocated, while the durable lease remains
 the source of truth.
 
 Ontology canonical writes are independently idempotent: source observations,
-commit DAG rows, first-parent changes, content-addressed blob analyses, source
+commit DAG rows, exact commit trees, first-parent changes, content-addressed blob analyses, source
 facts, and model-output proposals survive worker retries. Before fetching trees,
 the worker asks which commits are known, so a repeat build reads only the head
-tree and a new head stops at known parents. With an unchanged head, blob parsing and Daytona/Codex generation are reused and manifest/search projection returns a no-op checkpoint when there are no pending scoped events. The project task claims repository-scoped canonical
-outbox rows and rebuilds ref manifests, lexical/vector search, affected causal graphs, redirect
+tree and a new head stops at known parents. With an unchanged head, blob parsing and Daytona/Codex generation are reused and manifest/search projection returns a no-op checkpoint when there are no pending scoped events. The project task runs the manifest, search, reconciliation, and graph consumers over their own canonical outbox deliveries and rebuilds ref manifests, lexical/vector search, affected causal graphs, redirect
 reconciliation, retention, and the immutable graph. The ontology worker continuously drains remaining events while idle; global redirect/identity changes fan out across repositories and events are acknowledged only after affected projections succeed. Ontology list polling loads
 the newest full graph plus graph summaries; it does not hydrate historical node
 and edge collections.
@@ -123,10 +122,13 @@ capability roles:
 DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate -- --install-roles
 ```
 
-Grant `jina_ontology_writer` to the dedicated application login and
-`jina_ontology_reader` to reporting logins. Do not make either login the schema
-owner. The writer receives table DML and function execution only; the reader
-receives SELECT and function execution only. The migration also revokes PUBLIC
+Grant the matching `jina_ontology_intake`, `jina_ontology_code`, `jina_ontology_knowledge`,
+`jina_ontology_manifest`, `jina_ontology_search`, `jina_ontology_reconciliation`,
+`jina_ontology_graph`, or `jina_ontology_query` capability to a split service login.
+The modular-monolith login may use compatibility aggregate `jina_ontology_writer`;
+reporting logins use `jina_ontology_reader`. Do not make application logins the schema
+owner. Each component role can mutate only its owned outputs and canonical outbox deliveries.
+The migration also revokes PUBLIC
 access and configures matching default privileges for subsequently created
 Ontology objects. Composite foreign keys prevent new cross-tenant references,
 while partial unique indexes serialize live assertion candidates and

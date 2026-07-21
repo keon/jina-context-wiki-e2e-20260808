@@ -3,11 +3,12 @@ import {
   createEmptyBoardState,
   reduceBoard,
   supersedeEpochTasks,
+  supersedeTaskTree,
   type BoardState,
   type CommandActor,
   type TaskId
 } from "@jina/board";
-import { isIssueTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina/github";
+import { isIssueTrigger, isOntologyTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina/github";
 import { planPrReview, type PrReviewPlan } from "@jina/review";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 
@@ -53,6 +54,8 @@ export function ingestGitHubWebhook(
     next = ingestPullRequest(next, webhook, tenantId, options);
   } else if (isIssueTrigger(webhook.event)) {
     next = ingestIssue(next, webhook, tenantId, options);
+  } else if (isOntologyTrigger(webhook.event)) {
+    next = ingestOntologyPush(next, webhook, tenantId, options);
   } else {
     return { state, outcome: "ignored", createdTaskIds: [] };
   }
@@ -63,6 +66,84 @@ export function ingestGitHubWebhook(
     outcome: createdTaskIds.length > 0 ? "created" : "duplicate",
     createdTaskIds
   };
+}
+
+function ingestOntologyPush(
+  state: GitHubIntakeState,
+  webhook: ParsedGitHubWebhook,
+  tenantId: string,
+  options: GitHubIntakeOptions
+): GitHubIntakeState {
+  if (!isOntologyTrigger(webhook.event)) return state;
+  const ref = webhook.event.ref.slice("refs/heads/".length);
+  const requestKey = `push:${webhook.event.headSha}`;
+  const latestRoot = state.board.tasks.filter((task) =>
+    task.type === "ontology_build" && task.metadata.tenantId === tenantId &&
+    task.metadata.repository === webhook.repository && task.metadata.ref === ref
+  ).at(-1);
+  if (latestRoot?.metadata.githubHeadSha === webhook.event.headSha) return state;
+  const taskKey = `task_ontology:${tenantId}:${webhook.repository}:${ref}:delivery:${options.deliveryId}`;
+  const rootId = entityId<"task">(`${taskKey}:root`);
+
+  const actor: CommandActor = { type: "github", id: `github-delivery:${options.deliveryId}` };
+  let board = supersedeTaskTree(state.board, options.now, (task) =>
+    task.type.startsWith("ontology_") &&
+    task.metadata.tenantId === tenantId &&
+    task.metadata.repository === webhook.repository &&
+    task.metadata.ref === ref &&
+    task.metadata.requestKey !== requestKey
+  );
+  const commonMetadata = {
+    tenantId,
+    repository: webhook.repository,
+    ref,
+    requestKey,
+    githubDeliveryId: options.deliveryId,
+    githubHeadSha: webhook.event.headSha,
+    ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
+    ...(webhook.installationId !== undefined ? { githubInstallationId: webhook.installationId } : {})
+  };
+  const ingestId = entityId<"task">(`${taskKey}:ingest`);
+  const assertionId = entityId<"task">(`${taskKey}:assert`);
+  const projectionId = entityId<"task">(`${taskKey}:project`);
+  const tasks = [
+    {
+      id: rootId, type: "ontology_build", kind: "aggregate" as const,
+      title: `Build Ontology for ${webhook.repository}@${ref}`, assigneeRole: "system",
+      dedupeKey: `ontology:${tenantId}:${webhook.repository}:${ref}:${options.deliveryId}:root`, required: true,
+      metadata: commonMetadata
+    },
+    {
+      id: ingestId, type: "ontology_ingest", kind: "dispatchable" as const,
+      title: `Aggregate raw repository data for ${webhook.repository}@${ref}`, assigneeRole: "ontology_worker",
+      dedupeKey: `ontology:${tenantId}:${webhook.repository}:${ref}:${options.deliveryId}:ingest`, required: true,
+      dispatchTopic: "run-ontology-ingest", parentTaskId: rootId, metadata: commonMetadata
+    },
+    {
+      id: assertionId, type: "ontology_assert", kind: "dispatchable" as const,
+      title: `Derive assertions for ${webhook.repository}@${ref}`, assigneeRole: "ontology_worker",
+      dedupeKey: `ontology:${tenantId}:${webhook.repository}:${ref}:${options.deliveryId}:assert`, required: true,
+      dispatchTopic: "run-ontology-assert", parentTaskId: rootId, metadata: commonMetadata
+    },
+    {
+      id: projectionId, type: "ontology_project", kind: "dispatchable" as const,
+      title: `Project Ontology for ${webhook.repository}@${ref}`, assigneeRole: "ontology_worker",
+      dedupeKey: `ontology:${tenantId}:${webhook.repository}:${ref}:${options.deliveryId}:project`, required: true,
+      dispatchTopic: "run-ontology-project", parentTaskId: rootId, metadata: commonMetadata
+    }
+  ];
+  for (const task of tasks) {
+    board = applyCommand(board, { command: "CreateTask", task }, { actor, now: options.now }).state;
+  }
+  board = applyCommand(board, {
+    command: "LinkTask",
+    dependency: { taskId: assertionId, dependsOnTaskId: ingestId, relationship: "blocks", required: true, blocksParentCompletion: true }
+  }, { actor, now: options.now }).state;
+  board = applyCommand(board, {
+    command: "LinkTask",
+    dependency: { taskId: projectionId, dependsOnTaskId: assertionId, relationship: "blocks", required: true, blocksParentCompletion: true }
+  }, { actor, now: options.now }).state;
+  return { ...state, board: reduceBoard(board, options.now) };
 }
 
 function ingestPullRequest(
