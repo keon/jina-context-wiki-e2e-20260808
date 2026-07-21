@@ -228,7 +228,7 @@ jobs:
 
       - name: Verify task worker health
         run: |
-          curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-task-worker.outputs.url }}/health" | jq -e '.ok == true and .topics == ["run-review", "run-research", "run-publish", "run-cleanup"] and ((keys - ["active", "lastApiSuccessAt", "lastWork", "ok", "topics", "workerId"]) | length == 0) and (.lastWork == null or ((.lastWork | keys) - ["failureCategory", "finishedAt", "outcome", "topic"] | length == 0))'
+          curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-task-worker.outputs.url }}/health" | jq -e '.ok == true and .topics == ["run-review", "run-research", "run-publish", "run-cleanup"] and ((keys - ["active", "consecutiveApiFailures", "lastApiError", "lastApiErrorAt", "lastApiSuccessAt", "lastWork", "ok", "topics", "workerId"]) | length == 0) and (.lastWork == null or ((.lastWork | keys) - ["failureCategory", "finishedAt", "outcome", "topic"] | length == 0))'
 
       - name: Build and push dashboard image
         uses: docker/build-push-action@v7
