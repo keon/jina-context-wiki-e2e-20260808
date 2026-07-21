@@ -18,6 +18,7 @@ import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.
 
 const SECRET = "test-webhook-secret";
 const INTERNAL_TOKEN = "test-internal-token";
+const GRAPH_TOKEN = "test-graph-token";
 const TENANT = "github:installation:99";
 
 test("signed GitHub App deliveries create idempotent PR and issue tasks", async (context) => {
@@ -775,15 +776,16 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
   const graphB = fixtureGraph({ tenantId, repository: "other/b", ref: "main", taskId: "tenant-graph-b" });
   await ontologyStore.save(graphA);
   await ontologyStore.save(graphB);
-  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId });
+  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, graphApiToken: GRAPH_TOKEN, tenantId });
   const baseUrl = await listen(server);
-  const sync = (principalId: string, repositories: readonly string[]) => fetch(`${baseUrl}/internal/graph/access/sync`, {
+  const sync = (principalId: string, repositories: readonly string[], token = GRAPH_TOKEN) => fetch(`${baseUrl}/internal/graph/access/sync`, {
     method: "POST",
-    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify({ principalId, repositories })
   });
   try {
     assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs`)).status, 401);
+    assert.equal((await sync(principalA, ["omxyz/a"], INTERNAL_TOKEN)).status, 401);
     assert.equal((await sync(principalA, ["omxyz/a"])).status, 200);
     assert.equal((await sync(principalB, ["other/b"])).status, 200);
 

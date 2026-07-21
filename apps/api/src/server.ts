@@ -76,6 +76,8 @@ export interface ApiServerConfig {
   readonly stateStore?: ApiStateStore;
   readonly ontologyStore?: OntologyGraphStore;
   readonly internalApiToken?: string;
+  /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
+  readonly graphApiToken?: string;
   readonly principalId?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   /** Browser origins allowed to call the MCP endpoint. Non-browser clients normally omit Origin. */
@@ -371,7 +373,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (request.method === "POST" && url.pathname === "/internal/graph/access/sync") {
-      if (!config.internalApiToken || firstHeader(request.headers.authorization) !== `Bearer ${config.internalApiToken}` || !config.tenantId) {
+      if (!config.graphApiToken || firstHeader(request.headers.authorization) !== `Bearer ${config.graphApiToken}` || !config.tenantId) {
         json(response, 401, { error: "unauthorized" });
         return;
       }
@@ -393,7 +395,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
-    const principal = authenticatedPrincipal(request, config);
+    const principal = authenticatedPrincipal(request, config, url.pathname);
     if (!principal) {
       json(response, 401, { accepted: false, error: "unauthorized" });
       return;
@@ -1180,14 +1182,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   return server;
 }
 
-function authenticatedPrincipal(request: IncomingMessage, config: ApiServerConfig): { readonly tenantId: string; readonly principalId: string } | undefined {
+function authenticatedPrincipal(
+  request: IncomingMessage,
+  config: ApiServerConfig,
+  pathname: string
+): { readonly tenantId: string; readonly principalId: string } | undefined {
   if (config.enableDevEndpoints) {
     return {
       tenantId: firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default",
       principalId: config.principalId ?? "svc:dev"
     };
   }
-  if (!config.internalApiToken || firstHeader(request.headers.authorization) !== `Bearer ${config.internalApiToken}`) return undefined;
+  const authorization = firstHeader(request.headers.authorization);
+  const hasInternalAccess = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
+  const hasGraphAccess = Boolean(config.graphApiToken && authorization === `Bearer ${config.graphApiToken}` && isPublicGraphRoute(pathname));
+  if (!hasInternalAccess && !hasGraphAccess) return undefined;
   if (!config.tenantId) return undefined;
   const principalId = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))
     ?? config.principalId
