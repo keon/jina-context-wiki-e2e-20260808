@@ -73,7 +73,71 @@ interface EdgeRow {
   plane: OntologyEdge["plane"];
   confidence: number | null;
   why: string | null;
+  qualifiers: Readonly<Record<string, string | number | boolean>>;
   evidence: readonly string[];
+}
+
+const RESTORE_GITHUB_ENTITY_LABELS_SQL = `
+  with latest as (
+    select distinct on (payload->>'kind',payload->>'number') payload
+    from jina_ontology.observations
+    where tenant_id=$1 and repository=$2 and source='github' and redacted_at is null
+      and payload->>'kind' in ('issue','pull_request')
+      and payload->>'number' is not null and payload->>'title' is not null
+    order by payload->>'kind',payload->>'number',coalesce(occurred_at,recorded_at) desc,recorded_at desc,id desc
+  ), labels as (
+    select case payload->>'kind' when 'issue' then 'Issue' else 'PullRequest' end as kind,
+           case payload->>'kind'
+             when 'issue' then 'github:issue:' || $2 || '#' || (payload->>'number')
+             else 'github:pr:' || $2 || '#' || (payload->>'number')
+           end as natural_key,
+           '#' || (payload->>'number') || ' ' || (payload->>'title') as display_name
+    from latest
+  )
+  update jina_ontology.entities e set display_name=labels.display_name
+  from labels
+  where e.tenant_id=$1 and e.kind=labels.kind and e.natural_key=labels.natural_key
+    and e.display_name is distinct from labels.display_name`;
+
+function assertionNaturalKey(
+  assertion: Pick<StoredAssertion, "subject" | "predicate" | "object" | "qualifiers">
+): string {
+  return `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
+}
+
+async function lockAssertionNaturalKey(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  subjectId: string,
+  predicate: string,
+  objectId: string,
+  qualifiersHash: string,
+  cardinality: "one" | "many"
+): Promise<void> {
+  const naturalKey = cardinality === "one"
+    ? `${tenantId}:${repository}:${subjectId}:${predicate}:${qualifiersHash}`
+    : `${tenantId}:${repository}:${subjectId}:${predicate}:${objectId}:${qualifiersHash}`;
+  await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [naturalKey]);
+}
+
+async function findLiveAssertionByNaturalKey(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  subjectId: string,
+  predicate: string,
+  objectId: string,
+  qualifiersHash: string
+): Promise<{ readonly id: string; readonly status: "proposed" | "active" } | undefined> {
+  const result = await client.query<{ id: string; status: "proposed" | "active" }>(
+    `select id,status from jina_ontology.assertions
+     where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and object_id=$5 and qualifiers_hash=$6
+       and status in ('proposed','active')
+     order by recorded_at,id limit 1`,
+    [tenantId, repository, subjectId, predicate, objectId, qualifiersHash]
+  );
+  return result.rows[0];
 }
 
 interface GraphSummaryRow extends GraphRow {
@@ -121,12 +185,19 @@ interface BlobSymbolRow {
   end_line: number;
 }
 
+export interface PostgresOntologyGraphStoreConfig extends PoolConfig {
+  readonly manageSchema?: boolean;
+}
+
 export class PostgresOntologyGraphStore implements OntologyGraphStore {
   private readonly pool: Pool;
+  private readonly manageSchema: boolean;
   private initialized?: Promise<void>;
 
-  constructor(config: PoolConfig) {
-    this.pool = new Pool({ ...config, application_name: "jina-ontology", max: config.max ?? 5 });
+  constructor(config: PostgresOntologyGraphStoreConfig) {
+    const { manageSchema = true, ...poolConfig } = config;
+    this.manageSchema = manageSchema;
+    this.pool = new Pool({ ...poolConfig, application_name: "jina-ontology", max: poolConfig.max ?? 5 });
   }
 
   async save(graph: OntologyGraph): Promise<void> {
@@ -273,29 +344,20 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            on conflict do nothing`,
           [snapshot.tenantId, uniqueBlobs.map(([sha]) => sha), uniqueBlobs.map(([, size]) => size)]
         );
-        await client.query(
-          `insert into jina_ontology.commit_files (tenant_id,repository,commit_sha,path,blob_sha)
-           select $1,$2,$3,source.path,source.blob_sha
-           from unnest($4::text[],$5::text[]) as source(path,blob_sha)
-           on conflict do nothing`,
-          [snapshot.tenantId, snapshot.repository, snapshot.commitSha,
-            snapshot.files.map((file) => file.path), snapshot.files.map((file) => file.blobSha)]
-        );
       }
       const missing = await client.query<{ blob_sha: string; path: string; byte_size: number }>(
-        `select distinct on (f.blob_sha) f.blob_sha, f.path, b.byte_size
-         from jina_ontology.commit_files f
-         join jina_ontology.blobs b on b.tenant_id=f.tenant_id and b.blob_sha=f.blob_sha
+        `select distinct on (source.blob_sha) source.blob_sha,source.path,b.byte_size
+         from unnest($2::text[],$3::text[]) source(path,blob_sha)
+         join jina_ontology.blobs b on b.tenant_id=$1 and b.blob_sha=source.blob_sha
          left join jina_ontology.blob_analyses a
-           on a.tenant_id=f.tenant_id and a.blob_sha=f.blob_sha and a.parser_version=$4
-         where f.tenant_id=$1 and f.repository=$2 and f.commit_sha=$3 and a.blob_sha is null
-         order by f.blob_sha, f.path`,
-        [snapshot.tenantId, snapshot.repository, snapshot.commitSha, ONTOLOGY_PARSER_VERSION]
+           on a.tenant_id=$1 and a.blob_sha=source.blob_sha and a.parser_version=$4
+         where a.blob_sha is null order by source.blob_sha,source.path`,
+        [snapshot.tenantId, snapshot.files.map((file) => file.path),
+          snapshot.files.map((file) => file.blobSha), ONTOLOGY_PARSER_VERSION]
       );
       const parentFiles = snapshot.parents[0]
         ? await client.query<{ path: string; blob_sha: string }>(
-            `select path,blob_sha from jina_ontology.commit_files
-             where tenant_id=$1 and repository=$2 and commit_sha=$3`,
+            `select path,blob_sha from jina_ontology.commit_manifest($1,$2,$3)`,
             [snapshot.tenantId, snapshot.repository, snapshot.parents[0]]
           )
         : { rows: [] as { path: string; blob_sha: string }[] };
@@ -351,8 +413,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await client.query("begin");
       for (const analysis of analyses) {
         const known = await client.query(
-          `select 1 from jina_ontology.commit_files
-           where tenant_id=$1 and repository=$2 and commit_sha=$3 and blob_sha=$4 limit 1`,
+          `select 1 from jina_ontology.commit_manifest($1,$2,$3)
+           where blob_sha=$4 limit 1`,
           [scope.tenantId, scope.repository, scope.commitSha, analysis.blobSha]
         );
         if (known.rowCount !== 1) throw new Error(`blob ${analysis.blobSha} is not in the recorded snapshot`);
@@ -437,14 +499,15 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             observationId, repoId: observation.repository
           }, observation.recordedAt);
         } else confirmedObservationCount += 1;
-        const shouldReconcile = observation.kind === "codeowners"
+        const currentSourceSnapshot = observation.kind === "codeowners"
           ? insertedObservation.rowCount === 1
-          : insertedObservation.rowCount === 1 && await isLatestGitHubWorkItemObservation(client, observation, observationId);
+          : await isLatestGitHubWorkItemObservation(client, observation, observationId);
+        const shouldReconcile = insertedObservation.rowCount === 1 && currentSourceSnapshot;
         const entityIds = new Map<string, string>();
         for (const entity of normalized.entities) {
           const id = await ensureEntity(client, observation.tenantId, {
             kind: entity.kind, naturalKey: entity.key, label: entity.displayName
-          }, observation.recordedAt, shouldReconcile);
+          }, observation.recordedAt, currentSourceSnapshot);
           entityIds.set(`${entity.kind}:${entity.key}`, id);
         }
         if (normalized.githubIdentity) {
@@ -465,37 +528,83 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           const objectId = entityIds.get(`${intent.object.kind}:${intent.object.key}`)!;
           const qualifiers = intent.qualifiers ?? {};
           const qualifiersHash = stableId("q", canonicalJson(qualifiers));
-          const assertionId = stableId("assertion", `${observation.tenantId}:${subjectId}:${intent.predicate}:${objectId}:${qualifiersHash}`);
-          desiredAssertionIds.push(assertionId);
-          if (shouldReconcile && predicateDefinition(intent.predicate).cardinality === "one") {
-            await client.query(
-              `update jina_ontology.assertions set status='superseded',valid_to=$5,superseded_by=$6
-               where tenant_id=$1 and subject_id=$2 and predicate=$3 and qualifiers_hash=$4 and status='active' and id<>$6`,
-              [observation.tenantId, subjectId, intent.predicate, qualifiersHash, observation.recordedAt, assertionId]
-            );
+          const assertionId = stableId("assertion", `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${qualifiersHash}`);
+          const definition = predicateDefinition(intent.predicate);
+          await lockAssertionNaturalKey(
+            client, observation.tenantId, observation.repository, subjectId, intent.predicate, objectId, qualifiersHash, definition.cardinality
+          );
+          const existingLive = await findLiveAssertionByNaturalKey(
+            client, observation.tenantId, observation.repository, subjectId, intent.predicate, objectId, qualifiersHash
+          );
+          if (existingLive && existingLive.id !== assertionId) {
+            desiredAssertionIds.push(existingLive.id);
+            if (shouldReconcile) {
+              await client.query(
+                `update jina_ontology.assertions set last_confirmed_at=greatest(last_confirmed_at,$3)
+                 where tenant_id=$1 and id=$2`,
+                [observation.tenantId, existingLive.id, observation.recordedAt]
+              );
+              await insertOutbox(client, observation.tenantId, "assertion_changed", existingLive.id, {
+                assertionId: existingLive.id, repoId: observation.repository
+              }, observation.recordedAt);
+              if (definition.cardinality === "one") {
+                const superseded = await client.query<{ id: string }>(
+                  `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$7
+                   where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5
+                     and status='active' and id<>$7 returning id`,
+                  [observation.tenantId, observation.repository, subjectId, intent.predicate, qualifiersHash, observation.recordedAt, existingLive.id]
+                );
+                for (const row of superseded.rows) {
+                  await insertOutbox(client, observation.tenantId, "assertion_changed", row.id, {
+                    assertionId: row.id, repoId: observation.repository, status: "superseded"
+                  }, observation.recordedAt);
+                }
+              }
+            }
+            assertionCount += 1;
+            continue;
           }
+          desiredAssertionIds.push(assertionId);
           await client.query(
             `insert into jina_ontology.assertions as current
-              (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
+             (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
                object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,source_observation_id,
                generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,generator,last_confirmed_at)
-             values ($1,$2,$3,'source',$4,$5,$6,$7,$8,$9,$10,$11,$12,case when $19 then 'active' else 'retracted' end,1,'[]'::jsonb,$13,
+             values ($1,$2,$3,'source',$4,$5,$6,$7,$8,$9,$10,$11,$12,
+               case when $19 and $20 then 'proposed' when $19 then 'active' else 'retracted' end,1,'[]'::jsonb,$13,
                'github-normalizer-v1',$14,$15,$16::jsonb,$17,$18,$15)
              on conflict (id) do update set
                last_confirmed_at=greatest(current.last_confirmed_at,excluded.last_confirmed_at),
                source_observation_id=case when $19 then excluded.source_observation_id else current.source_observation_id end,
                subject_label=case when $19 then excluded.subject_label else current.subject_label end,
                object_label=case when $19 then excluded.object_label else current.object_label end,
-               status=case when $19 then 'active' else current.status end,
+               status=case when $19 and $20 then 'proposed' when $19 then 'active' else current.status end,
                valid_to=case when $19 then null else current.valid_to end`,
             [assertionId, observation.tenantId, observation.repository, subjectId, intent.subject.kind, intent.subject.key,
               intent.subject.displayName, intent.predicate, objectId, intent.object.kind, intent.object.key,
               intent.object.displayName, observationId, ONTOLOGY_REGISTRY_VERSION, observation.recordedAt,
               JSON.stringify(qualifiers), qualifiersHash, observation.kind === "codeowners" ? "source:codeowners" : "source:github",
-              shouldReconcile]
+              shouldReconcile, definition.cardinality === "one"]
           );
           assertionCount += 1;
           if (shouldReconcile) {
+            if (definition.cardinality === "one") {
+              const superseded = await client.query<{ id: string }>(
+                `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$7
+                 where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5
+                   and status='active' and id<>$7 returning id`,
+                [observation.tenantId, observation.repository, subjectId, intent.predicate, qualifiersHash, observation.recordedAt, assertionId]
+              );
+              for (const row of superseded.rows) {
+                await insertOutbox(client, observation.tenantId, "assertion_changed", row.id, {
+                  assertionId: row.id, repoId: observation.repository, status: "superseded"
+                }, observation.recordedAt);
+              }
+              await client.query(
+                `update jina_ontology.assertions set status='active' where tenant_id=$1 and id=$2`,
+                [observation.tenantId, assertionId]
+              );
+            }
             await insertOutbox(client, observation.tenantId, "assertion_changed", assertionId, {
               assertionId, repoId: observation.repository, status: "active"
             }, observation.recordedAt);
@@ -579,17 +688,27 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     evidenceFingerprint: string
   ): Promise<OntologyAssertionResult | undefined> {
     await this.initialize();
-    const observationId = assertionObservationId({ tenantId, repository, commitSha, generatorVersion, registryVersion, evidenceFingerprint });
-    const generated = await this.pool.query("select 1 from jina_ontology.model_outputs where observation_id=$1", [observationId]);
-    if (generated.rowCount !== 1) return undefined;
+    const generated = await this.pool.query<{ observation_id: string; evidence_fingerprint: string }>(
+      `select id as observation_id,payload->>'evidenceFingerprint' as evidence_fingerprint
+       from jina_ontology.observations
+       where id=$1 and tenant_id=$2 and repository=$3 and type='model_output'
+         and redacted_at is null and payload is not null`,
+      [
+        assertionObservationId({ tenantId, repository, commitSha, generatorVersion, registryVersion, evidenceFingerprint }),
+        tenantId,
+        repository
+      ]
+    );
+    const row = generated.rows[0];
+    if (!row?.evidence_fingerprint) return undefined;
     return this.assertionResult(
       tenantId,
       repository,
       commitSha,
       generatorVersion,
       registryVersion,
-      evidenceFingerprint,
-      observationId,
+      row.evidence_fingerprint,
+      row.observation_id,
       true
     );
   }
@@ -603,54 +722,63 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     try {
       await client.query("begin");
       const inserted = await client.query(
-        `insert into jina_ontology.model_outputs
-          (observation_id,tenant_id,repository,commit_sha,generator_version,registry_version,model,summary,generated_at,payload)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)
-         on conflict do nothing returning observation_id`,
-        [observationId, batch.tenantId, batch.repository, batch.commitSha, batch.generatorVersion,
-          batch.registryVersion, batch.model, batch.summary, batch.generatedAt, JSON.stringify(batch)]
+        `insert into jina_ontology.observations
+          (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
+         values ($1,$2,$3,'model_output',$4,$5,$6,$7::jsonb,$8)
+         on conflict do nothing returning id`,
+        [observationId, batch.tenantId, `model:${batch.model}`,
+          `${batch.repository}:${batch.commitSha}:${batch.generatorVersion}:${batch.registryVersion}:${batch.evidenceFingerprint}`,
+          batch.repository, batch.generatedAt, JSON.stringify(batch), stableId("sha", JSON.stringify(batch))]
       );
       if (inserted.rowCount === 1) {
-        await client.query(
-          `insert into jina_ontology.observations
-            (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
-           values ($1,$2,$3,'model_output',$4,$5,$6,$7::jsonb,$8) on conflict do nothing`,
-          [observationId, batch.tenantId, `model:${batch.model}`,
-            `${batch.repository}:${batch.commitSha}:${batch.generatorVersion}:${batch.registryVersion}:${batch.evidenceFingerprint}`,
-            batch.repository, batch.generatedAt, JSON.stringify(batch), stableId("sha", JSON.stringify(batch))]
-        );
         await insertOutbox(client, batch.tenantId, "observation_recorded", observationId, {
           observationId, repoId: batch.repository
         }, batch.generatedAt);
-        const retracted = await client.query<{ id: string }>(
-          `update jina_ontology.assertions set status='retracted',valid_to=$6
-           where tenant_id=$1 and repository=$2 and commit_sha=$3 and generator_version=$4
-             and generator=$5 and source_observation_id<>$7 and status in ('active','proposed')
-           returning id`,
-          [batch.tenantId, batch.repository, batch.commitSha, batch.generatorVersion,
-            `model:${batch.generatorVersion}`, batch.generatedAt, observationId]
-        );
-        for (const row of retracted.rows) {
-          await insertOutbox(client, batch.tenantId, "assertion_changed", row.id, {
-            assertionId: row.id, repoId: batch.repository, status: "retracted"
-          }, batch.generatedAt);
-        }
         for (const assertion of assertions) {
-          const subjectId = await ensureEntity(client, batch.tenantId, assertion.subject, batch.generatedAt);
-          const objectId = await ensureEntity(client, batch.tenantId, assertion.object, batch.generatedAt);
+          // Model observations may introduce entities, but they must not rename
+          // identities already established by deterministic source intake.
+          const subjectId = await ensureEntity(client, batch.tenantId, assertion.subject, batch.generatedAt, false);
+          const objectId = await ensureEntity(client, batch.tenantId, assertion.object, batch.generatedAt, false);
+          const qualifiersHash = stableId("q", canonicalJson(assertion.qualifiers ?? {}));
+          await lockAssertionNaturalKey(
+            client,
+            batch.tenantId,
+            batch.repository,
+            subjectId,
+            assertion.predicate,
+            objectId,
+            qualifiersHash,
+            predicateDefinition(assertion.predicate).cardinality
+          );
+          const existingLive = await findLiveAssertionByNaturalKey(
+            client, batch.tenantId, batch.repository, subjectId, assertion.predicate, objectId, qualifiersHash
+          );
+          if (existingLive) {
+            await client.query(
+              `update jina_ontology.assertions
+               set last_confirmed_at=greatest(last_confirmed_at,$3)
+               where tenant_id=$1 and id=$2`,
+              [batch.tenantId, existingLive.id, batch.generatedAt]
+            );
+            await insertOutbox(client, batch.tenantId, "assertion_changed", existingLive.id, {
+              assertionId: existingLive.id, repoId: batch.repository
+            }, batch.generatedAt);
+            continue;
+          }
           await client.query(
             `insert into jina_ontology.assertions
               (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
                predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
                source_observation_id,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,generator,last_confirmed_at)
              values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18,$19,$20,$21::jsonb,$22,$23,$20)
-             on conflict do nothing`,
+             on conflict (id) do update set
+               last_confirmed_at=greatest(jina_ontology.assertions.last_confirmed_at,excluded.last_confirmed_at)`,
             [assertion.id, assertion.tenantId, assertion.repository, assertion.commitSha,
               subjectId, assertion.subject.kind, assertion.subject.naturalKey, assertion.subject.label,
               assertion.predicate, objectId, assertion.object.kind, assertion.object.naturalKey, assertion.object.label,
               assertion.status, assertion.confidence, JSON.stringify(assertion.evidence), assertion.sourceObservationId,
               assertion.generatorVersion, assertion.registryVersion, assertion.recordedAt, JSON.stringify(assertion.qualifiers ?? {}),
-              stableId("q", canonicalJson(assertion.qualifiers ?? {})), `model:${assertion.generatorVersion}`]
+              qualifiersHash, `model:${assertion.generatorVersion}`]
           );
           await insertOutbox(client, batch.tenantId, "assertion_changed", assertion.id, {
             assertionId: assertion.id, repoId: batch.repository, status: assertion.status
@@ -679,6 +807,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
 
   async project(request: OntologyProjectionRequest): Promise<OntologyGraph> {
     await this.initialize();
+    await this.pool.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [request.tenantId, request.repository]);
     const commit = await this.pool.query<{ tree_sha: string; parents: string[]; source_observation_id: string }>(
       `select tree_sha,parents,source_observation_id from jina_ontology.commits
        where tenant_id=$1 and repository=$2 and sha=$3`,
@@ -686,20 +815,24 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     );
     if (!commit.rows[0]) throw new Error("cannot project an ontology before repository ingestion");
     const filesResult = await this.pool.query<{ path: string; blob_sha: string; byte_size: number }>(
-      `select f.path,f.blob_sha,b.byte_size from jina_ontology.commit_files f
-       join jina_ontology.blobs b on b.tenant_id=f.tenant_id and b.blob_sha=f.blob_sha
-       where f.tenant_id=$1 and f.repository=$2 and f.commit_sha=$3 order by f.path`,
+      `select manifest.path,manifest.blob_sha,blob.byte_size
+       from jina_ontology.commit_manifest($1,$2,$3) manifest
+       join jina_ontology.blobs blob on blob.tenant_id=$1 and blob.blob_sha=manifest.blob_sha
+       order by manifest.path`,
       [request.tenantId, request.repository, request.commitSha]
     );
     const analyses = await this.loadAnalyses(request.tenantId, [...new Set(filesResult.rows.map((row) => row.blob_sha))]);
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
       `select * from jina_ontology.assertions
-       where tenant_id=$1 and repository=$2 and status='active' order by recorded_at,id`,
+       where tenant_id=$1 and repository=$2 and status='active' and predicate<>'RESOLVED_BY'
+       order by recorded_at,id`,
       [request.tenantId, request.repository]
       ),
       this.pool.query<{ commit_sha: string; path: string; blob_sha: string }>(
-        `select commit_sha,path,blob_sha from jina_ontology.commit_files where tenant_id=$1 and repository=$2`,
+        `select candidate.commit_sha,manifest.path,manifest.blob_sha
+         from (select distinct commit_sha from jina_ontology.assertions where tenant_id=$1 and repository=$2) candidate
+         cross join lateral jina_ontology.commit_manifest($1,$2,candidate.commit_sha) manifest`,
         [request.tenantId, request.repository]
       ),
       this.pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge"; created_at: Date; id: string }>(
@@ -755,6 +888,25 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         ...("reason" in command && command.reason ? { reason: command.reason } : {})
       });
       if (command.type === "review_assertion") {
+        const candidate = await client.query<{
+          id: string; predicate: string; subject_id: string; object_id: string; qualifiers_hash: string; repository: string;
+        }>(
+          `select id,predicate,subject_id,object_id,qualifiers_hash,repository from jina_ontology.assertions
+           where tenant_id=$1 and id=$2`,
+          [tenantId, command.assertionId]
+        );
+        const pending = candidate.rows[0];
+        if (!pending) throw new Error("assertion not found");
+        await lockAssertionNaturalKey(
+          client,
+          tenantId,
+          pending.repository,
+          pending.subject_id,
+          pending.predicate,
+          pending.object_id,
+          pending.qualifiers_hash,
+          predicateDefinition(pending.predicate).cardinality
+        );
         const selected = await client.query<{
           id: string; status: string; predicate: string; subject_id: string; qualifiers_hash: string; repository: string;
         }>(
@@ -769,21 +921,21 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             : assertion.status === "active";
         if (!allowed) throw new Error(`cannot ${command.decision} assertion in ${assertion.status}`);
         const status = command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
+        if (status === "active" && predicateDefinition(assertion.predicate).cardinality === "one") {
+          const superseded = await client.query<{ id: string }>(
+            `update jina_ontology.assertions set status='superseded',valid_to=$7,superseded_by=$6,audit_id=$8
+             where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5 and status='active' and id<>$6
+             returning id`,
+            [tenantId, assertion.repository, assertion.subject_id, assertion.predicate, assertion.qualifiers_hash, assertion.id, now, auditId]
+          );
+          affectedIds.push(...superseded.rows.map((row) => row.id));
+        }
         await client.query(
           `update jina_ontology.assertions set status=$3,valid_to=case when $3='retracted' then $4 else valid_to end,audit_id=$5
            where tenant_id=$1 and id=$2`,
           [tenantId, assertion.id, status, now, auditId]
         );
         affectedIds.push(assertion.id);
-        if (status === "active" && predicateDefinition(assertion.predicate).cardinality === "one") {
-          const superseded = await client.query<{ id: string }>(
-            `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$5,audit_id=$7
-             where tenant_id=$1 and subject_id=$2 and predicate=$3 and qualifiers_hash=$4 and status='active' and id<>$5
-             returning id`,
-            [tenantId, assertion.subject_id, assertion.predicate, assertion.qualifiers_hash, assertion.id, now, auditId]
-          );
-          affectedIds.push(...superseded.rows.map((row) => row.id));
-        }
         for (const id of affectedIds) {
           outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", id, {
             assertionId: id, repoId: assertion.repository
@@ -914,7 +1066,6 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         await client.query(`update jina_ontology.entities set retired_at=$3 where tenant_id=$1 and natural_key like $2`, [tenantId, `%${command.repository}%`, now]);
         await deleteCodePlaneRepository(client, tenantId, command.repository);
         await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and repository=$2`, [tenantId, command.repository]);
-        await client.query(`delete from jina_ontology.issue_traces where tenant_id=$1 and repository=$2`, [tenantId, command.repository]);
         affectedIds.push(tombstoneId, ...retracted.rows.map((row) => row.id));
         outboxEventIds.push(await insertOutbox(client, tenantId, "tombstone", tombstoneId, { scope: { repository: command.repository } }, now));
       } else if (command.type === "grant_repository_access") {
@@ -926,6 +1077,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         affectedIds.push(`${command.repository}:${command.principalId}`);
       } else if (command.type === "assign_relationship") {
         const definition = predicateDefinition(command.predicate);
+        const repositoryScope = command.repository ?? "";
         validatePredicateEndpoints(definition, command.subject.kind, command.object.kind);
         validateQualifiers(definition, command.qualifiers);
         const subjectId = await ensureEntity(client, tenantId, {
@@ -936,30 +1088,73 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         }, now);
         const qualifiers = command.qualifiers ?? {};
         const qualifiersHash = stableId("q", canonicalJson(qualifiers));
-        const assertionId = stableId("assertion", `${tenantId}:${subjectId}:${definition.name}:${objectId}:${qualifiersHash}:${now}`);
-        if (definition.cardinality === "one") {
-          const superseded = await client.query<{ id: string }>(
-            `update jina_ontology.assertions set status='superseded',valid_to=$5,superseded_by=$6,audit_id=$7
-             where tenant_id=$1 and subject_id=$2 and predicate=$3 and qualifiers_hash=$4 and status='active' returning id`,
-            [tenantId, subjectId, definition.name, qualifiersHash, now, assertionId, auditId]
-          );
-          affectedIds.push(...superseded.rows.map((row) => row.id));
-        }
-        await client.query(
-          `insert into jina_ontology.assertions
-            (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
-             object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,asserted_by,generator_version,
-             registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at,audit_id)
-           values ($1,$2,$3,'command',$4,$5,$6,$7,$8,$9,$10,$11,$12,'active',1,'[]'::jsonb,$13,'command',$14,$15,$16::jsonb,$17,$15,$18)`,
-          [assertionId, tenantId, command.repository ?? "", subjectId, command.subject.kind, command.subject.key,
-            command.subject.displayName ?? command.subject.key, definition.name, objectId, command.object.kind, command.object.key,
-            command.object.displayName ?? command.object.key, actorId, ONTOLOGY_REGISTRY_VERSION, now,
-            JSON.stringify(qualifiers), qualifiersHash, auditId]
+        const assertionId = stableId("assertion", `${tenantId}:${repositoryScope}:${subjectId}:${definition.name}:${objectId}:${qualifiersHash}:${now}`);
+        await lockAssertionNaturalKey(
+          client, tenantId, repositoryScope, subjectId, definition.name, objectId, qualifiersHash, definition.cardinality
         );
-        affectedIds.push(assertionId);
-        outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", assertionId, {
-          assertionId, repoId: command.repository ?? null, status: "active"
-        }, now));
+        const existingLive = await findLiveAssertionByNaturalKey(
+          client, tenantId, repositoryScope, subjectId, definition.name, objectId, qualifiersHash
+        );
+        if (existingLive) {
+          if (definition.cardinality === "one") {
+            const superseded = await client.query<{ id: string }>(
+              `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$7,audit_id=$8
+               where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5
+                 and status='active' and id<>$7 returning id`,
+              [tenantId, repositoryScope, subjectId, definition.name, qualifiersHash, now, existingLive.id, auditId]
+            );
+            affectedIds.push(...superseded.rows.map((row) => row.id));
+            for (const row of superseded.rows) {
+              outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", row.id, {
+                assertionId: row.id, repoId: command.repository ?? null, status: "superseded"
+              }, now));
+            }
+          }
+          await client.query(
+            `update jina_ontology.assertions
+             set status='active',last_confirmed_at=greatest(last_confirmed_at,$3),audit_id=$4
+             where tenant_id=$1 and id=$2`,
+            [tenantId, existingLive.id, now, auditId]
+          );
+          affectedIds.push(existingLive.id);
+          outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", existingLive.id, {
+            assertionId: existingLive.id, repoId: command.repository ?? null, status: "active"
+          }, now));
+        } else {
+          await client.query(
+            `insert into jina_ontology.assertions
+              (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
+               object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,asserted_by,generator_version,
+               registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at,audit_id)
+             values ($1,$2,$3,'command',$4,$5,$6,$7,$8,$9,$10,$11,$12,$19,1,'[]'::jsonb,$13,'command',$14,$15,$16::jsonb,$17,$15,$18)`,
+            [assertionId, tenantId, repositoryScope, subjectId, command.subject.kind, command.subject.key,
+              command.subject.displayName ?? command.subject.key, definition.name, objectId, command.object.kind, command.object.key,
+              command.object.displayName ?? command.object.key, actorId, ONTOLOGY_REGISTRY_VERSION, now,
+              JSON.stringify(qualifiers), qualifiersHash, auditId, definition.cardinality === "one" ? "proposed" : "active"]
+          );
+          affectedIds.push(assertionId);
+          if (definition.cardinality === "one") {
+            const superseded = await client.query<{ id: string }>(
+              `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$7,audit_id=$8
+               where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5
+                 and status='active' and id<>$7 returning id`,
+              [tenantId, repositoryScope, subjectId, definition.name, qualifiersHash, now, assertionId, auditId]
+            );
+            affectedIds.push(...superseded.rows.map((row) => row.id));
+            for (const row of superseded.rows) {
+              outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", row.id, {
+                assertionId: row.id, repoId: command.repository ?? null, status: "superseded"
+              }, now));
+            }
+            await client.query(
+              `update jina_ontology.assertions set status='active' where tenant_id=$1 and id=$2`,
+              [tenantId, assertionId]
+            );
+          }
+          outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", assertionId, {
+            assertionId, repoId: command.repository ?? null, status: "active"
+          }, now));
+        }
       }
       await client.query("commit");
       return { auditId, action: command.type, affectedIds, outboxEventIds };
@@ -976,18 +1171,25 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
-  async rebuildDerivedProjections(tenantId: string, repository: string, ref: string, now: string): Promise<ProjectionRebuildResult> {
+  async rebuildDerivedProjections(
+    tenantId: string,
+    repository: string,
+    ref: string,
+    now: string,
+    force = false
+  ): Promise<ProjectionRebuildResult> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await client.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [tenantId, repository]);
       const claimed = await client.query<{ id: string; event_type: string; payload: Record<string, unknown> }>(
         `with candidates as (
            select id from jina_ontology.outbox
            where tenant_id=$1 and processed_at is null and available_at<=now()
              and (claim_expires_at is null or claim_expires_at<now())
              and coalesce(payload->>'repoId',payload#>>'{scope,repository}')=$3
-             and (payload->>'refName' is null or payload->>'refName'=$4)
+             and payload->>'refName'=$4
            order by created_at,id for update skip locked limit 1000
          )
          update jina_ontology.outbox o set claimed_by='projection:' || $3,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
@@ -1000,35 +1202,18 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       );
       const commitSha = head.rows[0]?.commit_sha;
       if (!commitSha) throw new Error("repository ref has not been ingested");
-      if (claimed.rows.length === 0) {
-        const existing = await client.query<{
-          manifest_count: string; search_count: string; issue_entity_count: string; issue_trace_count: string;
-        }>(
+      if (claimed.rows.length === 0 && !force) {
+        const existing = await client.query<{ manifest_count: string; search_count: string }>(
           `select
              (select count(*) from jina_ontology.ref_manifest
               where tenant_id=$1 and repository=$2 and ref_name=$3 and commit_sha=$4) as manifest_count,
              (select count(*) from jina_ontology.search_documents
-              where tenant_id=$1 and repository=$2) as search_count,
-             (select count(*) from jina_ontology.entities e
-              where e.tenant_id=$1 and e.kind='Issue' and e.retired_at is null and (
-                e.natural_key like 'github:issue:' || $2 || '#%' or exists (
-                  select 1 from jina_ontology.assertions a
-                  where a.tenant_id=$1 and a.repository=$2 and a.status='active'
-                    and a.predicate in ('RESOLVES','RESOLVED_BY','INTRODUCED_BY')
-                    and (a.subject_id=e.id or a.object_id=e.id)
-                )
-             )) as issue_entity_count,
-             (select count(*) from jina_ontology.issue_traces
-              where tenant_id=$1 and repository=$2 and ref_name=$3
-                and payload->'issue'->>'entityId'=issue_entity_id
-                and payload->'issue'->>'origin' is not null) as issue_trace_count`,
+              where tenant_id=$1 and repository=$2) as search_count`,
           [tenantId, repository, ref, commitSha]
         );
         const manifestFileCount = Number(existing.rows[0]?.manifest_count ?? 0);
         const searchDocumentCount = Number(existing.rows[0]?.search_count ?? 0);
-        const issueEntityCount = Number(existing.rows[0]?.issue_entity_count ?? 0);
-        const issueTraceCount = Number(existing.rows[0]?.issue_trace_count ?? 0);
-        if (manifestFileCount > 0 && searchDocumentCount > 0 && issueTraceCount === issueEntityCount) {
+        if (manifestFileCount > 0 && searchDocumentCount > 0) {
           await client.query("commit");
           return {
             manifestFileCount,
@@ -1043,8 +1228,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await client.query(`delete from jina_ontology.ref_manifest where tenant_id=$1 and repository=$2 and ref_name=$3`, [tenantId, repository, ref]);
       const manifest = await client.query(
         `insert into jina_ontology.ref_manifest (tenant_id,repository,ref_name,commit_sha,path,blob_sha,projected_at)
-         select tenant_id,repository,$3,commit_sha,path,blob_sha,$5
-         from jina_ontology.commit_files where tenant_id=$1 and repository=$2 and commit_sha=$4`,
+         select $1,$2,$3,$4,path,blob_sha,$5
+         from jina_ontology.commit_manifest($1,$2,$4)`,
         [tenantId, repository, ref, commitSha, now]
       );
 
@@ -1075,18 +1260,6 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           [stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`), tenantId, repository,
             document.source_kind, document.id, document.title, document.body, embeddingForText(`${document.title} ${document.body}`), now]
         );
-      }
-      await projectIssueTraces(client, tenantId, repository, ref, claimed.rows, claimed.rows.length === 0, now);
-      const repositoryWideEvents = claimed.rows.filter((event) => typeof event.payload.refName !== "string");
-      if (repositoryWideEvents.length > 0) {
-        const otherRefs = await client.query<{ ref_name: string }>(
-          `select ref_name from jina_ontology.refs
-           where tenant_id=$1 and repository=$2 and ref_name<>$3 order by ref_name`,
-          [tenantId, repository, ref]
-        );
-        for (const otherRef of otherRefs.rows) {
-          await projectIssueTraces(client, tenantId, repository, otherRef.ref_name, repositoryWideEvents, false, now);
-        }
       }
       const reconciledAssertionCount = await reconcileRedirectCollisions(client, tenantId, now);
       await garbageCollectCodePlane(client, tenantId, now, 90);
@@ -1121,7 +1294,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
     await this.initialize();
     const globalClient = await this.pool.connect();
-    let globalEventIds: readonly string[] = [];
+    let globalEventIds: readonly string[];
+    let pendingRows: readonly { readonly id: string; readonly repository: string }[];
     try {
       await globalClient.query("begin");
       const claimed = await globalClient.query<{ id: string }>(
@@ -1139,6 +1313,22 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         [tenantId, now]
       );
       globalEventIds = claimed.rows.map((row) => row.id);
+      const repositoryEvents = await globalClient.query<{ id: string; repository: string }>(
+        `with candidates as (
+           select id,coalesce(payload->>'repoId',payload#>>'{scope,repository}') as repository
+           from jina_ontology.outbox
+           where tenant_id=$1 and processed_at is null and available_at<=now()
+             and (claim_expires_at is null or claim_expires_at<now())
+             and coalesce(payload->>'repoId',payload#>>'{scope,repository}') is not null
+           order by created_at,id for update skip locked limit 10000
+         )
+         update jina_ontology.outbox o
+         set claimed_by='projection:fanout',claimed_at=$2,
+             claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
+         from candidates where o.id=candidates.id returning o.id,candidates.repository`,
+        [tenantId, now]
+      );
+      pendingRows = repositoryEvents.rows;
       await globalClient.query("commit");
     } catch (error) {
       await globalClient.query("rollback").catch(() => undefined);
@@ -1147,17 +1337,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       globalClient.release();
     }
 
-    const pending = await this.pool.query<{ id: string; repository: string }>(
-      `select id,coalesce(payload->>'repoId',payload#>>'{scope,repository}') as repository
-       from jina_ontology.outbox
-       where tenant_id=$1 and processed_at is null and available_at<=now()
-         and coalesce(payload->>'repoId',payload#>>'{scope,repository}') is not null
-         and (claim_expires_at is null or claim_expires_at<now())
-       order by created_at,id limit 10000`,
-      [tenantId]
-    );
-    const pendingIds = pending.rows.map((row) => row.id);
-    const affectedRepositories = new Set(pending.rows.map((row) => row.repository));
+    const pendingIds = pendingRows.map((row) => row.id);
+    const affectedRepositories = new Set(pendingRows.map((row) => row.repository));
     if (globalEventIds.length > 0) {
       const repositories = await this.pool.query<{ repository: string }>(
         `select distinct repository from jina_ontology.refs where tenant_id=$1`,
@@ -1169,25 +1350,30 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const rebuiltRepositories: string[] = [];
     try {
       for (const repository of [...affectedRepositories].sort()) {
-        const refs = await this.pool.query<{ ref_name: string }>(
-          `select ref_name from jina_ontology.refs
+        const refs = await this.pool.query<{ ref_name: string; commit_sha: string }>(
+          `select ref_name,commit_sha from jina_ontology.refs
            where tenant_id=$1 and repository=$2
            order by is_default desc,ref_name`,
           [tenantId, repository]
         );
         // A tombstoned repository has no ref left to rebuild; the command already
         // purged its derived state, so only its canonical event needs acknowledging.
-        if (refs.rows.length === 0) {
-          await this.ackRepositoryProjectionEvents(tenantId, repository, now);
-          continue;
-        }
+        if (refs.rows.length === 0) continue;
         for (const row of refs.rows) {
-          await this.rebuildDerivedProjections(tenantId, repository, row.ref_name, now);
+          await this.rebuildDerivedProjections(tenantId, repository, row.ref_name, now, true);
+          await this.project({
+            tenantId,
+            repository,
+            ref: row.ref_name,
+            commitSha: row.commit_sha,
+            taskId: `projection-drain:${stableId("scope", `${tenantId}:${repository}:${row.ref_name}:${now}`)}`,
+            generatedAt: now
+          });
         }
         rebuiltRepositories.push(repository);
       }
 
-      if (globalEventIds.length > 0) {
+      if (globalEventIds.length > 0 || pendingIds.length > 0) {
         const client = await this.pool.connect();
         try {
           await client.query("begin");
@@ -1197,6 +1383,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              set processed_at=$2,claimed_by=null,claimed_at=null,claim_expires_at=null,last_error=null
              where id=any($1::text[]) and claimed_by='projection:global'`,
             [globalEventIds, now]
+          );
+          await client.query(
+            `update jina_ontology.outbox
+             set processed_at=$2,claimed_by=null,claimed_at=null,claim_expires_at=null,last_error=null
+             where id=any($1::text[]) and claimed_by='projection:fanout'`,
+            [pendingIds, now]
           );
           await client.query("commit");
         } catch (error) {
@@ -1215,6 +1407,14 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           [globalEventIds, error instanceof Error ? error.message.slice(0, 2000) : String(error).slice(0, 2000)]
         ).catch(() => undefined);
       }
+      if (pendingIds.length > 0) {
+        await this.pool.query(
+          `update jina_ontology.outbox
+           set claimed_by=null,claimed_at=null,claim_expires_at=null,last_error=$2,available_at=now()+interval '30 seconds'
+           where id=any($1::text[]) and claimed_by='projection:fanout'`,
+          [pendingIds, error instanceof Error ? error.message.slice(0, 2000) : String(error).slice(0, 2000)]
+        ).catch(() => undefined);
+      }
       throw error;
     }
 
@@ -1229,17 +1429,6 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       processedEventCount: Number(processed.rows[0]?.count ?? 0),
       rebuiltRepositories
     };
-  }
-
-  private async ackRepositoryProjectionEvents(tenantId: string, repository: string, now: string): Promise<void> {
-    await this.pool.query(
-      `update jina_ontology.outbox
-       set processed_at=$3,claimed_by=null,claimed_at=null,claim_expires_at=null,last_error=null,attempts=attempts+1
-       where tenant_id=$1 and processed_at is null and available_at<=now()
-         and (claim_expires_at is null or claim_expires_at<now())
-         and coalesce(payload->>'repoId',payload#>>'{scope,repository}')=$2`,
-      [tenantId, repository, now]
-    );
   }
 
   async operationalMetrics(tenantId: string, now: string): Promise<OntologyOperationalMetrics> {
@@ -1317,6 +1506,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
               object_kind,object_natural_key,object_label,status,confidence,evidence,qualifiers,coalesce(generator,'unknown') as generator,registry_version
        from jina_ontology.assertions
        where tenant_id=$1 and repository=$2
+         and predicate<>'RESOLVED_BY'
          and ($3::text is null or status=$3)
          and ($4::text is null or predicate=$4)
        order by recorded_at desc,id limit 500`,
@@ -1357,7 +1547,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const items = request.template === "issue_trace"
       ? await retrieveIssueTrace(this.pool, request, ref.ref_name, limit + 1)
       : request.template === "feature_trace"
-        ? await retrieveFeatureTrace(this.pool, request, limit + 1)
+        ? await retrieveFeatureTrace(this.pool, request, ref.ref_name, limit + 1)
       : request.template === "structure"
         ? await retrieveStructure(this.pool, request, ref.ref_name, limit + 1)
         : request.template === "change"
@@ -1398,15 +1588,45 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     observationId: string,
     cached: boolean
   ): Promise<OntologyAssertionResult> {
-    const counts = await this.pool.query<{ status: string; count: string }>(
-      `select status,count(*) from jina_ontology.assertions
-       where tenant_id=$1 and repository=$2 and source_observation_id=$3 group by status`,
-      [tenantId, repository, observationId]
+    const modelOutput = await this.pool.query<{ payload: OntologyAssertionBatch }>(
+      `select payload from jina_ontology.observations
+       where id=$1 and tenant_id=$2 and repository=$3 and type='model_output'
+         and redacted_at is null and payload is not null`,
+      [observationId, tenantId, repository]
     );
-    const count = (status: string) => Number(counts.rows.find((row) => row.status === status)?.count ?? 0);
+    const generatedAssertions = modelOutput.rows[0]
+      ? normalizeAssertionBatchLenient(modelOutput.rows[0].payload).assertions
+      : [];
+    const generatedKeys = new Set(generatedAssertions.map(assertionNaturalKey));
+    const candidates = await this.pool.query<{
+      status: StoredAssertion["status"];
+      subject_kind: OntologyNode["kind"];
+      subject_natural_key: string;
+      predicate: string;
+      object_kind: OntologyNode["kind"];
+      object_natural_key: string;
+      qualifiers: Readonly<Record<string, string | number | boolean>>;
+    }>(
+      `select status,subject_kind,subject_natural_key,predicate,object_kind,object_natural_key,qualifiers
+       from jina_ontology.assertions where tenant_id=$1 and repository=$2
+         and predicate<>'RESOLVED_BY'
+       order by case status when 'active' then 0 when 'proposed' then 1 else 2 end,recorded_at desc,id`,
+      [tenantId, repository]
+    );
+    const selected = new Map<string, StoredAssertion["status"]>();
+    for (const candidate of candidates.rows) {
+      const key = assertionNaturalKey({
+        subject: { kind: candidate.subject_kind, naturalKey: candidate.subject_natural_key, label: "" },
+        predicate: candidate.predicate,
+        object: { kind: candidate.object_kind, naturalKey: candidate.object_natural_key, label: "" },
+        qualifiers: candidate.qualifiers
+      });
+      if (generatedKeys.has(key) && !selected.has(key)) selected.set(key, candidate.status);
+    }
+    const count = (status: string) => [...selected.values()].filter((candidate) => candidate === status).length;
     return {
       observationId,
-      assertionCount: counts.rows.reduce((total, row) => total + Number(row.count), 0),
+      assertionCount: selected.size,
       activeCount: count("active"),
       proposedCount: count("proposed"),
       knowledgeCheckpoint: knowledgeCheckpoint(
@@ -1502,13 +1722,14 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         plane: edge.plane,
         ...(edge.confidence !== null ? { confidence: edge.confidence } : {}),
         ...(edge.why ? { why: edge.why } : {}),
+        ...(Object.keys(edge.qualifiers ?? {}).length > 0 ? { qualifiers: edge.qualifiers } : {}),
         evidence: edge.evidence
       }))
     };
   }
 
   private initialize(): Promise<void> {
-    this.initialized ??= this.createSchema();
+    this.initialized ??= this.manageSchema ? this.createSchema() : Promise.resolve();
     return this.initialized;
   }
 
@@ -1538,10 +1759,10 @@ export async function insertOntologyGraph(client: PoolClient, graph: OntologyGra
   for (const edge of graph.edges) {
     await client.query(
       `insert into jina_ontology.edges
-        (graph_id,edge_id,source_node_id,target_node_id,predicate,plane,confidence,why,evidence)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)`,
+        (graph_id,edge_id,source_node_id,target_node_id,predicate,plane,confidence,why,qualifiers,evidence)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,
       [graph.id, edge.id, edge.source, edge.target, edge.predicate, edge.plane,
-        edge.confidence ?? null, edge.why ?? null, JSON.stringify(edge.evidence)]
+        edge.confidence ?? null, edge.why ?? null, JSON.stringify(edge.qualifiers ?? {}), JSON.stringify(edge.evidence)]
     );
   }
 }
@@ -1573,16 +1794,29 @@ async function ensureEntity(
   updateExisting = true
 ): Promise<string> {
   const id = stableId("entity", `${tenantId}:${entity.kind}:${entity.naturalKey}`);
-  const inserted = await client.query(
-    `insert into jina_ontology.entities as current (id,tenant_id,kind,natural_key,display_name)
+  const inserted = await client.query<{ id: string }>(
+    `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
      values ($1,$2,$3,$4,$5)
-     on conflict (tenant_id,kind,natural_key) do update
-       set display_name=case when $6 then excluded.display_name else current.display_name end
-     returning (xmax = 0) as created`,
-    [id, tenantId, entity.kind, entity.naturalKey, entity.label, updateExisting]
+     on conflict do nothing returning id`,
+    [id, tenantId, entity.kind, entity.naturalKey, entity.label]
   );
-  if (eventAt && inserted.rows[0]?.created === true) await insertOutbox(client, tenantId, "entity_changed", id, { entityId: id }, eventAt);
-  return id;
+  const created = inserted.rows[0]?.id !== undefined;
+  const existing = created
+    ? inserted
+    : await client.query<{ id: string }>(
+        `select id from jina_ontology.entities
+         where tenant_id=$1 and kind=$2 and natural_key=$3`,
+        [tenantId, entity.kind, entity.naturalKey]
+      );
+  const resolvedId = existing.rows[0]?.id;
+  if (!resolvedId) throw new Error("entity id collision");
+  if (!created && updateExisting) {
+    await client.query(`update jina_ontology.entities set display_name=$2 where id=$1`, [resolvedId, entity.label]);
+  }
+  if (eventAt && created) {
+    await insertOutbox(client, tenantId, "entity_changed", resolvedId, { entityId: resolvedId }, eventAt);
+  }
+  return resolvedId;
 }
 
 async function ensureIdentity(
@@ -1715,7 +1949,7 @@ function applicableAssertions(
           return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
         });
     if (!current) continue;
-    const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}`;
+    const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
     const prior = selected.get(key);
     if (!prior || prior.recordedAt < assertion.recordedAt) selected.set(key, assertion);
   }
@@ -1807,10 +2041,11 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
     ),
     client.query<{
       id: string; subject_id: string; object_id: string | null; literal_type: string | null; literal_value: unknown;
-      predicate: string; qualifiers_hash: string; valid_from: Date | null; recorded_at: Date;
+      repository: string; predicate: string; qualifiers_hash: string; valid_from: Date | null; recorded_at: Date;
     }>(
-      `select id,subject_id,object_id,literal_type,literal_value,predicate,qualifiers_hash,valid_from,recorded_at
-       from jina_ontology.assertions where tenant_id=$1 and status='active' for update`, [tenantId]
+      `select id,repository,subject_id,object_id,literal_type,literal_value,predicate,qualifiers_hash,valid_from,recorded_at
+       from jina_ontology.assertions
+       where tenant_id=$1 and status='active' and predicate<>'RESOLVED_BY' for update`, [tenantId]
     )
   ]);
   const mapping = redirectMap(redirectRows.rows);
@@ -1820,8 +2055,8 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
     const object = assertion.object_id ? resolveRedirect(mapping, assertion.object_id) : `${assertion.literal_type}:${canonicalJson(assertion.literal_value)}`;
     const definition = predicateDefinition(assertion.predicate);
     const key = definition.cardinality === "one"
-      ? `${subject}:${assertion.predicate}:${assertion.qualifiers_hash}`
-      : `${subject}:${assertion.predicate}:${object}:${assertion.qualifiers_hash}`;
+      ? `${assertion.repository}:${subject}:${assertion.predicate}:${assertion.qualifiers_hash}`
+      : `${assertion.repository}:${subject}:${assertion.predicate}:${object}:${assertion.qualifiers_hash}`;
     groups.set(key, [...(groups.get(key) ?? []), assertion]);
   }
   const supersede = new Map<string, string>();
@@ -1857,18 +2092,25 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
 }
 
 async function deleteCodePlaneRepository(client: PoolClient, tenantId: string, repository: string): Promise<void> {
+  const removed = await client.query<{ blob_sha: string }>(
+    `select distinct blob_sha from (
+       select old_blob_sha as blob_sha from jina_ontology.commit_changes where tenant_id=$1 and repository=$2
+       union all
+       select new_blob_sha as blob_sha from jina_ontology.commit_changes where tenant_id=$1 and repository=$2
+     ) referenced where blob_sha is not null`, [tenantId, repository]
+  );
   await client.query(`delete from jina_ontology.ref_manifest where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.commit_changes where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.refs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
-  const removed = await client.query<{ blob_sha: string }>(
-    `delete from jina_ontology.commit_files where tenant_id=$1 and repository=$2 returning blob_sha`, [tenantId, repository]
-  );
   await client.query(`delete from jina_ontology.commits where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   const candidates = [...new Set(removed.rows.map((row) => row.blob_sha))];
   if (candidates.length) {
     const orphaned = await client.query<{ blob_sha: string }>(
       `select source.sha as blob_sha from unnest($2::text[]) source(sha)
-       where not exists (select 1 from jina_ontology.commit_files f where f.tenant_id=$1 and f.blob_sha=source.sha)`,
+       where not exists (
+         select 1 from jina_ontology.commit_changes change
+         where change.tenant_id=$1 and (change.old_blob_sha=source.sha or change.new_blob_sha=source.sha)
+       )`,
       [tenantId, candidates]
     );
     const shas = orphaned.rows.map((row) => row.blob_sha);
@@ -1881,35 +2123,45 @@ async function deleteCodePlaneRepository(client: PoolClient, tenantId: string, r
     }
   }
   await client.query(`delete from jina_ontology.graphs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
-  await client.query(`delete from jina_ontology.model_outputs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.repository_acl where tenant_id=$1 and repository=$2`, [tenantId, repository]);
 }
 
 async function garbageCollectCodePlane(client: PoolClient, tenantId: string, now: string, recentDays: number): Promise<void> {
   const garbage = await client.query<{ repository: string; sha: string }>(
-    `with recursive reachable(repository,sha) as (
+    `with recursive pr_linked as (
+       select repository,substring(object_natural_key from ':sha:([a-f0-9]{40})$') as sha
+       from jina_ontology.assertions
+       where tenant_id=$1 and predicate='INCLUDES' and status='active'
+     ), reachable(repository,sha) as (
        select repository,commit_sha from jina_ontology.refs where tenant_id=$1
+       union
+       select repository,sha from pr_linked where sha is not null
        union
        select c.repository,parent.sha
        from reachable r
        join jina_ontology.commits c on c.tenant_id=$1 and c.repository=r.repository and c.sha=r.sha
        cross join lateral unnest(c.parents) parent(sha)
-     ), pr_linked as (
-       select repository,substring(object_natural_key from ':sha:([a-f0-9]{40})$') as sha
-       from jina_ontology.assertions
-       where tenant_id=$1 and predicate='INCLUDES' and status='active'
      )
      select c.repository,c.sha from jina_ontology.commits c
      where c.tenant_id=$1 and c.committed_at < $2::timestamptz - make_interval(days=>$3)
-       and not exists (select 1 from reachable r where r.repository=c.repository and r.sha=c.sha)
-       and not exists (select 1 from pr_linked p where p.repository=c.repository and p.sha=c.sha)`,
+       and not exists (select 1 from reachable r where r.repository=c.repository and r.sha=c.sha)`,
     [tenantId, now, recentDays]
   );
   if (garbage.rows.length === 0) return;
   const removed = await client.query<{ blob_sha: string }>(
-    `delete from jina_ontology.commit_files f using (
-       select source.repository,source.sha from unnest($2::text[],$3::text[]) source(repository,sha)
-     ) doomed where f.tenant_id=$1 and f.repository=doomed.repository and f.commit_sha=doomed.sha returning f.blob_sha`,
+    `select distinct blob_sha from (
+       select change.old_blob_sha as blob_sha
+       from jina_ontology.commit_changes change
+       join unnest($2::text[],$3::text[]) doomed(repository,sha)
+         on change.repository=doomed.repository and change.commit_sha=doomed.sha
+       where change.tenant_id=$1
+       union all
+       select change.new_blob_sha as blob_sha
+       from jina_ontology.commit_changes change
+       join unnest($2::text[],$3::text[]) doomed(repository,sha)
+         on change.repository=doomed.repository and change.commit_sha=doomed.sha
+       where change.tenant_id=$1
+     ) referenced where blob_sha is not null`,
     [tenantId, garbage.rows.map((row) => row.repository), garbage.rows.map((row) => row.sha)]
   );
   await client.query(
@@ -1928,7 +2180,10 @@ async function garbageCollectCodePlane(client: PoolClient, tenantId: string, now
   if (candidates.length === 0) return;
   const orphans = await client.query<{ blob_sha: string }>(
     `select source.sha as blob_sha from unnest($2::text[]) source(sha)
-     where not exists (select 1 from jina_ontology.commit_files f where f.tenant_id=$1 and f.blob_sha=source.sha)`,
+     where not exists (
+       select 1 from jina_ontology.commit_changes change
+       where change.tenant_id=$1 and (change.old_blob_sha=source.sha or change.new_blob_sha=source.sha)
+     )`,
     [tenantId, candidates]
   );
   const shas = orphans.rows.map((row) => row.blob_sha);
@@ -1942,16 +2197,16 @@ async function garbageCollectCodePlane(client: PoolClient, tenantId: string, now
 
 async function purgeRejectedModelPayloads(client: PoolClient, tenantId: string, now: string, retentionDays: number): Promise<void> {
   const expired = await client.query<{ observation_id: string }>(
-    `select m.observation_id from jina_ontology.model_outputs m
-     where m.tenant_id=$1 and m.generated_at < $2::timestamptz - make_interval(days=>$3)
+    `select o.id as observation_id from jina_ontology.observations o
+     where o.tenant_id=$1 and o.type='model_output' and o.redacted_at is null and o.payload is not null
+       and o.recorded_at < $2::timestamptz - make_interval(days=>$3)
        and not exists (
          select 1 from jina_ontology.assertions a
-         where a.source_observation_id=m.observation_id and a.status in ('active','proposed')
+         where a.source_observation_id=o.id and a.status in ('active','proposed')
        )`, [tenantId, now, retentionDays]
   );
   const ids = expired.rows.map((row) => row.observation_id);
   if (ids.length === 0) return;
-  await client.query(`delete from jina_ontology.model_outputs where observation_id=any($1::text[])`, [ids]);
   await client.query(
     `update jina_ontology.observations set payload=null,redacted_at=$2,redaction_reason='rejected model output retention'
      where id=any($1::text[]) and redacted_at is null`, [ids, now]
@@ -1976,386 +2231,7 @@ interface IssueTraceAssertionRow {
   readonly qualifiers: Record<string, unknown>;
 }
 
-interface IssueTraceEntityRow {
-  readonly id: string;
-  readonly kind: string;
-  readonly natural_key: string;
-  readonly display_name: string;
-}
-
-interface IssueTraceProjectionEvent {
-  readonly id: string;
-  readonly event_type: string;
-  readonly payload: Record<string, unknown>;
-}
-
-const ISSUE_TRACE_PREDICATES = ["RESOLVES", "RESOLVED_BY", "MERGED_AS", "INCLUDES", "INTRODUCED_BY"] as const;
-
-/**
- * Incrementally materialize issue-centric traces from canonical assertions.
- * The projection may traverse the small relationship subgraph to discover an
- * affected issue, but it rewrites only rows reachable from the claimed events.
- */
-async function projectIssueTraces(
-  client: PoolClient,
-  tenantId: string,
-  repository: string,
-  ref: string,
-  events: readonly IssueTraceProjectionEvent[],
-  forceAll: boolean,
-  now: string
-): Promise<void> {
-  const [activeResult, entityResult] = await Promise.all([
-    client.query<IssueTraceAssertionRow>(
-      `select id,predicate,subject_id,subject_kind,subject_natural_key,subject_label,
-              object_id,object_kind,object_natural_key,object_label,source_observation_id,
-              commit_sha,confidence,evidence,qualifiers
-       from jina_ontology.assertions
-       where tenant_id=$1 and repository=$2 and status='active' and predicate=any($3::text[])`,
-      [tenantId, repository, [...ISSUE_TRACE_PREDICATES]]
-    ),
-    client.query<IssueTraceEntityRow>(
-      `select e.id,e.kind,e.natural_key,e.display_name from jina_ontology.entities e
-       where e.tenant_id=$1 and e.retired_at is null and (
-         e.natural_key like 'github:pr:' || $2 || '#%' or
-         e.natural_key like 'repo:' || $2 || ':sha:%' or
-         (e.kind='Issue' and (
-           e.natural_key like 'github:issue:' || $2 || '#%' or
-           exists (
-             select 1 from jina_ontology.assertions a
-             where a.tenant_id=$1 and a.repository=$2 and (a.subject_id=e.id or a.object_id=e.id)
-           )
-         ))
-       )`,
-      [tenantId, repository]
-    )
-  ]);
-  const entitiesById = new Map(entityResult.rows.map((entity) => [entity.id, entity]));
-  const entityIdByKey = new Map(entityResult.rows.map((entity) => [entity.natural_key, entity.id]));
-  const issueEntityIds = new Set(entityResult.rows.filter((entity) => entity.kind === "Issue").map((entity) => entity.id));
-  const projectableIssueIds = new Set(
-    entityResult.rows.flatMap((entity) =>
-      entity.kind === "Issue" && entity.natural_key.startsWith(`github:issue:${repository}#`) ? [entity.id] : []
-    )
-  );
-  for (const assertion of activeResult.rows) {
-    if (assertion.subject_kind === "Issue") projectableIssueIds.add(assertion.subject_id);
-    if (assertion.object_kind === "Issue") projectableIssueIds.add(assertion.object_id);
-  }
-  let rebuildAll = forceAll;
-  if (!rebuildAll) {
-    const existingTraceCount = await client.query<{ count: string }>(
-      `select count(*) from jina_ontology.issue_traces
-       where tenant_id=$1 and repository=$2 and ref_name=$3`,
-      [tenantId, repository, ref]
-    );
-    rebuildAll = Number(existingTraceCount.rows[0]?.count ?? 0) !== projectableIssueIds.size;
-  }
-
-  const changedAssertionIds = events.flatMap((event) =>
-    event.event_type === "assertion_changed" && typeof event.payload.assertionId === "string"
-      ? [event.payload.assertionId]
-      : []
-  );
-  const observationIds = events.flatMap((event) =>
-    (event.event_type === "observation_recorded" || event.event_type === "observation_redacted") &&
-      typeof event.payload.observationId === "string"
-      ? [event.payload.observationId]
-      : []
-  );
-  const changedResult = changedAssertionIds.length > 0 || observationIds.length > 0
-    ? await client.query<IssueTraceAssertionRow>(
-        `select id,predicate,subject_id,subject_kind,subject_natural_key,subject_label,
-                object_id,object_kind,object_natural_key,object_label,source_observation_id,
-                commit_sha,confidence,evidence,qualifiers
-         from jina_ontology.assertions
-         where tenant_id=$1 and repository=$2
-           and (id=any($3::text[]) or source_observation_id=any($4::text[]))`,
-        [tenantId, repository, changedAssertionIds, observationIds]
-      )
-    : { rows: [] as IssueTraceAssertionRow[] };
-  const changedObservations = observationIds.length > 0
-    ? await client.query<{ id: string; payload: Record<string, unknown> | null }>(
-        `select id,payload from jina_ontology.observations where tenant_id=$1 and repository=$2 and id=any($3::text[])`,
-        [tenantId, repository, observationIds]
-      )
-    : { rows: [] as { id: string; payload: Record<string, unknown> | null }[] };
-
-  const adjacency = new Map<string, Set<string>>();
-  const link = (left: string, right: string): void => {
-    adjacency.set(left, new Set([...(adjacency.get(left) ?? []), right]));
-    adjacency.set(right, new Set([...(adjacency.get(right) ?? []), left]));
-  };
-  const relationshipRows = [...new Map([...activeResult.rows, ...changedResult.rows].map((row) => [row.id, row])).values()];
-  for (const assertion of relationshipRows) link(assertion.subject_id, assertion.object_id);
-
-  const affectedIssueIds = new Set<string>();
-  if (rebuildAll) {
-    for (const issueId of issueEntityIds) affectedIssueIds.add(issueId);
-  } else {
-    const pending = new Set<string>();
-    for (const assertion of changedResult.rows) {
-      pending.add(assertion.subject_id);
-      pending.add(assertion.object_id);
-    }
-    for (const observation of changedObservations.rows) {
-      const payload = observation.payload;
-      if (!payload || typeof payload.number !== "number") continue;
-      const key = payload.kind === "issue"
-        ? `github:issue:${repository}#${payload.number}`
-        : payload.kind === "pull_request"
-          ? `github:pr:${repository}#${payload.number}`
-          : undefined;
-      if (key && entityIdByKey.has(key)) pending.add(entityIdByKey.get(key)!);
-    }
-    const visited = new Set<string>();
-    while (pending.size > 0) {
-      const current = pending.values().next().value as string;
-      pending.delete(current);
-      if (visited.has(current)) continue;
-      visited.add(current);
-      if (issueEntityIds.has(current)) affectedIssueIds.add(current);
-      for (const adjacent of adjacency.get(current) ?? []) if (!visited.has(adjacent)) pending.add(adjacent);
-    }
-  }
-  if (rebuildAll) {
-    await client.query(
-      `delete from jina_ontology.issue_traces where tenant_id=$1 and repository=$2 and ref_name=$3`,
-      [tenantId, repository, ref]
-    );
-  }
-  if (affectedIssueIds.size === 0) return;
-  if (!rebuildAll) {
-    await client.query(
-      `delete from jina_ontology.issue_traces
-       where tenant_id=$1 and repository=$2 and ref_name=$3 and issue_entity_id=any($4::text[])`,
-      [tenantId, repository, ref, [...affectedIssueIds]]
-    );
-  }
-
-  const workItemObservations = await client.query<{
-    id: string; payload: Record<string, unknown>; recorded_at: Date;
-  }>(
-    `select id,payload,recorded_at from jina_ontology.observations
-     where tenant_id=$1 and repository=$2 and source='github' and redacted_at is null
-       and payload is not null and payload->>'kind' in ('issue','pull_request')
-     order by coalesce(occurred_at,recorded_at),recorded_at,id`,
-    [tenantId, repository]
-  );
-  const latestObservationByKey = new Map<string, { readonly id: string; readonly payload: Record<string, unknown> }>();
-  for (const observation of workItemObservations.rows) {
-    const kind = observation.payload.kind;
-    const number = observation.payload.number;
-    if ((kind === "issue" || kind === "pull_request") && typeof number === "number") {
-      latestObservationByKey.set(`${kind}:${number}`, observation);
-    }
-  }
-
-  const active = activeResult.rows;
-  const includedByPullRequest = new Map<string, IssueTraceAssertionRow[]>();
-  const causesByIssue = new Map<string, IssueTraceAssertionRow[]>();
-  const resolutionByPair = new Map<string, {
-    readonly issueId: string; readonly pullRequestId: string; readonly assertions: IssueTraceAssertionRow[];
-  }>();
-  for (const assertion of active) {
-    if (assertion.predicate === "INCLUDES" || assertion.predicate === "MERGED_AS") {
-      includedByPullRequest.set(assertion.subject_id, [...(includedByPullRequest.get(assertion.subject_id) ?? []), assertion]);
-    } else if (assertion.predicate === "INTRODUCED_BY") {
-      causesByIssue.set(assertion.subject_id, [...(causesByIssue.get(assertion.subject_id) ?? []), assertion]);
-    } else if (assertion.predicate === "RESOLVES" || assertion.predicate === "RESOLVED_BY") {
-      const issueId = assertion.predicate === "RESOLVES" ? assertion.object_id : assertion.subject_id;
-      const pullRequestId = assertion.predicate === "RESOLVES" ? assertion.subject_id : assertion.object_id;
-      const key = `${issueId}:${pullRequestId}`;
-      const pair = resolutionByPair.get(key) ?? { issueId, pullRequestId, assertions: [] };
-      pair.assertions.push(assertion);
-      resolutionByPair.set(key, pair);
-    }
-  }
-  const modelObservationIds = [...new Set(active.flatMap((assertion) =>
-    assertion.source_observation_id ? [assertion.source_observation_id] : []
-  ))];
-  const modelObservations = modelObservationIds.length > 0
-    ? await client.query<{ id: string; payload: Record<string, unknown> }>(
-        `select id,payload from jina_ontology.observations
-         where tenant_id=$1 and repository=$2 and id=any($3::text[])
-           and type='model_output' and redacted_at is null and payload is not null`,
-        [tenantId, repository, modelObservationIds]
-      )
-    : { rows: [] as { id: string; payload: Record<string, unknown> }[] };
-  const modelPayloadByObservationId = new Map(modelObservations.rows.map((observation) => [observation.id, observation.payload]));
-
-  const relevantCommitShas = new Set<string>();
-  for (const pair of resolutionByPair.values()) {
-    if (!affectedIssueIds.has(pair.issueId)) continue;
-    for (const assertion of includedByPullRequest.get(pair.pullRequestId) ?? []) {
-      const sha = shaFromNaturalKey(assertion.object_natural_key);
-      if (sha) relevantCommitShas.add(sha);
-    }
-  }
-  for (const [issueId, assertions] of causesByIssue) {
-    if (!affectedIssueIds.has(issueId)) continue;
-    for (const assertion of assertions) {
-      const sha = shaFromNaturalKey(assertion.object_natural_key);
-      if (sha) relevantCommitShas.add(sha);
-    }
-  }
-  const changes = relevantCommitShas.size > 0
-    ? await client.query<{
-        commit_sha: string; path: string; change: string; old_path: string | null;
-      }>(
-        `select commit_sha,path,change,old_path from jina_ontology.commit_changes
-         where tenant_id=$1 and repository=$2 and commit_sha=any($3::text[])
-         order by commit_sha,path`,
-        [tenantId, repository, [...relevantCommitShas]]
-      )
-    : { rows: [] as { commit_sha: string; path: string; change: string; old_path: string | null }[] };
-  const changesByCommit = new Map<string, typeof changes.rows>();
-  for (const change of changes.rows) {
-    changesByCommit.set(change.commit_sha, [...(changesByCommit.get(change.commit_sha) ?? []), change]);
-  }
-
-  for (const issueId of projectableIssueIds) {
-    if (!affectedIssueIds.has(issueId)) continue;
-    const issueEntity = entitiesById.get(issueId)!;
-    const issueNumber = numberFromNaturalKey(issueEntity.natural_key);
-    const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
-    const issuePayload = issueObservation?.payload;
-    const derivedDescription = issueNumber ? undefined : derivedIssueDescription(
-      issueEntity.natural_key,
-      modelPayloadByObservationId
-    );
-    const citations: RetrievalCitation[] = [{ kind: "entity", id: issueId, repository }];
-    if (issueObservation) citations.push({ kind: "observation", id: issueObservation.id, repository });
-    const resolutions = [...resolutionByPair.values()]
-      .filter((pair) => pair.issueId === issueId)
-      .map((pair) => {
-        const pullRequest = entitiesById.get(pair.pullRequestId);
-        const pullRequestNumber = pullRequest ? numberFromNaturalKey(pullRequest.natural_key) : undefined;
-        if (!pullRequest || !pullRequestNumber) return undefined;
-        const pullRequestObservation = latestObservationByKey.get(`pull_request:${pullRequestNumber}`);
-        const assertionIds = new Set(pair.assertions.map((assertion) => assertion.id));
-        const sourceObservationIds = new Set(pair.assertions.flatMap((assertion) => assertion.source_observation_id ? [assertion.source_observation_id] : []));
-        const commitAssertions = includedByPullRequest.get(pair.pullRequestId) ?? [];
-        for (const assertion of commitAssertions) {
-          assertionIds.add(assertion.id);
-          if (assertion.source_observation_id) sourceObservationIds.add(assertion.source_observation_id);
-        }
-        if (pullRequestObservation) sourceObservationIds.add(pullRequestObservation.id);
-        for (const assertionId of assertionIds) citations.push({ kind: "assertion", id: assertionId, repository });
-        for (const observationId of sourceObservationIds) citations.push({ kind: "observation", id: observationId, repository });
-        const bySha = new Map<string, "merge" | "included">();
-        for (const assertion of commitAssertions) {
-          const sha = shaFromNaturalKey(assertion.object_natural_key);
-          if (sha) bySha.set(sha, assertion.predicate === "MERGED_AS" ? "merge" : bySha.get(sha) ?? "included");
-        }
-        const commits = [...bySha].sort((left, right) =>
-          (left[1] === "merge" ? 0 : 1) - (right[1] === "merge" ? 0 : 1) || left[0].localeCompare(right[0])
-        ).map(([sha, role]) => {
-          const commitChanges = (changesByCommit.get(sha) ?? []).map((change) => ({
-            commitSha: sha,
-            path: change.path,
-            change: change.change,
-            ...(change.old_path ? { oldPath: change.old_path } : {})
-          }));
-          for (const change of commitChanges) citations.push({
-            kind: "commit_change", id: `${sha}:${change.path}`, repository, commitSha: sha, path: change.path
-          });
-          return { sha, url: `https://github.com/${repository}/commit/${sha}`, role, changes: commitChanges };
-        });
-        return {
-          pullRequestNumber,
-          title: typeof pullRequestObservation?.payload.title === "string" ? pullRequestObservation.payload.title : pullRequest.display_name,
-          url: typeof pullRequestObservation?.payload.url === "string"
-            ? pullRequestObservation.payload.url
-            : `https://github.com/${repository}/pull/${pullRequestNumber}`,
-          commits,
-          assertionIds: [...assertionIds],
-          observationIds: [...sourceObservationIds]
-        };
-      })
-      .filter((resolution): resolution is NonNullable<typeof resolution> => Boolean(resolution))
-      .sort((left, right) => left.pullRequestNumber - right.pullRequestNumber);
-    const introducedBy = (causesByIssue.get(issueId) ?? []).flatMap((assertion) => {
-      const sha = shaFromNaturalKey(assertion.object_natural_key);
-      if (!sha) return [];
-      citations.push({ kind: "assertion", id: assertion.id, repository });
-      if (assertion.source_observation_id) citations.push({ kind: "observation", id: assertion.source_observation_id, repository });
-      const evidence = Array.isArray(assertion.evidence) ? assertion.evidence : [];
-      if (/^[a-f0-9]{40}$/i.test(assertion.commit_sha)) {
-        for (const value of evidence) {
-          const citation = retrievalCitationFromEvidence(repository, assertion.commit_sha, value);
-          if (citation) citations.push(citation);
-        }
-      }
-      const causalPullRequests = [...new Map(
-        [...includedByPullRequest.entries()].flatMap(([pullRequestId, inclusions]) =>
-          inclusions.some((inclusion) => inclusion.object_id === assertion.object_id)
-            ? [[pullRequestId, inclusions] as const]
-            : []
-        )
-      )].flatMap(([pullRequestId, inclusions]) => {
-        const pullRequest = entitiesById.get(pullRequestId);
-        const number = pullRequest ? numberFromNaturalKey(pullRequest.natural_key) : undefined;
-        if (!pullRequest || !number) return [];
-        const pullRequestObservation = latestObservationByKey.get(`pull_request:${number}`);
-        for (const inclusion of inclusions) {
-          citations.push({ kind: "assertion", id: inclusion.id, repository });
-          if (inclusion.source_observation_id) citations.push({ kind: "observation", id: inclusion.source_observation_id, repository });
-        }
-        if (pullRequestObservation) citations.push({ kind: "observation", id: pullRequestObservation.id, repository });
-        return [{
-          number,
-          title: typeof pullRequestObservation?.payload.title === "string" ? pullRequestObservation.payload.title : pullRequest.display_name,
-          url: typeof pullRequestObservation?.payload.url === "string"
-            ? pullRequestObservation.payload.url
-            : `https://github.com/${repository}/pull/${number}`
-        }];
-      }).sort((left, right) => left.number - right.number);
-      const commitChanges = (changesByCommit.get(sha) ?? []).map((change) => ({
-        commitSha: sha, path: change.path, change: change.change, ...(change.old_path ? { oldPath: change.old_path } : {})
-      }));
-      for (const change of commitChanges) citations.push({
-        kind: "commit_change", id: `${sha}:${change.path}`, repository, commitSha: sha, path: change.path
-      });
-      const reason = typeof assertion.qualifiers.reason === "string" ? assertion.qualifiers.reason : undefined;
-      return [{
-        sha,
-        url: `https://github.com/${repository}/commit/${sha}`,
-        role: "introduced" as const,
-        changes: commitChanges,
-        ...(reason ? { why: reason } : {}),
-        evidence,
-        evidenceCommitSha: assertion.commit_sha,
-        assertionIds: [assertion.id],
-        pullRequests: causalPullRequests
-      }];
-    });
-    const payload: IssueTraceProjection = {
-      issue: {
-        entityId: issueId,
-        origin: issueNumber ? "github" : "derived",
-        title: typeof issuePayload?.title === "string" ? issuePayload.title : issueEntity.display_name,
-        ...(issueNumber ? { number: issueNumber, displayId: `#${issueNumber}` } : { displayId: "virtual" }),
-        ...(derivedDescription ? { description: derivedDescription } : {}),
-        ...(typeof issuePayload?.url === "string" ? { url: issuePayload.url } : issueNumber
-          ? { url: `https://github.com/${repository}/issues/${issueNumber}` }
-          : {}),
-        ...(typeof issuePayload?.state === "string" ? { state: issuePayload.state } : {})
-      },
-      resolutions,
-      introducedBy,
-      citations: dedupeRetrievalCitations(citations)
-    };
-    await client.query(
-      `insert into jina_ontology.issue_traces
-        (tenant_id,repository,ref_name,issue_number,issue_entity_id,payload,projected_at)
-       values ($1,$2,$3,$4,$5,$6::jsonb,$7)
-       on conflict (tenant_id,repository,ref_name,issue_entity_id)
-       do update set issue_number=excluded.issue_number,payload=excluded.payload,projected_at=excluded.projected_at`,
-      [tenantId, repository, ref, issueNumber ?? null, issueId, JSON.stringify(payload), now]
-    );
-  }
-}
+const ISSUE_TRACE_PREDICATES = ["RESOLVES", "MERGED_AS", "INCLUDES", "INTRODUCED_BY"] as const;
 
 function numberFromNaturalKey(naturalKey: string): number | undefined {
   const value = /#(\d+)$/.exec(naturalKey)?.[1];
@@ -2420,70 +2296,437 @@ function dedupeRetrievalCitations(citations: readonly RetrievalCitation[]): Retr
   });
 }
 
+interface IssueTraceGraphNodeRow {
+  readonly node_id: string;
+  readonly kind: string;
+  readonly label: string;
+  readonly description: string;
+  readonly evidence: string[];
+}
+
+interface IssueTraceGraphEdgeRow {
+  readonly edge_id: string;
+  readonly source_node_id: string;
+  readonly target_node_id: string;
+  readonly predicate: string;
+  readonly why: string | null;
+  readonly evidence: string[];
+}
+
 async function retrieveIssueTrace(
   pool: Pool,
   request: RetrievalRequest,
   ref: string,
   limit: number
 ): Promise<RetrievalItem[]> {
-  if (!request.issueEntityId && !request.issueNumber && !request.issueText && !request.pullRequestNumber && !request.commitSha) return [];
-  const commitPrefix = request.commitSha?.toLowerCase() ?? "";
-  const issueText = request.issueText?.trim() ?? "";
-  const result = await pool.query<{ payload: IssueTraceProjection }>(
-    `select payload from jina_ontology.issue_traces
-     where tenant_id=$1 and repository=$2 and ref_name=$3
-       and (
-         ($8<>'' and issue_entity_id=$8) or
-         ($4::int is not null and issue_number=$4) or
-         ($4::int is null and $7<>'' and (
-           position(lower($7) in lower(coalesce(payload->'issue'->>'title',''))) > 0 or
-           position(lower($7) in lower(coalesce(payload->'issue'->>'description',''))) > 0 or
-           exists (
-             select 1 from jina_ontology.observations observation
-             where observation.tenant_id=$1
-               and observation.repository=$2
-               and observation.source='github'
-               and observation.redacted_at is null
-               and observation.payload->>'kind'='issue'
-               and (observation.payload->>'number')::int=issue_number
-               and (
-                 position(lower($7) in lower(coalesce(observation.payload->>'title',''))) > 0 or
-                 position(lower($7) in lower(coalesce(observation.payload->>'body',''))) > 0
-               )
-           )
-         )) or
-         ($5<>'' and (
-           exists (select 1 from jsonb_array_elements(coalesce(payload->'introducedBy','[]'::jsonb)) cause where cause->>'sha' like $5 || '%') or
-           exists (
-             select 1 from jsonb_array_elements(coalesce(payload->'resolutions','[]'::jsonb)) resolution,
-                           jsonb_array_elements(coalesce(resolution->'commits','[]'::jsonb)) commit
-             where commit->>'sha' like $5 || '%'
-           )
-         )) or
-         ($6::int is not null and (
-           exists (
-             select 1 from jsonb_array_elements(coalesce(payload->'resolutions','[]'::jsonb)) resolution
-             where (resolution->>'pullRequestNumber')::int=$6
-           ) or
-           exists (
-             select 1 from jsonb_array_elements(coalesce(payload->'introducedBy','[]'::jsonb)) cause,
-                           jsonb_array_elements(coalesce(cause->'pullRequests','[]'::jsonb)) pull_request
-             where (pull_request->>'number')::int=$6
-           )
-         ))
-       )
-     order by
-       case
-         when $7<>'' and lower(coalesce(payload->'issue'->>'title',''))=lower($7) then 0
-         when $7<>'' and position(lower($7) in lower(coalesce(payload->'issue'->>'title',''))) > 0 then 1
-         else 2
-       end,
-       issue_number nulls last,payload->'issue'->>'title'
-     limit $9`,
-    [request.tenantId, request.repository, ref, request.issueNumber ?? null, commitPrefix,
-      request.pullRequestNumber ?? null, issueText, request.issueEntityId ?? "", limit]
+  const issueText = request.issueText?.trim().toLowerCase() ?? "";
+  if (!request.issueEntityId && !request.issueNumber && !issueText && !request.pullRequestNumber && !request.commitSha) return [];
+  const graphResult = await pool.query<{ id: string; commit_sha: string }>(
+    `select graph.id,graph.commit_sha from jina_ontology.refs ref
+     join jina_ontology.graphs graph
+       on graph.tenant_id=ref.tenant_id and graph.repository=ref.repository and graph.commit_sha=ref.commit_sha
+     where ref.tenant_id=$1 and ref.repository=$2 and ref.ref_name=$3
+     order by graph.generated_at desc,case when graph.ref=$3 then 0 else 1 end,graph.id desc limit 1`,
+    [request.tenantId, request.repository, ref]
   );
-  return result.rows.map(({ payload }) => {
+  const graph = graphResult.rows[0];
+  if (!graph) return [];
+  let modelObservationRows: { id: string; payload: Record<string, unknown> }[] = [];
+  if (issueText) {
+    modelObservationRows = (await pool.query<{ id: string; payload: Record<string, unknown> }>(
+      `select id,payload from jina_ontology.observations
+       where tenant_id=$1 and repository=$2 and type='model_output' and redacted_at is null and payload is not null
+         and position($3 in lower(payload::text)) > 0`,
+      [request.tenantId, request.repository, issueText]
+    )).rows;
+  }
+  const earlyModelPayloads = new Map(modelObservationRows.map((observation) => [observation.id, observation.payload]));
+  const derivedIssueNaturalKeys = new Set<string>();
+  if (issueText) {
+    for (const payload of earlyModelPayloads.values()) {
+      if (!Array.isArray(payload.assertions)) continue;
+      for (const candidate of payload.assertions) {
+        if (typeof candidate !== "object" || candidate === null || candidate.predicate !== "RESOLVES") continue;
+        const object = typeof candidate.object === "object" && candidate.object !== null
+          ? candidate.object as Record<string, unknown>
+          : undefined;
+        if (typeof object?.naturalKey !== "string") continue;
+        if (derivedIssueDescription(object.naturalKey, earlyModelPayloads)?.toLowerCase().includes(issueText)) {
+          derivedIssueNaturalKeys.add(object.naturalKey);
+        }
+      }
+    }
+  }
+  let candidateQuery: string;
+  let candidateValues: unknown[];
+  if (request.issueEntityId) {
+    candidateQuery = `select node.node_id,node.kind,node.label,node.description,node.evidence
+      from jina_ontology.nodes node
+      join jina_ontology.entities entity on entity.tenant_id=$2 and entity.id=$3 and entity.kind='Issue'
+        and entity.natural_key=node.description
+      where node.graph_id=$1 and node.kind='Issue'
+      order by node.label,node.node_id limit $4`;
+    candidateValues = [graph.id, request.tenantId, request.issueEntityId, limit];
+  } else if (request.issueNumber) {
+    candidateQuery = `select node_id,kind,label,description,evidence from jina_ontology.nodes
+      where graph_id=$1 and kind='Issue' and description=$2 order by label,node_id limit $3`;
+    candidateValues = [graph.id, `github:issue:${request.repository}#${request.issueNumber}`, limit];
+  } else if (issueText) {
+    candidateQuery = `with matching_issue_numbers as materialized (
+        select distinct observation.payload->>'number' as issue_number
+        from jina_ontology.observations observation
+        where observation.tenant_id=$3 and observation.repository=$4 and observation.source='github'
+          and observation.redacted_at is null and observation.payload->>'kind'='issue'
+          and (position($2 in lower(coalesce(observation.payload->>'title',''))) > 0
+            or position($2 in lower(coalesce(observation.payload->>'body',''))) > 0)
+      )
+      select node.node_id,node.kind,node.label,node.description,node.evidence
+      from jina_ontology.nodes node
+      where node.graph_id=$1 and node.kind='Issue' and (
+        position($2 in lower(node.label)) > 0 or node.description=any($5::text[]) or
+        substring(node.description from '#([0-9]+)$') in (select issue_number from matching_issue_numbers)
+      )
+      order by case when lower(node.label)=$2 then 0 when position($2 in lower(node.label)) > 0 then 1 else 2 end,
+               node.label,node.node_id limit $6`;
+    candidateValues = [graph.id, issueText, request.tenantId, request.repository, [...derivedIssueNaturalKeys], limit];
+  } else if (request.pullRequestNumber) {
+    candidateQuery = `select distinct issue.node_id,issue.kind,issue.label,issue.description,issue.evidence
+      from jina_ontology.nodes issue
+      where issue.graph_id=$1 and issue.kind='Issue' and (
+        exists (select 1 from jina_ontology.edges resolution
+          join jina_ontology.nodes pull_request on pull_request.graph_id=resolution.graph_id
+            and pull_request.node_id=resolution.source_node_id and pull_request.description=$2
+          where resolution.graph_id=$1 and resolution.predicate='RESOLVES' and resolution.target_node_id=issue.node_id)
+        or exists (select 1 from jina_ontology.edges cause
+          join jina_ontology.edges inclusion on inclusion.graph_id=cause.graph_id
+            and inclusion.target_node_id=cause.target_node_id and inclusion.predicate in ('INCLUDES','MERGED_AS')
+          join jina_ontology.nodes pull_request on pull_request.graph_id=inclusion.graph_id
+            and pull_request.node_id=inclusion.source_node_id and pull_request.description=$2
+          where cause.graph_id=$1 and cause.predicate='INTRODUCED_BY' and cause.source_node_id=issue.node_id)
+      ) order by issue.label,issue.node_id limit $3`;
+    candidateValues = [graph.id, `github:pr:${request.repository}#${request.pullRequestNumber}`, limit];
+  } else {
+    candidateQuery = `select distinct issue.node_id,issue.kind,issue.label,issue.description,issue.evidence
+      from jina_ontology.nodes issue
+      where issue.graph_id=$1 and issue.kind='Issue' and (
+        exists (select 1 from jina_ontology.edges cause
+          join jina_ontology.nodes commit on commit.graph_id=cause.graph_id and commit.node_id=cause.target_node_id
+          where cause.graph_id=$1 and cause.predicate='INTRODUCED_BY' and cause.source_node_id=issue.node_id
+            and lower(commit.description) like '%:sha:'||$2||'%')
+        or exists (select 1 from jina_ontology.edges resolution
+          join jina_ontology.edges inclusion on inclusion.graph_id=resolution.graph_id
+            and inclusion.source_node_id=resolution.source_node_id and inclusion.predicate in ('INCLUDES','MERGED_AS')
+          join jina_ontology.nodes commit on commit.graph_id=inclusion.graph_id and commit.node_id=inclusion.target_node_id
+          where resolution.graph_id=$1 and resolution.predicate='RESOLVES' and resolution.target_node_id=issue.node_id
+            and lower(commit.description) like '%:sha:'||$2||'%')
+      ) order by issue.label,issue.node_id limit $3`;
+    candidateValues = [graph.id, request.commitSha!.toLowerCase(), limit];
+  }
+  const candidateIssueResult = await pool.query<IssueTraceGraphNodeRow>(candidateQuery, candidateValues);
+  if (candidateIssueResult.rows.length === 0) return [];
+  const candidateIssueIds = candidateIssueResult.rows.map((issue) => issue.node_id);
+  const edgeResult = await pool.query<IssueTraceGraphEdgeRow>(
+    `with resolution_pull_requests as (
+       select source_node_id from jina_ontology.edges
+       where graph_id=$1 and predicate='RESOLVES' and target_node_id=any($2::text[])
+     ), causal_commits as (
+       select target_node_id from jina_ontology.edges
+       where graph_id=$1 and predicate='INTRODUCED_BY' and source_node_id=any($2::text[])
+     )
+     select edge_id,source_node_id,target_node_id,predicate,why,evidence from jina_ontology.edges
+     where graph_id=$1 and predicate=any($3::text[]) and (
+       source_node_id=any($2::text[]) or target_node_id=any($2::text[]) or
+       (predicate in ('INCLUDES','MERGED_AS') and (
+         source_node_id in (select source_node_id from resolution_pull_requests) or
+         target_node_id in (select target_node_id from causal_commits)
+       ))
+     )`, [graph.id, candidateIssueIds, [...ISSUE_TRACE_PREDICATES]]
+  );
+  const relevantNodeIds = new Set(candidateIssueIds);
+  for (const edge of edgeResult.rows) {
+    relevantNodeIds.add(edge.source_node_id);
+    relevantNodeIds.add(edge.target_node_id);
+  }
+  const nodeResult = await pool.query<IssueTraceGraphNodeRow>(
+    `select node_id,kind,label,description,evidence from jina_ontology.nodes
+     where graph_id=$1 and node_id=any($2::text[])`, [graph.id, [...relevantNodeIds]]
+  );
+  const relevantEntityIds = nodeResult.rows.map((node) =>
+    stableId("entity", `${request.tenantId}:${node.kind}:${node.description}`)
+  );
+  const relevantNumbers = nodeResult.rows.flatMap((node) => {
+    const number = numberFromNaturalKey(node.description);
+    return number ? [number] : [];
+  });
+  const [assertionResult, observationResult] = await Promise.all([
+    pool.query<IssueTraceAssertionRow & { recorded_at: Date }>(
+      `select id,predicate,subject_id,subject_kind,subject_natural_key,subject_label,
+              object_id,object_kind,object_natural_key,object_label,source_observation_id,
+              commit_sha,confidence,evidence,qualifiers,recorded_at
+       from jina_ontology.assertions
+       where tenant_id=$1 and repository=$2 and status='active' and predicate=any($3::text[])
+         and (subject_id=any($4::text[]) or object_id=any($4::text[]))
+       order by recorded_at desc,id desc`,
+      [request.tenantId, request.repository, [...ISSUE_TRACE_PREDICATES], relevantEntityIds]
+    ),
+    relevantNumbers.length > 0
+      ? pool.query<{ id: string; payload: Record<string, unknown>; recorded_at: Date }>(
+          `select id,payload,recorded_at from jina_ontology.observations
+           where tenant_id=$1 and repository=$2 and source='github' and redacted_at is null
+             and payload is not null and payload->>'kind' in ('issue','pull_request')
+             and (payload->>'number')::int=any($3::int[])
+           order by coalesce(occurred_at,recorded_at),recorded_at,id`,
+          [request.tenantId, request.repository, relevantNumbers]
+        )
+      : Promise.resolve({ rows: [] as { id: string; payload: Record<string, unknown>; recorded_at: Date }[] })
+  ]);
+  if (candidateIssueResult.rows.some((issue) => !numberFromNaturalKey(issue.description))) {
+    const loadedIds = new Set(modelObservationRows.map((observation) => observation.id));
+    const missingIds = [...new Set(assertionResult.rows.flatMap((assertion) =>
+      assertion.source_observation_id && !loadedIds.has(assertion.source_observation_id)
+        ? [assertion.source_observation_id]
+        : []
+    ))];
+    if (missingIds.length > 0) {
+      const missing = await pool.query<{ id: string; payload: Record<string, unknown> }>(
+        `select id,payload from jina_ontology.observations
+         where tenant_id=$1 and repository=$2 and id=any($3::text[])
+           and type='model_output' and redacted_at is null and payload is not null`,
+        [request.tenantId, request.repository, missingIds]
+      );
+      modelObservationRows.push(...missing.rows);
+    }
+  }
+  const nodesById = new Map(nodeResult.rows.map((node) => [node.node_id, node]));
+  const issueNodes = nodeResult.rows.filter((node) => node.kind === "Issue");
+  const relationKey = (subjectNaturalKey: string, predicate: string, objectNaturalKey: string): string =>
+    JSON.stringify([subjectNaturalKey, predicate, objectNaturalKey]);
+  const assertionsByRelation = new Map<string, (IssueTraceAssertionRow & { recorded_at: Date })[]>();
+  for (const assertion of assertionResult.rows) {
+    const key = relationKey(assertion.subject_natural_key, assertion.predicate, assertion.object_natural_key);
+    assertionsByRelation.set(key, [...(assertionsByRelation.get(key) ?? []), assertion]);
+  }
+  const assertionForEdge = (edge: IssueTraceGraphEdgeRow): (IssueTraceAssertionRow & { recorded_at: Date }) | undefined => {
+    const subject = nodesById.get(edge.source_node_id)?.description;
+    const object = nodesById.get(edge.target_node_id)?.description;
+    if (!subject || !object) return undefined;
+    const candidates = assertionsByRelation.get(relationKey(subject, edge.predicate, object)) ?? [];
+    return candidates.find((candidate) =>
+      edge.predicate !== "INTRODUCED_BY" || typeof candidate.qualifiers.reason !== "string" || candidate.qualifiers.reason === edge.why
+    ) ?? candidates[0];
+  };
+  const latestObservationByKey = new Map<string, { readonly id: string; readonly payload: Record<string, unknown> }>();
+  for (const observation of observationResult.rows) {
+    const kind = observation.payload.kind;
+    const number = observation.payload.number;
+    if ((kind === "issue" || kind === "pull_request") && typeof number === "number") {
+      latestObservationByKey.set(`${kind}:${number}`, observation);
+    }
+  }
+  const modelPayloadByObservationId = new Map(modelObservationRows.map((observation) => [observation.id, observation.payload]));
+  const resolves = edgeResult.rows.filter((edge) => edge.predicate === "RESOLVES");
+  const causes = edgeResult.rows.filter((edge) => edge.predicate === "INTRODUCED_BY");
+  const inclusions = edgeResult.rows.filter((edge) => edge.predicate === "INCLUDES" || edge.predicate === "MERGED_AS");
+  const commitPrefix = request.commitSha?.toLowerCase() ?? "";
+  const candidates = issueNodes.filter((issue) => {
+    const naturalKey = issue.description;
+    const issueNumber = numberFromNaturalKey(naturalKey);
+    const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
+    if (request.issueEntityId) {
+      return stableId("entity", `${request.tenantId}:Issue:${naturalKey}`) === request.issueEntityId;
+    }
+    if (request.issueNumber) return issueNumber === request.issueNumber;
+    if (issueText) {
+      return issue.label.toLowerCase().includes(issueText) ||
+        String(issueObservation?.payload.title ?? "").toLowerCase().includes(issueText) ||
+        String(issueObservation?.payload.body ?? "").toLowerCase().includes(issueText) ||
+        (derivedIssueDescription(naturalKey, modelPayloadByObservationId)?.toLowerCase().includes(issueText) ?? false);
+    }
+    if (request.pullRequestNumber) {
+      const pullRequestNumber = request.pullRequestNumber;
+      const directlyResolved = resolves.some((edge) => edge.target_node_id === issue.node_id &&
+        numberFromNaturalKey(nodesById.get(edge.source_node_id)?.description ?? "") === pullRequestNumber);
+      const causedByPullRequest = causes.some((cause) => cause.source_node_id === issue.node_id &&
+        inclusions.some((inclusion) => inclusion.target_node_id === cause.target_node_id &&
+          numberFromNaturalKey(nodesById.get(inclusion.source_node_id)?.description ?? "") === pullRequestNumber));
+      return directlyResolved || causedByPullRequest;
+    }
+    if (commitPrefix) {
+      const causedByCommit = causes.some((edge) => edge.source_node_id === issue.node_id &&
+        shaFromNaturalKey(nodesById.get(edge.target_node_id)?.description ?? "")?.startsWith(commitPrefix));
+      const resolvedByCommit = resolves.some((resolution) => resolution.target_node_id === issue.node_id &&
+        inclusions.some((inclusion) => inclusion.source_node_id === resolution.source_node_id &&
+          shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "")?.startsWith(commitPrefix)));
+      return causedByCommit || resolvedByCommit;
+    }
+    return false;
+  }).sort((left, right) => {
+    if (!issueText) return (numberFromNaturalKey(left.description) ?? Number.MAX_SAFE_INTEGER) -
+      (numberFromNaturalKey(right.description) ?? Number.MAX_SAFE_INTEGER) || left.label.localeCompare(right.label);
+    const leftTitle = String(latestObservationByKey.get(`issue:${numberFromNaturalKey(left.description)}`)?.payload.title ?? left.label).toLowerCase();
+    const rightTitle = String(latestObservationByKey.get(`issue:${numberFromNaturalKey(right.description)}`)?.payload.title ?? right.label).toLowerCase();
+    return (leftTitle === issueText ? 0 : leftTitle.includes(issueText) ? 1 : 2) -
+      (rightTitle === issueText ? 0 : rightTitle.includes(issueText) ? 1 : 2) || leftTitle.localeCompare(rightTitle);
+  }).slice(0, limit);
+  if (candidates.length === 0) return [];
+
+  const relevantCommitShas = new Set<string>();
+  for (const issue of candidates) {
+    for (const cause of causes.filter((edge) => edge.source_node_id === issue.node_id)) {
+      const sha = shaFromNaturalKey(nodesById.get(cause.target_node_id)?.description ?? "");
+      if (sha) relevantCommitShas.add(sha);
+    }
+    for (const resolution of resolves.filter((edge) => edge.target_node_id === issue.node_id)) {
+      for (const inclusion of inclusions.filter((edge) => edge.source_node_id === resolution.source_node_id)) {
+        const sha = shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "");
+        if (sha) relevantCommitShas.add(sha);
+      }
+    }
+  }
+  const changeResult = relevantCommitShas.size > 0
+    ? await pool.query<{ commit_sha: string; path: string; change: string; old_path: string | null }>(
+        `select commit_sha,path,change,old_path from jina_ontology.commit_changes
+         where tenant_id=$1 and repository=$2 and commit_sha=any($3::text[]) order by commit_sha,path`,
+        [request.tenantId, request.repository, [...relevantCommitShas]]
+      )
+    : { rows: [] as { commit_sha: string; path: string; change: string; old_path: string | null }[] };
+  const changesByCommit = new Map<string, typeof changeResult.rows>();
+  for (const change of changeResult.rows) {
+    changesByCommit.set(change.commit_sha, [...(changesByCommit.get(change.commit_sha) ?? []), change]);
+  }
+  const edgeCitations = (edge: IssueTraceGraphEdgeRow): RetrievalCitation[] => {
+    const assertion = assertionForEdge(edge);
+    const citations: RetrievalCitation[] = [];
+    if (assertion) {
+      citations.push({ kind: "assertion", id: assertion.id, repository: request.repository });
+      if (assertion.source_observation_id) citations.push({ kind: "observation", id: assertion.source_observation_id, repository: request.repository });
+    }
+    for (const evidence of edge.evidence) {
+      if (evidence.startsWith("observation:")) {
+        citations.push({ kind: "observation", id: evidence.slice("observation:".length), repository: request.repository });
+      } else {
+        const evidenceCommitSha = assertion && /^[a-f0-9]{40}$/i.test(assertion.commit_sha) ? assertion.commit_sha : graph.commit_sha;
+        const citation = retrievalCitationFromEvidence(request.repository, evidenceCommitSha, evidence);
+        if (citation) citations.push(citation);
+      }
+    }
+    return citations;
+  };
+
+  return candidates.map((issue): RetrievalItem => {
+    const issueNumber = numberFromNaturalKey(issue.description);
+    const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
+    const citations: RetrievalCitation[] = [{
+      kind: "entity", id: stableId("entity", `${request.tenantId}:Issue:${issue.description}`), repository: request.repository
+    }];
+    if (issueObservation) citations.push({ kind: "observation", id: issueObservation.id, repository: request.repository });
+    const issueResolutions = resolves.filter((edge) => edge.target_node_id === issue.node_id).flatMap((resolution) => {
+      const pullRequest = nodesById.get(resolution.source_node_id);
+      const pullRequestNumber = pullRequest ? numberFromNaturalKey(pullRequest.description) : undefined;
+      if (!pullRequest || !pullRequestNumber) return [];
+      const pullRequestObservation = latestObservationByKey.get(`pull_request:${pullRequestNumber}`);
+      const relatedInclusions = inclusions.filter((edge) => edge.source_node_id === pullRequest.node_id);
+      const assertionIds = new Set<string>();
+      const observationIds = new Set<string>();
+      for (const edge of [resolution, ...relatedInclusions]) {
+        const assertion = assertionForEdge(edge);
+        if (assertion) {
+          assertionIds.add(assertion.id);
+          if (assertion.source_observation_id) observationIds.add(assertion.source_observation_id);
+        }
+        citations.push(...edgeCitations(edge));
+      }
+      if (pullRequestObservation) {
+        observationIds.add(pullRequestObservation.id);
+        citations.push({ kind: "observation", id: pullRequestObservation.id, repository: request.repository });
+      }
+      const bySha = new Map<string, "merge" | "included">();
+      for (const inclusion of relatedInclusions) {
+        const sha = shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "");
+        if (sha) bySha.set(sha, inclusion.predicate === "MERGED_AS" ? "merge" : bySha.get(sha) ?? "included");
+      }
+      const commits = [...bySha].sort((left, right) =>
+        (left[1] === "merge" ? 0 : 1) - (right[1] === "merge" ? 0 : 1) || left[0].localeCompare(right[0])
+      ).map(([sha, role]) => {
+        const changes = (changesByCommit.get(sha) ?? []).map((change) => ({
+          commitSha: sha, path: change.path, change: change.change, ...(change.old_path ? { oldPath: change.old_path } : {})
+        }));
+        for (const change of changes) citations.push({
+          kind: "commit_change", id: `${sha}:${change.path}`, repository: request.repository, commitSha: sha, path: change.path
+        });
+        return { sha, url: `https://github.com/${request.repository}/commit/${sha}`, role, changes };
+      });
+      return [{
+        pullRequestNumber,
+        title: String(pullRequestObservation?.payload.title ?? pullRequest.label),
+        url: String(pullRequestObservation?.payload.url ?? `https://github.com/${request.repository}/pull/${pullRequestNumber}`),
+        commits,
+        assertionIds: [...assertionIds],
+        observationIds: [...observationIds]
+      }];
+    }).sort((left, right) => left.pullRequestNumber - right.pullRequestNumber);
+    const introducedBy = causes.filter((edge) => edge.source_node_id === issue.node_id).flatMap((cause) => {
+      const commit = nodesById.get(cause.target_node_id);
+      const sha = commit ? shaFromNaturalKey(commit.description) : undefined;
+      if (!commit || !sha) return [];
+      const assertion = assertionForEdge(cause);
+      citations.push(...edgeCitations(cause));
+      const causalPullRequests = [...new Map(inclusions.filter((edge) => edge.target_node_id === commit.node_id).flatMap((inclusion) => {
+        const pullRequest = nodesById.get(inclusion.source_node_id);
+        const number = pullRequest ? numberFromNaturalKey(pullRequest.description) : undefined;
+        if (!pullRequest || !number) return [];
+        const observation = latestObservationByKey.get(`pull_request:${number}`);
+        citations.push(...edgeCitations(inclusion));
+        if (observation) citations.push({ kind: "observation", id: observation.id, repository: request.repository });
+        return [[number, {
+          number,
+          title: String(observation?.payload.title ?? pullRequest.label),
+          url: String(observation?.payload.url ?? `https://github.com/${request.repository}/pull/${number}`)
+        }] as const];
+      })).values()].sort((left, right) => left.number - right.number);
+      const changes = (changesByCommit.get(sha) ?? []).map((change) => ({
+        commitSha: sha, path: change.path, change: change.change, ...(change.old_path ? { oldPath: change.old_path } : {})
+      }));
+      for (const change of changes) citations.push({
+        kind: "commit_change", id: `${sha}:${change.path}`, repository: request.repository, commitSha: sha, path: change.path
+      });
+      return [{
+        sha,
+        url: `https://github.com/${request.repository}/commit/${sha}`,
+        role: "introduced" as const,
+        changes,
+        ...(cause.why ? { why: cause.why } : {}),
+        evidence: cause.evidence,
+        evidenceCommitSha: assertion?.commit_sha ?? graph.commit_sha,
+        assertionIds: assertion ? [assertion.id] : [],
+        pullRequests: causalPullRequests
+      }];
+    });
+    const payload: IssueTraceProjection = {
+      issue: {
+        entityId: stableId("entity", `${request.tenantId}:Issue:${issue.description}`),
+        origin: issueNumber ? "github" : "derived",
+        title: String(issueObservation?.payload.title ?? issue.label.replace(/^#\d+\s+/, "")),
+        ...(issueNumber ? { number: issueNumber, displayId: `#${issueNumber}` } : { displayId: "virtual" }),
+        ...(!issueNumber ? { description: derivedIssueDescription(issue.description, modelPayloadByObservationId) ?? issue.label } : {}),
+        ...(typeof issueObservation?.payload.url === "string" ? { url: issueObservation.payload.url } : issueNumber
+          ? { url: `https://github.com/${request.repository}/issues/${issueNumber}` }
+          : {}),
+        ...(typeof issueObservation?.payload.state === "string" ? { state: issueObservation.payload.state } : {})
+      },
+      resolutions: issueResolutions,
+      introducedBy,
+      citations: dedupeRetrievalCitations(citations)
+    };
+    return issueTraceRetrievalItem(payload, request, commitPrefix);
+  });
+}
+
+function issueTraceRetrievalItem(
+  payload: IssueTraceProjection,
+  request: RetrievalRequest,
+  commitPrefix: string
+): RetrievalItem {
     const firstResolution = payload.resolutions[0];
     const firstCommit = firstResolution?.commits[0];
     const wantsCausality = Boolean(request.commitSha) || /caus|introduc|root cause/i.test(request.query ?? "");
@@ -2507,10 +2750,9 @@ async function retrieveIssueTrace(
       citations: payload.citations,
       score: firstResolution ? 3 : payload.introducedBy.length > 0 ? 2 : 1
     };
-  });
 }
 
-async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, limit: number): Promise<RetrievalItem[]> {
+async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, ref: string, limit: number): Promise<RetrievalItem[]> {
   const featureText = request.featureText?.trim() ?? "";
   if (!featureText) return [];
   const result = await pool.query<{
@@ -2527,24 +2769,56 @@ async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, limit
     evidence: string[];
     source_observation_id: string | null;
   }>(
-    `select id,commit_sha,subject_kind,subject_natural_key,subject_label,predicate,
-            object_kind,object_natural_key,object_label,confidence,evidence,source_observation_id
-     from jina_ontology.assertions
-     where tenant_id=$1 and repository=$2 and status='active'
-       and predicate in ('IMPLEMENTS','DOCUMENTED_BY','LIKELY_AFFECTS','REFERENCES')
-       and (subject_kind='Feature' or object_kind='Feature')
+    `with current_ref as (
+       select commit_sha from jina_ontology.refs
+       where tenant_id=$1 and repository=$2 and ref_name=$4
+     ), projected_ref as (
+       select current_ref.commit_sha from current_ref
+       where exists (
+         select 1 from jina_ontology.graphs graph
+         where graph.tenant_id=$1 and graph.repository=$2 and graph.ref=$4 and graph.commit_sha=current_ref.commit_sha
+       )
+     )
+     select assertion.id,assertion.commit_sha,assertion.subject_kind,assertion.subject_natural_key,assertion.subject_label,assertion.predicate,
+            assertion.object_kind,assertion.object_natural_key,assertion.object_label,assertion.confidence,
+            assertion.evidence,assertion.source_observation_id
+     from jina_ontology.assertions assertion
+     cross join projected_ref
+     where assertion.tenant_id=$1 and assertion.repository=$2 and assertion.status='active'
+       and assertion.predicate in ('IMPLEMENTS','DOCUMENTED_BY','LIKELY_AFFECTS','REFERENCES')
+       and (assertion.subject_kind='Feature' or assertion.object_kind='Feature')
        and (
-         (subject_kind='Feature' and (
-           position(lower($3) in lower(subject_label)) > 0 or position(lower($3) in lower(subject_natural_key)) > 0
+         (assertion.commit_sha='source' and jsonb_array_length(assertion.evidence)=0 and assertion.source_observation_id is not null)
+         or (
+           assertion.commit_sha<>'source' and jsonb_array_length(assertion.evidence)>0 and not exists (
+             select 1
+             from jsonb_array_elements_text(assertion.evidence) cited(value)
+             left join lateral (
+               select regexp_replace(cited.value, ':[0-9]+(-[0-9]+)?$', '') as path
+             ) citation on true
+             left join lateral (
+               select blob_sha from jina_ontology.commit_manifest($1,$2,assertion.commit_sha)
+               where path=citation.path
+             ) source_file on true
+             left join jina_ontology.ref_manifest current_file
+               on current_file.tenant_id=$1 and current_file.repository=$2 and current_file.ref_name=$4
+              and current_file.commit_sha=projected_ref.commit_sha and current_file.path=citation.path
+             where source_file.blob_sha is null or current_file.blob_sha is null or source_file.blob_sha<>current_file.blob_sha
+           )
+         )
+       )
+       and (
+         (assertion.subject_kind='Feature' and (
+           position(lower($3) in lower(assertion.subject_label)) > 0 or position(lower($3) in lower(assertion.subject_natural_key)) > 0
          )) or
-         (object_kind='Feature' and (
-           position(lower($3) in lower(object_label)) > 0 or position(lower($3) in lower(object_natural_key)) > 0
+         (assertion.object_kind='Feature' and (
+           position(lower($3) in lower(assertion.object_label)) > 0 or position(lower($3) in lower(assertion.object_natural_key)) > 0
          ))
        )
-     order by case predicate when 'IMPLEMENTS' then 0 when 'DOCUMENTED_BY' then 1 when 'LIKELY_AFFECTS' then 2 else 3 end,
-              confidence desc,id
-     limit $4`,
-    [request.tenantId, request.repository, featureText, limit]
+     order by case assertion.predicate when 'IMPLEMENTS' then 0 when 'DOCUMENTED_BY' then 1 when 'LIKELY_AFFECTS' then 2 else 3 end,
+              assertion.confidence desc,assertion.id
+     limit $5`,
+    [request.tenantId, request.repository, featureText, ref, limit]
   );
   return result.rows.map((row) => {
     const featureIsSubject = row.subject_kind === "Feature";
@@ -2674,6 +2948,7 @@ async function retrieveChange(pool: Pool, request: RetrievalRequest, headSha: st
        join jina_ontology.ref_manifest m on m.tenant_id=$1 and m.repository=$2
        join jina_ontology.symbol_edges e on e.tenant_id=m.tenant_id and e.blob_sha=m.blob_sha and e.parser_version=$4
          and (e.to_moniker=changed.name or e.to_moniker=changed.moniker or e.to_moniker like '%.' || changed.name)
+       where m.path<>changed.path
        order by changed.path,m.path,e.start_line limit $5`,
       [request.tenantId, request.repository, commitShas, ONTOLOGY_PARSER_VERSION, limit - items.length]
     );
@@ -2798,7 +3073,12 @@ async function retrieveOwnership(pool: Pool, request: RetrievalRequest, limit: n
        where ch.tenant_id=$1 and ch.repository=$2 and (ch.path=$3 or ch.old_path=$3) and c.author_external_id is not null
        order by c.committed_at desc limit $4`, [request.tenantId, request.repository, request.path, limit - items.length]
     );
-    items.push(...authors.rows.map((row, index): RetrievalItem => ({
+    const seenAuthors = new Set<string>();
+    const uniqueAuthors = authors.rows.filter((row) => {
+      const key = row.entity_id ?? row.author_external_id;
+      return seenAuthors.has(key) ? false : (seenAuthors.add(key), true);
+    });
+    items.push(...uniqueAuthors.map((row, index): RetrievalItem => ({
       kind: "recent_author", title: row.display_name ?? row.author_external_id,
       data: { authorExternalId: row.author_external_id, committedAt: row.committed_at.toISOString() }, score: 1 / (index + 1),
       citations: [{ kind: "commit_change", id: `${row.sha}:${request.path}`, repository: request.repository, commitSha: row.sha, path: request.path! }]
@@ -2819,7 +3099,7 @@ function codeownersPatternMatches(rawPattern: string, path: string): boolean {
   const anchored = pattern.startsWith("/");
   const normalized = pattern.replace(/^\//, "").replace(/\/$/, "/**");
   const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*");
+    .replace(/\*\*/g, "\uE000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\uE000/g, ".*");
   if (!anchored && !normalized.includes("/")) return new RegExp(`(?:^|/)${escaped}$`).test(path);
   return new RegExp(`^${escaped}$`).test(path);
 }
@@ -2879,6 +3159,8 @@ export const ONTOLOGY_SCHEMA_SQL = `
         evidence jsonb not null,
         primary key (graph_id, node_id)
       );
+      create index if not exists ontology_nodes_graph_kind_description
+        on jina_ontology.nodes (graph_id,kind,description);
       create table if not exists jina_ontology.edges (
         graph_id text not null references jina_ontology.graphs(id) on delete cascade,
         edge_id text not null,
@@ -2888,6 +3170,7 @@ export const ONTOLOGY_SCHEMA_SQL = `
         plane text not null check (plane in ('code','knowledge')),
         confidence double precision check (confidence is null or (confidence >= 0 and confidence <= 1)),
         why text,
+        qualifiers jsonb not null default '{}'::jsonb,
         evidence jsonb not null,
         primary key (graph_id, edge_id),
         foreign key (graph_id, source_node_id) references jina_ontology.nodes(graph_id, node_id),
@@ -2895,9 +3178,14 @@ export const ONTOLOGY_SCHEMA_SQL = `
       );
       alter table jina_ontology.edges add column if not exists confidence double precision;
       alter table jina_ontology.edges add column if not exists why text;
+      alter table jina_ontology.edges add column if not exists qualifiers jsonb not null default '{}'::jsonb;
       alter table jina_ontology.edges drop constraint if exists edges_confidence_check;
       alter table jina_ontology.edges add constraint edges_confidence_check
         check (confidence is null or (confidence >= 0 and confidence <= 1));
+      create index if not exists ontology_edges_graph_predicate_source
+        on jina_ontology.edges (graph_id,predicate,source_node_id);
+      create index if not exists ontology_edges_graph_predicate_target
+        on jina_ontology.edges (graph_id,predicate,target_node_id);
       create table if not exists jina_ontology.observations (
         id text primary key,
         tenant_id text not null,
@@ -2914,6 +3202,9 @@ export const ONTOLOGY_SCHEMA_SQL = `
       );
       alter table jina_ontology.observations add column if not exists occurred_at timestamptz;
       alter table jina_ontology.observations add column if not exists supersedes_id text references jina_ontology.observations(id);
+      create index if not exists ontology_observations_work_item
+        on jina_ontology.observations (tenant_id,repository,source,((payload->>'kind')),((payload->>'number')))
+        where redacted_at is null and payload is not null;
       create table if not exists jina_ontology.commits (
         tenant_id text not null,
         repository text not null,
@@ -2942,17 +3233,6 @@ export const ONTOLOGY_SCHEMA_SQL = `
         byte_size integer not null,
         primary key (tenant_id,blob_sha)
       );
-      create table if not exists jina_ontology.commit_files (
-        tenant_id text not null,
-        repository text not null,
-        commit_sha text not null,
-        path text not null,
-        blob_sha text not null,
-        primary key (tenant_id,repository,commit_sha,path),
-        foreign key (tenant_id,repository,commit_sha) references jina_ontology.commits(tenant_id,repository,sha),
-        foreign key (tenant_id,blob_sha) references jina_ontology.blobs(tenant_id,blob_sha)
-      );
-      create index if not exists ontology_commit_files_blob on jina_ontology.commit_files (tenant_id,blob_sha);
       create table if not exists jina_ontology.commit_changes (
         tenant_id text not null,
         repository text not null,
@@ -2967,6 +3247,42 @@ export const ONTOLOGY_SCHEMA_SQL = `
       );
       create index if not exists ontology_commit_changes_path
         on jina_ontology.commit_changes (tenant_id,repository,path,commit_sha);
+      create or replace function jina_ontology.commit_manifest(
+        p_tenant_id text,
+        p_repository text,
+        p_commit_sha text
+      ) returns table(path text,blob_sha text)
+      language sql stable parallel safe
+      as $manifest$
+        with recursive ancestry(sha,depth,visited) as (
+          select p_commit_sha,0,array[p_commit_sha]
+          union all
+          select commit.parents[1],ancestry.depth+1,ancestry.visited || commit.parents[1]
+          from ancestry
+          join jina_ontology.commits commit
+            on commit.tenant_id=p_tenant_id and commit.repository=p_repository and commit.sha=ancestry.sha
+          where cardinality(commit.parents)>0 and not commit.parents[1]=any(ancestry.visited)
+        ), events as (
+          select ancestry.depth,change.path,
+                 case when change.change='delete' then null else change.new_blob_sha end as blob_sha
+          from ancestry
+          join jina_ontology.commit_changes change
+            on change.tenant_id=p_tenant_id and change.repository=p_repository and change.commit_sha=ancestry.sha
+          union all
+          select ancestry.depth,change.old_path as path,null as blob_sha
+          from ancestry
+          join jina_ontology.commit_changes change
+            on change.tenant_id=p_tenant_id and change.repository=p_repository and change.commit_sha=ancestry.sha
+          where change.change='rename' and change.old_path is not null
+        ), latest as (
+          select events.path,events.blob_sha,
+                 row_number() over (partition by events.path order by events.depth) as position
+          from events
+        )
+        select latest.path,latest.blob_sha from latest
+        where latest.position=1 and latest.blob_sha is not null
+        order by latest.path
+      $manifest$;
       create table if not exists jina_ontology.blob_analyses (
         tenant_id text not null,
         blob_sha text not null,
@@ -3011,23 +3327,6 @@ export const ONTOLOGY_SCHEMA_SQL = `
         primary key (tenant_id,blob_sha,parser_version,from_moniker,kind,to_moniker,start_line,end_line),
         foreign key (tenant_id,blob_sha,parser_version) references jina_ontology.blob_analyses(tenant_id,blob_sha,parser_version)
       );
-      create table if not exists jina_ontology.model_outputs (
-        observation_id text primary key,
-        tenant_id text not null,
-        repository text not null,
-        commit_sha text not null,
-        generator_version text not null,
-        registry_version text not null,
-        model text not null,
-        summary text not null,
-        generated_at timestamptz not null,
-        payload jsonb not null,
-        unique (tenant_id,repository,commit_sha,generator_version)
-      );
-      alter table jina_ontology.model_outputs
-        drop constraint if exists model_outputs_tenant_id_repository_commit_sha_generator_version_key;
-      create index if not exists ontology_model_outputs_generation
-        on jina_ontology.model_outputs (tenant_id,repository,commit_sha,generator_version,generated_at desc);
       create table if not exists jina_ontology.entities (
         id text primary key,
         tenant_id text not null,
@@ -3115,8 +3414,13 @@ export const ONTOLOGY_SCHEMA_SQL = `
       alter table jina_ontology.assertions add column if not exists superseded_by text references jina_ontology.assertions(id);
       alter table jina_ontology.assertions add column if not exists audit_id text references jina_ontology.audit_log(id);
       update jina_ontology.assertions set last_confirmed_at=recorded_at where last_confirmed_at is null;
-      create index if not exists ontology_assertions_cardinality
-        on jina_ontology.assertions (tenant_id,subject_id,predicate,qualifiers_hash,status);
+      drop index if exists jina_ontology.ontology_assertions_cardinality;
+      create index if not exists ontology_assertions_cardinality_repository
+        on jina_ontology.assertions (tenant_id,repository,subject_id,predicate,qualifiers_hash,status);
+      create index if not exists ontology_assertions_active_subject
+        on jina_ontology.assertions (tenant_id,repository,subject_id,predicate) where status='active';
+      create index if not exists ontology_assertions_active_object
+        on jina_ontology.assertions (tenant_id,repository,object_id,predicate) where status='active';
       create table if not exists jina_ontology.outbox (
         id text primary key,
         tenant_id text not null,
@@ -3163,33 +3467,6 @@ export const ONTOLOGY_SCHEMA_SQL = `
       create unique index if not exists ontology_search_documents_scoped_source
         on jina_ontology.search_documents (tenant_id,repository,source_kind,source_id);
       create index if not exists ontology_search_documents_lexical on jina_ontology.search_documents using gin(search_vector);
-      create table if not exists jina_ontology.issue_traces (
-        tenant_id text not null,
-        repository text not null,
-        ref_name text not null,
-        issue_number integer check (issue_number is null or issue_number > 0),
-        issue_entity_id text not null references jina_ontology.entities(id),
-        payload jsonb not null,
-        projected_at timestamptz not null,
-        primary key (tenant_id,repository,ref_name,issue_entity_id)
-      );
-      do $$
-      begin
-        if exists (
-          select 1 from pg_constraint
-          where conrelid='jina_ontology.issue_traces'::regclass and conname='issue_traces_pkey'
-            and pg_get_constraintdef(oid) not like '%issue_entity_id%'
-        ) then
-          alter table jina_ontology.issue_traces drop constraint issue_traces_pkey;
-          alter table jina_ontology.issue_traces
-            add primary key (tenant_id,repository,ref_name,issue_entity_id);
-        end if;
-      end $$;
-      alter table jina_ontology.issue_traces alter column issue_number drop not null;
-      create index if not exists ontology_issue_traces_entity
-        on jina_ontology.issue_traces (tenant_id,issue_entity_id);
-      create index if not exists ontology_issue_traces_number
-        on jina_ontology.issue_traces (tenant_id,repository,ref_name,issue_number) where issue_number is not null;
       create table if not exists jina_ontology.erasure_filters (
         id text primary key,
         tenant_id text not null,
@@ -3207,4 +3484,102 @@ export const ONTOLOGY_SCHEMA_SQL = `
         created_at timestamptz not null default now(),
         primary key (tenant_id,repository,principal_id)
       );
+      create unique index if not exists ontology_observations_tenant_identity
+        on jina_ontology.observations (tenant_id,id);
+      create unique index if not exists ontology_entities_tenant_identity
+        on jina_ontology.entities (tenant_id,id);
+      create unique index if not exists ontology_audit_tenant_identity
+        on jina_ontology.audit_log (tenant_id,id);
+      create unique index if not exists ontology_assertions_tenant_identity
+        on jina_ontology.assertions (tenant_id,id);
+      drop index if exists jina_ontology.ontology_assertions_one_active;
+      create unique index if not exists ontology_assertions_one_active_repository
+        on jina_ontology.assertions (tenant_id,repository,subject_id,predicate,qualifiers_hash)
+        where status='active' and predicate in ('OWNED_BY','MERGED_AS','MOVED_FROM');
+      drop index if exists jina_ontology.ontology_assertions_one_live_candidate;
+      create unique index if not exists ontology_assertions_one_live_candidate_repository
+        on jina_ontology.assertions (tenant_id,repository,subject_id,predicate,object_id,qualifiers_hash)
+        where status in ('proposed','active');
+      do $$ begin
+        if not exists (select 1 from pg_constraint where conname='observations_supersedes_same_tenant') then
+          alter table jina_ontology.observations add constraint observations_supersedes_same_tenant
+            foreign key (tenant_id,supersedes_id) references jina_ontology.observations(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='commits_observation_same_tenant') then
+          alter table jina_ontology.commits add constraint commits_observation_same_tenant
+            foreign key (tenant_id,source_observation_id) references jina_ontology.observations(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='refs_commit_same_tenant_repository') then
+          alter table jina_ontology.refs add constraint refs_commit_same_tenant_repository
+            foreign key (tenant_id,repository,commit_sha) references jina_ontology.commits(tenant_id,repository,sha) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='commit_changes_old_blob_same_tenant') then
+          alter table jina_ontology.commit_changes add constraint commit_changes_old_blob_same_tenant
+            foreign key (tenant_id,old_blob_sha) references jina_ontology.blobs(tenant_id,blob_sha) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='commit_changes_new_blob_same_tenant') then
+          alter table jina_ontology.commit_changes add constraint commit_changes_new_blob_same_tenant
+            foreign key (tenant_id,new_blob_sha) references jina_ontology.blobs(tenant_id,blob_sha) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='identities_entity_same_tenant') then
+          alter table jina_ontology.identities add constraint identities_entity_same_tenant
+            foreign key (tenant_id,entity_id) references jina_ontology.entities(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='identities_observation_same_tenant') then
+          alter table jina_ontology.identities add constraint identities_observation_same_tenant
+            foreign key (tenant_id,source_observation_id) references jina_ontology.observations(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='audit_parent_same_tenant') then
+          alter table jina_ontology.audit_log add constraint audit_parent_same_tenant
+            foreign key (tenant_id,parent_audit_id) references jina_ontology.audit_log(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='redirect_from_entity_same_tenant') then
+          alter table jina_ontology.entity_redirects add constraint redirect_from_entity_same_tenant
+            foreign key (tenant_id,from_entity_id) references jina_ontology.entities(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='redirect_to_entity_same_tenant') then
+          alter table jina_ontology.entity_redirects add constraint redirect_to_entity_same_tenant
+            foreign key (tenant_id,to_entity_id) references jina_ontology.entities(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='redirect_audit_same_tenant') then
+          alter table jina_ontology.entity_redirects add constraint redirect_audit_same_tenant
+            foreign key (tenant_id,audit_id) references jina_ontology.audit_log(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertions_subject_same_tenant') then
+          alter table jina_ontology.assertions add constraint assertions_subject_same_tenant
+            foreign key (tenant_id,subject_id) references jina_ontology.entities(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertions_object_same_tenant') then
+          alter table jina_ontology.assertions add constraint assertions_object_same_tenant
+            foreign key (tenant_id,object_id) references jina_ontology.entities(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertions_observation_same_tenant') then
+          alter table jina_ontology.assertions add constraint assertions_observation_same_tenant
+            foreign key (tenant_id,source_observation_id) references jina_ontology.observations(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertions_superseded_same_tenant') then
+          alter table jina_ontology.assertions add constraint assertions_superseded_same_tenant
+            foreign key (tenant_id,superseded_by) references jina_ontology.assertions(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertions_audit_same_tenant') then
+          alter table jina_ontology.assertions add constraint assertions_audit_same_tenant
+            foreign key (tenant_id,audit_id) references jina_ontology.audit_log(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='erasure_audit_same_tenant') then
+          alter table jina_ontology.erasure_filters add constraint erasure_audit_same_tenant
+            foreign key (tenant_id,audit_id) references jina_ontology.audit_log(tenant_id,id) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='manifest_commit_same_tenant_repository') then
+          alter table jina_ontology.ref_manifest add constraint manifest_commit_same_tenant_repository
+            foreign key (tenant_id,repository,commit_sha) references jina_ontology.commits(tenant_id,repository,sha) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='manifest_blob_same_tenant') then
+          alter table jina_ontology.ref_manifest add constraint manifest_blob_same_tenant
+            foreign key (tenant_id,blob_sha) references jina_ontology.blobs(tenant_id,blob_sha) not valid;
+        end if;
+        if not exists (select 1 from pg_constraint where conname='assertions_exactly_one_provenance') then
+          alter table jina_ontology.assertions add constraint assertions_exactly_one_provenance
+            check ((source_observation_id is null) <> (asserted_by is null)) not valid;
+        end if;
+      end $$;
     `;

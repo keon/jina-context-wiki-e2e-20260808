@@ -60,7 +60,10 @@ function createStateStore(): ApiStateStore | undefined {
 
 function createOntologyStore(): OntologyGraphStore {
   const config = databaseConfig();
-  return config ? new PostgresOntologyGraphStore(config) : new MemoryOntologyGraphStore();
+  return config ? new PostgresOntologyGraphStore({
+    ...config,
+    manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
+  }) : new MemoryOntologyGraphStore();
 }
 
 function databaseConfig(): PostgresJsonStateStoreConfig | undefined {

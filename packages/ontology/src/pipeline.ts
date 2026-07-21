@@ -9,7 +9,6 @@ import {
 import { canonicalJson, type AssertionStatus } from "./knowledge.js";
 import type { GitHubSourceObservation } from "./normalizers.js";
 import {
-  ONTOLOGY_REGISTRY_VERSION,
   normalizePredicateName,
   predicateDefinition,
   validatePredicateEndpoints,
@@ -18,7 +17,7 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v7";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v11";
 export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
 
 export interface RepositoryTreeEntry {
@@ -143,6 +142,8 @@ export interface OntologyAssertionBatch {
   readonly model: string;
   readonly sandboxId?: string;
   readonly summary: string;
+  /** Exact parsed model document before graph normalization. */
+  readonly modelOutputRaw?: unknown;
   readonly rawOutput: GeneratedOntology;
   readonly assertions: readonly GeneratedAssertion[];
 }
@@ -290,13 +291,52 @@ export function codeCheckpoint(tenantId: string, repository: string, commitSha: 
 
 export function assertionEvidenceFingerprint(
   codeCheckpointValue: string,
-  observations: readonly GitHubSourceObservation[]
+  observations: readonly GitHubSourceObservation[],
+  semanticScope: {
+    readonly focusPaths?: readonly string[];
+    readonly problemEvidencePullRequestNumbers?: readonly number[];
+  } = {}
 ): string {
   const sourceEvidence = observations.map((observation) => {
     const { recordedAt: _recordedAt, ...stable } = observation;
     return stable;
   }).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
-  return stableId("evidence", canonicalJson({ codeCheckpoint: codeCheckpointValue, sourceEvidence }));
+  return stableId("evidence", canonicalJson({
+    codeCheckpoint: codeCheckpointValue,
+    sourceEvidence,
+    focusPaths: [...new Set(semanticScope.focusPaths ?? [])].sort(),
+    problemEvidencePullRequestNumbers: [...new Set(semanticScope.problemEvidencePullRequestNumbers ?? [])].sort((a, b) => a - b)
+  }));
+}
+
+/**
+ * Keep incremental semantic inspection bounded while retaining the evidence
+ * files most likely to explain changes spanning several newly ingested commits.
+ * Paths must exist at the requested ref; deleted historical paths cannot be
+ * cited by the assertion worker.
+ */
+export function selectAssertionFocusPaths(
+  headPaths: readonly string[],
+  historicalPathsNewestFirst: readonly string[],
+  currentPaths: ReadonlySet<string>,
+  limit = 200
+): readonly string[] {
+  const maximum = Math.max(1, limit);
+  const selected: string[] = [];
+  const seen = new Set<string>();
+  const add = (path: string): void => {
+    if (selected.length >= maximum || seen.has(path) || !currentPaths.has(path)) return;
+    seen.add(path);
+    selected.push(path);
+  };
+  headPaths.forEach(add);
+  historicalPathsNewestFirst.filter(isSemanticEvidencePath).forEach(add);
+  historicalPathsNewestFirst.forEach(add);
+  return selected;
+}
+
+function isSemanticEvidencePath(path: string): boolean {
+  return /(?:^|\/)(?:readme|changelog|incident|postmortem|root[-_]?cause|adr|rfc)|(?:^|\/)(?:docs?|test|tests|spec|specs)(?:\/|$)|(?:\.|[-_])(?:test|spec)\.[^/]+$/i.test(path);
 }
 
 export function knowledgeCheckpoint(
@@ -397,14 +437,7 @@ export function assertionsFromGeneratedOntology(
         ? { qualifiers: { reason: requiredCausalReason(edge.why) } }
         : {})
     };
-    if (!isVirtualResolution) return [assertion];
-    return [assertion, {
-      subject: assertion.object,
-      predicate: "RESOLVED_BY",
-      object: assertion.subject,
-      confidence: assertion.confidence,
-      evidence: assertion.evidence
-    }];
+    return [assertion];
   });
 }
 
@@ -482,10 +515,6 @@ function canonicalWorkItemId(value: string, kind: "Issue" | "PullRequest"): stri
 function requiredCausalReason(value: string | undefined): string {
   if (!value?.trim()) throw new Error("INTRODUCED_BY must explain why the commit caused the issue");
   return value.trim();
-}
-
-function normalizePredicate(value: string): string {
-  return value.trim().replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
 }
 
 function validateEvidence(value: string): EvidenceCitation {

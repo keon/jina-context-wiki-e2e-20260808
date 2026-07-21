@@ -63,7 +63,7 @@ IAP REST resource, preserving existing bindings without requiring the Cloud
 Resource Manager API. Health checks, task type definitions, and signed GitHub
 webhooks on the API remain public; tenant data does not.
 
-CI typechecks and tests the workspace, audits production dependencies at high
+CI lints, typechecks, and tests the workspace, audits production dependencies at high
 severity, and builds all three container images on every pull request. A deploy
 can run only from `refs/heads/main`, including manual dispatches. The protected
 `production` environment remains the approval boundary.
@@ -84,6 +84,7 @@ missing; worker health reports only the safe GitHub failure category.
 Pull-request CI must pass all of the following before merge:
 
 ```sh
+pnpm lint
 pnpm typecheck
 pnpm test
 pnpm audit --prod --audit-level=high
@@ -92,9 +93,35 @@ docker build -f apps/worker/Dockerfile .
 docker build -f apps/dashboard/Dockerfile .
 ```
 
+## Database migrations and roles
+
+Ontology schema changes are an administrative deployment concern, not a runtime
+request concern. Run the migration with a schema-owning login before setting
+`JINA_DB_MANAGE_SCHEMA=false` on the API:
+
+```sh
+DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate
+```
+
+An administrator with `CREATEROLE` can also install the least-privilege
+capability roles:
+
+```sh
+DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate -- --install-roles
+```
+
+Grant `jina_ontology_writer` to the dedicated application login and
+`jina_ontology_reader` to reporting logins. Do not make either login the schema
+owner. The writer receives table DML and function execution only; the reader
+receives SELECT and function execution only. The migration also revokes PUBLIC
+access and configures matching default privileges for subsequently created
+Ontology objects. Composite foreign keys prevent new cross-tenant references,
+while partial unique indexes serialize live assertion candidates and
+cardinality-one relationships.
+
 CI supplies PostgreSQL 17 through a service container, so the `@jina/db`
 integration test exercises commit deltas, parsing caches, GitHub normalization,
-knowledge review, outbox projection, all five cited templates, ACL denial,
+knowledge review, outbox projection, all six cited templates, ACL denial,
 redaction, erasure, and graph creation. After a `main` deployment, the workflow verifies API health,
 worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
 policy for `keon@omlabs.xyz`. It then executes the short-lived
@@ -103,7 +130,7 @@ internal credential directly into that job, so the GitHub deployer can never
 read it. The job submits `omxyz/jina-ontology-e2e` to the production three-chunk
 workflow and waits for the aggregate to finish.
 The acceptance check fails the deployment unless the graph has cited nodes and
-edges, the fixed retrieval orchestrator returns cited results, Issue #4 resolves through PR #5, and Codex proposes the documented Issue #4 → PR #3 / commit causality with a reason and checked evidence. The job reviews that fixture assertion, queries causality by issue number, quoted issue title, PR, and commit, starts a cached projection build, and requires a cited `INTRODUCED_BY` graph edge. The canonical outbox and parser backlog must also be empty. It rejects any blocked ontology task
+edges, the fixed retrieval orchestrator returns cited results, Issue #4 resolves through PR #5, and Codex proposes the documented Issue #4 → PR #3 / commit causality with a reason and checked evidence. The job reviews that fixture assertion, queries causality by issue number, quoted issue title, PR, and commit, and verifies cited counterfactual answers for omitting both the causing and resolving PRs. It then starts a cached projection build and requires a cited `INTRODUCED_BY` graph edge. The canonical outbox and parser backlog must also be empty. It rejects any blocked ontology task
 left for the accepted repository and ref; older active attempts must have been
 superseded, while their terminal records remain available on the History page.
 Repeated deployments deliberately exercise the unchanged-head cache path; a generator-contract version change performs one full semantic backfill and then returns to cached execution.
@@ -112,7 +139,10 @@ minutes. This outer wall-clock budget includes sandbox provisioning, repository
 checkout, Codex installation, the ontology worker's model-command budget,
 evidence validation, and cleanup. Production raises the executor's 30-minute
 default command budget to 40 minutes so a slow but active Codex run can complete
-while remaining inside the acceptance job's outer limits. It reports the root,
+while remaining inside the acceptance job's outer limits. The assertion worker
+preloads prioritized evidence concurrently; `ONTOLOGY_FOCUS_BUNDLE_FILE_LIMIT`,
+`ONTOLOGY_FOCUS_BUNDLE_MAX_CHARS`, and `ONTOLOGY_FOCUS_BUNDLE_FILE_CHARS` bound
+that prompt input independently from the larger assertion focus list. It reports the root,
 ingest, assertion, and projection statuses whenever they change. A blocked aggregate is
 terminal for this automated check: acceptance reads the related board events and
 includes the failed chunk's redacted worker reason instead of waiting for the

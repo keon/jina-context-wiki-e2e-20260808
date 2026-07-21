@@ -1,6 +1,6 @@
 import type { OntologyNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.4";
+export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.5";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -48,10 +48,6 @@ export const predicateRegistry = {
   },
   RESOLVES: {
     name: "RESOLVES", class: "relationship", subjectKinds: ["PullRequest"], objectKinds: ["Issue"],
-    cardinality: "many", review: "none", bitemporal: false
-  },
-  RESOLVED_BY: {
-    name: "RESOLVED_BY", class: "relationship", subjectKinds: ["Issue"], objectKinds: ["PullRequest"],
     cardinality: "many", review: "none", bitemporal: false
   },
   INTRODUCED_BY: {

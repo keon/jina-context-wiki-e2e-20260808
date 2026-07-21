@@ -35,6 +35,7 @@ import {
   type OntologyAssertionBatch,
   type OntologyGraph,
   type OntologyGraphStore,
+  type RepositoryContextOperation,
   type RepositorySnapshot
 } from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
@@ -318,6 +319,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, await orchestrator.answer({
         tenantId, allowedRepositories, repository: requiredString(body.repository, "repository"),
         question: requiredString(body.question, "question"),
+        ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
         ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
         ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
         ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
@@ -773,6 +775,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         const sourceObservationIds = Array.isArray(resultPayload.sourceObservationIds)
           ? resultPayload.sourceObservationIds.map((id) => requiredString(id, "result.sourceObservationIds"))
           : [];
+        const problemEvidencePullRequestNumbers = Array.isArray(resultPayload.problemEvidencePullRequestNumbers)
+          ? resultPayload.problemEvidencePullRequestNumbers.map((number) =>
+              requiredPositiveInteger(number, "result.problemEvidencePullRequestNumber")
+            )
+          : [];
         const sourcePullRequestNumbers = Array.isArray(resultPayload.sourcePullRequestNumbers)
           ? resultPayload.sourcePullRequestNumbers.map((number) => requiredPositiveInteger(number, "result.sourcePullRequestNumber"))
           : [];
@@ -791,7 +798,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               codeCheckpoint: requiredString(resultPayload.codeCheckpoint, "result.codeCheckpoint"),
               evidenceFingerprint: requiredString(resultPayload.evidenceFingerprint, "result.evidenceFingerprint"),
               ...(childType === "ontology_assert"
-                ? { analysisPaths, sourceObservationIds, sourcePullRequestNumbers, resolvedPullRequestNumbers }
+                ? { analysisPaths, problemEvidencePullRequestNumbers, sourceObservationIds, sourcePullRequestNumbers, resolvedPullRequestNumbers }
                 : {})
             }
           }, { actor: RUN_ACTOR, now }).state;
@@ -818,13 +825,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         }, { actor: RUN_ACTOR, now }).state;
       }
       if (outcome === "done" && message.topic === "run-ontology-project") {
+        const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
+        // Repository-wide assertion and source events can affect every tracked ref.
+        // Drain them through the all-ref fanout before completing this ref's task;
+        // otherwise the first per-ref rebuild would acknowledge the event early.
+        const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
         eventPayload = { ...await ontologyStore.rebuildDerivedProjections(
           tenantId,
           requiredString(currentTask.metadata.repository, "task.repository"),
           requiredString(currentTask.metadata.ref, "task.ref"),
           now
-        ) };
-        eventPayload = { ...eventPayload, effect: eventPayload.rebuilt ? "changed" : "noop" };
+        ), drainedEventCount: drained.processedEventCount, rebuiltRepositories: drained.rebuiltRepositories };
         graph = await ontologyStore.project({
           tenantId,
           repository: requiredString(currentTask.metadata.repository, "task.repository"),
@@ -833,6 +844,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           taskId: currentTask.id,
           generatedAt: now
         });
+        eventPayload = { ...eventPayload, effect: eventPayload.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop" };
       }
       board = applyCommand(board, {
         command: "CommentTask",
@@ -1243,6 +1255,7 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
     model: requiredString(value.model, "assertionBatch.model"),
     ...(typeof value.sandboxId === "string" && value.sandboxId ? { sandboxId: value.sandboxId } : {}),
     summary: requiredString(value.summary, "assertionBatch.summary"),
+    ...(value.modelOutputRaw !== undefined ? { modelOutputRaw: value.modelOutputRaw } : {}),
     rawOutput,
     assertions: assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers })
   };
@@ -1275,6 +1288,11 @@ function requiredGitShaPrefix(value: unknown, field: string): string {
 function requiredAssertionStatus(value: string): "proposed" | "active" | "rejected" | "superseded" | "retracted" {
   if (value === "proposed" || value === "active" || value === "rejected" || value === "superseded" || value === "retracted") return value;
   throw new Error("unsupported assertion status");
+}
+
+function requiredContextOperation(value: string): RepositoryContextOperation {
+  if (value === "lookup" || value === "counterfactual") return value;
+  throw new Error("operation must be lookup or counterfactual");
 }
 
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {

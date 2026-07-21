@@ -1,5 +1,6 @@
 export const retrievalTemplateNames = ["issue_trace", "feature_trace", "structure", "change", "intent", "ownership"] as const;
 export type RetrievalTemplateName = (typeof retrievalTemplateNames)[number];
+export type RepositoryContextOperation = "lookup" | "counterfactual";
 
 export interface RetrievalCitation {
   readonly kind: "code" | "commit_change" | "assertion" | "observation" | "entity";
@@ -72,7 +73,7 @@ export interface IssueTraceResolution {
   readonly observationIds: readonly string[];
 }
 
-/** Materialized issue-centric read model. Canonical assertions remain the source of truth. */
+/** Issue-centric result assembled from the projected graph and canonical provenance. */
 export interface IssueTraceProjection {
   readonly issue: {
     readonly entityId: string;
@@ -104,6 +105,7 @@ export interface RetrievalExecutor {
 }
 
 export interface OrchestratedContext {
+  readonly operation: RepositoryContextOperation;
   readonly question: string;
   readonly answer: string;
   readonly citedClaims: readonly {
@@ -124,10 +126,11 @@ export interface OrchestratedContext {
 export class RepositoryContextOrchestrator {
   constructor(private readonly executor: RetrievalExecutor) {}
 
-  async answer(input: Omit<RetrievalRequest, "template"> & { readonly question: string; readonly tokenBudget?: number }): Promise<OrchestratedContext> {
-    const templates = input.issueEntityId ? ["issue_trace" as const] : classifyTemplates(input.question);
-    const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
-    const calls: RetrievalResult[] = [];
+  async answer(input: Omit<RetrievalRequest, "template"> & {
+    readonly question: string;
+    readonly operation?: RepositoryContextOperation;
+    readonly tokenBudget?: number;
+  }): Promise<OrchestratedContext> {
     const issueEntityId = input.issueEntityId;
     const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
     const issueText = issueNumber ? undefined : input.issueText ?? extractIssueText(input.question);
@@ -136,6 +139,22 @@ export class RepositoryContextOrchestrator {
     const commitSha = input.commitSha ?? extractCommitSha(input.question);
     const path = input.path ?? extractRepositoryPath(input.question);
     const symbol = input.symbol ?? extractSymbol(input.question);
+    const operation = input.operation ?? (isCounterfactualQuestion(input.question) ? "counterfactual" : "lookup");
+    const extracted = {
+      ...(issueEntityId ? { issueEntityId } : {}),
+      ...(issueNumber ? { issueNumber } : {}),
+      ...(issueText ? { issueText } : {}),
+      ...(featureText ? { featureText } : {}),
+      ...(pullRequestNumber ? { pullRequestNumber } : {}),
+      ...(commitSha ? { commitSha } : {}),
+      ...(path ? { path } : {}),
+      ...(symbol ? { symbol } : {})
+    };
+    const templates = operation === "counterfactual"
+      ? counterfactualTemplates(extracted)
+      : issueEntityId ? ["issue_trace" as const] : classifyTemplates(input.question);
+    const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
+    const calls: RetrievalResult[] = [];
     for (const template of templates) {
       calls.push(await this.executor.retrieve({
         ...input,
@@ -152,17 +171,9 @@ export class RepositoryContextOrchestrator {
       }));
     }
     const citations = dedupeCitations(calls.flatMap((call) => call.items.flatMap((item) => item.citations)));
-    const synthesis = synthesizeContextAnswer(input.question, calls, {
-      ...(issueEntityId ? { issueEntityId } : {}),
-      ...(issueNumber ? { issueNumber } : {}),
-      ...(issueText ? { issueText } : {}),
-      ...(featureText ? { featureText } : {}),
-      ...(pullRequestNumber ? { pullRequestNumber } : {}),
-      ...(commitSha ? { commitSha } : {}),
-      ...(path ? { path } : {}),
-      ...(symbol ? { symbol } : {})
-    });
+    const synthesis = synthesizeContextAnswer(input.question, calls, extracted, operation);
     return {
+      operation,
       question: input.question,
       ...synthesis,
       calls,
@@ -170,6 +181,26 @@ export class RepositoryContextOrchestrator {
       truncated: calls.some((call) => call.truncated)
     };
   }
+}
+
+export function isCounterfactualQuestion(question: string): boolean {
+  return /\b(?:if|without|counterfactual|had\s+not|hadn't|did\s+not|didn't|never\s+(?:merged|landed|happened)|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?)\b/i.test(question) &&
+    /\b(?:would|could|might|still|exist|happen|break|fail|remain|work|affect|impact|merged|landed|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?)\b/i.test(question);
+}
+
+function counterfactualTemplates(extracted: {
+  readonly issueEntityId?: string;
+  readonly issueNumber?: number;
+  readonly issueText?: string;
+  readonly featureText?: string;
+  readonly pullRequestNumber?: number;
+  readonly commitSha?: string;
+}): readonly RetrievalTemplateName[] {
+  if (extracted.featureText) return ["feature_trace"];
+  if (extracted.issueEntityId || extracted.issueNumber || extracted.issueText || extracted.pullRequestNumber || extracted.commitSha) {
+    return ["issue_trace"];
+  }
+  return [];
 }
 
 export function classifyTemplates(question: string): readonly RetrievalTemplateName[] {
@@ -183,11 +214,12 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   const resolution = /resolv|fix(?:ed|es|ing)?|clos(?:e|ed|es|ing)/.test(value);
   if ((issueNumber || issueText) && (causal || resolution)) return ["issue_trace"];
   if ((pullRequestNumber || commitSha) && causal) return ["issue_trace"];
+  if ((pullRequestNumber || commitSha) && resolution && /\b(?:which|what)\s+(?:issue|bug|ticket)\b/.test(value)) return ["issue_trace"];
   if (featureText) return ["feature_trace"];
   const selected: RetrievalTemplateName[] = [];
   if (issueNumber || issueText) selected.push("issue_trace");
   if (/depend|call|import|structure|where|symbol|implement|define|test(?:s|ed|ing)? cover/.test(value)) selected.push("structure");
-  if (/change|break|impact|diff|pull request|\bpr\b/.test(value) || pullRequestNumber || commitSha) selected.push("change");
+  if (/change|break|impact|diff/.test(value) || pullRequestNumber || commitSha) selected.push("change");
   if (/why|intent|issue|introduced|history|exist/.test(value)) selected.push("intent");
   if (/\b(?:who|owner|owners|owned|owns|maintain|maintainer|maintainers|worked|author|authors)\b/.test(value)) selected.push("ownership");
   return selected.length > 0 ? [...new Set(selected)] : ["structure", "intent"];
@@ -279,8 +311,10 @@ function synthesizeContextAnswer(
     readonly commitSha?: string;
     readonly path?: string;
     readonly symbol?: string;
-  }
+  },
+  operation: RepositoryContextOperation
 ): Pick<OrchestratedContext, "answer" | "citedClaims" | "unresolvedAmbiguities" | "coverageGaps"> {
+  if (operation === "counterfactual") return synthesizeCounterfactualContext(calls, extracted);
   const unresolvedAmbiguities: string[] = [];
   const coverageGaps: { capability: RetrievalTemplateName | "query"; message: string }[] = [];
   const citedClaims: { text: string; citations: readonly RetrievalCitation[] }[] = [];
@@ -335,12 +369,14 @@ function synthesizeContextAnswer(
       }
       continue;
     }
-    const selected = call.items.slice(0, 6);
+    const answerItems = consolidateAnswerItems(call.template, call.items);
+    const selected = answerItems.slice(0, 6);
+    const resultCount = call.truncated ? call.totalBeforeLimit : answerItems.length;
     citedClaims.push(...selected.map((item) => ({ text: item.title, citations: item.citations })));
     if (call.template === "structure") {
-      answers.push(`Found ${call.totalBeforeLimit} cited structural fact${call.totalBeforeLimit === 1 ? "" : "s"}${extracted.symbol ? ` for ${extracted.symbol}` : extracted.path ? ` in ${extracted.path}` : ""}: ${selected.map((item) => item.title).join("; ")}.`);
+      answers.push(`Found ${resultCount} cited structural fact${resultCount === 1 ? "" : "s"}${extracted.symbol ? ` for ${extracted.symbol}` : extracted.path ? ` in ${extracted.path}` : ""}: ${selected.map((item) => item.title).join("; ")}.`);
     } else if (call.template === "change") {
-      answers.push(`The cited change set contains ${call.totalBeforeLimit} result${call.totalBeforeLimit === 1 ? "" : "s"}: ${selected.map((item) => item.title).join("; ")}.`);
+      answers.push(`The cited change set contains ${resultCount} result${resultCount === 1 ? "" : "s"}: ${selected.map((item) => item.title).join("; ")}.`);
     } else if (call.template === "ownership") {
       answers.push(`Ownership evidence: ${selected.map((item) => item.title).join("; ")}.`);
     } else {
@@ -352,6 +388,196 @@ function synthesizeContextAnswer(
     ? answers.join(" ")
     : "I could not produce a supported answer from the currently indexed repository evidence.";
   return { answer, citedClaims: dedupeClaims(citedClaims), unresolvedAmbiguities: [...new Set(unresolvedAmbiguities)], coverageGaps };
+}
+
+function consolidateAnswerItems(template: RetrievalTemplateName, items: readonly RetrievalItem[]): readonly RetrievalItem[] {
+  const consolidated = new Map<string, RetrievalItem>();
+  for (const item of items) {
+    const key = item.title;
+    const existing = consolidated.get(key);
+    if (!existing) {
+      consolidated.set(key, item);
+      continue;
+    }
+    consolidated.set(key, {
+      ...existing,
+      score: Math.max(existing.score, item.score),
+      citations: dedupeCitations([...existing.citations, ...item.citations])
+    });
+  }
+  return [...consolidated.values()];
+}
+
+function synthesizeCounterfactualContext(
+  calls: readonly RetrievalResult[],
+  extracted: {
+    readonly issueEntityId?: string;
+    readonly issueNumber?: number;
+    readonly issueText?: string;
+    readonly featureText?: string;
+    readonly pullRequestNumber?: number;
+    readonly commitSha?: string;
+  }
+): Pick<OrchestratedContext, "answer" | "citedClaims" | "unresolvedAmbiguities" | "coverageGaps"> {
+  const citedClaims: { text: string; citations: readonly RetrievalCitation[] }[] = [];
+  const unresolvedAmbiguities: string[] = [];
+  const coverageGaps: { capability: RetrievalTemplateName | "query"; message: string }[] = [];
+  const answers: string[] = [];
+
+  if (calls.length === 0) {
+    return {
+      answer: "I could not identify an issue, feature, pull request, or commit for this counterfactual.",
+      citedClaims,
+      unresolvedAmbiguities: ["Counterfactual lookup requires a resolvable issue, feature, pull request, or commit."],
+      coverageGaps: [{ capability: "query", message: "No fixed projection lookup could be selected safely." }]
+    };
+  }
+
+  for (const call of calls) {
+    if (call.items.length === 0) {
+      coverageGaps.push({
+        capability: call.template,
+        message: `No active reviewed ${call.template.replace("_", " ")} relationship supports this counterfactual.`
+      });
+      continue;
+    }
+    if (call.template === "issue_trace") {
+      const items = extracted.issueEntityId || extracted.issueNumber || extracted.issueText
+        ? (() => {
+            const selection = selectIssueTrace(call.items, extracted);
+            if (!selection.item) {
+              const ambiguity = selection.ambiguity ?? "No single issue trace could be selected safely.";
+              unresolvedAmbiguities.push(ambiguity);
+              return [];
+            }
+            return [selection.item];
+          })()
+        : call.items;
+      for (const item of items) {
+        const result = synthesizeIssueCounterfactual(item, extracted);
+        if (result.answer) answers.push(result.answer);
+        citedClaims.push(...result.claims);
+        if (result.coverageGap) coverageGaps.push({ capability: "issue_trace", message: result.coverageGap });
+      }
+      continue;
+    }
+    if (call.template === "feature_trace") {
+      const result = synthesizeFeatureCounterfactual(call.items, extracted);
+      if (result.answer) answers.push(result.answer);
+      citedClaims.push(...result.claims);
+      if (result.coverageGap) coverageGaps.push({ capability: "feature_trace", message: result.coverageGap });
+    }
+  }
+
+  return {
+    answer: answers.length > 0
+      ? answers.join(" ")
+      : "The current reviewed graph does not contain a causal or impact relationship that can support this counterfactual.",
+    citedClaims: dedupeClaims(citedClaims),
+    unresolvedAmbiguities: [...new Set(unresolvedAmbiguities)],
+    coverageGaps
+  };
+}
+
+function synthesizeIssueCounterfactual(
+  item: RetrievalItem,
+  extracted: { readonly pullRequestNumber?: number; readonly commitSha?: string }
+): {
+  readonly answer?: string;
+  readonly claims: readonly { readonly text: string; readonly citations: readonly RetrievalCitation[] }[];
+  readonly coverageGap?: string;
+} {
+  const trace = issueTraceData(item);
+  const issueLabel = trace.issue.displayId
+    ? `Issue ${trace.issue.displayId}${trace.issue.title ? ` (${trace.issue.title})` : ""}`
+    : trace.issue.title || "The issue";
+  const cause = extracted.commitSha
+    ? trace.introducedBy.find((candidate) => candidate.sha.startsWith(extracted.commitSha!))
+    : extracted.pullRequestNumber
+      ? trace.introducedBy.find((candidate) => candidate.pullRequests?.some((pullRequest) => pullRequest.number === extracted.pullRequestNumber))
+      : trace.introducedBy[0];
+  if (cause) {
+    const pullRequest = cause.pullRequests?.find((candidate) =>
+      !extracted.pullRequestNumber || candidate.number === extracted.pullRequestNumber
+    ) ?? cause.pullRequests?.[0];
+    const target = pullRequest ? `PR #${pullRequest.number}` : `commit ${cause.sha.slice(0, 12)}`;
+    const conclusion = `Without ${target}, the active reviewed causal model says ${issueLabel} would likely not have been introduced by that change; independent causes are not ruled out.`;
+    const why = cause.why ? `Why: ${cause.why}` : undefined;
+    const citations = citationsForCause(item, cause);
+    if (citations.length === 0) {
+      return {
+        claims: [],
+        coverageGap: `${issueLabel} has an active reviewed cause, but its causal evidence is unavailable at this ref.`
+      };
+    }
+    return {
+      answer: `${conclusion}${why ? ` ${why.endsWith(".") ? why : `${why}.`}` : ""}`,
+      claims: [{ text: conclusion, citations }, ...(why ? [{ text: why, citations }] : [])]
+    };
+  }
+  const resolution = extracted.pullRequestNumber
+    ? trace.resolutions.find((candidate) => candidate.pullRequestNumber === extracted.pullRequestNumber)
+    : extracted.commitSha
+      ? trace.resolutions.find((candidate) => candidate.commits.some((commit) => commit.sha.startsWith(extracted.commitSha!)))
+      : trace.resolutions[0];
+  if (resolution) {
+    const target = extracted.pullRequestNumber
+      ? `PR #${resolution.pullRequestNumber}`
+      : extracted.commitSha ? `commit ${extracted.commitSha.slice(0, 12)}` : `PR #${resolution.pullRequestNumber}`;
+    const conclusion = `Without ${target}, the recorded resolution for ${issueLabel} would be absent, so the issue would remain unresolved at this ref unless another fix replaced it.`;
+    const citations = citationsForResolution(item, resolution);
+    if (citations.length === 0) {
+      return {
+        claims: [],
+        coverageGap: `${issueLabel} has a recorded resolution, but its evidence is unavailable at this ref.`
+      };
+    }
+    return { answer: conclusion, claims: [{ text: conclusion, citations }] };
+  }
+  return {
+    claims: [],
+    coverageGap: `${issueLabel} has no active reviewed causal or resolution role for the referenced change.`
+  };
+}
+
+function synthesizeFeatureCounterfactual(
+  items: readonly RetrievalItem[],
+  extracted: { readonly pullRequestNumber?: number; readonly commitSha?: string }
+): {
+  readonly answer?: string;
+  readonly claims: readonly { readonly text: string; readonly citations: readonly RetrievalCitation[] }[];
+  readonly coverageGap?: string;
+} {
+  const impacts = items.filter((item) => {
+    if (item.data.predicate !== "LIKELY_AFFECTS" || !isRecord(item.data.related)) return false;
+    const naturalKey = typeof item.data.related.naturalKey === "string" ? item.data.related.naturalKey : "";
+    if (extracted.pullRequestNumber) return naturalKey.endsWith(`#${extracted.pullRequestNumber}`);
+    if (extracted.commitSha) return naturalKey.toLowerCase().endsWith(`:sha:${extracted.commitSha.toLowerCase()}`);
+    return true;
+  });
+  if (impacts.length === 0) {
+    return {
+      claims: [],
+      coverageGap: "Feature implementation or documentation alone does not establish a counterfactual; an active reviewed LIKELY_AFFECTS relationship is required."
+    };
+  }
+  const feature = impacts.map((item) => item.data.feature).find(isRecord);
+  const label = typeof feature?.label === "string" ? feature.label : "the feature";
+  const target = extracted.pullRequestNumber
+    ? `PR #${extracted.pullRequestNumber}`
+    : extracted.commitSha ? `commit ${extracted.commitSha.slice(0, 12)}` : "the referenced change";
+  const conclusion = `Without ${target}, the reviewed graph supports removing a likely impact on ${label}, but it does not prove that the feature would disappear or behave differently.`;
+  const citations = dedupeCitations(impacts.flatMap((item) => item.citations));
+  if (citations.length === 0) {
+    return {
+      claims: [],
+      coverageGap: `The reviewed LIKELY_AFFECTS relationship for ${label} has no available citation at this ref.`
+    };
+  }
+  return {
+    answer: conclusion,
+    claims: [{ text: conclusion, citations }]
+  };
 }
 
 function synthesizeFeatureTrace(

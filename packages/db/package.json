@@ -11,7 +11,8 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "lint": "echo \"lint not configured\"",
+    "lint": "eslint . --max-warnings 0",
+    "migrate": "pnpm build && node dist/migrate.js",
     "test": "pnpm build && node --test dist/postgres.integration.test.js"
   },
   "dependencies": {

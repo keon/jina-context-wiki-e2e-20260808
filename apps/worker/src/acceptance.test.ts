@@ -129,13 +129,24 @@ test("production acceptance reviews causality, queries it in both directions, an
       return json({ affectedIds: ["cause-assertion"] });
     }
     if (url.pathname === "/ontology/ask") {
-      const body = JSON.parse(String(init?.body ?? "{}")) as { question?: string };
+      const body = JSON.parse(String(init?.body ?? "{}")) as { question?: string; operation?: string };
       if (body.question?.includes("resolved issue")) return json({ calls: [{
         template: "issue_trace", items: [{
           data: { issue: { number: 7, title: "Application guard bypassed" }, resolutions: [{ pullRequestNumber: 8, commits: [{ sha: "b".repeat(40) }] }] },
           citations: [{ kind: "assertion", id: "resolves" }]
         }]
       }], citations: [{ kind: "assertion", id: "resolves" }] });
+      if (body.operation === "counterfactual") {
+        const causing = body.question?.includes("PR #6");
+        return json({
+          operation: "counterfactual",
+          answer: causing
+            ? "Without PR #6, the issue would likely not have been introduced by that change."
+            : "Without PR #8, the issue would remain unresolved.",
+          calls: [{ template: "issue_trace", items: [{ citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }] }],
+          citedClaims: [{ text: "supported", citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }]
+        });
+      }
       if (body.question?.includes("caused") || body.question?.includes("cause")) {
         causalQuestions.push(body.question);
         return json({ calls: [{ template: "issue_trace", items: [{

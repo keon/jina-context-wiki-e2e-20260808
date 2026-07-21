@@ -5,7 +5,7 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "lint": "echo \"lint not configured\"",
+    "lint": "eslint . --max-warnings 0",
     "test": "pnpm build && node --test dist/github-app.test.js",
     "dev": "pnpm build && JINA_ENABLE_DEV_ENDPOINTS=true JINA_SIMULATE_RUNS=true node dist/dev-server.js",
     "start": "node dist/dev-server.js"

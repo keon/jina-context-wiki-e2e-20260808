@@ -23,6 +23,7 @@ Six concepts carry the whole design: **board**, **task**, **pipeline**, **run**,
 
 ```sh
 pnpm install
+pnpm lint
 pnpm typecheck
 pnpm test                # unit, API, worker-protocol, and optional Postgres tests
 pnpm dev                 # api dev server :4000 + live board dashboard :3000
@@ -41,7 +42,7 @@ The CLI review harness is a separate local evaluation path. Its trace and usage 
 
 ## Ontology Worker
 
-`ontology_build` is an aggregate with three worker-owned children: `ontology_ingest` aggregates the immutable Git tree and parses only blob SHA/parser-version cache misses; `ontology_assert` runs Codex in Daytona against paths added or modified relative to the first parent and records its cited output as model observations and registry-validated assertions; `ontology_project` builds disposable graph/search/issue-trace read models from the canonical stores. Parser-cache misses and semantic change scope are intentionally separate: a previously analyzed blob is reused wherever it appears, while semantic work follows commit changes. A generator-contract change performs one full semantic scan of an unchanged head and caches that new generation; routine retries remain no-ops. Unchanged blob analyses and assertions backed by unchanged evidence carry forward across commits. Reviewed causal facts include a reason and checked evidence, support Issue title/body, number, PR, and commit lookup in both directions, and render as `INTRODUCED_BY` graph edges. Internal blob work remains batched and does not create per-file board tasks.
+`ontology_build` is an aggregate with three worker-owned children: `ontology_ingest` stores immutable commits as first-parent churn and parses only blob SHA/parser-version cache misses; `ontology_assert` runs Codex in Daytona against a bounded cross-commit focus list and records its cited output as model observations and registry-validated proposals; `ontology_project` reconstructs the hot-ref manifest and builds disposable graph/search read models from the canonical stores. Parser-cache misses and semantic change scope are intentionally separate: a previously analyzed blob is reused wherever it appears, while semantic work follows current changes plus still-present root-cause/test evidence from newly ingested commits. Assertion generations are reused only on an exact code/source evidence fingerprint; a generator-contract or evidence change performs one bounded semantic scan and caches that exact generation. Reviewed facts retain their review and provenance when a later generator confirms them. Reviewed causal facts include a reason and checked evidence, support Issue title/body, number, PR, and commit lookup in both directions, and render as `INTRODUCED_BY` graph edges. Counterfactual questions are deterministic synthesis over those same reviewed relationships, not a new task or schema. Internal blob work remains batched and does not create per-file board tasks.
 
 Local execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and either `OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Override provider and model with `ONTOLOGY_CODEX_PROVIDER` and `ONTOLOGY_CODEX_MODEL` when needed.
 

@@ -1,6 +1,6 @@
 # Jina Architecture
 
-> **Documentation status (2026-07-20):** The "Current implementation" section and [ONTOLOGY.md](ONTOLOGY.md) are authoritative for the runtime in this repository. The remainder describes the broader board/review target. Trigger.dev, normalized board task/run/finding tables, external GitHub publication, and the expanded gate model are targets; the Repository Context v5.3 Ontology path is implemented.
+> **Documentation status (2026-07-21):** The "Current implementation" section and [ONTOLOGY.md](ONTOLOGY.md) are authoritative for the runtime in this repository. The remainder describes the broader board/review target. Trigger.dev, normalized board task/run/finding tables, external GitHub publication, and the expanded gate model are targets; the Repository Context v5.5 Ontology path is implemented.
 
 ## Current implementation
 
@@ -9,7 +9,7 @@ The current repository implementation is configured to run as four Cloud Run ser
 - `jina-api` verifies GitHub webhooks, applies board commands, runs the readiness reducer, and owns short lease/completion transactions.
 - `jina-dashboard` serves the current board, retained task-attempt history, task-type catalog, task details, Ontology visualization, and fixed-template cited context queries. Direct Cloud Run IAP authenticates browser users; the server-side proxy forwards the verified email as the application principal and adds the API service credential.
 - `jina-task-worker` polls for `run-review`, `run-research`, `run-publish`, and `run-cleanup` messages. Review fetches the PR diff from GitHub and calls OpenAI with a strict findings schema. Publish currently records an internal idempotent publication only.
-- `jina-ontology-worker` runs three board-visible chunks: raw-data aggregation, assertion derivation, and projection. Aggregation walks only the previously unseen commit-DAG portion, records immutable GitHub/Git observations, computes first-parent deltas, normalizes PR/issue/CODEOWNERS facts, and applies the tree-sitter structural parser only to unseen tenant/blob/parser pairs. New GitHub snapshots also retract source facts that disappeared. Assertion generation checks out the pinned commit in Daytona, validates citations and kind-specific IDs, records model output, and stores inference as proposed knowledge; this includes PR-anchored derived Issues and repository-scoped Feature candidates without creating more board tasks. A generator-contract change triggers one cached backfill for an unchanged head. Projection claims repository-scoped canonical events, fans their affected issue traces across every ref, reconciles redirects, applies retention, and creates or reuses the content-addressed cited graph shown on the dashboard. Reviewed `INTRODUCED_BY` facts include a causal reason and appear in both reverse retrieval and the graph; reviewed Feature relationships support fixed cited implementation, documentation, and likely-impact queries. Stage results distinguish changed work, confirmation, and true no-ops.
+- `jina-ontology-worker` runs three board-visible chunks: raw-data aggregation, assertion derivation, and projection. Aggregation walks only the previously unseen commit-DAG portion, records immutable GitHub/Git observations, stores first-parent churn rather than full per-commit manifests, normalizes PR/issue/CODEOWNERS facts, and applies the tree-sitter structural parser only to unseen tenant/blob/parser pairs. New GitHub snapshots also retract source facts that disappeared. Assertion generation checks out the pinned commit in Daytona, validates citations and kind-specific IDs, records model output, and stores inference as proposed knowledge; this includes PR-anchored derived Issues and repository-scoped Feature candidates without creating more board tasks. A generator-contract change triggers one bounded uncached semantic refresh for an unchanged head, then exact-fingerprint retries are cached. Projection claims repository-scoped canonical events, rebuilds every affected ref from churn, reconciles redirects, applies retention, and creates or reuses the content-addressed cited graph shown on the dashboard. Reviewed `INTRODUCED_BY` facts include a causal reason and appear in both reverse retrieval and the graph; reviewed Feature relationships support fixed cited implementation, documentation, and likely-impact queries. Stage results distinguish changed work, confirmation, and true no-ops.
 
 The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Ontology uses relational canonical intake, code-plane, knowledge, audit, outbox, ACL, lifecycle, manifest, search, and graph tables in `jina_ontology`. Canonical operations and board completion are independently idempotent and lease-fenced, so a retry converges after a crash between their transactions.
 
@@ -33,7 +33,7 @@ GitHub webhook -> API -> PostgreSQL board snapshot/outbox
 Browser -> Cloud Run IAP -> dashboard proxy -> authenticated API reads
 ```
 
-Production is scoped to the canonical `omlabs` tenant. Startup migration rewrites configured legacy tenant aliases. The API is public only where required for health and signed webhook intake; tenant reads and worker mutations require the internal bearer credential.
+Production is scoped to the canonical `omlabs` tenant. Startup migration rewrites configured legacy tenant aliases. The API exposes only health, signed webhook intake, and the non-tenant `GET /task-types` catalog without the internal bearer credential; tenant reads and worker mutations require it.
 
 ## Broader target architecture and purpose
 
@@ -146,9 +146,13 @@ Next.js Dashboard on Vercel
 
 The MVP runtime fleet runs the API server, the outbox relay, and the agent run code. Review work that needs repository files runs inside Daytona-backed sandboxes. Future grounding and fix runs reuse Daytona with additional, stricter permissions.
 
-## Codebase Layout
+## Target Codebase Layout
 
-Jina is split by runtime first, then by reusable domain packages.
+The broader target is split by runtime first, then by reusable domain packages.
+This map is a target organization for the Trigger.dev design, not an inventory of
+the current Cloud Run runtime. The current `apps/worker` and `packages/ontology`
+boundaries are described in the README and the current-implementation section
+above.
 
 ```text
 apps/
@@ -265,6 +269,7 @@ Workspace tooling:
 
 - Use `pnpm` workspaces for `apps/*` and `packages/*`.
 - Use Turborepo for cached `build`, `test`, `lint`, and `typecheck` pipelines.
+- Enforce JavaScript and TypeScript linting with the workspace ESLint flat configuration; CI treats warnings as failures.
 - Use TypeScript project references for package-level type boundaries once the packages are real build units.
 - Add boundary enforcement early, either with Nx's module-boundary ESLint rule or equivalent local ESLint restrictions. The important rule is that domain packages cannot import adapters, runtime apps, or database repositories.
 

@@ -40,7 +40,7 @@ export interface SourceEntityIntent {
 
 export interface SourceAssertionIntent {
   readonly subject: SourceEntityIntent;
-  readonly predicate: "AUTHORED_BY" | "INCLUDES" | "MERGED_AS" | "RESOLVES" | "RESOLVED_BY" | "REFERENCES" | "OWNED_BY";
+  readonly predicate: "AUTHORED_BY" | "INCLUDES" | "MERGED_AS" | "RESOLVES" | "REFERENCES" | "OWNED_BY";
   readonly object: SourceEntityIntent;
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
 }
@@ -89,7 +89,6 @@ export function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation):
       const issue: SourceEntityIntent = { kind: "Issue", key: `github:issue:${observation.repository}#${number}`, displayName: `Issue #${number}` };
       entities.push(issue);
       assertions.push({ subject, predicate: resolved.has(number) ? "RESOLVES" : "REFERENCES", object: issue });
-      if (resolved.has(number)) assertions.push({ subject: issue, predicate: "RESOLVED_BY", object: subject });
     }
   }
   return { entities: dedupe(entities, (entity) => `${entity.kind}:${entity.key}`), assertions: dedupe(assertions, (item) => `${item.subject.key}:${item.predicate}:${item.object.key}`), ...(githubIdentity ? { githubIdentity } : {}) };

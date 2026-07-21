@@ -11,8 +11,8 @@
   "scripts": {
     "build": "tsc -b",
     "typecheck": "tsc -b",
-    "lint": "echo \"lint not configured\"",
-    "test": "echo \"test not configured\""
+    "lint": "eslint . --max-warnings 0",
+    "test": "pnpm run build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@daytona/sdk": "^0.199.0",

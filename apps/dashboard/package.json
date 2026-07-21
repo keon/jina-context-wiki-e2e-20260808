@@ -5,8 +5,8 @@
   "scripts": {
     "build": "tsc -b && node scripts/build-client.mjs",
     "typecheck": "tsc -b",
-    "lint": "echo \"lint not configured\"",
-    "test": "pnpm build && node --test dist/app/page.test.js",
+    "lint": "eslint . --max-warnings 0",
+    "test": "pnpm build && node --test dist/app/*.test.js",
     "dev": "pnpm build && node dist/server/dev-server.js"
   },
   "dependencies": {

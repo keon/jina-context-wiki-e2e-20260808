@@ -32,6 +32,8 @@ export interface OntologyEdge {
   readonly predicate: string;
   readonly plane: OntologyPlane;
   readonly confidence?: number;
+  /** Canonical assertion qualifiers retained by materialized knowledge projections. */
+  readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
   /** Human-readable semantic rationale. Required for causal model assertions. */
   readonly why?: string;
   readonly evidence: readonly string[];
@@ -52,6 +54,8 @@ export interface OntologyGraph {
   readonly summary: string;
   readonly nodes: readonly OntologyNode[];
   readonly edges: readonly OntologyEdge[];
+  /** Exact parsed JSON downloaded from a model run; omitted from projections and persisted graph reads. */
+  readonly rawModelOutput?: unknown;
 }
 
 export interface OntologyGraphSummary extends Omit<OntologyGraph, "nodes" | "edges"> {
@@ -70,6 +74,8 @@ export interface OntologyBuildRequest {
   readonly ref: string;
   readonly commitSha?: string;
   readonly focusPaths?: readonly string[];
+  /** PRs whose complete changed-file list contains durable regression/problem evidence. */
+  readonly problemEvidencePullRequestNumbers?: readonly number[];
   /** Immutable source observations included in this generation's evidence fingerprint. */
   readonly sourceEvidence?: readonly OntologySourceEvidence[];
   readonly taskId: string;
@@ -121,7 +127,7 @@ export function createOntologyGraph(input: {
     .map((edge) => ({
       ...edge,
       predicate: normalizePredicate(edge.predicate),
-      id: stableId("edge", `${edge.source}:${edge.predicate}:${edge.target}:${edge.plane}`)
+      id: stableId("edge", `${edge.source}:${edge.predicate}:${edge.target}:${edge.plane}:${canonicalGraphJson(edge.qualifiers ?? {})}:${edge.why ?? ""}`)
     }));
 
   if (!nodes.some((node) => node.kind === "Repository")) {
@@ -209,6 +215,133 @@ export async function validateOntologyEvidence(
   validateCausalEvidenceContents(generated, files);
 }
 
+/**
+ * A merged PR that explicitly describes an untracked repair and changes a
+ * durable problem/evidence file must yield a reviewable virtual Issue proposal.
+ * The rule only detects a missing proposal; the model still names the problem,
+ * explains it, and supplies repository citations.
+ */
+export function validateRequiredVirtualIssues(
+  generated: GeneratedOntology,
+  sourceEvidence: readonly OntologySourceEvidence[],
+  problemEvidencePullRequestNumbers: readonly number[] = []
+): void {
+  for (const number of requiredVirtualIssuePullRequestNumbers(sourceEvidence, problemEvidencePullRequestNumbers)) {
+    const issueId = `virtual:pr:${number}`;
+    const node = generated.nodes.find((candidate) => candidate.kind === "Issue" && candidate.id === issueId);
+    const resolutions = generated.edges.filter((edge) => edge.predicate === "RESOLVES" && edge.target === issueId);
+    const pullRequest = resolutions[0] ? generated.nodes.find((candidate) => candidate.id === resolutions[0]!.source) : undefined;
+    const pullRequestNumber = pullRequest?.kind === "PullRequest"
+      ? /^(?:pr:|#)?(\d+)$/i.exec(pullRequest.id.trim())?.[1]
+      : undefined;
+    if (!node || resolutions.length !== 1 || pullRequestNumber !== String(number)) {
+      throw new Error(`pull request #${number} explicitly repairs an untracked problem and requires virtual Issue ${issueId}`);
+    }
+  }
+}
+
+export function requiredVirtualIssuePullRequestNumbers(
+  sourceEvidence: readonly OntologySourceEvidence[],
+  problemEvidencePullRequestNumbers: readonly number[] = []
+): readonly number[] {
+  const problemPullRequests = new Set(problemEvidencePullRequestNumbers);
+  if (problemPullRequests.size === 0) return [];
+  const required = sourceEvidence.flatMap((evidence) => {
+    if (!isRecord(evidence.payload)) return [];
+    const payload = evidence.payload;
+    if (payload.kind !== "pull_request" || typeof payload.number !== "number" || !payload.mergedAt) return [];
+    if (!problemPullRequests.has(payload.number)) return [];
+    if (Array.isArray(payload.resolvesIssueNumbers) && payload.resolvesIssueNumbers.length > 0) return [];
+    if (Array.isArray(payload.referencesIssueNumbers) && payload.referencesIssueNumbers.length > 0) return [];
+    const text = `${typeof payload.title === "string" ? payload.title : ""}\n${typeof payload.body === "string" ? payload.body : ""}`;
+    if (/\b(?:not|isn't|is not)\s+(?:a\s+)?(?:bug\s+)?fix\b|\bno\s+behavior\s+change\b/i.test(text)) return [];
+    const repair = /\b(?:fix(?:e[sd])?|repair(?:s|ed|ing)?|restor(?:e[sd]?|ing)|correct(?:s|ed|ing)?)\b/i.test(text);
+    const problem = /\b(?:bug|regression|incorrect|broken|fail(?:s|ed|ing|ure)?|cannot|can't|unable|denied|wrong)\b/i.test(text);
+    return repair && problem ? [payload.number] : [];
+  });
+  return [...new Set(required)];
+}
+
+export interface CausalEvidenceFile {
+  readonly path: string;
+  readonly content: string;
+}
+
+export interface RequiredCausalAnchor {
+  readonly issueId: string;
+  readonly commitSha: string;
+  readonly evidencePath: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
+/** Detect only explicit root-cause records; proximity or PR membership never qualifies. */
+export function requiredCausalAnchors(
+  files: readonly CausalEvidenceFile[],
+  virtualIssuePullRequestNumbers: readonly number[] = []
+): readonly RequiredCausalAnchor[] {
+  const anchors: RequiredCausalAnchor[] = [];
+  for (const file of files) {
+    if (!/(?:^|\/)(?:incident|postmortem|root[-_]?cause)|root[-_]?cause/i.test(file.path)) continue;
+    if (!/\bintroduced\s+by\b/i.test(file.content)) continue;
+    const lines = file.content.split(/\r?\n/);
+    const shaMatch = /\b([a-f0-9]{40})\b/i.exec(file.content);
+    const commitSha = shaMatch?.[1]?.toLowerCase();
+    if (!commitSha) continue;
+    const issuePattern = /\b(?:github\s+)?issue\s+#(\d+)\b/i;
+    const issueNumber = issuePattern.exec(file.content)?.[1];
+    const issueId = issueNumber ?? (
+      /\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && virtualIssuePullRequestNumbers.length === 1
+        ? `virtual:pr:${virtualIssuePullRequestNumbers[0]}`
+        : undefined
+    );
+    if (issueId) {
+      const shaLine = Math.max(1, lines.findIndex((line) => line.toLowerCase().includes(commitSha)) + 1);
+      const issueLine = issueNumber
+        ? Math.max(1, lines.findIndex((line) => issuePattern.test(line)) + 1)
+        : 1;
+      anchors.push({
+        issueId,
+        commitSha,
+        evidencePath: file.path,
+        startLine: Math.min(issueLine, shaLine),
+        endLine: Math.min(lines.length, shaLine + 2)
+      });
+    }
+  }
+  return anchors.filter((anchor, index) => anchors.findIndex((candidate) =>
+    candidate.issueId === anchor.issueId && candidate.commitSha === anchor.commitSha
+  ) === index);
+}
+
+export function validateRequiredCausalAssertions(
+  generated: GeneratedOntology,
+  anchors: readonly RequiredCausalAnchor[]
+): void {
+  for (const anchor of anchors) {
+    const issue = generated.nodes.find((node) => node.kind === "Issue" && node.id === anchor.issueId);
+    const commit = generated.nodes.find((node) => node.kind === "Commit" && node.id.toLowerCase() === anchor.commitSha);
+    const edge = issue && commit ? generated.edges.find((candidate) =>
+      candidate.predicate === "INTRODUCED_BY" && candidate.source === issue.id && candidate.target === commit.id
+    ) : undefined;
+    const spansAnchor = edge?.evidence.some((value) => {
+      const citation = parseEvidenceCitation(value);
+      return citation.path === anchor.evidencePath && citation.startLine <= anchor.startLine && citation.endLine >= anchor.endLine;
+    });
+    if (!edge || !spansAnchor) {
+      throw new Error(`explicit root-cause evidence requires Issue ${anchor.issueId} INTRODUCED_BY commit ${anchor.commitSha}`);
+    }
+  }
+}
+
+export function isProblemEvidencePath(path: string): boolean {
+  const segments = path.split("/").filter(Boolean);
+  const baseName = segments.at(-1) ?? "";
+  return segments.some((segment) => /^(?:incidents?|postmortems?|root[-_]?causes?|bugs?|regressions?)$/i.test(segment))
+    || /(?:^|[-_.])(?:incident|postmortem|root[-_]?cause|bug[-_]?report|regression[-_]?(?:test|spec))(?:[-_.]|$)/i.test(baseName)
+    || /(?:\.|[-_])(?:test|spec)\.[^/]+$/i.test(baseName);
+}
+
 function validateCausalEvidenceContents(generated: GeneratedOntology, files: ReadonlyMap<string, string>): void {
   const nodes = new Map(generated.nodes.map((node) => [node.id, node]));
   for (const edge of generated.edges) {
@@ -236,6 +369,7 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
       const issueReference = issueNumber ? `Issue #${issueNumber}` : `derived Issue ${issue.label}`;
       throw new Error(`INTRODUCED_BY evidence must explicitly name ${issueReference} and commit ${commitSha}`);
     }
+    if (!edge.why) throw new Error("INTRODUCED_BY must include a causal explanation for human review");
   }
 }
 

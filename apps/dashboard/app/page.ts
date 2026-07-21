@@ -874,7 +874,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
       <section class="ontology-workspace" id="ontology-workspace">
         <section class="ontology-card">
           <div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div>
-          <div class="graph-wrap"><div id="ontology-graph" role="application" aria-label="Repository ontology graph"><div class="ontology-label-layer" id="ontology-label-layer"></div></div><div class="graph-empty-state" id="ontology-graph-empty" hidden></div><canvas class="ontology-minimap" id="ontology-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="ontology-summary" id="ontology-summary"></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
+          <div class="graph-wrap"><div id="ontology-graph" role="application" aria-label="Repository ontology graph"><div class="ontology-label-layer" id="ontology-label-layer"></div></div><div class="graph-empty-state" id="ontology-graph-empty" hidden></div><canvas class="ontology-minimap" id="ontology-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading graph renderer…</span><section class="ontology-summary" id="ontology-summary"></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
         </section>
         <aside class="ontology-details side-inspector" id="ontology-details" aria-live="polite"></aside>
       </section>
@@ -891,7 +891,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   <div class="detail-body" id="detail-body"></div>
 </dialog>
 
-<script src="/assets/ontology-graph-client.js?v=freeform-1"></script>
+<script src="/assets/ontology-graph-client.js?v=adaptive-1"></script>
 <script>
 const API = ${JSON.stringify(apiUrl)};
 const API_LABEL = ${JSON.stringify(apiLabel)};
@@ -1030,8 +1030,8 @@ function renderOntology() {
   ontologyWorkspace.classList.toggle("has-selection", Boolean(ontologyViewState.selected));
   ontologySummary.append(
     ontologyStat("Repository", graph.repository),
-    ontologyStat("Nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
-    ontologyStat("Edges", visibleCount(visibleGraph.edges.length, graph.edges.length)),
+    ontologyStat("Visible nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
+    ontologyStat("Visible edges", visibleCount(visibleGraph.edges.length, graph.edges.length)),
     ontologyStat("Commit", graph.commitSha.slice(0, 12)),
     ontologyStat("Generated", formatTime(graph.generatedAt)),
     ontologyStat("Executor", graph.generator.executor + " · " + graph.generator.model)
@@ -1189,7 +1189,7 @@ function friendlyNodeLabels(graph) {
 function ontologySearchMatches(graph, visibleGraph, labels, query, limit) {
   const normalized = String(query || "").trim().toLocaleLowerCase();
   if (!normalized) return [];
-  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const tokens = normalized.split(/\\s+/).filter(Boolean);
   const matches = [];
   const visibleNodeIds = new Set(visibleGraph.nodes.map(function(node) { return node.id; }));
   const nodesById = new Map(graph.nodes.map(function(node) { return [node.id, node]; }));

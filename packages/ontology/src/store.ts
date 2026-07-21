@@ -194,7 +194,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     registryVersion: string,
     evidenceFingerprint: string
   ): Promise<OntologyAssertionResult | undefined> {
-    const stored = this.assertionBatches.get(assertionKey(tenantId, repository, commitSha, generatorVersion, registryVersion, evidenceFingerprint));
+    const stored = this.assertionBatches.get(
+      assertionKey(tenantId, repository, commitSha, generatorVersion, registryVersion, evidenceFingerprint)
+    );
     return stored ? assertionResult(stored.batch, stored.assertions, true) : undefined;
   }
 
@@ -203,22 +205,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     const existing = this.assertionBatches.get(key);
     if (existing) return assertionResult(existing.batch, existing.assertions, true);
     const normalized = normalizeAssertionBatchLenient(batch);
-    const assertions = normalized.assertions;
-    for (const [storedKey, stored] of this.assertionBatches) {
-      if (
-        storedKey !== key && stored.batch.tenantId === batch.tenantId && stored.batch.repository === batch.repository &&
-        stored.batch.commitSha === batch.commitSha && stored.batch.generatorVersion === batch.generatorVersion
-      ) {
-        this.assertionBatches.set(storedKey, {
-          ...stored,
-          assertions: stored.assertions.map((assertion) =>
-            assertion.status === "active" || assertion.status === "proposed"
-              ? { ...assertion, status: "retracted" as const, validTo: batch.generatedAt }
-              : assertion
-          )
-        });
-      }
-    }
+    const prior = new Map(this.allAssertions()
+      .filter((assertion) => assertion.tenantId === batch.tenantId && assertion.repository === batch.repository)
+      .filter((assertion) => assertion.status === "active" || assertion.status === "proposed")
+      .map((assertion) => [storedAssertionNaturalKey(assertion), assertion]));
+    const assertions = normalized.assertions.map((assertion) => {
+      const existingAssertion = prior.get(storedAssertionNaturalKey(assertion));
+      return existingAssertion
+        ? { ...existingAssertion, lastConfirmedAt: batch.generatedAt }
+        : assertion;
+    });
     this.assertionBatches.set(key, { batch: structuredClone(batch), assertions });
     return assertionResult(batch, assertions, false, normalized.warnings);
   }
@@ -371,18 +367,25 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
     const limit = Math.max(1, Math.min(request.limit ?? 50, 200));
     const snapshot = [...this.snapshots.values()]
-      .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && (!request.ref || value.ref === request.ref))
+      .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && value.updateRef !== false && (!request.ref || value.ref === request.ref))
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
+    const hasCurrentProjection = Boolean(snapshot && [...this.graphs.values()].some((graph) =>
+      graph.tenantId === request.tenantId && graph.repository === request.repository &&
+      graph.ref === snapshot.ref && graph.commitSha === snapshot.commitSha
+    ));
+    const currentAssertions = snapshot && hasCurrentProjection
+      ? this.allAssertions().filter((assertion) => assertionIsCurrentForSnapshot(assertion, snapshot, this.snapshots))
+      : [];
     const items = request.template === "issue_trace"
       ? memoryIssueTraceItems(
           request,
           this.githubObservations,
           this.snapshots,
-          this.allAssertions(),
+          currentAssertions,
           [...this.assertionBatches.values()].map((stored) => stored.batch)
         )
       : request.template === "feature_trace"
-        ? memoryFeatureTraceItems(request, this.allAssertions())
+        ? memoryFeatureTraceItems(request, currentAssertions)
       : memoryRetrievalItems(request, snapshot, this.blobAnalyses, this.allAssertions());
     return {
       template: request.template, repository: request.repository, ref: request.ref ?? snapshot?.ref ?? "main",
@@ -391,10 +394,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   private allAssertions(): StoredAssertion[] {
-    return [
+    const assertions = [
       ...this.sourceAssertions.values(),
       ...[...this.assertionBatches.values()].flatMap((stored) => stored.assertions)
     ];
+    const byId = new Map<string, StoredAssertion>();
+    for (const assertion of assertions) {
+      const current = byId.get(assertion.id);
+      if (!current || current.lastConfirmedAt < assertion.lastConfirmedAt) byId.set(assertion.id, assertion);
+    }
+    return [...byId.values()];
   }
 
   private rebuildSourceAssertions(): void {
@@ -408,7 +417,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         const qualifiers = intent.qualifiers ?? {};
         const assertionId = stableId(
           "assertion",
-          `${observation.tenantId}:${subjectId}:${intent.predicate}:${objectId}:${stableId("q", canonicalJson(qualifiers))}`
+          `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${stableId("q", canonicalJson(qualifiers))}`
         );
         this.sourceAssertions.set(assertionId, {
           id: assertionId,
@@ -791,7 +800,7 @@ function memoryCodeownersPatternMatches(rawPattern: string, path: string): boole
   const anchored = pattern.startsWith("/");
   const normalized = pattern.replace(/^\//, "").replace(/\/$/, "/**");
   const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\u0000/g, ".*");
+    .replace(/\*\*/g, "\uE000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\uE000/g, ".*");
   if (!anchored && !normalized.includes("/")) return new RegExp(`(?:^|/)${escaped}$`).test(path);
   return new RegExp(`^${escaped}$`).test(path);
 }
@@ -894,6 +903,7 @@ export function createOntologyProjection(
       predicate: assertion.predicate,
       plane: "knowledge",
       confidence: assertion.confidence,
+      ...(Object.keys(assertion.qualifiers ?? {}).length > 0 ? { qualifiers: assertion.qualifiers } : {}),
       ...(assertion.predicate === "INTRODUCED_BY" && typeof assertion.qualifiers?.reason === "string"
         ? { why: assertion.qualifiers.reason }
         : {}),
@@ -977,10 +987,13 @@ function assertionKey(
 ): string {
   return `${tenantId}:${repository}:${commitSha}:${generatorVersion}:${registryVersion}:${evidenceFingerprint}`;
 }
+function storedAssertionNaturalKey(assertion: StoredAssertion): string {
+  return `${assertion.repository}:${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
+}
 function dedupeApplicableAssertions(assertions: readonly StoredAssertion[]): readonly StoredAssertion[] {
   const selected = new Map<string, StoredAssertion>();
   for (const assertion of assertions) {
-    const key = `${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}`;
+    const key = `${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
     const current = selected.get(key);
     if (!current || current.recordedAt < assertion.recordedAt) selected.set(key, assertion);
   }
@@ -993,6 +1006,16 @@ function assertionEvidenceIsCurrent(assertion: StoredAssertion, source: Reposito
     const path = citation.replace(/:\d+(?:-\d+)?$/, "");
     return sourceFiles.get(path) !== undefined && sourceFiles.get(path) === currentFiles.get(path);
   });
+}
+function assertionIsCurrentForSnapshot(
+  assertion: StoredAssertion,
+  current: RepositorySnapshot,
+  snapshots: ReadonlyMap<string, RepositorySnapshot>
+): boolean {
+  if (assertion.tenantId !== current.tenantId || assertion.repository !== current.repository || assertion.status !== "active") return false;
+  if (assertion.commitSha === "source") return assertion.evidence.length === 0 && Boolean(assertion.sourceObservationId);
+  const source = snapshots.get(snapshotKey(assertion.tenantId, assertion.repository, assertion.commitSha));
+  return Boolean(source && assertion.evidence.length > 0 && assertionEvidenceIsCurrent(assertion, source, current));
 }
 function filePriority(path: string): number {
   if (/^README(?:\.|$)/i.test(path)) return 0;

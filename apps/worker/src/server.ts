@@ -18,6 +18,8 @@ import {
   codeCheckpoint,
   languageForPath,
   linkedIssueNumbers,
+  isProblemEvidencePath,
+  selectAssertionFocusPaths,
   type BlobAnalysis,
   type GitHubSourceObservation,
   type OntologyAssertionBatch,
@@ -238,6 +240,8 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   let reusedBlobCount = 0;
   let discoveredBlobCount = 0;
   let fileCount = 0;
+  let headPaths = new Set<string>();
+  const changedPathsByCommit = new Map<string, readonly string[]>();
   let ownershipObservation: GitHubSourceObservation | undefined;
   const workItems = new Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>();
   for (const sha of orderedShas) {
@@ -247,6 +251,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
       isHead: sha === commitSha, isDefaultRef: ref === defaultBranch
     });
     const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", { ...lease, snapshot });
+    changedPathsByCommit.set(sha, plan.changedPaths);
     const analyses: BlobAnalysis[] = [];
     for (const missing of plan.missingBlobs) {
       analyses.push(await analyzeGitHubBlob(repository, missing));
@@ -260,6 +265,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     discoveredBlobCount += plan.discoveredBlobCount;
     if (sha === commitSha) {
       headPlan = plan;
+      headPaths = new Set(snapshot.files.map((file) => file.path));
       fileCount = plan.fileCount;
       const codeowners = [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"]
         .map((path) => snapshot.files.find((file) => file.path === path))
@@ -280,6 +286,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     }
   }
   if (!headPlan) throw new Error("head commit was not included in repository history ingestion");
+  const problemEvidencePullRequestNumbers = await hydratePullRequestScope(repository, workItems, headPaths);
   const observations: GitHubSourceObservation[] = await githubWorkItemObservations(tenantId, repository, workItems);
   if (ownershipObservation) observations.push(ownershipObservation);
   let sourceResult: OntologySourceIngestResult = {
@@ -296,9 +303,23 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     });
   }
   const currentCodeCheckpoint = codeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_PARSER_VERSION);
-  const evidenceFingerprint = assertionEvidenceFingerprint(currentCodeCheckpoint, observations);
   const newCommitCount = orderedShas.filter((sha) => !discovery.knownCommitShas.has(sha)).length;
   const confirmedCommitCount = orderedShas.length - newCommitCount;
+  const newlyIngestedHistoricalPaths = orderedShas.slice(0, -1).reverse().flatMap((sha) => changedPathsByCommit.get(sha) ?? []);
+  // If this commit is already known but a new generator version has no cache,
+  // give that one run a bounded current-tree scan. The selector prioritizes
+  // docs/tests before ordinary files; successful output is then cached.
+  const historicalFocusPaths = newCommitCount === 0 ? [...headPaths] : newlyIngestedHistoricalPaths;
+  const analysisPaths = selectAssertionFocusPaths(
+    headPlan.changedPaths,
+    historicalFocusPaths,
+    headPaths,
+    positiveInt(process.env.ONTOLOGY_ASSERTION_FOCUS_LIMIT, 200)
+  );
+  const evidenceFingerprint = assertionEvidenceFingerprint(currentCodeCheckpoint, observations, {
+    focusPaths: analysisPaths,
+    problemEvidencePullRequestNumbers
+  });
   return {
     effect: newCommitCount > 0 || parsedBlobCount > 0 || sourceResult.newObservationCount > 0 || sourceResult.updatedObservationCount > 0
       ? "changed"
@@ -323,7 +344,8 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     discoveredBlobCount,
     reusedBlobCount,
     parsedBlobCount,
-    analysisPaths: headPlan.changedPaths,
+    analysisPaths,
+    problemEvidencePullRequestNumbers,
     changeCount: headPlan.changes.length,
     parserVersion: ONTOLOGY_PARSER_VERSION,
     codeCheckpoint: currentCodeCheckpoint,
@@ -475,6 +497,39 @@ async function githubWorkItemObservations(
   return observations;
 }
 
+async function hydratePullRequestScope(
+  repository: string,
+  pullRequests: Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>,
+  currentPaths: ReadonlySet<string>
+): Promise<readonly number[]> {
+  const results = await mapWithConcurrency(
+    [...pullRequests.entries()],
+    positiveInt(process.env.ONTOLOGY_GITHUB_PR_CONCURRENCY, 4),
+    async ([number, value]) => {
+      const [commitPage, filePage] = await Promise.all([
+        githubJsonArrayPages(`/repos/${repository}/pulls/${number}/commits`),
+        githubJsonArrayPages(`/repos/${repository}/pulls/${number}/files`, 30)
+      ]);
+      if (!commitPage.complete || !filePage.complete) {
+        throw new Error(`GitHub PR #${number} exceeded the bounded commit/file pagination limit`);
+      }
+      const completeCommitShas = commitPage.items.flatMap((commit) =>
+        typeof commit.sha === "string" && /^[a-f0-9]{40}$/i.test(commit.sha) ? [commit.sha.toLowerCase()] : []
+      );
+      if (completeCommitShas.length > 0) {
+        value.commitShas.clear();
+        completeCommitShas.forEach((sha) => value.commitShas.add(sha));
+      }
+      const hasCurrentProblemEvidence = filePage.items.some((file) => {
+        const path = typeof file.filename === "string" ? file.filename : undefined;
+        return Boolean(path && currentPaths.has(path) && isProblemEvidencePath(path));
+      });
+      return hasCurrentProblemEvidence ? number : undefined;
+    }
+  );
+  return results.filter((number): number is number => number !== undefined).sort((a, b) => a - b);
+}
+
 async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
   if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
   const tenantId = requiredString(work.task.metadata.tenantId, "task tenantId");
@@ -483,6 +538,11 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
   const commitSha = requiredGitSha(work.task.metadata.commitSha, "task commitSha");
   const evidenceFingerprint = requiredString(work.task.metadata.evidenceFingerprint, "task evidenceFingerprint");
   const focusPaths = stringArray(work.task.metadata.analysisPaths);
+  const problemEvidencePullRequestNumbers = Array.isArray(work.task.metadata.problemEvidencePullRequestNumbers)
+    ? work.task.metadata.problemEvidencePullRequestNumbers.map((value) =>
+        requiredPositiveInteger(value, "task problemEvidencePullRequestNumber")
+      )
+    : [];
   const sourcePullRequestNumbers = Array.isArray(work.task.metadata.sourcePullRequestNumbers)
     ? work.task.metadata.sourcePullRequestNumbers.map((value) => requiredPositiveInteger(value, "task sourcePullRequestNumber"))
     : [];
@@ -491,7 +551,13 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
     : [];
   const cache = await internalApiJson<{ readonly cached: Record<string, unknown> | null }>(
     "/internal/ontology/assertions/cached",
-    { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitSha, evidenceFingerprint }
+    {
+      taskId: work.task.id,
+      messageId: work.message.id,
+      leaseId: work.message.leaseId,
+      commitSha,
+      evidenceFingerprint
+    }
   );
   if (cache.cached) return { outcome: "done", result: { cached: cache.cached } };
   const evidence = await internalApiJson<{ readonly evidence: readonly OntologySourceEvidence[] }>(
@@ -507,6 +573,7 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
     ref,
     commitSha,
     focusPaths,
+    problemEvidencePullRequestNumbers,
     sourceEvidence: evidence.evidence,
     taskId: work.task.id
   });
@@ -528,6 +595,7 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
       model: graph.generator.model,
       ...(graph.generator.sandboxId ? { sandboxId: graph.generator.sandboxId } : {}),
       summary: graph.summary,
+      ...(graph.rawModelOutput !== undefined ? { modelOutputRaw: graph.rawModelOutput } : {}),
       rawOutput,
       assertions
     }
@@ -673,6 +741,38 @@ async function githubJsonArray(path: string): Promise<Record<string, unknown>[]>
   const value = await response.json() as unknown;
   if (!Array.isArray(value) || value.some((item) => !isRecord(item))) throw new Error(`GitHub response ${path} is not an object array`);
   return value as Record<string, unknown>[];
+}
+
+async function githubJsonArrayPages(
+  path: string,
+  maximumPages = 3
+): Promise<{ readonly items: readonly Record<string, unknown>[]; readonly complete: boolean }> {
+  const items: Record<string, unknown>[] = [];
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const separator = path.includes("?") ? "&" : "?";
+    const batch = await githubJsonArray(`${path}${separator}per_page=100&page=${page}`);
+    items.push(...batch);
+    if (batch.length < 100) return { items, complete: true };
+  }
+  return { items, complete: false };
+}
+
+async function mapWithConcurrency<T, R>(
+  values: readonly T[],
+  limit: number,
+  operation: (value: T) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(values.length, Math.max(1, limit)) }, async () => {
+    while (nextIndex < values.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await operation(values[index]!);
+    }
+  });
+  await Promise.all(workers);
+  return results;
 }
 
 async function githubText(path: string, accept: string): Promise<string> {

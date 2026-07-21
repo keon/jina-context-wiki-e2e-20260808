@@ -1,6 +1,6 @@
 # Data Models
 
-> **Implementation status (2026-07-20):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.1 schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; issue-centric trace projections; and immutable graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
+> **Implementation status (2026-07-21):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.5 schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; and immutable relational graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
 
 This document defines the core Postgres data model for Jina. It is the schema-oriented companion to [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -16,15 +16,17 @@ Deliberately deferred tables — introduced only when a second concrete use exis
 Ontology is deliberately separate from the normalized board target below. Its implemented PostgreSQL tables are:
 
 ```text
-intake       observations, model_outputs
-code         commits, refs, commit_files, commit_changes, blobs,
+intake       observations
+code         commits, refs, commit_changes, blobs,
              blob_analyses, blob_symbols, blob_imports, symbol_edges
 knowledge    entities, identities, entity_redirects, assertions, audit_log
 infra        outbox, erasure_filters, repository_acl
-projections  ref_manifest, search_documents, issue_traces, graphs, nodes, edges
+projections  ref_manifest, search_documents, graphs, nodes, edges
 ```
 
-`commit_files` is immutable tree state by commit; `commit_changes` is the first-parent delta. `ref_manifest` is a rebuildable hot-ref projection. `issue_traces` is keyed by tenant, repository, ref, and Issue entity ID; its optional issue number is a GitHub compatibility lookup, not identity. Repository-wide knowledge events update every ref copy before acknowledgment. Its JSON payload contains cited resolution and reviewed causality paths for provider-backed and derived Issues, including associated PRs, causal reason, checked evidence, and first-parent changes. Repository, file, symbol, commit, PR, issue, and Feature natural keys include their repository scope; a Feature uses `repo:<repository>:feature:<stable-slug>`. `INTRODUCED_BY` requires the Issue → Commit endpoints plus a nonempty `reason` qualifier. Assertions contain typed qualifiers, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version.
+`commit_changes` stores only each commit's first-parent churn; the root commit is represented as adds. `commit_manifest(tenant, repository, sha)` reconstructs immutable historical tree state from that ancestry, while `ref_manifest` is the rebuildable hot-ref projection. Storage therefore grows with changed paths rather than commits multiplied by every file in each tree. `issue_trace` retrieval directly traverses the latest `graphs`/`nodes`/`edges` generation produced by `ontology_project` and joins canonical assertions, observations, and commit changes for cited detail. It does not maintain a second JSON projection. Repository, file, symbol, commit, PR, issue, and Feature natural keys include their repository scope; a Feature uses `repo:<repository>:feature:<stable-slug>`. `INTRODUCED_BY` requires the Issue → Commit endpoints plus a nonempty `reason` qualifier. Assertions contain typed qualifiers, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version. Counterfactuals add no table: they are deterministic synthesis over the existing issue/Feature retrieval results.
+
+Upgraded databases may still contain the former `commit_files`, `model_outputs`, and `issue_traces` tables and historical `RESOLVED_BY` assertion rows. Current code neither writes nor reads them: historical manifests are reconstructed from churn, model generations live only as `model_output` observations, and issue-centric reads reverse-traverse `RESOLVES` through the current graph. The compatibility boundary preserves those legacy rows for audit/history safety while excluding them from current projections and reads.
 
 ## Conventions
 
@@ -71,7 +73,7 @@ github_identities
 - updated_at
 ```
 
-All application queries must be scoped by `tenant_id`. Postgres row-level security can be added later for defense in depth, but application-level scoping is still required.
+All application queries must be scoped by `tenant_id`. The implemented Ontology schema additionally uses composite same-tenant foreign keys for relationships and provenance, composite tenant identity uniqueness, and partial unique indexes for live assertion cardinality. `jina_ontology_reader` and `jina_ontology_writer` are NOLOGIN capability roles; the runtime writer can mutate data but cannot own or alter the schema. Application-level scoping remains required, and row-level security can still be added later as another defense-in-depth layer.
 
 Suggested constraints:
 

@@ -25,7 +25,7 @@ sequenceDiagram
         API-->>GitHub: 202 accepted
     else ignored event
         API->>DB: Commit delivery ID
-        API-->>GitHub: 200 acknowledged
+        API-->>GitHub: 202 acknowledged
     end
 ```
 
@@ -94,15 +94,20 @@ sequenceDiagram
     DB-->>Worker: Previously unseen blob SHAs only
     Worker->>GitHub: Read missing blobs plus PR/issue/CODEOWNERS sources
     Worker->>API: Store versioned symbols/typed edges and normalized explicit facts
-    API->>DB: Queue assertion task with added/modified/renamed current paths
+    API->>DB: Queue assertion task with bounded cross-commit focus paths
     Worker->>API: Claim run-ontology-assert and check generation cache
     alt assertion input already processed
         API-->>Worker: Reuse checkpoint
     else new content needs semantic analysis
         Worker->>Daytona: Clone and checkout immutable commit SHA
-        Worker->>Codex: Analyze first-parent changed paths with semantic-only cited schema
+        Worker->>Codex: Analyze bounded current paths with semantic-only cited schema
         Codex-->>Worker: Cited semantic relationships
         Worker->>Daytona: Validate every cited file and line range
+        alt output validation fails once
+            Worker->>Codex: Repair citations or required virtual Issue in the same task
+            Codex-->>Worker: Complete corrected JSON
+            Worker->>Daytona: Validate again or fail closed
+        end
         Worker->>API: Complete with model-output observation
         API->>DB: Store registry-validated model assertions as proposed
     end
@@ -123,7 +128,7 @@ sequenceDiagram
     end
 ```
 
-Graph identity includes the task generation, so a later projection cannot rewrite a graph referenced by an older task. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation is cached by repository commit and generator version; model facts stay proposed until an audited command accepts them. Projections carry forward accepted assertions only while every cited path still resolves to the same blob.
+Graph identity is content-addressed by tenant, repository, commit, projection version, and canonical graph content, so a later projection cannot rewrite a graph referenced by an older task and an unchanged projection reuses the same ID. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation uses only an exact evidence-fingerprint cache hit; a mismatch runs the generator. Re-emitted semantic facts preserve their original provenance and review status and update only confirmation time. Model facts stay proposed until an audited command accepts them. Projections carry forward accepted assertions only while every cited path still resolves to the same blob.
 
 ## Cited repository question
 
@@ -138,13 +143,16 @@ sequenceDiagram
     Browser->>Dashboard: Ask repository question
     Dashboard->>API: POST /ontology/ask + service credential + verified IAP principal
     API->>DB: Resolve principal repository scope
-    API->>API: Classify into structure/change/intent/ownership templates
+    API->>API: Extract typed identifiers and classify fixed templates
     loop selected fixed templates
         API->>DB: Execute bounded typed query with redirect resolution
         DB-->>API: Structured rows + citations + truncation
     end
     API->>API: Re-check repository scope at context assembly
-    API-->>Dashboard: Template calls and citations (never free-form SQL/prose)
+    opt counterfactual operation
+        API->>API: Compare reviewed introducing/resolving/impact role
+    end
+    API-->>Dashboard: Deterministic answer, template calls, and citations
     Dashboard-->>Browser: Cited result cards
 ```
 

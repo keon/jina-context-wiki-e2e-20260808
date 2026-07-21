@@ -221,6 +221,26 @@ export async function runProductionOntologyAcceptance(
         pollIntervalMs
       });
     }
+    if (config.causality.causingPullRequestNumber) {
+      await verifyCounterfactualAnswer(
+        fetchImpl,
+        apiUrl,
+        headers,
+        repository,
+        ref,
+        `If PR #${config.causality.causingPullRequestNumber} had not merged, would issue #${expectedIssueNumber} exist?`,
+        "likely not have been introduced"
+      );
+      await verifyCounterfactualAnswer(
+        fetchImpl,
+        apiUrl,
+        headers,
+        repository,
+        ref,
+        `If PR #${expectedResolutionPullRequestNumber} had not merged, would issue #${expectedIssueNumber} remain?`,
+        "remain unresolved"
+      );
+    }
 
     await runFollowupOntologyBuild(
       fetchImpl,
@@ -271,6 +291,32 @@ export async function runProductionOntologyAcceptance(
     edgeCount: edges.length,
     citationCount: citations.length
   };
+}
+
+async function verifyCounterfactualAnswer(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  repository: string,
+  ref: string,
+  question: string,
+  expectedText: string
+): Promise<void> {
+  const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+    method: "POST",
+    headers: { ...headers, "content-type": "application/json" },
+    body: JSON.stringify({ repository, ref, operation: "counterfactual", question })
+  });
+  const answer = requiredString(context.answer, "counterfactual context.answer");
+  const calls = requiredArray(context.calls, "counterfactual context.calls");
+  const claims = requiredArray(context.citedClaims, "counterfactual context.citedClaims");
+  const everyClaimIsCited = claims.every((claim) =>
+    isRecord(claim) && requiredArray(claim.citations, "counterfactual claim.citations").length > 0
+  );
+  if (context.operation !== "counterfactual" || !answer.toLowerCase().includes(expectedText) || claims.length === 0 ||
+    !everyClaimIsCited || calls.length !== 1 || !isRecord(calls[0]) || calls[0].template !== "issue_trace") {
+    throw new Error(`production counterfactual context is unsupported or uncited for: ${question}`);
+  }
 }
 
 export function blockedOntologyTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {

@@ -58,7 +58,7 @@ export function runReviewTask(state: WorkflowState, taskId: TaskId, now: IsoTime
   });
   const headSha = String(task.metadata.headSha ?? "");
 
-  let board = applyCommand(next.board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now })
+  const board = applyCommand(next.board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now })
     .state;
 
   return {

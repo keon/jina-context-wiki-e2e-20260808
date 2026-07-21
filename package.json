@@ -12,7 +12,11 @@
     "review:pr": "pnpm --filter @jina/workflows review:pr"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.7.0",
+    "globals": "^17.7.0",
     "turbo": "latest",
-    "typescript": "latest"
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0"
   }
 }
