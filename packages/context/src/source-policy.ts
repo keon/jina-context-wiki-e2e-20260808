@@ -12,14 +12,20 @@ export function isSourceAllowed(policy: SourcePolicy, sourceUri: string): boolea
     return false;
   }
   if (source.protocol !== "https:" && source.protocol !== "http:") return false;
+  if (source.username || source.password) return false;
   return policy.allowlist.some((allowed) => {
     try {
       const boundary = new URL(allowed);
-      if (boundary.protocol !== source.protocol || boundary.origin !== source.origin) return false;
-      const allowedPath = boundary.pathname.endsWith("/") ? boundary.pathname : `${boundary.pathname}/`;
-      return source.pathname === boundary.pathname || source.pathname.startsWith(allowedPath);
+      if (boundary.username || boundary.password || boundary.protocol !== source.protocol || boundary.origin !== source.origin) return false;
+      const boundaryPath = normalizedBoundaryPath(boundary.pathname);
+      const sourcePath = normalizedBoundaryPath(source.pathname);
+      return sourcePath === boundaryPath || source.pathname.startsWith(boundaryPath === "/" ? "/" : `${boundaryPath}/`);
     } catch {
       return false;
     }
   });
+}
+
+function normalizedBoundaryPath(path: string): string {
+  return path === "/" ? path : path.replace(/\/+$/, "");
 }

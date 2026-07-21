@@ -60,12 +60,14 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   private readonly assertionBatches = new Map<string, { readonly batch: OntologyAssertionBatch; readonly assertions: readonly StoredAssertion[] }>();
   private readonly sourceAssertions = new Map<string, StoredAssertion>();
   private readonly humanAssertions = new Map<string, StoredAssertion>();
-  private readonly repositoryAcl = new Map<string, Set<string>>();
+  private readonly repositoryAcl = new Map<string, Map<string, "reader" | "writer" | "admin">>();
+  private readonly repositoryTombstones = new Set<string>();
   private readonly memoryAudit: OntologyCommandResult[] = [];
   private readonly assertionRelations: { readonly sourceAssertionId: string; readonly relation: "supports" | "contradicts"; readonly targetAssertionId: string; readonly evidenceObservationId: string }[] = [];
   private readonly sourceObservations: RepositorySourceObservation[] = [];
 
   async save(graph: OntologyGraph): Promise<void> {
+    this.assertRepositoryWritable(graph.tenantId, graph.repository);
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
   }
 
@@ -93,6 +95,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan> {
+    this.assertRepositoryWritable(snapshot.tenantId, snapshot.repository);
     const key = snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.commitSha);
     if (!this.snapshots.has(key)) this.snapshots.set(key, structuredClone(snapshot));
     const firstPathByBlob = new Map<string, { readonly path: string; readonly size: number }>();
@@ -123,6 +126,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
     analyses: readonly BlobAnalysis[]
   ): Promise<void> {
+    this.assertRepositoryWritable(scope.tenantId, scope.repository);
     const snapshot = this.snapshots.get(snapshotKey(scope.tenantId, scope.repository, scope.commitSha));
     if (!snapshot) throw new Error("repository snapshot must be recorded before blob analysis");
     const known = new Set(snapshot.files.map((file) => file.blobSha));
@@ -134,6 +138,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async applyGitHubObservations(observations: readonly RepositorySourceObservation[]): Promise<OntologySourceIngestResult> {
+    for (const observation of observations) this.assertRepositoryWritable(observation.tenantId, observation.repository);
     let newObservationCount = 0;
     let updatedObservationCount = 0;
     let confirmedObservationCount = 0;
@@ -202,6 +207,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async saveAssertionBatch(batch: OntologyAssertionBatch): Promise<OntologyAssertionResult> {
+    this.assertRepositoryWritable(batch.tenantId, batch.repository);
     const key = assertionKey(batch.tenantId, batch.repository, batch.commitSha, batch.generatorVersion, batch.registryVersion, batch.evidenceFingerprint);
     const existing = this.assertionBatches.get(key);
     if (existing) return assertionResult(existing.batch, existing.assertions, true);
@@ -221,6 +227,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async project(request: OntologyProjectionRequest): Promise<OntologyGraph> {
+    this.assertRepositoryWritable(request.tenantId, request.repository);
     const snapshot = this.snapshots.get(snapshotKey(request.tenantId, request.repository, request.commitSha));
     if (!snapshot) throw new Error("cannot project an ontology before repository ingestion");
     const assertions = dedupeApplicableAssertions(this.allAssertions()
@@ -247,7 +254,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   async executeCommand(tenantId: string, actorId: string, command: OntologyCommand, now: string, actorIsTenantAdmin = false): Promise<OntologyCommandResult> {
     if (!actorId.startsWith("svc:") && !actorIsTenantAdmin) {
       const repository = "repository" in command ? command.repository : undefined;
-      if (!repository || !this.repositoryAcl.get(`${tenantId}:${actorId}`)?.has(repository)) {
+      const role = repository ? this.repositoryAcl.get(`${tenantId}:${actorId}`)?.get(repository) : undefined;
+      const requiresAdmin = command.type === "grant_repository_access" || command.type === "tombstone_repository";
+      if (!role || role === "reader" || (requiresAdmin && role !== "admin")) {
         throw new DomainError("ontology command access denied", "forbidden");
       }
     }
@@ -305,12 +314,14 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       }
       affectedIds.push(source.id, target.id);
     } else if (command.type === "grant_repository_access") {
+      this.assertRepositoryWritable(tenantId, command.repository);
       const key = `${tenantId}:${command.principalId}`;
-      const repositories = this.repositoryAcl.get(key) ?? new Set<string>();
-      repositories.add(command.repository);
+      const repositories = this.repositoryAcl.get(key) ?? new Map<string, "reader" | "writer" | "admin">();
+      repositories.set(command.repository, command.role);
       this.repositoryAcl.set(key, repositories);
       affectedIds.push(command.repository);
     } else if (command.type === "tombstone_repository") {
+      this.repositoryTombstones.add(repositoryKey(tenantId, command.repository));
       for (const [key, snapshot] of this.snapshots) if (snapshot.tenantId === tenantId && snapshot.repository === command.repository) this.snapshots.delete(key);
       for (const [key, graph] of this.graphs) if (graph.tenantId === tenantId && graph.repository === command.repository) this.graphs.delete(key);
       for (const [key, stored] of this.assertionBatches) if (stored.batch.tenantId === tenantId && stored.batch.repository === command.repository) this.assertionBatches.delete(key);
@@ -321,6 +332,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         const observation = this.sourceObservations[index];
         if (observation?.tenantId === tenantId && observation.repository === command.repository) this.sourceObservations.splice(index, 1);
       }
+      for (const repositories of this.repositoryAcl.values()) repositories.delete(command.repository);
       this.rebuildSourceAssertions();
       affectedIds.push(command.repository);
     } else if (command.type === "redact_observation") {
@@ -348,6 +360,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     } else if (command.type === "erase_person" || command.type === "merge_entities" || command.type === "unmerge_entities") {
       throw new DomainError(`${command.type} requires the relational ontology store`, "conflict");
     } else if (command.type === "assign_relationship") {
+      if (command.repository) this.assertRepositoryWritable(tenantId, command.repository);
       const definition = predicateDefinition(command.predicate);
       if (definition.review === "none") {
         throw new DomainError("explicit-source predicates must enter through intake, not an internal assignment", "conflict");
@@ -374,6 +387,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async rebuildDerivedProjections(tenantId: string, repository: string, ref: string, now: string): Promise<ProjectionRebuildResult> {
+    this.assertRepositoryWritable(tenantId, repository);
     const snapshot = [...this.snapshots.values()]
       .filter((value) => value.tenantId === tenantId && value.repository === repository && value.ref === ref && value.updateRef !== false)
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
@@ -414,7 +428,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         ...[...this.graphs.values()].filter((graph) => graph.tenantId === tenantId).map((graph) => graph.repository)
       ])].sort();
     }
-    return [...(this.repositoryAcl.get(`${tenantId}:${principalId}`) ?? [])].sort();
+    return [...(this.repositoryAcl.get(`${tenantId}:${principalId}`)?.keys() ?? [])].sort();
   }
 
   async listAssertions(
@@ -541,6 +555,12 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
           recordedAt: observation.recordedAt
         });
       }
+    }
+  }
+
+  private assertRepositoryWritable(tenantId: string, repository: string): void {
+    if (this.repositoryTombstones.has(repositoryKey(tenantId, repository))) {
+      throw new DomainError("repository is tombstoned", "conflict");
     }
   }
 }
@@ -1118,6 +1138,7 @@ function assertionResult(
 }
 
 function snapshotKey(tenantId: string, repository: string, commitSha: string): string { return `${tenantId}:${repository}:${commitSha}`; }
+function repositoryKey(tenantId: string, repository: string): string { return `${tenantId}:${repository}`; }
 function blobKey(tenantId: string, blobSha: string, parserVersion: string): string { return `${tenantId}:${blobSha}:${parserVersion}`; }
 function assertionKey(
   tenantId: string,

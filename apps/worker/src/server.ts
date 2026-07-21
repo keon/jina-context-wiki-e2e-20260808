@@ -89,6 +89,18 @@ type WorkResult =
     }
   | { readonly outcome: "failed"; readonly reason: string };
 
+interface LeaseExecutionState {
+  readonly controller: AbortController;
+  lostReason?: string;
+}
+
+class LeaseLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LeaseLostError";
+  }
+}
+
 const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
@@ -102,19 +114,25 @@ const ontologyExecutor = topics.includes("run-ontology-assert")
   : undefined;
 let stopping = false;
 let active = false;
+let activeLease: LeaseExecutionState | undefined;
 let lastApiSuccessAt: string | undefined;
 let lastApiError: string | undefined;
+let lastApiErrorAt: string | undefined;
+let consecutiveApiFailures = 0;
 let lastWork: {
   readonly topic: WorkerTopic;
-  readonly outcome: WorkResult["outcome"];
+  readonly outcome: WorkResult["outcome"] | "lease_lost";
   readonly finishedAt: string;
   readonly failureCategory?: WorkerFailureCategory;
 } | undefined;
 
 const server = createServer((request, response) => {
   if (request.url === "/health" || request.url === "/healthz") {
-    response.writeHead(lastApiSuccessAt ? 200 : 503, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: Boolean(lastApiSuccessAt), workerId, topics, active, lastApiSuccessAt, lastWork }));
+    const ok = Boolean(lastApiSuccessAt) && !lastApiError;
+    response.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ok, workerId, topics, active, lastApiSuccessAt, lastApiError, lastApiErrorAt, consecutiveApiFailures, lastWork
+    }));
     return;
   }
   response.writeHead(404, { "content-type": "application/json" });
@@ -133,7 +151,7 @@ async function poll(): Promise<void> {
       if (work) await execute(work);
       if (drainsOntologyProjections) await drainOntologyProjectionEvents();
     } catch (error) {
-      lastApiError = errorMessage(error);
+      recordApiFailure(error);
       console.error("worker poll failed", lastApiError);
     }
     if (!stopping) await delay(pollIntervalMs);
@@ -142,49 +160,62 @@ async function poll(): Promise<void> {
 
 async function drainOntologyProjectionEvents(): Promise<void> {
   await internalApiJson("/internal/ontology/outbox/drain", {});
+  recordApiSuccess();
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
   const response = await apiRequest("/internal/worker/claim", { workerId, topics });
   if (response.status === 204) {
-    lastApiSuccessAt = new Date().toISOString();
-    lastApiError = undefined;
+    recordApiSuccess(!drainsOntologyProjections);
     return undefined;
   }
   if (!response.ok) throw new Error(`claim failed with ${response.status}: ${await response.text()}`);
-  lastApiSuccessAt = new Date().toISOString();
-  lastApiError = undefined;
+  recordApiSuccess(!drainsOntologyProjections);
   return parseClaimedWork(await response.json());
 }
 
 async function execute(work: ClaimedWork): Promise<void> {
   active = true;
+  const lease: LeaseExecutionState = { controller: new AbortController() };
+  activeLease = lease;
   const heartbeat = setInterval(() => {
     void renew(work).catch((error) => {
-      console.error("worker lease renewal failed", errorMessage(error));
+      loseLease(lease, error);
+      console.error("worker lease renewal failed", lease.lostReason);
     });
   }, heartbeatIntervalMs);
   heartbeat.unref();
 
-  let result: WorkResult;
+  let result: WorkResult | undefined;
   try {
     result = await executeTopic(work);
   } catch (error) {
-    result = { outcome: "failed", reason: errorMessage(error).slice(0, 2_000) };
+    if (!lease.lostReason) result = { outcome: "failed", reason: errorMessage(error).slice(0, 2_000) };
   } finally {
     clearInterval(heartbeat);
   }
 
-  lastWork = {
-    topic: work.message.topic,
-    outcome: result.outcome,
-    finishedAt: new Date().toISOString(),
-    ...(result.outcome === "failed" ? { failureCategory: workerFailureCategory(result.reason) } : {})
-  };
-
   try {
+    if (lease.lostReason || !result) {
+      lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+      return;
+    }
     await complete(work, result);
+    lastWork = {
+      topic: work.message.topic,
+      outcome: result.outcome,
+      finishedAt: new Date().toISOString(),
+      ...(result.outcome === "failed" ? { failureCategory: workerFailureCategory(result.reason) } : {})
+    };
+  } catch (error) {
+    if (error instanceof LeaseLostError) {
+      loseLease(lease, error);
+      lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+      return;
+    }
+    throw error;
   } finally {
+    activeLease = undefined;
     active = false;
   }
 }
@@ -743,8 +774,10 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
     focusPaths,
     problemEvidencePullRequestNumbers,
     sourceEvidence: evidence.evidence,
-    taskId: work.task.id
+    taskId: work.task.id,
+    ...(activeLease ? { signal: activeLease.controller.signal } : {})
   });
+  assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
   const assertions = assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers });
@@ -849,7 +882,7 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
       },
       store: false
     }),
-    signal: AbortSignal.timeout(10 * 60 * 1000)
+    signal: requestSignal(10 * 60 * 1000)
   });
   if (!response.ok) throw new Error(`OpenAI review failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
   const payload = await response.json() as Record<string, unknown>;
@@ -869,9 +902,12 @@ async function renew(work: ClaimedWork): Promise<void> {
     messageId: work.message.id,
     leaseId: work.message.leaseId
   });
-  if (!response.ok) throw new Error(`renewal failed with ${response.status}: ${await response.text()}`);
-  lastApiSuccessAt = new Date().toISOString();
-  lastApiError = undefined;
+  if (!response.ok) {
+    const message = `renewal failed with ${response.status}: ${await response.text()}`;
+    if (response.status === 409) throw new LeaseLostError(message);
+    throw new Error(message);
+  }
+  recordApiSuccess(!drainsOntologyProjections);
 }
 
 async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
@@ -881,21 +917,22 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
     taskId: work.task.id,
     ...result
   });
-  if (!response.ok && response.status !== 409) {
+  if (response.status === 409) {
+    throw new LeaseLostError(`completion rejected after lease loss: ${await response.text()}`);
+  }
+  if (!response.ok) {
     throw new Error(`completion failed with ${response.status}: ${await response.text()}`);
   }
-  if (response.ok) {
-    lastApiSuccessAt = new Date().toISOString();
-    lastApiError = undefined;
-  }
+  recordApiSuccess(!drainsOntologyProjections);
 }
 
 function apiRequest(path: string, body: unknown): Promise<Response> {
+  assertLeaseOwned();
   return fetch(`${apiUrl}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000)
+    signal: requestSignal(30_000)
   });
 }
 
@@ -974,6 +1011,7 @@ async function githubText(path: string, accept: string): Promise<string> {
 }
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
+  assertLeaseOwned();
   const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   const response = await fetch(`${githubApiUrl}${path}`, {
@@ -983,7 +1021,7 @@ async function githubRequest(path: string, accept: string): Promise<Response> {
       "user-agent": "jina-review-worker",
       ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {})
     },
-    signal: AbortSignal.timeout(60_000)
+    signal: requestSignal(60_000)
   });
   if (!response.ok) throw new Error(`GitHub request failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
   return response;
@@ -1108,6 +1146,36 @@ function requiredStringArray(value: unknown, name: string): readonly string[] {
 function requiredPositiveIntegerArray(value: unknown, name: string): readonly number[] {
   if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
   return value.map((item) => requiredPositiveInteger(item, name));
+}
+
+function assertLeaseOwned(): void {
+  if (activeLease?.lostReason) throw new LeaseLostError(activeLease.lostReason);
+}
+
+function requestSignal(timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return activeLease ? AbortSignal.any([activeLease.controller.signal, timeout]) : timeout;
+}
+
+function loseLease(lease: LeaseExecutionState, error: unknown): void {
+  if (lease.lostReason) return;
+  lease.lostReason = errorMessage(error);
+  recordApiFailure(new LeaseLostError(lease.lostReason));
+  lease.controller.abort(new LeaseLostError(lease.lostReason));
+}
+
+function recordApiSuccess(clearError = true): void {
+  lastApiSuccessAt = new Date().toISOString();
+  if (!clearError) return;
+  lastApiError = undefined;
+  lastApiErrorAt = undefined;
+  consecutiveApiFailures = 0;
+}
+
+function recordApiFailure(error: unknown): void {
+  lastApiError = errorMessage(error);
+  lastApiErrorAt = new Date().toISOString();
+  consecutiveApiFailures += 1;
 }
 
 function delay(milliseconds: number): Promise<void> {

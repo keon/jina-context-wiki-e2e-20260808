@@ -282,6 +282,103 @@ test("worker rejects malformed topic metadata before dispatch", async (context) 
   assert.equal(completions, 0);
 });
 
+test("worker aborts active work and never completes after lease renewal is rejected", async (context) => {
+  let claims = 0;
+  let completions = 0;
+  const mock = createServer(async (request, response) => {
+    await readJson(request);
+    if (request.url === "/internal/worker/claim") {
+      claims += 1;
+      return claims === 1
+        ? json(response, 200, {
+            message: { id: "message", topic: "run-review", leaseId: "lease", leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() },
+            task: { id: "task", metadata: { tenantId: "omlabs", repository: "omlabs/example", pullRequestNumber: 2 } }
+          })
+        : json(response, 204, {});
+    }
+    if (request.url === "/internal/worker/renew") return json(response, 409, { code: "stale_lease" });
+    if (request.url === "/internal/worker/complete") {
+      completions += 1;
+      return json(response, 200, { accepted: true });
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/2") {
+      if (request.headers.accept?.includes("diff")) {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("diff --git a/a.ts b/a.ts\n+const value = 1;\n");
+      } else json(response, 200, { title: "Test change" });
+      return;
+    }
+    if (request.url === "/openai/responses") {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      return json(response, 200, { output_text: JSON.stringify({ summary: "Too late", findings: [] }) });
+    }
+    json(response, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  const address = mock.address() as AddressInfo;
+  const workerPort = await availablePort();
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(workerPort),
+      JINA_API_URL: `http://127.0.0.1:${address.port}`,
+      INTERNAL_API_TOKEN: "test-token",
+      WORKER_TOPICS: "run-review",
+      WORKER_HEARTBEAT_INTERVAL_MS: "10",
+      WORKER_POLL_INTERVAL_MS: "10",
+      GITHUB_API_URL: `http://127.0.0.1:${address.port}/github`,
+      OPENAI_API_URL: `http://127.0.0.1:${address.port}/openai`,
+      OPENAI_API_KEY: "test-openai-key"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await stopWorker(worker);
+    const closed = new Promise<void>((resolve, reject) => mock.close((error) => error ? reject(error) : resolve()));
+    mock.closeAllConnections();
+    await closed;
+  });
+
+  const health = await waitForHealth(workerPort, (payload) => payload.lastWork?.outcome === "lease_lost");
+  assert.equal(health.payload.lastWork?.outcome, "lease_lost");
+  assert.equal(completions, 0);
+});
+
+test("worker health remains degraded when ontology outbox draining fails", async (context) => {
+  const mock = createServer(async (request, response) => {
+    await readJson(request);
+    if (request.url === "/internal/worker/claim") return json(response, 204, {});
+    if (request.url === "/internal/ontology/outbox/drain") return json(response, 500, { error: "drain unavailable" });
+    json(response, 404, { error: "not found" });
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  const address = mock.address() as AddressInfo;
+  const workerPort = await availablePort();
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: String(workerPort),
+      JINA_API_URL: `http://127.0.0.1:${address.port}`,
+      INTERNAL_API_TOKEN: "test-token",
+      WORKER_TOPICS: "run-ontology-project",
+      WORKER_POLL_INTERVAL_MS: "10"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  context.after(async () => {
+    await stopWorker(worker);
+    const closed = new Promise<void>((resolve, reject) => mock.close((error) => error ? reject(error) : resolve()));
+    mock.closeAllConnections();
+    await closed;
+  });
+
+  const health = await waitForHealth(workerPort, (payload) => typeof payload.lastApiError === "string");
+  assert.equal(health.status, 503);
+  assert.equal(health.payload.ok, false);
+  assert.match(String(health.payload.lastApiError), /ontology.*outbox\/drain failed with 500/i);
+  assert.equal(Number(health.payload.consecutiveApiFailures) > 0, true);
+});
+
 async function readJson(request: import("node:http").IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));
@@ -291,4 +388,48 @@ async function readJson(request: import("node:http").IncomingMessage): Promise<u
 function json(response: import("node:http").ServerResponse, status: number, payload: unknown): void {
   response.writeHead(status, { "content-type": "application/json" });
   response.end(status === 204 ? undefined : JSON.stringify(payload));
+}
+
+async function availablePort(): Promise<number> {
+  const server = createServer();
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  return port;
+}
+
+async function waitForHealth(
+  port: number,
+  predicate: (payload: WorkerHealth) => boolean
+): Promise<{ readonly status: number; readonly payload: WorkerHealth }> {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}/health`);
+      const payload = await response.json() as WorkerHealth;
+      if (predicate(payload)) return { status: response.status, payload };
+    } catch {
+      // The worker may not have bound its port yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error("worker health did not reach the expected state");
+}
+
+interface WorkerHealth extends Record<string, unknown> {
+  readonly lastWork?: { readonly outcome?: unknown };
+}
+
+async function stopWorker(worker: ReturnType<typeof spawn>): Promise<void> {
+  if (worker.exitCode !== null) return;
+  const exited = new Promise<void>((resolve) => worker.once("exit", () => resolve()));
+  worker.kill("SIGTERM");
+  const timeout = setTimeout(() => {
+    if (worker.exitCode === null) worker.kill("SIGKILL");
+  }, 1_000);
+  try {
+    await exited;
+  } finally {
+    clearTimeout(timeout);
+  }
 }

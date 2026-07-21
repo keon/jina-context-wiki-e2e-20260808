@@ -933,6 +933,64 @@ test("memory administration applies supported commands and rejects unsupported c
   );
 });
 
+test("memory repository roles enforce administration boundaries and tombstones block replay", async () => {
+  const store = new MemoryOntologyGraphStore();
+  const tenantId = "t";
+  const repository = "org/tombstoned";
+  const now = "2026-07-20T00:00:00.000Z";
+  for (const [principalId, role] of [
+    ["user:reader@example.com", "reader"],
+    ["user:writer@example.com", "writer"],
+    ["user:admin@example.com", "admin"]
+  ] as const) {
+    await store.executeCommand(tenantId, "svc:test", {
+      type: "grant_repository_access", repository, principalId, role
+    }, now);
+  }
+
+  const assignment = {
+    type: "assign_relationship" as const,
+    repository,
+    subject: { kind: "File" as const, key: `repo:${repository}:path:src/app.ts` },
+    predicate: "IMPLEMENTS",
+    object: { kind: "Feature" as const, key: `repo:${repository}:feature:example` }
+  };
+  await assert.rejects(
+    store.executeCommand(tenantId, "user:reader@example.com", assignment, now),
+    /access denied/
+  );
+  await store.executeCommand(tenantId, "user:writer@example.com", assignment, now);
+  await assert.rejects(
+    store.executeCommand(tenantId, "user:writer@example.com", {
+      type: "grant_repository_access", repository, principalId: "user:other@example.com", role: "reader"
+    }, now),
+    /access denied/
+  );
+  await store.executeCommand(tenantId, "user:admin@example.com", {
+    type: "grant_repository_access", repository, principalId: "user:other@example.com", role: "reader"
+  }, now);
+  await store.executeCommand(tenantId, "user:admin@example.com", {
+    type: "tombstone_repository", repository, reason: "erasure request"
+  }, now);
+
+  assert.deepEqual(await store.repositoriesForPrincipal(tenantId, "user:reader@example.com"), []);
+  await assert.rejects(store.applyGitHubObservations([{
+    tenantId, repository, kind: "issue", number: 1, title: "Must not return", state: "open",
+    url: `https://github.com/${repository}/issues/1`, occurredAt: now, recordedAt: now
+  }]), /repository is tombstoned/);
+  await assert.rejects(store.planIngestion({
+    tenantId, repository, ref: "main", commitSha: "a".repeat(40), treeSha: "b".repeat(40),
+    parents: [], recordedAt: now, taskId: "replay", files: []
+  }), /repository is tombstoned/);
+  await assert.rejects(
+    store.executeCommand(tenantId, "svc:test", {
+      type: "grant_repository_access", repository, principalId: "user:reader@example.com", role: "reader"
+    }, now),
+    /repository is tombstoned/
+  );
+  await assert.rejects(store.executeCommand(tenantId, "svc:test", assignment, now), /repository is tombstoned/);
+});
+
 test("reviews and retrieves a virtual issue through the generalized Issue assertion", async () => {
   const store = new MemoryOntologyGraphStore();
   const repository = "org/repo";

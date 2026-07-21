@@ -48,6 +48,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
     systemPrompt: string,
     allowEmptyEdges: boolean
   ): Promise<OntologyGraph> {
+    request.signal?.throwIfAborted();
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
     const openaiKey = process.env.OPENAI_API_KEY?.trim();
     const openrouterKey = process.env.OPENROUTER_API_KEY?.trim();
@@ -72,10 +73,12 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
         { timeout: positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 300) }
       );
 
+      request.signal?.throwIfAborted();
       await cloneRepository(sandbox, request, cloneToken);
       if (request.commitSha) await checkoutExpectedCommit(sandbox, request.commitSha);
       await prepareCodex(sandbox);
       const input = await writeInputFiles(sandbox, request, outputSchema, systemPrompt);
+      request.signal?.throwIfAborted();
       const basePrompt = input.prompt;
       if (provider === "openrouter") await startOutputLimitingProxy(sandbox);
 
@@ -101,6 +104,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       let rawModelOutput: unknown;
       let validationFailure = "";
       for (let attempt = 0; attempt < 2; attempt += 1) {
+        request.signal?.throwIfAborted();
         if (attempt > 0) {
           await sandbox.fs.uploadFile(
             Buffer.from(repairPrompt(basePrompt, validationFailure)),
@@ -135,6 +139,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
               providerEnvironment,
               positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
             );
+            request.signal?.throwIfAborted();
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             if (executionAttempt + 1 >= executionAttempts || !isTransientCodexExecutionFailure(message)) throw error;
@@ -145,6 +150,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
           if (executionAttempt + 1 >= executionAttempts) break;
           const delaySeconds = positiveInt(process.env.ONTOLOGY_CODEX_RETRY_DELAY_SECONDS, 10);
           await sandbox.process.executeCommand(`sleep ${delaySeconds}`, REPO_DIR, undefined, delaySeconds + 5);
+          request.signal?.throwIfAborted();
         }
         if (!run) throw new Error("Codex ontology build failed after a transient Daytona execution error");
         if (run.exitCode !== 0) {
@@ -154,13 +160,16 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
           RESULT_PATH,
           positiveInt(process.env.DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS, 120)
         );
+        request.signal?.throwIfAborted();
         try {
           const parsedModelOutput = parseJsonResult(resultBuffer.toString("utf8"));
           const candidate = parseGeneratedOntology(parsedModelOutput);
           const validationErrors: string[] = [];
           try {
             await validateOntologyEvidence(candidate, async (path) => {
+              request.signal?.throwIfAborted();
               const contents = await sandbox!.fs.downloadFile(`${REPO_DIR}/${path}`, 120);
+              request.signal?.throwIfAborted();
               return contents.toString("utf8");
             });
           } catch (error) {
@@ -192,7 +201,9 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       }
 
       if (!generated) throw new Error("Codex ontology build did not produce a validated result");
+      request.signal?.throwIfAborted();
       const shaResult = await sandbox.process.executeCommand("git rev-parse HEAD", REPO_DIR, undefined, 60);
+      request.signal?.throwIfAborted();
       if (shaResult.exitCode !== 0) {
         throw new Error(`Unable to resolve repository commit: ${truncate(shaResult.result)}`);
       }
