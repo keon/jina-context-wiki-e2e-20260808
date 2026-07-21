@@ -1,6 +1,6 @@
 # Data Models
 
-> **Implementation status (2026-07-21):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.5 schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; and immutable relational graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
+> **Implementation status (2026-07-21):** The board still persists a JSONB snapshot in `jina_runtime.api_state`, with unique deliveries in `jina_runtime.github_deliveries`. Ontology's Repository Context v5.1 causal schema is implemented in `jina_ontology`: observations; commit/ref/change/blob/symbol/edge code facts; entities/identities/redirects/assertions/assertion-relations/audit; canonical outbox and lifecycle filters; ACLs; ref manifests; lexical/vector search; and immutable relational graph projections. The normalized board task/run/finding/gate/usage/billing/artifact tables described below remain target design.
 
 This document defines the core Postgres data model for Jina. It is the schema-oriented companion to [ARCHITECTURE.md](ARCHITECTURE.md).
 
@@ -19,14 +19,15 @@ Ontology is deliberately separate from the normalized board target below. Its im
 intake       observations
 code         commits, refs, commit_changes, blobs,
              blob_analyses, blob_symbols, blob_imports, symbol_edges
-knowledge    entities, identities, entity_redirects, assertions, audit_log
+knowledge    entities, identities, entity_redirects, assertions,
+             assertion_relations, audit_log
 infra        outbox, erasure_filters, repository_acl
 projections  ref_manifest, search_documents, graphs, nodes, edges
 ```
 
-`commit_changes` stores only each commit's first-parent churn; the root commit is represented as adds. `commit_manifest(tenant, repository, sha)` reconstructs immutable historical tree state from that ancestry, while `ref_manifest` is the rebuildable hot-ref projection. Storage therefore grows with changed paths rather than commits multiplied by every file in each tree. `issue_trace` retrieval directly traverses the latest `graphs`/`nodes`/`edges` generation produced by `ontology_project` and joins canonical assertions, observations, and commit changes for cited detail. It does not maintain a second JSON projection. Repository, file, symbol, commit, PR, issue, and Feature natural keys include their repository scope; a Feature uses `repo:<repository>:feature:<stable-slug>`. `INTRODUCED_BY` requires the Issue → Commit endpoints plus a nonempty `reason` qualifier. Assertions contain typed qualifiers, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version. Counterfactuals add no table: they are deterministic synthesis over the existing issue/Feature retrieval results.
+`commit_changes` stores only each commit's first-parent churn; the root commit is represented as adds. `commit_manifest(tenant, repository, sha)` reconstructs immutable historical tree state from that ancestry, while `ref_manifest` is the rebuildable hot-ref projection. Storage therefore grows with changed paths rather than commits multiplied by every file in each tree. Generic causal and compatibility issue/Feature retrieval directly traverse the latest `graphs`/`nodes`/`edges` generation produced by `ontology_project`; there is no second JSON projection. Stable semantic keys include `repo:<repository>:feature:<slug>`, `package:<ecosystem>:<name>`, `service:<source>:<external-id>`, `deployment:<source>:<external-id>`, `incident:<source>:<external-id>`, and `virtual-issue:<repository>:<content-digest>`. `INTRODUCED_BY` requires Issue/VirtualIssue/Incident → Commit/Deployment endpoints plus a nonempty `reason`. Assertions contain typed qualifiers, five-state review status, confidence, provenance, generator, validity, supersession, confirmation time, audit linkage, and registry version. `assertion_relations` records cited `supports | contradicts` links. Counterfactuals add no table: they remove paths from the materialized causal graph in memory.
 
-Upgraded databases may still contain the former `commit_files`, `model_outputs`, and `issue_traces` tables and historical `RESOLVED_BY` assertion rows. Current code neither writes nor reads them: historical manifests are reconstructed from churn, model generations live only as `model_output` observations, and issue-centric reads reverse-traverse `RESOLVES` through the current graph. The compatibility boundary preserves those legacy rows for audit/history safety while excluding them from current projections and reads.
+Upgraded databases may still contain the former `commit_files`, `model_outputs`, and `issue_traces` tables. Current code neither writes nor reads those legacy caches: historical manifests are reconstructed from churn and model generations live only as `model_output` observations. Current projection does retain reviewed `RESOLVED_BY` assertions alongside deterministic `RESOLVES` facts.
 
 ## Conventions
 

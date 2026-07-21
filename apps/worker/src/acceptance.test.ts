@@ -140,11 +140,10 @@ test("production acceptance reviews causality, queries it in both directions, an
         const causing = body.question?.includes("PR #6");
         return json({
           operation: "counterfactual",
-          answer: causing
-            ? "Without PR #6, the issue would likely not have been introduced by that change."
-            : "Without PR #8, the issue would remain unresolved.",
-          calls: [{ template: "issue_trace", items: [{ citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }] }],
-          citedClaims: [{ text: "supported", citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }]
+          answer: "Removing the PR eliminates every currently known reviewed path to the issue.",
+          calls: [{ template: "counterfactual", items: [{ citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }] }],
+          citedClaims: [{ text: "supported", citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }],
+          counterfactual: { basis: "graph-derived", removedPaths: [{ citations: [{ kind: "assertion", id: causing ? "cause" : "fix" }] }], remainingPaths: [] }
         });
       }
       if (body.question?.includes("caused") || body.question?.includes("cause")) {
