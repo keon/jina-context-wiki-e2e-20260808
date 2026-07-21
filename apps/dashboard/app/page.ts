@@ -122,19 +122,22 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip[aria-pressed="false"] { border-color: #293143; background: #111620; color: #68758b; text-decoration: line-through; }
   .graph-filter-chip[aria-pressed="false"]::before { background: #465166; }
   .graph-filter-chip:hover, .graph-reset:hover { border-color: #7184aa; background: #202b40; }
-  .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .graph-node:focus-visible, .graph-edge-group:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
+  .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .graph-node:focus-visible, .graph-edge-label-button:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
   .graph-reset { align-self: start; border-radius: .5rem; background: #151c29; }
   .graph-reset:disabled { opacity: .42; cursor: default; }
   .graph-wrap { min-height: 590px; overflow: auto; background: radial-gradient(circle at 50% 50%, #182036, #0d1119 66%); }
   #ontology-graph { display: block; width: 100%; min-width: 900px; height: 590px; }
-  .graph-edge { stroke-width: 1.5; opacity: .62; }
-  .graph-edge-hit { stroke: transparent; stroke-width: 16; cursor: pointer; }
+  .graph-edge { fill: none; stroke-width: 1.5; opacity: .62; }
+  .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
   .graph-edge-group { cursor: pointer; }
-  .graph-edge-group:hover .graph-edge, .graph-edge-group.selected .graph-edge { stroke-width: 3.5; opacity: 1; }
-  .graph-edge-group:hover .graph-edge-label, .graph-edge-group.selected .graph-edge-label { fill: #f2f5fa; font-weight: 750; }
+  .graph-edge-group:hover .graph-edge, .graph-edge-group.hovered .graph-edge, .graph-edge-group.selected .graph-edge { stroke-width: 3.5; opacity: 1; }
   .graph-edge-code { stroke: #6495ed; }
   .graph-edge-knowledge { stroke: #d88fff; stroke-dasharray: 5 4; }
-  .graph-edge-label { fill: #7e8ca5; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-anchor: middle; pointer-events: none; }
+  .graph-edge-label-button { cursor: pointer; }
+  .graph-edge-label-bg { fill: #111824; stroke: #34415a; stroke-width: 1; }
+  .graph-edge-label { fill: #95a2b8; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-anchor: middle; pointer-events: none; }
+  .graph-edge-label-button:hover .graph-edge-label-bg, .graph-edge-label-button.selected .graph-edge-label-bg { fill: #1b2639; stroke: #829bd0; }
+  .graph-edge-label-button:hover .graph-edge-label, .graph-edge-label-button.selected .graph-edge-label { fill: #f2f5fa; font-weight: 750; }
   .graph-node { cursor: pointer; }
   .graph-node circle { stroke-width: 2; filter: drop-shadow(0 5px 8px rgb(0 0 0 / 35%)); transition: stroke-width 120ms ease, filter 120ms ease; }
   .graph-node:hover circle, .graph-node.selected circle { stroke-width: 4; filter: drop-shadow(0 0 10px rgb(142 168 255 / 65%)); }
@@ -153,10 +156,30 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .ontology-item span { display: block; margin-top: .3rem; color: #7e8aa0; font-size: .66rem; line-height: 1.45; }
   .ontology-item-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .7rem; }
   .ontology-item-type { flex: 0 0 auto; border: 1px solid #36415a; border-radius: 99px; padding: .15rem .4rem; color: #8da1c4; font-size: .58rem; }
+  .ontology-explanation { margin: 0; color: #cbd3e1; font-size: .72rem; line-height: 1.55; }
+  .ontology-inspector-section { margin-top: .85rem; }
+  .ontology-inspector-section h3 { margin: 0 0 .48rem; color: #8d9bb2; font-size: .6rem; letter-spacing: .09em; text-transform: uppercase; }
   .ontology-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .55rem; margin-top: .7rem; }
   .ontology-detail-field { border: 1px solid #242d40; border-radius: .55rem; background: #0f141e; padding: .55rem .6rem; }
   .ontology-detail-field .label { margin-bottom: .25rem; }
   .ontology-detail-field .value { color: #d3dae6; font-size: .68rem; line-height: 1.45; }
+  .ontology-confidence { border: 1px solid #2d3d59; border-radius: .6rem; background: #101827; padding: .62rem .68rem; }
+  .ontology-confidence-top { display: flex; align-items: baseline; justify-content: space-between; gap: .7rem; }
+  .ontology-confidence-top .label { margin: 0; }
+  .ontology-confidence-value { color: #dce5f5; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 750; }
+  .ontology-confidence-meter { height: .28rem; margin-top: .48rem; border-radius: 99px; background: #252e40; overflow: hidden; }
+  .ontology-confidence-fill { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #6e91e8, #66d6bd); }
+  .ontology-confidence-note { margin: .42rem 0 0; color: #75839a; font-size: .62rem; line-height: 1.45; }
+  .ontology-evidence-list { display: flex; flex-wrap: wrap; gap: .38rem; margin: 0; padding: 0; list-style: none; }
+  .ontology-evidence { border: 1px solid #34425a; border-radius: .42rem; background: #151d2a; padding: .3rem .42rem; color: #aebbd0; font: .62rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .ontology-relationship-list { display: grid; gap: .42rem; }
+  .ontology-relationship { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .7rem; width: 100%; border: 1px solid #2a3449; border-radius: .58rem; background: #111823; padding: .55rem .62rem; color: inherit; text-align: left; cursor: pointer; }
+  .ontology-relationship:hover { border-color: #62769c; background: #172133; }
+  .ontology-relationship:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
+  .ontology-relationship-title { color: #d6deeb; font-size: .67rem; font-weight: 700; }
+  .ontology-relationship-meta { color: #8a99b1; font: .6rem ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+  .ontology-relationship-explanation { grid-column: 1 / -1; color: #74839b; font-size: .61rem; line-height: 1.42; }
+  .ontology-item .ontology-item-type, .ontology-item .ontology-confidence span, .ontology-item .ontology-relationship span { margin-top: 0; }
   .graph-empty { fill: #6f7d94; font-size: 14px; text-anchor: middle; }
   .plane-key { display: flex; gap: .8rem; align-items: center; color: #7f8ca2; font-size: .66rem; }
   .plane-key span::before { content: ""; display: inline-block; width: 1.4rem; margin-right: .35rem; border-top: 2px solid #6495ed; vertical-align: middle; }
@@ -414,30 +437,48 @@ function renderOntology() {
   renderGraphControls(graph);
 
   const positions = graphPositions(visibleGraph.nodes);
-  for (const edge of visibleGraph.edges) {
+  const edgeLabels = [];
+  for (let edgeIndex = 0; edgeIndex < visibleGraph.edges.length; edgeIndex += 1) {
+    const edge = visibleGraph.edges[edgeIndex];
     const source = positions.get(edge.source);
     const target = positions.get(edge.target);
     if (!source || !target) continue;
+    const geometry = graphEdgeGeometry(source, target, edgeIndex);
     const selected = ontologyViewState.selected?.kind === "edge" && ontologyViewState.selected.id === edge.id;
     const group = svgElement("g", "graph-edge-group" + (selected ? " selected" : ""));
-    group.setAttribute("role", "button");
-    group.setAttribute("tabindex", "0");
-    group.setAttribute("aria-label", edge.predicate + " edge");
-    const hit = svgElement("line", "graph-edge-hit");
-    hit.setAttribute("x1", source.x); hit.setAttribute("y1", source.y);
-    hit.setAttribute("x2", target.x); hit.setAttribute("y2", target.y);
-    const line = svgElement("line", "graph-edge graph-edge-" + edge.plane);
-    line.setAttribute("x1", source.x); line.setAttribute("y1", source.y);
-    line.setAttribute("x2", target.x); line.setAttribute("y2", target.y);
+    const hit = svgElement("path", "graph-edge-hit");
+    hit.setAttribute("d", geometry.path);
+    const line = svgElement("path", "graph-edge graph-edge-" + edge.plane);
+    line.setAttribute("d", geometry.path);
+    group.append(hit, line);
+    group.addEventListener("click", function(event) {
+      event.stopPropagation();
+      selectGraphItem("edge", edge.id);
+    });
+    ontologyGraph.append(group);
+
+    const labelGroup = svgElement("g", "graph-edge-label-button" + (selected ? " selected" : ""));
+    labelGroup.setAttribute("transform", "translate(" + geometry.labelX + " " + geometry.labelY + ")");
+    labelGroup.setAttribute("role", "button");
+    labelGroup.setAttribute("tabindex", "0");
+    labelGroup.setAttribute("aria-label", edge.predicate + " edge");
+    const labelWidth = Math.max(62, edge.predicate.length * 6.5 + 18);
+    const background = svgElement("rect", "graph-edge-label-bg");
+    background.setAttribute("x", String(-labelWidth / 2)); background.setAttribute("y", "-12");
+    background.setAttribute("width", String(labelWidth)); background.setAttribute("height", "20");
+    background.setAttribute("rx", "6");
     const label = svgElement("text", "graph-edge-label");
-    label.setAttribute("x", String((source.x + target.x) / 2));
-    label.setAttribute("y", String((source.y + target.y) / 2 - 5));
+    label.setAttribute("y", "2");
     label.textContent = edge.predicate;
     const title = svgElement("title");
     title.textContent = edge.predicate + " — " + edge.source + " to " + edge.target;
-    group.append(hit, line, label, title);
-    makeGraphItemInteractive(group, "edge", edge.id);
-    ontologyGraph.append(group);
+    labelGroup.append(background, label, title);
+    labelGroup.addEventListener("mouseenter", function() { group.classList.add("hovered"); });
+    labelGroup.addEventListener("mouseleave", function() { group.classList.remove("hovered"); });
+    labelGroup.addEventListener("focus", function() { group.classList.add("hovered"); });
+    labelGroup.addEventListener("blur", function() { group.classList.remove("hovered"); });
+    makeGraphItemInteractive(labelGroup, "edge", edge.id);
+    edgeLabels.push(labelGroup);
   }
   for (const node of visibleGraph.nodes) {
     const point = positions.get(node.id);
@@ -456,6 +497,7 @@ function renderOntology() {
     makeGraphItemInteractive(group, "node", node.id);
     ontologyGraph.append(group);
   }
+  ontologyGraph.append(...edgeLabels);
   if (!visibleGraph.nodes.length) {
     const empty = svgElement("text", "graph-empty");
     empty.setAttribute("x", "550"); empty.setAttribute("y", "295");
@@ -534,8 +576,7 @@ function toggleGraphFilter(group, type) {
 function makeGraphItemInteractive(element, kind, id) {
   function select(event) {
     event.stopPropagation();
-    ontologyViewState.selected = { kind: kind, id: id };
-    renderOntology();
+    selectGraphItem(kind, id);
   }
   element.addEventListener("click", select);
   element.addEventListener("keydown", function(event) {
@@ -544,6 +585,11 @@ function makeGraphItemInteractive(element, kind, id) {
       select(event);
     }
   });
+}
+
+function selectGraphItem(kind, id) {
+  ontologyViewState.selected = { kind: kind, id: id };
+  renderOntology();
 }
 
 function renderOntologyInspector(graph, visibleGraph) {
@@ -560,13 +606,23 @@ function renderOntologyInspector(graph, visibleGraph) {
     if (!node) return;
     const relatedEdges = visibleGraph.edges.filter(function(edge) { return edge.source === node.id || edge.target === node.id; });
     const item = ontologyInspectorItem(node.label, "Node · " + node.kind);
-    item.append(textElement("span", "", node.description));
+    item.append(ontologyExplanation(node.description || "No explanation provided for this node."));
     item.append(ontologyDetailGrid([
       ["ID", node.id],
+      ["Type", node.kind],
       ["Path", node.path || "Not applicable"],
-      ["Visible relationships", String(relatedEdges.length)],
-      ["Evidence", evidenceLabel(node.evidence)]
+      ["Visible relationships", String(relatedEdges.length)]
     ]));
+    const confidence = connectedConfidenceSummary(relatedEdges);
+    item.append(ontologyConfidence(
+      "Connected relationship confidence",
+      confidence.value,
+      confidence.scoredCount
+        ? "Average of " + confidence.scoredCount + " scored visible relationship" + (confidence.scoredCount === 1 ? "" : "s") + ". Nodes do not carry a direct confidence score."
+        : "No visible connected relationships provide confidence scores. Nodes do not carry a direct confidence score."
+    ));
+    item.append(ontologyEvidenceSection(node.evidence));
+    item.append(ontologyRelationshipSection(node, relatedEdges, graph));
     ontologyDetails.append(item);
     return;
   }
@@ -575,14 +631,22 @@ function renderOntologyInspector(graph, visibleGraph) {
   const source = graph.nodes.find(function(node) { return node.id === edge.source; });
   const target = graph.nodes.find(function(node) { return node.id === edge.target; });
   const item = ontologyInspectorItem(edge.predicate, "Edge · " + edge.plane + " plane");
-  item.append(textElement("span", "", (source?.label || edge.source) + " → " + (target?.label || edge.target)));
+  item.append(ontologyExplanation(
+    edge.why || "This relationship states that " + (source?.label || edge.source) + " " + humanize(edge.predicate) + " " + (target?.label || edge.target) + "."
+  ));
   item.append(ontologyDetailGrid([
-    ["Source", source ? source.kind + " · " + source.label : edge.source],
-    ["Target", target ? target.kind + " · " + target.label : edge.target],
-    ["Confidence", edge.confidence === undefined ? "Not provided" : Math.round(edge.confidence * 100) + "%"],
-    ["Why", edge.why || "No rationale provided"],
-    ["Evidence", evidenceLabel(edge.evidence)]
+    ["ID", edge.id],
+    ["Predicate", edge.predicate],
+    ["Plane", edge.plane],
+    ["Source", source ? source.kind + " · " + source.label + " (" + source.id + ")" : edge.source],
+    ["Target", target ? target.kind + " · " + target.label + " (" + target.id + ")" : edge.target]
   ]));
+  item.append(ontologyConfidence(
+    "Relationship confidence",
+    edge.confidence,
+    edge.confidence === undefined ? "This relationship was stored without a confidence score." : "Direct confidence score stored on this relationship."
+  ));
+  item.append(ontologyEvidenceSection(edge.evidence));
   ontologyDetails.append(item);
 }
 
@@ -604,8 +668,94 @@ function ontologyDetailGrid(fields) {
   return grid;
 }
 
-function evidenceLabel(evidence) {
-  return evidence.length ? evidence.join(", ") : "None provided";
+function ontologyExplanation(value) {
+  const section = element("section", "ontology-inspector-section");
+  section.append(textElement("h3", "", "Explanation"), textElement("p", "ontology-explanation", value));
+  return section;
+}
+
+function connectedConfidenceSummary(edges) {
+  const scores = edges.map(function(edge) { return edge.confidence; }).filter(function(value) {
+    return typeof value === "number" && Number.isFinite(value);
+  });
+  return {
+    value: scores.length ? scores.reduce(function(total, value) { return total + value; }, 0) / scores.length : undefined,
+    scoredCount: scores.length,
+    totalCount: edges.length
+  };
+}
+
+function ontologyConfidence(label, value, note) {
+  const section = element("section", "ontology-inspector-section");
+  section.append(textElement("h3", "", "Confidence"));
+  const card = element("div", "ontology-confidence");
+  const top = element("div", "ontology-confidence-top");
+  top.append(textElement("span", "label", label), textElement("strong", "ontology-confidence-value", confidenceLabel(value)));
+  card.append(top);
+  if (typeof value === "number" && Number.isFinite(value)) {
+    const meter = element("div", "ontology-confidence-meter");
+    meter.setAttribute("role", "meter");
+    meter.setAttribute("aria-label", label);
+    meter.setAttribute("aria-valuemin", "0"); meter.setAttribute("aria-valuemax", "100");
+    meter.setAttribute("aria-valuenow", String(Math.round(clampConfidence(value) * 100)));
+    const fill = element("span", "ontology-confidence-fill");
+    fill.style.width = Math.round(clampConfidence(value) * 100) + "%";
+    meter.append(fill);
+    card.append(meter);
+  }
+  card.append(textElement("p", "ontology-confidence-note", note));
+  section.append(card);
+  return section;
+}
+
+function confidenceLabel(value) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "Not provided";
+  const confidence = clampConfidence(value);
+  return Math.round(confidence * 100) + "% · " + confidence.toFixed(2);
+}
+
+function clampConfidence(value) { return Math.max(0, Math.min(1, value)); }
+
+function ontologyEvidenceSection(evidence) {
+  const section = element("section", "ontology-inspector-section");
+  section.append(textElement("h3", "", "Evidence · " + evidence.length));
+  if (!evidence.length) {
+    section.append(textElement("p", "empty-detail", "No evidence citations were provided."));
+    return section;
+  }
+  const list = element("ul", "ontology-evidence-list");
+  for (const citation of evidence) list.append(textElement("li", "ontology-evidence", citation));
+  section.append(list);
+  return section;
+}
+
+function ontologyRelationshipSection(node, edges, graph) {
+  const section = element("section", "ontology-inspector-section");
+  section.append(textElement("h3", "", "Visible relationships · " + edges.length));
+  if (!edges.length) {
+    section.append(textElement("p", "empty-detail", "No visible relationships connect to this node."));
+    return section;
+  }
+  const list = element("div", "ontology-relationship-list");
+  for (const edge of edges) {
+    const outgoing = edge.source === node.id;
+    const otherId = outgoing ? edge.target : edge.source;
+    const other = graph.nodes.find(function(candidate) { return candidate.id === otherId; });
+    const button = element("button", "ontology-relationship");
+    button.type = "button";
+    button.append(
+      textElement("span", "ontology-relationship-title", (outgoing ? "Outgoing · " : "Incoming · ") + edge.predicate + " · " + (other?.label || otherId)),
+      textElement("span", "ontology-relationship-meta", edge.plane + " · " + confidenceLabel(edge.confidence)),
+      textElement("span", "ontology-relationship-explanation", edge.why || "No relationship explanation provided. Select for full details.")
+    );
+    button.addEventListener("click", function() {
+      ontologyViewState.selected = { kind: "edge", id: edge.id };
+      renderOntology();
+    });
+    list.append(button);
+  }
+  section.append(list);
+  return section;
 }
 
 function renderContextResults() {
@@ -825,6 +975,21 @@ function graphPositions(nodes) {
     positions.set(rest[index].id, { x: 550 + Math.cos(angle) * ring * 1.75, y: 295 + Math.sin(angle) * ring });
   }
   return positions;
+}
+
+function graphEdgeGeometry(source, target, index) {
+  const dx = target.x - source.x;
+  const dy = target.y - source.y;
+  const length = Math.max(Math.hypot(dx, dy), 1);
+  const direction = index % 2 === 0 ? 1 : -1;
+  const offset = (130 + (index % 3) * 20) * direction;
+  const controlX = (source.x + target.x) / 2 - (dy / length) * offset;
+  const controlY = (source.y + target.y) / 2 + (dx / length) * offset;
+  return {
+    path: "M " + source.x + " " + source.y + " Q " + controlX + " " + controlY + " " + target.x + " " + target.y,
+    labelX: (source.x + 2 * controlX + target.x) / 4,
+    labelY: (source.y + 2 * controlY + target.y) / 4
+  };
 }
 
 function svgElement(tag, className) {

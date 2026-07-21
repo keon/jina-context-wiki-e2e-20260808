@@ -41,13 +41,25 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /aria-label="Graph visibility controls"/);
   assert.match(html, /function filterOntologyGraph/);
   assert.match(html, /function renderGraphControls/);
+  assert.match(html, /function graphEdgeGeometry/);
+  assert.match(html, /graph-edge-label-button/);
   assert.match(html, /function toggleGraphFilter/);
   assert.match(html, /function makeGraphItemInteractive/);
   assert.match(html, /function renderOntologyInspector/);
+  assert.match(html, /function ontologyExplanation/);
+  assert.match(html, /function connectedConfidenceSummary/);
+  assert.match(html, /function ontologyConfidence/);
+  assert.match(html, /function ontologyEvidenceSection/);
+  assert.match(html, /function ontologyRelationshipSection/);
   assert.match(html, /data-filter-group/);
   assert.match(html, /Select a node or relationship/);
   assert.match(html, /Visible relationships/);
-  assert.match(html, /No rationale provided/);
+  assert.match(html, /Connected relationship confidence/);
+  assert.match(html, /Nodes do not carry a direct confidence score/);
+  assert.match(html, /Direct confidence score stored on this relationship/);
+  assert.match(html, /"Explanation"/);
+  assert.match(html, /No relationship explanation provided/);
+  assert.match(html, /Evidence · /);
   assert.match(html, /Show all/);
   assert.match(html, /Ask with citations/);
   assert.match(html, /function renderIssueTrace/);
@@ -112,6 +124,33 @@ test("dashboard page renders clickable task detail affordances", () => {
     ["contains"],
     "edge relationship types can be hidden independently"
   );
+
+  const confidenceSource = script.match(/function connectedConfidenceSummary\(edges\) \{[\s\S]+?\n\}\n\nfunction ontologyConfidence/)?.[0]
+    .replace(/\n\nfunction ontologyConfidence$/, "");
+  assert.ok(confidenceSource);
+  const connectedConfidenceSummary = new Function(`${confidenceSource}; return connectedConfidenceSummary;`)() as (
+    edges: Array<{ confidence?: number }>
+  ) => { value?: number; scoredCount: number; totalCount: number };
+  assert.deepEqual(
+    connectedConfidenceSummary([{ confidence: 0.8 }, {}, { confidence: 1 }]),
+    { value: 0.9, scoredCount: 2, totalCount: 3 },
+    "node confidence is derived only from scored connected relationships"
+  );
+  assert.deepEqual(
+    connectedConfidenceSummary([{}, {}]),
+    { value: undefined, scoredCount: 0, totalCount: 2 },
+    "nodes without scored relationships do not invent a confidence value"
+  );
+
+  const edgeGeometrySource = script.match(/function graphEdgeGeometry\(source, target, index\) \{[\s\S]+?\n\}\n\nfunction svgElement/)?.[0]
+    .replace(/\n\nfunction svgElement$/, "");
+  assert.ok(edgeGeometrySource);
+  const graphEdgeGeometry = new Function(`${edgeGeometrySource}; return graphEdgeGeometry;`)() as (
+    source: { x: number; y: number }, target: { x: number; y: number }, index: number
+  ) => { path: string; labelX: number; labelY: number };
+  const geometry = graphEdgeGeometry({ x: 0, y: 0 }, { x: 0, y: 100 }, 0);
+  assert.match(geometry.path, / Q /);
+  assert.notEqual(geometry.labelX, 0, "curved edges move their clickable label away from overlapping nodes");
 
   const partitionSource = script.match(/function partitionBoardTasks\(tasks\) \{[\s\S]+?\n\}\n\nfunction renderColumns/)?.[0]
     .replace(/\n\nfunction renderColumns$/, "");
