@@ -423,6 +423,59 @@ test("Postgres projections retain reviewed RESOLVED_BY relationships after an up
   }
 });
 
+test("Postgres batched blob analyses keep first-write-wins dedupe and reject unknown blobs", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const pool = new Pool({ connectionString });
+  const suffix = Date.now().toString(36);
+  const tenantId = `blob-batch-${suffix}`;
+  const snapshot = {
+    tenantId,
+    repository: "omlabs/db-blob-batch-fixture",
+    ref: "main",
+    commitSha: "1".repeat(40),
+    treeSha: "2".repeat(40),
+    parents: [],
+    recordedAt: "2026-07-19T12:00:00.000Z",
+    taskId: `ingest-${suffix}`,
+    files: [{ path: "src/util.ts", blobSha: "3".repeat(40), size: 30 }]
+  };
+  const analysisFor = (moniker: string) => ({
+    blobSha: "3".repeat(40),
+    parserVersion: ONTOLOGY_PARSER_VERSION,
+    language: "typescript",
+    symbols: [{ moniker, name: moniker, kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 2 }],
+    imports: [],
+    edges: []
+  });
+  try {
+    await store.planIngestion(snapshot);
+    await store.applyBlobAnalyses(snapshot, [analysisFor("first"), analysisFor("second")]);
+    const symbols = await pool.query<{ moniker: string }>(
+      `select moniker from jina_ontology.blob_symbols where tenant_id=$1 and blob_sha=$2`,
+      [tenantId, "3".repeat(40)]
+    );
+    assert.deepEqual(symbols.rows.map((row) => row.moniker), ["first"],
+      "a duplicate blob/parser pair in one batch keeps only the first analysis's rows");
+    await assert.rejects(
+      store.applyBlobAnalyses(snapshot, [analysisFor("third"), { ...analysisFor("stray"), blobSha: "4".repeat(40) }]),
+      /blob 4{40} is not in the recorded snapshot/,
+      "an analysis outside the recorded snapshot rejects the batch before writing"
+    );
+    const afterRejection = await pool.query<{ moniker: string }>(
+      `select moniker from jina_ontology.blob_symbols where tenant_id=$1`,
+      [tenantId]
+    );
+    assert.deepEqual(afterRejection.rows.map((row) => row.moniker), ["first"],
+      "a rejected batch writes nothing");
+  } finally {
+    await pool.end();
+    await store.close();
+  }
+});
+
 test("Postgres reuses content-addressed blobs and projects canonical assertions", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {

@@ -412,13 +412,18 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         : { rows: [] as { path: string; blob_sha: string }[] };
       const parentTree = parentFiles.rows.map((file) => ({ path: file.path, blobSha: file.blob_sha, size: 0 }));
       const changes = computeCommitChanges(snapshot.files, parentTree);
-      for (const change of changes) {
+      if (changes.length > 0) {
         await client.query(
           `insert into jina_ontology.commit_changes
             (tenant_id,repository,commit_sha,path,change,old_path,old_blob_sha,new_blob_sha)
-           values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing`,
-          [snapshot.tenantId, snapshot.repository, snapshot.commitSha, change.path, change.change,
-            change.oldPath ?? null, change.oldBlobSha ?? null, change.newBlobSha ?? null]
+           select $1,$2,$3,source.path,source.change,source.old_path,source.old_blob_sha,source.new_blob_sha
+           from unnest($4::text[],$5::text[],$6::text[],$7::text[],$8::text[])
+             as source(path,change,old_path,old_blob_sha,new_blob_sha)
+           on conflict do nothing`,
+          [snapshot.tenantId, snapshot.repository, snapshot.commitSha,
+            changes.map((change) => change.path), changes.map((change) => change.change),
+            changes.map((change) => change.oldPath ?? null), changes.map((change) => change.oldBlobSha ?? null),
+            changes.map((change) => change.newBlobSha ?? null)]
         );
       }
       if (snapshot.updateRef !== false && oldRefSha !== snapshot.commitSha) {
@@ -463,43 +468,83 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await client.query("begin");
       await assertPipelineWriteFence(client, scope.tenantId, scope.repository, "run-ontology-ingest", writeFence);
       await assertRepositoryWritable(client, scope.tenantId, scope.repository);
-      for (const analysis of analyses) {
-        const known = await client.query(
-          `select 1 from jina_ontology.commit_manifest($1,$2,$3)
-           where blob_sha=$4 limit 1`,
-          [scope.tenantId, scope.repository, scope.commitSha, analysis.blobSha]
+      if (analyses.length > 0) {
+        const membership = await client.query<{ blob_sha: string }>(
+          `select distinct blob_sha from jina_ontology.commit_manifest($1,$2,$3)
+           where blob_sha=any($4::text[])`,
+          [scope.tenantId, scope.repository, scope.commitSha,
+            [...new Set(analyses.map((analysis) => analysis.blobSha))]]
         );
-        if (known.rowCount !== 1) throw new Error(`blob ${analysis.blobSha} is not in the recorded snapshot`);
-        const inserted = await client.query(
+        const knownBlobShas = new Set(membership.rows.map((row) => row.blob_sha));
+        for (const analysis of analyses) {
+          if (!knownBlobShas.has(analysis.blobSha)) {
+            throw new Error(`blob ${analysis.blobSha} is not in the recorded snapshot`);
+          }
+        }
+        const inserted = await client.query<{ blob_sha: string; parser_version: string }>(
           `insert into jina_ontology.blob_analyses (tenant_id,blob_sha,parser_version,language)
-           values ($1,$2,$3,$4) on conflict do nothing returning blob_sha`,
-          [scope.tenantId, analysis.blobSha, analysis.parserVersion, analysis.language ?? null]
+           select $1,source.blob_sha,source.parser_version,source.language
+           from unnest($2::text[],$3::text[],$4::text[]) as source(blob_sha,parser_version,language)
+           on conflict do nothing returning blob_sha,parser_version`,
+          [scope.tenantId, analyses.map((analysis) => analysis.blobSha),
+            analyses.map((analysis) => analysis.parserVersion),
+            analyses.map((analysis) => analysis.language ?? null)]
         );
-        if (inserted.rowCount !== 1) continue;
-        for (const symbol of analysis.symbols) {
+        const analysisKey = (blobSha: string, parserVersion: string) => `${blobSha}\u0000${parserVersion}`;
+        const insertedKeys = new Set(inserted.rows.map((row) => analysisKey(row.blob_sha, row.parser_version)));
+        const seenKeys = new Set<string>();
+        const active = analyses.filter((analysis) => {
+          const key = analysisKey(analysis.blobSha, analysis.parserVersion);
+          if (!insertedKeys.has(key) || seenKeys.has(key)) return false;
+          seenKeys.add(key);
+          return true;
+        });
+        const symbols = active.flatMap((analysis) => analysis.symbols.map((symbol) => ({ analysis, symbol })));
+        if (symbols.length > 0) {
           await client.query(
             `insert into jina_ontology.blob_symbols
               (tenant_id,blob_sha,parser_version,moniker,name,kind,signature_hash,start_line,end_line)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing`,
-            [scope.tenantId, analysis.blobSha, analysis.parserVersion, symbol.moniker, symbol.name,
-              symbol.kind, symbol.signatureHash, symbol.startLine, symbol.endLine]
+             select $1,source.blob_sha,source.parser_version,source.moniker,source.name,source.kind,
+                    source.signature_hash,source.start_line,source.end_line
+             from unnest($2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::text[],$8::integer[],$9::integer[])
+               as source(blob_sha,parser_version,moniker,name,kind,signature_hash,start_line,end_line)
+             on conflict do nothing`,
+            [scope.tenantId, symbols.map(({ analysis }) => analysis.blobSha),
+              symbols.map(({ analysis }) => analysis.parserVersion),
+              symbols.map(({ symbol }) => symbol.moniker), symbols.map(({ symbol }) => symbol.name),
+              symbols.map(({ symbol }) => symbol.kind), symbols.map(({ symbol }) => symbol.signatureHash),
+              symbols.map(({ symbol }) => symbol.startLine), symbols.map(({ symbol }) => symbol.endLine)]
           );
         }
-        for (const item of analysis.imports) {
+        const imports = active.flatMap((analysis) => analysis.imports.map((item) => ({ analysis, item })));
+        if (imports.length > 0) {
           await client.query(
             `insert into jina_ontology.blob_imports
               (tenant_id,blob_sha,parser_version,specifier,line)
-             values ($1,$2,$3,$4,$5) on conflict do nothing`,
-            [scope.tenantId, analysis.blobSha, analysis.parserVersion, item.specifier, item.line]
+             select $1,source.blob_sha,source.parser_version,source.specifier,source.line
+             from unnest($2::text[],$3::text[],$4::text[],$5::integer[])
+               as source(blob_sha,parser_version,specifier,line)
+             on conflict do nothing`,
+            [scope.tenantId, imports.map(({ analysis }) => analysis.blobSha),
+              imports.map(({ analysis }) => analysis.parserVersion),
+              imports.map(({ item }) => item.specifier), imports.map(({ item }) => item.line)]
           );
         }
-        for (const edge of analysis.edges) {
+        const edges = active.flatMap((analysis) => analysis.edges.map((edge) => ({ analysis, edge })));
+        if (edges.length > 0) {
           await client.query(
             `insert into jina_ontology.symbol_edges
               (tenant_id,blob_sha,parser_version,from_moniker,kind,to_moniker,start_line,end_line)
-             values ($1,$2,$3,$4,$5,$6,$7,$8) on conflict do nothing`,
-            [scope.tenantId, analysis.blobSha, analysis.parserVersion, edge.fromMoniker, edge.kind,
-              edge.toMoniker, edge.startLine, edge.endLine]
+             select $1,source.blob_sha,source.parser_version,source.from_moniker,source.kind,
+                    source.to_moniker,source.start_line,source.end_line
+             from unnest($2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::integer[],$8::integer[])
+               as source(blob_sha,parser_version,from_moniker,kind,to_moniker,start_line,end_line)
+             on conflict do nothing`,
+            [scope.tenantId, edges.map(({ analysis }) => analysis.blobSha),
+              edges.map(({ analysis }) => analysis.parserVersion),
+              edges.map(({ edge }) => edge.fromMoniker), edges.map(({ edge }) => edge.kind),
+              edges.map(({ edge }) => edge.toMoniker),
+              edges.map(({ edge }) => edge.startLine), edges.map(({ edge }) => edge.endLine)]
           );
         }
       }
@@ -1376,7 +1421,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       if (consumers.includes("search")) {
         await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and repository=$2`, [tenantId, repository]);
         const documents = await client.query<{ id: string; title: string; body: string; source_kind: string }>(
-        `select id,source || ':' || type as title,coalesce(payload::text,'') as body,'observation' as source_kind
+        `select id,source || ':' || type as title,
+                case when type='source_snapshot' then '' else coalesce(payload::text,'') end as body,
+                'observation' as source_kind
          from jina_ontology.observations where tenant_id=$1 and repository=$2 and redacted_at is null
          union all
          select distinct e.id,e.display_name as title,e.natural_key as body,'entity' as source_kind
@@ -1398,17 +1445,26 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          where tenant_id=$1 order by created_at,id`, [tenantId]
       );
         const searchRedirectMap = redirectMap(searchRedirects.rows);
-        for (const document of documents.rows) {
-          if (document.source_kind === "entity" && resolveRedirect(searchRedirectMap, document.id) !== document.id) continue;
+        const projected = documents.rows.filter((document) =>
+          document.source_kind !== "entity" || resolveRedirect(searchRedirectMap, document.id) === document.id);
+        if (projected.length > 0) {
           await client.query(
           `insert into jina_ontology.search_documents
             (id,tenant_id,repository,source_kind,source_id,title,body,embedding,projected_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
-          [stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`), tenantId, repository,
-            document.source_kind, document.id, document.title, document.body, embeddingForText(`${document.title} ${document.body}`), now]
+           select source.id,$1,$2,source.source_kind,source.source_id,source.title,source.body,
+                  (select array_agg(element.value::float8 order by element.ordinality)
+                   from jsonb_array_elements_text(source.embedding) with ordinality as element(value,ordinality)),
+                  $3
+           from unnest($4::text[],$5::text[],$6::text[],$7::text[],$8::text[],$9::jsonb[])
+             as source(id,source_kind,source_id,title,body,embedding)`,
+          [tenantId, repository, now,
+            projected.map((document) => stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`)),
+            projected.map((document) => document.source_kind), projected.map((document) => document.id),
+            projected.map((document) => document.title), projected.map((document) => document.body),
+            projected.map((document) => JSON.stringify(embeddingForText(`${document.title} ${document.body}`)))]
           );
-          searchDocumentCount += 1;
         }
+        searchDocumentCount = projected.length;
       } else {
         searchDocumentCount = 0;
       }
@@ -2200,16 +2256,17 @@ async function insertOutbox(
   createdAt: string
 ): Promise<string> {
   const consumers = outboxConsumers(eventType);
-  const ids: string[] = [];
-  for (const consumer of consumers) {
-    const id = stableId("outbox", `${tenantId}:${eventType}:${aggregateId}:${createdAt}:${JSON.stringify(payload)}:${consumer}`);
-    ids.push(id);
-    await client.query(
-      `insert into jina_ontology.outbox (id,tenant_id,event_type,consumer,aggregate_id,payload,created_at,available_at)
-       values ($1,$2,$3,$4,$5,$6::jsonb,$7,$7) on conflict do nothing`,
-      [id, tenantId, eventType, consumer, aggregateId, JSON.stringify(payload), createdAt]
-    );
-  }
+  const serializedPayload = JSON.stringify(payload);
+  const ids = consumers.map((consumer) =>
+    stableId("outbox", `${tenantId}:${eventType}:${aggregateId}:${createdAt}:${serializedPayload}:${consumer}`)
+  );
+  await client.query(
+    `insert into jina_ontology.outbox (id,tenant_id,event_type,consumer,aggregate_id,payload,created_at,available_at)
+     select source.id,$1,$2,source.consumer,$3,$4::jsonb,$5,$5
+     from unnest($6::text[],$7::text[]) as source(id,consumer)
+     on conflict do nothing`,
+    [tenantId, eventType, aggregateId, serializedPayload, createdAt, ids, [...consumers]]
+  );
   return ids[0]!;
 }
 
