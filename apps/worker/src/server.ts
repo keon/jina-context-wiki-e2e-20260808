@@ -338,7 +338,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     candidates: moveCandidates, recordedAt: new Date().toISOString()
   });
   if (discovery.knownCommitShas.has(commitSha)) {
-    await hydrateRecentMergedPullRequestScope(repository, defaultBranch, workItems);
+    await hydrateRecentMergedPullRequestScope(repository, commitSha, workItems);
   }
   const problemEvidencePullRequestNumbers = await hydratePullRequestScope(repository, workItems, headPaths);
   const observations: RepositorySourceObservation[] = [
@@ -558,22 +558,34 @@ async function githubWorkItemObservations(
 
 async function hydrateRecentMergedPullRequestScope(
   repository: string,
-  defaultBranch: string,
+  headCommitSha: string,
   pullRequests: Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>
 ): Promise<void> {
   const recent = await githubJsonArray(
-    `/repos/${repository}/pulls?state=closed&base=${encodeURIComponent(defaultBranch)}&sort=updated&direction=desc&per_page=100`
+    `/repos/${repository}/pulls?state=closed&sort=updated&direction=desc&per_page=100`
   );
-  for (const item of recent) {
-    if (typeof item.number !== "number" || typeof item.merged_at !== "string" || !item.merged_at) continue;
+  const candidates = recent.filter((item) => {
+    if (typeof item.number !== "number" || pullRequests.has(item.number) ||
+      typeof item.merged_at !== "string" || !item.merged_at ||
+      typeof item.merge_commit_sha !== "string" || !/^[a-f0-9]{40}$/i.test(item.merge_commit_sha)) return false;
     const text = `${typeof item.title === "string" ? item.title : ""}\n${typeof item.body === "string" ? item.body : ""}`;
     const links = linkedIssueNumbers(text);
     const untrackedRepair = links.resolves.length === 0 && links.references.length === 0 &&
       /\b(?:fix(?:e[sd])?|repair(?:s|ed|ing)?|restor(?:e[sd]?|ing)|correct(?:s|ed|ing)?)\b/i.test(text) &&
       /\b(?:bug|regression|incorrect|broken|fail(?:s|ed|ing|ure)?|cannot|can't|unable|denied|wrong)\b/i.test(text);
-    if (!untrackedRepair) continue;
-    const existing = pullRequests.get(item.number);
-    if (existing) continue;
+    return untrackedRepair;
+  });
+  const reachable = await mapWithConcurrency(
+    candidates,
+    positiveInt(process.env.ONTOLOGY_GITHUB_PR_CONCURRENCY, 4),
+    async (item) => {
+      const mergeCommitSha = requiredGitSha(item.merge_commit_sha, "GitHub pull request merge commit SHA");
+      const comparison = await githubJson(`/repos/${repository}/compare/${mergeCommitSha}...${headCommitSha}`);
+      return comparison.status === "ahead" || comparison.status === "identical" ? item : undefined;
+    }
+  );
+  for (const item of reachable) {
+    if (!item || typeof item.number !== "number") continue;
     const commitShas = new Set<string>();
     if (typeof item.merge_commit_sha === "string" && /^[a-f0-9]{40}$/i.test(item.merge_commit_sha)) {
       commitShas.add(item.merge_commit_sha.toLowerCase());
