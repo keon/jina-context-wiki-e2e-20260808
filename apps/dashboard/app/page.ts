@@ -152,8 +152,21 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .kind-Symbol circle { fill: #45321c; stroke: #efb964; }
   .kind-Document circle { fill: #3f244e; stroke: #cf89e9; }
   .kind-Feature circle { fill: #173b50; stroke: #5fd3f3; }
+  .kind-Package circle { fill: #173253; stroke: #66aef4; }
+  .kind-Service circle { fill: #163f3b; stroke: #51d7c9; }
+  .kind-Deployment circle { fill: #213d2c; stroke: #63cf87; }
+  .kind-Incident circle { fill: #4e2021; stroke: #f2615d; }
+  .kind-VirtualIssue circle { fill: #4b3020; stroke: #ed9a52; }
   .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { fill: #3c2830; stroke: #ef879f; }
   .kind-Engineer circle, .kind-Team circle { fill: #283248; stroke: #91a7d4; }
+  .assertion-review { border: 1px solid #252d40; border-radius: .85rem; background: #10151f; overflow: hidden; }
+  .assertion-review > summary { padding: .8rem 1rem; color: #cbd3e1; cursor: pointer; font-size: .72rem; font-weight: 700; }
+  .assertion-review-toolbar { display: flex; gap: .55rem; flex-wrap: wrap; padding: .8rem 1rem; }
+  .assertion-review-list { display: grid; gap: .65rem; padding: 0 1rem 1rem; }
+  .assertion-review-item { border: 1px solid #2a3449; border-radius: .65rem; background: #111823; padding: .72rem; }
+  .assertion-review-item header, .assertion-actions { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; }
+  .assertion-review-item p { color: #aeb8c9; font-size: .7rem; }
+  .assertion-relations { color: #8e9bb0; font-size: .64rem; }
   .ontology-details { display: grid; gap: .7rem; padding: 1rem; border-top: 1px solid #252d40; }
   .ontology-item { border: 1px solid #262e42; border-radius: .7rem; background: #121722; padding: .72rem; }
   .ontology-item strong { display: block; font-size: .74rem; }
@@ -404,7 +417,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-node .node-kind { fill: #666; font-size: 8px; }
   .kind-Repository circle { stroke: #9d91f0; }
   .kind-File circle, .kind-Symbol circle { stroke: #668f85; }
-  .kind-Document circle, .kind-Feature circle { stroke: #88749f; }
+  .kind-Document circle, .kind-Feature circle, .kind-Package circle, .kind-Service circle, .kind-Deployment circle, .kind-Incident circle, .kind-VirtualIssue circle { stroke: #88749f; }
   .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { stroke: #a8787e; }
   .kind-Engineer circle, .kind-Team circle { stroke: #74809a; }
   .graph-node.dimmed, .graph-edge-group.dimmed, .graph-edge-label-button.dimmed { opacity: .1; }
@@ -778,7 +791,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-node .node-kind { fill: #747474; font-size: 8px; letter-spacing: 0; text-anchor: start; text-transform: none; }
   .kind-Repository .node-icon { stroke: #9d91f0; }
   .kind-File .node-icon, .kind-Symbol .node-icon { stroke: #6ea398; }
-  .kind-Document .node-icon, .kind-Feature .node-icon { stroke: #9479ad; }
+  .kind-Document .node-icon, .kind-Feature .node-icon, .kind-Package .node-icon, .kind-Service .node-icon, .kind-Deployment .node-icon, .kind-Incident .node-icon, .kind-VirtualIssue .node-icon { stroke: #9479ad; }
   .kind-Commit .node-icon, .kind-PullRequest .node-icon, .kind-Issue .node-icon { stroke: #78bf8b; }
   .kind-Engineer .node-icon, .kind-Team .node-icon { stroke: #7890bb; }
   .graph-kind-label { fill: #666; font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
@@ -895,6 +908,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
         </section>
         <aside class="ontology-details side-inspector" id="ontology-details" aria-live="polite"></aside>
       </section>
+      <details class="assertion-review"><summary>Review proposed knowledge</summary><div class="assertion-review-toolbar"><select id="assertion-predicate-filter" aria-label="Filter assertions by predicate"><option value="">All predicates</option></select><select id="assertion-kind-filter" aria-label="Filter assertions by entity kind"><option value="">All entity kinds</option></select></div><section class="assertion-review-list" id="assertion-review-list" aria-live="polite"></section></details>
     </div>
   </section>
 </main>
@@ -915,6 +929,7 @@ let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
 let ontologyState = { latest: null, graphs: [] };
+let assertionState = [];
 let ontologyViewState = {
   graphKey: null,
   selected: null,
@@ -963,6 +978,7 @@ const contextSearchShell = document.getElementById("context-search-shell");
 const contextSearchResults = document.getElementById("context-search-results");
 const contextQuestion = document.getElementById("context-question");
 const contextSearchSubmit = document.getElementById("context-search-submit");
+const assertionReviewList = document.getElementById("assertion-review-list");
 
 async function refresh() {
   try {
@@ -974,8 +990,14 @@ async function refresh() {
       const response = await fetch(API + "/ontology");
       if (!response.ok) throw new Error("API request failed");
       const nextOntologyState = await response.json();
+      let nextAssertions = [];
+      if (nextOntologyState.latest) {
+        const assertionResponse = await fetch(API + "/ontology/assertions?repository=" + encodeURIComponent(nextOntologyState.latest.repository));
+        if (assertionResponse.ok) nextAssertions = (await assertionResponse.json()).assertions || [];
+      }
       if (requestSequence !== ontologyRefreshSequence || location.pathname !== "/ontology") return;
       ontologyState = nextOntologyState;
+      assertionState = nextAssertions;
     } else if (showingTaskTypes) {
       const responses = await Promise.all([fetch(API + "/task-types"), fetch(API + "/board"), fetch(API + "/events")]);
       if (!responses.every(function(response) { return response.ok; })) throw new Error("API request failed");
@@ -1029,6 +1051,7 @@ function renderOntology() {
   ontologySummary.replaceChildren();
   ontologyDetails.replaceChildren();
   graphControls.replaceChildren();
+  renderAssertionReview();
   const graph = ontologyState.latest;
   const graphKey = graph ? ontologyGraphIdentity(graph) : null;
   if (graphKey !== ontologyViewState.graphKey) resetOntologyViewForGraph(graphKey);
@@ -1652,6 +1675,10 @@ function renderContextResults() {
         : "No cited results."
     ));
     for (const item of call.items) {
+      if (item.kind === "causal_trace" && item.data && item.data.root) {
+        section.append(renderCausalTrace(item.data));
+        continue;
+      }
       if (item.kind === "issue_trace" && item.data && item.data.issue) {
         section.append(renderIssueTrace(item.data, item.citations, contextState.question));
         continue;
@@ -1766,6 +1793,7 @@ function renderContextAnswer(state) {
     textElement("span", "context-answer-label", "Answer"),
     textElement("p", "context-answer-text", state.answer)
   );
+  if (state.counterfactual) answer.append(renderCounterfactualDetails(state.counterfactual));
   const claims = Array.isArray(state.citedClaims) ? state.citedClaims : [];
   if (claims.length) {
     const list = element("div", "context-claims");
@@ -1781,6 +1809,91 @@ function renderContextAnswer(state) {
     answer.append(list);
   }
   return answer;
+}
+
+function renderCounterfactualDetails(value) {
+  const details = element("div", "context-claims");
+  details.append(textElement("h4", "", "Basis: " + (value.basis || "graph-derived")));
+  details.append(ontologyDetailGrid([
+    ["Intervention", value.intervention ? value.intervention.kind + " · " + value.intervention.label : "Unresolved"],
+    ["Outcome", value.outcome ? value.outcome.kind + " · " + value.outcome.label : "Unresolved"],
+    ["Known paths removed", String((value.removedPaths || []).length)],
+    ["Known paths remaining", String((value.remainingPaths || []).length)]
+  ]));
+  const why = (value.removedPaths || []).concat(value.remainingPaths || []).filter(function(path) { return path.why; });
+  if (why.length) details.append(traceFact("Why", why.map(function(path) { return path.why; }).join(" · ")));
+  const evidence = (value.removedPaths || []).concat(value.remainingPaths || []).flatMap(function(path) {
+    return citationLabels(path.citations || []);
+  });
+  details.append(traceEvidence(Array.from(new Set(evidence))));
+  return details;
+}
+
+function renderCausalTrace(trace) {
+  const container = element("div", "issue-trace");
+  container.append(textElement("strong", "", trace.root.kind + " · " + trace.root.label));
+  const groups = [
+    ["Causes", trace.causes], ["Resolutions", trace.resolutions], ["Implementations", trace.implementations],
+    ["Affected entities", trace.affectedEntities], ["Dependencies", trace.dependencies], ["Deployments", trace.deployments],
+    ["Documentation", trace.documentation], ["Ownership", trace.ownership], ["Moved from", trace.movedFrom]
+  ];
+  for (const group of groups) {
+    if (!Array.isArray(group[1]) || !group[1].length) continue;
+    const block = element("div", "trace-explanation");
+    block.append(textElement("span", "trace-fact-label", group[0]));
+    for (const path of group[1]) block.append(textElement("p", "trace-fact-value",
+      path.nodes.map(function(node) { return node.label; }).join(" → ") + (path.why ? " — " + path.why : "")
+    ));
+    container.append(block);
+  }
+  return container;
+}
+
+function renderAssertionReview() {
+  assertionReviewList.replaceChildren();
+  const predicateFilter = document.getElementById("assertion-predicate-filter");
+  const kindFilter = document.getElementById("assertion-kind-filter");
+  const predicates = uniqueValues(assertionState.map(function(assertion) { return assertion.predicate; }));
+  const kinds = uniqueValues(assertionState.flatMap(function(assertion) { return [assertion.subjectKind, assertion.objectKind]; }));
+  populateAssertionFilter(predicateFilter, "All predicates", predicates);
+  populateAssertionFilter(kindFilter, "All entity kinds", kinds);
+  const visible = assertionState.filter(function(assertion) {
+    return (!predicateFilter.value || assertion.predicate === predicateFilter.value) &&
+      (!kindFilter.value || assertion.subjectKind === kindFilter.value || assertion.objectKind === kindFilter.value);
+  });
+  if (!visible.length) {
+    assertionReviewList.append(textElement("p", "empty-detail", "No assertions match these filters."));
+    return;
+  }
+  for (const assertion of visible) {
+    const item = element("article", "assertion-review-item");
+    const heading = element("header");
+    heading.append(textElement("strong", "", assertion.subjectLabel + " " + assertion.predicate + " " + assertion.objectLabel),
+      textElement("span", "enabled-state", assertion.status));
+    item.append(heading,
+      textElement("p", "", "Confidence " + confidenceLabel(assertion.confidence) + " · " + assertion.generator),
+      traceEvidence(Array.isArray(assertion.evidence) ? assertion.evidence : []),
+      textElement("p", "assertion-relations", "Supports: " + (assertion.supportingAssertionIds || []).join(", ") + " · Contradicts: " + (assertion.contradictingAssertionIds || []).join(", ") )
+    );
+    const actions = element("footer", "assertion-actions");
+    for (const decision of assertion.status === "proposed" ? ["accept", "reject"] : assertion.status === "active" ? ["retract"] : []) {
+      const button = textElement("button", decision === "accept" ? "primary-button" : "secondary-button", humanize(decision));
+      button.type = "button";
+      button.dataset.assertionId = assertion.id;
+      button.dataset.assertionDecision = decision;
+      actions.append(button);
+    }
+    item.append(actions);
+    assertionReviewList.append(item);
+  }
+}
+
+function populateAssertionFilter(select, label, values) {
+  const current = select.value;
+  select.replaceChildren();
+  const all = textElement("option", "", label); all.value = ""; select.append(all);
+  for (const value of values) { const option = textElement("option", "", humanize(value)); option.value = value; select.append(option); }
+  select.value = values.includes(current) ? current : "";
 }
 
 function renderContextNotices(state) {
@@ -2784,6 +2897,19 @@ document.getElementById("context-query").addEventListener("submit", async functi
   contextSearchLoading = false;
   contextSearchOpen = true;
   renderOntology();
+});
+document.getElementById("assertion-predicate-filter").addEventListener("change", renderAssertionReview);
+document.getElementById("assertion-kind-filter").addEventListener("change", renderAssertionReview);
+assertionReviewList.addEventListener("click", async function(event) {
+  const button = event.target.closest("[data-assertion-decision]");
+  if (!button) return;
+  button.disabled = true;
+  const response = await fetch(API + "/ontology/commands", {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "review_assertion", assertionId: button.dataset.assertionId, decision: button.dataset.assertionDecision })
+  });
+  if (!response.ok) button.title = "Review failed with " + response.status;
+  await refresh();
 });
 async function postDemo(body) {
   await fetch(API + "/dev/webhooks/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
