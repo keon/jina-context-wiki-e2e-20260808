@@ -7,6 +7,7 @@ import { buildFocusEvidenceBundle, isTransientCodexExecutionFailure } from "./on
 test("classifies retryable provider execution failures", () => {
   assert.equal(isTransientCodexExecutionFailure("stream disconnected before completion: Internal Server Error"), true);
   assert.equal(isTransientCodexExecutionFailure("HTTP 429: rate limit exceeded"), true);
+  assert.equal(isTransientCodexExecutionFailure("Failed to execute command in sandbox: gateway unavailable"), true);
   assert.equal(isTransientCodexExecutionFailure("ontology output failed schema validation"), false);
   assert.equal(isTransientCodexExecutionFailure("model not found"), false);
 });

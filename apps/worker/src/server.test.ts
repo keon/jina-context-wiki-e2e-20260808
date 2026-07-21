@@ -8,6 +8,7 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
   let claimCount = 0;
   let renewals = 0;
   let projectionDrains = 0;
+  let ingestedPullRequestNumbers: number[] = [];
   const completions: Record<string, unknown>[] = [];
   let resolveCompletion!: () => void;
   const completed = new Promise<void>((resolve) => { resolveCompletion = resolve; });
@@ -65,13 +66,13 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
         fileCount: 1,
         discoveredBlobCount: 1,
         reusedBlobCount: 0,
-        changedPaths: ["src/index.ts"],
-        changes: [{ path: "src/index.ts", change: "add", newBlobSha: "c".repeat(40) }],
-        missingBlobs: [{ blobSha: "c".repeat(40), path: "src/index.ts", size: 42 }]
+        changedPaths: ["src/index.test.ts"],
+        changes: [{ path: "src/index.test.ts", change: "add", newBlobSha: "c".repeat(40) }],
+        missingBlobs: [{ blobSha: "c".repeat(40), path: "src/index.test.ts", size: 42 }]
       });
     }
     if (request.url === "/internal/ontology/ingest/known") {
-      return json(response, 200, { knownCommitShas: [] });
+      return json(response, 200, { knownCommitShas: ["a".repeat(40)] });
     }
     if (request.url === "/internal/ontology/outbox/drain") {
       projectionDrains += 1;
@@ -82,6 +83,20 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
       assert.equal(analyses.length, 1);
       assert.equal(analyses[0]?.symbols.length, 1);
       return json(response, 200, { accepted: true, count: 1 });
+    }
+    if (request.url === "/internal/ontology/ingest/github") {
+      const observations = (body as { observations: Array<{ kind: string; number?: number }> }).observations;
+      ingestedPullRequestNumbers = observations.flatMap((observation) =>
+        observation.kind === "pull_request" && observation.number ? [observation.number] : []
+      );
+      return json(response, 200, {
+        observationCount: observations.length,
+        observationIds: ["observation-pr-11"],
+        assertionCount: 0,
+        newObservationCount: observations.length,
+        updatedObservationCount: 0,
+        confirmedObservationCount: 0
+      });
     }
     if (request.url === "/github/repos/omlabs/example/commits/main") {
       return json(response, 200, {
@@ -99,10 +114,32 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
     if (request.url === `/github/repos/omlabs/example/commits/${"a".repeat(40)}/pulls`) {
       return json(response, 200, []);
     }
+    if (request.url === "/github/repos/omlabs/example/pulls?state=closed&sort=updated&direction=desc&per_page=100") {
+      return json(response, 200, [{
+        number: 11,
+        title: "Restore the broken export order",
+        body: "Fixes the regression without a tracked issue.",
+        state: "closed",
+        html_url: "https://github.com/omlabs/example/pull/11",
+        merged_at: "2026-07-21T00:00:00Z",
+        updated_at: "2026-07-21T00:00:00Z",
+        merge_commit_sha: "d".repeat(40),
+        user: { login: "reviewer" }
+      }]);
+    }
+    if (request.url === `/github/repos/omlabs/example/compare/${"d".repeat(40)}...${"a".repeat(40)}`) {
+      return json(response, 200, { status: "ahead" });
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/11/commits?per_page=100&page=1") {
+      return json(response, 200, [{ sha: "d".repeat(40) }]);
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/11/files?per_page=100&page=1") {
+      return json(response, 200, [{ filename: "src/index.test.ts" }]);
+    }
     if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
       return json(response, 200, {
         truncated: false,
-        tree: [{ type: "blob", path: "src/index.ts", sha: "c".repeat(40), size: 42 }]
+        tree: [{ type: "blob", path: "src/index.test.ts", sha: "c".repeat(40), size: 42 }]
       });
     }
     if (request.url === `/github/repos/omlabs/example/git/blobs/${"c".repeat(40)}`) {
@@ -177,11 +214,14 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
   const ingestionResult = completions[1]?.result as Record<string, unknown>;
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
   assert.equal(ingestionResult.effect, "changed");
-  assert.equal(ingestionResult.ingestedCommitCount, 1);
-  assert.equal(ingestionResult.newCommitCount, 1);
-  assert.equal(ingestionResult.confirmedCommitCount, 0);
+  assert.equal(ingestionResult.ingestedCommitCount, 0);
+  assert.equal(ingestionResult.newCommitCount, 0);
+  assert.equal(ingestionResult.confirmedCommitCount, 1);
   assert.equal(ingestionResult.parsedBlobCount, 1);
   assert.equal(ingestionResult.reusedBlobCount, 0);
+  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, [11]);
+  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [11]);
+  assert.deepEqual(ingestedPullRequestNumbers, [11]);
   assert.equal(projectionDrains > 0, true);
 });
 

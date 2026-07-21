@@ -119,30 +119,34 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
             `--output-last-message ${shellQuote(RESULT_PATH)}`,
             `-m ${shellQuote(model)}`,
             ...providerArguments,
-            `-c model_context_window=${positiveInt(process.env.ONTOLOGY_CODEX_CONTEXT_TOKENS, 6_000)}`,
-            `-c model_auto_compact_token_limit=${positiveInt(process.env.ONTOLOGY_CODEX_COMPACT_TOKENS, 4_500)}`,
+            `-c model_context_window=${positiveInt(process.env.ONTOLOGY_CODEX_CONTEXT_TOKENS, 16_000)}`,
+            `-c model_auto_compact_token_limit=${positiveInt(process.env.ONTOLOGY_CODEX_COMPACT_TOKENS, 12_000)}`,
             `-c model_reasoning_effort=${shellQuote(process.env.ONTOLOGY_CODEX_EFFORT?.trim() || "low")}`,
             "-c model_verbosity=low",
             `"$(cat ${shellQuote(PROMPT_PATH)})"`
           ].join(" ");
-        let run = await sandbox.process.executeCommand(
-          codexCommand,
-          REPO_DIR,
-          providerEnvironment,
-          positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
-        );
         const executionAttempts = positiveInt(process.env.ONTOLOGY_CODEX_EXECUTION_ATTEMPTS, 2);
-        for (let executionAttempt = 1; run.exitCode !== 0 && executionAttempt < executionAttempts; executionAttempt += 1) {
-          if (!isTransientCodexExecutionFailure(run.result)) break;
+        let run: Awaited<ReturnType<Sandbox["process"]["executeCommand"]>> | undefined;
+        for (let executionAttempt = 0; executionAttempt < executionAttempts; executionAttempt += 1) {
+          try {
+            run = await sandbox.process.executeCommand(
+              codexCommand,
+              REPO_DIR,
+              providerEnvironment,
+              positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
+            );
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            if (executionAttempt + 1 >= executionAttempts || !isTransientCodexExecutionFailure(message)) throw error;
+            run = undefined;
+          }
+          if (run?.exitCode === 0) break;
+          if (run && !isTransientCodexExecutionFailure(run.result)) break;
+          if (executionAttempt + 1 >= executionAttempts) break;
           const delaySeconds = positiveInt(process.env.ONTOLOGY_CODEX_RETRY_DELAY_SECONDS, 10);
           await sandbox.process.executeCommand(`sleep ${delaySeconds}`, REPO_DIR, undefined, delaySeconds + 5);
-          run = await sandbox.process.executeCommand(
-            codexCommand,
-            REPO_DIR,
-            providerEnvironment,
-            positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
-          );
         }
+        if (!run) throw new Error("Codex ontology build failed after a transient Daytona execution error");
         if (run.exitCode !== 0) {
           throw new Error(`Codex ontology build failed: ${redact(truncate(run.result), secrets)}`);
         }
@@ -223,7 +227,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
 }
 
 export function isTransientCodexExecutionFailure(output: string): boolean {
-  return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:429|500|502|503|504)|rate limit)/i.test(output);
+  return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:429|500|502|503|504)|rate limit|(?:daytona|sandbox).*(?:unavailable|failed|connection|timeout|timed out|gateway)|failed to .*sandbox)/i.test(output);
 }
 
 function selectProvider(openaiKey?: string, openrouterKey?: string): "openai" | "openrouter" {
