@@ -60,8 +60,9 @@ principal for graph reads. Its server maps a simulation tenant UUID to
 that principal. The sync is exact so repository removal or App uninstall is
 revoked on the next request. A dedicated `GRAPH_API_TOKEN` authenticates public
 graph routes and ACL synchronization without granting worker or board access.
-The production workflow synchronizes it from the `JINA_GRAPH_API_TOKEN` GitHub
-environment secret into Secret Manager; never expose it to browsers or agents.
+Provision it directly as `jina-graph-api-token` in Secret Manager; the production
+workflow mounts that secret without copying it through GitHub. Never expose it to
+browsers or agents.
 
 The API also serves stateless Streamable HTTP MCP at `POST /mcp`. MCP exposes one
 read-only `query_graph` tool and reuses the same repository-scoped retrieval path.
