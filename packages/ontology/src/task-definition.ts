@@ -1,29 +1,44 @@
 const ontologyTaskSpecs = [
   {
-    type: "ontology_build", kind: "aggregate", defaultAssigneeRole: "system",
+    type: "ontology_build",
+    kind: "aggregate",
+    defaultAssigneeRole: "system",
     description: "Coordinates raw-data aggregation, semantic assertion derivation, and graph projection."
   },
   {
-    type: "ontology_ingest", kind: "dispatchable", defaultAssigneeRole: "ontology_worker",
+    type: "ontology_ingest",
+    kind: "dispatchable",
+    defaultAssigneeRole: "ontology_worker",
     dispatchTopic: "run-ontology-ingest",
     description: "Aggregates an immutable repository snapshot and reuses versioned, content-addressed structural facts."
   },
   {
-    type: "ontology_assert", kind: "dispatchable", defaultAssigneeRole: "ontology_worker",
-    dispatchTopic: "run-ontology-assert", dependsOn: "ontology_ingest",
+    type: "ontology_assert",
+    kind: "dispatchable",
+    defaultAssigneeRole: "ontology_worker",
+    dispatchTopic: "run-ontology-assert",
+    dependsOn: "ontology_ingest",
     description: "Records cited model output and applies registry-validated semantic assertions with provenance."
   },
   {
-    type: "ontology_project", kind: "dispatchable", defaultAssigneeRole: "ontology_worker",
-    dispatchTopic: "run-ontology-project", dependsOn: "ontology_ingest",
+    type: "ontology_project",
+    kind: "dispatchable",
+    defaultAssigneeRole: "ontology_worker",
+    dispatchTopic: "run-ontology-project",
+    dependsOn: "ontology_ingest",
     description: "Builds a disposable dashboard graph from canonical code facts and available assertions."
   }
 ] as const;
 
-export const ontologyTaskTypeDefinitions = ontologyTaskSpecs.map(({ type, kind, defaultAssigneeRole, description, ...spec }) => ({
-  type, kind, defaultAssigneeRole, description,
-  ...("dispatchTopic" in spec ? { dispatchTopic: spec.dispatchTopic } : {})
-}));
+export const ontologyTaskTypeDefinitions = ontologyTaskSpecs.map(
+  ({ type, kind, defaultAssigneeRole, description, ...spec }) => ({
+    type,
+    kind,
+    defaultAssigneeRole,
+    description,
+    ...("dispatchTopic" in spec ? { dispatchTopic: spec.dispatchTopic } : {})
+  })
+);
 
 /** Intake events that create workflow tasks; these are not board task-to-task dependencies. */
 export const ontologyTaskTypeTriggers = [
@@ -49,7 +64,8 @@ export const ontologyTaskTypeTriggers = [
     workflow: "ontology_build",
     taskType: "ontology_project",
     source: "POST /ontology/build",
-    description: "Creates the projection task in a waiting state; ontology_ingest completion unblocks it independently of model assertions."
+    description:
+      "Creates the projection task in a waiting state; ontology_ingest completion unblocks it independently of model assertions."
   },
   {
     workflow: "ontology_build",
@@ -85,12 +101,17 @@ export const ontologyTaskTypeDependencies = [
     relationship: "blocks",
     required: spec.type !== "ontology_assert"
   })),
-  ...ontologyTaskSpecs.flatMap((spec) => "dependsOn" in spec ? [{
-    workflow: "ontology_build",
-    taskType: spec.type,
-    dependsOnTaskType: spec.dependsOn,
-    relationship: "blocks",
-    required: true
-  }] : [])
+  ...ontologyTaskSpecs.flatMap((spec) =>
+    "dependsOn" in spec
+      ? [
+          {
+            workflow: "ontology_build",
+            taskType: spec.type,
+            dependsOnTaskType: spec.dependsOn,
+            relationship: "blocks",
+            required: true
+          }
+        ]
+      : []
+  )
 ];
-

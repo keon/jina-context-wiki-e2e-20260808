@@ -3,10 +3,7 @@ import { test } from "node:test";
 import { isAllowedDashboardApiRequest } from "./proxy-policy.js";
 
 test("dashboard proxy allows ontology assertion reads", () => {
-  assert.equal(
-    isAllowedDashboardApiRequest("GET", "/api/ontology/assertions", true),
-    true
-  );
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/ontology/assertions", true), true);
 });
 
 test("dashboard proxy allows assertion review commands", () => {

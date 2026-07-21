@@ -114,32 +114,51 @@ export function movedFromSimilarityCandidates(
 ): readonly MovedFromCandidate[] {
   const deleted = changes.filter((change) => change.change === "delete" && change.oldBlobSha);
   const added = changes.filter((change) => change.change === "add" && change.newBlobSha);
-  const candidates: MovedFromCandidate[] = changes.filter((change) =>
-    change.change === "rename" && change.oldPath && change.oldBlobSha && change.newBlobSha
-  ).map((change) => {
-    const oldSignatures = new Set((analyses.get(change.oldBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
-    const newSignatures = new Set((analyses.get(change.newBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
-    return {
-      oldPath: change.oldPath!, newPath: change.path, similarity: 1,
-      matchingSignatureHashes: [...oldSignatures].filter((signature) => newSignatures.has(signature)).sort()
-    };
-  });
+  const candidates: MovedFromCandidate[] = changes
+    .filter((change) => change.change === "rename" && change.oldPath && change.oldBlobSha && change.newBlobSha)
+    .map((change) => {
+      const oldSignatures = new Set(
+        (analyses.get(change.oldBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash)
+      );
+      const newSignatures = new Set(
+        (analyses.get(change.newBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash)
+      );
+      return {
+        oldPath: change.oldPath!,
+        newPath: change.path,
+        similarity: 1,
+        matchingSignatureHashes: [...oldSignatures].filter((signature) => newSignatures.has(signature)).sort()
+      };
+    });
   for (const oldFile of deleted) {
-    const oldSignatures = new Set((analyses.get(oldFile.oldBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
+    const oldSignatures = new Set(
+      (analyses.get(oldFile.oldBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash)
+    );
     if (oldSignatures.size === 0) continue;
     for (const newFile of added) {
-      const newSignatures = new Set((analyses.get(newFile.newBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
+      const newSignatures = new Set(
+        (analyses.get(newFile.newBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash)
+      );
       if (newSignatures.size === 0) continue;
       const matching = [...oldSignatures].filter((signature) => newSignatures.has(signature));
       const similarity = matching.length / Math.max(oldSignatures.size, newSignatures.size);
-      if (similarity >= threshold) candidates.push({
-        oldPath: oldFile.path, newPath: newFile.path, similarity,
-        matchingSignatureHashes: matching.sort()
-      });
+      if (similarity >= threshold)
+        candidates.push({
+          oldPath: oldFile.path,
+          newPath: newFile.path,
+          similarity,
+          matchingSignatureHashes: matching.sort()
+        });
     }
   }
-  return [...new Map(candidates.map((candidate) => [`${candidate.oldPath}:${candidate.newPath}`, candidate])).values()]
-    .sort((left, right) => right.similarity - left.similarity || left.oldPath.localeCompare(right.oldPath) || left.newPath.localeCompare(right.newPath));
+  return [
+    ...new Map(candidates.map((candidate) => [`${candidate.oldPath}:${candidate.newPath}`, candidate])).values()
+  ].sort(
+    (left, right) =>
+      right.similarity - left.similarity ||
+      left.oldPath.localeCompare(right.oldPath) ||
+      left.newPath.localeCompare(right.newPath)
+  );
 }
 
 export interface OntologyIngestPlan {
@@ -339,15 +358,25 @@ export function normalizeAssertionBatchLenient(batch: OntologyAssertionBatch): {
   return { assertions, warnings };
 }
 
-export function assertionObservationId(batch: Pick<OntologyAssertionBatch, "tenantId" | "repository" | "commitSha" | "generatorVersion" | "registryVersion" | "evidenceFingerprint">): string {
+export function assertionObservationId(
+  batch: Pick<
+    OntologyAssertionBatch,
+    "tenantId" | "repository" | "commitSha" | "generatorVersion" | "registryVersion" | "evidenceFingerprint"
+  >
+): string {
   return stableId(
     "observation",
     `${batch.tenantId}:${batch.repository}:${batch.commitSha}:model:${batch.generatorVersion}:registry:${batch.registryVersion}:evidence:${batch.evidenceFingerprint}`
   );
 }
 
-export function sourceObservationId(snapshot: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha" | "treeSha">): string {
-  return stableId("observation", `${snapshot.tenantId}:${snapshot.repository}:${snapshot.commitSha}:git:${snapshot.treeSha}`);
+export function sourceObservationId(
+  snapshot: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha" | "treeSha">
+): string {
+  return stableId(
+    "observation",
+    `${snapshot.tenantId}:${snapshot.repository}:${snapshot.commitSha}:git:${snapshot.treeSha}`
+  );
 }
 
 export function codeCheckpoint(tenantId: string, repository: string, commitSha: string, parserVersion: string): string {
@@ -362,16 +391,23 @@ export function assertionEvidenceFingerprint(
     readonly problemEvidencePullRequestNumbers?: readonly number[];
   } = {}
 ): string {
-  const sourceEvidence = observations.map((observation) => {
-    const { recordedAt: _recordedAt, ...stable } = observation;
-    return stable;
-  }).sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
-  return stableId("evidence", canonicalJson({
-    codeCheckpoint: codeCheckpointValue,
-    sourceEvidence,
-    focusPaths: [...new Set(semanticScope.focusPaths ?? [])].sort(),
-    problemEvidencePullRequestNumbers: [...new Set(semanticScope.problemEvidencePullRequestNumbers ?? [])].sort((a, b) => a - b)
-  }));
+  const sourceEvidence = observations
+    .map((observation) => {
+      const { recordedAt: _recordedAt, ...stable } = observation;
+      return stable;
+    })
+    .sort((left, right) => canonicalJson(left).localeCompare(canonicalJson(right)));
+  return stableId(
+    "evidence",
+    canonicalJson({
+      codeCheckpoint: codeCheckpointValue,
+      sourceEvidence,
+      focusPaths: [...new Set(semanticScope.focusPaths ?? [])].sort(),
+      problemEvidencePullRequestNumbers: [...new Set(semanticScope.problemEvidencePullRequestNumbers ?? [])].sort(
+        (a, b) => a - b
+      )
+    })
+  );
 }
 
 /**
@@ -401,7 +437,9 @@ export function selectAssertionFocusPaths(
 }
 
 function isSemanticEvidencePath(path: string): boolean {
-  return /(?:^|\/)(?:readme|changelog|incident|postmortem|root[-_]?cause|adr|rfc)|(?:^|\/)(?:docs?|test|tests|spec|specs)(?:\/|$)|(?:\.|[-_])(?:test|spec)\.[^/]+$/i.test(path);
+  return /(?:^|\/)(?:readme|changelog|incident|postmortem|root[-_]?cause|adr|rfc)|(?:^|\/)(?:docs?|test|tests|spec|specs)(?:\/|$)|(?:\.|[-_])(?:test|spec)\.[^/]+$/i.test(
+    path
+  );
 }
 
 export function knowledgeCheckpoint(
@@ -412,7 +450,10 @@ export function knowledgeCheckpoint(
   registryVersion: string,
   evidenceFingerprint: string
 ): string {
-  return stableId("knowledge", `${tenantId}:${repository}:${commitSha}:${generatorVersion}:${registryVersion}:${evidenceFingerprint}`);
+  return stableId(
+    "knowledge",
+    `${tenantId}:${repository}:${commitSha}:${generatorVersion}:${registryVersion}:${evidenceFingerprint}`
+  );
 }
 
 export function entityKey(entity: OntologyEntityRef): string {
@@ -439,8 +480,11 @@ export function computeCommitChanges(
     renamedOldPaths.add(oldFile.path);
     renamedNewPaths.add(candidate.path);
     changes.push({
-      path: candidate.path, change: "rename", oldPath: oldFile.path,
-      oldBlobSha: oldFile.blobSha, newBlobSha: candidate.blobSha
+      path: candidate.path,
+      change: "rename",
+      oldPath: oldFile.path,
+      oldBlobSha: oldFile.blobSha,
+      newBlobSha: candidate.blobSha
     });
   }
   for (const file of current) {
@@ -478,13 +522,13 @@ export function assertionsFromGeneratedOntology(
     const subject = nodes.get(edge.source);
     const object = nodes.get(edge.target);
     if (!subject || !object) return [];
-    const isDerivedResolution = (edge.predicate === "RESOLVED_BY" &&
-      subject.kind === "Issue" && /^derived:pr:\d+$/i.test(subject.id.trim())) ||
+    const isDerivedResolution =
+      (edge.predicate === "RESOLVED_BY" && subject.kind === "Issue" && /^derived:pr:\d+$/i.test(subject.id.trim())) ||
       (edge.predicate === "RESOLVES" && object.kind === "Issue" && /^derived:pr:\d+$/i.test(object.id.trim()));
-    const duplicatesExplicitGitHubResolution = !isDerivedResolution && (
-      (edge.predicate === "RESOLVES" && subject.kind === "PullRequest" && object.kind === "Issue") ||
-      (edge.predicate === "RESOLVED_BY" && subject.kind === "Issue" && object.kind === "PullRequest")
-    );
+    const duplicatesExplicitGitHubResolution =
+      !isDerivedResolution &&
+      ((edge.predicate === "RESOLVES" && subject.kind === "PullRequest" && object.kind === "Issue") ||
+        (edge.predicate === "RESOLVED_BY" && subject.kind === "Issue" && object.kind === "PullRequest"));
     // Explicit GitHub issue resolution is an authoritative intake fact. A model
     // may repeat it after reading source evidence, but must not create a second
     // knowledge assertion with independent provenance.
@@ -504,9 +548,7 @@ export function assertionsFromGeneratedOntology(
       confidence: edge.confidence ?? 0,
       explanation: requiredAssertionExplanation(edge.predicate, edge.why),
       evidence: edge.evidence,
-      ...(edge.predicate === "INTRODUCED_BY"
-        ? { qualifiers: { reason: requiredCausalReason(edge.why) } }
-        : {})
+      ...(edge.predicate === "INTRODUCED_BY" ? { qualifiers: { reason: requiredCausalReason(edge.why) } } : {})
     };
     return [assertion];
   });
@@ -531,15 +573,18 @@ function validateDerivedIssueNodes(
     if (anchors.has(anchor)) throw new Error(`only one derived Issue is allowed for pull request #${anchor}`);
     if (resolved.has(anchor)) throw new Error(`pull request #${anchor} already explicitly resolves an issue`);
     anchors.add(anchor);
-    const resolutions = generated.edges.filter((edge) =>
-      (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
-      (edge.predicate === "RESOLVES" && edge.target === node.id)
+    const resolutions = generated.edges.filter(
+      (edge) =>
+        (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
+        (edge.predicate === "RESOLVES" && edge.target === node.id)
     );
     if (resolutions.length !== 1) throw new Error(`derived Issue ${node.id} requires exactly one RESOLVES edge`);
     const resolution = resolutions[0]!;
     const pullRequest = nodes.get(resolution.predicate === "RESOLVED_BY" ? resolution.target : resolution.source);
-    const subjectNumber = pullRequest?.kind === "PullRequest" ? canonicalWorkItemId(pullRequest.id, "PullRequest") : undefined;
-    if (subjectNumber !== String(anchor)) throw new Error(`derived Issue ${node.id} must be resolved by pull request #${anchor}`);
+    const subjectNumber =
+      pullRequest?.kind === "PullRequest" ? canonicalWorkItemId(pullRequest.id, "PullRequest") : undefined;
+    if (subjectNumber !== String(anchor))
+      throw new Error(`derived Issue ${node.id} must be resolved by pull request #${anchor}`);
   }
 }
 
@@ -572,7 +617,8 @@ function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: 
   if (node.kind === "Service" || node.kind === "Deployment" || node.kind === "Incident") {
     const prefix = node.kind.toLowerCase();
     const match = new RegExp(`^${prefix}:([^:]+):(.+)$`, "i").exec(node.id.trim());
-    if (!match?.[1] || !match[2]) throw new Error(`${node.kind} id must use ${prefix}:<source>:<external-id>: ${node.id}`);
+    if (!match?.[1] || !match[2])
+      throw new Error(`${node.kind} id must use ${prefix}:<source>:<external-id>: ${node.id}`);
     return `${prefix}:${match[1].toLowerCase()}:${match[2]}`;
   }
   if (node.kind === "Issue") {

@@ -16,7 +16,13 @@ export function isSourceAllowed(policy: SourcePolicy, sourceUri: string): boolea
   return policy.allowlist.some((allowed) => {
     try {
       const boundary = new URL(allowed);
-      if (boundary.username || boundary.password || boundary.protocol !== source.protocol || boundary.origin !== source.origin) return false;
+      if (
+        boundary.username ||
+        boundary.password ||
+        boundary.protocol !== source.protocol ||
+        boundary.origin !== source.origin
+      )
+        return false;
       const boundaryPath = normalizedBoundaryPath(boundary.pathname);
       const sourcePath = normalizedBoundaryPath(source.pathname);
       return sourcePath === boundaryPath || source.pathname.startsWith(boundaryPath === "/" ? "/" : `${boundaryPath}/`);

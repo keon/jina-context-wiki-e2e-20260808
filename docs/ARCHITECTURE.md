@@ -47,7 +47,7 @@ The system is designed for agent collaboration without handing the whole job to 
 
 Six concepts carry the whole design:
 
-- **Board** — the Postgres tables (`tasks`, `task_dependencies`, `task_events`, `task_runs`, `outbox`) that are the source of truth *and* the orchestrator.
+- **Board** — the Postgres tables (`tasks`, `task_dependencies`, `task_events`, `task_runs`, `outbox`) that are the source of truth _and_ the orchestrator.
 - **Task** — one unit of work; a board card. MVP types: `pr_review`, `review_pass`, `context`, `publish`, `issue_triage`, `human_decision`.
 - **Pipeline** — a versioned template that says which tasks a trigger creates and how they depend on each other. The MVP has one, the PR review pipeline, defined in code (`packages/review`), not in a database table.
 - **Run** — one stateless execution attempt of a task on Trigger.dev, recorded in `task_runs`.
@@ -116,10 +116,10 @@ Grounding, fixing, testing, documentation, release, and incident-response remain
    A checkout broker creates Daytona sandboxes, performs authenticated clone/fetch with scoped credentials, removes credentials from the sandbox, records the checkout lifecycle, and only then lets reviewer agents inspect the working tree.
 
 10. **GitHub webhooks are thin and idempotent.**
-   Webhook handlers verify signatures, dedupe deliveries, store the event, seed/advance the board, and write the outbox transactionally. Heavy review work and product-state transitions never run inline.
+    Webhook handlers verify signatures, dedupe deliveries, store the event, seed/advance the board, and write the outbox transactionally. Heavy review work and product-state transitions never run inline.
 
 11. **Every external side effect is auditable.**
-   GitHub writes, model calls, comments, checks, labels, and publications produce durable records. Future code execution and repository mutation must produce the same audit trail before being enabled.
+    GitHub writes, model calls, comments, checks, labels, and publications produce durable records. Future code execution and repository mutation must produce the same audit trail before being enabled.
 
 12. **Untrusted code runs only in isolated sandboxes — distinct from Trigger.dev.**
     Trigger.dev durably runs trusted Jina code. The Daytona sandbox isolates adversarial PR code. The MVP does not execute PR code at all; future grounding/fix execution is sandboxed, egress-controlled, and policy-gated.
@@ -285,7 +285,7 @@ Every task type has a declared **kind** that fixes how the reducer treats it:
 
 `context` is a core handoff task type, but external fetching is enabled only when policy grants controlled egress. Findings are stored as `review_findings` + `finding_threads`. A `finding` task is created only when a finding needs independent workflow, approval, grounding, or fix work.
 
-`dedupe_key` is unique per tenant + task type when present, and is **epoch-scoped**: one root `pr_review` per `(pr, epoch)`, one `review_pass` per `(pr, epoch, review_profile)`, one `publish` task per `(pr, epoch, publication_mode)`, one context task per `(target_task_id, normalized_source_set, question_hash)`. Head SHAs can recur across epochs (force-push away and back), so `head_sha` belongs in *publication* keys — where "never re-comment for the same SHA" is the desired semantics — not in task dedupe keys.
+`dedupe_key` is unique per tenant + task type when present, and is **epoch-scoped**: one root `pr_review` per `(pr, epoch)`, one `review_pass` per `(pr, epoch, review_profile)`, one `publish` task per `(pr, epoch, publication_mode)`, one context task per `(target_task_id, normalized_source_set, question_hash)`. Head SHAs can recur across epochs (force-push away and back), so `head_sha` belongs in _publication_ keys — where "never re-comment for the same SHA" is the desired semantics — not in task dedupe keys.
 
 ## Pipelines
 

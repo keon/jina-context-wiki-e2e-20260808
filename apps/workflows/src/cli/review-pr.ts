@@ -1,10 +1,5 @@
 import { execFileSync } from "node:child_process";
-import {
-  createReviewHarness,
-  isHarnessType,
-  type HarnessType,
-  type ReviewResult
-} from "@jina/ai";
+import { createReviewHarness, isHarnessType, type HarnessType, type ReviewResult } from "@jina/ai";
 import {
   applyCommand,
   findTask,
@@ -37,15 +32,18 @@ async function main(): Promise<void> {
 
   console.log(`Fetching ${options.repository}#${options.pullRequestNumber} via gh ...`);
   const pr = gh<{ number: number; title: string; headRefOid: string; url: string }>([
-    "pr", "view", String(options.pullRequestNumber),
-    "--repo", options.repository,
-    "--json", "number,title,headRefOid,url"
+    "pr",
+    "view",
+    String(options.pullRequestNumber),
+    "--repo",
+    options.repository,
+    "--json",
+    "number,title,headRefOid,url"
   ]);
-  const diff = execFileSync(
-    "gh",
-    ["pr", "diff", String(options.pullRequestNumber), "--repo", options.repository],
-    { encoding: "utf8", maxBuffer: 32 * 1024 * 1024 }
-  );
+  const diff = execFileSync("gh", ["pr", "diff", String(options.pullRequestNumber), "--repo", options.repository], {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024
+  });
 
   console.log(`PR: ${pr.title}`);
   console.log(`Head: ${pr.headRefOid}  Diff: ${diff.length} chars  Harness: ${options.harness}`);
@@ -126,13 +124,18 @@ async function runReview(
         command: "CommentTask",
         taskId,
         eventType: "run.step",
-        payload: { seq: step.seq, stepType: step.type, detail: step.detail, ...(step.model ? { model: step.model } : {}) }
+        payload: {
+          seq: step.seq,
+          stepType: step.type,
+          detail: step.detail,
+          ...(step.model ? { model: step.model } : {})
+        }
       },
       { actor: RUN_ACTOR, now: nowIso() }
     ).state;
   }
 
-  const headSha = String(task.metadata.headSha ?? "");
+  const headSha = stringValue(task.metadata.headSha);
   let findings = state.findings;
   let threads = state.findingThreads;
   for (const finding of review.findings) {
@@ -156,8 +159,11 @@ async function runReview(
     },
     { actor: RUN_ACTOR, now: nowIso() }
   ).state;
-  board = applyCommand(board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now: nowIso() })
-    .state;
+  board = applyCommand(
+    board,
+    { command: "TransitionTask", taskId, toStatus: "done" },
+    { actor: RUN_ACTOR, now: nowIso() }
+  ).state;
 
   return {
     state: { ...state, board: reduceBoard(board, nowIso()), findings, findingThreads: threads },
@@ -176,7 +182,7 @@ function runPublish(
     return state;
   }
 
-  const headSha = String(task.metadata.headSha ?? "");
+  const headSha = stringValue(task.metadata.headSha);
   const pr = findPullRequest(state, options.repository, options.pullRequestNumber);
   if (pr && headSha !== pr.headSha) {
     return state;
@@ -219,8 +225,11 @@ function runPublish(
     },
     { actor: RUN_ACTOR, now: nowIso() }
   ).state;
-  board = applyCommand(board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now: nowIso() })
-    .state;
+  board = applyCommand(
+    board,
+    { command: "TransitionTask", taskId, toStatus: "done" },
+    { actor: RUN_ACTOR, now: nowIso() }
+  ).state;
 
   return { ...state, board: reduceBoard(board, nowIso()), publications: upserted.records };
 }
@@ -272,7 +281,9 @@ function printRunReport(review: ReviewResult): void {
   console.log(`Credits (own-harness, included rates): ${infra} infra + 0 AI = ${infra}`);
   if (costKnown) {
     const managedAi = aiCreditsForCost(totalCost, defaultBillingPolicy, "included", "managed");
-    console.log(`  (managed equivalent at default 30% subsidy: ${infra + managedAi} credits for $${totalCost.toFixed(4)} of AI cost)`);
+    console.log(
+      `  (managed equivalent at default 30% subsidy: ${infra + managedAi} credits for $${totalCost.toFixed(4)} of AI cost)`
+    );
   }
 }
 
@@ -291,9 +302,7 @@ function dryRunReview(harness: HarnessType, title: string): ReviewResult {
         category: "dry-run"
       }
     ],
-    steps: [
-      { seq: 1, type: "note", detail: "dry run: harness not invoked" }
-    ],
+    steps: [{ seq: 1, type: "note", detail: "dry run: harness not invoked" }],
     usage: []
   };
 }
@@ -312,6 +321,10 @@ function printBoard(state: WorkflowState): void {
 
 function gh<T>(args: readonly string[]): T {
   return JSON.parse(execFileSync("gh", [...args], { encoding: "utf8" })) as T;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function parseArgs(argv: readonly string[]): CliOptions {
@@ -345,7 +358,9 @@ function parseArgs(argv: readonly string[]): CliOptions {
 
   const [repository, prNumber] = positional;
   if (!repository || !prNumber || !/^\d+$/.test(prNumber)) {
-    console.error("Usage: review-pr <owner/repo> <pr-number> [--dry-run] [--post] [--harness openrouter-chat|codex-cli] [--model <slug>]");
+    console.error(
+      "Usage: review-pr <owner/repo> <pr-number> [--dry-run] [--post] [--harness openrouter-chat|codex-cli] [--model <slug>]"
+    );
     process.exit(2);
   }
 
@@ -363,7 +378,9 @@ main().catch((error: unknown) => {
   const message = error instanceof Error ? error.message : String(error);
   console.error(`review-pr failed: ${message}`);
   if (/OPENROUTER_API_KEY|authentication|401/i.test(message)) {
-    console.error("Hint: export OPENROUTER_API_KEY=<your key> (create one at openrouter.ai, or connect via the dashboard later).");
+    console.error(
+      "Hint: export OPENROUTER_API_KEY=<your key> (create one at openrouter.ai, or connect via the dashboard later)."
+    );
   }
   if (/gh: command not found|ENOENT/.test(message)) {
     console.error("Hint: this command needs the GitHub CLI (`gh`) and, for --harness codex-cli, the Codex CLI.");

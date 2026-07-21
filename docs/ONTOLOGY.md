@@ -6,11 +6,11 @@ This document describes the implementation in this repository as of 2026-07-21. 
 
 The implementation contains the Repository Context Architecture v5.1 causal model (registry contract `repository-context-v5.7-causal`) with three board-visible chunks rather than a card per internal mechanism:
 
-| Task type | Internal responsibilities | Durable completion |
-| --- | --- | --- |
-| `ontology_ingest` | Immutable GitHub/Git intake, exact commit trees, new reachable commits, first-parent deltas, content-addressed parsing, and deterministic PR/issue/CODEOWNERS/package/service/deployment/incident normalization | Observations, code-plane rows, explicit source facts, and code checkpoint are durable |
-| `ontology_assert` | Daytona checkout, Codex semantic analysis, citation validation, model observation, and registry validation, including derived Issue, Feature, movement, impact, documentation, and causal proposals | Raw model output is recorded and every supported inference is stored as `proposed` |
-| `ontology_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest/search rebuild, relational graph materialization, retention | Projection checkpoint and immutable graph generation are durable |
+| Task type          | Internal responsibilities                                                                                                                                                                                       | Durable completion                                                                    |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `ontology_ingest`  | Immutable GitHub/Git intake, exact commit trees, new reachable commits, first-parent deltas, content-addressed parsing, and deterministic PR/issue/CODEOWNERS/package/service/deployment/incident normalization | Observations, code-plane rows, explicit source facts, and code checkpoint are durable |
+| `ontology_assert`  | Daytona checkout, Codex semantic analysis, citation validation, model observation, and registry validation, including derived Issue, Feature, movement, impact, documentation, and causal proposals             | Raw model output is recorded and every supported inference is stored as `proposed`    |
+| `ontology_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest/search rebuild, relational graph materialization, retention                                                                            | Projection checkpoint and immutable graph generation are durable                      |
 
 `ontology_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
 
@@ -114,13 +114,13 @@ Once an exact semantic scope has been generated, an unchanged ref is a no-op thr
 
 All tables are in PostgreSQL under `jina_ontology`, and every row is tenant-scoped.
 
-| Plane | Tables |
-| --- | --- |
-| Intake | `observations` |
-| Code | `commits`, `refs`, `commit_changes`, `blobs`, `blob_analyses`, `blob_symbols`, `blob_imports`, `symbol_edges` |
-| Knowledge | `entities`, `identities`, `entity_redirects`, `assertions`, `assertion_relations`, `audit_log` |
-| Infrastructure | `outbox`, `erasure_filters`, `repository_acl`, `retrieval_metrics` |
-| Rebuildable projections | `ref_manifest`, `search_documents`, `graphs`, `graph_heads`, `nodes`, `edges` |
+| Plane                   | Tables                                                                                                        |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Intake                  | `observations`                                                                                                |
+| Code                    | `commits`, `refs`, `commit_changes`, `blobs`, `blob_analyses`, `blob_symbols`, `blob_imports`, `symbol_edges` |
+| Knowledge               | `entities`, `identities`, `entity_redirects`, `assertions`, `assertion_relations`, `audit_log`                |
+| Infrastructure          | `outbox`, `erasure_filters`, `repository_acl`, `retrieval_metrics`                                            |
+| Rebuildable projections | `ref_manifest`, `search_documents`, `graphs`, `graph_heads`, `nodes`, `edges`                                 |
 
 Exact trees on `commits` are canonical historical state; `commit_changes` is the compact, queryable first-parent delta record. `commit_manifest(...)` returns a requested commit tree, and `ref_manifest` stores the hot-ref result used by retrieval and projection. Schema upgrades drop the superseded `commit_files` table. Graph rows are immutable and content-addressed by commit, projection version, and canonical graph content; `graph_heads` records which immutable generation is current for each ref, so reverting content to an older graph ID remains ref-correct.
 
@@ -169,20 +169,20 @@ Unmerge cancels the matching redirect but does not silently restore facts supers
 
 Models cannot compose database queries. The API exposes eight deterministic templates:
 
-| Template | Answer path |
-| --- | --- |
-| `issue_trace` | issue title/body phrase, issue number, PR, or commit → projected graph issue → resolving and introducing PRs/commits → canonical reason/evidence and changes |
-| `feature_trace` | extracted feature phrase → active reviewed Feature relationships → implementing files/symbols, documentation, and reviewed likely-impact sources |
-| `causal_trace` | resolved Issue/Feature/Incident/Service root → all reviewed causal, impact, implementation, dependency, deployment, documentation, ownership, and movement paths |
+| Template         | Answer path                                                                                                                                                                 |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `issue_trace`    | issue title/body phrase, issue number, PR, or commit → projected graph issue → resolving and introducing PRs/commits → canonical reason/evidence and changes                |
+| `feature_trace`  | extracted feature phrase → active reviewed Feature relationships → implementing files/symbols, documentation, and reviewed likely-impact sources                            |
+| `causal_trace`   | resolved Issue/Feature/Incident/Service root → all reviewed causal, impact, implementation, dependency, deployment, documentation, ownership, and movement paths            |
 | `counterfactual` | resolved outcome plus PR/commit/package/deployment/implementation intervention → remove matching paths from the causal trace in memory → report removed and remaining paths |
-| `structure` | validated name/moniker/path → definitions and typed edges inside the selected ref manifest |
-| `change` | PR → included commits → first-parent changes → changed symbols → inbound affected surface |
-| `intent` | file history → commits → PRs → resolved/referenced issues → raw observation text |
-| `ownership` | active/source ownership by registry authority → recent commit authors via accepted identities |
+| `structure`      | validated name/moniker/path → definitions and typed edges inside the selected ref manifest                                                                                  |
+| `change`         | PR → included commits → first-parent changes → changed symbols → inbound affected surface                                                                                   |
+| `intent`         | file history → commits → PRs → resolved/referenced issues → raw observation text                                                                                            |
+| `ownership`      | active/source ownership by registry authority → recent commit authors via accepted identities                                                                               |
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Issue and Feature retrieval require a materialized graph for the resolved ref and admit model assertions only when every cited blob is unchanged in that ref; stale or missing evidence produces no relationship rather than leaking a claim from another branch. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` chooses only those fixed templates. Its conservative planner extracts issue/root text, features, PRs, commits, packages, deployments, repository paths, and identifier-shaped symbols. Counterfactual phrasing selects the fixed `counterfactual` template, loads a materialized causal trace, removes every path containing the resolved intervention, and recomputes the known paths in memory. The response includes `basis: graph-derived`, intervention, outcome, removed/remaining paths, cited claims, ambiguities, and coverage gaps. It says that all *currently known reviewed* paths disappear; it never claims an outcome was impossible through an unknown path. The endpoint remains synchronous and read-only and creates no board task or stored counterfactual fact.
+`POST /ontology/ask` chooses only those fixed templates. Its conservative planner extracts issue/root text, features, PRs, commits, packages, deployments, repository paths, and identifier-shaped symbols. Counterfactual phrasing selects the fixed `counterfactual` template, loads a materialized causal trace, removes every path containing the resolved intervention, and recomputes the known paths in memory. The response includes `basis: graph-derived`, intervention, outcome, removed/remaining paths, cited claims, ambiguities, and coverage gaps. It says that all _currently known reviewed_ paths disappear; it never claims an outcome was impossible through an unknown path. The endpoint remains synchronous and read-only and creates no board task or stored counterfactual fact.
 
 The external MCP contract intentionally hides those internal templates. `POST /mcp`
 advertises only `query_graph(repository, query, ref?)` and returns an answer, cited

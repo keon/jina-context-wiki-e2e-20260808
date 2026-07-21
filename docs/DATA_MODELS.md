@@ -525,7 +525,7 @@ unique(harness_versions.tenant_id, harness_versions.name, harness_versions.versi
 index(gate_results.tenant_id, gate_results.task_id)
 ```
 
-Gate results attach to tasks — there is no separate stage table; a stage *is* a task. Harness versions are immutable per root task: a new prompt, tool config, model policy, or context rule creates a new row so run outcomes can be compared over time.
+Gate results attach to tasks — there is no separate stage table; a stage _is_ a task. Harness versions are immutable per root task: a new prompt, tool config, model policy, or context rule creates a new row so run outcomes can be compared over time.
 
 ## Agents And Review Profiles
 

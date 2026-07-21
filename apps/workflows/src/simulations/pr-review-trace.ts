@@ -1,9 +1,4 @@
-import {
-  findTasksByType,
-  nextPendingOutboxMessage,
-  type BoardTask,
-  type TaskStatus
-} from "@jina/board";
+import { findTasksByType, nextPendingOutboxMessage, type BoardTask, type TaskStatus } from "@jina/board";
 import type { GitHubWebhookEvent } from "@jina/github";
 import { ingestGitHubWebhook } from "../ingest/github-webhook.js";
 import { drainOneOutboxMessage } from "../relay/outbox-relay.js";
@@ -113,4 +108,3 @@ function isSingleTaskDone(current: WorkflowState, type: BoardTask["type"]): bool
   const tasks = findTasksByType(current.board, type);
   return tasks.length === 1 && tasks[0]?.status === "done";
 }
-

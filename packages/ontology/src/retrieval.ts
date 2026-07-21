@@ -1,6 +1,15 @@
 import { evaluateCounterfactual, type CausalTraceProjection, type CounterfactualEvaluation } from "./causal.js";
 
-export const retrievalTemplateNames = ["counterfactual", "causal_trace", "issue_trace", "feature_trace", "structure", "change", "intent", "ownership"] as const;
+export const retrievalTemplateNames = [
+  "counterfactual",
+  "causal_trace",
+  "issue_trace",
+  "feature_trace",
+  "structure",
+  "change",
+  "intent",
+  "ownership"
+] as const;
 export type RetrievalTemplateName = (typeof retrievalTemplateNames)[number];
 export type RepositoryContextOperation = "lookup" | "counterfactual";
 
@@ -133,14 +142,16 @@ export interface OrchestratedContext {
 export class RepositoryContextOrchestrator {
   constructor(private readonly executor: RetrievalExecutor) {}
 
-  async answer(input: Omit<RetrievalRequest, "template"> & {
-    readonly question: string;
-    readonly operation?: RepositoryContextOperation;
-    readonly tokenBudget?: number;
-  }): Promise<OrchestratedContext> {
+  async answer(
+    input: Omit<RetrievalRequest, "template"> & {
+      readonly question: string;
+      readonly operation?: RepositoryContextOperation;
+      readonly tokenBudget?: number;
+    }
+  ): Promise<OrchestratedContext> {
     const issueEntityId = input.issueEntityId;
     const issueNumber = input.issueNumber ?? extractIssueNumber(input.question);
-    const issueText = issueNumber ? undefined : input.issueText ?? extractIssueText(input.question);
+    const issueText = issueNumber ? undefined : (input.issueText ?? extractIssueText(input.question));
     const featureText = input.featureText ?? extractFeatureText(input.question);
     const rootText = input.rootText ?? extractCausalRootText(input.question);
     const pullRequestNumber = input.pullRequestNumber ?? extractPullRequestNumber(input.question);
@@ -159,26 +170,36 @@ export class RepositoryContextOrchestrator {
       ...(path ? { path } : {}),
       ...(symbol ? { symbol } : {})
     };
-    const templates = operation === "counterfactual"
-      ? ["counterfactual" as const]
-      : issueEntityId ? ["issue_trace" as const] : classifyTemplates(input.question);
-    const perCallLimit = Math.max(1, Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80))));
+    const templates =
+      operation === "counterfactual"
+        ? ["counterfactual" as const]
+        : issueEntityId
+          ? ["issue_trace" as const]
+          : classifyTemplates(input.question);
+    const perCallLimit = Math.max(
+      1,
+      Math.min(input.limit ?? 50, Math.floor((input.tokenBudget ?? 4_000) / Math.max(80, templates.length * 80)))
+    );
     const calls: RetrievalResult[] = [];
     for (const template of templates) {
-      calls.push(await this.executor.retrieve({
-        ...input,
-        template,
-        ...(template === "intent" || template === "causal_trace" || template === "counterfactual" ? { query: input.query ?? input.question } : {}),
-        ...(issueNumber ? { issueNumber } : {}),
-        ...(issueText ? { issueText } : {}),
-        ...(featureText ? { featureText } : {}),
-        ...(rootText ? { rootText } : {}),
-        ...(pullRequestNumber ? { pullRequestNumber } : {}),
-        ...(commitSha ? { commitSha } : {}),
-        ...(path ? { path } : {}),
-        ...(symbol ? { symbol } : {}),
-        limit: perCallLimit
-      }));
+      calls.push(
+        await this.executor.retrieve({
+          ...input,
+          template,
+          ...(template === "intent" || template === "causal_trace" || template === "counterfactual"
+            ? { query: input.query ?? input.question }
+            : {}),
+          ...(issueNumber ? { issueNumber } : {}),
+          ...(issueText ? { issueText } : {}),
+          ...(featureText ? { featureText } : {}),
+          ...(rootText ? { rootText } : {}),
+          ...(pullRequestNumber ? { pullRequestNumber } : {}),
+          ...(commitSha ? { commitSha } : {}),
+          ...(path ? { path } : {}),
+          ...(symbol ? { symbol } : {}),
+          limit: perCallLimit
+        })
+      );
     }
     const citations = dedupeCitations(calls.flatMap((call) => call.items.flatMap((item) => item.citations)));
     const synthesis = synthesizeContextAnswer(input.question, calls, extracted, operation);
@@ -194,8 +215,14 @@ export class RepositoryContextOrchestrator {
 }
 
 export function isCounterfactualQuestion(question: string): boolean {
-  return /\b(?:if|without|counterfactual|had\s+not|hadn't|did\s+not|didn't|never\s+(?:merged|landed|happened)|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?|exclude[ds]?|excluding)\b/i.test(question) &&
-    /\b(?:would|could|might|still|exist|happen|break|fail|remain|work|affect|impact|disappear|merged|landed|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?|exclude[ds]?|excluding)\b/i.test(question);
+  return (
+    /\b(?:if|without|counterfactual|had\s+not|hadn't|did\s+not|didn't|never\s+(?:merged|landed|happened)|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?|exclude[ds]?|excluding)\b/i.test(
+      question
+    ) &&
+    /\b(?:would|could|might|still|exist|happen|break|fail|remain|work|affect|impact|disappear|merged|landed|revert(?:ed|ing)?|remove(?:d|ing)?|omit(?:ted|ting)?|exclude[ds]?|excluding)\b/i.test(
+      question
+    )
+  );
 }
 
 export function classifyTemplates(question: string): readonly RetrievalTemplateName[] {
@@ -211,14 +238,17 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   if (/\b(?:renamed?|moved?|previously)\b/.test(value)) return ["causal_trace"];
   if ((issueNumber || issueText) && (causal || resolution)) return ["issue_trace"];
   if ((pullRequestNumber || commitSha) && causal) return ["issue_trace"];
-  if ((pullRequestNumber || commitSha) && resolution && /\b(?:which|what)\s+(?:issue|bug|ticket)\b/.test(value)) return ["issue_trace"];
+  if ((pullRequestNumber || commitSha) && resolution && /\b(?:which|what)\s+(?:issue|bug|ticket)\b/.test(value))
+    return ["issue_trace"];
   if (featureText) return ["feature_trace"];
   const selected: RetrievalTemplateName[] = [];
   if (issueNumber || issueText) selected.push("issue_trace");
-  if (/depend|call|import|structure|where|symbol|implement|define|test(?:s|ed|ing)? cover/.test(value)) selected.push("structure");
+  if (/depend|call|import|structure|where|symbol|implement|define|test(?:s|ed|ing)? cover/.test(value))
+    selected.push("structure");
   if (/change|break|impact|diff/.test(value) || pullRequestNumber || commitSha) selected.push("change");
   if (/why|intent|issue|introduced|history|exist/.test(value)) selected.push("intent");
-  if (/\b(?:who|owner|owners|owned|owns|maintain|maintainer|maintainers|worked|author|authors)\b/.test(value)) selected.push("ownership");
+  if (/\b(?:who|owner|owners|owned|owns|maintain|maintainer|maintainers|worked|author|authors)\b/.test(value))
+    selected.push("ownership");
   return selected.length > 0 ? [...new Set(selected)] : ["structure", "intent"];
 }
 
@@ -237,7 +267,8 @@ export function extractCommitSha(question: string): string | undefined {
 
 export function extractIssueNumber(question: string): number | undefined {
   const labeled = /\b(?:issue|bug|ticket)\s*#?\s*(\d+)\b/i.exec(question);
-  const match = labeled ?? (/\b(?:pull request|pr)\s*#?\s*\d+\b/i.test(question) ? null : /(?:^|\s)#(\d+)\b/.exec(question));
+  const match =
+    labeled ?? (/\b(?:pull request|pr)\s*#?\s*\d+\b/i.test(question) ? null : /(?:^|\s)#(\d+)\b/.exec(question));
   if (!match?.[1]) return undefined;
   const value = Number.parseInt(match[1], 10);
   return Number.isSafeInteger(value) && value > 0 ? value : undefined;
@@ -249,11 +280,21 @@ export function extractIssueNumber(question: string): number | undefined {
  * repository and returns canonical, cited issue traces.
  */
 export function extractIssueText(question: string): string | undefined {
-  if (!/issue|bug|ticket|problem|caus|introduc|root cause|resolv|fix|clos|first\s+(?:start|begin|appear)/i.test(question)) return undefined;
+  if (
+    !/issue|bug|ticket|problem|caus|introduc|root cause|resolv|fix|clos|first\s+(?:start|begin|appear)/i.test(question)
+  )
+    return undefined;
   const quoted = /["“]([^"”\n]{2,500})["”]/.exec(question)?.[1];
-  const temporal = /\bwhen\s+did\s+(?:the\s+)?(?:problem|issue|bug|ticket)?\s*(.+?)\s+first\s+(?:start|begin|appear)\b/i.exec(question)?.[1];
-  const unquoted = /\b(?:what|which\s+(?:pr|pull request|commit))?\s*(?:caused|causes|introduced|introduces|root cause of)\s+(.+?)(?:,\s*(?:and\s+)?why\b|\?|$)/i.exec(question)?.[1];
-  const value = (quoted ?? temporal ?? unquoted)?.trim()
+  const temporal =
+    /\bwhen\s+did\s+(?:the\s+)?(?:problem|issue|bug|ticket)?\s*(.+?)\s+first\s+(?:start|begin|appear)\b/i.exec(
+      question
+    )?.[1];
+  const unquoted =
+    /\b(?:what|which\s+(?:pr|pull request|commit))?\s*(?:caused|causes|introduced|introduces|root cause of)\s+(.+?)(?:,\s*(?:and\s+)?why\b|\?|$)/i.exec(
+      question
+    )?.[1];
+  const value = (quoted ?? temporal ?? unquoted)
+    ?.trim()
     .replace(/["”]$/g, "")
     .replace(/\s+(?:issue|bug|ticket|problem)$/i, "")
     .replace(/\s+/g, " ");
@@ -261,24 +302,33 @@ export function extractIssueText(question: string): string | undefined {
 }
 
 function isCausalIssueQuestion(question: string): boolean {
-  return /caus|introduc|root cause|first\s+(?:start|begin|appear)|when\s+did[\s\S]{0,200}\b(?:start|begin|appear)/i.test(question);
+  return /caus|introduc|root cause|first\s+(?:start|begin|appear)|when\s+did[\s\S]{0,200}\b(?:start|begin|appear)/i.test(
+    question
+  );
 }
 
 export function extractFeatureText(question: string): string | undefined {
   if (!/feature|capabilit|implement|affect|impact|break|document/i.test(question)) return undefined;
   const quoted = /["“]([^"”\n]{2,200})["”]/.exec(question)?.[1];
   const named = /\b(?:feature|capabilit(?:y|ies))\s+(?:called\s+|named\s+)(.+?)(?:\?|$)/i.exec(question)?.[1];
-  const beforeKind = /(.+?)\s+(?:feature|capability)\b/i.exec(question)?.[1]
+  const beforeKind = /(.+?)\s+(?:feature|capability)\b/i
+    .exec(question)?.[1]
     ?.replace(/^.*\b(?:implements?|affects?|impacts?|breaks?|documents?)\s+(?:the\s+)?/i, "")
     .replace(/^(?:what|which|where|how|could|would|might|does|do|is|are|show|describe)\s+(?:the\s+)?/i, "");
-  const value = (quoted ?? named ?? beforeKind)?.trim().replace(/[?.!,]+$/g, "").replace(/\s+/g, " ");
+  const value = (quoted ?? named ?? beforeKind)
+    ?.trim()
+    .replace(/[?.!,]+$/g, "")
+    .replace(/\s+/g, " ");
   return value || undefined;
 }
 
 export function extractCausalRootText(question: string): string | undefined {
   const quoted = /["“]([^"”\n]{2,500})["”]/.exec(question)?.[1];
   if (quoted) return quoted.trim();
-  const named = /\b(?:incident|service|feature|issue)\s+(?:called\s+|named\s+)?([^,?]+?)(?:,|\?|\s+(?:did|does|was|were|would|could)\b|$)/i.exec(question)?.[1];
+  const named =
+    /\b(?:incident|service|feature|issue)\s+(?:called\s+|named\s+)?([^,?]+?)(?:,|\?|\s+(?:did|does|was|were|would|could)\b|$)/i.exec(
+      question
+    )?.[1];
   return named?.trim().replace(/\s+/g, " ") || undefined;
 }
 
@@ -340,8 +390,17 @@ function synthesizeContextAnswer(
   if (templates.has("ownership") && !extracted.symbol && !extracted.path) {
     unresolvedAmbiguities.push("No exact repository path or symbol could be extracted for ownership lookup.");
   }
-  if (templates.has("issue_trace") && !extracted.issueEntityId && !extracted.issueNumber && !extracted.issueText && !extracted.pullRequestNumber && !extracted.commitSha) {
-    unresolvedAmbiguities.push("No issue, pull request, commit, or issue description could be resolved from the question.");
+  if (
+    templates.has("issue_trace") &&
+    !extracted.issueEntityId &&
+    !extracted.issueNumber &&
+    !extracted.issueText &&
+    !extracted.pullRequestNumber &&
+    !extracted.commitSha
+  ) {
+    unresolvedAmbiguities.push(
+      "No issue, pull request, commit, or issue description could be resolved from the question."
+    );
   }
   if (templates.has("feature_trace") && !extracted.featureText) {
     unresolvedAmbiguities.push("No exact feature description could be resolved from the question.");
@@ -351,15 +410,19 @@ function synthesizeContextAnswer(
     if (call.items.length === 0) {
       coverageGaps.push({
         capability: call.template,
-        message: call.template === "structure"
-          ? `No cited structural facts matched${extracted.symbol ? ` symbol ${extracted.symbol}` : extracted.path ? ` path ${extracted.path}` : " the question"}. The repository may have degraded or missing language coverage.`
-          : `No cited ${call.template.replace("_", " ")} facts matched the validated query parameters.`
+        message:
+          call.template === "structure"
+            ? `No cited structural facts matched${extracted.symbol ? ` symbol ${extracted.symbol}` : extracted.path ? ` path ${extracted.path}` : " the question"}. The repository may have degraded or missing language coverage.`
+            : `No cited ${call.template.replace("_", " ")} facts matched the validated query parameters.`
       });
       continue;
     }
     if (call.template === "causal_trace") {
       if (call.items.length > 1 && call.items[0]?.score === call.items[1]?.score) {
-        const message = `Multiple causal roots match the question: ${call.items.slice(0, 5).map((item) => item.title).join(", ")}.`;
+        const message = `Multiple causal roots match the question: ${call.items
+          .slice(0, 5)
+          .map((item) => item.title)
+          .join(", ")}.`;
         unresolvedAmbiguities.push(message);
         answers.push(message);
         continue;
@@ -367,16 +430,31 @@ function synthesizeContextAnswer(
       const item = call.items[0]!;
       const trace = item.data as unknown as CausalTraceProjection;
       const paths = [
-        ...trace.causes, ...trace.resolutions, ...trace.implementations, ...trace.affectedEntities,
-        ...trace.dependencies, ...trace.deployments, ...trace.documentation, ...trace.ownership, ...trace.movedFrom
+        ...trace.causes,
+        ...trace.resolutions,
+        ...trace.implementations,
+        ...trace.affectedEntities,
+        ...trace.dependencies,
+        ...trace.deployments,
+        ...trace.documentation,
+        ...trace.ownership,
+        ...trace.movedFrom
       ];
-      const claims = paths.slice(0, 12).map((candidate) => ({
-        text: `${candidate.kind}: ${candidate.nodes.map((node) => node.label).join(" → ")}${candidate.why ? ` — ${candidate.why}` : ""}`,
-        citations: candidate.citations
-      })).filter((claim) => claim.citations.length > 0);
-      answers.push(paths.length > 0
-        ? `${trace.root.label} has ${paths.length} reviewed causal-projection path${paths.length === 1 ? "" : "s"}: ${claims.slice(0, 6).map((claim) => claim.text).join("; ")}.`
-        : `${trace.root.label} is present in the projection, but it has no active reviewed causal paths.`);
+      const claims = paths
+        .slice(0, 12)
+        .map((candidate) => ({
+          text: `${candidate.kind}: ${candidate.nodes.map((node) => node.label).join(" → ")}${candidate.why ? ` — ${candidate.why}` : ""}`,
+          citations: candidate.citations
+        }))
+        .filter((claim) => claim.citations.length > 0);
+      answers.push(
+        paths.length > 0
+          ? `${trace.root.label} has ${paths.length} reviewed causal-projection path${paths.length === 1 ? "" : "s"}: ${claims
+              .slice(0, 6)
+              .map((claim) => claim.text)
+              .join("; ")}.`
+          : `${trace.root.label} is present in the projection, but it has no active reviewed causal paths.`
+      );
       citedClaims.push(...claims);
       continue;
     }
@@ -410,9 +488,13 @@ function synthesizeContextAnswer(
     const resultCount = call.truncated ? call.totalBeforeLimit : answerItems.length;
     citedClaims.push(...selected.map((item) => ({ text: item.title, citations: item.citations })));
     if (call.template === "structure") {
-      answers.push(`Found ${resultCount} cited structural fact${resultCount === 1 ? "" : "s"}${extracted.symbol ? ` for ${extracted.symbol}` : extracted.path ? ` in ${extracted.path}` : ""}: ${selected.map((item) => item.title).join("; ")}.`);
+      answers.push(
+        `Found ${resultCount} cited structural fact${resultCount === 1 ? "" : "s"}${extracted.symbol ? ` for ${extracted.symbol}` : extracted.path ? ` in ${extracted.path}` : ""}: ${selected.map((item) => item.title).join("; ")}.`
+      );
     } else if (call.template === "change") {
-      answers.push(`The cited change set contains ${resultCount} result${resultCount === 1 ? "" : "s"}: ${selected.map((item) => item.title).join("; ")}.`);
+      answers.push(
+        `The cited change set contains ${resultCount} result${resultCount === 1 ? "" : "s"}: ${selected.map((item) => item.title).join("; ")}.`
+      );
     } else if (call.template === "ownership") {
       answers.push(`Ownership evidence: ${selected.map((item) => item.title).join("; ")}.`);
     } else {
@@ -423,10 +505,18 @@ function synthesizeContextAnswer(
   const answer = answers.length
     ? answers.join(" ")
     : "I could not produce a supported answer from the currently indexed repository evidence.";
-  return { answer, citedClaims: dedupeClaims(citedClaims), unresolvedAmbiguities: [...new Set(unresolvedAmbiguities)], coverageGaps };
+  return {
+    answer,
+    citedClaims: dedupeClaims(citedClaims),
+    unresolvedAmbiguities: [...new Set(unresolvedAmbiguities)],
+    coverageGaps
+  };
 }
 
-function consolidateAnswerItems(template: RetrievalTemplateName, items: readonly RetrievalItem[]): readonly RetrievalItem[] {
+function consolidateAnswerItems(
+  template: RetrievalTemplateName,
+  items: readonly RetrievalItem[]
+): readonly RetrievalItem[] {
   const consolidated = new Map<string, RetrievalItem>();
   for (const item of items) {
     const key = item.title;
@@ -472,19 +562,28 @@ function synthesizeCounterfactualContext(
 
   const causalCall = calls.find((call) => call.template === "counterfactual" || call.template === "causal_trace");
   if (causalCall) {
-    if (causalCall.items.length === 0) return {
-      answer: "The current materialized projection has no resolvable causal root for this counterfactual.",
-      citedClaims: [], unresolvedAmbiguities: [],
-      coverageGaps: [{ capability: "counterfactual", message: "No active reviewed causal trace matched the requested outcome." }]
-    };
-    if (causalCall.items.length > 1 && causalCall.items[0]?.score === causalCall.items[1]?.score) return {
-      answer: "The counterfactual outcome is ambiguous in the current projection.", citedClaims: [],
-      unresolvedAmbiguities: [`Select one outcome: ${causalCall.items.slice(0, 5).map((item) => item.title).join(", ")}.`], coverageGaps: []
-    };
-    const evaluation = evaluateCounterfactual(
-      causalCall.items[0]!.data as unknown as CausalTraceProjection,
-      question
-    );
+    if (causalCall.items.length === 0)
+      return {
+        answer: "The current materialized projection has no resolvable causal root for this counterfactual.",
+        citedClaims: [],
+        unresolvedAmbiguities: [],
+        coverageGaps: [
+          { capability: "counterfactual", message: "No active reviewed causal trace matched the requested outcome." }
+        ]
+      };
+    if (causalCall.items.length > 1 && causalCall.items[0]?.score === causalCall.items[1]?.score)
+      return {
+        answer: "The counterfactual outcome is ambiguous in the current projection.",
+        citedClaims: [],
+        unresolvedAmbiguities: [
+          `Select one outcome: ${causalCall.items
+            .slice(0, 5)
+            .map((item) => item.title)
+            .join(", ")}.`
+        ],
+        coverageGaps: []
+      };
+    const evaluation = evaluateCounterfactual(causalCall.items[0]!.data as unknown as CausalTraceProjection, question);
     return {
       answer: evaluation.answer,
       citedClaims: evaluation.citedClaims,
@@ -503,17 +602,18 @@ function synthesizeCounterfactualContext(
       continue;
     }
     if (call.template === "issue_trace") {
-      const items = extracted.issueEntityId || extracted.issueNumber || extracted.issueText
-        ? (() => {
-            const selection = selectIssueTrace(call.items, extracted);
-            if (!selection.item) {
-              const ambiguity = selection.ambiguity ?? "No single issue trace could be selected safely.";
-              unresolvedAmbiguities.push(ambiguity);
-              return [];
-            }
-            return [selection.item];
-          })()
-        : call.items;
+      const items =
+        extracted.issueEntityId || extracted.issueNumber || extracted.issueText
+          ? (() => {
+              const selection = selectIssueTrace(call.items, extracted);
+              if (!selection.item) {
+                const ambiguity = selection.ambiguity ?? "No single issue trace could be selected safely.";
+                unresolvedAmbiguities.push(ambiguity);
+                return [];
+              }
+              return [selection.item];
+            })()
+          : call.items;
       for (const item of items) {
         const result = synthesizeIssueCounterfactual(item, extracted);
         if (result.answer) answers.push(result.answer);
@@ -531,9 +631,10 @@ function synthesizeCounterfactualContext(
   }
 
   return {
-    answer: answers.length > 0
-      ? answers.join(" ")
-      : "The current reviewed graph does not contain a causal or impact relationship that can support this counterfactual.",
+    answer:
+      answers.length > 0
+        ? answers.join(" ")
+        : "The current reviewed graph does not contain a causal or impact relationship that can support this counterfactual.",
     citedClaims: dedupeClaims(citedClaims),
     unresolvedAmbiguities: [...new Set(unresolvedAmbiguities)],
     coverageGaps
@@ -555,12 +656,15 @@ function synthesizeIssueCounterfactual(
   const cause = extracted.commitSha
     ? trace.introducedBy.find((candidate) => candidate.sha.startsWith(extracted.commitSha!))
     : extracted.pullRequestNumber
-      ? trace.introducedBy.find((candidate) => candidate.pullRequests?.some((pullRequest) => pullRequest.number === extracted.pullRequestNumber))
+      ? trace.introducedBy.find((candidate) =>
+          candidate.pullRequests?.some((pullRequest) => pullRequest.number === extracted.pullRequestNumber)
+        )
       : trace.introducedBy[0];
   if (cause) {
-    const pullRequest = cause.pullRequests?.find((candidate) =>
-      !extracted.pullRequestNumber || candidate.number === extracted.pullRequestNumber
-    ) ?? cause.pullRequests?.[0];
+    const pullRequest =
+      cause.pullRequests?.find(
+        (candidate) => !extracted.pullRequestNumber || candidate.number === extracted.pullRequestNumber
+      ) ?? cause.pullRequests?.[0];
     const target = pullRequest ? `PR #${pullRequest.number}` : `commit ${cause.sha.slice(0, 12)}`;
     const conclusion = `Without ${target}, the active reviewed causal model says ${issueLabel} would likely not have been introduced by that change; independent causes are not ruled out.`;
     const why = cause.why ? `Why: ${cause.why}` : undefined;
@@ -579,12 +683,16 @@ function synthesizeIssueCounterfactual(
   const resolution = extracted.pullRequestNumber
     ? trace.resolutions.find((candidate) => candidate.pullRequestNumber === extracted.pullRequestNumber)
     : extracted.commitSha
-      ? trace.resolutions.find((candidate) => candidate.commits.some((commit) => commit.sha.startsWith(extracted.commitSha!)))
+      ? trace.resolutions.find((candidate) =>
+          candidate.commits.some((commit) => commit.sha.startsWith(extracted.commitSha!))
+        )
       : trace.resolutions[0];
   if (resolution) {
     const target = extracted.pullRequestNumber
       ? `PR #${resolution.pullRequestNumber}`
-      : extracted.commitSha ? `commit ${extracted.commitSha.slice(0, 12)}` : `PR #${resolution.pullRequestNumber}`;
+      : extracted.commitSha
+        ? `commit ${extracted.commitSha.slice(0, 12)}`
+        : `PR #${resolution.pullRequestNumber}`;
     const conclusion = `Without ${target}, the recorded resolution for ${issueLabel} would be absent, so the issue would remain unresolved at this ref unless another fix replaced it.`;
     const citations = citationsForResolution(item, resolution);
     if (citations.length === 0) {
@@ -619,14 +727,17 @@ function synthesizeFeatureCounterfactual(
   if (impacts.length === 0) {
     return {
       claims: [],
-      coverageGap: "Feature implementation or documentation alone does not establish a counterfactual; an active reviewed LIKELY_AFFECTS relationship is required."
+      coverageGap:
+        "Feature implementation or documentation alone does not establish a counterfactual; an active reviewed LIKELY_AFFECTS relationship is required."
     };
   }
   const feature = impacts.map((item) => item.data.feature).find(isRecord);
   const label = typeof feature?.label === "string" ? feature.label : "the feature";
   const target = extracted.pullRequestNumber
     ? `PR #${extracted.pullRequestNumber}`
-    : extracted.commitSha ? `commit ${extracted.commitSha.slice(0, 12)}` : "the referenced change";
+    : extracted.commitSha
+      ? `commit ${extracted.commitSha.slice(0, 12)}`
+      : "the referenced change";
   const conclusion = `Without ${target}, the reviewed graph supports removing a likely impact on ${label}, but it does not prove that the feature would disappear or behave differently.`;
   const citations = dedupeCitations(impacts.flatMap((item) => item.citations));
   if (citations.length === 0) {
@@ -649,15 +760,21 @@ function synthesizeFeatureTrace(
   readonly claims: readonly { readonly text: string; readonly citations: readonly RetrievalCitation[] }[];
   readonly ambiguity?: string;
 } {
-  const featureKeys = new Set(items.flatMap((item) => {
-    const feature = item.data.feature;
-    return isRecord(feature) && typeof feature.naturalKey === "string" ? [feature.naturalKey] : [];
-  }));
-  if (featureKeys.size > 1) {
-    const labels = [...new Set(items.flatMap((item) => {
+  const featureKeys = new Set(
+    items.flatMap((item) => {
       const feature = item.data.feature;
-      return isRecord(feature) && typeof feature.label === "string" ? [feature.label] : [];
-    }))];
+      return isRecord(feature) && typeof feature.naturalKey === "string" ? [feature.naturalKey] : [];
+    })
+  );
+  if (featureKeys.size > 1) {
+    const labels = [
+      ...new Set(
+        items.flatMap((item) => {
+          const feature = item.data.feature;
+          return isRecord(feature) && typeof feature.label === "string" ? [feature.label] : [];
+        })
+      )
+    ];
     return {
       answer: "",
       claims: [],
@@ -679,9 +796,10 @@ function synthesizeFeatureTrace(
         : [...implementations, ...documents, ...impacts, ...references];
   const relationships = selected.length > 0 ? selected : items;
   const claims = relationships.slice(0, 8).map((item) => ({ text: item.title, citations: item.citations }));
-  const answer = claims.length > 0
-    ? `${featureLabel}: ${claims.map((claim) => claim.text).join("; ")}.`
-    : `${featureLabel} has no active reviewed relationship matching this question.`;
+  const answer =
+    claims.length > 0
+      ? `${featureLabel}: ${claims.map((claim) => claim.text).join("; ")}.`
+      : `${featureLabel} has no active reviewed relationship matching this question.`;
   return { answer, claims };
 }
 
@@ -696,19 +814,27 @@ function synthesizeIssueTrace(
     readonly pullRequestNumber?: number;
     readonly commitSha?: string;
   }
-): { readonly answer: string; readonly claims: readonly { text: string; citations: readonly RetrievalCitation[] }[]; readonly coverageGap?: string } {
+): {
+  readonly answer: string;
+  readonly claims: readonly { text: string; citations: readonly RetrievalCitation[] }[];
+  readonly coverageGap?: string;
+} {
   const trace = item.data as unknown as IssueTraceProjection;
   const issue = trace.issue;
   const causal = isCausalIssueQuestion(question);
   const introduced = extracted.commitSha
     ? trace.introducedBy?.find((cause) => cause.sha?.startsWith(extracted.commitSha!))
     : extracted.pullRequestNumber
-      ? trace.introducedBy?.find((cause) => cause.pullRequests?.some((pullRequest) => pullRequest.number === extracted.pullRequestNumber))
+      ? trace.introducedBy?.find((cause) =>
+          cause.pullRequests?.some((pullRequest) => pullRequest.number === extracted.pullRequestNumber)
+        )
       : trace.introducedBy?.[0];
   const resolution = extracted.pullRequestNumber
     ? trace.resolutions?.find((candidate) => candidate.pullRequestNumber === extracted.pullRequestNumber)
     : extracted.commitSha
-      ? trace.resolutions?.find((candidate) => candidate.commits?.some((commit) => commit.sha?.startsWith(extracted.commitSha!)))
+      ? trace.resolutions?.find((candidate) =>
+          candidate.commits?.some((commit) => commit.sha?.startsWith(extracted.commitSha!))
+        )
       : trace.resolutions?.[0];
   const issueLabel = issue?.displayId
     ? `Issue ${issue.displayId}${issue.title ? ` (${issue.title})` : ""}`
@@ -727,11 +853,21 @@ function synthesizeIssueTrace(
     };
   }
   if (causal) {
-    const laterFix = resolution?.pullRequestNumber ? ` A later resolution is recorded in PR #${resolution.pullRequestNumber}.` : "";
+    const laterFix = resolution?.pullRequestNumber
+      ? ` A later resolution is recorded in PR #${resolution.pullRequestNumber}.`
+      : "";
     return {
       answer: `No active reviewed causal assertion identifies which change introduced ${issueLabel}.${laterFix}`,
-      claims: resolution?.pullRequestNumber ? [{ text: `${issueLabel} was later resolved by PR #${resolution.pullRequestNumber}.`, citations: citationsForResolution(item, resolution) }] : [],
-      coverageGap: "Causality requires an active reviewed INTRODUCED_BY assertion; proposed or missing claims are not presented as fact."
+      claims: resolution?.pullRequestNumber
+        ? [
+            {
+              text: `${issueLabel} was later resolved by PR #${resolution.pullRequestNumber}.`,
+              citations: citationsForResolution(item, resolution)
+            }
+          ]
+        : [],
+      coverageGap:
+        "Causality requires an active reviewed INTRODUCED_BY assertion; proposed or missing claims are not presented as fact."
     };
   }
   if (resolution?.pullRequestNumber) {
@@ -781,7 +917,9 @@ function selectIssueTrace(
     const issue = issueTraceData(item).issue;
     return issue?.number ? `#${issue.number}${issue.title ? ` ${issue.title}` : ""}` : item.title;
   });
-  return { ambiguity: `Multiple issues matched this question: ${identifiers.join("; ")}. Refine the issue description before treating a causal result as fact.` };
+  return {
+    ambiguity: `Multiple issues matched this question: ${identifiers.join("; ")}. Refine the issue description before treating a causal result as fact.`
+  };
 }
 
 function issueTraceData(item: RetrievalItem): IssueTraceProjection {
@@ -790,14 +928,23 @@ function issueTraceData(item: RetrievalItem): IssueTraceProjection {
 
 function citationsForCause(
   item: RetrievalItem,
-  cause: { readonly evidence?: readonly string[]; readonly evidenceCommitSha?: string; readonly assertionIds?: readonly string[] }
+  cause: {
+    readonly evidence?: readonly string[];
+    readonly evidenceCommitSha?: string;
+    readonly assertionIds?: readonly string[];
+  }
 ): readonly RetrievalCitation[] {
   const assertionIds = new Set(cause.assertionIds ?? []);
-  return dedupeCitations(item.citations.filter((citation) =>
-    (citation.kind === "assertion" && assertionIds.has(citation.id)) ||
-    (citation.kind === "code" && Boolean(cause.evidenceCommitSha) && citation.commitSha === cause.evidenceCommitSha &&
-      (cause.evidence ?? []).some((value) => evidenceMatchesCitation(value, citation)))
-  ));
+  return dedupeCitations(
+    item.citations.filter(
+      (citation) =>
+        (citation.kind === "assertion" && assertionIds.has(citation.id)) ||
+        (citation.kind === "code" &&
+          Boolean(cause.evidenceCommitSha) &&
+          citation.commitSha === cause.evidenceCommitSha &&
+          (cause.evidence ?? []).some((value) => evidenceMatchesCitation(value, citation)))
+    )
+  );
 }
 
 function evidenceMatchesCitation(value: string, citation: RetrievalCitation): boolean {
@@ -818,12 +965,15 @@ function citationsForResolution(
 ): readonly RetrievalCitation[] {
   const assertionIds = new Set(resolution.assertionIds ?? []);
   const observationIds = new Set(resolution.observationIds ?? []);
-  const commitShas = new Set((resolution.commits ?? []).flatMap((commit) => commit.sha ? [commit.sha] : []));
-  return dedupeCitations(item.citations.filter((citation) =>
-    (citation.kind === "assertion" && assertionIds.has(citation.id)) ||
-    (citation.kind === "observation" && observationIds.has(citation.id)) ||
-    (citation.kind === "commit_change" && Boolean(citation.commitSha) && commitShas.has(citation.commitSha!))
-  ));
+  const commitShas = new Set((resolution.commits ?? []).flatMap((commit) => (commit.sha ? [commit.sha] : [])));
+  return dedupeCitations(
+    item.citations.filter(
+      (citation) =>
+        (citation.kind === "assertion" && assertionIds.has(citation.id)) ||
+        (citation.kind === "observation" && observationIds.has(citation.id)) ||
+        (citation.kind === "commit_change" && Boolean(citation.commitSha) && commitShas.has(citation.commitSha!))
+    )
+  );
 }
 
 function dedupeClaims<T extends { readonly text: string }>(claims: readonly T[]): readonly T[] {

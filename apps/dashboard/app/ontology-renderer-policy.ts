@@ -38,7 +38,11 @@ export function canvasGraphSlice<Node extends SliceNode, Edge extends SliceEdge>
   edges: readonly Edge[],
   nodeLimit = CANVAS_NODE_LIMIT,
   edgeLimit = CANVAS_EDGE_LIMIT
-): { readonly nodes: readonly Node[]; readonly edges: readonly Edge[]; readonly truncated: boolean } {
+): {
+  readonly nodes: readonly Node[];
+  readonly edges: readonly Edge[];
+  readonly truncated: boolean;
+} {
   if (nodes.length <= nodeLimit && edges.length <= edgeLimit) {
     return { nodes, edges, truncated: false };
   }

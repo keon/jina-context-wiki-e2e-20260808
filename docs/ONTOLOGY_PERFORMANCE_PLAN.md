@@ -8,14 +8,14 @@ running the real `PostgresOntologyGraphStore` code against PostgreSQL.
 
 Production, per internal API call (Cloud Run request logs):
 
-| Call | Typical | Worst observed | Local benchmark (same code, unix socket) |
-| --- | --- | --- | --- |
-| `/internal/ontology/ingest/blobs` (50 analyses) | ~12 s | 495 s, one 504 at 300 s | 0.85 s |
-| `/internal/ontology/ingest/plan` (one commit) | 4–29 s | 67 s (930 KB response) | 45 ms (2k tree) / 159 ms (10k tree) |
-| `/internal/ontology/ingest/github` (one repo's PR/issue set) | 10–70 s | 131.7 s | 1.4 s / 100 observations |
-| `/internal/worker/complete` | 1–27 s | 250 s | — |
-| `/internal/worker/claim` (empty poll) | 0.6–13 s | 70 s | — |
-| `/internal/ontology/outbox/drain` | 3–16 s | 572 s | 3.0 s with events / 4 ms empty |
+| Call                                                         | Typical  | Worst observed          | Local benchmark (same code, unix socket) |
+| ------------------------------------------------------------ | -------- | ----------------------- | ---------------------------------------- |
+| `/internal/ontology/ingest/blobs` (50 analyses)              | ~12 s    | 495 s, one 504 at 300 s | 0.85 s                                   |
+| `/internal/ontology/ingest/plan` (one commit)                | 4–29 s   | 67 s (930 KB response)  | 45 ms (2k tree) / 159 ms (10k tree)      |
+| `/internal/ontology/ingest/github` (one repo's PR/issue set) | 10–70 s  | 131.7 s                 | 1.4 s / 100 observations                 |
+| `/internal/worker/complete`                                  | 1–27 s   | 250 s                   | —                                        |
+| `/internal/worker/claim` (empty poll)                        | 0.6–13 s | 70 s                    | —                                        |
+| `/internal/ontology/outbox/drain`                            | 3–16 s   | 572 s                   | 3.0 s with events / 4 ms empty           |
 
 Whole tasks, production:
 
@@ -69,13 +69,13 @@ the backfill path never emits per-commit projection work.
 
 ## Targets (acceptance gates)
 
-| Scenario | Baseline | Target |
-| --- | --- | --- |
-| Delta push, cached assert (no semantic change) | 8–10 min | ≤ 30 s |
-| Delta push with semantic assert | 20–40+ min | ≤ 4 min (model-bound) |
-| Batch init, 1k commits / 10k blobs / 200 PRs | hours | ≤ 15 min |
-| e2e acceptance build (deploy gate) | 20–40+ min | ≤ 5 min |
-| Empty claim poll | 0.6–70 s | ≤ 100 ms |
+| Scenario                                       | Baseline   | Target                |
+| ---------------------------------------------- | ---------- | --------------------- |
+| Delta push, cached assert (no semantic change) | 8–10 min   | ≤ 30 s                |
+| Delta push with semantic assert                | 20–40+ min | ≤ 4 min (model-bound) |
+| Batch init, 1k commits / 10k blobs / 200 PRs   | hours      | ≤ 15 min              |
+| e2e acceptance build (deploy gate)             | 20–40+ min | ≤ 5 min               |
+| Empty claim poll                               | 0.6–70 s   | ≤ 100 ms              |
 
 These align with the SLOs already declared in ONTOLOGY.md (ref-to-manifest p95
 ≤ 30 s, observation-to-search p95 ≤ 60 s), currently missed by an order of

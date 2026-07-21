@@ -14,10 +14,10 @@ Strategy source: `jina-code-review/docs/BILLING_OPENROUTER_AUTUMN.md` (2026-07-0
 
 `$1 = 100 Jina Credits`, metered at the org level.
 
-| Run mode | AI credits | Infra credits |
-| --- | --- | --- |
+| Run mode                        | AI credits                              | Infra credits              |
+| ------------------------------- | --------------------------------------- | -------------------------- |
 | Managed (Jina's OpenRouter key) | `ceil(cost_usd × customer_share × 100)` | 100 included / 150 overage |
-| Own-harness (tenant's key) | 0 — tenant pays their provider directly | 100 included / 150 overage |
+| Own-harness (tenant's key)      | 0 — tenant pays their provider directly | 100 included / 150 overage |
 
 `customer_share = 1 − subsidy_rate` (default subsidy 30% → share 0.70) at included rates; no subsidy (`share = 1.0`) at overage rates. Example: a $50 managed run at defaults → `0.70 × $50 × 100 + 100 = 3,600 credits`.
 

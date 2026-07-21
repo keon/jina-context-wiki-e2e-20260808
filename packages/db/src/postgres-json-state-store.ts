@@ -39,18 +39,15 @@ export class PostgresJsonStateStore<T> {
 
   async load(): Promise<T | undefined> {
     await this.initialize();
-    const result = await this.pool.query<{ snapshot: T }>(
-      "select snapshot from jina_runtime.api_state where id = 1"
-    );
+    const result = await this.pool.query<{ snapshot: T }>("select snapshot from jina_runtime.api_state where id = 1");
     return result.rows[0]?.snapshot;
   }
 
   async hasDelivery(deliveryId: string): Promise<boolean> {
     await this.initialize();
-    const result = await this.pool.query(
-      "select 1 from jina_runtime.github_deliveries where delivery_id = $1",
-      [deliveryId]
-    );
+    const result = await this.pool.query("select 1 from jina_runtime.github_deliveries where delivery_id = $1", [
+      deliveryId
+    ]);
     return result.rowCount === 1;
   }
 
@@ -88,9 +85,7 @@ export class PostgresJsonStateStore<T> {
         }
       }
 
-      const current = await client.query<{ snapshot: T }>(
-        "select snapshot from jina_runtime.api_state where id = 1"
-      );
+      const current = await client.query<{ snapshot: T }>("select snapshot from jina_runtime.api_state where id = 1");
       const update = await operation(current.rows[0]?.snapshot);
       await client.query(
         `insert into jina_runtime.api_state (id, snapshot)

@@ -22,7 +22,10 @@ test("Canvas fallback deterministically bounds a large graph without dangling ed
   assert.ok(first.edges.length <= CANVAS_EDGE_LIMIT);
   assert.deepEqual(first, second);
   const selectedIds = new Set(first.nodes.map((node) => node.id));
-  assert.equal(first.edges.every((edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target)), true);
+  assert.equal(
+    first.edges.every((edge) => selectedIds.has(edge.source) && selectedIds.has(edge.target)),
+    true
+  );
   assert.equal(
     canvasFallbackStatus(nodes.length, edges.length, first.nodes.length, first.edges.length),
     `Canvas fallback · rendering 1,200 of 5,000 nodes · ${first.edges.length.toLocaleString()} of 20,000 edges`

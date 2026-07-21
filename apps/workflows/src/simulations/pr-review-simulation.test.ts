@@ -1,10 +1,4 @@
-import {
-  applyCommand,
-  findTasksByType,
-  nextPendingOutboxMessage,
-  type BoardTask,
-  type TaskStatus
-} from "@jina/board";
+import { applyCommand, findTasksByType, nextPendingOutboxMessage, type BoardTask, type TaskStatus } from "@jina/board";
 import type { GitHubWebhookEvent } from "@jina/github";
 import { aiCreditsForCost, defaultBillingPolicy, infraCreditsForRun } from "@jina/policy";
 import { ingestGitHubWebhook, type GitHubWebhookIngestContext } from "../ingest/github-webhook.js";
@@ -13,8 +7,16 @@ import { drainOneOutboxMessage, drainOutbox } from "../relay/outbox-relay.js";
 import { createWorkflowState, type WorkflowState } from "../state.js";
 import { deterministicClock } from "./deterministic-clock.js";
 
-const OPENED: GitHubWebhookEvent = { type: "pull_request.opened", pullRequestNumber: 42, headSha: "abc123" };
-const SYNCHRONIZED: GitHubWebhookEvent = { type: "pull_request.synchronize", pullRequestNumber: 42, headSha: "def456" };
+const OPENED: GitHubWebhookEvent = {
+  type: "pull_request.opened",
+  pullRequestNumber: 42,
+  headSha: "abc123"
+};
+const SYNCHRONIZED: GitHubWebhookEvent = {
+  type: "pull_request.synchronize",
+  pullRequestNumber: 42,
+  headSha: "def456"
+};
 
 const BASE_CONTEXT: GitHubWebhookIngestContext = {
   tenantId: "tenant_1",
@@ -222,7 +224,10 @@ function drainRequiredStep(state: WorkflowState, clock: () => string): WorkflowS
 
 function assertTaskStatus(state: WorkflowState, type: BoardTask["type"], status: TaskStatus, epoch?: number): void {
   const tasks = epoch === undefined ? findTasksByType(state.board, type) : tasksOf(state, type, epoch);
-  assert(tasks.length === 1, `expected one ${type} task${epoch === undefined ? "" : ` in epoch ${epoch}`}, got ${tasks.length}`);
+  assert(
+    tasks.length === 1,
+    `expected one ${type} task${epoch === undefined ? "" : ` in epoch ${epoch}`}, got ${tasks.length}`
+  );
   const task = tasks[0];
   assert(task !== undefined && task.status === status, `expected ${type} to be ${status}, got ${task?.status}`);
 }
@@ -243,7 +248,6 @@ function singleTask(state: WorkflowState, type: BoardTask["type"]): BoardTask {
   assert(task !== undefined, `expected ${type} task`);
   return task;
 }
-
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {

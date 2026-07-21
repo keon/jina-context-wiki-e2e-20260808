@@ -20,10 +20,12 @@ const citationSchema = z.object({
 
 const graphQueryResultSchema = {
   answer: z.string(),
-  claims: z.array(z.object({
-    text: z.string(),
-    citations: z.array(citationSchema)
-  })),
+  claims: z.array(
+    z.object({
+      text: z.string(),
+      citations: z.array(citationSchema)
+    })
+  ),
   incomplete: z.boolean(),
   notes: z.array(z.string())
 };
@@ -48,35 +50,49 @@ export type GraphQueryExecutor = (query: GraphQuery) => Promise<GraphQueryResult
 
 /** Creates the complete public MCP surface. Deliberately exposes one read-only graph query. */
 function createGraphMcpServer(execute: GraphQueryExecutor): McpServer {
-  const server = new McpServer({ name: "jina-graph", version: "1.0.0" }, {
-    instructions: "Use query_graph for questions about a repository. Answers are bounded to cited graph evidence."
-  });
-  server.registerTool("query_graph", {
-    title: "Query Jina graph",
-    description: "Answer a question about repository code, history, ownership, issues, pull requests, commits, features, and relationships using cited graph evidence.",
-    inputSchema: {
-      repository: z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina"),
-      query: z.string().trim().min(1).max(4_000).describe("Natural-language question about the repository"),
-      ref: z.string().trim().min(1).max(300).optional().describe("Optional branch, tag, or ref; the default ref is used when omitted")
-    },
-    outputSchema: graphQueryResultSchema,
-    annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false
+  const server = new McpServer(
+    { name: "jina-graph", version: "1.0.0" },
+    {
+      instructions: "Use query_graph for questions about a repository. Answers are bounded to cited graph evidence."
     }
-  }, async (input) => {
-    const result = await execute({
-      repository: input.repository,
-      query: input.query,
-      ...(input.ref ? { ref: input.ref } : {})
-    });
-    return {
-      content: [{ type: "text", text: renderGraphQueryResult(result) }],
-      structuredContent: { ...result }
-    };
-  });
+  );
+  server.registerTool(
+    "query_graph",
+    {
+      title: "Query Jina graph",
+      description:
+        "Answer a question about repository code, history, ownership, issues, pull requests, commits, features, and relationships using cited graph evidence.",
+      inputSchema: {
+        repository: z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina"),
+        query: z.string().trim().min(1).max(4_000).describe("Natural-language question about the repository"),
+        ref: z
+          .string()
+          .trim()
+          .min(1)
+          .max(300)
+          .optional()
+          .describe("Optional branch, tag, or ref; the default ref is used when omitted")
+      },
+      outputSchema: graphQueryResultSchema,
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false
+      }
+    },
+    async (input) => {
+      const result = await execute({
+        repository: input.repository,
+        query: input.query,
+        ...(input.ref ? { ref: input.ref } : {})
+      });
+      return {
+        content: [{ type: "text", text: renderGraphQueryResult(result) }],
+        structuredContent: { ...result }
+      };
+    }
+  );
   return server;
 }
 
@@ -89,11 +105,13 @@ export async function handleGraphMcpRequest(
 ): Promise<void> {
   if (request.method !== "POST") {
     response.writeHead(405, { "content-type": "application/json; charset=utf-8", allow: "POST" });
-    response.end(JSON.stringify({
-      jsonrpc: "2.0",
-      error: { code: -32000, message: "Method not allowed" },
-      id: null
-    }));
+    response.end(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        error: { code: -32000, message: "Method not allowed" },
+        id: null
+      })
+    );
     return;
   }
 
@@ -114,10 +132,7 @@ export async function handleGraphMcpRequest(
 }
 
 export function publicGraphQueryResult(context: OrchestratedContext): GraphQueryResult {
-  const notes = [
-    ...context.unresolvedAmbiguities,
-    ...context.coverageGaps.map((gap) => gap.message)
-  ];
+  const notes = [...context.unresolvedAmbiguities, ...context.coverageGaps.map((gap) => gap.message)];
   return {
     answer: context.answer,
     claims: context.citedClaims,
@@ -127,9 +142,9 @@ export function publicGraphQueryResult(context: OrchestratedContext): GraphQuery
 }
 
 function renderGraphQueryResult(result: GraphQueryResult): string {
-  const evidence = result.claims.flatMap((claim) => claim.citations.map((citation) =>
-    `- ${claim.text} (${formatCitation(citation)})`
-  ));
+  const evidence = result.claims.flatMap((claim) =>
+    claim.citations.map((citation) => `- ${claim.text} (${formatCitation(citation)})`)
+  );
   const notes = result.notes.map((note) => `- ${note}`);
   return [
     result.answer,

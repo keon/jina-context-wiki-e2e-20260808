@@ -11,8 +11,11 @@ export function runResearchTask(state: WorkflowState, taskId: TaskId, now: IsoTi
     return state;
   }
 
-  let board = applyCommand(state.board, { command: "TransitionTask", taskId, toStatus: "in_progress" }, { actor: RUN_ACTOR, now })
-    .state;
+  let board = applyCommand(
+    state.board,
+    { command: "TransitionTask", taskId, toStatus: "in_progress" },
+    { actor: RUN_ACTOR, now }
+  ).state;
 
   const targetTaskId = stringMetadata(task.metadata.targetTaskId, taskId);
   const sourceUrls = stringArrayMetadata(task.metadata.sourceUrls);
@@ -29,18 +32,20 @@ export function runResearchTask(state: WorkflowState, taskId: TaskId, now: IsoTi
       },
       { actor: RUN_ACTOR, now }
     ).state;
-    board = applyCommand(board, { command: "TransitionTask", taskId, toStatus: "failed" }, { actor: RUN_ACTOR, now }).state;
+    board = applyCommand(
+      board,
+      { command: "TransitionTask", taskId, toStatus: "failed" },
+      { actor: RUN_ACTOR, now }
+    ).state;
 
     return { ...state, board: reduceBoard(board, now) };
   }
 
-  const items = allowedUrls.map(
-    (sourceUrl): ContextItemDraft => ({
-      sourceUri: sourceUrl,
-      summary: "Extracted dependency behavior",
-      citations: [sourceUrl]
-    })
-  );
+  const items = allowedUrls.map((sourceUrl): ContextItemDraft => ({
+    sourceUri: sourceUrl,
+    summary: "Extracted dependency behavior",
+    citations: [sourceUrl]
+  }));
 
   board = applyCommand(
     board,
@@ -60,7 +65,7 @@ export function runResearchTask(state: WorkflowState, taskId: TaskId, now: IsoTi
     contextItems: [
       ...state.contextItems,
       ...items.map((item) => ({
-        taskId: taskId as string,
+        taskId: taskId,
         targetTaskId,
         item
       }))

@@ -1,13 +1,5 @@
 export type TaskStatus =
-  | "triage"
-  | "blocked"
-  | "queued"
-  | "in_progress"
-  | "in_review"
-  | "done"
-  | "canceled"
-  | "failed"
-  | "superseded";
+  "triage" | "blocked" | "queued" | "in_progress" | "in_review" | "done" | "canceled" | "failed" | "superseded";
 
 export const terminalTaskStatuses = ["done", "canceled", "failed", "superseded"] as const;
 

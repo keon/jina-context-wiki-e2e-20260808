@@ -18,7 +18,10 @@ const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const stateStore = createStateStore();
 const ontologyStore = createOntologyStore();
 const ontologyCoordinator = createOntologyCoordinator();
-if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_TENANT_ID)) {
+if (
+  !enableDevEndpoints &&
+  (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_TENANT_ID)
+) {
   throw new Error("INTERNAL_API_TOKEN, GRAPH_API_TOKEN, and JINA_TENANT_ID are required in production");
 }
 
@@ -71,18 +74,22 @@ function createStateStore(): ApiStateStore | undefined {
 
 function createOntologyStore(): OntologyGraphStore {
   const config = databaseConfig();
-  return config ? new PostgresOntologyGraphStore({
-    ...config,
-    manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
-  }) : new MemoryOntologyGraphStore();
+  return config
+    ? new PostgresOntologyGraphStore({
+        ...config,
+        manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
+      })
+    : new MemoryOntologyGraphStore();
 }
 
 function createOntologyCoordinator(): OntologyPipelineCoordinator {
   const config = databaseConfig();
-  return config ? new PostgresOntologyPipelineCoordinator({
-    ...config,
-    manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
-  }) : new MemoryOntologyPipelineCoordinator();
+  return config
+    ? new PostgresOntologyPipelineCoordinator({
+        ...config,
+        manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
+      })
+    : new MemoryOntologyPipelineCoordinator();
 }
 
 function databaseConfig(): PostgresJsonStateStoreConfig | undefined {
@@ -109,5 +116,8 @@ function requiredEnv(name: string): string {
 }
 
 function commaSeparatedEnv(name: string): readonly string[] {
-  return (process.env[name] ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+  return (process.env[name] ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
 }

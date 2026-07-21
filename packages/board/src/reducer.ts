@@ -110,7 +110,12 @@ export function addDependency(state: BoardState, dependency: TaskDependencyDraft
   );
 }
 
-export function transitionBoardTask(state: BoardState, taskId: TaskId, toStatus: TaskStatus, now: IsoTimestamp): BoardState {
+export function transitionBoardTask(
+  state: BoardState,
+  taskId: TaskId,
+  toStatus: TaskStatus,
+  now: IsoTimestamp
+): BoardState {
   const task = findTask(state, taskId);
   if (!task || task.status === toStatus || isTerminalTaskStatus(task.status)) {
     return state;
@@ -196,7 +201,7 @@ export function leaseNextOutboxMessage(state: BoardState, input: LeaseOutboxInpu
   return {
     state: {
       ...state,
-      outbox: state.outbox.map((message) => message.id === candidate.id ? leased : message)
+      outbox: state.outbox.map((message) => (message.id === candidate.id ? leased : message))
     },
     message: leased
   };
@@ -215,16 +220,19 @@ export function renewOutboxLease(
 ): BoardState | undefined {
   const message = findOutboxMessage(state, messageId);
   if (
-    !message || message.status !== "leased" || message.leaseId !== leaseId ||
-    !message.leaseExpiresAt || message.leaseExpiresAt <= now
+    !message ||
+    message.status !== "leased" ||
+    message.leaseId !== leaseId ||
+    !message.leaseExpiresAt ||
+    message.leaseExpiresAt <= now
   ) {
     return undefined;
   }
   return {
     ...state,
-    outbox: state.outbox.map((candidate) => candidate.id === messageId
-      ? { ...candidate, leasedAt: now, leaseExpiresAt: expiresAt }
-      : candidate)
+    outbox: state.outbox.map((candidate) =>
+      candidate.id === messageId ? { ...candidate, leasedAt: now, leaseExpiresAt: expiresAt } : candidate
+    )
   };
 }
 
@@ -241,7 +249,9 @@ export function findTasksByType(state: BoardState, type: BoardTask["type"]): rea
 }
 
 function requiredDependenciesSatisfied(state: BoardState, taskId: TaskId): boolean {
-  const requiredDependencies = state.dependencies.filter((dependency) => dependency.taskId === taskId && dependency.required);
+  const requiredDependencies = state.dependencies.filter(
+    (dependency) => dependency.taskId === taskId && dependency.required
+  );
 
   return requiredDependencies.every((dependency) => {
     const dependencyTask = findTask(state, dependency.dependsOnTaskId);

@@ -43,10 +43,10 @@ export function productionAcceptanceExitCode(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   if (/ended as|timed out|missing from the board|retains blocked ontology tasks/.test(message)) return 20;
   if (/latest ontology graph|ontology\.latest/.test(message)) return 21;
-  if (/ontology graph is empty/.test(message)) return 22;
-  if (/ontology graph contains uncited/.test(message)) return 23;
+  if (message.includes("ontology graph is empty")) return 22;
+  if (message.includes("ontology graph contains uncited")) return 23;
   if (/context retrieval|causal context|causality assertion|INTRODUCED_BY|v5\.1/.test(message)) return 24;
-  if (/ontology backlog/.test(message)) return 25;
+  if (message.includes("ontology backlog")) return 25;
   return 26;
 }
 
@@ -114,11 +114,15 @@ export async function runProductionOntologyAcceptance(
     const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
     const tasks = requiredArray(board.tasks, "board.tasks");
     const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-    throw new Error(`production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`);
+    throw new Error(
+      `production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`
+    );
   }
   const blockedTaskIds = blockedOntologyTaskIds(completedBoardTasks ?? [], repository, ref);
   if (blockedTaskIds.length > 0) {
-    throw new Error(`production board retains blocked ontology tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`);
+    throw new Error(
+      `production board retains blocked ontology tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`
+    );
   }
 
   const ontology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
@@ -158,16 +162,21 @@ export async function runProductionOntologyAcceptance(
   const issue = requiredRecord(issueData.issue, "issue trace.issue");
   const expectedIssueTitle = requiredString(issue.title, "issue trace.issue.title");
   const resolutions = requiredArray(issueData.resolutions, "issue trace.resolutions");
-  const expectedResolution = resolutions.find((value) =>
-    isRecord(value) && value.pullRequestNumber === expectedResolutionPullRequestNumber
+  const expectedResolution = resolutions.find(
+    (value) => isRecord(value) && value.pullRequestNumber === expectedResolutionPullRequestNumber
   );
   const commits = isRecord(expectedResolution) ? requiredArray(expectedResolution.commits, "issue trace.commits") : [];
   if (
-    !isRecord(expectedResolution) || commits.length === 0 ||
+    !isRecord(expectedResolution) ||
+    commits.length === 0 ||
     !commits.every((commit) => isRecord(commit) && typeof commit.sha === "string" && commit.sha.length === 40) ||
-    !isRecord(firstIssueItem) || !Array.isArray(firstIssueItem.citations) || firstIssueItem.citations.length === 0
+    !isRecord(firstIssueItem) ||
+    !Array.isArray(firstIssueItem.citations) ||
+    firstIssueItem.citations.length === 0
   ) {
-    throw new Error(`production context retrieval did not project issue #${expectedIssueNumber} to PR #${expectedResolutionPullRequestNumber} and its commits`);
+    throw new Error(
+      `production context retrieval did not project issue #${expectedIssueNumber} to PR #${expectedResolutionPullRequestNumber} and its commits`
+    );
   }
 
   if (config.causality) {
@@ -178,24 +187,34 @@ export async function runProductionOntologyAcceptance(
       { headers }
     );
     const assertions = requiredArray(assertionResponse.assertions, "ontology assertions");
-    const causalAssertion = assertions.find((value) => isRecord(value) &&
-      value.subjectNaturalKey === `github:issue:${repository}#${expectedIssueNumber}` &&
-      value.objectNaturalKey === `repo:${repository}:sha:${causingCommitSha}`
+    const causalAssertion = assertions.find(
+      (value) =>
+        isRecord(value) &&
+        value.subjectNaturalKey === `github:issue:${repository}#${expectedIssueNumber}` &&
+        value.objectNaturalKey === `repo:${repository}:sha:${causingCommitSha}`
     );
     if (!isRecord(causalAssertion)) {
-      throw new Error(`production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`);
+      throw new Error(
+        `production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`
+      );
     }
     if (config.verifyV51Fixture) {
       await reviewFixtureProposals(
-        fetchImpl, apiUrl, headers, assertions,
+        fetchImpl,
+        apiUrl,
+        headers,
+        assertions,
         new Set([requiredString(causalAssertion.id, "causality assertion id")])
       );
     }
     const causalEvidence = requiredArray(causalAssertion.evidence, "causality assertion evidence");
     const causalQualifiers = requiredRecord(causalAssertion.qualifiers, "causality assertion qualifiers");
     const causalReason = requiredString(causalQualifiers.reason, "causality assertion reason");
-    if (causalEvidence.length === 0 ||
-      (config.causality.reasonIncludes && !causalReason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase()))) {
+    if (
+      causalEvidence.length === 0 ||
+      (config.causality.reasonIncludes &&
+        !causalReason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase()))
+    ) {
       throw new Error("production causality assertion is missing its expected reason or evidence");
     }
     if (causalAssertion.status === "proposed") {
@@ -225,7 +244,9 @@ export async function runProductionOntologyAcceptance(
       await waitForCausalTrace(fetchImpl, apiUrl, headers, repository, ref, question, {
         issueNumber: expectedIssueNumber,
         causingCommitSha,
-        ...(config.causality.causingPullRequestNumber === undefined ? {} : { causingPullRequestNumber: config.causality.causingPullRequestNumber }),
+        ...(config.causality.causingPullRequestNumber === undefined
+          ? {}
+          : { causingPullRequestNumber: config.causality.causingPullRequestNumber }),
         ...(config.causality.reasonIncludes === undefined ? {} : { reasonIncludes: config.causality.reasonIncludes }),
         deadline,
         pollIntervalMs
@@ -270,20 +291,35 @@ export async function runProductionOntologyAcceptance(
     }
     nodes = requiredArray(latest.nodes, "causal ontology.latest.nodes");
     edges = requiredArray(latest.edges, "causal ontology.latest.edges");
-    const nodeById = new Map(nodes.flatMap((node) =>
-      isRecord(node) && typeof node.id === "string" ? [[node.id, node] as const] : []
-    ));
+    const nodeById = new Map(
+      nodes.flatMap((node) => (isRecord(node) && typeof node.id === "string" ? [[node.id, node] as const] : []))
+    );
     const causalEdge = edges.find((edge) => {
-      if (!isRecord(edge) || edge.predicate !== "INTRODUCED_BY" || typeof edge.source !== "string" || typeof edge.target !== "string") return false;
+      if (
+        !isRecord(edge) ||
+        edge.predicate !== "INTRODUCED_BY" ||
+        typeof edge.source !== "string" ||
+        typeof edge.target !== "string"
+      )
+        return false;
       const issueNode = nodeById.get(edge.source);
       const commitNode = nodeById.get(edge.target);
-      return issueNode?.kind === "Issue" && issueNode.description === `github:issue:${repository}#${expectedIssueNumber}` &&
-        commitNode?.kind === "Commit" && commitNode.description === `repo:${repository}:sha:${causingCommitSha}` &&
-        typeof edge.why === "string" && edge.why.trim().length > 0 &&
-        (!config.causality?.reasonIncludes || edge.why.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())) &&
-        hasEvidence(edge);
+      return (
+        issueNode?.kind === "Issue" &&
+        issueNode.description === `github:issue:${repository}#${expectedIssueNumber}` &&
+        commitNode?.kind === "Commit" &&
+        commitNode.description === `repo:${repository}:sha:${causingCommitSha}` &&
+        typeof edge.why === "string" &&
+        edge.why.trim().length > 0 &&
+        (!config.causality?.reasonIncludes ||
+          edge.why.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())) &&
+        hasEvidence(edge)
+      );
     });
-    if (!causalEdge) throw new Error("production ontology graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason");
+    if (!causalEdge)
+      throw new Error(
+        "production ontology graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason"
+      );
     if (config.verifyV51Fixture) {
       await verifyV51FixtureQueries(fetchImpl, apiUrl, headers, repository, ref);
     }
@@ -291,9 +327,14 @@ export async function runProductionOntologyAcceptance(
 
   const metrics = await apiJson(fetchImpl, `${apiUrl}/ontology/metrics`, { headers });
   const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");
-  const pendingEvents = Object.values(outboxDepth).reduce<number>((sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"), 0);
+  const pendingEvents = Object.values(outboxDepth).reduce<number>(
+    (sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"),
+    0
+  );
   if (pendingEvents !== 0 || metrics.unparsedBlobCount !== 0) {
-    throw new Error(`production ontology backlog is not empty (outbox=${pendingEvents}, unparsed=${String(metrics.unparsedBlobCount)})`);
+    throw new Error(
+      `production ontology backlog is not empty (outbox=${pendingEvents}, unparsed=${String(metrics.unparsedBlobCount)})`
+    );
   }
 
   return {
@@ -324,8 +365,8 @@ async function verifyCounterfactualAnswer(
     const answer = requiredString(context.answer, "counterfactual context.answer");
     const calls = requiredArray(context.calls, "counterfactual context.calls");
     const claims = requiredArray(context.citedClaims, "counterfactual context.citedClaims");
-    const everyClaimIsCited = claims.every((claim) =>
-      isRecord(claim) && requiredArray(claim.citations, "counterfactual claim.citations").length > 0
+    const everyClaimIsCited = claims.every(
+      (claim) => isRecord(claim) && requiredArray(claim.citations, "counterfactual claim.citations").length > 0
     );
     const evaluation = isRecord(context.counterfactual) ? context.counterfactual : undefined;
     const remainingPaths = evaluation && Array.isArray(evaluation.remainingPaths) ? evaluation.remainingPaths : [];
@@ -333,9 +374,20 @@ async function verifyCounterfactualAnswer(
     const honestLanguage = expectRemainingPaths
       ? /alternative|remain/i.test(answer)
       : /every currently known reviewed path|no known path/i.test(answer);
-    if (context.operation === "counterfactual" && honestLanguage && remainingMatches && claims.length > 0 &&
-      everyClaimIsCited && calls.length === 1 && isRecord(calls[0]) && calls[0].template === "counterfactual" &&
-      evaluation?.basis === "graph-derived" && Array.isArray(evaluation.removedPaths) && evaluation.removedPaths.length > 0) return;
+    if (
+      context.operation === "counterfactual" &&
+      honestLanguage &&
+      remainingMatches &&
+      claims.length > 0 &&
+      everyClaimIsCited &&
+      calls.length === 1 &&
+      isRecord(calls[0]) &&
+      calls[0].template === "counterfactual" &&
+      evaluation?.basis === "graph-derived" &&
+      Array.isArray(evaluation.removedPaths) &&
+      evaluation.removedPaths.length > 0
+    )
+      return;
     if (attempt < 29) await delay(2_000);
   }
   throw new Error(`production counterfactual context is unsupported or uncited for: ${question}`);
@@ -349,12 +401,26 @@ async function reviewFixtureProposals(
   excludedIds: ReadonlySet<string>
 ): Promise<void> {
   const reviewablePredicates = new Set([
-    "IMPLEMENTS", "DOCUMENTED_BY", "REFERENCES", "OWNED_BY", "MOVED_FROM",
-    "LIKELY_AFFECTS", "INTRODUCED_BY", "RESOLVED_BY", "INCIDENT_IMPACTS"
+    "IMPLEMENTS",
+    "DOCUMENTED_BY",
+    "REFERENCES",
+    "OWNED_BY",
+    "MOVED_FROM",
+    "LIKELY_AFFECTS",
+    "INTRODUCED_BY",
+    "RESOLVED_BY",
+    "INCIDENT_IMPACTS"
   ]);
   for (const value of assertions) {
-    if (!isRecord(value) || value.status !== "proposed" || typeof value.id !== "string" || excludedIds.has(value.id) ||
-      typeof value.predicate !== "string" || !reviewablePredicates.has(value.predicate)) continue;
+    if (
+      !isRecord(value) ||
+      value.status !== "proposed" ||
+      typeof value.id !== "string" ||
+      excludedIds.has(value.id) ||
+      typeof value.predicate !== "string" ||
+      !reviewablePredicates.has(value.predicate)
+    )
+      continue;
     if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
       throw new Error(`production v5.1 proposal ${value.id} has no review evidence`);
     }
@@ -362,7 +428,9 @@ async function reviewFixtureProposals(
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
-        type: "review_assertion", assertionId: value.id, decision: "accept",
+        type: "review_assertion",
+        assertionId: value.id,
+        decision: "accept",
         reason: "production v5.1 fixture evidence verified"
       })
     });
@@ -376,19 +444,27 @@ async function verifyV51FixtureQueries(
   repository: string,
   ref: string
 ): Promise<void> {
-  const ask = (question: string, operation?: "counterfactual") => apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
-    method: "POST",
-    headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, question, ...(operation ? { operation } : {}) })
-  });
+  const ask = (question: string, operation?: "counterfactual") =>
+    apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ repository, ref, question, ...(operation ? { operation } : {}) })
+    });
 
   const implementationContext = await ask("Which symbols implement feature named Administrator resource deletion?");
   const featureItems = itemsForTemplate(implementationContext, "feature_trace");
-  const implementations = featureItems.filter((item) => isRecord(item) && isRecord(item.data) &&
-    item.data.predicate === "IMPLEMENTS" && isRecord(item.data.related) &&
-    (item.data.related.kind === "File" || item.data.related.kind === "Symbol"));
+  const implementations = featureItems.filter(
+    (item) =>
+      isRecord(item) &&
+      isRecord(item.data) &&
+      item.data.predicate === "IMPLEMENTS" &&
+      isRecord(item.data.related) &&
+      (item.data.related.kind === "File" || item.data.related.kind === "Symbol")
+  );
   if (implementations.length < 2 || !implementations.every(hasCitations)) {
-    throw new Error("production v5.1 context did not return both cited Administrator resource deletion implementations");
+    throw new Error(
+      "production v5.1 context did not return both cited Administrator resource deletion implementations"
+    );
   }
 
   const packageContext = await ask("What package does the Administrator resource deletion implementation depend on?");
@@ -403,53 +479,78 @@ async function verifyV51FixtureQueries(
   );
   const packageEvaluation = requiredRecord(packageCounterfactual.counterfactual, "v5.1 package counterfactual");
   const removedPackagePaths = requiredArray(packageEvaluation.removedPaths, "v5.1 package removedPaths");
-  if (packageEvaluation.basis !== "graph-derived" || removedPackagePaths.length === 0 ||
-    !removedPackagePaths.some((path) => pathHasNode(path, "Package", "zod"))) {
+  if (
+    packageEvaluation.basis !== "graph-derived" ||
+    removedPackagePaths.length === 0 ||
+    !removedPackagePaths.some((path) => pathHasNode(path, "Package", "zod"))
+  ) {
     throw new Error("production v5.1 package counterfactual did not remove a graph-derived implementation path");
   }
 
-  const moveContext = await ask("Did the renamed symbol previously implement the same Administrator resource deletion feature?");
+  const moveContext = await ask(
+    "Did the renamed symbol previously implement the same Administrator resource deletion feature?"
+  );
   const moveTrace = causalTraceFor(moveContext, "renamed implementation");
-  if (!tracePaths(moveTrace.movedFrom).some((path) =>
-    pathHasNode(path, "File", "legacy-admin-deletion") || pathHasNode(path, "Symbol", "canAdministratorDeleteViaLegacy")
-  )) throw new Error("production v5.1 context did not preserve reviewed MOVED_FROM continuity");
+  if (
+    !tracePaths(moveTrace.movedFrom).some(
+      (path) =>
+        pathHasNode(path, "File", "legacy-admin-deletion") ||
+        pathHasNode(path, "Symbol", "canAdministratorDeleteViaLegacy")
+    )
+  )
+    throw new Error("production v5.1 context did not preserve reviewed MOVED_FROM continuity");
 
   const incidentCauseContext = await ask("Which deployment introduced incident INC-2026-42, and why?");
   const incidentCauseTrace = causalTraceFor(incidentCauseContext, "incident cause");
-  if (!tracePaths(incidentCauseTrace.causes).some((path) => pathHasNode(path, "Deployment", "5535506368") && hasPathWhy(path))) {
+  if (
+    !tracePaths(incidentCauseTrace.causes).some(
+      (path) => pathHasNode(path, "Deployment", "5535506368") && hasPathWhy(path)
+    )
+  ) {
     throw new Error("production v5.1 context did not return the cited deployment that introduced INC-2026-42");
   }
 
   const incidentImpactContext = await ask("Which service and feature did incident INC-2026-42 impact?");
   const incidentImpactTrace = causalTraceFor(incidentImpactContext, "incident impact");
   const impacts = tracePaths(incidentImpactTrace.affectedEntities);
-  if (!impacts.some((path) => pathHasNode(path, "Service", "atlas-access-api")) ||
-    !impacts.some((path) => pathHasNode(path, "Feature", "Administrator resource deletion"))) {
+  if (
+    !impacts.some((path) => pathHasNode(path, "Service", "atlas-access-api")) ||
+    !impacts.some((path) => pathHasNode(path, "Feature", "Administrator resource deletion"))
+  ) {
     throw new Error("production v5.1 context did not return both the impacted service and feature");
   }
 
   const incidentResolutionContext = await ask("Which later deployment or PR resolved incident INC-2026-42?");
   const incidentResolutionTrace = causalTraceFor(incidentResolutionContext, "incident resolution");
-  if (!tracePaths(incidentResolutionTrace.resolutions).some((path) =>
-    pathHasNode(path, "Deployment", "5535522601") || pathHasNode(path, "PullRequest", "#16")
-  )) throw new Error("production v5.1 context did not return the later incident resolution");
+  if (
+    !tracePaths(incidentResolutionTrace.resolutions).some(
+      (path) => pathHasNode(path, "Deployment", "5535522601") || pathHasNode(path, "PullRequest", "#16")
+    )
+  )
+    throw new Error("production v5.1 context did not return the later incident resolution");
 
   const derivedContext = await ask("What issue was derived for the unlinked fixing PR #11?");
   const derivedTrace = causalTraceFor(derivedContext, "derived issue");
   const derivedRoot = requiredRecord(derivedTrace.root, "v5.1 derived issue root");
-  if (derivedRoot.kind !== "Issue" || !tracePaths(derivedTrace.resolutions).some((path) => pathHasNode(path, "PullRequest", "#11"))) {
+  if (
+    derivedRoot.kind !== "Issue" ||
+    !tracePaths(derivedTrace.resolutions).some((path) => pathHasNode(path, "PullRequest", "#11"))
+  ) {
     throw new Error("production v5.1 context did not resolve PR #11 through a cited derived Issue");
   }
 }
 
 function itemsForTemplate(context: Record<string, unknown>, template: string): unknown[] {
-  const call = requiredArray(context.calls, "v5.1 context.calls").find((value) => isRecord(value) && value.template === template);
+  const call = requiredArray(context.calls, "v5.1 context.calls").find(
+    (value) => isRecord(value) && value.template === template
+  );
   return isRecord(call) ? requiredArray(call.items, `v5.1 ${template}.items`) : [];
 }
 
 function causalTraceFor(context: Record<string, unknown>, capability: string): Record<string, unknown> {
   const item = itemsForTemplate(context, "causal_trace")[0];
-  if (!isRecord(item) || !hasCitations(item)) throw new Error(`production v5.1 ${capability} has no cited causal trace`);
+  if (!isRecord(item) || !hasCitations(item))
+    throw new Error(`production v5.1 ${capability} has no cited causal trace`);
   return requiredRecord(item.data, `v5.1 ${capability}.data`);
 }
 
@@ -459,8 +560,14 @@ function tracePaths(value: unknown): Record<string, unknown>[] {
 
 function pathHasNode(path: unknown, kind: string, text: string): boolean {
   if (!isRecord(path) || !Array.isArray(path.nodes)) return false;
-  return path.nodes.some((node) => isRecord(node) && node.kind === kind &&
-    `${String(node.label ?? "")} ${String(node.description ?? "")} ${String(node.id ?? "")}`.toLowerCase().includes(text.toLowerCase()));
+  return path.nodes.some(
+    (node) =>
+      isRecord(node) &&
+      node.kind === kind &&
+      `${stringValue(node.label)} ${stringValue(node.description)} ${stringValue(node.id)}`
+        .toLowerCase()
+        .includes(text.toLowerCase())
+  );
 }
 
 function hasPathWhy(path: unknown): boolean {
@@ -473,7 +580,13 @@ function hasCitations(value: unknown): boolean {
 
 export function blockedOntologyTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
   return tasks.flatMap((task) => {
-    if (!isRecord(task) || task.status !== "blocked" || typeof task.type !== "string" || !task.type.startsWith("ontology_")) return [];
+    if (
+      !isRecord(task) ||
+      task.status !== "blocked" ||
+      typeof task.type !== "string" ||
+      !task.type.startsWith("ontology_")
+    )
+      return [];
     const metadata = isRecord(task.metadata) ? task.metadata : {};
     return metadata.repository === repository && metadata.ref === ref && typeof task.id === "string" ? [task.id] : [];
   });
@@ -508,20 +621,30 @@ async function waitForCausalTrace(
       if (!isRecord(item) || !isRecord(item.data)) return false;
       const issue = isRecord(item.data.issue) ? item.data.issue : {};
       if (issue.number !== expected.issueNumber) return false;
-      const causes = Array.isArray(item.data.introducedBy) ? item.data.introducedBy : [];
-      const cause = causes.find((value) => isRecord(value) && value.sha === expected.causingCommitSha);
+      const causes = Array.isArray(item.data.introducedBy) ? item.data.introducedBy.filter(isRecord) : [];
+      const cause = causes.find((value) => value.sha === expected.causingCommitSha);
       if (!isRecord(cause)) return false;
       if (typeof cause.why !== "string" || !cause.why.trim()) return false;
-      if (expected.reasonIncludes && !cause.why.toLowerCase().includes(expected.reasonIncludes.toLowerCase())) return false;
+      if (expected.reasonIncludes && !cause.why.toLowerCase().includes(expected.reasonIncludes.toLowerCase()))
+        return false;
       if (!Array.isArray(cause.evidence) || cause.evidence.length === 0) return false;
       if (typeof cause.evidenceCommitSha !== "string" || !/^[a-f0-9]{40}$/i.test(cause.evidenceCommitSha)) return false;
       if (expected.causingPullRequestNumber) {
         const pullRequests = Array.isArray(cause.pullRequests) ? cause.pullRequests : [];
-        if (!pullRequests.some((pullRequest) => isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber)) return false;
+        if (
+          !pullRequests.some(
+            (pullRequest) => isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber
+          )
+        )
+          return false;
       }
       const citations = Array.isArray(item.citations) ? item.citations : [];
-      return citations.some((citation) => isRecord(citation) && citation.kind === "assertion") &&
-        citations.some((citation) => isRecord(citation) && citation.kind === "code" && citation.commitSha === cause.evidenceCommitSha);
+      return (
+        citations.some((citation) => isRecord(citation) && citation.kind === "assertion") &&
+        citations.some(
+          (citation) => isRecord(citation) && citation.kind === "code" && citation.commitSha === cause.evidenceCommitSha
+        )
+      );
     });
     if (matched) return;
     await delay(expected.pollIntervalMs);
@@ -560,7 +683,10 @@ async function runFollowupOntologyBuild(
     }
     if (status === "done") {
       const blocked = blockedOntologyTaskIds(tasks, repository, ref);
-      if (blocked.length > 0) throw new Error(`production board retains blocked ontology tasks for ${repository}@${ref}: ${blocked.join(", ")}`);
+      if (blocked.length > 0)
+        throw new Error(
+          `production board retains blocked ontology tasks for ${repository}@${ref}: ${blocked.join(", ")}`
+        );
       return;
     }
     if (TERMINAL_FAILURES.has(status)) {
@@ -602,25 +728,32 @@ async function workflowFailureSummary(
   for (const task of tasks) {
     if (!isRecord(task) || typeof task.id !== "string") continue;
     if (task.id !== rootTaskId && task.parentTaskId !== rootTaskId) continue;
-    taskLabels.set(task.id, task.id === rootTaskId
-      ? "root"
-      : typeof task.type === "string" && task.type ? task.type : "child");
+    taskLabels.set(
+      task.id,
+      task.id === rootTaskId ? "root" : typeof task.type === "string" && task.type ? task.type : "child"
+    );
   }
   const events = await apiArray(fetchImpl, `${apiUrl}/events`, { headers });
   const failures = events.flatMap((event) => {
     if (!isRecord(event) || typeof event.taskId !== "string" || !taskLabels.has(event.taskId)) return [];
     if (typeof event.type !== "string" || !event.type.endsWith(".failed")) return [];
     const payload = isRecord(event.payload) ? event.payload : {};
-    const reason = typeof payload.reason === "string" && payload.reason.trim()
-      ? payload.reason.trim().replace(/\s+/g, " ").slice(0, 800)
-      : event.type;
+    const reason =
+      typeof payload.reason === "string" && payload.reason.trim()
+        ? payload.reason.trim().replace(/\s+/g, " ").slice(0, 800)
+        : event.type;
     return [`${taskLabels.get(event.taskId)}: ${reason}`];
   });
   return failures.length > 0 ? `; failures: ${failures.slice(-3).join(" | ")}` : "";
 }
 
 function hasEvidence(value: unknown): boolean {
-  return isRecord(value) && Array.isArray(value.evidence) && value.evidence.length > 0 && value.evidence.every((item) => typeof item === "string" && item.length > 0);
+  return (
+    isRecord(value) &&
+    Array.isArray(value.evidence) &&
+    value.evidence.length > 0 &&
+    value.evidence.every((item) => typeof item === "string" && item.length > 0)
+  );
 }
 
 function hasCitedItems(value: unknown): boolean {
@@ -648,7 +781,8 @@ function requiredString(value: unknown, field: string): string {
 }
 
 function requiredNonNegativeNumber(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) throw new Error(`${field} must be a non-negative number`);
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    throw new Error(`${field} must be a non-negative number`);
   return value;
 }
 
@@ -665,6 +799,10 @@ function requiredFullGitSha(value: string, field: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function delay(ms: number): Promise<void> {
@@ -688,13 +826,15 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ...(expectedIssueNumber === undefined ? {} : { expectedIssueNumber }),
       ...(expectedResolutionPullRequestNumber === undefined ? {} : { expectedResolutionPullRequestNumber }),
       ...(verifyV51Fixture ? { verifyV51Fixture: true } : {}),
-      ...(causingCommitSha ? {
-        causality: {
-          causingCommitSha,
-          ...(causingPullRequestNumber === undefined ? {} : { causingPullRequestNumber }),
-          ...(reasonIncludes ? { reasonIncludes } : {})
-        }
-      } : {})
+      ...(causingCommitSha
+        ? {
+            causality: {
+              causingCommitSha,
+              ...(causingPullRequestNumber === undefined ? {} : { causingPullRequestNumber }),
+              ...(reasonIncludes ? { reasonIncludes } : {})
+            }
+          }
+        : {})
     });
     const message = `Production ontology accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`;
     await writeTerminationMessage(message);
@@ -728,14 +868,19 @@ async function writeTerminationMessage(message: string): Promise<void> {
 
 function summarizeWorkflowTasks(tasks: readonly unknown[], rootTaskId: string): string {
   const related = tasks
-    .filter((value): value is Record<string, unknown> => isRecord(value) && (value.id === rootTaskId || value.parentTaskId === rootTaskId))
+    .filter(
+      (value): value is Record<string, unknown> =>
+        isRecord(value) && (value.id === rootTaskId || value.parentTaskId === rootTaskId)
+    )
     .sort((left, right) => taskSortKey(left, rootTaskId).localeCompare(taskSortKey(right, rootTaskId)));
   if (related.length === 0) return "no related tasks";
-  return related.map((task) => {
-    const label = task.id === rootTaskId ? "root" : typeof task.type === "string" && task.type ? task.type : "child";
-    const status = typeof task.status === "string" && task.status ? task.status : "unknown";
-    return `${label}=${status}`;
-  }).join(", ");
+  return related
+    .map((task) => {
+      const label = task.id === rootTaskId ? "root" : typeof task.type === "string" && task.type ? task.type : "child";
+      const status = typeof task.status === "string" && task.status ? task.status : "unknown";
+      return `${label}=${status}`;
+    })
+    .join(", ");
 }
 
 function taskSortKey(task: Record<string, unknown>, rootTaskId: string): string {
@@ -745,5 +890,5 @@ function taskSortKey(task: Record<string, unknown>, rootTaskId: string): string 
     ontology_assert: "2-assert",
     ontology_project: "3-project"
   };
-  return typeof task.type === "string" ? order[task.type] ?? `9-${task.type}` : "9-child";
+  return typeof task.type === "string" ? (order[task.type] ?? `9-${task.type}`) : "9-child";
 }

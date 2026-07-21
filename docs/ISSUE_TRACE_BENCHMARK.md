@@ -28,11 +28,11 @@ The scaled fixture contained one graph generation with 5,000 Issues, 5,000 Pull 
 
 ## Results
 
-| Dataset | Path | p50 | p95 | max |
-| --- | --- | ---: | ---: | ---: |
-| Real validation repository (94 nodes, 163 edges) | JSON cache | 0.7 ms | 1.8 ms | 5.5 ms |
-| Real validation repository (94 nodes, 163 edges) | Direct relational traversal | 2.2 ms | 5.9 ms | 8.0 ms |
-| Synthetic scale (5,000 issues, 15,000 nodes, 20,000 edges) | JSON cache | 6.7 ms | 9.2 ms | 14.6 ms |
+| Dataset                                                    | Path                        |     p50 |     p95 |     max |
+| ---------------------------------------------------------- | --------------------------- | ------: | ------: | ------: |
+| Real validation repository (94 nodes, 163 edges)           | JSON cache                  |  0.7 ms |  1.8 ms |  5.5 ms |
+| Real validation repository (94 nodes, 163 edges)           | Direct relational traversal |  2.2 ms |  5.9 ms |  8.0 ms |
+| Synthetic scale (5,000 issues, 15,000 nodes, 20,000 edges) | JSON cache                  |  6.7 ms |  9.2 ms | 14.6 ms |
 | Synthetic scale (5,000 issues, 15,000 nodes, 20,000 edges) | Direct relational traversal | 21.1 ms | 35.7 ms | 43.7 ms |
 
 The initial unindexed full-graph direct implementation measured 855.2 ms p95 at synthetic scale. Narrowing traversal to the selected issue neighborhood and adding relational indexes reduced p95 to 35.7 ms. The optimized direct path is slower than denormalized JSON, but it avoids duplicated projection logic and remains well within the target.

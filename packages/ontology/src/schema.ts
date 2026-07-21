@@ -35,7 +35,20 @@ export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
         properties: {
           source: { type: "string" },
           target: { type: "string" },
-          predicate: { type: "string", enum: ["IMPLEMENTS", "DOCUMENTED_BY", "REFERENCES", "OWNED_BY", "MOVED_FROM", "LIKELY_AFFECTS", "INTRODUCED_BY", "RESOLVED_BY", "INCIDENT_IMPACTS"] },
+          predicate: {
+            type: "string",
+            enum: [
+              "IMPLEMENTS",
+              "DOCUMENTED_BY",
+              "REFERENCES",
+              "OWNED_BY",
+              "MOVED_FROM",
+              "LIKELY_AFFECTS",
+              "INTRODUCED_BY",
+              "RESOLVED_BY",
+              "INCIDENT_IMPACTS"
+            ]
+          },
           plane: { type: "string", enum: ["knowledge"] },
           confidence: { type: "number", minimum: 0, maximum: 1 },
           why: { type: "string", minLength: 1 },

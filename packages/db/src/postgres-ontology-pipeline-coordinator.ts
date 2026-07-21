@@ -81,7 +81,10 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   async createBuild(request: OntologyPipelineBuildRequest): Promise<OntologyBuildRecord> {
     await this.initialize();
     const client = await this.pool.connect();
-    const id = stableId("ontology-job", `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`);
+    const id = stableId(
+      "ontology-job",
+      `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
+    );
     try {
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
@@ -98,7 +101,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
            order by created_at desc limit 1`,
           [request.tenantId, request.repository, request.ref]
         );
-        if (latest.rows[0] && (latest.rows[0].metadata as Record<string, unknown>).githubHeadSha === request.dedupeHeadSha) {
+        if (latest.rows[0] && latest.rows[0].metadata.githubHeadSha === request.dedupeHeadSha) {
           await client.query("commit");
           return buildRecord(latest.rows[0]);
         }
@@ -134,18 +137,42 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         `insert into jina_board.workflows
           (id,tenant_id,repository,ref_name,request_key,status,snapshot_first,metadata,created_at,updated_at)
          values ($1,$2,$3,$4,$5,'queued',$6,$7::jsonb,$8,$8) returning *`,
-        [id, request.tenantId, request.repository, request.ref, request.requestKey, request.snapshotFirst,
-          JSON.stringify(request.metadata ?? {}), request.createdAt]
+        [
+          id,
+          request.tenantId,
+          request.repository,
+          request.ref,
+          request.requestKey,
+          request.snapshotFirst,
+          JSON.stringify(request.metadata ?? {}),
+          request.createdAt
+        ]
       );
-      await insertBoardEvent(client, request.tenantId, id, "task.created", request.createdAt, { type: "ontology_build" });
+      await insertBoardEvent(client, request.tenantId, id, "task.created", request.createdAt, {
+        type: "ontology_build"
+      });
       const stages = plannedStages(id, request);
       for (const stage of stages) {
         await client.query(
           `insert into jina_board.tasks
             (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,attempt,created_at,updated_at)
            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,0,$14,$14)`,
-          [stage.id, id, request.tenantId, request.repository, request.ref, request.requestKey, stage.phase, stage.stage,
-            stage.topic, stage.status, stage.priority, stage.ordinal, JSON.stringify(stage.metadata), request.createdAt]
+          [
+            stage.id,
+            id,
+            request.tenantId,
+            request.repository,
+            request.ref,
+            request.requestKey,
+            stage.phase,
+            stage.stage,
+            stage.topic,
+            stage.status,
+            stage.priority,
+            stage.ordinal,
+            JSON.stringify(stage.metadata),
+            request.createdAt
+          ]
         );
         await insertBoardEvent(client, request.tenantId, stage.id, "task.created", request.createdAt, {
           type: `ontology_${stage.stage}`,
@@ -163,10 +190,11 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
           );
         }
         for (const prerequisite of ontologyStagePrerequisites(stage, request.snapshotFirst)) {
-          const dependency = stages.find((candidate) =>
-            candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
+          const dependency = stages.find(
+            (candidate) => candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
           );
-          if (!dependency) throw new Error(`missing ontology stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
+          if (!dependency)
+            throw new Error(`missing ontology stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
           await client.query(
             `insert into jina_board.dependencies
               (workflow_id,task_id,depends_on_task_id,relationship,required,blocks_parent_completion,created_at)
@@ -265,13 +293,17 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
       );
       const row = leased.rows[0]!;
       await insertBoardEvent(client, row.tenant_id, row.id, "task.transitioned", input.now, {
-        fromStatus: "queued", toStatus: "in_progress", attempt: row.attempt, workerId: input.workerId,
+        fromStatus: "queued",
+        toStatus: "in_progress",
+        attempt: row.attempt,
+        workerId: input.workerId,
         startedAt: input.now
       });
-      await client.query(
-        `update jina_board.workflows set status=$2,updated_at=$3 where id=$1`,
-        [row.build_id, row.phase === "history" ? "enriching" : "in_progress", input.now]
-      );
+      await client.query(`update jina_board.workflows set status=$2,updated_at=$3 where id=$1`, [
+        row.build_id,
+        row.phase === "history" ? "enriching" : "in_progress",
+        input.now
+      ]);
       await insertBoardEvent(client, row.tenant_id, row.build_id, "task.updated", input.now, {
         workflowStatus: row.phase === "history" ? "enriching" : "in_progress"
       });
@@ -324,12 +356,15 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         await client.query("rollback");
         return false;
       }
-      await client.query(
-        `update jina_board.workflows set status=$2,updated_at=$3 where id=$1`,
-        [stage.build_id, stage.phase === "history" ? "enriching" : "in_progress", input.now]
-      );
+      await client.query(`update jina_board.workflows set status=$2,updated_at=$3 where id=$1`, [
+        stage.build_id,
+        stage.phase === "history" ? "enriching" : "in_progress",
+        input.now
+      ]);
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
-        fromStatus: "in_progress", toStatus: "queued", reason: input.reason,
+        fromStatus: "in_progress",
+        toStatus: "queued",
+        reason: input.reason,
         attempt: stage.attempt,
         startedAt: stage.started_at?.toISOString() ?? input.now,
         completedAt: input.now,
@@ -402,7 +437,9 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         [stage.id, input.outcome, JSON.stringify(metadata), input.now]
       );
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
-        fromStatus: "in_progress", toStatus: input.outcome, attempt: stage.attempt,
+        fromStatus: "in_progress",
+        toStatus: input.outcome,
+        attempt: stage.attempt,
         startedAt: stage.started_at?.toISOString() ?? input.now,
         completedAt: input.now,
         durationMs: Math.max(0, Date.parse(input.now) - (stage.started_at?.getTime() ?? Date.parse(input.now))),
@@ -414,8 +451,13 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
            where build_id=$1 and status='triage'`,
           [stage.build_id, input.now]
         );
-        await client.query("update jina_board.workflows set status='failed',updated_at=$2 where id=$1", [stage.build_id, input.now]);
-        await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.transitioned", input.now, { toStatus: "failed" });
+        await client.query("update jina_board.workflows set status='failed',updated_at=$2 where id=$1", [
+          stage.build_id,
+          input.now
+        ]);
+        await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.transitioned", input.now, {
+          toStatus: "failed"
+        });
       } else {
         const ready = await client.query<StageRow>(
           `with ready as (
@@ -441,7 +483,8 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         );
         for (const candidate of ready.rows) {
           await insertBoardEvent(client, candidate.tenant_id, candidate.id, "task.transitioned", input.now, {
-            fromStatus: "triage", toStatus: "queued"
+            fromStatus: "triage",
+            toStatus: "queued"
           });
         }
         const state = await client.query<{
@@ -467,10 +510,11 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
             : current.snapshot_first && current.snapshot_published
               ? "enriching"
               : "in_progress";
-        await client.query(
-          "update jina_board.workflows set status=$2,updated_at=$3 where id=$1",
-          [stage.build_id, workflowStatus, input.now]
-        );
+        await client.query("update jina_board.workflows set status=$2,updated_at=$3 where id=$1", [
+          stage.build_id,
+          workflowStatus,
+          input.now
+        ]);
         await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.updated", input.now, {
           workflowStatus,
           queuedStageIds: ready.rows.map((candidate) => candidate.id)
@@ -515,13 +559,13 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
     // push an authorized repository's history out of the window.
     const builds = filter?.repositories
       ? await this.pool.query<BuildRow>(
-        "select * from jina_board.workflows where tenant_id=$1 and repository=any($2::text[]) order by created_at desc,id limit 200",
-        [tenantId, [...filter.repositories]]
-      )
+          "select * from jina_board.workflows where tenant_id=$1 and repository=any($2::text[]) order by created_at desc,id limit 200",
+          [tenantId, [...filter.repositories]]
+        )
       : await this.pool.query<BuildRow>(
-        "select * from jina_board.workflows where tenant_id=$1 order by created_at desc,id limit 200",
-        [tenantId]
-      );
+          "select * from jina_board.workflows where tenant_id=$1 order by created_at desc,id limit 200",
+          [tenantId]
+        );
     const stages = await this.pool.query<StageRow>(
       "select * from jina_board.tasks where tenant_id=$1 and build_id=any($2::text[]) order by build_id,ordinal",
       [tenantId, builds.rows.map((build) => build.id)]
@@ -543,13 +587,13 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
     // failures.
     const events = filter?.taskIds
       ? await this.pool.query<EventRow>(
-        "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 and task_id=any($2::text[]) order by id desc limit 1000",
-        [tenantId, [...filter.taskIds]]
-      )
+          "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 and task_id=any($2::text[]) order by id desc limit 1000",
+          [tenantId, [...filter.taskIds]]
+        )
       : await this.pool.query<EventRow>(
-        "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 order by id desc limit 1000",
-        [tenantId]
-      );
+          "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 order by id desc limit 1000",
+          [tenantId]
+        );
     return events.rows.reverse().map((event) => ({
       id: `task-board-event-${event.id}`,
       taskId: event.task_id,
@@ -608,7 +652,10 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   }
 }
 
-function plannedStages(buildId: string, request: OntologyPipelineBuildRequest): Array<{
+function plannedStages(
+  buildId: string,
+  request: OntologyPipelineBuildRequest
+): {
   readonly id: string;
   readonly phase: "snapshot" | "history";
   readonly stage: "ingest" | "assert" | "project";
@@ -617,9 +664,12 @@ function plannedStages(buildId: string, request: OntologyPipelineBuildRequest): 
   readonly priority: number;
   readonly ordinal: number;
   readonly metadata: Readonly<Record<string, unknown>>;
-}> {
+}[] {
   const phases = request.snapshotFirst
-    ? [{ phase: "snapshot" as const, priority: 100 }, { phase: "history" as const, priority: 10 }]
+    ? [
+        { phase: "snapshot" as const, priority: 100 },
+        { phase: "history" as const, priority: 10 }
+      ]
     : [{ phase: "history" as const, priority: 50 }];
   return phases.flatMap(({ phase, priority }, phaseIndex) =>
     (["ingest", "assert", "project"] as const).map((stage, stageIndex) => ({
@@ -627,7 +677,7 @@ function plannedStages(buildId: string, request: OntologyPipelineBuildRequest): 
       phase,
       stage,
       topic: `run-ontology-${stage}` as OntologyWorkerTopic,
-      status: phaseIndex === 0 && stageIndex === 0 ? "queued" as const : "triage" as const,
+      status: phaseIndex === 0 && stageIndex === 0 ? ("queued" as const) : ("triage" as const),
       priority,
       ordinal: phaseIndex * 3 + stageIndex,
       metadata: {
@@ -636,7 +686,7 @@ function plannedStages(buildId: string, request: OntologyPipelineBuildRequest): 
         repository: request.repository,
         ref: request.ref,
         requestKey: request.requestKey,
-        pipelinePhase: phase,
+        pipelinePhase: phase
       }
     }))
   );
@@ -697,7 +747,12 @@ function leaseRecord(row: StageRow): OntologyStageLease {
 
 function claimRecord(row: StageRow): OntologyStageClaim {
   return {
-    message: { id: row.id, topic: row.topic, leaseId: row.lease_id!, leaseExpiresAt: row.lease_expires_at!.toISOString() },
+    message: {
+      id: row.id,
+      topic: row.topic,
+      leaseId: row.lease_id!,
+      leaseExpiresAt: row.lease_expires_at!.toISOString()
+    },
     task: { id: row.id, type: `ontology_${row.stage}`, status: "in_progress", metadata: row.metadata }
   };
 }

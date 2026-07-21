@@ -4,13 +4,13 @@ Jina accepts real GitHub App webhook deliveries at `POST /webhooks/github`. The 
 
 ## Current behavior
 
-| GitHub event | Action | Board result |
-| --- | --- | --- |
-| Push | non-deleted branch head | Creates the existing `ontology_build`/ingest/assert/project tree; an unchanged latest head deduplicates redelivery, while every real ref transition supersedes stale work |
-| Pull request | `opened` | Creates the existing root review, review-pass, and publication tasks |
-| Pull request | `synchronize` | Supersedes the old head epoch and creates the next review task graph |
-| Issues | `opened` | Creates one manual `issue_triage` card |
-| Everything else | Any | Acknowledged and ignored |
+| GitHub event    | Action                  | Board result                                                                                                                                                              |
+| --------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Push            | non-deleted branch head | Creates the existing `ontology_build`/ingest/assert/project tree; an unchanged latest head deduplicates redelivery, while every real ref transition supersedes stale work |
+| Pull request    | `opened`                | Creates the existing root review, review-pass, and publication tasks                                                                                                      |
+| Pull request    | `synchronize`           | Supersedes the old head epoch and creates the next review task graph                                                                                                      |
+| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                                                    |
+| Everything else | Any                     | Acknowledged and ignored                                                                                                                                                  |
 
 Issue triage deliberately has no automatic agent runner yet. It stays in `triage` until a user acts on it.
 

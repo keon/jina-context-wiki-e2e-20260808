@@ -133,7 +133,10 @@ export function createOntologyGraph(input: {
     .map((edge) => ({
       ...edge,
       predicate: normalizePredicate(edge.predicate),
-      id: stableId("edge", `${edge.source}:${edge.predicate}:${edge.target}:${edge.plane}:${canonicalGraphJson(edge.qualifiers ?? {})}:${edge.why ?? ""}`)
+      id: stableId(
+        "edge",
+        `${edge.source}:${edge.predicate}:${edge.target}:${edge.plane}:${canonicalGraphJson(edge.qualifiers ?? {})}:${edge.why ?? ""}`
+      )
     }));
 
   if (!nodes.some((node) => node.kind === "Repository")) {
@@ -171,13 +174,21 @@ function canonicalGraphJson(value: unknown): string {
   }
   if (value !== null && typeof value === "object") {
     const record = value as Record<string, unknown>;
-    return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalGraphJson(record[key])}`).join(",")}}`;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalGraphJson(record[key])}`)
+      .join(",")}}`;
   }
   return value === undefined ? "undefined" : JSON.stringify(value);
 }
 
 export function parseGeneratedOntology(value: unknown): GeneratedOntology {
-  if (!isRecord(value) || typeof value.summary !== "string" || !Array.isArray(value.nodes) || !Array.isArray(value.edges)) {
+  if (
+    !isRecord(value) ||
+    typeof value.summary !== "string" ||
+    !Array.isArray(value.nodes) ||
+    !Array.isArray(value.edges)
+  ) {
     throw new Error("Codex returned an invalid ontology document");
   }
 
@@ -197,32 +208,54 @@ export function sourceBackedModelEntityIds(evidence: readonly OntologySourceEvid
     if (!isRecord(item.payload) || item.payload.removed === true) continue;
     const payload = item.payload;
     const repository = typeof payload.repository === "string" ? payload.repository : item.repository;
-    if (payload.kind === "package_manifest" && typeof payload.ecosystem === "string" && Array.isArray(payload.dependencies)) {
+    if (
+      payload.kind === "package_manifest" &&
+      typeof payload.ecosystem === "string" &&
+      Array.isArray(payload.dependencies)
+    ) {
       for (const dependency of payload.dependencies) {
         if (isRecord(dependency) && typeof dependency.name === "string") {
           ids.add(`package:${payload.ecosystem.toLowerCase()}:${dependency.name.toLowerCase()}`);
         }
       }
     }
-    if (payload.kind === "service_definition" && typeof payload.source === "string" && typeof payload.externalId === "string") {
+    if (
+      payload.kind === "service_definition" &&
+      typeof payload.source === "string" &&
+      typeof payload.externalId === "string"
+    ) {
       ids.add(`service:${payload.source}:${payload.externalId}`);
       for (const dependency of Array.isArray(payload.dependsOnServices) ? payload.dependsOnServices : []) {
-        if (isRecord(dependency) && typeof dependency.source === "string" && typeof dependency.externalId === "string") {
+        if (
+          isRecord(dependency) &&
+          typeof dependency.source === "string" &&
+          typeof dependency.externalId === "string"
+        ) {
           ids.add(`service:${dependency.source}:${dependency.externalId}`);
         }
       }
     }
     if (payload.kind === "deployment" && typeof payload.source === "string" && typeof payload.externalId === "string") {
       ids.add(`deployment:${payload.source}:${payload.externalId}`);
-      if (isRecord(payload.service) && typeof payload.service.source === "string" && typeof payload.service.externalId === "string") {
+      if (
+        isRecord(payload.service) &&
+        typeof payload.service.source === "string" &&
+        typeof payload.service.externalId === "string"
+      ) {
         ids.add(`service:${payload.service.source}:${payload.service.externalId}`);
       }
     }
     if (payload.kind === "incident" && typeof payload.source === "string" && typeof payload.externalId === "string") {
-      ids.add(typeof payload.issueNumber === "number"
-        ? `incident:github:${repository}#${payload.issueNumber}`
-        : `incident:${payload.source}:${payload.externalId}`);
-      if (isRecord(payload.impactedService) && typeof payload.impactedService.source === "string" && typeof payload.impactedService.externalId === "string") {
+      ids.add(
+        typeof payload.issueNumber === "number"
+          ? `incident:github:${repository}#${payload.issueNumber}`
+          : `incident:${payload.source}:${payload.externalId}`
+      );
+      if (
+        isRecord(payload.impactedService) &&
+        typeof payload.impactedService.source === "string" &&
+        typeof payload.impactedService.externalId === "string"
+      ) {
         ids.add(`service:${payload.impactedService.source}:${payload.impactedService.externalId}`);
       }
     }
@@ -237,7 +270,8 @@ export function validateSourceBackedModelEntities(
   const allowed = sourceBackedModelEntityIds(evidence);
   for (const node of generated.nodes) {
     if (!["Package", "Service", "Deployment", "Incident"].includes(node.kind)) continue;
-    if (!allowed.has(node.id)) throw new Error(`${node.kind} ${node.id} is not anchored by deterministic source evidence`);
+    if (!allowed.has(node.id))
+      throw new Error(`${node.kind} ${node.id} is not anchored by deterministic source evidence`);
   }
 }
 
@@ -290,18 +324,22 @@ export function validateRequiredDerivedIssues(
   for (const number of requiredDerivedIssuePullRequestNumbers(sourceEvidence, problemEvidencePullRequestNumbers)) {
     const derivedIssueId = `derived:pr:${number}`;
     const node = generated.nodes.find((candidate) => candidate.kind === "Issue" && candidate.id === derivedIssueId);
-    const resolutions = node ? generated.edges.filter((edge) =>
-      (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
-      (edge.predicate === "RESOLVES" && edge.target === node.id)
-    ) : [];
+    const resolutions = node
+      ? generated.edges.filter(
+          (edge) =>
+            (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
+            (edge.predicate === "RESOLVES" && edge.target === node.id)
+        )
+      : [];
     const resolution = resolutions[0];
     const pullRequestId = resolution?.predicate === "RESOLVED_BY" ? resolution.target : resolution?.source;
     const pullRequest = pullRequestId ? generated.nodes.find((candidate) => candidate.id === pullRequestId) : undefined;
-    const pullRequestNumber = pullRequest?.kind === "PullRequest"
-      ? /^(?:pr:|#)?(\d+)$/i.exec(pullRequest.id.trim())?.[1]
-      : undefined;
+    const pullRequestNumber =
+      pullRequest?.kind === "PullRequest" ? /^(?:pr:|#)?(\d+)$/i.exec(pullRequest.id.trim())?.[1] : undefined;
     if (!node || resolutions.length !== 1 || pullRequestNumber !== String(number)) {
-      throw new Error(`pull request #${number} explicitly repairs an untracked problem and requires derived Issue ${derivedIssueId}`);
+      throw new Error(
+        `pull request #${number} explicitly repairs an untracked problem and requires derived Issue ${derivedIssueId}`
+      );
     }
   }
 }
@@ -322,7 +360,8 @@ export function requiredDerivedIssuePullRequestNumbers(
     const text = `${typeof payload.title === "string" ? payload.title : ""}\n${typeof payload.body === "string" ? payload.body : ""}`;
     if (/\b(?:not|isn't|is not)\s+(?:a\s+)?(?:bug\s+)?fix\b|\bno\s+behavior\s+change\b/i.test(text)) return [];
     const repair = /\b(?:fix(?:e[sd])?|repair(?:s|ed|ing)?|restor(?:e[sd]?|ing)|correct(?:s|ed|ing)?)\b/i.test(text);
-    const problem = /\b(?:bug|regression|incorrect|broken|fail(?:s|ed|ing|ure)?|cannot|can't|unable|denied|wrong)\b/i.test(text);
+    const problem =
+      /\b(?:bug|regression|incorrect|broken|fail(?:s|ed|ing|ure)?|cannot|can't|unable|denied|wrong)\b/i.test(text);
     return repair && problem ? [payload.number] : [];
   });
   return [...new Set(required)];
@@ -356,16 +395,14 @@ export function requiredCausalAnchors(
     if (!commitSha) continue;
     const issuePattern = /\b(?:github\s+)?issue\s+#(\d+)\b/i;
     const issueNumber = issuePattern.exec(file.content)?.[1];
-    const issueId = issueNumber ?? (
-      /\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && derivedIssuePullRequestNumbers.length === 1
+    const issueId =
+      issueNumber ??
+      (/\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && derivedIssuePullRequestNumbers.length === 1
         ? `derived:pr:${derivedIssuePullRequestNumbers[0]}`
-        : undefined
-    );
+        : undefined);
     if (issueId) {
       const shaLine = Math.max(1, lines.findIndex((line) => line.toLowerCase().includes(commitSha)) + 1);
-      const issueLine = issueNumber
-        ? Math.max(1, lines.findIndex((line) => issuePattern.test(line)) + 1)
-        : 1;
+      const issueLine = issueNumber ? Math.max(1, lines.findIndex((line) => issuePattern.test(line)) + 1) : 1;
       anchors.push({
         issueId,
         commitSha,
@@ -375,9 +412,12 @@ export function requiredCausalAnchors(
       });
     }
   }
-  return anchors.filter((anchor, index) => anchors.findIndex((candidate) =>
-    candidate.issueId === anchor.issueId && candidate.commitSha === anchor.commitSha
-  ) === index);
+  return anchors.filter(
+    (anchor, index) =>
+      anchors.findIndex(
+        (candidate) => candidate.issueId === anchor.issueId && candidate.commitSha === anchor.commitSha
+      ) === index
+  );
 }
 
 export function validateRequiredCausalAssertions(
@@ -387,15 +427,25 @@ export function validateRequiredCausalAssertions(
   for (const anchor of anchors) {
     const issue = generated.nodes.find((node) => node.kind === "Issue" && node.id === anchor.issueId);
     const commit = generated.nodes.find((node) => node.kind === "Commit" && node.id.toLowerCase() === anchor.commitSha);
-    const edge = issue && commit ? generated.edges.find((candidate) =>
-      candidate.predicate === "INTRODUCED_BY" && candidate.source === issue.id && candidate.target === commit.id
-    ) : undefined;
+    const edge =
+      issue && commit
+        ? generated.edges.find(
+            (candidate) =>
+              candidate.predicate === "INTRODUCED_BY" && candidate.source === issue.id && candidate.target === commit.id
+          )
+        : undefined;
     const spansAnchor = edge?.evidence.some((value) => {
       const citation = parseEvidenceCitation(value);
-      return citation.path === anchor.evidencePath && citation.startLine <= anchor.startLine && citation.endLine >= anchor.endLine;
+      return (
+        citation.path === anchor.evidencePath &&
+        citation.startLine <= anchor.startLine &&
+        citation.endLine >= anchor.endLine
+      );
     });
     if (!edge || !spansAnchor) {
-      throw new Error(`explicit root-cause evidence requires Issue ${anchor.issueId} INTRODUCED_BY commit ${anchor.commitSha}`);
+      throw new Error(
+        `explicit root-cause evidence requires Issue ${anchor.issueId} INTRODUCED_BY commit ${anchor.commitSha}`
+      );
     }
   }
 }
@@ -403,9 +453,13 @@ export function validateRequiredCausalAssertions(
 export function isProblemEvidencePath(path: string): boolean {
   const segments = path.split("/").filter(Boolean);
   const baseName = segments.at(-1) ?? "";
-  return segments.some((segment) => /^(?:incidents?|postmortems?|root[-_]?causes?|bugs?|regressions?)$/i.test(segment))
-    || /(?:^|[-_.])(?:incident|postmortem|root[-_]?cause|bug[-_]?report|regression[-_]?(?:test|spec))(?:[-_.]|$)/i.test(baseName)
-    || /(?:\.|[-_])(?:test|spec)\.[^/]+$/i.test(baseName);
+  return (
+    segments.some((segment) => /^(?:incidents?|postmortems?|root[-_]?causes?|bugs?|regressions?)$/i.test(segment)) ||
+    /(?:^|[-_.])(?:incident|postmortem|root[-_]?cause|bug[-_]?report|regression[-_]?(?:test|spec))(?:[-_.]|$)/i.test(
+      baseName
+    ) ||
+    /(?:\.|[-_])(?:test|spec)\.[^/]+$/i.test(baseName)
+  );
 }
 
 function validateCausalEvidenceContents(generated: GeneratedOntology, files: ReadonlyMap<string, string>): void {
@@ -414,37 +468,52 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
     if (edge.predicate !== "INTRODUCED_BY") continue;
     const root = nodes.get(edge.source);
     const cause = nodes.get(edge.target);
-    if (!root || !["Issue", "Incident"].includes(root.kind) ||
-      !cause || !["Commit", "Deployment"].includes(cause.kind)) {
+    if (
+      !root ||
+      !["Issue", "Incident"].includes(root.kind) ||
+      !cause ||
+      !["Commit", "Deployment"].includes(cause.kind)
+    ) {
       throw new Error("INTRODUCED_BY evidence must connect an Issue or Incident to a Commit or Deployment");
     }
     const issueNumber = root.kind === "Issue" ? /^(?:issue:)?#?(\d+)$/i.exec(root.id.trim())?.[1] : undefined;
-    const derivedAnchor = root.kind === "Issue"
-      ? /^derived:pr:(\d+)$/i.exec(root.id.trim())?.[1]
-      : undefined;
+    const derivedAnchor = root.kind === "Issue" ? /^derived:pr:(\d+)$/i.exec(root.id.trim())?.[1] : undefined;
     const incidentId = root.kind === "Incident" ? /^incident:[^:]+:.+$/i.test(root.id.trim()) : false;
-    const commitSha = cause.kind === "Commit"
-      ? /^(?:(?:commit|sha):)?([a-f0-9]{40})$/i.exec(cause.id.trim())?.[1]?.toLowerCase()
-      : undefined;
-    const deploymentId = cause.kind === "Deployment" && /^deployment:[^:]+:.+$/i.test(cause.id.trim())
-      ? cause.id.trim()
-      : undefined;
+    const commitSha =
+      cause.kind === "Commit"
+        ? /^(?:(?:commit|sha):)?([a-f0-9]{40})$/i.exec(cause.id.trim())?.[1]?.toLowerCase()
+        : undefined;
+    const deploymentId =
+      cause.kind === "Deployment" && /^deployment:[^:]+:.+$/i.test(cause.id.trim()) ? cause.id.trim() : undefined;
     if ((!issueNumber && !derivedAnchor && !incidentId) || (cause.kind === "Commit" ? !commitSha : !deploymentId)) {
       throw new Error("INTRODUCED_BY evidence requires valid causal entity identities");
     }
-    const citedText = edge.evidence.map((value) => {
-      const citation = parseEvidenceCitation(value);
-      const lines = files.get(citation.path)?.split(/\r?\n/) ?? [];
-      return lines.slice(citation.startLine - 1, citation.endLine).join("\n");
-    }).join("\n");
+    const citedText = edge.evidence
+      .map((value) => {
+        const citation = parseEvidenceCitation(value);
+        const lines = files.get(citation.path)?.split(/\r?\n/) ?? [];
+        return lines.slice(citation.startLine - 1, citation.endLine).join("\n");
+      })
+      .join("\n");
     const namesRoot = issueNumber
-      ? new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(citedText)
-      : citedText.toLowerCase().includes(root.label.trim().toLowerCase()) || citedText.toLowerCase().includes(root.id.trim().toLowerCase());
+      ? new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(
+          citedText
+        )
+      : citedText.toLowerCase().includes(root.label.trim().toLowerCase()) ||
+        citedText.toLowerCase().includes(root.id.trim().toLowerCase());
     const namesCause = commitSha
       ? citedText.toLowerCase().includes(commitSha)
-      : Boolean(deploymentId && (citedText.toLowerCase().includes(deploymentId.toLowerCase()) || citedText.toLowerCase().includes(cause.label.trim().toLowerCase())));
+      : Boolean(
+          deploymentId &&
+          (citedText.toLowerCase().includes(deploymentId.toLowerCase()) ||
+            citedText.toLowerCase().includes(cause.label.trim().toLowerCase()))
+        );
     if (!namesRoot || !namesCause) {
-      const rootReference = issueNumber ? `Issue #${issueNumber}` : derivedAnchor ? `Issue ${root.label}` : `${root.kind} ${root.label}`;
+      const rootReference = issueNumber
+        ? `Issue #${issueNumber}`
+        : derivedAnchor
+          ? `Issue ${root.label}`
+          : `${root.kind} ${root.label}`;
       const causeReference = commitSha ? `commit ${commitSha}` : `Deployment ${cause.label}`;
       throw new Error(`INTRODUCED_BY evidence must explicitly name ${rootReference} and ${causeReference}`);
     }
@@ -513,12 +582,18 @@ function dedupeEdges(edges: readonly OntologyEdge[]): readonly OntologyEdge[] {
 }
 
 function normalizePredicate(value: string): string {
-  return value.trim().replace(/[^A-Za-z0-9]+/g, "_").replace(/^_+|_+$/g, "").toUpperCase();
+  return value
+    .trim()
+    .replace(/[^A-Za-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "")
+    .toUpperCase();
 }
 
 function requiredEvidence(value: unknown, owner: string): readonly string[] {
   const evidence = Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim())
+    ? value
+        .filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+        .map((item) => item.trim())
     : [];
   if (evidence.length === 0) throw new Error(`${owner} must include evidence`);
   evidence.forEach(parseEvidenceCitation);

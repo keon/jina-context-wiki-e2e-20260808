@@ -3,13 +3,7 @@ import type { EntityId } from "@jina/shared-kernel";
 export type TaskId = EntityId<"task">;
 
 export type TaskDependencyRelationship =
-  | "blocks"
-  | "relates_to"
-  | "context_for"
-  | "verifies"
-  | "fixes"
-  | "publishes"
-  | "supersedes";
+  "blocks" | "relates_to" | "context_for" | "verifies" | "fixes" | "publishes" | "supersedes";
 
 export interface TaskDependencyDraft {
   readonly taskId: TaskId;
@@ -25,7 +19,6 @@ export function createContextForDependency(taskId: TaskId, contextTaskId: TaskId
     dependsOnTaskId: contextTaskId,
     relationship: "context_for",
     required: true,
-    blocksParentCompletion: true,
+    blocksParentCompletion: true
   };
 }
-

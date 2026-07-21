@@ -16,7 +16,8 @@ export type WorkerFailureCategory =
 export function workerFailureCategory(reason: string): WorkerFailureCategory {
   const value = reason.toLowerCase();
   if (/github request failed with 401|bad credentials/.test(value)) return "github_authentication";
-  if (/github request failed with 403/.test(value)) return /rate limit/.test(value) ? "github_rate_limit" : "github_forbidden";
+  if (value.includes("github request failed with 403"))
+    return value.includes("rate limit") ? "github_rate_limit" : "github_forbidden";
   if (/github request failed with 404|repository not found/.test(value)) return "github_not_found";
   if (/github request failed with 429|rate limit/.test(value)) return "github_rate_limit";
   if (/github.*(?:timed out|timeout)|(?:timed out|timeout).*github/.test(value)) return "github_timeout";

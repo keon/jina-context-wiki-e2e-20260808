@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
-import { ONTOLOGY_PARSER_VERSION, type BlobAnalysis, type CodeSymbolEdgeFact, type CodeSymbolFact } from "./pipeline.js";
+import {
+  ONTOLOGY_PARSER_VERSION,
+  type BlobAnalysis,
+  type CodeSymbolEdgeFact,
+  type CodeSymbolFact
+} from "./pipeline.js";
 
 const DECLARATION_KINDS: Readonly<Record<string, string>> = {
   function_declaration: "function",
@@ -27,7 +32,8 @@ export function analyzeSourceBlob(blobSha: string, language: string, source: str
   walk(root, (node) => {
     const declarationKind = DECLARATION_KINDS[node.kind()];
     if (declarationKind) {
-      const nameNode = field(node, "name") ?? firstNamedLeaf(node, new Set(["identifier", "property_identifier", "type_identifier"]));
+      const nameNode =
+        field(node, "name") ?? firstNamedLeaf(node, new Set(["identifier", "property_identifier", "type_identifier"]));
       const name = nameNode?.text().trim();
       if (name) {
         const owner = enclosingDeclarationNames(node).reverse().join(".");
@@ -60,20 +66,32 @@ export function analyzeSourceBlob(blobSha: string, language: string, source: str
       pushEdge(edges, node, "calls", target);
     }
     if (node.kind() === "extends_clause" || node.kind() === "class_heritage") {
-      const target = node.children().map((child) => child.text()).find((text) => !/^extends$/.test(text.trim()));
+      const target = node
+        .children()
+        .map((child) => child.text())
+        .find((text) => !/^extends$/.test(text.trim()));
       pushEdge(edges, node, "extends", target);
     }
     if (node.kind() === "identifier" || node.kind() === "type_identifier") {
       const parentKind = node.parent()?.kind();
-      if (!parentKind || DECLARATION_KINDS[parentKind] || parentKind === "call_expression" || parentKind === "import_clause") return;
+      if (
+        !parentKind ||
+        DECLARATION_KINDS[parentKind] ||
+        parentKind === "call_expression" ||
+        parentKind === "import_clause"
+      )
+        return;
       pushEdge(edges, node, "references", node.text());
     }
   });
 
   for (const item of imports) {
     edges.push({
-      fromMoniker: moduleMoniker(language), kind: "imports", toMoniker: `module:${item.specifier}`,
-      startLine: item.line, endLine: item.line
+      fromMoniker: moduleMoniker(language),
+      kind: "imports",
+      toMoniker: `module:${item.specifier}`,
+      startLine: item.line,
+      endLine: item.line
     });
   }
   return {
@@ -82,11 +100,19 @@ export function analyzeSourceBlob(blobSha: string, language: string, source: str
     language,
     symbols: dedupe(symbols, (symbol) => symbol.moniker).slice(0, 2_000),
     imports: dedupe(imports, (item) => `${item.specifier}:${item.line}`).slice(0, 2_000),
-    edges: dedupe(edges, (edge) => `${edge.fromMoniker}:${edge.kind}:${edge.toMoniker}:${edge.startLine}:${edge.endLine}`).slice(0, 10_000)
+    edges: dedupe(
+      edges,
+      (edge) => `${edge.fromMoniker}:${edge.kind}:${edge.toMoniker}:${edge.startLine}:${edge.endLine}`
+    ).slice(0, 10_000)
   };
 }
 
-function pushEdge(edges: CodeSymbolEdgeFact[], node: SgNode, kind: CodeSymbolEdgeFact["kind"], target: string | undefined): void {
+function pushEdge(
+  edges: CodeSymbolEdgeFact[],
+  node: SgNode,
+  kind: CodeSymbolEdgeFact["kind"],
+  target: string | undefined
+): void {
   const toMoniker = target?.replace(/\s+/g, " ").trim();
   if (!toMoniker || toMoniker.length > 300) return;
   const range = node.range();
@@ -152,41 +178,79 @@ function lexicalFallback(blobSha: string, language: string, source: string): Blo
   const lines = source.split(/\r?\n/);
   lines.forEach((line, index) => {
     const lineNumber = index + 1;
-    const declaration = /\b(?:export\s+)?(?:async\s+)?(class|function|interface|type|enum|const|let|var|def|struct|trait)\s+([A-Za-z_$][\w$]*)/.exec(line);
+    const declaration =
+      /\b(?:export\s+)?(?:async\s+)?(class|function|interface|type|enum|const|let|var|def|struct|trait)\s+([A-Za-z_$][\w$]*)/.exec(
+        line
+      );
     if (declaration?.[1] && declaration[2]) {
       const signatureHash = hash(normalizedSignature(line, declaration[2]));
       symbols.push({
         moniker: `${language}:${declaration[2]}#${signatureHash.slice(0, 12)}`,
-        name: declaration[2], kind: declaration[1], signatureHash, startLine: lineNumber, endLine: lineNumber
+        name: declaration[2],
+        kind: declaration[1],
+        signatureHash,
+        startLine: lineNumber,
+        endLine: lineNumber
       });
     }
     const importMatch = /(?:\bfrom\s+|\bimport\s*(?:[^"']*?\s+from\s+)?|\brequire\s*\()\s*["']([^"']+)["']/.exec(line);
     if (importMatch?.[1]) imports.push({ specifier: importMatch[1], line: lineNumber });
   });
   return {
-    blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, language,
+    blobSha,
+    parserVersion: ONTOLOGY_PARSER_VERSION,
+    language,
     symbols: dedupe(symbols, (symbol) => symbol.moniker).slice(0, 2_000),
     imports: dedupe(imports, (item) => `${item.specifier}:${item.line}`).slice(0, 2_000),
     edges: imports.map((item) => ({
-      fromMoniker: moduleMoniker(language), kind: "imports" as const, toMoniker: `module:${item.specifier}`,
-      startLine: item.line, endLine: item.line
+      fromMoniker: moduleMoniker(language),
+      kind: "imports" as const,
+      toMoniker: `module:${item.specifier}`,
+      startLine: item.line,
+      endLine: item.line
     }))
   };
 }
 
-function moduleMoniker(language: string): string { return `${language}:<module>`; }
-function stripQuotes(value: string): string { return value.replace(/^["'`]|["'`]$/g, "").trim(); }
-function hash(value: string): string { return createHash("sha256").update(value).digest("hex"); }
+function moduleMoniker(language: string): string {
+  return `${language}:<module>`;
+}
+function stripQuotes(value: string): string {
+  return value.replace(/^["'`]|["'`]$/g, "").trim();
+}
+function hash(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
 function dedupe<T>(values: readonly T[], key: (value: T) => string): T[] {
   const seen = new Set<string>();
-  return values.filter((value) => seen.has(key(value)) ? false : (seen.add(key(value)), true));
+  return values.filter((value) => (seen.has(key(value)) ? false : (seen.add(key(value)), true)));
 }
 
 export function languageForPath(path: string): string | undefined {
   const extension = path.toLowerCase().split(".").at(-1);
-  return ({
-    ts: "typescript", tsx: "typescript", js: "javascript", jsx: "javascript", mjs: "javascript", cjs: "javascript",
-    py: "python", go: "go", rs: "rust", java: "java", rb: "ruby", php: "php", cs: "csharp", cpp: "cpp", c: "c",
-    h: "c", hpp: "cpp", swift: "swift", kt: "kotlin", md: "markdown", mdx: "markdown"
-  } as Record<string, string>)[extension ?? ""];
+  return (
+    {
+      ts: "typescript",
+      tsx: "typescript",
+      js: "javascript",
+      jsx: "javascript",
+      mjs: "javascript",
+      cjs: "javascript",
+      py: "python",
+      go: "go",
+      rs: "rust",
+      java: "java",
+      rb: "ruby",
+      php: "php",
+      cs: "csharp",
+      cpp: "cpp",
+      c: "c",
+      h: "c",
+      hpp: "cpp",
+      swift: "swift",
+      kt: "kotlin",
+      md: "markdown",
+      mdx: "markdown"
+    } as Record<string, string>
+  )[extension ?? ""];
 }

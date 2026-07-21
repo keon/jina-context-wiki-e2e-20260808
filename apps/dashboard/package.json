@@ -13,7 +13,7 @@
     "@cosmos.gl/graph": "^3.3.0"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0",
-    "esbuild": "^0.25.12"
+    "@types/node": "^26.1.1",
+    "esbuild": "^0.28.1"
   }
 }

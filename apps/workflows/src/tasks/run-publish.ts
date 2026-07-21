@@ -11,9 +11,9 @@ export function runPublishTask(state: WorkflowState, taskId: TaskId, now: IsoTim
     return state;
   }
 
-  const repository = String(task.metadata.repository ?? "");
+  const repository = stringValue(task.metadata.repository);
   const prNumber = Number(task.metadata.pullRequestNumber ?? 0);
-  const headSha = String(task.metadata.headSha ?? "");
+  const headSha = stringValue(task.metadata.headSha);
 
   const pr = findPullRequest(state, repository, prNumber);
   if (pr && task.epoch !== undefined && task.epoch !== pr.currentEpoch) {
@@ -24,8 +24,11 @@ export function runPublishTask(state: WorkflowState, taskId: TaskId, now: IsoTim
     return state;
   }
 
-  let board = applyCommand(state.board, { command: "TransitionTask", taskId, toStatus: "in_progress" }, { actor: RUN_ACTOR, now })
-    .state;
+  let board = applyCommand(
+    state.board,
+    { command: "TransitionTask", taskId, toStatus: "in_progress" },
+    { actor: RUN_ACTOR, now }
+  ).state;
 
   const key = buildPublicationKey(`${repository}#${prNumber}`, headSha, "summary");
   const upserted = upsertPublication(state.publications, { key, headSha, target: "summary" });
@@ -47,4 +50,8 @@ export function runPublishTask(state: WorkflowState, taskId: TaskId, now: IsoTim
     board: reduceBoard(board, now),
     publications: upserted.records
   };
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }

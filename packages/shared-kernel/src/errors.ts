@@ -3,7 +3,7 @@ export type DomainErrorCode = "invalid_argument" | "not_found" | "forbidden" | "
 export class DomainError extends Error {
   constructor(
     message: string,
-    readonly code: DomainErrorCode,
+    readonly code: DomainErrorCode
   ) {
     super(message);
     this.name = "DomainError";

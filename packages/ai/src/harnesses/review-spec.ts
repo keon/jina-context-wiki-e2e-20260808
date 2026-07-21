@@ -16,7 +16,10 @@ export const REVIEW_FINDINGS_SCHEMA = {
   additionalProperties: false,
   required: ["summary", "findings"],
   properties: {
-    summary: { type: "string", description: "Two to four sentences on what the PR does and its overall risk." },
+    summary: {
+      type: "string",
+      description: "Two to four sentences on what the PR does and its overall risk."
+    },
     findings: {
       type: "array",
       items: {
@@ -25,12 +28,21 @@ export const REVIEW_FINDINGS_SCHEMA = {
         required: ["title", "body", "severity", "confidence", "filePath", "lineStart", "category"],
         properties: {
           title: { type: "string" },
-          body: { type: "string", description: "The concrete failure scenario: inputs/state that produce wrong behavior." },
+          body: {
+            type: "string",
+            description: "The concrete failure scenario: inputs/state that produce wrong behavior."
+          },
           severity: { type: "string", enum: ["low", "medium", "high", "critical"] },
           confidence: { type: "number", description: "0 to 1" },
           filePath: { type: "string" },
-          lineStart: { type: "integer", description: "1-indexed line in the new file; 0 when unknown." },
-          category: { type: "string", description: "Short kebab-case slug, e.g. correctness, security, error-handling." }
+          lineStart: {
+            type: "integer",
+            description: "1-indexed line in the new file; 0 when unknown."
+          },
+          category: {
+            type: "string",
+            description: "Short kebab-case slug, e.g. correctness, security, error-handling."
+          }
         }
       }
     }
@@ -58,6 +70,9 @@ ${prepared.diff}
 </diff>`;
 }
 
-export function parseReviewOutput(text: string): { summary: string; findings: readonly ReviewFinding[] } {
+export function parseReviewOutput(text: string): {
+  summary: string;
+  findings: readonly ReviewFinding[];
+} {
   return JSON.parse(text) as { summary: string; findings: ReviewFinding[] };
 }

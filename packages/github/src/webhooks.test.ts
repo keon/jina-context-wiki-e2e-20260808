@@ -1,10 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  InvalidGitHubWebhookPayloadError,
-  parseGitHubWebhook,
-  verifyGitHubWebhookSignature
-} from "./webhooks.js";
+import { InvalidGitHubWebhookPayloadError, parseGitHubWebhook, verifyGitHubWebhookSignature } from "./webhooks.js";
 
 test("verifies GitHub's published HMAC-SHA256 test vector", () => {
   const valid = verifyGitHubWebhookSignature(
@@ -14,28 +10,28 @@ test("verifies GitHub's published HMAC-SHA256 test vector", () => {
   );
 
   assert.equal(valid, true);
-  assert.equal(
-    verifyGitHubWebhookSignature("wrong", Buffer.from("Hello, World!"), "sha256=" + "0".repeat(64)),
-    false
-  );
+  assert.equal(verifyGitHubWebhookSignature("wrong", Buffer.from("Hello, World!"), "sha256=" + "0".repeat(64)), false);
 });
 
 test("parses an opened pull request delivery", () => {
-  const parsed = parseGitHubWebhook("pull_request", jsonBytes({
-    action: "opened",
-    number: 42,
-    pull_request: {
+  const parsed = parseGitHubWebhook(
+    "pull_request",
+    jsonBytes({
+      action: "opened",
       number: 42,
-      title: "Make it work",
-      html_url: "https://github.com/omlabs/example/pull/42",
-      draft: false,
-      user: { login: "octocat" },
-      head: { sha: "abc123" }
-    },
-    repository: { id: 10, full_name: "omlabs/example" },
-    installation: { id: 99 },
-    sender: { login: "octocat" }
-  }));
+      pull_request: {
+        number: 42,
+        title: "Make it work",
+        html_url: "https://github.com/omlabs/example/pull/42",
+        draft: false,
+        user: { login: "octocat" },
+        head: { sha: "abc123" }
+      },
+      repository: { id: 10, full_name: "omlabs/example" },
+      installation: { id: 99 },
+      sender: { login: "octocat" }
+    })
+  );
 
   assert.equal(parsed?.repository, "omlabs/example");
   assert.equal(parsed?.installationId, 99);
@@ -77,15 +73,18 @@ test("parses a newly opened issue and ignores non-open actions", () => {
 });
 
 test("parses branch pushes for ontology intake", () => {
-  const parsed = parseGitHubWebhook("push", jsonBytes({
-    ref: "refs/heads/main",
-    before: "a".repeat(40),
-    after: "b".repeat(40),
-    deleted: false,
-    repository: { id: 10, full_name: "omlabs/example" },
-    installation: { id: 99 },
-    sender: { login: "octocat" }
-  }));
+  const parsed = parseGitHubWebhook(
+    "push",
+    jsonBytes({
+      ref: "refs/heads/main",
+      before: "a".repeat(40),
+      after: "b".repeat(40),
+      deleted: false,
+      repository: { id: 10, full_name: "omlabs/example" },
+      installation: { id: 99 },
+      sender: { login: "octocat" }
+    })
+  );
   assert.deepEqual(parsed?.event, {
     type: "push",
     ref: "refs/heads/main",

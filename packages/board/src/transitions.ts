@@ -22,7 +22,11 @@ const dispatchableRules: readonly TransitionRule[] = [
 
 const transitionRules: Record<TaskKind, readonly TransitionRule[]> = {
   aggregate: [
-    { from: ["triage", "blocked"], to: ["done", "blocked", "failed"], actors: ["reducer", "system"] },
+    {
+      from: ["triage", "blocked"],
+      to: ["done", "blocked", "failed"],
+      actors: ["reducer", "system"]
+    },
     { from: ["triage", "blocked"], to: ["superseded"], actors: ["system", "github"] },
     { from: ["triage", "blocked"], to: ["canceled"], actors: ["user", "system"] }
   ],

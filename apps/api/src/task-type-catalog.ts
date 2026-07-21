@@ -45,7 +45,9 @@ export function buildTaskTypeCatalog(
   const registeredTypes = new Set(definitions.map((definition) => definition.type));
   for (const rule of rules) {
     if (!registeredTypes.has(rule.taskType) || !registeredTypes.has(rule.dependsOnTaskType)) {
-      throw new Error(`task-type dependency references an unregistered type: ${rule.taskType} -> ${rule.dependsOnTaskType}`);
+      throw new Error(
+        `task-type dependency references an unregistered type: ${rule.taskType} -> ${rule.dependsOnTaskType}`
+      );
     }
   }
   for (const trigger of triggers) {
@@ -56,11 +58,13 @@ export function buildTaskTypeCatalog(
 
   return definitions.map((definition) => ({
     ...definition,
-    triggeredBy: triggers.filter((trigger) => trigger.taskType === definition.type).map((trigger) => ({
-      source: trigger.source,
-      description: trigger.description,
-      conditions: trigger.condition ? [trigger.condition] : []
-    })),
+    triggeredBy: triggers
+      .filter((trigger) => trigger.taskType === definition.type)
+      .map((trigger) => ({
+        source: trigger.source,
+        description: trigger.description,
+        conditions: trigger.condition ? [trigger.condition] : []
+      })),
     dependsOn: summarizeRules(
       rules.filter((rule) => rule.taskType === definition.type),
       (rule) => rule.dependsOnTaskType
@@ -76,12 +80,15 @@ function summarizeRules(
   rules: readonly TaskTypeDependencyRule[],
   relatedTaskType: (rule: TaskTypeDependencyRule) => string
 ): readonly TaskTypeDependencySummary[] {
-  const summaries = new Map<string, {
-    relationships: Set<string>;
-    workflows: Set<string>;
-    required: boolean;
-    conditions: Set<string>;
-  }>();
+  const summaries = new Map<
+    string,
+    {
+      relationships: Set<string>;
+      workflows: Set<string>;
+      required: boolean;
+      conditions: Set<string>;
+    }
+  >();
 
   for (const rule of rules) {
     const taskType = relatedTaskType(rule);

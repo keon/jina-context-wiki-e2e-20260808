@@ -1,13 +1,6 @@
 import type { IsoTimestamp } from "@jina/shared-kernel";
 import type { TaskDependencyDraft, TaskId } from "./dependencies.js";
-import {
-  addDependency,
-  addTask,
-  appendEvent,
-  findTask,
-  transitionBoardTask,
-  type BoardState
-} from "./reducer.js";
+import { addDependency, addTask, appendEvent, findTask, transitionBoardTask, type BoardState } from "./reducer.js";
 import type { TaskStatus } from "./task-status.js";
 import { createBoardTask, type BoardTask, type CreateBoardTaskInput } from "./tasks.js";
 import { canTransition, type TransitionActorType } from "./transitions.js";
@@ -52,14 +45,11 @@ export interface CommentTaskCommand {
   readonly payload?: Record<string, unknown>;
 }
 
-export type BoardCommandInput = CreateTaskCommand | UpdateTaskCommand | TransitionTaskCommand | LinkTaskCommand | CommentTaskCommand;
+export type BoardCommandInput =
+  CreateTaskCommand | UpdateTaskCommand | TransitionTaskCommand | LinkTaskCommand | CommentTaskCommand;
 
 export type CommandRejectionReason =
-  | "invalid_transition"
-  | "unknown_task"
-  | "unknown_dependency"
-  | "budget_exhausted"
-  | "policy_denied";
+  "invalid_transition" | "unknown_task" | "unknown_dependency" | "budget_exhausted" | "policy_denied";
 
 export interface CommandRejection {
   readonly reason: CommandRejectionReason;
@@ -80,7 +70,11 @@ export interface CommandResult {
   readonly rejection?: CommandRejection;
 }
 
-export function applyCommand(state: BoardState, command: BoardCommandInput, options: ApplyCommandOptions): CommandResult {
+export function applyCommand(
+  state: BoardState,
+  command: BoardCommandInput,
+  options: ApplyCommandOptions
+): CommandResult {
   for (const guard of options.guards ?? []) {
     const rejection = guard(state, command);
     if (rejection) {
@@ -108,12 +102,24 @@ function applyUpdateTask(state: BoardState, command: UpdateTaskCommand, options:
   }
   return {
     accepted: true,
-    state: appendEvent({
-      ...state,
-      tasks: state.tasks.map((task) => task.id === command.taskId
-        ? { ...task, metadata: { ...task.metadata, ...command.metadata }, updatedAt: options.now }
-        : task)
-    }, "task.updated", options.now, command.taskId, { metadataKeys: Object.keys(command.metadata) })
+    state: appendEvent(
+      {
+        ...state,
+        tasks: state.tasks.map((task) =>
+          task.id === command.taskId
+            ? {
+                ...task,
+                metadata: { ...task.metadata, ...command.metadata },
+                updatedAt: options.now
+              }
+            : task
+        )
+      },
+      "task.updated",
+      options.now,
+      command.taskId,
+      { metadataKeys: Object.keys(command.metadata) }
+    )
   };
 }
 
@@ -158,7 +164,11 @@ function applyCreateTask(state: BoardState, command: CreateTaskCommand, options:
   return { state: next, accepted: true };
 }
 
-function applyTransitionTask(state: BoardState, command: TransitionTaskCommand, options: ApplyCommandOptions): CommandResult {
+function applyTransitionTask(
+  state: BoardState,
+  command: TransitionTaskCommand,
+  options: ApplyCommandOptions
+): CommandResult {
   const task = findTask(state, command.taskId);
   if (!task) {
     return reject(state, command, { reason: "unknown_task" }, options);
@@ -178,7 +188,10 @@ function applyTransitionTask(state: BoardState, command: TransitionTaskCommand, 
     );
   }
 
-  return { state: transitionBoardTask(state, command.taskId, command.toStatus, options.now), accepted: true };
+  return {
+    state: transitionBoardTask(state, command.taskId, command.toStatus, options.now),
+    accepted: true
+  };
 }
 
 function applyLinkTask(state: BoardState, command: LinkTaskCommand, options: ApplyCommandOptions): CommandResult {

@@ -7,9 +7,5 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "references": [
-    { "path": "../board" },
-    { "path": "../shared-kernel" }
-  ]
+  "references": [{ "path": "../board" }, { "path": "../shared-kernel" }]
 }
-

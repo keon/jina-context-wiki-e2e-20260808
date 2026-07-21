@@ -1,6 +1,13 @@
 import { nowIso } from "@jina/shared-kernel";
 import type { HarnessStep, ReviewHarness, ReviewRequest, ReviewResult } from "./harness.js";
-import { buildReviewPrompt, DEFAULT_OPENROUTER_MODEL, parseReviewOutput, prepareDiff, REVIEW_FINDINGS_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-spec.js";
+import {
+  buildReviewPrompt,
+  DEFAULT_OPENROUTER_MODEL,
+  parseReviewOutput,
+  prepareDiff,
+  REVIEW_FINDINGS_SCHEMA,
+  REVIEW_SYSTEM_PROMPT
+} from "./review-spec.js";
 
 const BASE_URL = "https://openrouter.ai/api/v1";
 

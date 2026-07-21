@@ -11,12 +11,7 @@ import {
 import { isBudgetExhausted } from "@jina/policy";
 import { buildFindingFingerprint, upsertFindingThread } from "@jina/review";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
-import {
-  findPullRequest,
-  recordPullRequestSpend,
-  type TrackedPullRequest,
-  type WorkflowState
-} from "../state.js";
+import { findPullRequest, recordPullRequestSpend, type TrackedPullRequest, type WorkflowState } from "../state.js";
 
 const RUN_ACTOR: CommandActor = { type: "run", id: "run-review" };
 const REVIEW_RUN_COST = 1000;
@@ -35,8 +30,11 @@ export function runReviewTask(state: WorkflowState, taskId: TaskId, now: IsoTime
   const epoch = task.epoch ?? 1;
   let next: WorkflowState = {
     ...state,
-    board: applyCommand(state.board, { command: "TransitionTask", taskId, toStatus: "in_progress" }, { actor: RUN_ACTOR, now })
-      .state
+    board: applyCommand(
+      state.board,
+      { command: "TransitionTask", taskId, toStatus: "in_progress" },
+      { actor: RUN_ACTOR, now }
+    ).state
   };
   next = recordPullRequestSpend(next, repositoryOf(task), prNumberOf(task), epoch, REVIEW_RUN_COST);
 
@@ -56,18 +54,18 @@ export function runReviewTask(state: WorkflowState, taskId: TaskId, now: IsoTime
     rule: "general-review",
     normalizedMessage: "suspicious change in diff"
   });
-  const headSha = String(task.metadata.headSha ?? "");
+  const headSha = stringValue(task.metadata.headSha);
 
-  const board = applyCommand(next.board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now })
-    .state;
+  const board = applyCommand(
+    next.board,
+    { command: "TransitionTask", taskId, toStatus: "done" },
+    { actor: RUN_ACTOR, now }
+  ).state;
 
   return {
     ...next,
     board: reduceBoard(board, now),
-    findings: [
-      ...next.findings,
-      { taskId, fingerprint, title: "Suspicious change in diff", headSha }
-    ],
+    findings: [...next.findings, { taskId, fingerprint, title: "Suspicious change in diff", headSha }],
     findingThreads: upsertFindingThread(next.findingThreads, fingerprint, headSha)
   };
 }
@@ -124,7 +122,10 @@ function budgetGuard(state: WorkflowState, task: BoardTask, epoch: number): Comm
       return undefined;
     }
     return isBudgetExhausted(state.budgetLimits, pr.spend, epoch)
-      ? { reason: "budget_exhausted", detail: `spend ${pr.spend.total} reached the configured ceiling` }
+      ? {
+          reason: "budget_exhausted",
+          detail: `spend ${pr.spend.total} reached the configured ceiling`
+        }
       : undefined;
   };
 }
@@ -137,8 +138,7 @@ function hasSatisfiedContext(state: WorkflowState, taskId: TaskId): boolean {
   return contextDependencies.some((dependency) => {
     const contextTask = findTask(state.board, dependency.dependsOnTaskId);
     return (
-      contextTask?.status === "done" &&
-      state.contextItems.some((item) => item.taskId === dependency.dependsOnTaskId)
+      contextTask?.status === "done" && state.contextItems.some((item) => item.taskId === dependency.dependsOnTaskId)
     );
   });
 }
@@ -148,7 +148,11 @@ function pullRequestForTask(state: WorkflowState, task: BoardTask): TrackedPullR
 }
 
 function repositoryOf(task: BoardTask): string {
-  return String(task.metadata.repository ?? "");
+  return stringValue(task.metadata.repository);
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 function prNumberOf(task: BoardTask): number {

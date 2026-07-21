@@ -45,7 +45,9 @@ function proxyApiRequest(request: IncomingMessage, response: ServerResponse): vo
   const upstreamUrl = new URL(`${incoming.pathname.slice(4)}${incoming.search}`, apiUrl);
   const headers = { ...request.headers };
   const iapEmail = firstHeader(request.headers["x-goog-authenticated-user-email"])
-    ?.replace(/^accounts\.google\.com:/i, "").trim().toLowerCase();
+    ?.replace(/^accounts\.google\.com:/i, "")
+    .trim()
+    .toLowerCase();
   delete headers.host;
   delete headers.connection;
   delete headers.authorization;

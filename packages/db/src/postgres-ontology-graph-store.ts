@@ -122,9 +122,10 @@ async function lockAssertionNaturalKey(
   qualifiersHash: string,
   cardinality: "one" | "many"
 ): Promise<void> {
-  const naturalKey = cardinality === "one"
-    ? `${tenantId}:${repository}:${subjectId}:${predicate}:${qualifiersHash}`
-    : `${tenantId}:${repository}:${subjectId}:${predicate}:${objectId}:${qualifiersHash}`;
+  const naturalKey =
+    cardinality === "one"
+      ? `${tenantId}:${repository}:${subjectId}:${predicate}:${qualifiersHash}`
+      : `${tenantId}:${repository}:${subjectId}:${predicate}:${objectId}:${qualifiersHash}`;
   await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [naturalKey]);
 }
 
@@ -338,7 +339,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          where tenant_id=$1 and ((kind='identity' and value=$2) or (kind='commit' and value=$3))`,
         [snapshot.tenantId, snapshot.authorExternalId ?? "", snapshot.commitSha]
       );
-      const authorExternalId = filtered.rows.some((row) => row.kind === "identity") ? undefined : snapshot.authorExternalId;
+      const authorExternalId = filtered.rows.some((row) => row.kind === "identity")
+        ? undefined
+        : snapshot.authorExternalId;
       const message = filtered.rows.some((row) => row.kind === "commit") ? undefined : snapshot.message;
       const { authorExternalId: _rawAuthor, message: _rawMessage, ...snapshotWithoutSensitiveFields } = snapshot;
       const filteredSnapshot: RepositorySnapshot = {
@@ -361,13 +364,17 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         // the live ref head must always arrive as a full tree: that pass is
         // what re-discovers retained blobs whose analyses are still missing.
         if (snapshot.updateRef !== false) {
-          throw new DomainError("delta snapshot cannot move the live ref; head commits require a full tree", "conflict");
+          throw new DomainError(
+            "delta snapshot cannot move the live ref; head commits require a full tree",
+            "conflict"
+          );
         }
         const parentRecorded = await client.query(
           `select 1 from jina_ontology.commits where tenant_id=$1 and repository=$2 and sha=$3 and tree_recorded`,
           [snapshot.tenantId, snapshot.repository, parentSha]
         );
-        if (parentRecorded.rowCount !== 1) throw new DomainError("delta snapshot parent tree is not recorded", "conflict");
+        if (parentRecorded.rowCount !== 1)
+          throw new DomainError("delta snapshot parent tree is not recorded", "conflict");
         const tree = new Map<string, { path: string; blobSha: string; size: number }>(
           parentManifest.rows.map((row) => [row.path, { path: row.path, blobSha: row.blob_sha, size: 0 }])
         );
@@ -383,8 +390,15 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
          values ($1,$2,'git','source_snapshot',$3,$4,$5,$6::jsonb,$7)
          on conflict (id) do nothing`,
-        [observationId, snapshot.tenantId, `${snapshot.repository}:${snapshot.commitSha}`, snapshot.repository,
-          snapshot.recordedAt, JSON.stringify(filteredSnapshot), stableId("sha", JSON.stringify(filteredSnapshot))]
+        [
+          observationId,
+          snapshot.tenantId,
+          `${snapshot.repository}:${snapshot.commitSha}`,
+          snapshot.repository,
+          snapshot.recordedAt,
+          JSON.stringify(filteredSnapshot),
+          stableId("sha", JSON.stringify(filteredSnapshot))
+        ]
       );
       if (files.length > 0) {
         await client.query(
@@ -401,26 +415,95 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         on conflict (tenant_id,repository,sha) do update set
            tree_sha=excluded.tree_sha,
            tree_recorded=true`,
-        [snapshot.tenantId, snapshot.repository, snapshot.commitSha, snapshot.treeSha, snapshot.parents,
-          authorExternalId ?? null, snapshot.committedAt ?? null, message ?? null, observationId]
+        [
+          snapshot.tenantId,
+          snapshot.repository,
+          snapshot.commitSha,
+          snapshot.treeSha,
+          snapshot.parents,
+          authorExternalId ?? null,
+          snapshot.committedAt ?? null,
+          message ?? null,
+          observationId
+        ]
       );
       const steadyStateEventAt = snapshot.updateRef !== false ? snapshot.recordedAt : undefined;
-      const repositoryEntityId = await ensureEntity(client, snapshot.tenantId, {
-        kind: "Repository", naturalKey: `github:repo:${snapshot.repository}`, label: snapshot.repository
-      }, steadyStateEventAt);
-      const commitEntityId = await ensureEntity(client, snapshot.tenantId, {
-        kind: "Commit", naturalKey: `repo:${snapshot.repository}:sha:${snapshot.commitSha}`, label: snapshot.commitSha.slice(0, 12)
-      }, steadyStateEventAt);
-      await ensureIdentity(client, snapshot.tenantId, "github-repository", snapshot.repository, repositoryEntityId, "accepted", observationId, snapshot.recordedAt, snapshot.updateRef !== false);
-      await ensureIdentity(client, snapshot.tenantId, "git-sha", snapshot.commitSha, commitEntityId, "accepted", observationId, snapshot.recordedAt, snapshot.updateRef !== false);
+      const repositoryEntityId = await ensureEntity(
+        client,
+        snapshot.tenantId,
+        {
+          kind: "Repository",
+          naturalKey: `github:repo:${snapshot.repository}`,
+          label: snapshot.repository
+        },
+        steadyStateEventAt
+      );
+      const commitEntityId = await ensureEntity(
+        client,
+        snapshot.tenantId,
+        {
+          kind: "Commit",
+          naturalKey: `repo:${snapshot.repository}:sha:${snapshot.commitSha}`,
+          label: snapshot.commitSha.slice(0, 12)
+        },
+        steadyStateEventAt
+      );
+      await ensureIdentity(
+        client,
+        snapshot.tenantId,
+        "github-repository",
+        snapshot.repository,
+        repositoryEntityId,
+        "accepted",
+        observationId,
+        snapshot.recordedAt,
+        snapshot.updateRef !== false
+      );
+      await ensureIdentity(
+        client,
+        snapshot.tenantId,
+        "git-sha",
+        snapshot.commitSha,
+        commitEntityId,
+        "accepted",
+        observationId,
+        snapshot.recordedAt,
+        snapshot.updateRef !== false
+      );
       if (snapshot.authorGitHubLogin) {
-        const engineerId = await ensureEntity(client, snapshot.tenantId, {
-          kind: "Engineer", naturalKey: `github:user:${snapshot.authorGitHubLogin}`,
-          label: snapshot.authorName ?? snapshot.authorGitHubLogin
-        }, steadyStateEventAt);
-        await ensureIdentity(client, snapshot.tenantId, "github", snapshot.authorGitHubLogin, engineerId, "accepted", observationId, snapshot.recordedAt, snapshot.updateRef !== false);
+        const engineerId = await ensureEntity(
+          client,
+          snapshot.tenantId,
+          {
+            kind: "Engineer",
+            naturalKey: `github:user:${snapshot.authorGitHubLogin}`,
+            label: snapshot.authorName ?? snapshot.authorGitHubLogin
+          },
+          steadyStateEventAt
+        );
+        await ensureIdentity(
+          client,
+          snapshot.tenantId,
+          "github",
+          snapshot.authorGitHubLogin,
+          engineerId,
+          "accepted",
+          observationId,
+          snapshot.recordedAt,
+          snapshot.updateRef !== false
+        );
         if (authorExternalId) {
-          await ensureIdentity(client, snapshot.tenantId, "git-email", authorExternalId, engineerId, "proposed", observationId, snapshot.recordedAt, snapshot.updateRef !== false);
+          await ensureIdentity(
+            client,
+            snapshot.tenantId,
+            "git-email",
+            authorExternalId,
+            engineerId,
+            "proposed",
+            observationId,
+            snapshot.recordedAt,
+            snapshot.updateRef !== false
+          );
         }
       }
       let oldRefSha: string | undefined;
@@ -435,12 +518,22 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            values ($1,$2,$3,$4,$5,$6)
            on conflict (tenant_id,repository,ref_name) do update
            set commit_sha=excluded.commit_sha, is_default=excluded.is_default, updated_at=excluded.updated_at`,
-          [snapshot.tenantId, snapshot.repository, snapshot.ref, snapshot.commitSha, snapshot.isDefaultRef ?? snapshot.ref === "main", snapshot.recordedAt]
+          [
+            snapshot.tenantId,
+            snapshot.repository,
+            snapshot.ref,
+            snapshot.commitSha,
+            snapshot.isDefaultRef ?? snapshot.ref === "main",
+            snapshot.recordedAt
+          ]
         );
       }
-      const blobSource = snapshot.mode === "delta"
-        ? files.filter((file) => (snapshot.deltas ?? []).some((delta) => delta.path === file.path && delta.blobSha !== null))
-        : files;
+      const blobSource =
+        snapshot.mode === "delta"
+          ? files.filter((file) =>
+              (snapshot.deltas ?? []).some((delta) => delta.path === file.path && delta.blobSha !== null)
+            )
+          : files;
       if (blobSource.length > 0) {
         const uniqueBlobs = [...new Map(blobSource.map((file) => [file.blobSha, file.size])).entries()];
         await client.query(
@@ -458,8 +551,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          left join jina_ontology.blob_analyses a
            on a.tenant_id=$1 and a.blob_sha=source.blob_sha and a.parser_version=$4
          where a.blob_sha is null order by source.blob_sha,source.path`,
-        [snapshot.tenantId, blobSource.map((file) => file.path),
-          blobSource.map((file) => file.blobSha), ONTOLOGY_PARSER_VERSION]
+        [
+          snapshot.tenantId,
+          blobSource.map((file) => file.path),
+          blobSource.map((file) => file.blobSha),
+          ONTOLOGY_PARSER_VERSION
+        ]
       );
       const parentTree = parentManifest.rows.map((file) => ({ path: file.path, blobSha: file.blob_sha, size: 0 }));
       const changes = computeCommitChanges(files, parentTree);
@@ -471,22 +568,54 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            from unnest($4::text[],$5::text[],$6::text[],$7::text[],$8::text[])
              as source(path,change,old_path,old_blob_sha,new_blob_sha)
            on conflict do nothing`,
-          [snapshot.tenantId, snapshot.repository, snapshot.commitSha,
-            changes.map((change) => change.path), changes.map((change) => change.change),
-            changes.map((change) => change.oldPath ?? null), changes.map((change) => change.oldBlobSha ?? null),
-            changes.map((change) => change.newBlobSha ?? null)]
+          [
+            snapshot.tenantId,
+            snapshot.repository,
+            snapshot.commitSha,
+            changes.map((change) => change.path),
+            changes.map((change) => change.change),
+            changes.map((change) => change.oldPath ?? null),
+            changes.map((change) => change.oldBlobSha ?? null),
+            changes.map((change) => change.newBlobSha ?? null)
+          ]
         );
       }
       if (snapshot.updateRef !== false && oldRefSha !== snapshot.commitSha) {
-        await insertOutbox(client, snapshot.tenantId, "observation_recorded", observationId, {
-          observationId, repoId: snapshot.repository
-        }, snapshot.recordedAt);
-        await insertOutbox(client, snapshot.tenantId, "commit_ingested", `${snapshot.repository}:${snapshot.commitSha}`, {
-          repoId: snapshot.repository, commitSha: snapshot.commitSha
-        }, snapshot.recordedAt);
-        await insertOutbox(client, snapshot.tenantId, "ref_moved", `${snapshot.repository}:${snapshot.ref}`, {
-          repoId: snapshot.repository, refName: snapshot.ref, oldSha: oldRefSha ?? null, newSha: snapshot.commitSha
-        }, snapshot.recordedAt);
+        await insertOutbox(
+          client,
+          snapshot.tenantId,
+          "observation_recorded",
+          observationId,
+          {
+            observationId,
+            repoId: snapshot.repository
+          },
+          snapshot.recordedAt
+        );
+        await insertOutbox(
+          client,
+          snapshot.tenantId,
+          "commit_ingested",
+          `${snapshot.repository}:${snapshot.commitSha}`,
+          {
+            repoId: snapshot.repository,
+            commitSha: snapshot.commitSha
+          },
+          snapshot.recordedAt
+        );
+        await insertOutbox(
+          client,
+          snapshot.tenantId,
+          "ref_moved",
+          `${snapshot.repository}:${snapshot.ref}`,
+          {
+            repoId: snapshot.repository,
+            refName: snapshot.ref,
+            oldSha: oldRefSha ?? null,
+            newSha: snapshot.commitSha
+          },
+          snapshot.recordedAt
+        );
       }
       await reassertPipelineWriteFence(client, writeFence);
       await client.query("commit");
@@ -524,8 +653,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         const membership = await client.query<{ blob_sha: string }>(
           `select distinct blob_sha from jina_ontology.commit_manifest($1,$2,$3)
            where blob_sha=any($4::text[])`,
-          [scope.tenantId, scope.repository, scope.commitSha,
-            [...new Set(analyses.map((analysis) => analysis.blobSha))]]
+          [
+            scope.tenantId,
+            scope.repository,
+            scope.commitSha,
+            [...new Set(analyses.map((analysis) => analysis.blobSha))]
+          ]
         );
         const knownBlobShas = new Set(membership.rows.map((row) => row.blob_sha));
         for (const analysis of analyses) {
@@ -538,9 +671,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            select $1,source.blob_sha,source.parser_version,source.language
            from unnest($2::text[],$3::text[],$4::text[]) as source(blob_sha,parser_version,language)
            on conflict do nothing returning blob_sha,parser_version`,
-          [scope.tenantId, analyses.map((analysis) => analysis.blobSha),
+          [
+            scope.tenantId,
+            analyses.map((analysis) => analysis.blobSha),
             analyses.map((analysis) => analysis.parserVersion),
-            analyses.map((analysis) => analysis.language ?? null)]
+            analyses.map((analysis) => analysis.language ?? null)
+          ]
         );
         const analysisKey = (blobSha: string, parserVersion: string) => `${blobSha}\u0000${parserVersion}`;
         const insertedKeys = new Set(inserted.rows.map((row) => analysisKey(row.blob_sha, row.parser_version)));
@@ -561,11 +697,17 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              from unnest($2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::text[],$8::integer[],$9::integer[])
                as source(blob_sha,parser_version,moniker,name,kind,signature_hash,start_line,end_line)
              on conflict do nothing`,
-            [scope.tenantId, symbols.map(({ analysis }) => analysis.blobSha),
+            [
+              scope.tenantId,
+              symbols.map(({ analysis }) => analysis.blobSha),
               symbols.map(({ analysis }) => analysis.parserVersion),
-              symbols.map(({ symbol }) => symbol.moniker), symbols.map(({ symbol }) => symbol.name),
-              symbols.map(({ symbol }) => symbol.kind), symbols.map(({ symbol }) => symbol.signatureHash),
-              symbols.map(({ symbol }) => symbol.startLine), symbols.map(({ symbol }) => symbol.endLine)]
+              symbols.map(({ symbol }) => symbol.moniker),
+              symbols.map(({ symbol }) => symbol.name),
+              symbols.map(({ symbol }) => symbol.kind),
+              symbols.map(({ symbol }) => symbol.signatureHash),
+              symbols.map(({ symbol }) => symbol.startLine),
+              symbols.map(({ symbol }) => symbol.endLine)
+            ]
           );
         }
         const imports = active.flatMap((analysis) => analysis.imports.map((item) => ({ analysis, item })));
@@ -577,9 +719,13 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              from unnest($2::text[],$3::text[],$4::text[],$5::integer[])
                as source(blob_sha,parser_version,specifier,line)
              on conflict do nothing`,
-            [scope.tenantId, imports.map(({ analysis }) => analysis.blobSha),
+            [
+              scope.tenantId,
+              imports.map(({ analysis }) => analysis.blobSha),
               imports.map(({ analysis }) => analysis.parserVersion),
-              imports.map(({ item }) => item.specifier), imports.map(({ item }) => item.line)]
+              imports.map(({ item }) => item.specifier),
+              imports.map(({ item }) => item.line)
+            ]
           );
         }
         const edges = active.flatMap((analysis) => analysis.edges.map((edge) => ({ analysis, edge })));
@@ -592,11 +738,16 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              from unnest($2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::integer[],$8::integer[])
                as source(blob_sha,parser_version,from_moniker,kind,to_moniker,start_line,end_line)
              on conflict do nothing`,
-            [scope.tenantId, edges.map(({ analysis }) => analysis.blobSha),
+            [
+              scope.tenantId,
+              edges.map(({ analysis }) => analysis.blobSha),
               edges.map(({ analysis }) => analysis.parserVersion),
-              edges.map(({ edge }) => edge.fromMoniker), edges.map(({ edge }) => edge.kind),
+              edges.map(({ edge }) => edge.fromMoniker),
+              edges.map(({ edge }) => edge.kind),
               edges.map(({ edge }) => edge.toMoniker),
-              edges.map(({ edge }) => edge.startLine), edges.map(({ edge }) => edge.endLine)]
+              edges.map(({ edge }) => edge.startLine),
+              edges.map(({ edge }) => edge.endLine)
+            ]
           );
         }
       }
@@ -632,7 +783,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           writeFence
         );
       }
-      const scopes = [...new Set(observations.map((observation) => `${observation.tenantId}\0${observation.repository}`))].sort();
+      const scopes = [
+        ...new Set(observations.map((observation) => `${observation.tenantId}\0${observation.repository}`))
+      ].sort();
       for (const scope of scopes) {
         const [tenantId, repository] = scope.split("\0");
         await assertRepositoryWritable(client, tenantId!, repository!);
@@ -656,39 +809,84 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             (id,tenant_id,source,type,external_id,repository,occurred_at,recorded_at,payload,payload_sha)
            values ($1,$2,$9,'source_snapshot',$3,$4,$5,$6,$7::jsonb,$8)
            on conflict (tenant_id,source,external_id) do nothing returning id`,
-          [observationId, observation.tenantId, externalId, observation.repository,
-            "occurredAt" in observation ? observation.occurredAt ?? null : null,
-            observation.recordedAt, payload, stableId("sha", payload), source]
+          [
+            observationId,
+            observation.tenantId,
+            externalId,
+            observation.repository,
+            "occurredAt" in observation ? (observation.occurredAt ?? null) : null,
+            observation.recordedAt,
+            payload,
+            stableId("sha", payload),
+            source
+          ]
         );
         if (insertedObservation.rowCount === 1) {
           if (priorVersion.rowCount) updatedObservationCount += 1;
           else newObservationCount += 1;
-          await insertOutbox(client, observation.tenantId, "observation_recorded", observationId, {
-            observationId, repoId: observation.repository
-          }, observation.recordedAt);
+          await insertOutbox(
+            client,
+            observation.tenantId,
+            "observation_recorded",
+            observationId,
+            {
+              observationId,
+              repoId: observation.repository
+            },
+            observation.recordedAt
+          );
         } else confirmedObservationCount += 1;
-        const currentSourceSnapshot = observation.kind === "pull_request" || observation.kind === "issue"
-          ? await isLatestGitHubWorkItemObservation(client, observation, observationId)
-          : insertedObservation.rowCount === 1;
+        const currentSourceSnapshot =
+          observation.kind === "pull_request" || observation.kind === "issue"
+            ? await isLatestGitHubWorkItemObservation(client, observation, observationId)
+            : insertedObservation.rowCount === 1;
         const shouldReconcile = insertedObservation.rowCount === 1 && currentSourceSnapshot;
         const entityIds = new Map<string, string>();
         for (const entity of normalized.entities) {
-          const id = await ensureEntity(client, observation.tenantId, {
-            kind: entity.kind, naturalKey: entity.key, label: entity.displayName
-          }, observation.recordedAt, currentSourceSnapshot);
+          const id = await ensureEntity(
+            client,
+            observation.tenantId,
+            {
+              kind: entity.kind,
+              naturalKey: entity.key,
+              label: entity.displayName
+            },
+            observation.recordedAt,
+            currentSourceSnapshot
+          );
           entityIds.set(`${entity.kind}:${entity.key}`, id);
         }
         if (normalized.githubIdentity) {
-          const entityId = entityIds.get(`${normalized.githubIdentity.entity.kind}:${normalized.githubIdentity.entity.key}`)!;
-          const identityId = stableId("identity", `${observation.tenantId}:github:${normalized.githubIdentity.externalId}:${entityId}`);
+          const entityId = entityIds.get(
+            `${normalized.githubIdentity.entity.kind}:${normalized.githubIdentity.entity.key}`
+          )!;
+          const identityId = stableId(
+            "identity",
+            `${observation.tenantId}:github:${normalized.githubIdentity.externalId}:${entityId}`
+          );
           const inserted = await client.query(
             `insert into jina_ontology.identities
               (id,tenant_id,source,external_id,entity_id,status,confidence,source_observation_id,created_at)
              values ($1,$2,'github',$3,$4,'accepted',1,$5,$6)
              on conflict (tenant_id,source,external_id,entity_id) do nothing returning id`,
-            [identityId, observation.tenantId, normalized.githubIdentity.externalId, entityId, observationId, observation.recordedAt]
+            [
+              identityId,
+              observation.tenantId,
+              normalized.githubIdentity.externalId,
+              entityId,
+              observationId,
+              observation.recordedAt
+            ]
           );
-          if (inserted.rowCount === 1) await insertOutbox(client, observation.tenantId, "identity_changed", identityId, { identityId }, observation.recordedAt);
+          if (inserted.rowCount === 1)
+            await insertOutbox(
+              client,
+              observation.tenantId,
+              "identity_changed",
+              identityId,
+              { identityId },
+              observation.recordedAt
+            );
         }
         const desiredAssertionIds: string[] = [];
         for (const intent of normalized.assertions) {
@@ -702,35 +900,79 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           );
           const definition = predicateDefinition(intent.predicate);
           await lockAssertionNaturalKey(
-            client, observation.tenantId, observation.repository, subjectId, intent.predicate, objectId, qualifiersHash, definition.cardinality
+            client,
+            observation.tenantId,
+            observation.repository,
+            subjectId,
+            intent.predicate,
+            objectId,
+            qualifiersHash,
+            definition.cardinality
           );
           const existingLive = await findLiveAssertionByNaturalKey(
-            client, observation.tenantId, observation.repository, subjectId, intent.predicate, objectId, qualifiersHash
+            client,
+            observation.tenantId,
+            observation.repository,
+            subjectId,
+            intent.predicate,
+            objectId,
+            qualifiersHash
           );
           if (existingLive) {
             desiredAssertionIds.push(existingLive.id);
             if (shouldReconcile) {
-              await backfillAssertionExplanation(client, observation.tenantId, existingLive.id, intent.explanation, observation.recordedAt);
+              await backfillAssertionExplanation(
+                client,
+                observation.tenantId,
+                existingLive.id,
+                intent.explanation,
+                observation.recordedAt
+              );
               await client.query(
                 `update jina_ontology.assertions set
                    last_confirmed_at=greatest(last_confirmed_at,$3)
                  where tenant_id=$1 and id=$2`,
                 [observation.tenantId, existingLive.id, observation.recordedAt]
               );
-              await insertOutbox(client, observation.tenantId, "assertion_changed", existingLive.id, {
-                assertionId: existingLive.id, repoId: observation.repository
-              }, observation.recordedAt);
+              await insertOutbox(
+                client,
+                observation.tenantId,
+                "assertion_changed",
+                existingLive.id,
+                {
+                  assertionId: existingLive.id,
+                  repoId: observation.repository
+                },
+                observation.recordedAt
+              );
               if (definition.cardinality === "one") {
                 const superseded = await client.query<{ id: string }>(
                   `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$7
                    where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5
                      and status='active' and id<>$7 returning id`,
-                  [observation.tenantId, observation.repository, subjectId, intent.predicate, qualifiersHash, observation.recordedAt, existingLive.id]
+                  [
+                    observation.tenantId,
+                    observation.repository,
+                    subjectId,
+                    intent.predicate,
+                    qualifiersHash,
+                    observation.recordedAt,
+                    existingLive.id
+                  ]
                 );
                 for (const row of superseded.rows) {
-                  await insertOutbox(client, observation.tenantId, "assertion_changed", row.id, {
-                    assertionId: row.id, repoId: observation.repository, status: "superseded"
-                  }, observation.recordedAt);
+                  await insertOutbox(
+                    client,
+                    observation.tenantId,
+                    "assertion_changed",
+                    row.id,
+                    {
+                      assertionId: row.id,
+                      repoId: observation.repository,
+                      status: "superseded"
+                    },
+                    observation.recordedAt
+                  );
                 }
               }
             }
@@ -753,11 +995,30 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                object_label=case when $19 then excluded.object_label else current.object_label end,
                status=case when $19 and $20 then 'proposed' when $19 then 'active' else current.status end,
                valid_to=case when $19 then null else current.valid_to end`,
-            [assertionId, observation.tenantId, observation.repository, subjectId, intent.subject.kind, intent.subject.key,
-              intent.subject.displayName, intent.predicate, objectId, intent.object.kind, intent.object.key,
-              intent.object.displayName, observationId, ONTOLOGY_REGISTRY_VERSION, observation.recordedAt,
-              JSON.stringify(qualifiers), qualifiersHash, `source:${source}`,
-              shouldReconcile, definition.cardinality === "one", `${source}-normalizer-v1`, intent.explanation]
+            [
+              assertionId,
+              observation.tenantId,
+              observation.repository,
+              subjectId,
+              intent.subject.kind,
+              intent.subject.key,
+              intent.subject.displayName,
+              intent.predicate,
+              objectId,
+              intent.object.kind,
+              intent.object.key,
+              intent.object.displayName,
+              observationId,
+              ONTOLOGY_REGISTRY_VERSION,
+              observation.recordedAt,
+              JSON.stringify(qualifiers),
+              qualifiersHash,
+              `source:${source}`,
+              shouldReconcile,
+              definition.cardinality === "one",
+              `${source}-normalizer-v1`,
+              intent.explanation
+            ]
           );
           assertionCount += 1;
           if (shouldReconcile) {
@@ -766,21 +1027,47 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                 `update jina_ontology.assertions set status='superseded',valid_to=$6,superseded_by=$7
                  where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5
                    and status='active' and id<>$7 returning id`,
-                [observation.tenantId, observation.repository, subjectId, intent.predicate, qualifiersHash, observation.recordedAt, assertionId]
+                [
+                  observation.tenantId,
+                  observation.repository,
+                  subjectId,
+                  intent.predicate,
+                  qualifiersHash,
+                  observation.recordedAt,
+                  assertionId
+                ]
               );
               for (const row of superseded.rows) {
-                await insertOutbox(client, observation.tenantId, "assertion_changed", row.id, {
-                  assertionId: row.id, repoId: observation.repository, status: "superseded"
-                }, observation.recordedAt);
+                await insertOutbox(
+                  client,
+                  observation.tenantId,
+                  "assertion_changed",
+                  row.id,
+                  {
+                    assertionId: row.id,
+                    repoId: observation.repository,
+                    status: "superseded"
+                  },
+                  observation.recordedAt
+                );
               }
-              await client.query(
-                `update jina_ontology.assertions set status='active' where tenant_id=$1 and id=$2`,
-                [observation.tenantId, assertionId]
-              );
+              await client.query(`update jina_ontology.assertions set status='active' where tenant_id=$1 and id=$2`, [
+                observation.tenantId,
+                assertionId
+              ]);
             }
-            await insertOutbox(client, observation.tenantId, "assertion_changed", assertionId, {
-              assertionId, repoId: observation.repository, status: "active"
-            }, observation.recordedAt);
+            await insertOutbox(
+              client,
+              observation.tenantId,
+              "assertion_changed",
+              assertionId,
+              {
+                assertionId,
+                repoId: observation.repository,
+                status: "active"
+              },
+              observation.recordedAt
+            );
           }
         }
         if (shouldReconcile) {
@@ -794,14 +1081,31 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                    and o.payload->>'kind'=$5 and ($6::text is null or o.payload->>$6=$8)
                )
              returning a.id`,
-            [observation.tenantId, observation.repository,
-              observation.kind === "codeowners" ? ["source:codeowners", "source:github"] : [`source:${source}`], source, observation.kind,
-              scope.field, desiredAssertionIds, scope.value, observation.recordedAt]
+            [
+              observation.tenantId,
+              observation.repository,
+              observation.kind === "codeowners" ? ["source:codeowners", "source:github"] : [`source:${source}`],
+              source,
+              observation.kind,
+              scope.field,
+              desiredAssertionIds,
+              scope.value,
+              observation.recordedAt
+            ]
           );
           for (const row of retracted.rows) {
-            await insertOutbox(client, observation.tenantId, "assertion_changed", row.id, {
-              assertionId: row.id, repoId: observation.repository, status: "retracted"
-            }, observation.recordedAt);
+            await insertOutbox(
+              client,
+              observation.tenantId,
+              "assertion_changed",
+              row.id,
+              {
+                assertionId: row.id,
+                repoId: observation.repository,
+                status: "retracted"
+              },
+              observation.recordedAt
+            );
           }
         }
       }
@@ -845,14 +1149,16 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       [tenantId, repository, requested]
     );
     if (result.rows.length !== requested.length) throw new Error("assertion evidence observation was not found");
-    return result.rows.map((row) => ({
-      id: row.id,
-      source: row.source,
-      type: row.type,
-      repository: row.repository ?? repository,
-      payloadSha: row.payload_sha,
-      payload: row.payload
-    })).sort((left, right) => left.id.localeCompare(right.id));
+    return result.rows
+      .map((row) => ({
+        id: row.id,
+        source: row.source,
+        type: row.type,
+        repository: row.repository ?? repository,
+        payloadSha: row.payload_sha,
+        payload: row.payload
+      }))
+      .sort((left, right) => left.id.localeCompare(right.id));
   }
 
   async hasAssertionGeneration(
@@ -870,7 +1176,14 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
        where id=$1 and tenant_id=$2 and repository=$3 and type='model_output'
          and redacted_at is null and payload is not null`,
       [
-        assertionObservationId({ tenantId, repository, commitSha, generatorVersion, registryVersion, evidenceFingerprint }),
+        assertionObservationId({
+          tenantId,
+          repository,
+          commitSha,
+          generatorVersion,
+          registryVersion,
+          evidenceFingerprint
+        }),
         tenantId,
         repository
       ]
@@ -889,7 +1202,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     );
   }
 
-  async saveAssertionBatch(batch: OntologyAssertionBatch, writeFence?: OntologyWriteFence): Promise<OntologyAssertionResult> {
+  async saveAssertionBatch(
+    batch: OntologyAssertionBatch,
+    writeFence?: OntologyWriteFence
+  ): Promise<OntologyAssertionResult> {
     await this.initialize();
     const normalized = normalizeAssertionBatchLenient(batch);
     const assertions = normalized.assertions;
@@ -904,14 +1220,29 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
          values ($1,$2,$3,'model_output',$4,$5,$6,$7::jsonb,$8)
          on conflict do nothing returning id`,
-        [observationId, batch.tenantId, `model:${batch.model}`,
+        [
+          observationId,
+          batch.tenantId,
+          `model:${batch.model}`,
           `${batch.repository}:${batch.commitSha}:${batch.generatorVersion}:${batch.registryVersion}:${batch.evidenceFingerprint}`,
-          batch.repository, batch.generatedAt, JSON.stringify(batch), stableId("sha", JSON.stringify(batch))]
+          batch.repository,
+          batch.generatedAt,
+          JSON.stringify(batch),
+          stableId("sha", JSON.stringify(batch))
+        ]
       );
       if (inserted.rowCount === 1) {
-        await insertOutbox(client, batch.tenantId, "observation_recorded", observationId, {
-          observationId, repoId: batch.repository
-        }, batch.generatedAt);
+        await insertOutbox(
+          client,
+          batch.tenantId,
+          "observation_recorded",
+          observationId,
+          {
+            observationId,
+            repoId: batch.repository
+          },
+          batch.generatedAt
+        );
         for (const assertion of assertions) {
           // Model observations may introduce entities, but they must not rename
           // identities already established by deterministic source intake.
@@ -929,11 +1260,23 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             predicateDefinition(assertion.predicate).cardinality
           );
           const existingLive = await findLiveAssertionByNaturalKey(
-            client, batch.tenantId, batch.repository, subjectId, assertion.predicate, objectId, qualifiersHash
+            client,
+            batch.tenantId,
+            batch.repository,
+            subjectId,
+            assertion.predicate,
+            objectId,
+            qualifiersHash
           );
           if (existingLive) {
             if (assertion.explanation) {
-              await backfillAssertionExplanation(client, batch.tenantId, existingLive.id, assertion.explanation, batch.generatedAt);
+              await backfillAssertionExplanation(
+                client,
+                batch.tenantId,
+                existingLive.id,
+                assertion.explanation,
+                batch.generatedAt
+              );
             }
             await client.query(
               `update jina_ontology.assertions
@@ -941,9 +1284,17 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                where tenant_id=$1 and id=$2`,
               [batch.tenantId, existingLive.id, batch.generatedAt]
             );
-            await insertOutbox(client, batch.tenantId, "assertion_changed", existingLive.id, {
-              assertionId: existingLive.id, repoId: batch.repository
-            }, batch.generatedAt);
+            await insertOutbox(
+              client,
+              batch.tenantId,
+              "assertion_changed",
+              existingLive.id,
+              {
+                assertionId: existingLive.id,
+                repoId: batch.repository
+              },
+              batch.generatedAt
+            );
             continue;
           }
           await client.query(
@@ -954,16 +1305,45 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22::jsonb,$23,$24,$21)
              on conflict (id) do update set
                last_confirmed_at=greatest(jina_ontology.assertions.last_confirmed_at,excluded.last_confirmed_at)`,
-            [assertion.id, assertion.tenantId, assertion.repository, assertion.commitSha,
-              subjectId, assertion.subject.kind, assertion.subject.naturalKey, assertion.subject.label,
-              assertion.predicate, objectId, assertion.object.kind, assertion.object.naturalKey, assertion.object.label,
-              assertion.status, assertion.confidence, assertion.explanation, JSON.stringify(assertion.evidence), assertion.sourceObservationId,
-              assertion.generatorVersion, assertion.registryVersion, assertion.recordedAt, JSON.stringify(assertion.qualifiers ?? {}),
-              qualifiersHash, `model:${assertion.generatorVersion}`]
+            [
+              assertion.id,
+              assertion.tenantId,
+              assertion.repository,
+              assertion.commitSha,
+              subjectId,
+              assertion.subject.kind,
+              assertion.subject.naturalKey,
+              assertion.subject.label,
+              assertion.predicate,
+              objectId,
+              assertion.object.kind,
+              assertion.object.naturalKey,
+              assertion.object.label,
+              assertion.status,
+              assertion.confidence,
+              assertion.explanation,
+              JSON.stringify(assertion.evidence),
+              assertion.sourceObservationId,
+              assertion.generatorVersion,
+              assertion.registryVersion,
+              assertion.recordedAt,
+              JSON.stringify(assertion.qualifiers ?? {}),
+              qualifiersHash,
+              `model:${assertion.generatorVersion}`
+            ]
           );
-          await insertOutbox(client, batch.tenantId, "assertion_changed", assertion.id, {
-            assertionId: assertion.id, repoId: batch.repository, status: assertion.status
-          }, batch.generatedAt);
+          await insertOutbox(
+            client,
+            batch.tenantId,
+            "assertion_changed",
+            assertion.id,
+            {
+              assertionId: assertion.id,
+              repoId: batch.repository,
+              status: assertion.status
+            },
+            batch.generatedAt
+          );
         }
       }
       await reassertPipelineWriteFence(client, writeFence);
@@ -1014,13 +1394,15 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
        order by manifest.path`,
       [request.tenantId, request.repository, request.commitSha]
     );
-    const analyses = await this.loadAnalyses(request.tenantId, [...new Set(filesResult.rows.map((row) => row.blob_sha))]);
+    const analyses = await this.loadAnalyses(request.tenantId, [
+      ...new Set(filesResult.rows.map((row) => row.blob_sha))
+    ]);
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
-      `select * from jina_ontology.assertions
+        `select * from jina_ontology.assertions
        where tenant_id=$1 and repository=$2 and status in ('active','proposed') and object_id is not null
        order by recorded_at,id`,
-      [request.tenantId, request.repository]
+        [request.tenantId, request.repository]
       ),
       this.pool.query<{ commit_sha: string; path: string; blob_sha: string }>(
         `select candidate.commit_sha,manifest.path,manifest.blob_sha
@@ -1030,11 +1412,15 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       ),
       this.pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
         `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
-         where tenant_id=$1 order by created_at,id`, [request.tenantId]
+         where tenant_id=$1 order by created_at,id`,
+        [request.tenantId]
       ),
-      this.pool.query<{ id: string; kind: StoredAssertion["subject"]["kind"]; natural_key: string; display_name: string }>(
-        `select id,kind,natural_key,display_name from jina_ontology.entities where tenant_id=$1`, [request.tenantId]
-      )
+      this.pool.query<{
+        id: string;
+        kind: StoredAssertion["subject"]["kind"];
+        natural_key: string;
+        display_name: string;
+      }>(`select id,kind,natural_key,display_name from jina_ontology.entities where tenant_id=$1`, [request.tenantId])
     ]);
     const snapshot: RepositorySnapshot = {
       tenantId: request.tenantId,
@@ -1076,7 +1462,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     try {
       await client.query("begin");
       await authorizeOntologyCommand(client, tenantId, actorId, command, actorIsTenantAdmin);
-      if (command.type === "review_assertion" && command.decision === "reject" && (!command.reason || !command.rejectionCode)) {
+      if (
+        command.type === "review_assertion" &&
+        command.decision === "reject" &&
+        (!command.reason || !command.rejectionCode)
+      ) {
         throw new Error("assertion rejection requires a reason and rejection code");
       }
       if ("repository" in command && command.repository) {
@@ -1084,12 +1474,23 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         else await assertRepositoryWritable(client, tenantId, command.repository);
       }
       await insertAudit(client, {
-        id: auditId, tenantId, actorId, action: command.type, input: command, result: "accepted", now,
+        id: auditId,
+        tenantId,
+        actorId,
+        action: command.type,
+        input: command,
+        result: "accepted",
+        now,
         ...("reason" in command && command.reason ? { reason: command.reason } : {})
       });
       if (command.type === "review_assertion") {
         const candidate = await client.query<{
-          id: string; predicate: string; subject_id: string; object_id: string; qualifiers_hash: string; repository: string;
+          id: string;
+          predicate: string;
+          subject_id: string;
+          object_id: string;
+          qualifiers_hash: string;
+          repository: string;
         }>(
           `select id,predicate,subject_id,object_id,qualifiers_hash,repository from jina_ontology.assertions
            where tenant_id=$1 and id=$2`,
@@ -1108,7 +1509,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           predicateDefinition(pending.predicate).cardinality
         );
         const selected = await client.query<{
-          id: string; status: string; predicate: string; subject_id: string; qualifiers_hash: string; repository: string;
+          id: string;
+          status: string;
+          predicate: string;
+          subject_id: string;
+          qualifiers_hash: string;
+          repository: string;
         }>(
           `select id,status,predicate,subject_id,qualifiers_hash,repository from jina_ontology.assertions
            where tenant_id=$1 and id=$2 for update`,
@@ -1116,17 +1522,30 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         );
         const assertion = selected.rows[0];
         if (!assertion) throw new Error("assertion not found");
-        const allowed = command.decision === "accept" ? assertion.status === "proposed"
-          : command.decision === "reject" ? assertion.status === "proposed"
-            : assertion.status === "active";
+        const allowed =
+          command.decision === "accept"
+            ? assertion.status === "proposed"
+            : command.decision === "reject"
+              ? assertion.status === "proposed"
+              : assertion.status === "active";
         if (!allowed) throw new Error(`cannot ${command.decision} assertion in ${assertion.status}`);
-        const status = command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
+        const status =
+          command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
         if (status === "active" && predicateDefinition(assertion.predicate).cardinality === "one") {
           const superseded = await client.query<{ id: string }>(
             `update jina_ontology.assertions set status='superseded',valid_to=$7,superseded_by=$6,audit_id=$8
              where tenant_id=$1 and repository=$2 and subject_id=$3 and predicate=$4 and qualifiers_hash=$5 and status='active' and id<>$6
              returning id`,
-            [tenantId, assertion.repository, assertion.subject_id, assertion.predicate, assertion.qualifiers_hash, assertion.id, now, auditId]
+            [
+              tenantId,
+              assertion.repository,
+              assertion.subject_id,
+              assertion.predicate,
+              assertion.qualifiers_hash,
+              assertion.id,
+              now,
+              auditId
+            ]
           );
           affectedIds.push(...superseded.rows.map((row) => row.id));
         }
@@ -1137,9 +1556,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         );
         affectedIds.push(assertion.id);
         for (const id of affectedIds) {
-          outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", id, {
-            assertionId: id, repoId: assertion.repository
-          }, now));
+          outboxEventIds.push(
+            await insertOutbox(
+              client,
+              tenantId,
+              "assertion_changed",
+              id,
+              {
+                assertionId: id,
+                repoId: assertion.repository
+              },
+              now
+            )
+          );
         }
       } else if (command.type === "relate_assertions") {
         const assertions = await client.query<{ id: string; repository: string }>(
@@ -1157,18 +1586,41 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           [tenantId, command.evidenceObservationId, repositories[0]]
         );
         if (evidence.rowCount !== 1) throw new Error("assertion relation evidence observation was not found");
-        const relationId = stableId("assertion_relation", `${tenantId}:${command.sourceAssertionId}:${command.relation}:${command.targetAssertionId}:${command.evidenceObservationId}`);
+        const relationId = stableId(
+          "assertion_relation",
+          `${tenantId}:${command.sourceAssertionId}:${command.relation}:${command.targetAssertionId}:${command.evidenceObservationId}`
+        );
         await client.query(
           `insert into jina_ontology.assertion_relations
             (id,tenant_id,source_assertion_id,relation,target_assertion_id,evidence_observation_id,created_at)
            values ($1,$2,$3,$4,$5,$6,$7) on conflict do nothing`,
-          [relationId, tenantId, command.sourceAssertionId, command.relation, command.targetAssertionId, command.evidenceObservationId, now]
+          [
+            relationId,
+            tenantId,
+            command.sourceAssertionId,
+            command.relation,
+            command.targetAssertionId,
+            command.evidenceObservationId,
+            now
+          ]
         );
         affectedIds.push(relationId, command.sourceAssertionId, command.targetAssertionId);
-        for (const repository of repositories) outboxEventIds.push(await insertOutbox(
-          client, tenantId, "assertion_relation_changed", relationId,
-          { relationId, repoId: repository, sourceAssertionId: command.sourceAssertionId, targetAssertionId: command.targetAssertionId }, now
-        ));
+        for (const repository of repositories)
+          outboxEventIds.push(
+            await insertOutbox(
+              client,
+              tenantId,
+              "assertion_relation_changed",
+              relationId,
+              {
+                relationId,
+                repoId: repository,
+                sourceAssertionId: command.sourceAssertionId,
+                targetAssertionId: command.targetAssertionId
+              },
+              now
+            )
+          );
       } else if (command.type === "merge_entities" || command.type === "unmerge_entities") {
         const entities = await client.query<{ id: string }>(
           `select id from jina_ontology.entities where tenant_id=$1 and id=any($2::text[])`,
@@ -1178,24 +1630,44 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         if (command.fromEntityId === command.toEntityId) throw new Error("cannot redirect an entity to itself");
         const kind = command.type === "merge_entities" ? "merge" : "unmerge";
         if (kind === "merge") {
-          const redirects = await client.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
+          const redirects = await client.query<{
+            from_entity_id: string;
+            to_entity_id: string;
+            kind: "merge" | "unmerge";
+          }>(
             `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
-             where tenant_id=$1 order by created_at,id`, [tenantId]
+             where tenant_id=$1 order by created_at,id`,
+            [tenantId]
           );
           const mapping = redirectMap(redirects.rows);
           mapping.set(command.fromEntityId, command.toEntityId);
           resolveRedirect(mapping, command.fromEntityId);
         }
-        const redirectId = stableId("redirect", `${tenantId}:${command.fromEntityId}:${command.toEntityId}:${kind}:${now}`);
+        const redirectId = stableId(
+          "redirect",
+          `${tenantId}:${command.fromEntityId}:${command.toEntityId}:${kind}:${now}`
+        );
         await client.query(
           `insert into jina_ontology.entity_redirects
             (id,tenant_id,from_entity_id,to_entity_id,kind,audit_id,created_at) values ($1,$2,$3,$4,$5,$6,$7)`,
           [redirectId, tenantId, command.fromEntityId, command.toEntityId, kind, auditId, now]
         );
         affectedIds.push(redirectId, command.fromEntityId, command.toEntityId);
-        outboxEventIds.push(await insertOutbox(client, tenantId, "redirect_added", redirectId, {
-          fromEntityId: command.fromEntityId, toEntityId: command.toEntityId, kind, auditId
-        }, now));
+        outboxEventIds.push(
+          await insertOutbox(
+            client,
+            tenantId,
+            "redirect_added",
+            redirectId,
+            {
+              fromEntityId: command.fromEntityId,
+              toEntityId: command.toEntityId,
+              kind,
+              auditId
+            },
+            now
+          )
+        );
       } else if (command.type === "redact_observation") {
         const redacted = await client.query<{ repository: string | null }>(
           `update jina_ontology.observations set payload=null,redacted_at=$3,redaction_reason=$4
@@ -1209,18 +1681,32 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             `update jina_ontology.commits set message=null where tenant_id=$1 and sha=any($2::text[])`,
             [tenantId, command.commitShas]
           );
-          for (const sha of command.commitShas) await insertErasureFilter(client, tenantId, "commit", sha, auditId, now);
+          for (const sha of command.commitShas)
+            await insertErasureFilter(client, tenantId, "commit", sha, auditId, now);
         }
         const retracted = await client.query<{ id: string }>(
           `update jina_ontology.assertions set status='retracted',valid_to=$3,audit_id=$4
            where tenant_id=$1 and source_observation_id=$2 and status in ('active','proposed') returning id`,
           [tenantId, command.observationId, now, auditId]
         );
-        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and source_id=$2`, [tenantId, command.observationId]);
+        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and source_id=$2`, [
+          tenantId,
+          command.observationId
+        ]);
         affectedIds.push(command.observationId, ...retracted.rows.map((row) => row.id));
-        outboxEventIds.push(await insertOutbox(client, tenantId, "observation_redacted", command.observationId, {
-          observationId: command.observationId, repoId: redacted.rows[0]?.repository ?? null
-        }, now));
+        outboxEventIds.push(
+          await insertOutbox(
+            client,
+            tenantId,
+            "observation_redacted",
+            command.observationId,
+            {
+              observationId: command.observationId,
+              repoId: redacted.rows[0]?.repository ?? null
+            },
+            now
+          )
+        );
       } else if (command.type === "erase_person") {
         const entity = await client.query<{ id: string }>(
           `select id from jina_ontology.entities where tenant_id=$1 and id=$2 and kind='Engineer' for update`,
@@ -1232,12 +1718,20 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            where tenant_id=$1 and entity_id=$2 and status<>'erased' returning id,external_id`,
           [tenantId, command.entityId]
         );
-        await client.query(`update jina_ontology.entities set retired_at=$3 where tenant_id=$1 and id=$2`, [tenantId, command.entityId, now]);
+        await client.query(`update jina_ontology.entities set retired_at=$3 where tenant_id=$1 and id=$2`, [
+          tenantId,
+          command.entityId,
+          now
+        ]);
         const externalIds = identities.rows.map((identity) => identity.external_id);
         const personalObservationIds: string[] = [];
         if (externalIds.length) {
-          await client.query(`update jina_ontology.commits set author_external_id=null where tenant_id=$1 and author_external_id=any($2::text[])`, [tenantId, externalIds]);
-          for (const externalId of externalIds) await insertErasureFilter(client, tenantId, "identity", externalId, auditId, now);
+          await client.query(
+            `update jina_ontology.commits set author_external_id=null where tenant_id=$1 and author_external_id=any($2::text[])`,
+            [tenantId, externalIds]
+          );
+          for (const externalId of externalIds)
+            await insertErasureFilter(client, tenantId, "identity", externalId, auditId, now);
           const personalObservations = await client.query<{ id: string; repository: string | null }>(
             `select id,repository from jina_ontology.observations
              where tenant_id=$1 and redacted_at is null and payload is not null
@@ -1253,9 +1747,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             );
             for (const observation of personalObservations.rows) {
               await insertErasureFilter(client, tenantId, "observation", observation.id, auditId, now);
-              outboxEventIds.push(await insertOutbox(client, tenantId, "observation_redacted", observation.id, {
-                observationId: observation.id, repoId: observation.repository
-              }, now));
+              outboxEventIds.push(
+                await insertOutbox(
+                  client,
+                  tenantId,
+                  "observation_redacted",
+                  observation.id,
+                  {
+                    observationId: observation.id,
+                    repoId: observation.repository
+                  },
+                  now
+                )
+              );
             }
           }
         }
@@ -1266,24 +1770,51 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              and status in ('active','proposed') returning id,repository`,
           [tenantId, command.entityId, personalObservationIds, now, auditId]
         );
-        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and source_id=$2`, [tenantId, command.entityId]);
-        affectedIds.push(command.entityId, ...identities.rows.map((identity) => identity.id), ...retracted.rows.map((row) => row.id));
+        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and source_id=$2`, [
+          tenantId,
+          command.entityId
+        ]);
+        affectedIds.push(
+          command.entityId,
+          ...identities.rows.map((identity) => identity.id),
+          ...retracted.rows.map((row) => row.id)
+        );
         for (const id of identities.rows.map((identity) => identity.id)) {
           outboxEventIds.push(await insertOutbox(client, tenantId, "identity_changed", id, { identityId: id }, now));
         }
         for (const assertion of retracted.rows) {
-          outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", assertion.id, {
-            assertionId: assertion.id, repoId: assertion.repository || null, status: "retracted"
-          }, now));
+          outboxEventIds.push(
+            await insertOutbox(
+              client,
+              tenantId,
+              "assertion_changed",
+              assertion.id,
+              {
+                assertionId: assertion.id,
+                repoId: assertion.repository || null,
+                status: "retracted"
+              },
+              now
+            )
+          );
         }
-        outboxEventIds.push(await insertOutbox(client, tenantId, "entity_changed", command.entityId, { entityId: command.entityId }, now));
+        outboxEventIds.push(
+          await insertOutbox(client, tenantId, "entity_changed", command.entityId, { entityId: command.entityId }, now)
+        );
       } else if (command.type === "tombstone_repository") {
         const tombstoneId = stableId("observation", `${tenantId}:tombstone:${command.repository}:${now}`);
         await client.query(
           `insert into jina_ontology.observations
             (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
            values ($1,$2,'internal:command','tombstone',$3,$3,$4,$5::jsonb,$6)`,
-          [tombstoneId, tenantId, command.repository, now, JSON.stringify({ repository: command.repository, reason: command.reason }), stableId("sha", command.reason)]
+          [
+            tombstoneId,
+            tenantId,
+            command.repository,
+            now,
+            JSON.stringify({ repository: command.repository, reason: command.reason }),
+            stableId("sha", command.reason)
+          ]
         );
         await insertErasureFilter(client, tenantId, "repository", command.repository, auditId, now);
         const retracted = await client.query<{ id: string }>(
@@ -1291,11 +1822,26 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            where tenant_id=$1 and repository=$2 and status in ('active','proposed') returning id`,
           [tenantId, command.repository, now, auditId]
         );
-        await client.query(`update jina_ontology.entities set retired_at=$3 where tenant_id=$1 and natural_key like $2`, [tenantId, `%${command.repository}%`, now]);
+        await client.query(
+          `update jina_ontology.entities set retired_at=$3 where tenant_id=$1 and natural_key like $2`,
+          [tenantId, `%${command.repository}%`, now]
+        );
         await deleteCodePlaneRepository(client, tenantId, command.repository);
-        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and repository=$2`, [tenantId, command.repository]);
+        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and repository=$2`, [
+          tenantId,
+          command.repository
+        ]);
         affectedIds.push(tombstoneId, ...retracted.rows.map((row) => row.id));
-        outboxEventIds.push(await insertOutbox(client, tenantId, "tombstone", tombstoneId, { scope: { repository: command.repository } }, now));
+        outboxEventIds.push(
+          await insertOutbox(
+            client,
+            tenantId,
+            "tombstone",
+            tombstoneId,
+            { scope: { repository: command.repository } },
+            now
+          )
+        );
       } else if (command.type === "grant_repository_access") {
         await client.query(
           `insert into jina_ontology.repository_acl (tenant_id,repository,principal_id,role,created_at)
@@ -1308,20 +1854,50 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         const repositoryScope = command.repository ?? "";
         validatePredicateEndpoints(definition, command.subject.kind, command.object.kind);
         validateQualifiers(definition, command.qualifiers);
-        const subjectId = await ensureEntity(client, tenantId, {
-          kind: command.subject.kind, naturalKey: command.subject.key, label: command.subject.displayName ?? command.subject.key
-        }, now);
-        const objectId = await ensureEntity(client, tenantId, {
-          kind: command.object.kind, naturalKey: command.object.key, label: command.object.displayName ?? command.object.key
-        }, now);
+        const subjectId = await ensureEntity(
+          client,
+          tenantId,
+          {
+            kind: command.subject.kind,
+            naturalKey: command.subject.key,
+            label: command.subject.displayName ?? command.subject.key
+          },
+          now
+        );
+        const objectId = await ensureEntity(
+          client,
+          tenantId,
+          {
+            kind: command.object.kind,
+            naturalKey: command.object.key,
+            label: command.object.displayName ?? command.object.key
+          },
+          now
+        );
         const qualifiers = command.qualifiers ?? {};
         const qualifiersHash = stableId("q", canonicalJson(qualifiers));
-        const assertionId = stableId("assertion", `${tenantId}:${repositoryScope}:${subjectId}:${definition.name}:${objectId}:${qualifiersHash}:${now}`);
+        const assertionId = stableId(
+          "assertion",
+          `${tenantId}:${repositoryScope}:${subjectId}:${definition.name}:${objectId}:${qualifiersHash}:${now}`
+        );
         await lockAssertionNaturalKey(
-          client, tenantId, repositoryScope, subjectId, definition.name, objectId, qualifiersHash, definition.cardinality
+          client,
+          tenantId,
+          repositoryScope,
+          subjectId,
+          definition.name,
+          objectId,
+          qualifiersHash,
+          definition.cardinality
         );
         const existingLive = await findLiveAssertionByNaturalKey(
-          client, tenantId, repositoryScope, subjectId, definition.name, objectId, qualifiersHash
+          client,
+          tenantId,
+          repositoryScope,
+          subjectId,
+          definition.name,
+          objectId,
+          qualifiersHash
         );
         if (existingLive) {
           if (definition.cardinality === "one") {
@@ -1333,9 +1909,20 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             );
             affectedIds.push(...superseded.rows.map((row) => row.id));
             for (const row of superseded.rows) {
-              outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", row.id, {
-                assertionId: row.id, repoId: command.repository ?? null, status: "superseded"
-              }, now));
+              outboxEventIds.push(
+                await insertOutbox(
+                  client,
+                  tenantId,
+                  "assertion_changed",
+                  row.id,
+                  {
+                    assertionId: row.id,
+                    repoId: command.repository ?? null,
+                    status: "superseded"
+                  },
+                  now
+                )
+              );
             }
           }
           await client.query(
@@ -1346,9 +1933,20 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             [tenantId, existingLive.id, now, auditId, command.reason]
           );
           affectedIds.push(existingLive.id);
-          outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", existingLive.id, {
-            assertionId: existingLive.id, repoId: command.repository ?? null, status: "active"
-          }, now));
+          outboxEventIds.push(
+            await insertOutbox(
+              client,
+              tenantId,
+              "assertion_changed",
+              existingLive.id,
+              {
+                assertionId: existingLive.id,
+                repoId: command.repository ?? null,
+                status: "active"
+              },
+              now
+            )
+          );
         } else {
           await client.query(
             `insert into jina_ontology.assertions
@@ -1356,10 +1954,28 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,asserted_by,generator_version,
                registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at,audit_id)
              values ($1,$2,$3,'command',$4,$5,$6,$7,$8,$9,$10,$11,$12,$19,1,$20,'[]'::jsonb,$13,'command',$14,$15,$16::jsonb,$17,$15,$18)`,
-            [assertionId, tenantId, repositoryScope, subjectId, command.subject.kind, command.subject.key,
-              command.subject.displayName ?? command.subject.key, definition.name, objectId, command.object.kind, command.object.key,
-              command.object.displayName ?? command.object.key, actorId, ONTOLOGY_REGISTRY_VERSION, now,
-              JSON.stringify(qualifiers), qualifiersHash, auditId, definition.cardinality === "one" ? "proposed" : "active", command.reason]
+            [
+              assertionId,
+              tenantId,
+              repositoryScope,
+              subjectId,
+              command.subject.kind,
+              command.subject.key,
+              command.subject.displayName ?? command.subject.key,
+              definition.name,
+              objectId,
+              command.object.kind,
+              command.object.key,
+              command.object.displayName ?? command.object.key,
+              actorId,
+              ONTOLOGY_REGISTRY_VERSION,
+              now,
+              JSON.stringify(qualifiers),
+              qualifiersHash,
+              auditId,
+              definition.cardinality === "one" ? "proposed" : "active",
+              command.reason
+            ]
           );
           affectedIds.push(assertionId);
           if (definition.cardinality === "one") {
@@ -1371,29 +1987,61 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             );
             affectedIds.push(...superseded.rows.map((row) => row.id));
             for (const row of superseded.rows) {
-              outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", row.id, {
-                assertionId: row.id, repoId: command.repository ?? null, status: "superseded"
-              }, now));
+              outboxEventIds.push(
+                await insertOutbox(
+                  client,
+                  tenantId,
+                  "assertion_changed",
+                  row.id,
+                  {
+                    assertionId: row.id,
+                    repoId: command.repository ?? null,
+                    status: "superseded"
+                  },
+                  now
+                )
+              );
             }
-            await client.query(
-              `update jina_ontology.assertions set status='active' where tenant_id=$1 and id=$2`,
-              [tenantId, assertionId]
-            );
+            await client.query(`update jina_ontology.assertions set status='active' where tenant_id=$1 and id=$2`, [
+              tenantId,
+              assertionId
+            ]);
           }
-          outboxEventIds.push(await insertOutbox(client, tenantId, "assertion_changed", assertionId, {
-            assertionId, repoId: command.repository ?? null, status: "active"
-          }, now));
+          outboxEventIds.push(
+            await insertOutbox(
+              client,
+              tenantId,
+              "assertion_changed",
+              assertionId,
+              {
+                assertionId,
+                repoId: command.repository ?? null,
+                status: "active"
+              },
+              now
+            )
+          );
         }
       }
       await client.query("commit");
       return { auditId, action: command.type, affectedIds, outboxEventIds };
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
-      await this.pool.query(
-        `insert into jina_ontology.audit_log (id,tenant_id,actor_id,action,input,result,reason,created_at)
+      await this.pool
+        .query(
+          `insert into jina_ontology.audit_log (id,tenant_id,actor_id,action,input,result,reason,created_at)
          values ($1,$2,$3,$4,$5::jsonb,'rejected',$6,$7) on conflict do nothing`,
-        [auditId, tenantId, actorId, command.type, JSON.stringify(command), error instanceof Error ? error.message : String(error), now]
-      ).catch(() => undefined);
+          [
+            auditId,
+            tenantId,
+            actorId,
+            command.type,
+            JSON.stringify(command),
+            error instanceof Error ? error.message : String(error),
+            now
+          ]
+        )
+        .catch(() => undefined);
       throw error;
     } finally {
       client.release();
@@ -1460,7 +2108,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       }
       let manifestFileCount = 0;
       if (consumers.includes("manifest")) {
-        await client.query(`delete from jina_ontology.ref_manifest where tenant_id=$1 and repository=$2 and ref_name=$3`, [tenantId, repository, ref]);
+        await client.query(
+          `delete from jina_ontology.ref_manifest where tenant_id=$1 and repository=$2 and ref_name=$3`,
+          [tenantId, repository, ref]
+        );
         const manifest = await client.query(
           `insert into jina_ontology.ref_manifest (tenant_id,repository,ref_name,commit_sha,path,blob_sha,projected_at)
            select $1,$2,$3,$4,path,blob_sha,$5
@@ -1472,9 +2123,12 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
 
       let searchDocumentCount = 0;
       if (consumers.includes("search")) {
-        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and repository=$2`, [tenantId, repository]);
+        await client.query(`delete from jina_ontology.search_documents where tenant_id=$1 and repository=$2`, [
+          tenantId,
+          repository
+        ]);
         const documents = await client.query<{ id: string; title: string; body: string; source_kind: string }>(
-        `select id,source || ':' || type as title,
+          `select id,source || ':' || type as title,
                 case when type='source_snapshot' then '' else coalesce(payload::text,'') end as body,
                 'observation' as source_kind
          from jina_ontology.observations where tenant_id=$1 and repository=$2 and redacted_at is null
@@ -1491,18 +2145,25 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              where a.tenant_id=$1 and a.repository=$2 and (a.subject_id=e.id or a.object_id=e.id)
            )
          )`,
-        [tenantId, repository]
+          [tenantId, repository]
         );
-        const searchRedirects = await client.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
-        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
-         where tenant_id=$1 order by created_at,id`, [tenantId]
-      );
+        const searchRedirects = await client.query<{
+          from_entity_id: string;
+          to_entity_id: string;
+          kind: "merge" | "unmerge";
+        }>(
+          `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
+         where tenant_id=$1 order by created_at,id`,
+          [tenantId]
+        );
         const searchRedirectMap = redirectMap(searchRedirects.rows);
-        const projected = documents.rows.filter((document) =>
-          document.source_kind !== "entity" || resolveRedirect(searchRedirectMap, document.id) === document.id);
+        const projected = documents.rows.filter(
+          (document) =>
+            document.source_kind !== "entity" || resolveRedirect(searchRedirectMap, document.id) === document.id
+        );
         if (projected.length > 0) {
           await client.query(
-          `insert into jina_ontology.search_documents
+            `insert into jina_ontology.search_documents
             (id,tenant_id,repository,source_kind,source_id,title,body,embedding,projected_at)
            select source.id,$1,$2,source.source_kind,source.source_id,source.title,source.body,
                   (select array_agg(element.value::float8 order by element.ordinality)
@@ -1510,11 +2171,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                   $3
            from unnest($4::text[],$5::text[],$6::text[],$7::text[],$8::text[],$9::jsonb[])
              as source(id,source_kind,source_id,title,body,embedding)`,
-          [tenantId, repository, now,
-            projected.map((document) => stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`)),
-            projected.map((document) => document.source_kind), projected.map((document) => document.id),
-            projected.map((document) => document.title), projected.map((document) => document.body),
-            projected.map((document) => JSON.stringify(embeddingForText(`${document.title} ${document.body}`)))]
+            [
+              tenantId,
+              repository,
+              now,
+              projected.map((document) =>
+                stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`)
+              ),
+              projected.map((document) => document.source_kind),
+              projected.map((document) => document.id),
+              projected.map((document) => document.title),
+              projected.map((document) => document.body),
+              projected.map((document) => JSON.stringify(embeddingForText(`${document.title} ${document.body}`)))
+            ]
           );
         }
         searchDocumentCount = projected.length;
@@ -1599,8 +2268,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         [tenantId, entityIds]
       );
       const scopedRedirectMap = redirectMap(redirects.rows);
-      const projected = documents.rows.filter((document) =>
-        document.source_kind !== "entity" || resolveRedirect(scopedRedirectMap, document.id) === document.id);
+      const projected = documents.rows.filter(
+        (document) =>
+          document.source_kind !== "entity" || resolveRedirect(scopedRedirectMap, document.id) === document.id
+      );
       await client.query(
         `delete from jina_ontology.search_documents
          where tenant_id=$1 and repository=$2 and (
@@ -1621,11 +2292,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
            on conflict (tenant_id,repository,source_kind,source_id) do update set
              title=excluded.title,body=excluded.body,
              embedding=excluded.embedding,projected_at=excluded.projected_at`,
-          [tenantId, repository, now,
-            projected.map((document) => stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`)),
-            projected.map((document) => document.source_kind), projected.map((document) => document.id),
-            projected.map((document) => document.title), projected.map((document) => document.body),
-            projected.map((document) => JSON.stringify(embeddingForText(`${document.title} ${document.body}`)))]
+          [
+            tenantId,
+            repository,
+            now,
+            projected.map((document) =>
+              stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`)
+            ),
+            projected.map((document) => document.source_kind),
+            projected.map((document) => document.id),
+            projected.map((document) => document.title),
+            projected.map((document) => document.body),
+            projected.map((document) => JSON.stringify(embeddingForText(`${document.title} ${document.body}`)))
+          ]
         );
       }
       await client.query("commit");
@@ -1647,16 +2326,23 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     // A repository whose ingest stage is mid-flight would have its projections
     // rebuilt once per drain while blob batches stream in; its events stay
     // pending and retry shortly after the ingest completes.
-    const activeIngests = await this.pool.query<{ repository: string }>(
-      `select distinct repository from jina_board.tasks
+    const activeIngests = await this.pool
+      .query<{ repository: string }>(
+        `select distinct repository from jina_board.tasks
        where tenant_id=$1 and stage='ingest' and status='in_progress'`,
-      [tenantId]
-    ).catch(() => ({ rows: [] as { repository: string }[] }));
+        [tenantId]
+      )
+      .catch(() => ({ rows: [] as { repository: string }[] }));
     const suppressedRepositories = new Set(activeIngests.rows.map((row) => row.repository));
     const consumers = ["legacy", "manifest", "search", "reconciliation", "graph"] as const;
     for (const consumer of consumers) {
       const claimOwner = `projection:${consumer}:${randomUUID()}`;
-      const allClaimed = await this.pool.query<{ id: string; repository: string | null; event_type: string; payload: Record<string, unknown> }>(
+      const allClaimed = await this.pool.query<{
+        id: string;
+        repository: string | null;
+        event_type: string;
+        payload: Record<string, unknown>;
+      }>(
         `with candidates as (
            select id,coalesce(payload->>'repoId',payload#>>'{scope,repository}') as repository
            from jina_ontology.outbox
@@ -1670,8 +2356,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         [tenantId, now, consumer, claimOwner]
       );
       if (allClaimed.rows.length === 0) continue;
-      const suppressed = allClaimed.rows.filter((row) =>
-        suppressedRepositories.size > 0 && (row.repository === null || suppressedRepositories.has(row.repository)));
+      const suppressed = allClaimed.rows.filter(
+        (row) =>
+          suppressedRepositories.size > 0 && (row.repository === null || suppressedRepositories.has(row.repository))
+      );
       const suppressedIds = new Set(suppressed.map((row) => row.id));
       if (suppressedIds.size > 0) {
         await this.pool.query(
@@ -1684,10 +2372,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       const claimed = { rows: allClaimed.rows.filter((row) => !suppressedIds.has(row.id)) };
       if (claimed.rows.length === 0) continue;
       const ids = claimed.rows.map((row) => row.id);
-      const affectedRepositories = new Set(claimed.rows.flatMap((row) => row.repository ? [row.repository] : []));
+      const affectedRepositories = new Set(claimed.rows.flatMap((row) => (row.repository ? [row.repository] : [])));
       if (claimed.rows.some((row) => row.repository === null)) {
         const all = await this.pool.query<{ repository: string }>(
-          `select distinct repository from jina_ontology.refs where tenant_id=$1`, [tenantId]
+          `select distinct repository from jina_ontology.refs where tenant_id=$1`,
+          [tenantId]
         );
         for (const row of all.rows) affectedRepositories.add(row.repository);
       }
@@ -1717,9 +2406,18 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             const relevant = claimed.rows.filter((row) => row.repository === null || row.repository === repository);
             if (relevant.length > 0 && relevant.every((row) => scopedTypes.has(row.event_type))) {
               await this.upsertSearchDocuments(
-                tenantId, repository,
-                relevant.flatMap((row) => row.event_type === "observation_recorded" && typeof row.payload.observationId === "string" ? [row.payload.observationId] : []),
-                relevant.flatMap((row) => row.event_type === "entity_changed" && typeof row.payload.entityId === "string" ? [row.payload.entityId] : []),
+                tenantId,
+                repository,
+                relevant.flatMap((row) =>
+                  row.event_type === "observation_recorded" && typeof row.payload.observationId === "string"
+                    ? [row.payload.observationId]
+                    : []
+                ),
+                relevant.flatMap((row) =>
+                  row.event_type === "entity_changed" && typeof row.payload.entityId === "string"
+                    ? [row.payload.entityId]
+                    : []
+                ),
                 now
               );
             } else {
@@ -1733,7 +2431,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
             for (const row of refs.rows) {
               await this.rebuildDerivedProjections(tenantId, repository, row.ref_name, now, true);
               await this.project({
-                tenantId, repository, ref: row.ref_name, commitSha: row.commit_sha,
+                tenantId,
+                repository,
+                ref: row.ref_name,
+                commitSha: row.commit_sha,
                 taskId: `projection-drain:${stableId("scope", `${tenantId}:${repository}:${row.ref_name}:${now}:legacy`)}`,
                 generatedAt: now
               });
@@ -1741,7 +2442,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           } else if (consumer === "graph") {
             for (const row of refs.rows) {
               await this.project({
-                tenantId, repository, ref: row.ref_name, commitSha: row.commit_sha,
+                tenantId,
+                repository,
+                ref: row.ref_name,
+                commitSha: row.commit_sha,
                 taskId: `projection-drain:${stableId("scope", `${tenantId}:${repository}:${row.ref_name}:${now}:graph`)}`,
                 generatedAt: now
               });
@@ -1757,12 +2461,14 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         );
         processedEventCount += acknowledged.rowCount ?? 0;
       } catch (error) {
-        await this.pool.query(
-          `update jina_ontology.outbox
+        await this.pool
+          .query(
+            `update jina_ontology.outbox
            set claimed_by=null,claimed_at=null,claim_expires_at=null,last_error=$2,available_at=now()+interval '30 seconds'
            where id=any($1::text[]) and claimed_by=$3`,
-          [ids, error instanceof Error ? error.message.slice(0, 2000) : String(error).slice(0, 2000), claimOwner]
-        ).catch(() => undefined);
+            [ids, error instanceof Error ? error.message.slice(0, 2000) : String(error).slice(0, 2000), claimOwner]
+          )
+          .catch(() => undefined);
         throw error;
       }
     }
@@ -1774,25 +2480,36 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const [outbox, backlog, parsed, proposed, unexplained, erasure, freshness, labels, retrieval] = await Promise.all([
       this.pool.query<{ event_type: string; consumer: string; count: string; oldest: Date | null }>(
         `select event_type,consumer,count(*),min(created_at) as oldest from jina_ontology.outbox
-         where tenant_id=$1 and processed_at is null group by event_type,consumer`, [tenantId]
+         where tenant_id=$1 and processed_at is null group by event_type,consumer`,
+        [tenantId]
       ),
       this.pool.query<{ count: string }>(
         `select count(distinct (b.blob_sha,b.tenant_id)) from jina_ontology.blobs b
          left join jina_ontology.blob_analyses a on a.tenant_id=b.tenant_id and a.blob_sha=b.blob_sha and a.parser_version=$2
-         where b.tenant_id=$1 and a.blob_sha is null`, [tenantId, ONTOLOGY_PARSER_VERSION]
+         where b.tenant_id=$1 and a.blob_sha is null`,
+        [tenantId, ONTOLOGY_PARSER_VERSION]
       ),
       this.pool.query<{ count: string }>(
-        `select count(*) from jina_ontology.blob_analyses where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`, [tenantId]
+        `select count(*) from jina_ontology.blob_analyses where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`,
+        [tenantId]
       ),
-      this.pool.query<{ count: string }>(`select count(*) from jina_ontology.assertions where tenant_id=$1 and status='proposed'`, [tenantId]),
-      this.pool.query<{ count: string }>(`select count(*) from jina_ontology.assertions where tenant_id=$1 and explanation is null`, [tenantId]),
+      this.pool.query<{ count: string }>(
+        `select count(*) from jina_ontology.assertions where tenant_id=$1 and status='proposed'`,
+        [tenantId]
+      ),
+      this.pool.query<{ count: string }>(
+        `select count(*) from jina_ontology.assertions where tenant_id=$1 and explanation is null`,
+        [tenantId]
+      ),
       this.pool.query<{ count: string }>(
         `select count(distinct (event_type,aggregate_id)) from jina_ontology.outbox
-         where tenant_id=$1 and processed_at is null and event_type in ('observation_redacted','tombstone')`, [tenantId]
+         where tenant_id=$1 and processed_at is null and event_type in ('observation_redacted','tombstone')`,
+        [tenantId]
       ),
       this.pool.query<{ manifest: Date | null; search: Date | null }>(
         `select (select max(projected_at) from jina_ontology.ref_manifest where tenant_id=$1) as manifest,
-                (select max(projected_at) from jina_ontology.search_documents where tenant_id=$1) as search`, [tenantId]
+                (select max(projected_at) from jina_ontology.search_documents where tenant_id=$1) as search`,
+        [tenantId]
       ),
       this.pool.query<{ generator: string; predicate: string; accepted: string; rejected: string }>(
         `select a.generator,a.predicate,
@@ -1800,7 +2517,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           count(*) filter (where l.action='review_assertion' and l.input->>'decision' in ('reject','retract')) as rejected
          from jina_ontology.audit_log l
          join jina_ontology.assertions a on a.id=l.input->>'assertionId'
-         where l.tenant_id=$1 and a.generator is not null group by a.generator,a.predicate`, [tenantId]
+         where l.tenant_id=$1 and a.generator is not null group by a.generator,a.predicate`,
+        [tenantId]
       ),
       this.pool.query<{ template: string; requests: string; average: string; p95: string; truncated: string }>(
         `select template,count(*) as requests,avg(duration_ms) as average,
@@ -1808,24 +2526,33 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
                 avg(case when truncated then 1.0 else 0.0 end) as truncated
          from jina_ontology.retrieval_metrics
          where tenant_id=$1 and recorded_at>=now()-interval '24 hours'
-         group by template order by template`, [tenantId]
+         group by template order by template`,
+        [tenantId]
       )
     ]);
     const nowMs = new Date(now).getTime();
-    const oldest = outbox.rows.flatMap((row) => row.oldest ? [row.oldest.getTime()] : []).sort((a, b) => a - b)[0];
+    const oldest = outbox.rows.flatMap((row) => (row.oldest ? [row.oldest.getTime()] : [])).sort((a, b) => a - b)[0];
     const manifest = freshness.rows[0]?.manifest?.getTime();
     const search = freshness.rows[0]?.search?.getTime();
     return {
-      outboxDepth: Object.fromEntries([...new Set(outbox.rows.map((row) => row.event_type))].map((eventType) => [
-        eventType, outbox.rows.filter((row) => row.event_type === eventType).reduce((sum, row) => sum + Number(row.count), 0)
-      ])),
-      outboxDepthByConsumer: Object.fromEntries([...new Set(outbox.rows.map((row) => row.consumer))].map((consumer) => [
-        consumer, outbox.rows.filter((row) => row.consumer === consumer).reduce((sum, row) => sum + Number(row.count), 0)
-      ])),
+      outboxDepth: Object.fromEntries(
+        [...new Set(outbox.rows.map((row) => row.event_type))].map((eventType) => [
+          eventType,
+          outbox.rows.filter((row) => row.event_type === eventType).reduce((sum, row) => sum + Number(row.count), 0)
+        ])
+      ),
+      outboxDepthByConsumer: Object.fromEntries(
+        [...new Set(outbox.rows.map((row) => row.consumer))].map((consumer) => [
+          consumer,
+          outbox.rows.filter((row) => row.consumer === consumer).reduce((sum, row) => sum + Number(row.count), 0)
+        ])
+      ),
       oldestOutboxAgeSeconds: oldest ? Math.max(0, (nowMs - oldest) / 1000) : 0,
       reconciliationLagSeconds: (() => {
-        const timestamp = outbox.rows.filter((row) => row.consumer === "reconciliation" && row.oldest)
-          .map((row) => row.oldest!.getTime()).sort((a, b) => a - b)[0];
+        const timestamp = outbox.rows
+          .filter((row) => row.consumer === "reconciliation" && row.oldest)
+          .map((row) => row.oldest!.getTime())
+          .sort((a, b) => a - b)[0];
         return timestamp ? Math.max(0, (nowMs - timestamp) / 1000) : 0;
       })(),
       unparsedBlobCount: Number(backlog.rows[0]?.count ?? 0),
@@ -1836,13 +2563,22 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       unexplainedAssertionCount: Number(unexplained.rows[0]?.count ?? 0),
       pendingErasureEventCount: Number(erasure.rows[0]?.count ?? 0),
       retrievalTemplates: retrieval.rows.map((row) => ({
-        template: row.template, requests: Number(row.requests), averageLatencyMs: Number(row.average),
-        p95LatencyMs: Number(row.p95), truncationRate: Number(row.truncated)
+        template: row.template,
+        requests: Number(row.requests),
+        averageLatencyMs: Number(row.average),
+        p95LatencyMs: Number(row.p95),
+        truncationRate: Number(row.truncated)
       })),
       acceptanceRates: labels.rows.map((row) => {
         const accepted = Number(row.accepted);
         const rejected = Number(row.rejected);
-        return { generator: row.generator, predicate: row.predicate, accepted, rejected, rate: accepted / Math.max(1, accepted + rejected) };
+        return {
+          generator: row.generator,
+          predicate: row.predicate,
+          accepted,
+          rejected,
+          rate: accepted / Math.max(1, accepted + rejected)
+        };
       })
     };
   }
@@ -1851,7 +2587,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     await this.initialize();
     const result = principalId.startsWith("svc:")
       ? await this.pool.query<{ repository: string }>(
-          `select distinct repository from jina_ontology.refs where tenant_id=$1 order by repository`, [tenantId]
+          `select distinct repository from jina_ontology.refs where tenant_id=$1 order by repository`,
+          [tenantId]
         )
       : await this.pool.query<{ repository: string }>(
           `select repository from jina_ontology.repository_acl where tenant_id=$1 and principal_id=$2 order by repository`,
@@ -1863,16 +2600,34 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   async listAssertions(
     tenantId: string,
     repository: string,
-    filter: { readonly status?: StoredAssertion["status"]; readonly predicate?: string; readonly entityKind?: OntologyNode["kind"] } = {}
+    filter: {
+      readonly status?: StoredAssertion["status"];
+      readonly predicate?: string;
+      readonly entityKind?: OntologyNode["kind"];
+    } = {}
   ): Promise<readonly OntologyAssertionSummary[]> {
     await this.initialize();
     const result = await this.pool.query<{
-      id: string; repository: string; commit_sha: string; subject_id: string; subject_kind: OntologyAssertionSummary["subjectKind"];
-      subject_natural_key: string; subject_label: string; predicate: string;
-      object_id: string; object_kind: OntologyAssertionSummary["objectKind"]; object_natural_key: string; object_label: string;
-      status: OntologyAssertionSummary["status"]; confidence: number | null; explanation: string | null; evidence: string[];
+      id: string;
+      repository: string;
+      commit_sha: string;
+      subject_id: string;
+      subject_kind: OntologyAssertionSummary["subjectKind"];
+      subject_natural_key: string;
+      subject_label: string;
+      predicate: string;
+      object_id: string;
+      object_kind: OntologyAssertionSummary["objectKind"];
+      object_natural_key: string;
+      object_label: string;
+      status: OntologyAssertionSummary["status"];
+      confidence: number | null;
+      explanation: string | null;
+      evidence: string[];
       source_observation_id: string | null;
-      qualifiers: Record<string, string | number | boolean>; generator: string; registry_version: string;
+      qualifiers: Record<string, string | number | boolean>;
+      generator: string;
+      registry_version: string;
     }>(
       `select id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
               object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,source_observation_id,
@@ -1887,16 +2642,31 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     );
     const [redirects, entities, relations] = await Promise.all([
       this.pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
-        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`, [tenantId]
+        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`,
+        [tenantId]
       ),
-      this.pool.query<{ id: string; kind: OntologyAssertionSummary["subjectKind"]; natural_key: string; display_name: string }>(
-        `select id,kind,natural_key,display_name from jina_ontology.entities where tenant_id=$1`, [tenantId]
-      ),
+      this.pool.query<{
+        id: string;
+        kind: OntologyAssertionSummary["subjectKind"];
+        natural_key: string;
+        display_name: string;
+      }>(`select id,kind,natural_key,display_name from jina_ontology.entities where tenant_id=$1`, [tenantId]),
       result.rows.length === 0
-        ? Promise.resolve({ rows: [] as { source_assertion_id: string; relation: "supports" | "contradicts"; target_assertion_id: string }[] })
-        : this.pool.query<{ source_assertion_id: string; relation: "supports" | "contradicts"; target_assertion_id: string }>(
+        ? Promise.resolve({
+            rows: [] as {
+              source_assertion_id: string;
+              relation: "supports" | "contradicts";
+              target_assertion_id: string;
+            }[]
+          })
+        : this.pool.query<{
+            source_assertion_id: string;
+            relation: "supports" | "contradicts";
+            target_assertion_id: string;
+          }>(
             `select source_assertion_id,relation,target_assertion_id from jina_ontology.assertion_relations
-             where tenant_id=$1 and target_assertion_id=any($2::text[])`, [tenantId, result.rows.map((row) => row.id)]
+             where tenant_id=$1 and target_assertion_id=any($2::text[])`,
+            [tenantId, result.rows.map((row) => row.id)]
           )
     ]);
     const mapping = redirectMap(redirects.rows);
@@ -1904,31 +2674,36 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     return result.rows.map((row) => {
       const subject = byId.get(resolveRedirect(mapping, row.subject_id));
       const object = byId.get(resolveRedirect(mapping, row.object_id));
-      return ({
-      id: row.id,
-      repository: row.repository,
-      commitSha: row.commit_sha,
-      subjectKind: subject?.kind ?? row.subject_kind,
-      subjectNaturalKey: subject?.natural_key ?? row.subject_natural_key,
-      subjectLabel: subject?.display_name ?? row.subject_label,
-      predicate: row.predicate,
-      objectKind: object?.kind ?? row.object_kind,
-      objectNaturalKey: object?.natural_key ?? row.object_natural_key,
-      objectLabel: object?.display_name ?? row.object_label,
-      status: row.status,
-      ...(row.confidence === null ? {} : { confidence: row.confidence }),
-      ...(row.explanation ? { explanation: row.explanation } : {}),
-      evidence: row.evidence.length > 0
-        ? row.evidence
-        : row.source_observation_id ? [`observation:${row.source_observation_id}`] : [],
-      qualifiers: row.qualifiers,
-      generator: row.generator,
-      registryVersion: row.registry_version,
-      supportingAssertionIds: relations.rows.filter((relation) => relation.target_assertion_id === row.id && relation.relation === "supports")
-        .map((relation) => relation.source_assertion_id),
-      contradictingAssertionIds: relations.rows.filter((relation) => relation.target_assertion_id === row.id && relation.relation === "contradicts")
-        .map((relation) => relation.source_assertion_id)
-      });
+      return {
+        id: row.id,
+        repository: row.repository,
+        commitSha: row.commit_sha,
+        subjectKind: subject?.kind ?? row.subject_kind,
+        subjectNaturalKey: subject?.natural_key ?? row.subject_natural_key,
+        subjectLabel: subject?.display_name ?? row.subject_label,
+        predicate: row.predicate,
+        objectKind: object?.kind ?? row.object_kind,
+        objectNaturalKey: object?.natural_key ?? row.object_natural_key,
+        objectLabel: object?.display_name ?? row.object_label,
+        status: row.status,
+        ...(row.confidence === null ? {} : { confidence: row.confidence }),
+        ...(row.explanation ? { explanation: row.explanation } : {}),
+        evidence:
+          row.evidence.length > 0
+            ? row.evidence
+            : row.source_observation_id
+              ? [`observation:${row.source_observation_id}`]
+              : [],
+        qualifiers: row.qualifiers,
+        generator: row.generator,
+        registryVersion: row.registry_version,
+        supportingAssertionIds: relations.rows
+          .filter((relation) => relation.target_assertion_id === row.id && relation.relation === "supports")
+          .map((relation) => relation.source_assertion_id),
+        contradictingAssertionIds: relations.rows
+          .filter((relation) => relation.target_assertion_id === row.id && relation.relation === "contradicts")
+          .map((relation) => relation.source_assertion_id)
+      };
     });
   }
 
@@ -1947,30 +2722,43 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     );
     const ref = refResult.rows[0];
     if (!ref) throw new Error("repository ref not found");
-    const items = request.template === "causal_trace" || request.template === "counterfactual"
-      ? await this.retrieveCausalTrace(request, ref.ref_name, ref.commit_sha)
-      : request.template === "issue_trace"
-      ? await retrieveIssueTrace(this.pool, request, ref.ref_name, limit + 1)
-      : request.template === "feature_trace"
-        ? await retrieveFeatureTrace(this.pool, request, ref.ref_name, limit + 1)
-      : request.template === "structure"
-        ? await retrieveStructure(this.pool, request, ref.ref_name, limit + 1)
-        : request.template === "change"
-          ? await retrieveChange(this.pool, request, ref.commit_sha, limit + 1)
-          : request.template === "intent"
-            ? await retrieveIntent(this.pool, request, limit + 1)
-            : await retrieveOwnership(this.pool, request, limit + 1);
+    const items =
+      request.template === "causal_trace" || request.template === "counterfactual"
+        ? await this.retrieveCausalTrace(request, ref.ref_name, ref.commit_sha)
+        : request.template === "issue_trace"
+          ? await retrieveIssueTrace(this.pool, request, ref.ref_name, limit + 1)
+          : request.template === "feature_trace"
+            ? await retrieveFeatureTrace(this.pool, request, ref.ref_name, limit + 1)
+            : request.template === "structure"
+              ? await retrieveStructure(this.pool, request, ref.ref_name, limit + 1)
+              : request.template === "change"
+                ? await retrieveChange(this.pool, request, ref.commit_sha, limit + 1)
+                : request.template === "intent"
+                  ? await retrieveIntent(this.pool, request, limit + 1)
+                  : await retrieveOwnership(this.pool, request, limit + 1);
     // Exit filter repeats the entry permission check so a future template cannot widen scope accidentally.
-    const permitted = items.filter((item) => item.citations.every((citation) => request.allowedRepositories.includes(citation.repository)));
+    const permitted = items.filter((item) =>
+      item.citations.every((citation) => request.allowedRepositories.includes(citation.repository))
+    );
     const result = {
-      template: request.template, repository: request.repository, ref: ref.ref_name,
-      items: permitted.slice(0, limit), truncated: permitted.length > limit,
-      totalBeforeLimit: permitted.length, limit
+      template: request.template,
+      repository: request.repository,
+      ref: ref.ref_name,
+      items: permitted.slice(0, limit),
+      truncated: permitted.length > limit,
+      totalBeforeLimit: permitted.length,
+      limit
     };
     await this.pool.query(
       `insert into jina_ontology.retrieval_metrics (tenant_id,repository,template,duration_ms,truncated,recorded_at)
        values ($1,$2,$3,$4,$5,now())`,
-      [request.tenantId, request.repository, request.template, Math.max(0, performance.now() - startedAt), result.truncated]
+      [
+        request.tenantId,
+        request.repository,
+        request.template,
+        Math.max(0, performance.now() - startedAt),
+        result.truncated
+      ]
     );
     return result;
   }
@@ -1979,17 +2767,21 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const distinct = [...new Set(aliases.filter((alias) => alias && alias !== tenantId))];
     if (distinct.length === 0) return;
     await this.initialize();
-    await this.pool.query(
-      "update jina_ontology.graphs set tenant_id = $1 where tenant_id = any($2::text[])",
-      [tenantId, distinct]
-    );
+    await this.pool.query("update jina_ontology.graphs set tenant_id = $1 where tenant_id = any($2::text[])", [
+      tenantId,
+      distinct
+    ]);
   }
 
   async close(): Promise<void> {
     await this.pool.end();
   }
 
-  private async retrieveCausalTrace(request: RetrievalRequest, ref: string, commitSha: string): Promise<readonly RetrievalItem[]> {
+  private async retrieveCausalTrace(
+    request: RetrievalRequest,
+    ref: string,
+    commitSha: string
+  ): Promise<readonly RetrievalItem[]> {
     const graph = await this.pool.query<GraphRow>(
       `select graph.* from jina_ontology.graph_heads head
        join jina_ontology.graphs graph on graph.id=head.graph_id
@@ -2064,7 +2856,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     };
   }
 
-  private async loadAnalyses(tenantId: string, blobShas: readonly string[]): Promise<ReadonlyMap<string, BlobAnalysis>> {
+  private async loadAnalyses(
+    tenantId: string,
+    blobShas: readonly string[]
+  ): Promise<ReadonlyMap<string, BlobAnalysis>> {
     const analyses = new Map<string, BlobAnalysis>();
     if (blobShas.length === 0) return analyses;
     const [rows, symbols, imports, edges] = await Promise.all([
@@ -2083,7 +2878,14 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          where tenant_id=$1 and blob_sha=any($2::text[]) and parser_version=$3`,
         [tenantId, blobShas, ONTOLOGY_PARSER_VERSION]
       ),
-      this.pool.query<{ blob_sha: string; from_moniker: string; kind: "calls" | "imports" | "references" | "extends"; to_moniker: string; start_line: number; end_line: number }>(
+      this.pool.query<{
+        blob_sha: string;
+        from_moniker: string;
+        kind: "calls" | "imports" | "references" | "extends";
+        to_moniker: string;
+        start_line: number;
+        end_line: number;
+      }>(
         `select blob_sha,from_moniker,kind,to_moniker,start_line,end_line from jina_ontology.symbol_edges
          where tenant_id=$1 and blob_sha=any($2::text[]) and parser_version=$3`,
         [tenantId, blobShas, ONTOLOGY_PARSER_VERSION]
@@ -2094,19 +2896,28 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         blobSha: row.blob_sha,
         parserVersion: row.parser_version,
         ...(row.language ? { language: row.language } : {}),
-        symbols: symbols.rows.filter((symbol) => symbol.blob_sha === row.blob_sha).map((symbol) => ({
-          moniker: symbol.moniker,
-          name: symbol.name,
-          kind: symbol.kind,
-          signatureHash: symbol.signature_hash,
-          startLine: symbol.start_line,
-          endLine: symbol.end_line
-        })),
-        imports: imports.rows.filter((item) => item.blob_sha === row.blob_sha).map((item) => ({ specifier: item.specifier, line: item.line })),
-        edges: edges.rows.filter((edge) => edge.blob_sha === row.blob_sha).map((edge) => ({
-          fromMoniker: edge.from_moniker, kind: edge.kind, toMoniker: edge.to_moniker,
-          startLine: edge.start_line, endLine: edge.end_line
-        }))
+        symbols: symbols.rows
+          .filter((symbol) => symbol.blob_sha === row.blob_sha)
+          .map((symbol) => ({
+            moniker: symbol.moniker,
+            name: symbol.name,
+            kind: symbol.kind,
+            signatureHash: symbol.signature_hash,
+            startLine: symbol.start_line,
+            endLine: symbol.end_line
+          })),
+        imports: imports.rows
+          .filter((item) => item.blob_sha === row.blob_sha)
+          .map((item) => ({ specifier: item.specifier, line: item.line })),
+        edges: edges.rows
+          .filter((edge) => edge.blob_sha === row.blob_sha)
+          .map((edge) => ({
+            fromMoniker: edge.from_moniker,
+            kind: edge.kind,
+            toMoniker: edge.to_moniker,
+            startLine: edge.start_line,
+            endLine: edge.end_line
+          }))
       });
     }
     return analyses;
@@ -2167,8 +2978,18 @@ async function insertOntologyGraph(client: PoolClient, graph: OntologyGraph): Pr
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
      on conflict (id) do nothing
      returning id`,
-    [graph.id, graph.tenantId, graph.repository, graph.ref, graph.commitSha, graph.generatedAt,
-      graph.generator.executor, graph.generator.model, graph.generator.sandboxId ?? null, graph.summary]
+    [
+      graph.id,
+      graph.tenantId,
+      graph.repository,
+      graph.ref,
+      graph.commitSha,
+      graph.generatedAt,
+      graph.generator.executor,
+      graph.generator.model,
+      graph.generator.sandboxId ?? null,
+      graph.summary
+    ]
   );
   if (inserted.rowCount !== 1) return;
   for (const node of graph.nodes) {
@@ -2183,17 +3004,35 @@ async function insertOntologyGraph(client: PoolClient, graph: OntologyGraph): Pr
       `insert into jina_ontology.edges
         (graph_id,edge_id,source_node_id,target_node_id,predicate,plane,confidence,why,qualifiers,evidence)
        values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,
-      [graph.id, edge.id, edge.source, edge.target, edge.predicate, edge.plane,
-        edge.confidence ?? null, edge.why ?? null, JSON.stringify(edge.qualifiers ?? {}), JSON.stringify(edge.evidence)]
+      [
+        graph.id,
+        edge.id,
+        edge.source,
+        edge.target,
+        edge.predicate,
+        edge.plane,
+        edge.confidence ?? null,
+        edge.why ?? null,
+        JSON.stringify(edge.qualifiers ?? {}),
+        JSON.stringify(edge.evidence)
+      ]
     );
   }
 }
 
-function repositoryObservationScope(observation: RepositorySourceObservation): { readonly field: string | null; readonly value: string } {
-  if (observation.kind === "pull_request" || observation.kind === "issue") return { field: "number", value: String(observation.number) };
+function repositoryObservationScope(observation: RepositorySourceObservation): {
+  readonly field: string | null;
+  readonly value: string;
+} {
+  if (observation.kind === "pull_request" || observation.kind === "issue")
+    return { field: "number", value: String(observation.number) };
   if (observation.kind === "package_manifest") return { field: "path", value: observation.path };
   if (observation.kind === "move_candidate") return { field: "commitSha", value: observation.commitSha };
-  if (observation.kind === "service_definition" || observation.kind === "deployment" || observation.kind === "incident") {
+  if (
+    observation.kind === "service_definition" ||
+    observation.kind === "deployment" ||
+    observation.kind === "incident"
+  ) {
     return { field: "externalId", value: observation.externalId };
   }
   return { field: null, value: "" };
@@ -2212,8 +3051,15 @@ async function isLatestGitHubWorkItemObservation(
          and (coalesce(o.occurred_at,o.recorded_at),o.recorded_at,o.id) >
              (coalesce($6::timestamptz,$7::timestamptz),$7::timestamptz,$3)
      ) as is_latest`,
-    [observation.tenantId, observation.repository, observationId, observation.kind, String(observation.number),
-      observation.occurredAt ?? null, observation.recordedAt]
+    [
+      observation.tenantId,
+      observation.repository,
+      observationId,
+      observation.kind,
+      String(observation.number),
+      observation.occurredAt ?? null,
+      observation.recordedAt
+    ]
   );
   return result.rows[0]?.is_latest === true;
 }
@@ -2269,7 +3115,8 @@ async function ensureIdentity(
      values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict (tenant_id,source,external_id,entity_id) do nothing returning id`,
     [id, tenantId, source, externalId, entityId, status, status === "accepted" ? 1 : null, observationId, now]
   );
-  if (emitEvent && inserted.rowCount === 1) await insertOutbox(client, tenantId, "identity_changed", id, { identityId: id }, now);
+  if (emitEvent && inserted.rowCount === 1)
+    await insertOutbox(client, tenantId, "identity_changed", id, { identityId: id }, now);
   return id;
 }
 
@@ -2351,7 +3198,12 @@ function storedAssertion(row: StoredAssertionRow): StoredAssertion {
 function resolveStoredAssertionRows(
   rows: readonly StoredAssertionRow[],
   redirects: readonly { from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }[],
-  entities: readonly { id: string; kind: StoredAssertion["subject"]["kind"]; natural_key: string; display_name: string }[]
+  entities: readonly {
+    id: string;
+    kind: StoredAssertion["subject"]["kind"];
+    natural_key: string;
+    display_name: string;
+  }[]
 ): readonly StoredAssertionRow[] {
   const mapping = redirectMap(redirects);
   const byId = new Map(entities.map((entity) => [entity.id, entity]));
@@ -2360,14 +3212,22 @@ function resolveStoredAssertionRows(
     const object = byId.get(resolveRedirect(mapping, row.object_id));
     return {
       ...row,
-      ...(subject ? {
-        subject_id: subject.id, subject_kind: subject.kind,
-        subject_natural_key: subject.natural_key, subject_label: subject.display_name
-      } : {}),
-      ...(object ? {
-        object_id: object.id, object_kind: object.kind,
-        object_natural_key: object.natural_key, object_label: object.display_name
-      } : {})
+      ...(subject
+        ? {
+            subject_id: subject.id,
+            subject_kind: subject.kind,
+            subject_natural_key: subject.natural_key,
+            subject_label: subject.display_name
+          }
+        : {}),
+      ...(object
+        ? {
+            object_id: object.id,
+            object_kind: object.kind,
+            object_natural_key: object.natural_key,
+            object_label: object.display_name
+          }
+        : {})
     };
   });
 }
@@ -2381,14 +3241,15 @@ function applicableAssertions(
   const currentMap = new Map(currentFiles.map((file) => [file.path, file.blob_sha]));
   const selected = new Map<string, StoredAssertion>();
   for (const assertion of assertions) {
-    const current = assertion.evidence.length === 0
-      ? (assertion.commitSha === "source" && Boolean(assertion.sourceObservationId)) ||
-        (assertion.commitSha === "command" && Boolean(assertion.assertedBy))
-      : assertion.evidence.every((citation) => {
-          const path = citation.replace(/:\d+(?:-\d+)?$/, "");
-          const sourceBlob = sourceMap.get(`${assertion.commitSha}:${path}`);
-          return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
-        });
+    const current =
+      assertion.evidence.length === 0
+        ? (assertion.commitSha === "source" && Boolean(assertion.sourceObservationId)) ||
+          (assertion.commitSha === "command" && Boolean(assertion.assertedBy))
+        : assertion.evidence.every((citation) => {
+            const path = citation.replace(/:\d+(?:-\d+)?$/, "");
+            const sourceBlob = sourceMap.get(`${assertion.commitSha}:${path}`);
+            return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
+          });
     if (!current) continue;
     const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
     const prior = selected.get(key);
@@ -2439,15 +3300,22 @@ async function insertOutbox(
 
 function outboxConsumers(eventType: string): readonly ("manifest" | "search" | "reconciliation" | "graph")[] {
   switch (eventType) {
-    case "ref_moved": return ["manifest", "graph"];
+    case "ref_moved":
+      return ["manifest", "graph"];
     case "observation_recorded":
     case "entity_changed":
-    case "identity_changed": return ["search", "graph"];
-    case "assertion_changed": return ["reconciliation", "graph"];
-    case "redirect_added": return ["reconciliation", "search", "graph"];
-    case "observation_redacted": return ["search", "graph"];
-    case "tombstone": return ["manifest", "search", "reconciliation", "graph"];
-    default: return ["graph"];
+    case "identity_changed":
+      return ["search", "graph"];
+    case "assertion_changed":
+      return ["reconciliation", "graph"];
+    case "redirect_added":
+      return ["reconciliation", "search", "graph"];
+    case "observation_redacted":
+      return ["search", "graph"];
+    case "tombstone":
+      return ["manifest", "search", "reconciliation", "graph"];
+    default:
+      return ["graph"];
   }
 }
 
@@ -2492,15 +3360,34 @@ async function reassertPipelineWriteFence(client: PoolClient, writeFence?: Ontol
   if (result.rowCount !== 1) throw new DomainError("stale ontology worker lease", "conflict");
 }
 
-async function insertAudit(client: PoolClient, input: {
-  readonly id: string; readonly tenantId: string; readonly actorId: string; readonly action: string;
-  readonly input: unknown; readonly result: "accepted" | "rejected"; readonly now: string; readonly reason?: string; readonly parentAuditId?: string;
-}): Promise<void> {
+async function insertAudit(
+  client: PoolClient,
+  input: {
+    readonly id: string;
+    readonly tenantId: string;
+    readonly actorId: string;
+    readonly action: string;
+    readonly input: unknown;
+    readonly result: "accepted" | "rejected";
+    readonly now: string;
+    readonly reason?: string;
+    readonly parentAuditId?: string;
+  }
+): Promise<void> {
   await client.query(
     `insert into jina_ontology.audit_log (id,tenant_id,actor_id,action,input,result,reason,parent_audit_id,created_at)
      values ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9)`,
-    [input.id, input.tenantId, input.actorId, input.action, JSON.stringify(input.input), input.result,
-      input.reason ?? null, input.parentAuditId ?? null, input.now]
+    [
+      input.id,
+      input.tenantId,
+      input.actorId,
+      input.action,
+      JSON.stringify(input.input),
+      input.result,
+      input.reason ?? null,
+      input.parentAuditId ?? null,
+      input.now
+    ]
   );
 }
 
@@ -2530,8 +3417,12 @@ async function backfillAssertionExplanation(
 }
 
 async function insertErasureFilter(
-  client: PoolClient, tenantId: string, kind: "identity" | "observation" | "commit" | "repository",
-  value: string, auditId: string, now: string
+  client: PoolClient,
+  tenantId: string,
+  kind: "identity" | "observation" | "commit" | "repository",
+  value: string,
+  auditId: string,
+  now: string
 ): Promise<void> {
   await client.query(
     `insert into jina_ontology.erasure_filters (id,tenant_id,kind,value,audit_id,created_at)
@@ -2540,7 +3431,9 @@ async function insertErasureFilter(
   );
 }
 
-function redirectMap(rows: readonly { from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }[]): Map<string, string> {
+function redirectMap(
+  rows: readonly { from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }[]
+): Map<string, string> {
   const mapping = new Map<string, string>();
   for (const row of rows) {
     if (row.kind === "merge") mapping.set(row.from_entity_id, row.to_entity_id);
@@ -2562,17 +3455,32 @@ function resolveRedirect(mapping: ReadonlyMap<string, string>, entityId: string)
 
 async function reconcileRedirectCollisions(client: PoolClient, tenantId: string, now: string): Promise<number> {
   const [redirectRows, assertionRows] = await Promise.all([
-    client.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge"; audit_id: string; created_at: Date; id: string }>(
+    client.query<{
+      from_entity_id: string;
+      to_entity_id: string;
+      kind: "merge" | "unmerge";
+      audit_id: string;
+      created_at: Date;
+      id: string;
+    }>(
       `select from_entity_id,to_entity_id,kind,audit_id,created_at,id from jina_ontology.entity_redirects
-       where tenant_id=$1 order by created_at,id`, [tenantId]
+       where tenant_id=$1 order by created_at,id`,
+      [tenantId]
     ),
     client.query<{
-      id: string; subject_id: string; object_id: string;
-      repository: string; predicate: string; qualifiers_hash: string; valid_from: Date | null; recorded_at: Date;
+      id: string;
+      subject_id: string;
+      object_id: string;
+      repository: string;
+      predicate: string;
+      qualifiers_hash: string;
+      valid_from: Date | null;
+      recorded_at: Date;
     }>(
       `select id,repository,subject_id,object_id,predicate,qualifiers_hash,valid_from,recorded_at
        from jina_ontology.assertions
-       where tenant_id=$1 and status='active' and object_id is not null for update`, [tenantId]
+       where tenant_id=$1 and status='active' and object_id is not null for update`,
+      [tenantId]
     )
   ]);
   const mapping = redirectMap(redirectRows.rows);
@@ -2581,9 +3489,10 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
     const subject = resolveRedirect(mapping, assertion.subject_id);
     const object = resolveRedirect(mapping, assertion.object_id);
     const definition = predicateDefinition(assertion.predicate);
-    const key = definition.cardinality === "one"
-      ? `${assertion.repository}:${subject}:${assertion.predicate}:${assertion.qualifiers_hash}`
-      : `${assertion.repository}:${subject}:${assertion.predicate}:${object}:${assertion.qualifiers_hash}`;
+    const key =
+      definition.cardinality === "one"
+        ? `${assertion.repository}:${subject}:${assertion.predicate}:${assertion.qualifiers_hash}`
+        : `${assertion.repository}:${subject}:${assertion.predicate}:${object}:${assertion.qualifiers_hash}`;
     groups.set(key, [...(groups.get(key) ?? []), assertion]);
   }
   const supersede = new Map<string, string>();
@@ -2604,14 +3513,20 @@ async function reconcileRedirectCollisions(client: PoolClient, tenantId: string,
   const parentAuditId = [...redirectRows.rows].reverse().find((row) => row.kind === "merge")?.audit_id;
   const auditId = stableId("audit", `${tenantId}:reconciliation:${[...supersede].flat().join(":")}:${now}`);
   await insertAudit(client, {
-    id: auditId, tenantId, actorId: "svc:reconciliation", action: "reconcile_redirect_collisions",
-    input: { superseded: Object.fromEntries(supersede) }, result: "accepted", now,
+    id: auditId,
+    tenantId,
+    actorId: "svc:reconciliation",
+    action: "reconcile_redirect_collisions",
+    input: { superseded: Object.fromEntries(supersede) },
+    result: "accepted",
+    now,
     ...(parentAuditId ? { parentAuditId } : {})
   });
   for (const [loser, winner] of supersede) {
     await client.query(
       `update jina_ontology.assertions set status='superseded',valid_to=$3,superseded_by=$4,audit_id=$5
-       where tenant_id=$1 and id=$2`, [tenantId, loser, now, winner, auditId]
+       where tenant_id=$1 and id=$2`,
+      [tenantId, loser, now, winner, auditId]
     );
     await insertOutbox(client, tenantId, "assertion_changed", loser, { assertionId: loser, supersededBy: winner }, now);
   }
@@ -2624,18 +3539,33 @@ async function deleteCodePlaneRepository(client: PoolClient, tenantId: string, r
        select old_blob_sha as blob_sha from jina_ontology.commit_changes where tenant_id=$1 and repository=$2
        union all
        select new_blob_sha as blob_sha from jina_ontology.commit_changes where tenant_id=$1 and repository=$2
-     ) referenced where blob_sha is not null`, [tenantId, repository]
+     ) referenced where blob_sha is not null`,
+    [tenantId, repository]
   );
-  await client.query(`delete from jina_ontology.ref_manifest where tenant_id=$1 and repository=$2`, [tenantId, repository]);
-  await client.query(`delete from jina_ontology.commit_changes where tenant_id=$1 and repository=$2`, [tenantId, repository]);
+  await client.query(`delete from jina_ontology.ref_manifest where tenant_id=$1 and repository=$2`, [
+    tenantId,
+    repository
+  ]);
+  await client.query(`delete from jina_ontology.commit_changes where tenant_id=$1 and repository=$2`, [
+    tenantId,
+    repository
+  ]);
   await client.query(`delete from jina_ontology.refs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await client.query(`delete from jina_ontology.commits where tenant_id=$1 and repository=$2`, [tenantId, repository]);
   await deleteOrphanBlobs(client, tenantId, [...new Set(removed.rows.map((row) => row.blob_sha))]);
   await client.query(`delete from jina_ontology.graphs where tenant_id=$1 and repository=$2`, [tenantId, repository]);
-  await client.query(`delete from jina_ontology.repository_acl where tenant_id=$1 and repository=$2`, [tenantId, repository]);
+  await client.query(`delete from jina_ontology.repository_acl where tenant_id=$1 and repository=$2`, [
+    tenantId,
+    repository
+  ]);
 }
 
-async function garbageCollectCodePlane(client: PoolClient, tenantId: string, now: string, recentDays: number): Promise<void> {
+async function garbageCollectCodePlane(
+  client: PoolClient,
+  tenantId: string,
+  now: string,
+  recentDays: number
+): Promise<void> {
   const garbage = await client.query<{ repository: string; sha: string }>(
     `with recursive pr_linked as (
        select repository,substring(object_natural_key from ':sha:([a-f0-9]{40})$') as sha
@@ -2700,14 +3630,34 @@ async function deleteOrphanBlobs(client: PoolClient, tenantId: string, candidate
   );
   const shas = orphaned.rows.map((row) => row.blob_sha);
   if (shas.length === 0) return;
-  await client.query(`delete from jina_ontology.symbol_edges where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-  await client.query(`delete from jina_ontology.blob_symbols where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-  await client.query(`delete from jina_ontology.blob_imports where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-  await client.query(`delete from jina_ontology.blob_analyses where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
-  await client.query(`delete from jina_ontology.blobs where tenant_id=$1 and blob_sha=any($2::text[])`, [tenantId, shas]);
+  await client.query(`delete from jina_ontology.symbol_edges where tenant_id=$1 and blob_sha=any($2::text[])`, [
+    tenantId,
+    shas
+  ]);
+  await client.query(`delete from jina_ontology.blob_symbols where tenant_id=$1 and blob_sha=any($2::text[])`, [
+    tenantId,
+    shas
+  ]);
+  await client.query(`delete from jina_ontology.blob_imports where tenant_id=$1 and blob_sha=any($2::text[])`, [
+    tenantId,
+    shas
+  ]);
+  await client.query(`delete from jina_ontology.blob_analyses where tenant_id=$1 and blob_sha=any($2::text[])`, [
+    tenantId,
+    shas
+  ]);
+  await client.query(`delete from jina_ontology.blobs where tenant_id=$1 and blob_sha=any($2::text[])`, [
+    tenantId,
+    shas
+  ]);
 }
 
-async function purgeRejectedModelPayloads(client: PoolClient, tenantId: string, now: string, retentionDays: number): Promise<void> {
+async function purgeRejectedModelPayloads(
+  client: PoolClient,
+  tenantId: string,
+  now: string,
+  retentionDays: number
+): Promise<void> {
   const expired = await client.query<{ observation_id: string }>(
     `select o.id as observation_id from jina_ontology.observations o
      where o.tenant_id=$1 and o.type='model_output' and o.redacted_at is null and o.payload is not null
@@ -2715,13 +3665,15 @@ async function purgeRejectedModelPayloads(client: PoolClient, tenantId: string, 
        and not exists (
          select 1 from jina_ontology.assertions a
          where a.source_observation_id=o.id and a.status in ('active','proposed')
-       )`, [tenantId, now, retentionDays]
+       )`,
+    [tenantId, now, retentionDays]
   );
   const ids = expired.rows.map((row) => row.observation_id);
   if (ids.length === 0) return;
   await client.query(
     `update jina_ontology.observations set payload=null,redacted_at=$2,redaction_reason='rejected model output retention'
-     where id=any($1::text[]) and redacted_at is null`, [ids, now]
+     where id=any($1::text[]) and redacted_at is null`,
+    [ids, now]
   );
 }
 
@@ -2745,6 +3697,14 @@ interface IssueTraceAssertionRow {
 
 const ISSUE_TRACE_PREDICATES = ["RESOLVES", "MERGED_AS", "INCLUDES", "INTRODUCED_BY"] as const;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function stringValue(value: unknown, fallback = ""): string {
+  return typeof value === "string" ? value : fallback;
+}
+
 function numberFromNaturalKey(naturalKey: string): number | undefined {
   const value = /#(\d+)$/.exec(naturalKey)?.[1];
   return value ? Number.parseInt(value, 10) : undefined;
@@ -2761,30 +3721,35 @@ function derivedIssueDescription(
   for (const payload of modelPayloadByObservationId.values()) {
     if (!Array.isArray(payload.assertions)) continue;
     const resolution = payload.assertions.find((candidate): candidate is Record<string, unknown> => {
-      if (typeof candidate !== "object" || candidate === null || candidate.predicate !== "RESOLVES") return false;
-      const object = typeof candidate.object === "object" && candidate.object !== null
-        ? candidate.object as Record<string, unknown>
-        : undefined;
+      if (!isRecord(candidate) || candidate.predicate !== "RESOLVES") return false;
+      const object = isRecord(candidate.object) ? candidate.object : undefined;
       return object?.naturalKey === issueNaturalKey;
     });
-    const subject = resolution && typeof resolution.subject === "object" && resolution.subject !== null
-      ? resolution.subject as Record<string, unknown>
-      : undefined;
-    const pullRequestNumber = typeof subject?.naturalKey === "string" ? numberFromNaturalKey(subject.naturalKey) : undefined;
-    const rawOutput = typeof payload.rawOutput === "object" && payload.rawOutput !== null
-      ? payload.rawOutput as Record<string, unknown>
-      : undefined;
+    const subject =
+      resolution && typeof resolution.subject === "object" && resolution.subject !== null
+        ? (resolution.subject as Record<string, unknown>)
+        : undefined;
+    const pullRequestNumber =
+      typeof subject?.naturalKey === "string" ? numberFromNaturalKey(subject.naturalKey) : undefined;
+    const rawOutput =
+      typeof payload.rawOutput === "object" && payload.rawOutput !== null
+        ? (payload.rawOutput as Record<string, unknown>)
+        : undefined;
     if (!pullRequestNumber || !Array.isArray(rawOutput?.nodes)) continue;
-    const node = rawOutput.nodes.find((candidate): candidate is Record<string, unknown> =>
-      typeof candidate === "object" && candidate !== null && candidate.kind === "Issue" &&
-        candidate.id === `derived:pr:${pullRequestNumber}`
+    const node = rawOutput.nodes.find(
+      (candidate): candidate is Record<string, unknown> =>
+        isRecord(candidate) && candidate.kind === "Issue" && candidate.id === `derived:pr:${pullRequestNumber}`
     );
     if (typeof node?.description === "string" && node.description.trim()) return node.description;
   }
   return undefined;
 }
 
-function retrievalCitationFromEvidence(repository: string, commitSha: string, value: string): RetrievalCitation | undefined {
+function retrievalCitationFromEvidence(
+  repository: string,
+  commitSha: string,
+  value: string
+): RetrievalCitation | undefined {
   const match = /^(.*):(\d+)(?:-(\d+))?$/.exec(value);
   if (!match?.[1] || !match[2]) return undefined;
   const startLine = Number.parseInt(match[2], 10);
@@ -2832,7 +3797,8 @@ async function retrieveIssueTrace(
   limit: number
 ): Promise<RetrievalItem[]> {
   const issueText = request.issueText?.trim().toLowerCase() ?? "";
-  if (!request.issueEntityId && !request.issueNumber && !issueText && !request.pullRequestNumber && !request.commitSha) return [];
+  if (!request.issueEntityId && !request.issueNumber && !issueText && !request.pullRequestNumber && !request.commitSha)
+    return [];
   const graphResult = await pool.query<{ id: string; commit_sha: string }>(
     `select graph.id,graph.commit_sha from jina_ontology.graph_heads head
      join jina_ontology.graphs graph on graph.id=head.graph_id
@@ -2844,12 +3810,14 @@ async function retrieveIssueTrace(
   if (!graph) return [];
   let modelObservationRows: { id: string; payload: Record<string, unknown> }[] = [];
   if (issueText) {
-    modelObservationRows = (await pool.query<{ id: string; payload: Record<string, unknown> }>(
-      `select id,payload from jina_ontology.observations
+    modelObservationRows = (
+      await pool.query<{ id: string; payload: Record<string, unknown> }>(
+        `select id,payload from jina_ontology.observations
        where tenant_id=$1 and repository=$2 and type='model_output' and redacted_at is null and payload is not null
          and position($3 in lower(payload::text)) > 0`,
-      [request.tenantId, request.repository, issueText]
-    )).rows;
+        [request.tenantId, request.repository, issueText]
+      )
+    ).rows;
   }
   const earlyModelPayloads = new Map(modelObservationRows.map((observation) => [observation.id, observation.payload]));
   const derivedIssueNaturalKeys = new Set<string>();
@@ -2857,10 +3825,8 @@ async function retrieveIssueTrace(
     for (const payload of earlyModelPayloads.values()) {
       if (!Array.isArray(payload.assertions)) continue;
       for (const candidate of payload.assertions) {
-        if (typeof candidate !== "object" || candidate === null || candidate.predicate !== "RESOLVES") continue;
-        const object = typeof candidate.object === "object" && candidate.object !== null
-          ? candidate.object as Record<string, unknown>
-          : undefined;
+        if (!isRecord(candidate) || candidate.predicate !== "RESOLVES") continue;
+        const object = isRecord(candidate.object) ? candidate.object : undefined;
         if (typeof object?.naturalKey !== "string") continue;
         if (derivedIssueDescription(object.naturalKey, earlyModelPayloads)?.toLowerCase().includes(issueText)) {
           derivedIssueNaturalKeys.add(object.naturalKey);
@@ -2951,7 +3917,8 @@ async function retrieveIssueTrace(
          source_node_id in (select source_node_id from resolution_pull_requests) or
          target_node_id in (select target_node_id from causal_commits)
        ))
-     )`, [graph.id, candidateIssueIds, [...ISSUE_TRACE_PREDICATES]]
+     )`,
+    [graph.id, candidateIssueIds, [...ISSUE_TRACE_PREDICATES]]
   );
   const relevantNodeIds = new Set(candidateIssueIds);
   for (const edge of edgeResult.rows) {
@@ -2960,7 +3927,8 @@ async function retrieveIssueTrace(
   }
   const nodeResult = await pool.query<IssueTraceGraphNodeRow>(
     `select node_id,kind,label,description,evidence from jina_ontology.nodes
-     where graph_id=$1 and node_id=any($2::text[])`, [graph.id, [...relevantNodeIds]]
+     where graph_id=$1 and node_id=any($2::text[])`,
+    [graph.id, [...relevantNodeIds]]
   );
   const relevantEntityIds = nodeResult.rows.map((node) =>
     stableId("entity", `${request.tenantId}:${node.kind}:${node.description}`)
@@ -2993,11 +3961,15 @@ async function retrieveIssueTrace(
   ]);
   if (candidateIssueResult.rows.some((issue) => !numberFromNaturalKey(issue.description))) {
     const loadedIds = new Set(modelObservationRows.map((observation) => observation.id));
-    const missingIds = [...new Set(assertionResult.rows.flatMap((assertion) =>
-      assertion.source_observation_id && !loadedIds.has(assertion.source_observation_id)
-        ? [assertion.source_observation_id]
-        : []
-    ))];
+    const missingIds = [
+      ...new Set(
+        assertionResult.rows.flatMap((assertion) =>
+          assertion.source_observation_id && !loadedIds.has(assertion.source_observation_id)
+            ? [assertion.source_observation_id]
+            : []
+        )
+      )
+    ];
     if (missingIds.length > 0) {
       const missing = await pool.query<{ id: string; payload: Record<string, unknown> }>(
         `select id,payload from jina_ontology.observations
@@ -3017,14 +3989,21 @@ async function retrieveIssueTrace(
     const key = relationKey(assertion.subject_natural_key, assertion.predicate, assertion.object_natural_key);
     assertionsByRelation.set(key, [...(assertionsByRelation.get(key) ?? []), assertion]);
   }
-  const assertionForEdge = (edge: IssueTraceGraphEdgeRow): (IssueTraceAssertionRow & { recorded_at: Date }) | undefined => {
+  const assertionForEdge = (
+    edge: IssueTraceGraphEdgeRow
+  ): (IssueTraceAssertionRow & { recorded_at: Date }) | undefined => {
     const subject = nodesById.get(edge.source_node_id)?.description;
     const object = nodesById.get(edge.target_node_id)?.description;
     if (!subject || !object) return undefined;
     const candidates = assertionsByRelation.get(relationKey(subject, edge.predicate, object)) ?? [];
-    return candidates.find((candidate) =>
-      edge.predicate !== "INTRODUCED_BY" || typeof candidate.qualifiers.reason !== "string" || candidate.qualifiers.reason === edge.why
-    ) ?? candidates[0];
+    return (
+      candidates.find(
+        (candidate) =>
+          edge.predicate !== "INTRODUCED_BY" ||
+          typeof candidate.qualifiers.reason !== "string" ||
+          candidate.qualifiers.reason === edge.why
+      ) ?? candidates[0]
+    );
   };
   const latestObservationByKey = new Map<string, { readonly id: string; readonly payload: Record<string, unknown> }>();
   for (const observation of observationResult.rows) {
@@ -3034,51 +4013,88 @@ async function retrieveIssueTrace(
       latestObservationByKey.set(`${kind}:${number}`, observation);
     }
   }
-  const modelPayloadByObservationId = new Map(modelObservationRows.map((observation) => [observation.id, observation.payload]));
+  const modelPayloadByObservationId = new Map(
+    modelObservationRows.map((observation) => [observation.id, observation.payload])
+  );
   const resolves = edgeResult.rows.filter((edge) => edge.predicate === "RESOLVES");
   const causes = edgeResult.rows.filter((edge) => edge.predicate === "INTRODUCED_BY");
   const inclusions = edgeResult.rows.filter((edge) => edge.predicate === "INCLUDES" || edge.predicate === "MERGED_AS");
   const commitPrefix = request.commitSha?.toLowerCase() ?? "";
-  const candidates = issueNodes.filter((issue) => {
-    const naturalKey = issue.description;
-    const issueNumber = numberFromNaturalKey(naturalKey);
-    const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
-    if (request.issueEntityId) {
-      return stableId("entity", `${request.tenantId}:Issue:${naturalKey}`) === request.issueEntityId;
-    }
-    if (request.issueNumber) return issueNumber === request.issueNumber;
-    if (issueText) {
-      return issue.label.toLowerCase().includes(issueText) ||
-        String(issueObservation?.payload.title ?? "").toLowerCase().includes(issueText) ||
-        String(issueObservation?.payload.body ?? "").toLowerCase().includes(issueText) ||
-        (derivedIssueDescription(naturalKey, modelPayloadByObservationId)?.toLowerCase().includes(issueText) ?? false);
-    }
-    if (request.pullRequestNumber) {
-      const pullRequestNumber = request.pullRequestNumber;
-      const directlyResolved = resolves.some((edge) => edge.target_node_id === issue.node_id &&
-        numberFromNaturalKey(nodesById.get(edge.source_node_id)?.description ?? "") === pullRequestNumber);
-      const causedByPullRequest = causes.some((cause) => cause.source_node_id === issue.node_id &&
-        inclusions.some((inclusion) => inclusion.target_node_id === cause.target_node_id &&
-          numberFromNaturalKey(nodesById.get(inclusion.source_node_id)?.description ?? "") === pullRequestNumber));
-      return directlyResolved || causedByPullRequest;
-    }
-    if (commitPrefix) {
-      const causedByCommit = causes.some((edge) => edge.source_node_id === issue.node_id &&
-        shaFromNaturalKey(nodesById.get(edge.target_node_id)?.description ?? "")?.startsWith(commitPrefix));
-      const resolvedByCommit = resolves.some((resolution) => resolution.target_node_id === issue.node_id &&
-        inclusions.some((inclusion) => inclusion.source_node_id === resolution.source_node_id &&
-          shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "")?.startsWith(commitPrefix)));
-      return causedByCommit || resolvedByCommit;
-    }
-    return false;
-  }).sort((left, right) => {
-    if (!issueText) return (numberFromNaturalKey(left.description) ?? Number.MAX_SAFE_INTEGER) -
-      (numberFromNaturalKey(right.description) ?? Number.MAX_SAFE_INTEGER) || left.label.localeCompare(right.label);
-    const leftTitle = String(latestObservationByKey.get(`issue:${numberFromNaturalKey(left.description)}`)?.payload.title ?? left.label).toLowerCase();
-    const rightTitle = String(latestObservationByKey.get(`issue:${numberFromNaturalKey(right.description)}`)?.payload.title ?? right.label).toLowerCase();
-    return (leftTitle === issueText ? 0 : leftTitle.includes(issueText) ? 1 : 2) -
-      (rightTitle === issueText ? 0 : rightTitle.includes(issueText) ? 1 : 2) || leftTitle.localeCompare(rightTitle);
-  }).slice(0, limit);
+  const candidates = issueNodes
+    .filter((issue) => {
+      const naturalKey = issue.description;
+      const issueNumber = numberFromNaturalKey(naturalKey);
+      const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
+      if (request.issueEntityId) {
+        return stableId("entity", `${request.tenantId}:Issue:${naturalKey}`) === request.issueEntityId;
+      }
+      if (request.issueNumber) return issueNumber === request.issueNumber;
+      if (issueText) {
+        return (
+          issue.label.toLowerCase().includes(issueText) ||
+          stringValue(issueObservation?.payload.title).toLowerCase().includes(issueText) ||
+          stringValue(issueObservation?.payload.body).toLowerCase().includes(issueText) ||
+          (derivedIssueDescription(naturalKey, modelPayloadByObservationId)?.toLowerCase().includes(issueText) ?? false)
+        );
+      }
+      if (request.pullRequestNumber) {
+        const pullRequestNumber = request.pullRequestNumber;
+        const directlyResolved = resolves.some(
+          (edge) =>
+            edge.target_node_id === issue.node_id &&
+            numberFromNaturalKey(nodesById.get(edge.source_node_id)?.description ?? "") === pullRequestNumber
+        );
+        const causedByPullRequest = causes.some(
+          (cause) =>
+            cause.source_node_id === issue.node_id &&
+            inclusions.some(
+              (inclusion) =>
+                inclusion.target_node_id === cause.target_node_id &&
+                numberFromNaturalKey(nodesById.get(inclusion.source_node_id)?.description ?? "") === pullRequestNumber
+            )
+        );
+        return directlyResolved || causedByPullRequest;
+      }
+      if (commitPrefix) {
+        const causedByCommit = causes.some(
+          (edge) =>
+            edge.source_node_id === issue.node_id &&
+            shaFromNaturalKey(nodesById.get(edge.target_node_id)?.description ?? "")?.startsWith(commitPrefix)
+        );
+        const resolvedByCommit = resolves.some(
+          (resolution) =>
+            resolution.target_node_id === issue.node_id &&
+            inclusions.some(
+              (inclusion) =>
+                inclusion.source_node_id === resolution.source_node_id &&
+                shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "")?.startsWith(commitPrefix)
+            )
+        );
+        return causedByCommit || resolvedByCommit;
+      }
+      return false;
+    })
+    .sort((left, right) => {
+      if (!issueText)
+        return (
+          (numberFromNaturalKey(left.description) ?? Number.MAX_SAFE_INTEGER) -
+            (numberFromNaturalKey(right.description) ?? Number.MAX_SAFE_INTEGER) ||
+          left.label.localeCompare(right.label)
+        );
+      const leftTitle = stringValue(
+        latestObservationByKey.get(`issue:${numberFromNaturalKey(left.description)}`)?.payload.title,
+        left.label
+      ).toLowerCase();
+      const rightTitle = stringValue(
+        latestObservationByKey.get(`issue:${numberFromNaturalKey(right.description)}`)?.payload.title,
+        right.label
+      ).toLowerCase();
+      return (
+        (leftTitle === issueText ? 0 : leftTitle.includes(issueText) ? 1 : 2) -
+          (rightTitle === issueText ? 0 : rightTitle.includes(issueText) ? 1 : 2) || leftTitle.localeCompare(rightTitle)
+      );
+    })
+    .slice(0, limit);
   if (candidates.length === 0) return [];
 
   const relevantCommitShas = new Set<string>();
@@ -3094,13 +4110,14 @@ async function retrieveIssueTrace(
       }
     }
   }
-  const changeResult = relevantCommitShas.size > 0
-    ? await pool.query<{ commit_sha: string; path: string; change: string; old_path: string | null }>(
-        `select commit_sha,path,change,old_path from jina_ontology.commit_changes
+  const changeResult =
+    relevantCommitShas.size > 0
+      ? await pool.query<{ commit_sha: string; path: string; change: string; old_path: string | null }>(
+          `select commit_sha,path,change,old_path from jina_ontology.commit_changes
          where tenant_id=$1 and repository=$2 and commit_sha=any($3::text[]) order by commit_sha,path`,
-        [request.tenantId, request.repository, [...relevantCommitShas]]
-      )
-    : { rows: [] as { commit_sha: string; path: string; change: string; old_path: string | null }[] };
+          [request.tenantId, request.repository, [...relevantCommitShas]]
+        )
+      : { rows: [] as { commit_sha: string; path: string; change: string; old_path: string | null }[] };
   const changesByCommit = new Map<string, typeof changeResult.rows>();
   for (const change of changeResult.rows) {
     changesByCommit.set(change.commit_sha, [...(changesByCommit.get(change.commit_sha) ?? []), change]);
@@ -3110,13 +4127,19 @@ async function retrieveIssueTrace(
     const citations: RetrievalCitation[] = [];
     if (assertion) {
       citations.push({ kind: "assertion", id: assertion.id, repository: request.repository });
-      if (assertion.source_observation_id) citations.push({ kind: "observation", id: assertion.source_observation_id, repository: request.repository });
+      if (assertion.source_observation_id)
+        citations.push({ kind: "observation", id: assertion.source_observation_id, repository: request.repository });
     }
     for (const evidence of edge.evidence) {
       if (evidence.startsWith("observation:")) {
-        citations.push({ kind: "observation", id: evidence.slice("observation:".length), repository: request.repository });
+        citations.push({
+          kind: "observation",
+          id: evidence.slice("observation:".length),
+          repository: request.repository
+        });
       } else {
-        const evidenceCommitSha = assertion && /^[a-f0-9]{40}$/i.test(assertion.commit_sha) ? assertion.commit_sha : graph.commit_sha;
+        const evidenceCommitSha =
+          assertion && /^[a-f0-9]{40}$/i.test(assertion.commit_sha) ? assertion.commit_sha : graph.commit_sha;
         const citation = retrievalCitationFromEvidence(request.repository, evidenceCommitSha, evidence);
         if (citation) citations.push(citation);
       }
@@ -3127,102 +4150,157 @@ async function retrieveIssueTrace(
   return candidates.map((issue): RetrievalItem => {
     const issueNumber = numberFromNaturalKey(issue.description);
     const issueObservation = issueNumber ? latestObservationByKey.get(`issue:${issueNumber}`) : undefined;
-    const citations: RetrievalCitation[] = [{
-      kind: "entity", id: stableId("entity", `${request.tenantId}:Issue:${issue.description}`), repository: request.repository
-    }];
-    if (issueObservation) citations.push({ kind: "observation", id: issueObservation.id, repository: request.repository });
-    const issueResolutions = resolves.filter((edge) => edge.target_node_id === issue.node_id).flatMap((resolution) => {
-      const pullRequest = nodesById.get(resolution.source_node_id);
-      const pullRequestNumber = pullRequest ? numberFromNaturalKey(pullRequest.description) : undefined;
-      if (!pullRequest || !pullRequestNumber) return [];
-      const pullRequestObservation = latestObservationByKey.get(`pull_request:${pullRequestNumber}`);
-      const relatedInclusions = inclusions.filter((edge) => edge.source_node_id === pullRequest.node_id);
-      const assertionIds = new Set<string>();
-      const observationIds = new Set<string>();
-      for (const edge of [resolution, ...relatedInclusions]) {
-        const assertion = assertionForEdge(edge);
-        if (assertion) {
-          assertionIds.add(assertion.id);
-          if (assertion.source_observation_id) observationIds.add(assertion.source_observation_id);
+    const citations: RetrievalCitation[] = [
+      {
+        kind: "entity",
+        id: stableId("entity", `${request.tenantId}:Issue:${issue.description}`),
+        repository: request.repository
+      }
+    ];
+    if (issueObservation)
+      citations.push({ kind: "observation", id: issueObservation.id, repository: request.repository });
+    const issueResolutions = resolves
+      .filter((edge) => edge.target_node_id === issue.node_id)
+      .flatMap((resolution) => {
+        const pullRequest = nodesById.get(resolution.source_node_id);
+        const pullRequestNumber = pullRequest ? numberFromNaturalKey(pullRequest.description) : undefined;
+        if (!pullRequest || !pullRequestNumber) return [];
+        const pullRequestObservation = latestObservationByKey.get(`pull_request:${pullRequestNumber}`);
+        const relatedInclusions = inclusions.filter((edge) => edge.source_node_id === pullRequest.node_id);
+        const assertionIds = new Set<string>();
+        const observationIds = new Set<string>();
+        for (const edge of [resolution, ...relatedInclusions]) {
+          const assertion = assertionForEdge(edge);
+          if (assertion) {
+            assertionIds.add(assertion.id);
+            if (assertion.source_observation_id) observationIds.add(assertion.source_observation_id);
+          }
+          citations.push(...edgeCitations(edge));
         }
-        citations.push(...edgeCitations(edge));
-      }
-      if (pullRequestObservation) {
-        observationIds.add(pullRequestObservation.id);
-        citations.push({ kind: "observation", id: pullRequestObservation.id, repository: request.repository });
-      }
-      const bySha = new Map<string, "merge" | "included">();
-      for (const inclusion of relatedInclusions) {
-        const sha = shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "");
-        if (sha) bySha.set(sha, inclusion.predicate === "MERGED_AS" ? "merge" : bySha.get(sha) ?? "included");
-      }
-      const commits = [...bySha].sort((left, right) =>
-        (left[1] === "merge" ? 0 : 1) - (right[1] === "merge" ? 0 : 1) || left[0].localeCompare(right[0])
-      ).map(([sha, role]) => {
+        if (pullRequestObservation) {
+          observationIds.add(pullRequestObservation.id);
+          citations.push({ kind: "observation", id: pullRequestObservation.id, repository: request.repository });
+        }
+        const bySha = new Map<string, "merge" | "included">();
+        for (const inclusion of relatedInclusions) {
+          const sha = shaFromNaturalKey(nodesById.get(inclusion.target_node_id)?.description ?? "");
+          if (sha) bySha.set(sha, inclusion.predicate === "MERGED_AS" ? "merge" : (bySha.get(sha) ?? "included"));
+        }
+        const commits = [...bySha]
+          .sort(
+            (left, right) =>
+              (left[1] === "merge" ? 0 : 1) - (right[1] === "merge" ? 0 : 1) || left[0].localeCompare(right[0])
+          )
+          .map(([sha, role]) => {
+            const changes = (changesByCommit.get(sha) ?? []).map((change) => ({
+              commitSha: sha,
+              path: change.path,
+              change: change.change,
+              ...(change.old_path ? { oldPath: change.old_path } : {})
+            }));
+            for (const change of changes)
+              citations.push({
+                kind: "commit_change",
+                id: `${sha}:${change.path}`,
+                repository: request.repository,
+                commitSha: sha,
+                path: change.path
+              });
+            return { sha, url: `https://github.com/${request.repository}/commit/${sha}`, role, changes };
+          });
+        return [
+          {
+            pullRequestNumber,
+            title: stringValue(pullRequestObservation?.payload.title, pullRequest.label),
+            url: stringValue(
+              pullRequestObservation?.payload.url,
+              `https://github.com/${request.repository}/pull/${pullRequestNumber}`
+            ),
+            commits,
+            assertionIds: [...assertionIds],
+            observationIds: [...observationIds]
+          }
+        ];
+      })
+      .sort((left, right) => left.pullRequestNumber - right.pullRequestNumber);
+    const introducedBy = causes
+      .filter((edge) => edge.source_node_id === issue.node_id)
+      .flatMap((cause) => {
+        const commit = nodesById.get(cause.target_node_id);
+        const sha = commit ? shaFromNaturalKey(commit.description) : undefined;
+        if (!commit || !sha) return [];
+        const assertion = assertionForEdge(cause);
+        citations.push(...edgeCitations(cause));
+        const causalPullRequests = [
+          ...new Map(
+            inclusions
+              .filter((edge) => edge.target_node_id === commit.node_id)
+              .flatMap((inclusion) => {
+                const pullRequest = nodesById.get(inclusion.source_node_id);
+                const number = pullRequest ? numberFromNaturalKey(pullRequest.description) : undefined;
+                if (!pullRequest || !number) return [];
+                const observation = latestObservationByKey.get(`pull_request:${number}`);
+                citations.push(...edgeCitations(inclusion));
+                if (observation)
+                  citations.push({ kind: "observation", id: observation.id, repository: request.repository });
+                return [
+                  [
+                    number,
+                    {
+                      number,
+                      title: stringValue(observation?.payload.title, pullRequest.label),
+                      url: stringValue(
+                        observation?.payload.url,
+                        `https://github.com/${request.repository}/pull/${number}`
+                      )
+                    }
+                  ] as const
+                ];
+              })
+          ).values()
+        ].sort((left, right) => left.number - right.number);
         const changes = (changesByCommit.get(sha) ?? []).map((change) => ({
-          commitSha: sha, path: change.path, change: change.change, ...(change.old_path ? { oldPath: change.old_path } : {})
+          commitSha: sha,
+          path: change.path,
+          change: change.change,
+          ...(change.old_path ? { oldPath: change.old_path } : {})
         }));
-        for (const change of changes) citations.push({
-          kind: "commit_change", id: `${sha}:${change.path}`, repository: request.repository, commitSha: sha, path: change.path
-        });
-        return { sha, url: `https://github.com/${request.repository}/commit/${sha}`, role, changes };
+        for (const change of changes)
+          citations.push({
+            kind: "commit_change",
+            id: `${sha}:${change.path}`,
+            repository: request.repository,
+            commitSha: sha,
+            path: change.path
+          });
+        return [
+          {
+            sha,
+            url: `https://github.com/${request.repository}/commit/${sha}`,
+            role: "introduced" as const,
+            changes,
+            ...(cause.why ? { why: cause.why } : {}),
+            evidence: cause.evidence,
+            evidenceCommitSha: assertion?.commit_sha ?? graph.commit_sha,
+            assertionIds: assertion ? [assertion.id] : [],
+            pullRequests: causalPullRequests
+          }
+        ];
       });
-      return [{
-        pullRequestNumber,
-        title: String(pullRequestObservation?.payload.title ?? pullRequest.label),
-        url: String(pullRequestObservation?.payload.url ?? `https://github.com/${request.repository}/pull/${pullRequestNumber}`),
-        commits,
-        assertionIds: [...assertionIds],
-        observationIds: [...observationIds]
-      }];
-    }).sort((left, right) => left.pullRequestNumber - right.pullRequestNumber);
-    const introducedBy = causes.filter((edge) => edge.source_node_id === issue.node_id).flatMap((cause) => {
-      const commit = nodesById.get(cause.target_node_id);
-      const sha = commit ? shaFromNaturalKey(commit.description) : undefined;
-      if (!commit || !sha) return [];
-      const assertion = assertionForEdge(cause);
-      citations.push(...edgeCitations(cause));
-      const causalPullRequests = [...new Map(inclusions.filter((edge) => edge.target_node_id === commit.node_id).flatMap((inclusion) => {
-        const pullRequest = nodesById.get(inclusion.source_node_id);
-        const number = pullRequest ? numberFromNaturalKey(pullRequest.description) : undefined;
-        if (!pullRequest || !number) return [];
-        const observation = latestObservationByKey.get(`pull_request:${number}`);
-        citations.push(...edgeCitations(inclusion));
-        if (observation) citations.push({ kind: "observation", id: observation.id, repository: request.repository });
-        return [[number, {
-          number,
-          title: String(observation?.payload.title ?? pullRequest.label),
-          url: String(observation?.payload.url ?? `https://github.com/${request.repository}/pull/${number}`)
-        }] as const];
-      })).values()].sort((left, right) => left.number - right.number);
-      const changes = (changesByCommit.get(sha) ?? []).map((change) => ({
-        commitSha: sha, path: change.path, change: change.change, ...(change.old_path ? { oldPath: change.old_path } : {})
-      }));
-      for (const change of changes) citations.push({
-        kind: "commit_change", id: `${sha}:${change.path}`, repository: request.repository, commitSha: sha, path: change.path
-      });
-      return [{
-        sha,
-        url: `https://github.com/${request.repository}/commit/${sha}`,
-        role: "introduced" as const,
-        changes,
-        ...(cause.why ? { why: cause.why } : {}),
-        evidence: cause.evidence,
-        evidenceCommitSha: assertion?.commit_sha ?? graph.commit_sha,
-        assertionIds: assertion ? [assertion.id] : [],
-        pullRequests: causalPullRequests
-      }];
-    });
     const payload: IssueTraceProjection = {
       issue: {
         entityId: stableId("entity", `${request.tenantId}:Issue:${issue.description}`),
         origin: issueNumber ? "github" : "derived",
-        title: String(issueObservation?.payload.title ?? issue.label.replace(/^#\d+\s+/, "")),
+        title: stringValue(issueObservation?.payload.title, issue.label.replace(/^#\d+\s+/, "")),
         ...(issueNumber ? { number: issueNumber, displayId: `#${issueNumber}` } : { displayId: "derived" }),
-        ...(!issueNumber ? { description: derivedIssueDescription(issue.description, modelPayloadByObservationId) ?? issue.label } : {}),
-        ...(typeof issueObservation?.payload.url === "string" ? { url: issueObservation.payload.url } : issueNumber
-          ? { url: `https://github.com/${request.repository}/issues/${issueNumber}` }
+        ...(!issueNumber
+          ? { description: derivedIssueDescription(issue.description, modelPayloadByObservationId) ?? issue.label }
           : {}),
+        ...(typeof issueObservation?.payload.url === "string"
+          ? { url: issueObservation.payload.url }
+          : issueNumber
+            ? { url: `https://github.com/${request.repository}/issues/${issueNumber}` }
+            : {}),
         ...(typeof issueObservation?.payload.state === "string" ? { state: issueObservation.payload.state } : {})
       },
       resolutions: issueResolutions,
@@ -3238,32 +4316,41 @@ function issueTraceRetrievalItem(
   request: RetrievalRequest,
   commitPrefix: string
 ): RetrievalItem {
-    const firstResolution = payload.resolutions[0];
-    const firstCommit = firstResolution?.commits[0];
-    const wantsCausality = Boolean(request.commitSha) || /caus|introduc|root cause/i.test(request.query ?? "");
-    const causalCommit = !wantsCausality ? undefined : request.commitSha
+  const firstResolution = payload.resolutions[0];
+  const firstCommit = firstResolution?.commits[0];
+  const wantsCausality = Boolean(request.commitSha) || /caus|introduc|root cause/i.test(request.query ?? "");
+  const causalCommit = !wantsCausality
+    ? undefined
+    : request.commitSha
       ? payload.introducedBy.find((commit) => commit.sha.startsWith(commitPrefix))
       : request.pullRequestNumber
-        ? payload.introducedBy.find((commit) => commit.pullRequests?.some((pullRequest) => pullRequest.number === request.pullRequestNumber))
+        ? payload.introducedBy.find((commit) =>
+            commit.pullRequests?.some((pullRequest) => pullRequest.number === request.pullRequestNumber)
+          )
         : payload.introducedBy[0];
-    const issueLabel = payload.issue.displayId ? `Issue ${payload.issue.displayId}` : payload.issue.title;
-    const title = causalCommit
-      ? `${causalCommit.sha.slice(0, 12)} caused ${issueLabel}`
-      : firstResolution
+  const issueLabel = payload.issue.displayId ? `Issue ${payload.issue.displayId}` : payload.issue.title;
+  const title = causalCommit
+    ? `${causalCommit.sha.slice(0, 12)} caused ${issueLabel}`
+    : firstResolution
       ? `${issueLabel} → PR #${firstResolution.pullRequestNumber}${firstCommit ? ` → ${firstCommit.sha.slice(0, 12)}` : ""}`
       : payload.introducedBy[0]
         ? `${issueLabel} introduced by ${payload.introducedBy[0].sha.slice(0, 12)}`
         : `${issueLabel} has no verified commit relationship`;
-    return {
-      kind: "issue_trace",
-      title,
-      data: payload as unknown as Readonly<Record<string, unknown>>,
-      citations: payload.citations,
-      score: firstResolution ? 3 : payload.introducedBy.length > 0 ? 2 : 1
-    };
+  return {
+    kind: "issue_trace",
+    title,
+    data: payload as unknown as Readonly<Record<string, unknown>>,
+    citations: payload.citations,
+    score: firstResolution ? 3 : payload.introducedBy.length > 0 ? 2 : 1
+  };
 }
 
-async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, ref: string, limit: number): Promise<RetrievalItem[]> {
+async function retrieveFeatureTrace(
+  pool: Pool,
+  request: RetrievalRequest,
+  ref: string,
+  limit: number
+): Promise<RetrievalItem[]> {
   const featureText = request.featureText?.trim() ?? "";
   if (!featureText) return [];
   const result = await pool.query<{
@@ -3328,27 +4415,44 @@ async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, ref: 
   );
   const [redirects, entities] = await Promise.all([
     pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
-      `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`, [request.tenantId]
+      `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`,
+      [request.tenantId]
     ),
     pool.query<{ id: string; kind: string; natural_key: string; display_name: string }>(
-      `select id,kind,natural_key,display_name from jina_ontology.entities where tenant_id=$1`, [request.tenantId]
+      `select id,kind,natural_key,display_name from jina_ontology.entities where tenant_id=$1`,
+      [request.tenantId]
     )
   ]);
   const mapping = redirectMap(redirects.rows);
   const entitiesById = new Map(entities.rows.map((entity) => [entity.id, entity]));
-  const rows = result.rows.map((row) => {
-    const subject = entitiesById.get(resolveRedirect(mapping, row.subject_id));
-    const object = entitiesById.get(resolveRedirect(mapping, row.object_id));
-    return {
-      ...row,
-      ...(subject ? { subject_kind: subject.kind, subject_natural_key: subject.natural_key, subject_label: subject.display_name } : {}),
-      ...(object ? { object_kind: object.kind, object_natural_key: object.natural_key, object_label: object.display_name } : {})
-    };
-  }).filter((row) => {
-    const feature = row.subject_kind === "Feature" ? row.subject_label + " " + row.subject_natural_key
-      : row.object_kind === "Feature" ? row.object_label + " " + row.object_natural_key : "";
-    return feature.toLocaleLowerCase().includes(featureText.toLocaleLowerCase());
-  }).slice(0, limit);
+  const rows = result.rows
+    .map((row) => {
+      const subject = entitiesById.get(resolveRedirect(mapping, row.subject_id));
+      const object = entitiesById.get(resolveRedirect(mapping, row.object_id));
+      return {
+        ...row,
+        ...(subject
+          ? {
+              subject_kind: subject.kind,
+              subject_natural_key: subject.natural_key,
+              subject_label: subject.display_name
+            }
+          : {}),
+        ...(object
+          ? { object_kind: object.kind, object_natural_key: object.natural_key, object_label: object.display_name }
+          : {})
+      };
+    })
+    .filter((row) => {
+      const feature =
+        row.subject_kind === "Feature"
+          ? row.subject_label + " " + row.subject_natural_key
+          : row.object_kind === "Feature"
+            ? row.object_label + " " + row.object_natural_key
+            : "";
+      return feature.toLocaleLowerCase().includes(featureText.toLocaleLowerCase());
+    })
+    .slice(0, limit);
   return rows.map((row) => {
     const featureIsSubject = row.subject_kind === "Feature";
     const feature = featureIsSubject
@@ -3357,20 +4461,28 @@ async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, ref: 
     const related = featureIsSubject
       ? { kind: row.object_kind, naturalKey: row.object_natural_key, label: row.object_label }
       : { kind: row.subject_kind, naturalKey: row.subject_natural_key, label: row.subject_label };
-    const title = row.predicate === "IMPLEMENTS"
-      ? `${related.label} implements ${feature.label}`
-      : row.predicate === "DOCUMENTED_BY"
-        ? `${feature.label} is documented by ${related.label}`
-        : row.predicate === "LIKELY_AFFECTS"
-          ? `${related.label} may affect ${feature.label}`
-          : `${related.label} references ${feature.label}`;
-    const citations: RetrievalCitation[] = [{
-      kind: "assertion", id: row.id, repository: request.repository,
-      ...(/^[a-f0-9]{40}$/i.test(row.commit_sha) ? { commitSha: row.commit_sha } : {})
-    }];
-    if (row.source_observation_id) citations.push({
-      kind: "observation", id: row.source_observation_id, repository: request.repository
-    });
+    const title =
+      row.predicate === "IMPLEMENTS"
+        ? `${related.label} implements ${feature.label}`
+        : row.predicate === "DOCUMENTED_BY"
+          ? `${feature.label} is documented by ${related.label}`
+          : row.predicate === "LIKELY_AFFECTS"
+            ? `${related.label} may affect ${feature.label}`
+            : `${related.label} references ${feature.label}`;
+    const citations: RetrievalCitation[] = [
+      {
+        kind: "assertion",
+        id: row.id,
+        repository: request.repository,
+        ...(/^[a-f0-9]{40}$/i.test(row.commit_sha) ? { commitSha: row.commit_sha } : {})
+      }
+    ];
+    if (row.source_observation_id)
+      citations.push({
+        kind: "observation",
+        id: row.source_observation_id,
+        repository: request.repository
+      });
     if (/^[a-f0-9]{40}$/i.test(row.commit_sha)) {
       for (const value of row.evidence) {
         const citation = retrievalCitationFromEvidence(request.repository, row.commit_sha, value);
@@ -3387,11 +4499,23 @@ async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, ref: 
   });
 }
 
-async function retrieveStructure(pool: Pool, request: RetrievalRequest, ref: string, limit: number): Promise<RetrievalItem[]> {
+async function retrieveStructure(
+  pool: Pool,
+  request: RetrievalRequest,
+  ref: string,
+  limit: number
+): Promise<RetrievalItem[]> {
   const symbol = request.symbol ?? "";
   const path = request.path ?? "";
   const definitions = await pool.query<{
-    path: string; commit_sha: string; blob_sha: string; moniker: string; name: string; symbol_kind: string; start_line: number; end_line: number;
+    path: string;
+    commit_sha: string;
+    blob_sha: string;
+    moniker: string;
+    name: string;
+    symbol_kind: string;
+    start_line: number;
+    end_line: number;
   }>(
     `select m.path,m.commit_sha,m.blob_sha,s.moniker,s.name,s.kind as symbol_kind,s.start_line,s.end_line
      from jina_ontology.ref_manifest m
@@ -3403,16 +4527,32 @@ async function retrieveStructure(pool: Pool, request: RetrievalRequest, ref: str
     [request.tenantId, request.repository, ref, symbol, path, ONTOLOGY_PARSER_VERSION, limit]
   );
   const items: RetrievalItem[] = definitions.rows.map((row) => ({
-    kind: "symbol_definition", title: `${row.name} is ${row.symbol_kind} in ${row.path}`,
-    data: { moniker: row.moniker, name: row.name, symbolKind: row.symbol_kind, path: row.path }, score: 2,
-    citations: [{
-      kind: "code", id: `${row.blob_sha}:${row.start_line}:${row.moniker}`, repository: request.repository,
-      commitSha: row.commit_sha, path: row.path, startLine: row.start_line, endLine: row.end_line
-    }]
+    kind: "symbol_definition",
+    title: `${row.name} is ${row.symbol_kind} in ${row.path}`,
+    data: { moniker: row.moniker, name: row.name, symbolKind: row.symbol_kind, path: row.path },
+    score: 2,
+    citations: [
+      {
+        kind: "code",
+        id: `${row.blob_sha}:${row.start_line}:${row.moniker}`,
+        repository: request.repository,
+        commitSha: row.commit_sha,
+        path: row.path,
+        startLine: row.start_line,
+        endLine: row.end_line
+      }
+    ]
   }));
   if (items.length >= limit) return items.slice(0, limit);
   const relationships = await pool.query<{
-    path: string; commit_sha: string; blob_sha: string; from_moniker: string; kind: string; to_moniker: string; start_line: number; end_line: number;
+    path: string;
+    commit_sha: string;
+    blob_sha: string;
+    from_moniker: string;
+    kind: string;
+    to_moniker: string;
+    start_line: number;
+    end_line: number;
   }>(
     `select m.path,m.commit_sha,m.blob_sha,e.from_moniker,e.kind,e.to_moniker,e.start_line,e.end_line
      from jina_ontology.ref_manifest m
@@ -3423,18 +4563,34 @@ async function retrieveStructure(pool: Pool, request: RetrievalRequest, ref: str
      order by case when e.from_moniker ilike $4 || '%' then 0 else 1 end,m.path,e.start_line limit $7`,
     [request.tenantId, request.repository, ref, symbol, path, ONTOLOGY_PARSER_VERSION, limit - items.length]
   );
-  items.push(...relationships.rows.map((row): RetrievalItem => ({
-    kind: row.kind, title: `${row.from_moniker} ${row.kind} ${row.to_moniker}`,
-    data: { fromMoniker: row.from_moniker, toMoniker: row.to_moniker, path: row.path }, score: 1,
-    citations: [{
-      kind: "code", id: `${row.blob_sha}:${row.start_line}:${row.from_moniker}`, repository: request.repository,
-      commitSha: row.commit_sha, path: row.path, startLine: row.start_line, endLine: row.end_line
-    }]
-  })));
+  items.push(
+    ...relationships.rows.map((row): RetrievalItem => ({
+      kind: row.kind,
+      title: `${row.from_moniker} ${row.kind} ${row.to_moniker}`,
+      data: { fromMoniker: row.from_moniker, toMoniker: row.to_moniker, path: row.path },
+      score: 1,
+      citations: [
+        {
+          kind: "code",
+          id: `${row.blob_sha}:${row.start_line}:${row.from_moniker}`,
+          repository: request.repository,
+          commitSha: row.commit_sha,
+          path: row.path,
+          startLine: row.start_line,
+          endLine: row.end_line
+        }
+      ]
+    }))
+  );
   return items;
 }
 
-async function retrieveChange(pool: Pool, request: RetrievalRequest, headSha: string, limit: number): Promise<RetrievalItem[]> {
+async function retrieveChange(
+  pool: Pool,
+  request: RetrievalRequest,
+  headSha: string,
+  limit: number
+): Promise<RetrievalItem[]> {
   let commitShas = [headSha];
   if (request.pullRequestNumber) {
     const key = `github:pr:${request.repository}#${request.pullRequestNumber}`;
@@ -3445,40 +4601,66 @@ async function retrieveChange(pool: Pool, request: RetrievalRequest, headSha: st
         [request.tenantId, request.repository]
       ),
       pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
-        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`, [request.tenantId]
+        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`,
+        [request.tenantId]
       ),
       pool.query<{ id: string; natural_key: string }>(
-        `select id,natural_key from jina_ontology.entities where tenant_id=$1`, [request.tenantId]
+        `select id,natural_key from jina_ontology.entities where tenant_id=$1`,
+        [request.tenantId]
       )
     ]);
     const mapping = redirectMap(redirects.rows);
     const naturalKeys = new Map(entities.rows.map((entity) => [entity.id, entity.natural_key]));
-    const parsed = included.rows.filter((row) =>
-      (naturalKeys.get(resolveRedirect(mapping, row.subject_id)) ?? row.subject_natural_key) === key
-    ).map((row) => {
-      const naturalKey = naturalKeys.get(resolveRedirect(mapping, row.object_id)) ?? row.object_natural_key;
-      return /:sha:([a-f0-9]{40})$/i.exec(naturalKey)?.[1];
-    }).filter((sha): sha is string => Boolean(sha));
+    const parsed = included.rows
+      .filter((row) => (naturalKeys.get(resolveRedirect(mapping, row.subject_id)) ?? row.subject_natural_key) === key)
+      .map((row) => {
+        const naturalKey = naturalKeys.get(resolveRedirect(mapping, row.object_id)) ?? row.object_natural_key;
+        return /:sha:([a-f0-9]{40})$/i.exec(naturalKey)?.[1];
+      })
+      .filter((sha): sha is string => Boolean(sha));
     if (parsed.length) commitShas = parsed;
   }
   const changes = await pool.query<{
-    commit_sha: string; path: string; change: string; old_path: string | null; old_blob_sha: string | null; new_blob_sha: string | null;
+    commit_sha: string;
+    path: string;
+    change: string;
+    old_path: string | null;
+    old_blob_sha: string | null;
+    new_blob_sha: string | null;
   }>(
     `select commit_sha,path,change,old_path,old_blob_sha,new_blob_sha from jina_ontology.commit_changes
      where tenant_id=$1 and repository=$2 and commit_sha=any($3::text[])
        and ($4::text is null or path=$4 or old_path=$4)
-     order by commit_sha,path limit $5`, [request.tenantId, request.repository, commitShas, request.path ?? null, limit]
+     order by commit_sha,path limit $5`,
+    [request.tenantId, request.repository, commitShas, request.path ?? null, limit]
   );
   const items: RetrievalItem[] = changes.rows.map((row) => ({
-    kind: "commit_change", title: `${row.change} ${row.path}`,
-    data: { change: row.change, oldPath: row.old_path, oldBlobSha: row.old_blob_sha, newBlobSha: row.new_blob_sha }, score: 1,
-    citations: [{ kind: "commit_change", id: `${row.commit_sha}:${row.path}`, repository: request.repository, commitSha: row.commit_sha, path: row.path }]
+    kind: "commit_change",
+    title: `${row.change} ${row.path}`,
+    data: { change: row.change, oldPath: row.old_path, oldBlobSha: row.old_blob_sha, newBlobSha: row.new_blob_sha },
+    score: 1,
+    citations: [
+      {
+        kind: "commit_change",
+        id: `${row.commit_sha}:${row.path}`,
+        repository: request.repository,
+        commitSha: row.commit_sha,
+        path: row.path
+      }
+    ]
   }));
-  const newBlobs = changes.rows.flatMap((row) => row.new_blob_sha ? [row.new_blob_sha] : []);
+  const newBlobs = changes.rows.flatMap((row) => (row.new_blob_sha ? [row.new_blob_sha] : []));
   if (newBlobs.length && items.length < limit) {
     const inbound = await pool.query<{
-      changed_path: string; changed_moniker: string; caller_path: string; caller_blob: string;
-      commit_sha: string; from_moniker: string; kind: string; start_line: number; end_line: number;
+      changed_path: string;
+      changed_moniker: string;
+      caller_path: string;
+      caller_blob: string;
+      commit_sha: string;
+      from_moniker: string;
+      kind: string;
+      start_line: number;
+      end_line: number;
     }>(
       `with changed as (
          select distinct ch.path,s.moniker,s.name
@@ -3496,14 +4678,25 @@ async function retrieveChange(pool: Pool, request: RetrievalRequest, headSha: st
        order by changed.path,m.path,e.start_line limit $5`,
       [request.tenantId, request.repository, commitShas, ONTOLOGY_PARSER_VERSION, limit - items.length]
     );
-    items.push(...inbound.rows.map((row): RetrievalItem => ({
-      kind: "affected_surface", title: `${row.caller_path} may be affected by ${row.changed_path}`,
-      data: { changedMoniker: row.changed_moniker, fromMoniker: row.from_moniker, relationship: row.kind }, score: 0.8,
-      citations: [{
-        kind: "code", id: `${row.caller_blob}:${row.start_line}:${row.from_moniker}`, repository: request.repository,
-        commitSha: row.commit_sha, path: row.caller_path, startLine: row.start_line, endLine: row.end_line
-      }]
-    })));
+    items.push(
+      ...inbound.rows.map((row): RetrievalItem => ({
+        kind: "affected_surface",
+        title: `${row.caller_path} may be affected by ${row.changed_path}`,
+        data: { changedMoniker: row.changed_moniker, fromMoniker: row.from_moniker, relationship: row.kind },
+        score: 0.8,
+        citations: [
+          {
+            kind: "code",
+            id: `${row.caller_blob}:${row.start_line}:${row.from_moniker}`,
+            repository: request.repository,
+            commitSha: row.commit_sha,
+            path: row.caller_path,
+            startLine: row.start_line,
+            endLine: row.end_line
+          }
+        ]
+      }))
+    );
   }
   return items.slice(0, limit);
 }
@@ -3512,22 +4705,45 @@ async function retrieveIntent(pool: Pool, request: RetrievalRequest, limit: numb
   const items: RetrievalItem[] = [];
   const historyCommitShas: string[] = [];
   if (request.path) {
-    const history = await pool.query<{ commit_sha: string; path: string; change: string; message: string | null; committed_at: Date | null }>(
+    const history = await pool.query<{
+      commit_sha: string;
+      path: string;
+      change: string;
+      message: string | null;
+      committed_at: Date | null;
+    }>(
       `select c.commit_sha,c.path,c.change,m.message,m.committed_at from jina_ontology.commit_changes c
        join jina_ontology.commits m on m.tenant_id=c.tenant_id and m.repository=c.repository and m.sha=c.commit_sha
        where c.tenant_id=$1 and c.repository=$2 and (c.path=$3 or c.old_path=$3)
-       order by m.committed_at desc nulls last limit $4`, [request.tenantId, request.repository, request.path, limit]
+       order by m.committed_at desc nulls last limit $4`,
+      [request.tenantId, request.repository, request.path, limit]
     );
     historyCommitShas.push(...history.rows.map((row) => row.commit_sha));
-    items.push(...history.rows.map((row): RetrievalItem => ({
-      kind: "history", title: row.message ?? `${row.change} ${row.path}`,
-      data: { change: row.change, ...(row.committed_at ? { committedAt: row.committed_at.toISOString() } : {}) }, score: 1,
-      citations: [{ kind: "commit_change", id: `${row.commit_sha}:${row.path}`, repository: request.repository, commitSha: row.commit_sha, path: row.path }]
-    })));
+    items.push(
+      ...history.rows.map((row): RetrievalItem => ({
+        kind: "history",
+        title: row.message ?? `${row.change} ${row.path}`,
+        data: { change: row.change, ...(row.committed_at ? { committedAt: row.committed_at.toISOString() } : {}) },
+        score: 1,
+        citations: [
+          {
+            kind: "commit_change",
+            id: `${row.commit_sha}:${row.path}`,
+            repository: request.repository,
+            commitSha: row.commit_sha,
+            path: row.path
+          }
+        ]
+      }))
+    );
   }
   if (historyCommitShas.length && items.length < limit) {
     const workLinks = await pool.query<{
-      includes_id: string; relation_id: string; relation: string; pr_label: string; issue_label: string;
+      includes_id: string;
+      relation_id: string;
+      relation: string;
+      pr_label: string;
+      issue_label: string;
       source_observation_id: string | null;
     }>(
       `select includes.id as includes_id,relation.id as relation_id,relation.predicate as relation,
@@ -3541,94 +4757,166 @@ async function retrieveIntent(pool: Pool, request: RetrievalRequest, limit: numb
        order by case relation.predicate when 'RESOLVES' then 0 else 1 end,relation.recorded_at desc limit $4`,
       [request.tenantId, request.repository, historyCommitShas, limit - items.length]
     );
-    items.push(...workLinks.rows.map((row): RetrievalItem => ({
-      kind: "work_intent", title: `${row.pr_label} ${row.relation.toLowerCase()} ${row.issue_label}`,
-      data: { pullRequest: row.pr_label, issue: row.issue_label, relation: row.relation }, score: row.relation === "RESOLVES" ? 2 : 1,
-      citations: [
-        { kind: "assertion", id: row.includes_id, repository: request.repository },
-        { kind: "assertion", id: row.relation_id, repository: request.repository },
-        ...(row.source_observation_id ? [{ kind: "observation" as const, id: row.source_observation_id, repository: request.repository }] : [])
-      ]
-    })));
+    items.push(
+      ...workLinks.rows.map((row): RetrievalItem => ({
+        kind: "work_intent",
+        title: `${row.pr_label} ${row.relation.toLowerCase()} ${row.issue_label}`,
+        data: { pullRequest: row.pr_label, issue: row.issue_label, relation: row.relation },
+        score: row.relation === "RESOLVES" ? 2 : 1,
+        citations: [
+          { kind: "assertion", id: row.includes_id, repository: request.repository },
+          { kind: "assertion", id: row.relation_id, repository: request.repository },
+          ...(row.source_observation_id
+            ? [{ kind: "observation" as const, id: row.source_observation_id, repository: request.repository }]
+            : [])
+        ]
+      }))
+    );
   }
   const query = request.query?.trim();
   if (query && items.length < limit) {
-    const search = await pool.query<{ source_id: string; source_kind: string; title: string; body: string; score: number; embedding: number[] | null }>(
+    const search = await pool.query<{
+      source_id: string;
+      source_kind: string;
+      title: string;
+      body: string;
+      score: number;
+      embedding: number[] | null;
+    }>(
       `select source_id,source_kind,title,body,ts_rank(search_vector,plainto_tsquery('english',$3)) as score,embedding
        from jina_ontology.search_documents where tenant_id=$1 and repository=$2
-       order by score desc,projected_at desc limit $4`, [request.tenantId, request.repository, query, Math.min(200, limit * 4)]
+       order by score desc,projected_at desc limit $4`,
+      [request.tenantId, request.repository, query, Math.min(200, limit * 4)]
     );
     const queryEmbedding = embeddingForText(query);
-    const ranked = search.rows.map((row) => ({ row, score: Number(row.score) + cosine(queryEmbedding, row.embedding ?? []) }))
-      .sort((a, b) => b.score - a.score).slice(0, limit - items.length);
-    items.push(...ranked.map(({ row, score }): RetrievalItem => ({
-      kind: row.source_kind, title: row.title, data: { excerpt: row.body.slice(0, 500) }, score,
-      citations: [{ kind: row.source_kind === "entity" ? "entity" : "observation", id: row.source_id, repository: request.repository }]
-    })));
+    const ranked = search.rows
+      .map((row) => ({ row, score: Number(row.score) + cosine(queryEmbedding, row.embedding ?? []) }))
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit - items.length);
+    items.push(
+      ...ranked.map(({ row, score }): RetrievalItem => ({
+        kind: row.source_kind,
+        title: row.title,
+        data: { excerpt: row.body.slice(0, 500) },
+        score,
+        citations: [
+          {
+            kind: row.source_kind === "entity" ? "entity" : "observation",
+            id: row.source_id,
+            repository: request.repository
+          }
+        ]
+      }))
+    );
   }
   return items.slice(0, limit);
 }
 
 async function retrieveOwnership(pool: Pool, request: RetrievalRequest, limit: number): Promise<RetrievalItem[]> {
   const assertions = await pool.query<{
-    id: string; subject_id: string; subject_label: string; subject_natural_key: string; object_id: string;
-    object_label: string; object_natural_key: string; qualifiers: Record<string, unknown>; recorded_at: Date;
-    generator: string | null; asserted_by: string | null;
+    id: string;
+    subject_id: string;
+    subject_label: string;
+    subject_natural_key: string;
+    object_id: string;
+    object_label: string;
+    object_natural_key: string;
+    qualifiers: Record<string, unknown>;
+    recorded_at: Date;
+    generator: string | null;
+    asserted_by: string | null;
   }>(
     `select id,subject_id,subject_label,subject_natural_key,object_id,object_label,object_natural_key,
             qualifiers,recorded_at,generator,asserted_by
      from jina_ontology.assertions where tenant_id=$1 and repository=$2 and predicate='OWNED_BY' and status='active'
-     order by recorded_at desc limit $3`, [request.tenantId, request.repository, Math.min(800, limit * 4)]
+     order by recorded_at desc limit $3`,
+    [request.tenantId, request.repository, Math.min(800, limit * 4)]
   );
   const redirects = await pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
-    `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`, [request.tenantId]
+    `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects where tenant_id=$1 order by created_at,id`,
+    [request.tenantId]
   );
   const mapping = redirectMap(redirects.rows);
   const resolved = await pool.query<{ id: string; display_name: string; natural_key: string }>(
-    `select id,display_name,natural_key from jina_ontology.entities where tenant_id=$1`, [request.tenantId]
+    `select id,display_name,natural_key from jina_ontology.entities where tenant_id=$1`,
+    [request.tenantId]
   );
   const names = new Map(resolved.rows.map((row) => [row.id, row]));
   const target = request.path ?? request.symbol;
-  const applicable = assertions.rows.filter((row) => {
-    const subject = names.get(resolveRedirect(mapping, row.subject_id));
-    return !target || (subject?.natural_key ?? row.subject_natural_key).includes(target) ||
-      (typeof row.qualifiers.pattern === "string" && codeownersPatternMatches(row.qualifiers.pattern, target));
-  }
-  ).sort((left, right) => ownershipAuthority(left) - ownershipAuthority(right) || right.recorded_at.getTime() - left.recorded_at.getTime());
+  const applicable = assertions.rows
+    .filter((row) => {
+      const subject = names.get(resolveRedirect(mapping, row.subject_id));
+      return (
+        !target ||
+        (subject?.natural_key ?? row.subject_natural_key).includes(target) ||
+        (typeof row.qualifiers.pattern === "string" && codeownersPatternMatches(row.qualifiers.pattern, target))
+      );
+    })
+    .sort(
+      (left, right) =>
+        ownershipAuthority(left) - ownershipAuthority(right) || right.recorded_at.getTime() - left.recorded_at.getTime()
+    );
   const items: RetrievalItem[] = applicable.map((row) => {
     const subject = names.get(resolveRedirect(mapping, row.subject_id));
     const owner = names.get(resolveRedirect(mapping, row.object_id));
     return {
-      kind: "ownership", title: `${subject?.display_name ?? row.subject_label} owned by ${owner?.display_name ?? row.object_label}`,
+      kind: "ownership",
+      title: `${subject?.display_name ?? row.subject_label} owned by ${owner?.display_name ?? row.object_label}`,
       data: {
         subjectKey: subject?.natural_key ?? row.subject_natural_key,
         ownerKey: owner?.natural_key ?? row.object_natural_key,
         qualifiers: row.qualifiers,
         authority: row.asserted_by ? "human" : row.generator === "source:codeowners" ? "codeowners" : "model"
-      }, score: 3 - ownershipAuthority(row),
+      },
+      score: 3 - ownershipAuthority(row),
       citations: [{ kind: "assertion", id: row.id, repository: request.repository }]
     };
   });
   if (request.path && items.length < limit) {
-    const authors = await pool.query<{ sha: string; author_external_id: string; committed_at: Date | null; entity_id: string | null; display_name: string | null }>(
+    const authors = await pool.query<{
+      sha: string;
+      author_external_id: string;
+      committed_at: Date | null;
+      entity_id: string | null;
+      display_name: string | null;
+    }>(
       `select c.sha,c.author_external_id,c.committed_at,i.entity_id,e.display_name
        from jina_ontology.commit_changes ch
        join jina_ontology.commits c on c.tenant_id=ch.tenant_id and c.repository=ch.repository and c.sha=ch.commit_sha
        left join jina_ontology.identities i on i.tenant_id=c.tenant_id and i.source='git-email' and i.external_id=c.author_external_id and i.status='accepted'
        left join jina_ontology.entities e on e.id=i.entity_id
        where ch.tenant_id=$1 and ch.repository=$2 and (ch.path=$3 or ch.old_path=$3) and c.author_external_id is not null
-       order by c.committed_at desc nulls last limit $4`, [request.tenantId, request.repository, request.path, limit - items.length]
+       order by c.committed_at desc nulls last limit $4`,
+      [request.tenantId, request.repository, request.path, limit - items.length]
     );
     const seenAuthors = new Set<string>();
     const uniqueAuthors = authors.rows.filter((row) => {
       const key = row.entity_id ? resolveRedirect(mapping, row.entity_id) : row.author_external_id;
       return seenAuthors.has(key) ? false : (seenAuthors.add(key), true);
     });
-    items.push(...uniqueAuthors.map((row, index): RetrievalItem => ({
-      kind: "recent_author", title: (row.entity_id ? names.get(resolveRedirect(mapping, row.entity_id))?.display_name : undefined) ?? row.display_name ?? row.author_external_id,
-      data: { authorExternalId: row.author_external_id, ...(row.committed_at ? { committedAt: row.committed_at.toISOString() } : {}) }, score: 1 / (index + 1),
-      citations: [{ kind: "commit_change", id: `${row.sha}:${request.path}`, repository: request.repository, commitSha: row.sha, path: request.path! }]
-    })));
+    items.push(
+      ...uniqueAuthors.map((row, index): RetrievalItem => ({
+        kind: "recent_author",
+        title:
+          (row.entity_id ? names.get(resolveRedirect(mapping, row.entity_id))?.display_name : undefined) ??
+          row.display_name ??
+          row.author_external_id,
+        data: {
+          authorExternalId: row.author_external_id,
+          ...(row.committed_at ? { committedAt: row.committed_at.toISOString() } : {})
+        },
+        score: 1 / (index + 1),
+        citations: [
+          {
+            kind: "commit_change",
+            id: `${row.sha}:${request.path}`,
+            repository: request.repository,
+            commitSha: row.sha,
+            path: request.path!
+          }
+        ]
+      }))
+    );
   }
   return items.slice(0, limit);
 }
@@ -3644,8 +4932,12 @@ function codeownersPatternMatches(rawPattern: string, path: string): boolean {
   if (!pattern || pattern.startsWith("!")) return false;
   const anchored = pattern.startsWith("/");
   const normalized = pattern.replace(/^\//, "").replace(/\/$/, "/**");
-  const escaped = normalized.replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\uE000").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]").replace(/\uE000/g, ".*");
+  const escaped = normalized
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "\uE000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]")
+    .replace(/\uE000/g, ".*");
   if (!anchored && !normalized.includes("/")) return new RegExp(`(?:^|/)${escaped}$`).test(path);
   return new RegExp(`^${escaped}$`).test(path);
 }

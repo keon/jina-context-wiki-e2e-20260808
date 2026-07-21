@@ -25,7 +25,9 @@ const TENANT = "github:installation:99";
 test("signed GitHub App deliveries create idempotent PR and issue tasks", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  context.after(() => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
 
   const address = server.address() as AddressInfo;
   const baseUrl = `http://127.0.0.1:${address.port}`;
@@ -36,113 +38,137 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 
   const issue = await deliver(baseUrl, "issues", "delivery-issue-1", issuePayload);
   assert.equal(issue.status, 202);
-  assert.equal((await issue.json() as { outcome: string }).outcome, "created");
+  assert.equal(((await issue.json()) as { outcome: string }).outcome, "created");
 
   const repeatedDelivery = await deliver(baseUrl, "issues", "delivery-issue-1", issuePayload);
   assert.equal(repeatedDelivery.status, 200);
-  assert.equal((await repeatedDelivery.json() as { duplicate: boolean }).duplicate, true);
+  assert.equal(((await repeatedDelivery.json()) as { duplicate: boolean }).duplicate, true);
 
   const sameIssueNewDelivery = await deliver(baseUrl, "issues", "delivery-issue-redelivery", issuePayload);
-  assert.equal((await sameIssueNewDelivery.json() as { outcome: string }).outcome, "duplicate");
+  assert.equal(((await sameIssueNewDelivery.json()) as { outcome: string }).outcome, "duplicate");
 
   const pullRequest = await deliver(baseUrl, "pull_request", "delivery-pr-1", pullRequestPayload(42, "abc123"));
   assert.equal(pullRequest.status, 202);
-  assert.equal((await pullRequest.json() as { createdTaskIds: string[] }).createdTaskIds.length, 3);
+  assert.equal(((await pullRequest.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 3);
 
   await deliver(baseUrl, "pull_request", "delivery-pr-2", pullRequestPayload(43, "other123"));
   await deliver(baseUrl, "pull_request", "delivery-pr-1-sync", pullRequestPayload(42, "def456", "synchronize"));
 
   assert.equal((await fetch(`${baseUrl}/board`)).status, 401);
   const boardResponse = await authenticatedFetch(`${baseUrl}/board`);
-  const board = await boardResponse.json() as {
-    tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
-    dependencies: Array<{
+  const board = (await boardResponse.json()) as {
+    tasks: { type: string; status: string; metadata: Record<string, unknown> }[];
+    dependencies: {
       taskId: string;
       dependsOnTaskId: string;
       relationship: string;
       required: boolean;
-    }>;
-    outbox: Array<{ topic: string }>;
+    }[];
+    outbox: { topic: string }[];
   };
 
   assert.equal(board.tasks.filter((task) => task.type === "issue_triage").length, 1);
   assert.equal(board.tasks.find((task) => task.type === "issue_triage")?.status, "triage");
   assert.equal(board.tasks.filter((task) => task.type === "pr_review").length, 3);
   assert.equal(
-    board.tasks
-      .filter((task) => task.metadata.pullRequestNumber === 43)
-      .some((task) => task.status === "superseded"),
+    board.tasks.filter((task) => task.metadata.pullRequestNumber === 43).some((task) => task.status === "superseded"),
     false,
     "synchronizing one PR must not supersede another PR's tasks"
   );
   assert.equal(
     board.tasks.find(
-      (task) => task.type === "review_pass" && task.metadata.pullRequestNumber === 42 && task.metadata.headSha === "def456"
+      (task) =>
+        task.type === "review_pass" && task.metadata.pullRequestNumber === 42 && task.metadata.headSha === "def456"
     )?.status,
     "queued"
   );
   assert.equal(board.outbox.filter((message) => message.topic === "run-review").length, 3);
   assert.equal(board.dependencies.length, 12);
   assert.equal(
-    board.dependencies.some(
-      (dependency) => dependency.relationship === "blocks" && dependency.required
-    ),
+    board.dependencies.some((dependency) => dependency.relationship === "blocks" && dependency.required),
     true
   );
 
   const taskTypes = await fetch(`${baseUrl}/task-types`).then(
-    (response) => response.json() as Promise<Array<{
-      type: string;
-      kind: string;
-      description: string;
-      triggeredBy: Array<{ source: string; description: string; conditions: string[] }>;
-      dependsOn: Array<{ taskType: string; relationships: string[]; conditions: string[] }>;
-      requiredBy: Array<{ taskType: string; relationships: string[] }>;
-    }>>
+    (response) =>
+      response.json() as Promise<
+        {
+          type: string;
+          kind: string;
+          description: string;
+          triggeredBy: { source: string; description: string; conditions: string[] }[];
+          dependsOn: { taskType: string; relationships: string[]; conditions: string[] }[];
+          requiredBy: { taskType: string; relationships: string[] }[];
+        }[]
+      >
   );
   assert.equal(taskTypes.length, 11);
   assert.deepEqual(
     taskTypes.map((definition) => definition.type),
     [
-      "pr_review", "review_pass", "context", "publish", "cleanup", "issue_triage", "human_decision",
-      "ontology_build", "ontology_ingest", "ontology_assert", "ontology_project"
+      "pr_review",
+      "review_pass",
+      "context",
+      "publish",
+      "cleanup",
+      "issue_triage",
+      "human_decision",
+      "ontology_build",
+      "ontology_ingest",
+      "ontology_assert",
+      "ontology_project"
     ]
   );
-  assert.equal(taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0), true);
-  assert.deepEqual(
-    taskTypes.find((definition) => definition.type === "ontology_ingest")?.triggeredBy,
-    [
-      {
-        source: "POST /ontology/build",
-        description: "Creates and queues the first executable Ontology task.",
-        conditions: []
-      },
-      {
-        source: "GitHub push webhook",
-        description: "Queues repository intake for a pushed branch head.",
-        conditions: []
-      }
-    ]
+  assert.equal(
+    taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0),
+    true
   );
-  assert.equal(taskTypes.find((definition) => definition.type === "ontology_assert")?.triggeredBy[0]?.source, "POST /ontology/build");
-  assert.equal(taskTypes.find((definition) => definition.type === "ontology_project")?.triggeredBy[0]?.source, "POST /ontology/build");
-  assert.equal(taskTypes.find((definition) => definition.type === "publish")?.triggeredBy[0]?.source, "GitHub pull_request webhook");
-  assert.deepEqual(
-    taskTypes.find((definition) => definition.type === "ontology_project")?.dependsOn,
-    [{ taskType: "ontology_ingest", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }]
+  assert.deepEqual(taskTypes.find((definition) => definition.type === "ontology_ingest")?.triggeredBy, [
+    {
+      source: "POST /ontology/build",
+      description: "Creates and queues the first executable Ontology task.",
+      conditions: []
+    },
+    {
+      source: "GitHub push webhook",
+      description: "Queues repository intake for a pushed branch head.",
+      conditions: []
+    }
+  ]);
+  assert.equal(
+    taskTypes.find((definition) => definition.type === "ontology_assert")?.triggeredBy[0]?.source,
+    "POST /ontology/build"
   );
-  assert.deepEqual(
-    taskTypes.find((definition) => definition.type === "review_pass")?.dependsOn,
-    [{
+  assert.equal(
+    taskTypes.find((definition) => definition.type === "ontology_project")?.triggeredBy[0]?.source,
+    "POST /ontology/build"
+  );
+  assert.equal(
+    taskTypes.find((definition) => definition.type === "publish")?.triggeredBy[0]?.source,
+    "GitHub pull_request webhook"
+  );
+  assert.deepEqual(taskTypes.find((definition) => definition.type === "ontology_project")?.dependsOn, [
+    {
+      taskType: "ontology_ingest",
+      relationships: ["blocks"],
+      workflows: ["ontology_build"],
+      required: true,
+      conditions: []
+    }
+  ]);
+  assert.deepEqual(taskTypes.find((definition) => definition.type === "review_pass")?.dependsOn, [
+    {
       taskType: "context",
       relationships: ["context_for"],
       workflows: ["pr_review"],
       required: true,
       conditions: ["when external context is requested"]
-    }]
-  );
+    }
+  ]);
   assert.deepEqual(
-    taskTypes.find((definition) => definition.type === "review_pass")?.requiredBy.map((dependency) => dependency.taskType),
+    taskTypes
+      .find((definition) => definition.type === "review_pass")
+      ?.requiredBy.map((dependency) => dependency.taskType),
     ["pr_review", "publish"]
   );
 });
@@ -150,30 +176,47 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 test("branch pushes create and supersede the existing ontology workflow", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  context.after(() => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))));
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   const first = await deliver(baseUrl, "push", "push-1", pushPayload("a".repeat(40)));
   assert.equal(first.status, 202);
-  assert.equal((await first.json() as { createdTaskIds: string[] }).createdTaskIds.length, 7);
+  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 7);
   const repeatedHead = await deliver(baseUrl, "push", "push-2", pushPayload("a".repeat(40)));
-  assert.equal((await repeatedHead.json() as { outcome: string }).outcome, "duplicate");
+  assert.equal(((await repeatedHead.json()) as { outcome: string }).outcome, "duplicate");
   const second = await deliver(baseUrl, "push", "push-3", pushPayload("b".repeat(40)));
-  assert.equal((await second.json() as { createdTaskIds: string[] }).createdTaskIds.length, 7);
+  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 7);
   const returned = await deliver(baseUrl, "push", "push-4", pushPayload("a".repeat(40)));
-  assert.equal((await returned.json() as { createdTaskIds: string[] }).createdTaskIds.length, 7,
-    "moving a branch back to an earlier SHA is a new ref transition, not a redelivery");
+  assert.equal(
+    ((await returned.json()) as { createdTaskIds: string[] }).createdTaskIds.length,
+    7,
+    "moving a branch back to an earlier SHA is a new ref transition, not a redelivery"
+  );
 
-  const board = await authenticatedFetch(`${baseUrl}/board`).then((response) => response.json() as Promise<{
-    tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
-  }>);
+  const board = await authenticatedFetch(`${baseUrl}/board`).then(
+    (response) =>
+      response.json() as Promise<{
+        tasks: { type: string; status: string; metadata: Record<string, unknown> }[];
+      }>
+  );
   const current = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-4");
   const old = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-3");
   assert.deepEqual(current.map((task) => task.type).sort(), [
-    "ontology_assert", "ontology_assert", "ontology_build", "ontology_ingest", "ontology_ingest", "ontology_project", "ontology_project"
+    "ontology_assert",
+    "ontology_assert",
+    "ontology_build",
+    "ontology_ingest",
+    "ontology_ingest",
+    "ontology_project",
+    "ontology_project"
   ]);
   assert.equal(current.find((task) => task.type === "ontology_ingest")?.status, "queued");
-  assert.equal(old.every((task) => task.status === "superseded"), true);
+  assert.equal(
+    old.every((task) => task.status === "superseded"),
+    true
+  );
 });
 
 test("ontology retrieval forwards generalized Issue identity and Feature text", async () => {
@@ -236,21 +279,25 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
         template: request.template,
         repository: request.repository,
         ref: request.ref ?? "main",
-        items: [{
-          kind: "symbol_definition",
-          title: "main is defined in src/index.ts",
-          data: { symbol: "main", path: "src/index.ts" },
-          citations: [{
-            kind: "code",
-            id: "blob-main:1-3",
-            repository: request.repository,
-            commitSha: "a".repeat(40),
-            path: "src/index.ts",
-            startLine: 1,
-            endLine: 3
-          }],
-          score: 1
-        }],
+        items: [
+          {
+            kind: "symbol_definition",
+            title: "main is defined in src/index.ts",
+            data: { symbol: "main", path: "src/index.ts" },
+            citations: [
+              {
+                kind: "code",
+                id: "blob-main:1-3",
+                repository: request.repository,
+                commitSha: "a".repeat(40),
+                path: "src/index.ts",
+                startLine: 1,
+                endLine: 3
+              }
+            ],
+            score: 1
+          }
+        ],
         truncated: false,
         totalBeforeLimit: 1,
         limit: request.limit ?? 50
@@ -266,70 +313,91 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
   const baseUrl = await listen(server);
   const client = new Client({ name: "jina-api-test", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
-    requestInit: { headers: {
-      authorization: `Bearer ${INTERNAL_TOKEN}`,
-      "x-jina-principal-id": "user:reader@example.com"
-    } }
+    requestInit: {
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": "user:reader@example.com"
+      }
+    }
   });
   const strangerClient = new Client({ name: "jina-api-stranger-test", version: "1.0.0" });
   const strangerTransport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
-    requestInit: { headers: {
-      authorization: `Bearer ${INTERNAL_TOKEN}`,
-      "x-jina-principal-id": "user:stranger@example.com"
-    } }
+    requestInit: {
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": "user:stranger@example.com"
+      }
+    }
   });
   try {
     assert.equal((await fetch(`${baseUrl}/mcp`, { method: "POST" })).status, 401);
-    assert.equal((await fetch(`${baseUrl}/mcp`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
-    })).status, 401);
-    assert.equal((await fetch(`${baseUrl}/mcp`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${INTERNAL_TOKEN}`,
-        "x-jina-principal-id": "user:reader@example.com",
-        origin: "https://untrusted.example"
-      }
-    })).status, 403);
+    assert.equal(
+      (
+        await fetch(`${baseUrl}/mcp`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
+        })
+      ).status,
+      401
+    );
+    assert.equal(
+      (
+        await fetch(`${baseUrl}/mcp`, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${INTERNAL_TOKEN}`,
+            "x-jina-principal-id": "user:reader@example.com",
+            origin: "https://untrusted.example"
+          }
+        })
+      ).status,
+      403
+    );
 
     await client.connect(transport as unknown as Transport);
     const tools = await client.listTools();
-    assert.deepEqual(tools.tools.map((tool) => tool.name), ["query_graph"]);
+    assert.deepEqual(
+      tools.tools.map((tool) => tool.name),
+      ["query_graph"]
+    );
     assert.equal(JSON.stringify(tools).includes("project"), false);
 
-    const result = await client.callTool({
+    const result = (await client.callTool({
       name: "query_graph",
       arguments: {
         repository: "omxyz/ontology-fixture",
         query: "Where is main implemented?"
       }
-    }) as CallToolResult;
+    })) as CallToolResult;
     assert.equal(result.isError, undefined);
     assert.match(String(result.content[0]?.type === "text" ? result.content[0].text : ""), /src\/index\.ts/);
     assert.deepEqual(result.structuredContent, {
       answer: "Found 1 cited structural fact for main: main is defined in src/index.ts.",
-      claims: [{
-        text: "main is defined in src/index.ts",
-        citations: [{
-          kind: "code",
-          id: "blob-main:1-3",
-          repository: "omxyz/ontology-fixture",
-          commitSha: "a".repeat(40),
-          path: "src/index.ts",
-          startLine: 1,
-          endLine: 3
-        }]
-      }],
+      claims: [
+        {
+          text: "main is defined in src/index.ts",
+          citations: [
+            {
+              kind: "code",
+              id: "blob-main:1-3",
+              repository: "omxyz/ontology-fixture",
+              commitSha: "a".repeat(40),
+              path: "src/index.ts",
+              startLine: 1,
+              endLine: 3
+            }
+          ]
+        }
+      ],
       incomplete: false,
       notes: []
     });
 
     await strangerClient.connect(strangerTransport as unknown as Transport);
-    const denied = await strangerClient.callTool({
+    const denied = (await strangerClient.callTool({
       name: "query_graph",
       arguments: { repository: "omxyz/ontology-fixture", query: "Where is main implemented?" }
-    }) as CallToolResult;
+    })) as CallToolResult;
     assert.equal(denied.isError, true);
   } finally {
     await strangerClient.close().catch(() => undefined);
@@ -345,15 +413,18 @@ test("development seed supports an interactive MCP graph query without credentia
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`));
   try {
     await client.connect(transport as unknown as Transport);
-    const result = await client.callTool({
+    const result = (await client.callTool({
       name: "query_graph",
       arguments: {
         repository: "omlabs/example",
         query: "Where is handleWebhook implemented?"
       }
-    }) as CallToolResult;
+    })) as CallToolResult;
     assert.equal(result.isError, undefined);
-    assert.match(String(result.content[0]?.type === "text" ? result.content[0].text : ""), /handleWebhook is function in src\/server\.ts/);
+    assert.match(
+      String(result.content[0]?.type === "text" ? result.content[0].text : ""),
+      /handleWebhook is function in src\/server\.ts/
+    );
   } finally {
     await client.close().catch(() => undefined);
     await close(server);
@@ -391,11 +462,14 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test", snapshotFirst: true
+        repository: "omxyz/ontology-fixture",
+        ref: "main",
+        requestKey: "test",
+        snapshotFirst: true
       })
     });
     assert.equal(created.status, 202);
-    const createdBody = await created.json() as { task: { id: string } };
+    const createdBody = (await created.json()) as { task: { id: string } };
     const commitSha = "a".repeat(40);
     const treeSha = "b".repeat(40);
     const readmeSha = "c".repeat(40);
@@ -446,7 +520,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       ]
     };
     const lease = { messageId: ingestion.message.id, leaseId: ingestion.message.leaseId };
-    const firstPlan = await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot }) as {
+    const firstPlan = (await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot })) as {
       missingBlobs: unknown[];
       changedPaths: string[];
       observationId: string;
@@ -458,30 +532,46 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       ...lease,
       commitSha,
       analyses: [
-        { blobSha: readmeSha, parserVersion: ONTOLOGY_PARSER_VERSION, language: "markdown", symbols: [], imports: [], edges: [] },
+        {
+          blobSha: readmeSha,
+          parserVersion: ONTOLOGY_PARSER_VERSION,
+          language: "markdown",
+          symbols: [],
+          imports: [],
+          edges: []
+        },
         {
           blobSha: sourceSha,
           parserVersion: ONTOLOGY_PARSER_VERSION,
           language: "typescript",
-          symbols: [{ moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }],
-          imports: [], edges: []
+          symbols: [
+            { moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }
+          ],
+          imports: [],
+          edges: []
         }
       ]
     });
-    const secondPlan = await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot }) as { missingBlobs: unknown[]; reusedBlobCount: number };
+    const secondPlan = (await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot })) as {
+      missingBlobs: unknown[];
+      reusedBlobCount: number;
+    };
     assert.equal(secondPlan.missingBlobs.length, 0);
     assert.equal(secondPlan.reusedBlobCount, 2);
-    assert.equal(await completeClaim(baseUrl, ingestion, {
-      observationId: firstPlan.observationId,
-      commitSha,
-      fileCount: 2,
-      discoveredBlobCount: 2,
-      reusedBlobCount: 0,
-      parsedBlobCount: 2,
-      parserVersion: ONTOLOGY_PARSER_VERSION,
-      codeCheckpoint: "code-checkpoint",
-      evidenceFingerprint: "evidence-fixture"
-    }), 200);
+    assert.equal(
+      await completeClaim(baseUrl, ingestion, {
+        observationId: firstPlan.observationId,
+        commitSha,
+        fileCount: 2,
+        discoveredBlobCount: 2,
+        reusedBlobCount: 0,
+        parsedBlobCount: 2,
+        parserVersion: ONTOLOGY_PARSER_VERSION,
+        codeCheckpoint: "code-checkpoint",
+        evidenceFingerprint: "evidence-fixture"
+      }),
+      200
+    );
 
     const assertion = await claimTopic(baseUrl, "run-ontology-assert");
     assert.equal(assertion.message.topic, "run-ontology-assert");
@@ -510,12 +600,26 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
             summary: "README documents the repository",
             nodes: [
               { id: "repo", kind: "Repository", label: "fixture", description: "repo", evidence: ["README.md:1"] },
-              { id: "readme", kind: "Document", label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
+              {
+                id: "readme",
+                kind: "Document",
+                label: "README",
+                description: "docs",
+                path: "README.md",
+                evidence: ["README.md:1"]
+              }
             ],
-            edges: [{
-              source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95,
-              why: "The README explicitly documents this repository.", evidence: ["README.md:1"]
-            }]
+            edges: [
+              {
+                source: "repo",
+                target: "readme",
+                predicate: "DOCUMENTED_BY",
+                plane: "knowledge",
+                confidence: 0.95,
+                why: "The README explicitly documents this repository.",
+                evidence: ["README.md:1"]
+              }
+            ]
           }
         }
       })
@@ -539,13 +643,16 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
         ref: "main",
         question: "Where is main implemented?"
       })
-    }).then((response) => response.json() as Promise<{
-      answer: string;
-      citedClaims: Array<{ text: string; citations: unknown[] }>;
-      calls: Array<{ template: string; items: Array<{ kind: string }> }>;
-      unresolvedAmbiguities: string[];
-      coverageGaps: unknown[];
-    }>);
+    }).then(
+      (response) =>
+        response.json() as Promise<{
+          answer: string;
+          citedClaims: { text: string; citations: unknown[] }[];
+          calls: { template: string; items: { kind: string }[] }[];
+          unresolvedAmbiguities: string[];
+          coverageGaps: unknown[];
+        }>
+    );
     assert.match(contextAnswer.answer, /main is function in src\/index\.ts/);
     assert.equal(contextAnswer.citedClaims[0]?.citations.length, 1);
     assert.equal(contextAnswer.calls[0]?.template, "structure");
@@ -554,7 +661,10 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     assert.deepEqual(contextAnswer.coverageGaps, []);
 
     const board = await fetch(`${baseUrl}/board`).then(
-      (response) => response.json() as Promise<{ tasks: Array<{ id: string; type: string; status: string; metadata: Record<string, unknown> }> }>
+      (response) =>
+        response.json() as Promise<{
+          tasks: { id: string; type: string; status: string; metadata: Record<string, unknown> }[];
+        }>
     );
     assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "ontology_ingest")?.status, "done");
@@ -584,13 +694,19 @@ test("a new ontology attempt supersedes older active work for the same repositor
       });
       assert.equal(response.status, 202);
     }
-    const board = await fetch(`${baseUrl}/board`).then((response) => response.json() as Promise<{
-      tasks: Array<{ type: string; status: string; metadata: Record<string, unknown> }>;
-    }>);
+    const board = await fetch(`${baseUrl}/board`).then(
+      (response) =>
+        response.json() as Promise<{
+          tasks: { type: string; status: string; metadata: Record<string, unknown> }[];
+        }>
+    );
     const first = board.tasks.filter((task) => task.metadata.requestKey === "first");
     const second = board.tasks.filter((task) => task.metadata.requestKey === "second");
     assert.equal(first.length, 7);
-    assert.equal(first.every((task) => task.status === "superseded"), true);
+    assert.equal(
+      first.every((task) => task.status === "superseded"),
+      true
+    );
     assert.equal(second.length, 7, "an idempotent request key does not duplicate the attempt");
     assert.equal(second.find((task) => task.type === "ontology_ingest")?.status, "queued");
     assert.equal(
@@ -598,7 +714,10 @@ test("a new ontology attempt supersedes older active work for the same repositor
       false,
       "a never-started stage omits metadata.timing entirely"
     );
-    assert.equal(second.some((task) => task.status === "blocked"), false);
+    assert.equal(
+      second.some((task) => task.status === "blocked"),
+      false
+    );
   } finally {
     await close(server);
   }
@@ -624,7 +743,7 @@ test("durable workers can drain review and publish topics", async () => {
     assert.equal(await completeClaim(baseUrl, publish, { published: true }), 200);
 
     const board = await fetch(`${baseUrl}/board`).then(
-      (response) => response.json() as Promise<{ tasks: Array<{ type: string; status: string }>; publications: unknown[] }>
+      (response) => response.json() as Promise<{ tasks: { type: string; status: string }[]; publications: unknown[] }>
     );
     assert.equal(board.tasks.find((task) => task.type === "review_pass")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "publish")?.status, "done");
@@ -637,7 +756,9 @@ test("durable workers can drain review and publish topics", async () => {
 
 test("API validation rejects traversal, mixed worker topics, and stale leases with typed errors", async () => {
   const ontologyStore = new MemoryOntologyGraphStore();
-  await ontologyStore.save(fixtureGraph({ tenantId: "default", repository: "owner/repo", ref: "main", taskId: "fixture" }));
+  await ontologyStore.save(
+    fixtureGraph({ tenantId: "default", repository: "owner/repo", ref: "main", taskId: "fixture" })
+  );
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", ontologyStore });
   const baseUrl = await listen(server);
   try {
@@ -647,7 +768,7 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
       body: JSON.stringify({ repository: "owner/..", ref: "main" })
     });
     assert.equal(invalidRepository.status, 400);
-    assert.equal((await invalidRepository.json() as { code?: string }).code, "invalid_request");
+    assert.equal(((await invalidRepository.json()) as { code?: string }).code, "invalid_request");
 
     const mixedTopics = await fetch(`${baseUrl}/internal/worker/claim`, {
       method: "POST",
@@ -655,7 +776,7 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
       body: JSON.stringify({ workerId: "test", topics: ["run-review", "run-unknown"] })
     });
     assert.equal(mixedTopics.status, 400);
-    assert.equal((await mixedTopics.json() as { code?: string }).code, "invalid_request");
+    assert.equal(((await mixedTopics.json()) as { code?: string }).code, "invalid_request");
 
     const staleRenewal = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
@@ -663,7 +784,7 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
       body: JSON.stringify({ messageId: "missing", leaseId: "expired" })
     });
     assert.equal(staleRenewal.status, 409);
-    assert.equal((await staleRenewal.json() as { code?: string }).code, "stale_lease");
+    assert.equal(((await staleRenewal.json()) as { code?: string }).code, "stale_lease");
 
     const missingCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
@@ -671,11 +792,11 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
       body: JSON.stringify({ messageId: "missing", leaseId: "expired", taskId: "missing", outcome: "done" })
     });
     assert.equal(missingCompletion.status, 404);
-    assert.equal((await missingCompletion.json() as { code?: string }).code, "not_found");
+    assert.equal(((await missingCompletion.json()) as { code?: string }).code, "not_found");
 
     const invalidKind = await fetch(`${baseUrl}/ontology/assertions?repository=owner/repo&entityKind=Unknown`);
     assert.equal(invalidKind.status, 400);
-    assert.equal((await invalidKind.json() as { code?: string }).code, "invalid_request");
+    assert.equal(((await invalidKind.json()) as { code?: string }).code, "invalid_request");
   } finally {
     await close(server);
   }
@@ -684,13 +805,18 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
 test("ontology commands require a forwarded principal identity", async () => {
   const ontologyStore = new MemoryOntologyGraphStore();
   const server = createApiServer({
-    ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a",
+    ontologyStore,
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: "tenant-a",
     tenantAdminPrincipalIds: ["user:admin@example.com"]
   });
   const baseUrl = await listen(server);
   try {
     const command = JSON.stringify({
-      type: "grant_repository_access", repository: "omxyz/a", principalId: "user:reader@example.com", role: "reader"
+      type: "grant_repository_access",
+      repository: "omxyz/a",
+      principalId: "user:reader@example.com",
+      role: "reader"
     });
     const withoutIdentity = await fetch(`${baseUrl}/ontology/commands`, {
       method: "POST",
@@ -719,9 +845,17 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
   const tenantBGraph = fixtureGraph({ tenantId: "tenant-b", repository: "omxyz/b", ref: "main", taskId: "task-b" });
   await ontologyStore.save(tenantAGraph);
   await ontologyStore.save(tenantBGraph);
-  await ontologyStore.executeCommand("tenant-a", "svc:test", {
-    type: "grant_repository_access", repository: "omxyz/a", principalId: "user:reader@example.com", role: "reader"
-  }, "2026-07-20T00:00:00.000Z");
+  await ontologyStore.executeCommand(
+    "tenant-a",
+    "svc:test",
+    {
+      type: "grant_repository_access",
+      repository: "omxyz/a",
+      principalId: "user:reader@example.com",
+      role: "reader"
+    },
+    "2026-07-20T00:00:00.000Z"
+  );
   const server = createApiServer({
     ontologyStore,
     internalApiToken: INTERNAL_TOKEN,
@@ -732,20 +866,29 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
   try {
     assert.equal((await fetch(`${baseUrl}/ontology`)).status, 401);
     const list = await authenticatedFetch(`${baseUrl}/ontology`).then(
-      (response) => response.json() as Promise<{ graphs: Array<{ id: string; tenantId: string }> }>
+      (response) => response.json() as Promise<{ graphs: { id: string; tenantId: string }[] }>
     );
-    assert.deepEqual(list.graphs.map((graph) => graph.tenantId), ["tenant-a"]);
+    assert.deepEqual(
+      list.graphs.map((graph) => graph.tenantId),
+      ["tenant-a"]
+    );
     assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`)).status, 200);
     assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantBGraph.id}`)).status, 404);
     const reader = await authenticatedFetch(`${baseUrl}/ontology`, "user:reader@example.com").then(
-      (response) => response.json() as Promise<{ graphs: Array<{ repository: string }> }>
+      (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
     );
-    assert.deepEqual(reader.graphs.map((graph) => graph.repository), ["omxyz/a"]);
+    assert.deepEqual(
+      reader.graphs.map((graph) => graph.repository),
+      ["omxyz/a"]
+    );
     const stranger = await authenticatedFetch(`${baseUrl}/ontology`, "user:stranger@example.com").then(
       (response) => response.json() as Promise<{ graphs: unknown[] }>
     );
     assert.deepEqual(stranger.graphs, []);
-    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`, "user:stranger@example.com")).status, 404);
+    assert.equal(
+      (await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`, "user:stranger@example.com")).status,
+      404
+    );
     assert.equal((await authenticatedFetch(`${baseUrl}/ontology/metrics`, "user:reader@example.com")).status, 403);
     assert.equal((await authenticatedFetch(`${baseUrl}/ontology/metrics`, "user:admin@example.com")).status, 200);
     const forbiddenCommand = await fetch(`${baseUrl}/ontology/commands`, {
@@ -759,7 +902,8 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
     });
     assert.equal(forbiddenCommand.status, 403);
     const drained = await fetch(`${baseUrl}/internal/ontology/outbox/drain`, {
-      method: "POST", headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
+      method: "POST",
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
     });
     assert.equal(drained.status, 200);
   } finally {
@@ -769,18 +913,31 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
 
 test("public graph REST API exposes authorized topology and cited queries without internal metadata", async () => {
   const ontologyStore = new MemoryOntologyGraphStore();
-  const graph = fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "refs/heads/main", taskId: "public-graph" });
+  const graph = fixtureGraph({
+    tenantId: "tenant-a",
+    repository: "omxyz/a",
+    ref: "refs/heads/main",
+    taskId: "public-graph"
+  });
   await ontologyStore.save(graph);
-  await ontologyStore.executeCommand("tenant-a", "svc:test", {
-    type: "grant_repository_access", repository: "omxyz/a", principalId: "user:reader@example.com", role: "reader"
-  }, "2026-07-20T00:00:00.000Z");
+  await ontologyStore.executeCommand(
+    "tenant-a",
+    "svc:test",
+    {
+      type: "grant_repository_access",
+      repository: "omxyz/a",
+      principalId: "user:reader@example.com",
+      role: "reader"
+    },
+    "2026-07-20T00:00:00.000Z"
+  );
   const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
   const baseUrl = await listen(server);
   try {
     assert.equal((await fetch(`${baseUrl}/v1/graphs`)).status, 401);
     const listResponse = await authenticatedFetch(`${baseUrl}/v1/graphs`, "user:reader@example.com");
     assert.equal(listResponse.status, 200);
-    const list = await listResponse.json() as { graphs: Array<Record<string, unknown>> };
+    const list = (await listResponse.json()) as { graphs: Record<string, unknown>[] };
     assert.equal(list.graphs.length, 1);
     assert.deepEqual(list.graphs[0], {
       id: graph.id,
@@ -792,12 +949,15 @@ test("public graph REST API exposes authorized topology and cited queries withou
       nodeCount: 2,
       edgeCount: 1
     });
-    assert.equal("tenantId" in list.graphs[0]!, false);
-    assert.equal("generator" in list.graphs[0]!, false);
+    assert.equal("tenantId" in list.graphs[0], false);
+    assert.equal("generator" in list.graphs[0], false);
 
-    const detailResponse = await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`, "user:reader@example.com");
+    const detailResponse = await authenticatedFetch(
+      `${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`,
+      "user:reader@example.com"
+    );
     assert.equal(detailResponse.status, 200);
-    const detail = await detailResponse.json() as Record<string, unknown>;
+    const detail = (await detailResponse.json()) as Record<string, unknown>;
     assert.equal(Array.isArray(detail.nodes), true);
     assert.equal(Array.isArray(detail.edges), true);
     assert.equal("rawModelOutput" in detail, false);
@@ -812,7 +972,7 @@ test("public graph REST API exposes authorized topology and cited queries withou
       body: JSON.stringify({ graphId: graph.id, query: "Where is the repository documentation?" })
     });
     assert.equal(queryResponse.status, 200, await queryResponse.clone().text());
-    const query = await queryResponse.json() as Record<string, unknown>;
+    const query = (await queryResponse.json()) as Record<string, unknown>;
     assert.equal(query.graphId, graph.id);
     assert.equal(typeof query.answer, "string");
     assert.equal(Array.isArray(query.claims), true);
@@ -820,7 +980,8 @@ test("public graph REST API exposes authorized topology and cited queries withou
     assert.equal(Array.isArray(query.highlightedEdgeIds), true);
 
     assert.equal(
-      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`, "user:stranger@example.com")).status,
+      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`, "user:stranger@example.com"))
+        .status,
       404
     );
   } finally {
@@ -837,13 +998,19 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
   const graphB = fixtureGraph({ tenantId, repository: "other/b", ref: "main", taskId: "tenant-graph-b" });
   await ontologyStore.save(graphA);
   await ontologyStore.save(graphB);
-  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, graphApiToken: GRAPH_TOKEN, tenantId });
-  const baseUrl = await listen(server);
-  const sync = (principalId: string, repositories: readonly string[], token = GRAPH_TOKEN) => fetch(`${baseUrl}/internal/graph/access/sync`, {
-    method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-    body: JSON.stringify({ principalId, repositories })
+  const server = createApiServer({
+    ontologyStore,
+    internalApiToken: INTERNAL_TOKEN,
+    graphApiToken: GRAPH_TOKEN,
+    tenantId
   });
+  const baseUrl = await listen(server);
+  const sync = (principalId: string, repositories: readonly string[], token = GRAPH_TOKEN) =>
+    fetch(`${baseUrl}/internal/graph/access/sync`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ principalId, repositories })
+    });
   try {
     assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs`)).status, 401);
     assert.equal((await sync(principalA, ["omxyz/a"], INTERNAL_TOKEN)).status, 401);
@@ -851,25 +1018,38 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
     assert.equal((await sync(principalB, ["other/b"])).status, 200);
 
     const listA = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalA).then(
-      (response) => response.json() as Promise<{ graphs: Array<{ repository: string }> }>
+      (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
     );
     const listB = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalB).then(
-      (response) => response.json() as Promise<{ graphs: Array<{ repository: string }> }>
+      (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
     );
-    assert.deepEqual(listA.graphs.map((graph) => graph.repository), ["omxyz/a"]);
-    assert.deepEqual(listB.graphs.map((graph) => graph.repository), ["other/b"]);
-    assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphB.id)}`, principalA)).status, 404);
-    assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphA.id)}`, principalB)).status, 404);
+    assert.deepEqual(
+      listA.graphs.map((graph) => graph.repository),
+      ["omxyz/a"]
+    );
+    assert.deepEqual(
+      listB.graphs.map((graph) => graph.repository),
+      ["other/b"]
+    );
+    assert.equal(
+      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphB.id)}`, principalA)).status,
+      404
+    );
+    assert.equal(
+      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphA.id)}`, principalB)).status,
+      404
+    );
 
-    const build = (principalId: string | undefined, repository: string) => fetch(`${baseUrl}/ontology/build`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${GRAPH_TOKEN}`,
-        "content-type": "application/json",
-        ...(principalId ? { "x-jina-principal-id": principalId } : {})
-      },
-      body: JSON.stringify({ repository, ref: "main", requestKey: `graph-client-${repository}` })
-    });
+    const build = (principalId: string | undefined, repository: string) =>
+      fetch(`${baseUrl}/ontology/build`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${GRAPH_TOKEN}`,
+          "content-type": "application/json",
+          ...(principalId ? { "x-jina-principal-id": principalId } : {})
+        },
+        body: JSON.stringify({ repository, ref: "main", requestKey: `graph-client-${repository}` })
+      });
     assert.equal((await build(undefined, "omxyz/a")).status, 401);
     assert.equal((await build(principalA, "omxyz/a")).status, 202);
     assert.equal((await build(principalA, "other/b")).status, 403);
@@ -910,13 +1090,13 @@ test("durable state survives an API server restart", async () => {
   const secondUrl = await listen(second);
   try {
     const board = await authenticatedFetch(`${secondUrl}/board`).then(
-      (response) => response.json() as Promise<{ tasks: Array<{ type: string }> }>
+      (response) => response.json() as Promise<{ tasks: { type: string }[] }>
     );
     assert.equal(board.tasks.filter((task) => task.type === "issue_triage").length, 1);
 
     const duplicate = await deliver(secondUrl, "issues", "delivery-persisted", issueOpenedPayload());
     assert.equal(duplicate.status, 200);
-    assert.equal((await duplicate.json() as { duplicate: boolean }).duplicate, true);
+    assert.equal(((await duplicate.json()) as { duplicate: boolean }).duplicate, true);
 
     const health = await fetch(`${secondUrl}/health`).then(
       (response) => response.json() as Promise<{ storage: string }>
@@ -933,7 +1113,8 @@ test("ontology task-board state is independent of the legacy JSON board snapshot
   const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyCoordinator });
   const firstUrl = await listen(first);
   const created = await fetch(`${firstUrl}/ontology/build`, {
-    method: "POST", headers: { "content-type": "application/json" },
+    method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ repository: "omxyz/legacy", ref: "main", requestKey: "legacy" })
   });
   assert.equal(created.status, 202);
@@ -944,12 +1125,18 @@ test("ontology task-board state is independent of the legacy JSON board snapshot
   const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyCoordinator });
   const secondUrl = await listen(second);
   try {
-    const board = await fetch(`${secondUrl}/board`).then((response) => response.json() as Promise<{
-      tasks: Array<{ status: string; metadata: Record<string, unknown> }>;
-      outbox: Array<{ id: string; status: string; topic: string }>;
-    }>);
+    const board = await fetch(`${secondUrl}/board`).then(
+      (response) =>
+        response.json() as Promise<{
+          tasks: { status: string; metadata: Record<string, unknown> }[];
+          outbox: { id: string; status: string; topic: string }[];
+        }>
+    );
     assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 7);
-    assert.equal(board.outbox.some((message) => message.topic === "run-ontology-ingest" && message.status === "pending"), true);
+    assert.equal(
+      board.outbox.some((message) => message.topic === "run-ontology-ingest" && message.status === "pending"),
+      true
+    );
   } finally {
     await close(second);
   }
@@ -981,7 +1168,7 @@ test("concurrent API instances mutate the latest durable snapshot", async () => 
   const restartedUrl = await listen(restarted);
   try {
     const board = await fetch(`${restartedUrl}/board`).then(
-      (response) => response.json() as Promise<{ pullRequests: Array<{ number: number }>; tasks: unknown[] }>
+      (response) => response.json() as Promise<{ pullRequests: { number: number }[]; tasks: unknown[] }>
     );
     assert.deepEqual(board.pullRequests.map((pullRequest) => pullRequest.number).sort(), [1, 2]);
     assert.equal(board.tasks.length, 6);
@@ -993,11 +1180,17 @@ test("concurrent API instances mutate the latest durable snapshot", async () => 
 test("repository builds supersede immediately without waiting for an ingestion data write", async () => {
   class GatedOntologyStore extends MemoryOntologyGraphStore {
     private signalEntered!: () => void;
-    readonly entered = new Promise<void>((resolve) => { this.signalEntered = resolve; });
+    readonly entered = new Promise<void>((resolve) => {
+      this.signalEntered = resolve;
+    });
     private releaseWrite!: () => void;
-    private readonly released = new Promise<void>((resolve) => { this.releaseWrite = resolve; });
+    private readonly released = new Promise<void>((resolve) => {
+      this.releaseWrite = resolve;
+    });
 
-    release(): void { this.releaseWrite(); }
+    release(): void {
+      this.releaseWrite();
+    }
 
     override async applyBlobAnalyses(
       scope: { readonly tenantId: string; readonly repository: string; readonly commitSha: string },
@@ -1012,12 +1205,25 @@ test("repository builds supersede immediately without waiting for an ingestion d
   const stateStore = new MemoryStateStore();
   const ontologyStore = new GatedOntologyStore();
   const ontologyCoordinator = new MemoryOntologyPipelineCoordinator();
-  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore, ontologyCoordinator });
-  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore, ontologyCoordinator });
+  const first = createApiServer({
+    enableDevEndpoints: true,
+    tenantId: "default",
+    stateStore,
+    ontologyStore,
+    ontologyCoordinator
+  });
+  const second = createApiServer({
+    enableDevEndpoints: true,
+    tenantId: "default",
+    stateStore,
+    ontologyStore,
+    ontologyCoordinator
+  });
   const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
   try {
     const build = await fetch(`${firstUrl}/ontology/build`, {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "first" })
     });
     assert.equal(build.status, 202);
@@ -1028,36 +1234,61 @@ test("repository builds supersede immediately without waiting for an ingestion d
       messageId: ingestion.message.id,
       leaseId: ingestion.message.leaseId,
       snapshot: {
-        repository: "omxyz/fenced", ref: "main", commitSha, treeSha: "c".repeat(40), parents: [],
-        recordedAt: "2026-07-20T00:00:00.000Z", taskId: ingestion.task.id,
+        repository: "omxyz/fenced",
+        ref: "main",
+        commitSha,
+        treeSha: "c".repeat(40),
+        parents: [],
+        recordedAt: "2026-07-20T00:00:00.000Z",
+        taskId: ingestion.task.id,
         files: [{ path: "src/index.ts", blobSha, size: 10 }]
       }
     });
 
     const write = fetch(`${firstUrl}/internal/ontology/ingest/blobs`, {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        messageId: ingestion.message.id, leaseId: ingestion.message.leaseId, taskId: ingestion.task.id, commitSha,
-        analyses: [{ blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, language: "typescript", symbols: [], imports: [], edges: [] }]
+        messageId: ingestion.message.id,
+        leaseId: ingestion.message.leaseId,
+        taskId: ingestion.task.id,
+        commitSha,
+        analyses: [
+          {
+            blobSha,
+            parserVersion: ONTOLOGY_PARSER_VERSION,
+            language: "typescript",
+            symbols: [],
+            imports: [],
+            edges: []
+          }
+        ]
       })
     });
     await ontologyStore.entered;
     let replacementSettled = false;
     const replacement = fetch(`${secondUrl}/ontology/build`, {
-      method: "POST", headers: { "content-type": "application/json" },
+      method: "POST",
+      headers: { "content-type": "application/json" },
       body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "second" })
-    }).then((response) => { replacementSettled = true; return response; });
+    }).then((response) => {
+      replacementSettled = true;
+      return response;
+    });
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(replacementSettled, true, "repository-scoped supersession is independent of the data write");
 
     ontologyStore.release();
     assert.equal((await write).status, 200);
     assert.equal((await replacement).status, 202);
-    assert.equal(await completeClaim(firstUrl, ingestion, {
-      commitSha,
-      codeCheckpoint: "stale",
-      evidenceFingerprint: "stale"
-    }), 409);
+    assert.equal(
+      await completeClaim(firstUrl, ingestion, {
+        commitSha,
+        codeCheckpoint: "stale",
+        evidenceFingerprint: "stale"
+      }),
+      409
+    );
   } finally {
     await Promise.all([close(first), close(second)]);
   }
@@ -1077,11 +1308,14 @@ test("ontology completion does not depend on the legacy board snapshot", async (
     assert.equal(created.status, 202);
     const commitSha = "a".repeat(40);
     const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
-    assert.equal(await completeClaim(baseUrl, ingestion, {
-      commitSha,
-      codeCheckpoint: "code-checkpoint",
-      evidenceFingerprint: "evidence-fingerprint"
-    }), 200);
+    assert.equal(
+      await completeClaim(baseUrl, ingestion, {
+        commitSha,
+        codeCheckpoint: "code-checkpoint",
+        evidenceFingerprint: "evidence-fingerprint"
+      }),
+      200
+    );
     const assertion = await claimTopic(baseUrl, "run-ontology-assert");
     const firstCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
@@ -1107,20 +1341,40 @@ test("ontology completion does not depend on the legacy board snapshot", async (
           rawOutput: {
             summary: "Repository documentation",
             nodes: [
-              { id: "repo", kind: "Repository", label: "resumable", description: "repository", evidence: ["README.md:1"] },
-              { id: "readme", kind: "Document", label: "README", description: "documentation", path: "README.md", evidence: ["README.md:1"] }
+              {
+                id: "repo",
+                kind: "Repository",
+                label: "resumable",
+                description: "repository",
+                evidence: ["README.md:1"]
+              },
+              {
+                id: "readme",
+                kind: "Document",
+                label: "README",
+                description: "documentation",
+                path: "README.md",
+                evidence: ["README.md:1"]
+              }
             ],
-            edges: [{
-              source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95,
-              why: "The README explicitly documents this repository.", evidence: ["README.md:1"]
-            }]
+            edges: [
+              {
+                source: "repo",
+                target: "readme",
+                predicate: "DOCUMENTED_BY",
+                plane: "knowledge",
+                confidence: 0.95,
+                why: "The README explicitly documents this repository.",
+                evidence: ["README.md:1"]
+              }
+            ]
           }
         }
       })
     });
     assert.equal(firstCompletion.status, 200);
     const board = await fetch(`${baseUrl}/board`).then(
-      (response) => response.json() as Promise<{ tasks: Array<{ id: string; status: string }> }>
+      (response) => response.json() as Promise<{ tasks: { id: string; status: string }[] }>
     );
     assert.equal(board.tasks.find((task) => task.id === assertion.task.id)?.status, "done");
     assert.equal((await ontologyStore.listAssertions("default", "omxyz/resumable")).length > 0, true);
@@ -1141,8 +1395,13 @@ test("configured aliases migrate existing tasks and ontology graphs to the canon
     tenantId: oldTenant
   });
   const firstUrl = await listen(first);
-  assert.equal((await deliver(firstUrl, "pull_request", "delivery-old-tenant", pullRequestPayload(55, "old-sha"))).status, 202);
-  await ontologyStore.save(fixtureGraph({ tenantId: oldTenant, repository: "omlabs/example", ref: "main", taskId: "old-task" }));
+  assert.equal(
+    (await deliver(firstUrl, "pull_request", "delivery-old-tenant", pullRequestPayload(55, "old-sha"))).status,
+    202
+  );
+  await ontologyStore.save(
+    fixtureGraph({ tenantId: oldTenant, repository: "omlabs/example", ref: "main", taskId: "old-task" })
+  );
   await close(first);
 
   const second = createApiServer({
@@ -1156,14 +1415,20 @@ test("configured aliases migrate existing tasks and ontology graphs to the canon
   const secondUrl = await listen(second);
   try {
     const board = await authenticatedFetch(`${secondUrl}/board`).then(
-      (response) => response.json() as Promise<{ tasks: Array<{ metadata: Record<string, unknown> }> }>
+      (response) => response.json() as Promise<{ tasks: { metadata: Record<string, unknown> }[] }>
     );
     assert.equal(board.tasks.length, 3);
-    assert.equal(board.tasks.every((task) => task.metadata.tenantId === "omlabs"), true);
-    const ontology = await authenticatedFetch(`${secondUrl}/ontology`).then(
-      (response) => response.json() as Promise<{ graphs: Array<{ tenantId: string }> }>
+    assert.equal(
+      board.tasks.every((task) => task.metadata.tenantId === "omlabs"),
+      true
     );
-    assert.deepEqual(ontology.graphs.map((graph) => graph.tenantId), ["omlabs"]);
+    const ontology = await authenticatedFetch(`${secondUrl}/ontology`).then(
+      (response) => response.json() as Promise<{ graphs: { tenantId: string }[] }>
+    );
+    assert.deepEqual(
+      ontology.graphs.map((graph) => graph.tenantId),
+      ["omlabs"]
+    );
   } finally {
     await close(second);
   }
@@ -1238,7 +1503,10 @@ class MemoryStateStore implements ApiStateStore {
       this.snapshot = structuredClone(next.state);
       outcome = { committed: true, result: next.result };
     });
-    this.updates = update.then(() => undefined, () => undefined);
+    this.updates = update.then(
+      () => undefined,
+      () => undefined
+    );
     await update;
     return outcome!;
   }
@@ -1286,29 +1554,52 @@ async function postJson(baseUrl: string, path: string, body: unknown): Promise<u
   return response.json();
 }
 
-function fixtureGraph(request: { tenantId: string; repository: string; ref: string; taskId: string; commitSha?: string }) {
-    return createOntologyGraph({
-      request,
-      commitSha: request.commitSha ?? "fixture-sha",
-      generatedAt: new Date().toISOString(),
-      executor: "fixture",
-      model: "fixture",
-      generated: {
-        summary: "Fixture repository",
-        nodes: [
-          { id: "repo", kind: "Repository", label: request.repository, description: "Repository", evidence: ["README.md:1"] },
-          { id: "file:README.md", kind: "File", label: "README.md", description: "Documentation", path: "README.md", evidence: ["README.md:1"] }
-        ],
-        edges: [{ source: "repo", target: "file:README.md", predicate: "CONTAINS", plane: "code", evidence: ["README.md:1"] }]
-      }
-    });
+function fixtureGraph(request: {
+  tenantId: string;
+  repository: string;
+  ref: string;
+  taskId: string;
+  commitSha?: string;
+}) {
+  return createOntologyGraph({
+    request,
+    commitSha: request.commitSha ?? "fixture-sha",
+    generatedAt: new Date().toISOString(),
+    executor: "fixture",
+    model: "fixture",
+    generated: {
+      summary: "Fixture repository",
+      nodes: [
+        {
+          id: "repo",
+          kind: "Repository",
+          label: request.repository,
+          description: "Repository",
+          evidence: ["README.md:1"]
+        },
+        {
+          id: "file:README.md",
+          kind: "File",
+          label: "README.md",
+          description: "Documentation",
+          path: "README.md",
+          evidence: ["README.md:1"]
+        }
+      ],
+      edges: [
+        { source: "repo", target: "file:README.md", predicate: "CONTAINS", plane: "code", evidence: ["README.md:1"] }
+      ]
+    }
+  });
 }
 
 function authenticatedFetch(url: string, principalId?: string): Promise<Response> {
-  return fetch(url, { headers: {
-    authorization: `Bearer ${INTERNAL_TOKEN}`,
-    ...(principalId ? { "x-jina-principal-id": principalId } : {})
-  } });
+  return fetch(url, {
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      ...(principalId ? { "x-jina-principal-id": principalId } : {})
+    }
+  });
 }
 
 async function deliver(

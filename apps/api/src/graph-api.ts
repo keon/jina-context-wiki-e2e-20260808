@@ -59,17 +59,18 @@ export function publicGraph(graph: OntologyGraph): PublicGraph {
   };
 }
 
-export function publicGraphQueryResult(
-  graph: OntologyGraph,
-  result: GraphQueryResult
-): PublicGraphQueryResult {
+export function publicGraphQueryResult(graph: OntologyGraph, result: GraphQueryResult): PublicGraphQueryResult {
   const citations = result.claims.flatMap((claim) => claim.citations);
   const citedIds = new Set(citations.map((citation) => citation.id));
   return {
     graphId: graph.id,
     ...result,
-    highlightedNodeIds: graph.nodes.filter((node) => citationMatches(node.id, node.evidence, citations, citedIds)).map((node) => node.id),
-    highlightedEdgeIds: graph.edges.filter((edge) => citationMatches(edge.id, edge.evidence, citations, citedIds)).map((edge) => edge.id)
+    highlightedNodeIds: graph.nodes
+      .filter((node) => citationMatches(node.id, node.evidence, citations, citedIds))
+      .map((node) => node.id),
+    highlightedEdgeIds: graph.edges
+      .filter((edge) => citationMatches(edge.id, edge.evidence, citations, citedIds))
+      .map((edge) => edge.id)
   };
 }
 

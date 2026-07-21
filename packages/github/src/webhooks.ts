@@ -191,23 +191,25 @@ function requiredPositiveInteger(value: unknown, field: string): number {
   return value;
 }
 
-function optionalStringProperty<Key extends string>(key: Key, value: unknown): { readonly [K in Key]?: string } {
-  return typeof value === "string" && value.length > 0 ? ({ [key]: value } as { [K in Key]: string }) : {};
+function optionalStringProperty<Key extends string>(key: Key, value: unknown): Readonly<Partial<Record<Key, string>>> {
+  return typeof value === "string" && value.length > 0
+    ? ({ [key]: value } as Record<Key, string>)
+    : ({} as Partial<Record<Key, string>>);
 }
 
-function optionalNumberProperty<Key extends string>(key: Key, value: unknown): { readonly [K in Key]?: number } {
+function optionalNumberProperty<Key extends string>(key: Key, value: unknown): Readonly<Partial<Record<Key, number>>> {
   return typeof value === "number" && Number.isSafeInteger(value)
-    ? ({ [key]: value } as { [K in Key]: number })
-    : {};
+    ? ({ [key]: value } as Record<Key, number>)
+    : ({} as Partial<Record<Key, number>>);
 }
 
 function optionalNestedStringProperty<Key extends string>(
   key: Key,
   container: unknown,
   field: string
-): { readonly [K in Key]?: string } {
+): Readonly<Partial<Record<Key, string>>> {
   if (typeof container !== "object" || container === null || Array.isArray(container)) {
-    return {};
+    return {} as Partial<Record<Key, string>>;
   }
   return optionalStringProperty(key, (container as Record<string, unknown>)[field]);
 }
@@ -216,9 +218,9 @@ function optionalNestedNumberProperty<Key extends string>(
   key: Key,
   container: unknown,
   field: string
-): { readonly [K in Key]?: number } {
+): Readonly<Partial<Record<Key, number>>> {
   if (typeof container !== "object" || container === null || Array.isArray(container)) {
-    return {};
+    return {} as Partial<Record<Key, number>>;
   }
   return optionalNumberProperty(key, (container as Record<string, unknown>)[field]);
 }

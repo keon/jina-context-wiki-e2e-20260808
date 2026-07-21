@@ -52,7 +52,7 @@ const SUPPORTED_TOPICS = [
   "run-ontology-assert",
   "run-ontology-project"
 ] as const;
-type WorkerTopic = typeof SUPPORTED_TOPICS[number];
+type WorkerTopic = (typeof SUPPORTED_TOPICS)[number];
 
 interface WorkMetadataByTopic {
   readonly "run-review": { readonly repository: string; readonly pullRequestNumber: number };
@@ -79,19 +79,21 @@ interface WorkMetadataByTopic {
   readonly "run-ontology-project": { readonly tenantId: string; readonly repository: string; readonly ref: string };
 }
 
-type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic ? {
-  readonly topic: T;
-  readonly message: {
-    readonly id: string;
-    readonly topic: T;
-    readonly leaseId: string;
-    readonly leaseExpiresAt: string;
-  };
-  readonly task: {
-    readonly id: string;
-    readonly metadata: WorkMetadataByTopic[T];
-  };
-} : never;
+type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic
+  ? {
+      readonly topic: T;
+      readonly message: {
+        readonly id: string;
+        readonly topic: T;
+        readonly leaseId: string;
+        readonly leaseExpiresAt: string;
+      };
+      readonly task: {
+        readonly id: string;
+        readonly metadata: WorkMetadataByTopic[T];
+      };
+    }
+  : never;
 
 type WorkResult =
   | {
@@ -122,9 +124,7 @@ const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const ontologyApiTimeoutMs = positiveInt(process.env.ONTOLOGY_API_TIMEOUT_MS, 15 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsOntologyProjections = topics.some((topic) => topic.startsWith("run-ontology"));
-const ontologyExecutor = topics.includes("run-ontology-assert")
-  ? new DaytonaCodexOntologyExecutor()
-  : undefined;
+const ontologyExecutor = topics.includes("run-ontology-assert") ? new DaytonaCodexOntologyExecutor() : undefined;
 let stopping = false;
 let active = false;
 let activeLease: LeaseExecutionState | undefined;
@@ -133,20 +133,32 @@ let lastApiSuccessAt: string | undefined;
 let lastApiError: string | undefined;
 let lastApiErrorAt: string | undefined;
 let consecutiveApiFailures = 0;
-let lastWork: {
-  readonly topic: WorkerTopic;
-  readonly outcome: WorkResult["outcome"] | "lease_lost";
-  readonly finishedAt: string;
-  readonly failureCategory?: WorkerFailureCategory;
-} | undefined;
+let lastWork:
+  | {
+      readonly topic: WorkerTopic;
+      readonly outcome: WorkResult["outcome"] | "lease_lost";
+      readonly finishedAt: string;
+      readonly failureCategory?: WorkerFailureCategory;
+    }
+  | undefined;
 
 const server = createServer((request, response) => {
   if (request.url === "/health" || request.url === "/healthz") {
     const ok = Boolean(lastApiSuccessAt) && !lastApiError;
     response.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
-    response.end(JSON.stringify({
-      ok, workerId, topics, active, lastApiSuccessAt, lastApiError, lastApiErrorAt, consecutiveApiFailures, lastWork
-    }));
+    response.end(
+      JSON.stringify({
+        ok,
+        workerId,
+        topics,
+        active,
+        lastApiSuccessAt,
+        lastApiError,
+        lastApiErrorAt,
+        consecutiveApiFailures,
+        lastWork
+      })
+    );
     return;
   }
   response.writeHead(404, { "content-type": "application/json" });
@@ -295,7 +307,9 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
       // Run the projection on its long-window route so completion stays a
       // fast status flip instead of racing the 30-second completion timeout.
       const projected = await internalApiJson<Record<string, unknown>>("/internal/ontology/project/run", {
-        taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId
+        taskId: work.task.id,
+        messageId: work.message.id,
+        leaseId: work.message.leaseId
       });
       return { outcome: "done", result: { projected } };
     }
@@ -344,11 +358,13 @@ async function runOntologyIngestWithTransport(
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
   const historyLimit = positiveInt(process.env.ONTOLOGY_HISTORY_LIMIT, 10_000);
-  const discovery = work.task.metadata.pipelinePhase === "snapshot"
-    ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
-    : await discoverNewCommits(work, repository, head, historyLimit);
+  const discovery =
+    work.task.metadata.pipelinePhase === "snapshot"
+      ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
+      : await discoverNewCommits(work, repository, head, historyLimit);
   const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
-  const defaultBranch = typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
+  const defaultBranch =
+    typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
   let headPlan: OntologyIngestPlan | undefined;
   let parsedBlobCount = 0;
   let reusedBlobCount = 0;
@@ -361,25 +377,38 @@ async function runOntologyIngestWithTransport(
   const workItems = new Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>();
   const recentTrees = new Map<string, ReadonlyMap<string, RepositoryTreeEntry>>();
   for (const sha of orderedShas) {
-    const commit = discovery.commits.get(sha) ?? (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
+    const commit =
+      discovery.commits.get(sha) ??
+      (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
     const snapshot = await repositorySnapshotFromGitHub({
-      tenantId, repository, ref, taskId: work.task.id, commit,
-      isHead: sha === commitSha, isDefaultRef: ref === defaultBranch
+      tenantId,
+      repository,
+      ref,
+      taskId: work.task.id,
+      commit,
+      isHead: sha === commitSha,
+      isDefaultRef: ref === defaultBranch
     });
     // Chain commits ship only their first-parent delta; the head keeps the full
     // tree so the ref manifest and blob backlog are re-checked end to end.
     const parentTree = snapshot.parents[0] ? recentTrees.get(snapshot.parents[0]) : undefined;
-    const wireSnapshot: RepositorySnapshot = sha !== commitSha && parentTree
-      ? { ...snapshot, mode: "delta", files: [], deltas: computeTreeDeltas(parentTree, snapshot.files) }
-      : snapshot;
+    const wireSnapshot: RepositorySnapshot =
+      sha !== commitSha && parentTree
+        ? { ...snapshot, mode: "delta", files: [], deltas: computeTreeDeltas(parentTree, snapshot.files) }
+        : snapshot;
     recentTrees.set(sha, new Map(snapshot.files.map((file) => [file.path, file])));
     if (recentTrees.size > 8) {
       const oldest = recentTrees.keys().next().value;
       if (oldest !== undefined) recentTrees.delete(oldest);
     }
-    const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", { ...lease, snapshot: wireSnapshot });
+    const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", {
+      ...lease,
+      snapshot: wireSnapshot
+    });
     changedPathsByCommit.set(sha, plan.changedPaths);
-    const analyses = await mapWithConcurrency(plan.missingBlobs, 8, (missing) => analyzeGitHubBlob(repository, missing));
+    const analyses = await mapWithConcurrency(plan.missingBlobs, 8, (missing) =>
+      analyzeGitHubBlob(repository, missing)
+    );
     for (let offset = 0; offset < analyses.length; offset += 50) {
       await submitBlobAnalyses(work, snapshot.commitSha, analyses.slice(offset, offset + 50));
     }
@@ -396,46 +425,90 @@ async function runOntologyIngestWithTransport(
       if (codeowners) {
         const source = await readGitHubBlob(repository, codeowners.blobSha);
         ownershipObservation = {
-          tenantId, repository, kind: "codeowners", commitSha, path: codeowners.path,
-          entries: parseCodeowners(source), recordedAt: snapshot.recordedAt
+          tenantId,
+          repository,
+          kind: "codeowners",
+          commitSha,
+          path: codeowners.path,
+          entries: parseCodeowners(source),
+          recordedAt: snapshot.recordedAt
         };
       } else {
-        const removedCodeowners = plan.changes.find((change) =>
-          change.change === "delete" && [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"].includes(change.path)
+        const removedCodeowners = plan.changes.find(
+          (change) =>
+            change.change === "delete" && [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"].includes(change.path)
         );
-        if (removedCodeowners) ownershipObservation = {
-          tenantId, repository, kind: "codeowners", commitSha, path: removedCodeowners.path,
-          entries: [], recordedAt: snapshot.recordedAt
-        };
+        if (removedCodeowners)
+          ownershipObservation = {
+            tenantId,
+            repository,
+            kind: "codeowners",
+            commitSha,
+            path: removedCodeowners.path,
+            entries: [],
+            recordedAt: snapshot.recordedAt
+          };
       }
       const deterministicFiles = snapshot.files.filter((file) => isDeterministicSourcePath(file.path)).slice(0, 100);
       for (const file of deterministicFiles) {
         const source = await readGitHubBlob(repository, file.blobSha);
         const manifest = parsePackageManifest({
-          tenantId, repository, commitSha, path: file.path, source, recordedAt: snapshot.recordedAt
+          tenantId,
+          repository,
+          commitSha,
+          path: file.path,
+          source,
+          recordedAt: snapshot.recordedAt
         });
         if (manifest) deterministicObservations.push(manifest);
-        deterministicObservations.push(...parseServiceDefinitions({
-          tenantId, repository, commitSha, path: file.path, content: source, recordedAt: snapshot.recordedAt
-        }));
+        deterministicObservations.push(
+          ...parseServiceDefinitions({
+            tenantId,
+            repository,
+            commitSha,
+            path: file.path,
+            content: source,
+            recordedAt: snapshot.recordedAt
+          })
+        );
         const incident = parseIncidentDocument({
-          tenantId, repository, path: file.path, content: source, recordedAt: snapshot.recordedAt
+          tenantId,
+          repository,
+          path: file.path,
+          content: source,
+          recordedAt: snapshot.recordedAt
         });
         if (incident) deterministicObservations.push(incident);
       }
-      for (const removed of plan.changes.filter((change) =>
-        change.change === "delete" && change.oldBlobSha && isDeterministicSourcePath(change.path)
+      for (const removed of plan.changes.filter(
+        (change) => change.change === "delete" && change.oldBlobSha && isDeterministicSourcePath(change.path)
       )) {
         const source = await readGitHubBlob(repository, removed.oldBlobSha!);
         const manifest = parsePackageManifest({
-          tenantId, repository, commitSha, path: removed.path, source, recordedAt: snapshot.recordedAt
+          tenantId,
+          repository,
+          commitSha,
+          path: removed.path,
+          source,
+          recordedAt: snapshot.recordedAt
         });
         if (manifest) deterministicObservations.push({ ...manifest, dependencies: [], removed: true });
-        deterministicObservations.push(...parseServiceDefinitions({
-          tenantId, repository, commitSha, path: removed.path, content: source, recordedAt: snapshot.recordedAt
-        }).map((service) => ({ ...service, dependsOnServices: [], removed: true })));
+        deterministicObservations.push(
+          ...parseServiceDefinitions({
+            tenantId,
+            repository,
+            commitSha,
+            path: removed.path,
+            content: source,
+            recordedAt: snapshot.recordedAt
+          }).map((service) => ({ ...service, dependsOnServices: [], removed: true }))
+        );
         const incident = parseIncidentDocument({
-          tenantId, repository, path: removed.path, content: source, recordedAt: snapshot.recordedAt
+          tenantId,
+          repository,
+          path: removed.path,
+          content: source,
+          recordedAt: snapshot.recordedAt
         });
         if (incident) deterministicObservations.push({ ...incident, removed: true });
       }
@@ -449,19 +522,24 @@ async function runOntologyIngestWithTransport(
   }
   if (!headPlan) throw new Error("head commit was not included in repository history ingestion");
   const moveCandidates = await buildMoveCandidates(repository, headPlan);
-  if (moveCandidates.length > 0) deterministicObservations.push({
-    tenantId, repository, kind: "move_candidate", commitSha,
-    candidates: moveCandidates, recordedAt: new Date().toISOString()
-  });
+  if (moveCandidates.length > 0)
+    deterministicObservations.push({
+      tenantId,
+      repository,
+      kind: "move_candidate",
+      commitSha,
+      candidates: moveCandidates,
+      recordedAt: new Date().toISOString()
+    });
   if (discovery.knownCommitShas.has(commitSha)) {
     await hydrateRecentMergedPullRequestScope(repository, commitSha, workItems);
   }
   const problemEvidencePullRequestNumbers = await hydratePullRequestScope(repository, workItems, headPaths);
   const observations: RepositorySourceObservation[] = [
-    ...await githubWorkItemObservations(tenantId, repository, workItems),
+    ...(await githubWorkItemObservations(tenantId, repository, workItems)),
     ...deterministicObservations,
-    ...await githubDeploymentObservations(tenantId, repository),
-    ...await githubIncidentObservations(tenantId, repository)
+    ...(await githubDeploymentObservations(tenantId, repository)),
+    ...(await githubIncidentObservations(tenantId, repository))
   ];
   if (ownershipObservation) observations.push(ownershipObservation);
   let sourceResult: OntologySourceIngestResult = {
@@ -474,13 +552,18 @@ async function runOntologyIngestWithTransport(
   };
   if (observations.length > 0) {
     sourceResult = await internalApiJson<OntologySourceIngestResult>("/internal/ontology/ingest/github", {
-      taskId: work.task.id, ...lease, observations
+      taskId: work.task.id,
+      ...lease,
+      observations
     });
   }
   const currentCodeCheckpoint = codeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_PARSER_VERSION);
   const newCommitCount = orderedShas.filter((sha) => !discovery.knownCommitShas.has(sha)).length;
   const confirmedCommitCount = orderedShas.length - newCommitCount;
-  const newlyIngestedHistoricalPaths = orderedShas.slice(0, -1).reverse().flatMap((sha) => changedPathsByCommit.get(sha) ?? []);
+  const newlyIngestedHistoricalPaths = orderedShas
+    .slice(0, -1)
+    .reverse()
+    .flatMap((sha) => changedPathsByCommit.get(sha) ?? []);
   // If this commit is already known but a new generator version has no cache,
   // give that one run a bounded current-tree scan. The selector prioritizes
   // docs/tests before ordinary files; successful output is then cached.
@@ -496,9 +579,13 @@ async function runOntologyIngestWithTransport(
     problemEvidencePullRequestNumbers
   });
   return {
-    effect: newCommitCount > 0 || parsedBlobCount > 0 || sourceResult.newObservationCount > 0 || sourceResult.updatedObservationCount > 0
-      ? "changed"
-      : "confirmed",
+    effect:
+      newCommitCount > 0 ||
+      parsedBlobCount > 0 ||
+      sourceResult.newObservationCount > 0 ||
+      sourceResult.updatedObservationCount > 0
+        ? "changed"
+        : "confirmed",
     observationId: headPlan.observationId,
     commitSha,
     fileCount,
@@ -511,7 +598,9 @@ async function runOntologyIngestWithTransport(
       observation.kind === "pull_request" ? [observation.number] : []
     ),
     resolvedPullRequestNumbers: observations.flatMap((observation) =>
-      observation.kind === "pull_request" && (observation.resolvesIssueNumbers?.length ?? 0) > 0 ? [observation.number] : []
+      observation.kind === "pull_request" && (observation.resolvesIssueNumbers?.length ?? 0) > 0
+        ? [observation.number]
+        : []
     ),
     newWorkItemObservationCount: sourceResult.newObservationCount,
     updatedWorkItemObservationCount: sourceResult.updatedObservationCount,
@@ -542,13 +631,24 @@ async function discoverNewCommits(
   while (pending.length > 0) {
     const batch = pending.splice(0, 25).filter((sha) => !expanded.has(sha));
     if (batch.length === 0) continue;
-    const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>("/internal/ontology/ingest/known", {
-      taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitShas: batch
-    });
+    const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>(
+      "/internal/ontology/ingest/known",
+      {
+        taskId: work.task.id,
+        messageId: work.message.id,
+        leaseId: work.message.leaseId,
+        commitShas: batch
+      }
+    );
     const knownSet = new Set(known.knownCommitShas);
     const unknownShas = batch.filter((sha) => !knownSet.has(sha) && !commits.has(sha));
-    const fetchedCommits = new Map(await mapWithConcurrency(unknownShas, 8, async (sha) =>
-      [sha, await githubJson(`/repos/${repository}/commits/${sha}`)] as const));
+    const fetchedCommits = new Map(
+      await mapWithConcurrency(
+        unknownShas,
+        8,
+        async (sha) => [sha, await githubJson(`/repos/${repository}/commits/${sha}`)] as const
+      )
+    );
     for (const sha of batch) {
       expanded.add(sha);
       if (knownSet.has(sha)) {
@@ -558,7 +658,8 @@ async function discoverNewCommits(
       }
       const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
       commits.set(sha, commit);
-      if (commits.size > limit) throw new Error(`reachable Git history exceeds ONTOLOGY_HISTORY_LIMIT=${limit}; refusing a partial backfill`);
+      if (commits.size > limit)
+        throw new Error(`reachable Git history exceeds ONTOLOGY_HISTORY_LIMIT=${limit}; refusing a partial backfill`);
       for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
         if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
         const parentSha = requiredGitSha(parent.sha, "GitHub parent SHA");
@@ -597,7 +698,10 @@ const execFileAsync = promisify(execFile);
 class GitIngestTransport {
   private cloneDir: string | undefined;
   private failed = false;
-  constructor(private readonly repository: string, private readonly ref: string) {}
+  constructor(
+    private readonly repository: string,
+    private readonly ref: string
+  ) {}
 
   private async git(args: readonly string[], maxBuffer = 64 * 1024 * 1024): Promise<string> {
     assertLeaseOwned();
@@ -628,17 +732,24 @@ class GitIngestTransport {
       // parser would actually read (larger blobs are skipped by analysis and
       // lazily fetched only if something else needs them).
       await this.git([
-        "clone", "--bare", "--quiet",
-        "--single-branch", "--branch", this.ref,
+        "clone",
+        "--bare",
+        "--quiet",
+        "--single-branch",
+        "--branch",
+        this.ref,
         "--filter=blob:limit=524288",
-        `${githubUrl}/${this.repository}.git`, dir
+        `${githubUrl}/${this.repository}.git`,
+        dir
       ]);
       this.cloneDir = dir;
       return true;
     } catch (error) {
       this.failed = true;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-      console.warn(`git ingest transport unavailable for ${this.repository}: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+      console.warn(
+        `git ingest transport unavailable for ${this.repository}: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`
+      );
       return false;
     }
   }
@@ -652,11 +763,13 @@ class GitIngestTransport {
         const tab = line.indexOf("\t");
         const [, type, sha, size] = line.slice(0, tab).split(/\s+/);
         if (type !== "blob" || !sha) return [];
-        return [{
-          path: line.slice(tab + 1),
-          blobSha: requiredGitSha(sha, "git tree blob SHA"),
-          size: Number.isSafeInteger(Number(size)) && Number(size) >= 0 ? Number(size) : 0
-        }];
+        return [
+          {
+            path: line.slice(tab + 1),
+            blobSha: requiredGitSha(sha, "git tree blob SHA"),
+            size: Number.isSafeInteger(Number(size)) && Number(size) >= 0 ? Number(size) : 0
+          }
+        ];
       });
     } catch {
       this.failed = true;
@@ -702,8 +815,13 @@ function computeTreeDeltas(
 }
 
 async function repositorySnapshotFromGitHub(input: {
-  readonly tenantId: string; readonly repository: string; readonly ref: string; readonly taskId: string;
-  readonly commit: Record<string, unknown>; readonly isHead: boolean; readonly isDefaultRef: boolean;
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly taskId: string;
+  readonly commit: Record<string, unknown>;
+  readonly isHead: boolean;
+  readonly isDefaultRef: boolean;
 }): Promise<RepositorySnapshot> {
   const commitSha = requiredGitSha(input.commit.sha, "GitHub commit SHA");
   const commitDetails = isRecord(input.commit.commit) ? input.commit.commit : {};
@@ -715,7 +833,8 @@ async function repositorySnapshotFromGitHub(input: {
   let entries: unknown[] = [];
   if (localEntries === undefined) {
     const tree = await githubJson(`/repos/${input.repository}/git/trees/${treeSha}?recursive=1`);
-    if (tree.truncated === true) throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
+    if (tree.truncated === true)
+      throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
     entries = Array.isArray(tree.tree) ? tree.tree : [];
   }
   return {
@@ -728,30 +847,43 @@ async function repositorySnapshotFromGitHub(input: {
       if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
       return requiredGitSha(parent.sha, "GitHub parent SHA");
     }),
-    ...(typeof authorDetails.email === "string" && authorDetails.email.trim() ? { authorExternalId: authorDetails.email.trim() } : {}),
-    ...(typeof githubAuthor.login === "string" && githubAuthor.login.trim() ? { authorGitHubLogin: githubAuthor.login.trim() } : {}),
-    ...(typeof authorDetails.name === "string" && authorDetails.name.trim() ? { authorName: authorDetails.name.trim() } : {}),
+    ...(typeof authorDetails.email === "string" && authorDetails.email.trim()
+      ? { authorExternalId: authorDetails.email.trim() }
+      : {}),
+    ...(typeof githubAuthor.login === "string" && githubAuthor.login.trim()
+      ? { authorGitHubLogin: githubAuthor.login.trim() }
+      : {}),
+    ...(typeof authorDetails.name === "string" && authorDetails.name.trim()
+      ? { authorName: authorDetails.name.trim() }
+      : {}),
     ...(typeof authorDetails.date === "string" ? { committedAt: authorDetails.date } : {}),
     ...(typeof commitDetails.message === "string" ? { message: commitDetails.message } : {}),
     isDefaultRef: input.isDefaultRef,
     updateRef: input.isHead,
     recordedAt: new Date().toISOString(),
     taskId: input.taskId,
-    files: localEntries ?? entries.flatMap((entry) => {
-      if (!isRecord(entry) || entry.type !== "blob") return [];
-      return [{
-        path: requiredString(entry.path, "GitHub tree path"),
-        blobSha: requiredGitSha(entry.sha, "GitHub blob SHA"),
-        size: typeof entry.size === "number" && Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
-      }];
-    })
+    files:
+      localEntries ??
+      entries.flatMap((entry) => {
+        if (!isRecord(entry) || entry.type !== "blob") return [];
+        return [
+          {
+            path: requiredString(entry.path, "GitHub tree path"),
+            blobSha: requiredGitSha(entry.sha, "GitHub blob SHA"),
+            size: typeof entry.size === "number" && Number.isSafeInteger(entry.size) && entry.size >= 0 ? entry.size : 0
+          }
+        ];
+      })
   };
 }
 
 async function githubWorkItemObservations(
   tenantId: string,
   repository: string,
-  pullRequests: ReadonlyMap<number, { readonly item: Record<string, unknown>; readonly commitShas: ReadonlySet<string> }>
+  pullRequests: ReadonlyMap<
+    number,
+    { readonly item: Record<string, unknown>; readonly commitShas: ReadonlySet<string> }
+  >
 ): Promise<GitHubSourceObservation[]> {
   const recordedAt = new Date().toISOString();
   const observations: GitHubSourceObservation[] = [];
@@ -765,7 +897,12 @@ async function githubWorkItemObservations(
     links.references.forEach((issue) => issueNumbers.add(issue));
     const user = isRecord(item.user) ? item.user : {};
     observations.push({
-      tenantId, repository, kind: "pull_request", number, title, body,
+      tenantId,
+      repository,
+      kind: "pull_request",
+      number,
+      title,
+      body,
       state: requiredString(item.state, "GitHub pull request state"),
       url: requiredString(item.html_url, "GitHub pull request URL"),
       ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
@@ -774,14 +911,20 @@ async function githubWorkItemObservations(
       ...(typeof item.merged_at === "string" && item.merged_at && typeof item.merge_commit_sha === "string"
         ? { mergeCommitSha: requiredGitSha(item.merge_commit_sha, "GitHub merge commit SHA") }
         : {}),
-      recordedAt, commitShas: [...value.commitShas], resolvesIssueNumbers: links.resolves, referencesIssueNumbers: links.references
+      recordedAt,
+      commitShas: [...value.commitShas],
+      resolvesIssueNumbers: links.resolves,
+      referencesIssueNumbers: links.references
     });
   }
   for (const number of issueNumbers) {
     const item = await githubJson(`/repos/${repository}/issues/${number}`);
     const user = isRecord(item.user) ? item.user : {};
     observations.push({
-      tenantId, repository, kind: "issue", number,
+      tenantId,
+      repository,
+      kind: "issue",
+      number,
       title: requiredString(item.title, "GitHub issue title"),
       ...(typeof item.body === "string" ? { body: item.body } : {}),
       state: requiredString(item.state, "GitHub issue state"),
@@ -803,12 +946,20 @@ async function hydrateRecentMergedPullRequestScope(
     `/repos/${repository}/pulls?state=closed&sort=updated&direction=desc&per_page=100`
   );
   const candidates = recent.filter((item) => {
-    if (typeof item.number !== "number" || pullRequests.has(item.number) ||
-      typeof item.merged_at !== "string" || !item.merged_at ||
-      typeof item.merge_commit_sha !== "string" || !/^[a-f0-9]{40}$/i.test(item.merge_commit_sha)) return false;
+    if (
+      typeof item.number !== "number" ||
+      pullRequests.has(item.number) ||
+      typeof item.merged_at !== "string" ||
+      !item.merged_at ||
+      typeof item.merge_commit_sha !== "string" ||
+      !/^[a-f0-9]{40}$/i.test(item.merge_commit_sha)
+    )
+      return false;
     const text = `${typeof item.title === "string" ? item.title : ""}\n${typeof item.body === "string" ? item.body : ""}`;
     const links = linkedIssueNumbers(text);
-    const untrackedRepair = links.resolves.length === 0 && links.references.length === 0 &&
+    const untrackedRepair =
+      links.resolves.length === 0 &&
+      links.references.length === 0 &&
       /\b(?:fix(?:e[sd])?|repair(?:s|ed|ing)?|restor(?:e[sd]?|ing)|correct(?:s|ed|ing)?)\b/i.test(text) &&
       /\b(?:bug|regression|incorrect|broken|fail(?:s|ed|ing|ure)?|cannot|can't|unable|denied|wrong)\b/i.test(text);
     return untrackedRepair;
@@ -840,8 +991,15 @@ async function githubDeploymentObservations(
   const deployments = await githubOptionalJsonArray(`/repos/${repository}/deployments?per_page=100`);
   const observations: RepositorySourceObservation[] = [];
   for (const deployment of deployments.slice(0, 50)) {
-    if (typeof deployment.id !== "number" || typeof deployment.sha !== "string" || !/^[a-f0-9]{40}$/i.test(deployment.sha)) continue;
-    const statuses = await githubOptionalJsonArray(`/repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`);
+    if (
+      typeof deployment.id !== "number" ||
+      typeof deployment.sha !== "string" ||
+      !/^[a-f0-9]{40}$/i.test(deployment.sha)
+    )
+      continue;
+    const statuses = await githubOptionalJsonArray(
+      `/repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`
+    );
     const latest = statuses[0] ?? {};
     const payload = isRecord(deployment.payload) ? deployment.payload : {};
     const service = isRecord(payload.service)
@@ -851,13 +1009,23 @@ async function githubDeploymentObservations(
           name: requiredString(payload.service.name, "GitHub deployment service name")
         }
       : typeof payload.service === "string" && payload.service.trim()
-        ? { source: "github-deployment", externalId: `${repository}:${payload.service.trim()}`, name: payload.service.trim() }
+        ? {
+            source: "github-deployment",
+            externalId: `${repository}:${payload.service.trim()}`,
+            name: payload.service.trim()
+          }
         : undefined;
     observations.push({
-      tenantId, repository, kind: "deployment", source: "github",
+      tenantId,
+      repository,
+      kind: "deployment",
+      source: "github",
       externalId: `${repository}:${deployment.id}`,
       commitSha: deployment.sha.toLowerCase(),
-      environment: typeof deployment.environment === "string" && deployment.environment.trim() ? deployment.environment : "unknown",
+      environment:
+        typeof deployment.environment === "string" && deployment.environment.trim()
+          ? deployment.environment
+          : "unknown",
       status: typeof latest.state === "string" ? latest.state : "created",
       ...(service ? { service } : {}),
       ...(typeof latest.created_at === "string" ? { occurredAt: latest.created_at } : {}),
@@ -867,14 +1035,26 @@ async function githubDeploymentObservations(
   const workflowResponse = await githubOptionalJson(`/repos/${repository}/actions/runs?status=completed&per_page=100`);
   const workflowRuns = Array.isArray(workflowResponse.workflow_runs) ? workflowResponse.workflow_runs : [];
   for (const value of workflowRuns.slice(0, 100)) {
-    if (!isRecord(value) || typeof value.id !== "number" || typeof value.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(value.head_sha)) continue;
+    if (
+      !isRecord(value) ||
+      typeof value.id !== "number" ||
+      typeof value.head_sha !== "string" ||
+      !/^[a-f0-9]{40}$/i.test(value.head_sha)
+    )
+      continue;
     const label = `${typeof value.name === "string" ? value.name : ""} ${typeof value.path === "string" ? value.path : ""}`;
     if (!/deploy|release|cloud\s*run/i.test(label)) continue;
     observations.push({
-      tenantId, repository, kind: "deployment", source: "github-actions", externalId: `${repository}:${value.id}`,
-      commitSha: value.head_sha.toLowerCase(), environment: "workflow",
+      tenantId,
+      repository,
+      kind: "deployment",
+      source: "github-actions",
+      externalId: `${repository}:${value.id}`,
+      commitSha: value.head_sha.toLowerCase(),
+      environment: "workflow",
       status: typeof value.conclusion === "string" ? value.conclusion : "completed",
-      ...(typeof value.updated_at === "string" ? { occurredAt: value.updated_at } : {}), recordedAt
+      ...(typeof value.updated_at === "string" ? { occurredAt: value.updated_at } : {}),
+      recordedAt
     });
   }
   return observations;
@@ -890,36 +1070,58 @@ async function githubIncidentObservations(
     if (isRecord(item.pull_request) || typeof item.number !== "number" || typeof item.title !== "string") return [];
     const user = isRecord(item.user) ? item.user : {};
     const issue: GitHubSourceObservation = {
-      tenantId, repository, kind: "issue", number: item.number, title: item.title,
+      tenantId,
+      repository,
+      kind: "issue",
+      number: item.number,
+      title: item.title,
       ...(typeof item.body === "string" ? { body: item.body } : {}),
       state: typeof item.state === "string" ? item.state : "open",
       url: typeof item.html_url === "string" ? item.html_url : `https://github.com/${repository}/issues/${item.number}`,
       ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
-      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}), recordedAt
+      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
+      recordedAt
     };
-    return [issue, {
-      tenantId, repository, kind: "incident", source: "github",
-      externalId: `${repository}#${item.number}`, title: item.title,
-      url: issue.url, issueNumber: item.number,
-      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}), recordedAt
-    }];
+    return [
+      issue,
+      {
+        tenantId,
+        repository,
+        kind: "incident",
+        source: "github",
+        externalId: `${repository}#${item.number}`,
+        title: item.title,
+        url: issue.url,
+        issueNumber: item.number,
+        ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
+        recordedAt
+      }
+    ];
   });
 }
 
 function isDeterministicSourcePath(path: string): boolean {
-  return /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|requirements\.txt|pyproject\.toml|go\.mod|Cargo\.(?:toml|lock)|Gemfile\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|(?:docker-)?compose(?:\.[^.]+)?\.ya?ml|catalog-info\.ya?ml|service-catalog\.ya?ml)$/i.test(path) ||
+  return (
+    /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|requirements\.txt|pyproject\.toml|go\.mod|Cargo\.(?:toml|lock)|Gemfile\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|(?:docker-)?compose(?:\.[^.]+)?\.ya?ml|catalog-info\.ya?ml|service-catalog\.ya?ml)$/i.test(
+      path
+    ) ||
     /(?:^|\/)Dockerfile(?:\.[A-Za-z0-9_.-]+)?$/i.test(path) ||
     /^\.github\/workflows\/.*\.ya?ml$/i.test(path) ||
     /(?:^|\/)(?:k8s|kubernetes|deploy|deployment|cloudrun|cloud-run)\/.*\.ya?ml$/i.test(path) ||
-    /(?:^|\/)(?:incidents?|postmortems?)(?:\/|[-_.]).*\.md(?:own)?$/i.test(path);
+    /(?:^|\/)(?:incidents?|postmortems?)(?:\/|[-_.]).*\.md(?:own)?$/i.test(path)
+  );
 }
 
 async function buildMoveCandidates(repository: string, plan: OntologyIngestPlan) {
   const analyses = new Map<string, BlobAnalysis>();
-  const candidates = plan.changes.filter((change) =>
-    (change.change === "add" && change.newBlobSha) || (change.change === "delete" && change.oldBlobSha) ||
-    (change.change === "rename" && change.oldBlobSha && change.newBlobSha)
-  ).slice(0, 40);
+  const candidates = plan.changes
+    .filter(
+      (change) =>
+        (change.change === "add" && change.newBlobSha) ||
+        (change.change === "delete" && change.oldBlobSha) ||
+        (change.change === "rename" && change.oldBlobSha && change.newBlobSha)
+    )
+    .slice(0, 40);
   for (const change of candidates) {
     const blobSha = change.newBlobSha ?? change.oldBlobSha;
     const language = languageForPath(change.path);
@@ -1001,7 +1203,10 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
   assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
-  const assertions = assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers });
+  const assertions = assertionsFromGeneratedOntology(rawOutput, repository, {
+    sourcePullRequestNumbers,
+    resolvedPullRequestNumbers
+  });
   // Persist the batch on the durable long-window route before completing, so
   // the completion request itself stays a fast status flip.
   const saved = await internalApiJson<Record<string, unknown>>("/internal/ontology/assertions/save", {
@@ -1046,7 +1251,8 @@ async function readGitHubBlob(repository: string, blobSha: string): Promise<stri
   const local = await activeGitIngestTransport?.blob(blobSha);
   if (local !== undefined) return local;
   const blob = await githubJson(`/repos/${repository}/git/blobs/${blobSha}`);
-  if (blob.encoding !== "base64" || typeof blob.content !== "string") throw new Error(`GitHub blob ${blobSha} is not base64 encoded`);
+  if (blob.encoding !== "base64" || typeof blob.content !== "string")
+    throw new Error(`GitHub blob ${blobSha} is not base64 encoded`);
   return Buffer.from(blob.content.replace(/\s/g, ""), "base64").toString("utf8");
 }
 
@@ -1059,7 +1265,11 @@ function parseCodeowners(source: string): readonly { readonly pattern: string; r
   });
 }
 
-async function submitBlobAnalyses(work: ClaimedWork, commitSha: string, analyses: readonly BlobAnalysis[]): Promise<void> {
+async function submitBlobAnalyses(
+  work: ClaimedWork,
+  commitSha: string,
+  analyses: readonly BlobAnalysis[]
+): Promise<void> {
   await internalApiJson("/internal/ontology/ingest/blobs", {
     taskId: work.task.id,
     messageId: work.message.id,
@@ -1075,7 +1285,7 @@ async function internalApiJson<T = Record<string, unknown>>(path: string, body: 
   // data calls to use the API service's longer processing window.
   const response = await apiRequest(path, body, ontologyApiTimeoutMs);
   if (!response.ok) throw new Error(`Ontology API ${path} failed with ${response.status}: ${await response.text()}`);
-  return await response.json() as T;
+  return (await response.json()) as T;
 }
 
 async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string, unknown>> {
@@ -1115,8 +1325,9 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
     }),
     signal: requestSignal(10 * 60 * 1000)
   });
-  if (!response.ok) throw new Error(`OpenAI review failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
-  const payload = await response.json() as Record<string, unknown>;
+  if (!response.ok)
+    throw new Error(`OpenAI review failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
+  const payload = (await response.json()) as Record<string, unknown>;
   const outputText = extractOutputText(payload);
   const parsed = parseReviewOutput(outputText);
   return {
@@ -1129,10 +1340,14 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
 }
 
 async function renew(work: ClaimedWork): Promise<void> {
-  const response = await apiRequest("/internal/worker/renew", {
-    messageId: work.message.id,
-    leaseId: work.message.leaseId
-  }, ontologyApiTimeoutMs);
+  const response = await apiRequest(
+    "/internal/worker/renew",
+    {
+      messageId: work.message.id,
+      leaseId: work.message.leaseId
+    },
+    ontologyApiTimeoutMs
+  );
   if (!response.ok) {
     const message = `renewal failed with ${response.status}: ${await response.text()}`;
     if (response.status === 409) throw new LeaseLostError(message);
@@ -1169,13 +1384,14 @@ function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Re
 
 async function githubJson(path: string): Promise<Record<string, unknown>> {
   const response = await githubRequest(path, "application/vnd.github+json");
-  return await response.json() as Record<string, unknown>;
+  return (await response.json()) as Record<string, unknown>;
 }
 
 async function githubJsonArray(path: string): Promise<Record<string, unknown>[]> {
   const response = await githubRequest(path, "application/vnd.github+json");
-  const value = await response.json() as unknown;
-  if (!Array.isArray(value) || value.some((item) => !isRecord(item))) throw new Error(`GitHub response ${path} is not an object array`);
+  const value = (await response.json()) as unknown;
+  if (!Array.isArray(value) || value.some((item) => !isRecord(item)))
+    throw new Error(`GitHub response ${path} is not an object array`);
   return value as Record<string, unknown>[];
 }
 
@@ -1267,16 +1483,17 @@ async function githubRequest(path: string, accept: string): Promise<Response> {
       continue;
     }
     if (response.ok) return response;
-    const rateLimited = response.status === 429 ||
-      (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0");
+    const rateLimited =
+      response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0");
     if (attempt < GITHUB_RETRY_ATTEMPTS - 1 && (rateLimited || response.status >= 500)) {
       const retryAfterSeconds = Number(response.headers.get("retry-after"));
       const resetEpochSeconds = Number(response.headers.get("x-ratelimit-reset"));
-      const waitMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
-        ? retryAfterSeconds * 1_000
-        : rateLimited && Number.isFinite(resetEpochSeconds) && resetEpochSeconds > 0
-          ? Math.max(resetEpochSeconds * 1_000 - Date.now(), GITHUB_RETRY_BASE_MS)
-          : GITHUB_RETRY_BASE_MS * 2 ** attempt;
+      const waitMs =
+        Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+          ? retryAfterSeconds * 1_000
+          : rateLimited && Number.isFinite(resetEpochSeconds) && resetEpochSeconds > 0
+            ? Math.max(resetEpochSeconds * 1_000 - Date.now(), GITHUB_RETRY_BASE_MS)
+            : GITHUB_RETRY_BASE_MS * 2 ** attempt;
       await delay(Math.min(waitMs, GITHUB_RETRY_MAX_WAIT_MS));
       continue;
     }
@@ -1303,9 +1520,7 @@ function configuredTopics(value: string | undefined): WorkerTopic[] {
     .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
-  const unknown = requested.filter((topic) =>
-    !SUPPORTED_TOPICS.includes(topic as WorkerTopic)
-  );
+  const unknown = requested.filter((topic) => !SUPPORTED_TOPICS.includes(topic as WorkerTopic));
   if (unknown.length > 0) throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
   const selected = requested as WorkerTopic[];
   if (selected.length === 0) throw new Error(`WORKER_TOPICS must contain at least one topic`);
@@ -1332,19 +1547,29 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       return {
         topic,
         message: { ...message, topic },
-        task: { id: taskId, metadata: {
-          repository: requiredString(metadata.repository, "task repository"),
-          pullRequestNumber: requiredPositiveInteger(metadata.pullRequestNumber, "task pullRequestNumber")
-        } }
+        task: {
+          id: taskId,
+          metadata: {
+            repository: requiredString(metadata.repository, "task repository"),
+            pullRequestNumber: requiredPositiveInteger(metadata.pullRequestNumber, "task pullRequestNumber")
+          }
+        }
       };
     case "run-research":
       return {
         topic,
         message: { ...message, topic },
-        task: { id: taskId, metadata: {
-          ...(metadata.question === undefined ? {} : { question: requiredString(metadata.question, "task question") }),
-          ...(metadata.sourceUrls === undefined ? {} : { sourceUrls: requiredStringArray(metadata.sourceUrls, "task sourceUrls") })
-        } }
+        task: {
+          id: taskId,
+          metadata: {
+            ...(metadata.question === undefined
+              ? {}
+              : { question: requiredString(metadata.question, "task question") }),
+            ...(metadata.sourceUrls === undefined
+              ? {}
+              : { sourceUrls: requiredStringArray(metadata.sourceUrls, "task sourceUrls") })
+          }
+        }
       };
     case "run-ontology-ingest":
       return {
@@ -1362,21 +1587,41 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       return {
         topic,
         message: { ...message, topic },
-        task: { id: taskId, metadata: {
-          ...repositoryMetadata(metadata),
-          commitSha: requiredGitSha(metadata.commitSha, "task commitSha"),
-          evidenceFingerprint: requiredString(metadata.evidenceFingerprint, "task evidenceFingerprint"),
-          ...(metadata.analysisPaths === undefined ? {} : { analysisPaths: requiredStringArray(metadata.analysisPaths, "task analysisPaths") }),
-          ...(metadata.problemEvidencePullRequestNumbers === undefined ? {} : {
-            problemEvidencePullRequestNumbers: requiredPositiveIntegerArray(metadata.problemEvidencePullRequestNumbers, "task problemEvidencePullRequestNumbers")
-          }),
-          ...(metadata.sourcePullRequestNumbers === undefined ? {} : {
-            sourcePullRequestNumbers: requiredPositiveIntegerArray(metadata.sourcePullRequestNumbers, "task sourcePullRequestNumbers")
-          }),
-          ...(metadata.resolvedPullRequestNumbers === undefined ? {} : {
-            resolvedPullRequestNumbers: requiredPositiveIntegerArray(metadata.resolvedPullRequestNumbers, "task resolvedPullRequestNumbers")
-          })
-        } }
+        task: {
+          id: taskId,
+          metadata: {
+            ...repositoryMetadata(metadata),
+            commitSha: requiredGitSha(metadata.commitSha, "task commitSha"),
+            evidenceFingerprint: requiredString(metadata.evidenceFingerprint, "task evidenceFingerprint"),
+            ...(metadata.analysisPaths === undefined
+              ? {}
+              : { analysisPaths: requiredStringArray(metadata.analysisPaths, "task analysisPaths") }),
+            ...(metadata.problemEvidencePullRequestNumbers === undefined
+              ? {}
+              : {
+                  problemEvidencePullRequestNumbers: requiredPositiveIntegerArray(
+                    metadata.problemEvidencePullRequestNumbers,
+                    "task problemEvidencePullRequestNumbers"
+                  )
+                }),
+            ...(metadata.sourcePullRequestNumbers === undefined
+              ? {}
+              : {
+                  sourcePullRequestNumbers: requiredPositiveIntegerArray(
+                    metadata.sourcePullRequestNumbers,
+                    "task sourcePullRequestNumbers"
+                  )
+                }),
+            ...(metadata.resolvedPullRequestNumbers === undefined
+              ? {}
+              : {
+                  resolvedPullRequestNumbers: requiredPositiveIntegerArray(
+                    metadata.resolvedPullRequestNumbers,
+                    "task resolvedPullRequestNumbers"
+                  )
+                })
+          }
+        }
       };
     case "run-publish":
       return { topic, message: { ...message, topic }, task: { id: taskId, metadata } };
@@ -1405,8 +1650,12 @@ function ontologyIngestMetadata(metadata: Record<string, unknown>): WorkMetadata
 }
 
 function requiredStringArray(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${name} must be a string array`);
-  return value.map((item) => item.trim()).filter(Boolean);
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
+    throw new Error(`${name} must be a string array`);
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter(Boolean);
 }
 
 function requiredPositiveIntegerArray(value: unknown, name: string): readonly number[] {

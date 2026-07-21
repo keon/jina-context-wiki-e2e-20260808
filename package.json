@@ -1,11 +1,15 @@
 {
   "name": "jina",
   "private": true,
-  "packageManager": "pnpm@11.10.0",
+  "packageManager": "pnpm@11.15.1",
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint",
+    "lint": "turbo run lint && pnpm format:check",
+    "lint:fix": "turbo run lint -- --fix && pnpm format",
+    "format": "prettier . --write",
+    "format:check": "prettier . --check",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
     "test": "turbo run test",
     "dev": "turbo run dev --filter=@jina/api --filter=@jina/dashboard",
     "simulate:pr-review": "pnpm --filter @jina/workflows simulate:pr-review",
@@ -14,8 +18,10 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "eslint": "^10.7.0",
+    "eslint-config-prettier": "^10.1.8",
     "globals": "^17.7.0",
-    "turbo": "latest",
+    "prettier": "^3.9.5",
+    "turbo": "^2.10.5",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.64.0"
   }

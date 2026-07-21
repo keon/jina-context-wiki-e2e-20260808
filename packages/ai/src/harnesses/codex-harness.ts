@@ -3,7 +3,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { HarnessStep, ModelUsageRecord, ReviewHarness, ReviewRequest, ReviewResult } from "./harness.js";
-import { buildReviewPrompt, DEFAULT_OPENROUTER_MODEL, parseReviewOutput, prepareDiff, REVIEW_FINDINGS_SCHEMA, REVIEW_SYSTEM_PROMPT } from "./review-spec.js";
+import {
+  buildReviewPrompt,
+  DEFAULT_OPENROUTER_MODEL,
+  parseReviewOutput,
+  prepareDiff,
+  REVIEW_FINDINGS_SCHEMA,
+  REVIEW_SYSTEM_PROMPT
+} from "./review-spec.js";
 
 const MAX_STEP_EVENTS = 20;
 
@@ -37,17 +44,25 @@ ${buildReviewPrompt(request, prepared)}`;
       "--json",
       "--ephemeral",
       "--skip-git-repo-check",
-      "--sandbox", "read-only",
-      "-C", workDir,
-      "--output-schema", schemaFile,
-      "--output-last-message", lastMessageFile,
+      "--sandbox",
+      "read-only",
+      "-C",
+      workDir,
+      "--output-schema",
+      schemaFile,
+      "--output-last-message",
+      lastMessageFile,
       ...(model ? ["-m", model] : []),
       ...(useOpenRouter
         ? [
-            "-c", "model_provider=openrouter",
-            "-c", "model_providers.openrouter.name=openrouter",
-            "-c", "model_providers.openrouter.base_url=https://openrouter.ai/api/v1",
-            "-c", "model_providers.openrouter.env_key=OPENROUTER_API_KEY"
+            "-c",
+            "model_provider=openrouter",
+            "-c",
+            "model_providers.openrouter.name=openrouter",
+            "-c",
+            "model_providers.openrouter.base_url=https://openrouter.ai/api/v1",
+            "-c",
+            "model_providers.openrouter.env_key=OPENROUTER_API_KEY"
           ]
         : []),
       prompt

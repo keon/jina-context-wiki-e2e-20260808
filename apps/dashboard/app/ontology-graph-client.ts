@@ -1,40 +1,40 @@
 import { Graph } from "@cosmos.gl/graph";
 import { canvasFallbackStatus, canvasGraphSlice, chooseRendererMode } from "./ontology-renderer-policy.js";
 
-type GraphNode = {
+interface GraphNode {
   id: string;
   kind: string;
   label: string;
   description?: string;
-};
+}
 
-type GraphEdge = {
+interface GraphEdge {
   id: string;
   source: string;
   target: string;
   predicate: string;
-  plane: "code" | "knowledge" | string;
-};
+  plane: string;
+}
 
 type GraphSelection = { kind: "node" | "edge"; id: string } | null;
 
-type RendererData = {
+interface RendererData {
   key: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
   labels: Record<string, string>;
-};
+}
 
-type RendererOptions = {
+interface RendererOptions {
   container: HTMLDivElement;
   labels: HTMLElement;
   minimap: HTMLCanvasElement;
   status: HTMLElement;
   onSelect: (selection: GraphSelection) => void;
   onZoomChange?: (percent: number) => void;
-};
+}
 
-type PublicRenderer = {
+interface PublicRenderer {
   setData(data: RendererData): void;
   setSelection(selection: GraphSelection): void;
   setSearchMatches(matches: Exclude<GraphSelection, null>[]): void;
@@ -42,7 +42,7 @@ type PublicRenderer = {
   zoomBy(factor: number): void;
   reset(): void;
   destroy(): void;
-};
+}
 
 declare global {
   interface Window {
@@ -93,7 +93,9 @@ class OntologyGraphRenderer implements PublicRenderer {
   private viewportGeneration = 0;
   private destroyed = false;
   private resizeObserver: ResizeObserver;
-  private readonly edgeDragStart = (event: PointerEvent) => this.beginEdgeDrag(event);
+  private readonly edgeDragStart = (event: PointerEvent) => {
+    this.beginEdgeDrag(event);
+  };
   private edgeDrag: {
     pointerId: number;
     sourceIndex: number;
@@ -157,7 +159,9 @@ class OntologyGraphRenderer implements PublicRenderer {
         const edge = this.data.edges[index];
         if (edge) this.options.onSelect({ kind: "edge", id: edge.id });
       },
-      onBackgroundClick: () => this.options.onSelect(null),
+      onBackgroundClick: () => {
+        this.options.onSelect(null);
+      },
       onPointMouseOver: (index) => {
         this.hoveredNode = index;
         this.queueLabels();
@@ -174,7 +178,9 @@ class OntologyGraphRenderer implements PublicRenderer {
         this.hoveredEdge = null;
         this.queueLabels();
       },
-      onSimulationStart: () => this.setStatus("Organizing topology…", true),
+      onSimulationStart: () => {
+        this.setStatus("Organizing topology…", true);
+      },
       onSimulationTick: () => {
         this.queueLabels();
       },
@@ -190,8 +196,12 @@ class OntologyGraphRenderer implements PublicRenderer {
         this.queueLabels();
         this.drawMinimap();
       },
-      onDragStart: () => this.stopAutoFit(),
-      onDrag: () => this.queueLabels(),
+      onDragStart: () => {
+        this.stopAutoFit();
+      },
+      onDrag: () => {
+        this.queueLabels();
+      },
       onDragEnd: () => {
         this.queueLabels();
         this.drawMinimap();
@@ -206,18 +216,22 @@ class OntologyGraphRenderer implements PublicRenderer {
     window.addEventListener("pointermove", this.moveEdgeDrag);
     window.addEventListener("pointerup", this.finishEdgeDrag);
     window.addEventListener("pointercancel", this.finishEdgeDrag);
-    void this.graph.ready.then(() => {
-      if (this.destroyed) return;
-      this.ready = true;
-      this.setStatus("GPU renderer ready", false);
-      const pendingData = this.data;
-      const pendingSearchMatches = this.searchMatches;
-      this.dataKey = "";
-      this.searchMatches = [];
-      this.setData(pendingData);
-      this.setSearchMatches(pendingSearchMatches);
-      this.queueLabels();
-    }).catch(() => onUnavailable());
+    void this.graph.ready
+      .then(() => {
+        if (this.destroyed) return;
+        this.ready = true;
+        this.setStatus("GPU renderer ready", false);
+        const pendingData = this.data;
+        const pendingSearchMatches = this.searchMatches;
+        this.dataKey = "";
+        this.searchMatches = [];
+        this.setData(pendingData);
+        this.setSearchMatches(pendingSearchMatches);
+        this.queueLabels();
+      })
+      .catch(() => {
+        onUnavailable();
+      });
   }
 
   setData(data: RendererData): void {
@@ -239,10 +253,12 @@ class OntologyGraphRenderer implements PublicRenderer {
     const previousPositions = this.positionsById();
     this.data = data;
     this.dataKey = nextKey;
-    this.graph.setConfigPartial({ simulationLinkDistance: topologyLinkDistance(data.nodes.length) } as Parameters<Graph["setConfigPartial"]>[0]);
+    this.graph.setConfigPartial({
+      simulationLinkDistance: topologyLinkDistance(data.nodes.length)
+    });
     this.nodeIndex = new Map(data.nodes.map((node, index) => [node.id, index]));
     this.edgeIndex = new Map(data.edges.map((edge, index) => [edge.id, index]));
-    this.degree = new Array(data.nodes.length).fill(0);
+    this.degree = Array.from({ length: data.nodes.length }, () => 0);
     const links = new Float32Array(data.edges.length * 2);
     const linkColors = new Float32Array(data.edges.length * 4);
     const linkWidths = new Float32Array(data.edges.length);
@@ -285,7 +301,7 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.graph.setLinkColors(linkColors);
     this.graph.setLinkWidths(linkWidths);
     this.graph.setLinkStyles(linkStyles);
-    this.graph.setLinkArrows(new Array(data.edges.length).fill(false));
+    this.graph.setLinkArrows(Array.from({ length: data.edges.length }, () => false));
     this.graph.render(0.65, 0);
     if (data.nodes.length) {
       this.graph.fitView(0, initialFitPadding(data.nodes.length), true);
@@ -446,7 +462,7 @@ class OntologyGraphRenderer implements PublicRenderer {
     this.data.nodes.forEach((node, index) => {
       const x = positions[index * 2];
       const y = positions[index * 2 + 1];
-      if (Number.isFinite(x) && Number.isFinite(y)) result.set(node.id, [x as number, y as number]);
+      if (Number.isFinite(x) && Number.isFinite(y)) result.set(node.id, [x!, y!]);
     });
     return result;
   }
@@ -494,8 +510,9 @@ class OntologyGraphRenderer implements PublicRenderer {
       if (selected !== undefined) edgeIndices.add(selected);
     } else {
       const sampled = this.graph.getSampledPoints().indices;
-      const sample = (sampled.length ? sampled : this.data.nodes.map((_node, index) => index))
-        .sort((left, right) => (this.degree[right] ?? 0) - (this.degree[left] ?? 0));
+      const sample = (sampled.length ? sampled : this.data.nodes.map((_node, index) => index)).sort(
+        (left, right) => (this.degree[right] ?? 0) - (this.degree[left] ?? 0)
+      );
       const limit = this.graph.getZoomLevel() > 4 ? 12 : 8;
       sample.slice(0, limit).forEach((index) => nodeIndices.add(index));
     }
@@ -516,11 +533,12 @@ class OntologyGraphRenderer implements PublicRenderer {
       const x = positions[index * 2];
       const y = positions[index * 2 + 1];
       if (!node || !Number.isFinite(x) || !Number.isFinite(y)) continue;
-      const screen = this.graph.spaceToScreenPosition([x as number, y as number]);
+      const screen = this.graph.spaceToScreenPosition([x!, y!]);
       if (!inside(this.options.container, screen, 46)) continue;
       const label = document.createElement("button");
       label.type = "button";
-      label.className = "cosmos-node-label" + (this.selection?.kind === "node" && this.selection.id === node.id ? " selected" : "");
+      label.className =
+        "cosmos-node-label" + (this.selection?.kind === "node" && this.selection.id === node.id ? " selected" : "");
       label.style.transform = `translate(${screen[0]}px, ${screen[1]}px)`;
       label.dataset.nodeId = node.id;
       label.setAttribute("aria-label", `${node.kind}: ${this.data.labels[node.id] ?? node.label}`);
@@ -541,20 +559,21 @@ class OntologyGraphRenderer implements PublicRenderer {
       const sourceIndex = this.nodeIndex.get(edge.source);
       const targetIndex = this.nodeIndex.get(edge.target);
       if (sourceIndex === undefined || targetIndex === undefined) continue;
-      const source = this.graph.spaceToScreenPosition([positions[sourceIndex * 2] as number, positions[sourceIndex * 2 + 1] as number]);
-      const target = this.graph.spaceToScreenPosition([positions[targetIndex * 2] as number, positions[targetIndex * 2 + 1] as number]);
+      const source = this.graph.spaceToScreenPosition([positions[sourceIndex * 2]!, positions[sourceIndex * 2 + 1]!]);
+      const target = this.graph.spaceToScreenPosition([positions[targetIndex * 2]!, positions[targetIndex * 2 + 1]!]);
       const dx = target[0] - source[0];
       const dy = target[1] - source[1];
       const length = Math.max(1, Math.hypot(dx, dy));
       const laneOffset = ((index % 7) - 3) * 10;
       const middle: [number, number] = [
-        (source[0] + target[0]) / 2 - dy / length * laneOffset,
-        (source[1] + target[1]) / 2 + dx / length * laneOffset
+        (source[0] + target[0]) / 2 - (dy / length) * laneOffset,
+        (source[1] + target[1]) / 2 + (dx / length) * laneOffset
       ];
       if (!inside(this.options.container, middle, 80)) continue;
       const label = document.createElement("button");
       label.type = "button";
-      label.className = "cosmos-edge-label" + (this.selection?.kind === "edge" && this.selection.id === edge.id ? " selected" : "");
+      label.className =
+        "cosmos-edge-label" + (this.selection?.kind === "edge" && this.selection.id === edge.id ? " selected" : "");
       label.style.transform = `translate(${middle[0]}px, ${middle[1]}px)`;
       label.dataset.edgeId = edge.id;
       label.dataset.edgeIndex = String(index);
@@ -566,8 +585,12 @@ class OntologyGraphRenderer implements PublicRenderer {
       });
       edgeFragments.push(label);
     }
-    edgeFragments.sort((left, right) => Number(left.classList.contains("selected")) - Number(right.classList.contains("selected")));
-    nodeFragments.sort((left, right) => Number(left.classList.contains("selected")) - Number(right.classList.contains("selected")));
+    edgeFragments.sort(
+      (left, right) => Number(left.classList.contains("selected")) - Number(right.classList.contains("selected"))
+    );
+    nodeFragments.sort(
+      (left, right) => Number(left.classList.contains("selected")) - Number(right.classList.contains("selected"))
+    );
     this.options.labels.replaceChildren(...edgeFragments, ...nodeFragments);
   }
 
@@ -582,11 +605,11 @@ class OntologyGraphRenderer implements PublicRenderer {
     context.scale(ratio, ratio);
     context.clearRect(0, 0, bounds.width, bounds.height);
     const positions = this.graph.getPointPositions();
-    const finite: Array<[number, number, number]> = [];
+    const finite: [number, number, number][] = [];
     this.data.nodes.forEach((_node, index) => {
       const x = positions[index * 2];
       const y = positions[index * 2 + 1];
-      if (Number.isFinite(x) && Number.isFinite(y)) finite.push([x as number, y as number, index]);
+      if (Number.isFinite(x) && Number.isFinite(y)) finite.push([x!, y!, index]);
     });
     if (!finite.length) return;
     const xs = finite.map((point) => point[0]);
@@ -740,7 +763,9 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
     this.canvas.setAttribute("aria-label", "Canvas ontology graph fallback");
     options.container.prepend(this.canvas);
     this.canvas.addEventListener("pointerdown", this.selectAtPointer);
-    this.resizeObserver = new ResizeObserver(() => this.render());
+    this.resizeObserver = new ResizeObserver(() => {
+      this.render();
+    });
     this.resizeObserver.observe(options.container);
     this.setStatus();
   }
@@ -809,10 +834,13 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
       const target = positions.get(edge.target);
       if (!source || !target) continue;
       const selected = this.selection?.kind === "edge" && this.selection.id === edge.id;
-      const highlighted = selected || matchedEdges.has(edge.id) || matchedNodes.has(edge.source) || matchedNodes.has(edge.target);
+      const highlighted =
+        selected || matchedEdges.has(edge.id) || matchedNodes.has(edge.source) || matchedNodes.has(edge.target);
       context.strokeStyle = highlighted
         ? "rgba(177, 165, 255, .9)"
-        : edge.plane === "knowledge" ? "rgba(148, 110, 186, .42)" : "rgba(92, 125, 186, .34)";
+        : edge.plane === "knowledge"
+          ? "rgba(148, 110, 186, .42)"
+          : "rgba(92, 125, 186, .34)";
       context.lineWidth = highlighted ? 1.8 : 0.7;
       context.beginPath();
       context.moveTo(source[0], source[1]);
@@ -842,12 +870,14 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
   private positions(width: number, height: number): Map<string, [number, number]> {
     const count = Math.max(1, this.data.nodes.length);
     const radius = Math.max(25, Math.min(width, height) * 0.44 * this.zoom);
-    return new Map(this.data.nodes.map((node, index) => {
-      const hash = hashString(node.id);
-      const angle = index * 2.399963229728653 + (hash % 360) * Math.PI / 180;
-      const distance = radius * Math.sqrt((index + 0.5) / count);
-      return [node.id, [width / 2 + Math.cos(angle) * distance, height / 2 + Math.sin(angle) * distance]];
-    }));
+    return new Map(
+      this.data.nodes.map((node, index) => {
+        const hash = hashString(node.id);
+        const angle = index * 2.399963229728653 + ((hash % 360) * Math.PI) / 180;
+        const distance = radius * Math.sqrt((index + 0.5) / count);
+        return [node.id, [width / 2 + Math.cos(angle) * distance, height / 2 + Math.sin(angle) * distance]];
+      })
+    );
   }
 
   private highlightedNodeIds(): Set<string> {
@@ -874,7 +904,8 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
       if (!point) return [];
       const label = document.createElement("button");
       label.type = "button";
-      label.className = "cosmos-node-label" + (this.selection?.kind === "node" && this.selection.id === node.id ? " selected" : "");
+      label.className =
+        "cosmos-node-label" + (this.selection?.kind === "node" && this.selection.id === node.id ? " selected" : "");
       label.style.transform = `translate(${point[0]}px, ${point[1]}px)`;
       label.dataset.nodeId = node.id;
       const name = document.createElement("span");
@@ -907,7 +938,12 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
       const distance = Math.min(bounds.width, bounds.height) * 0.42 * Math.sqrt((index + 0.5) / count);
       const color = NODE_COLORS[node.kind] ?? DEFAULT_NODE_COLOR;
       context.fillStyle = rgba(color, 0.75);
-      context.fillRect(bounds.width / 2 + Math.cos(angle) * distance, bounds.height / 2 + Math.sin(angle) * distance, 1.5, 1.5);
+      context.fillRect(
+        bounds.width / 2 + Math.cos(angle) * distance,
+        bounds.height / 2 + Math.sin(angle) * distance,
+        1.5,
+        1.5
+      );
     }
   }
 
@@ -967,9 +1003,15 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
     this.renderer.setSearchMatches(matches);
   }
 
-  fit(): void { this.renderer.fit(); }
-  zoomBy(factor: number): void { this.renderer.zoomBy(factor); }
-  reset(): void { this.renderer.reset(); }
+  fit(): void {
+    this.renderer.fit();
+  }
+  zoomBy(factor: number): void {
+    this.renderer.zoomBy(factor);
+  }
+  reset(): void {
+    this.renderer.reset();
+  }
 
   destroy(): void {
     this.destroyed = true;
@@ -982,7 +1024,9 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
       return new CanvasOntologyGraphRenderer(this.options);
     }
     try {
-      return new OntologyGraphRenderer(this.options, () => this.fallbackToCanvas());
+      return new OntologyGraphRenderer(this.options, () => {
+        this.fallbackToCanvas();
+      });
     } catch {
       this.usingCanvas = true;
       return new CanvasOntologyGraphRenderer(this.options);
@@ -1019,7 +1063,7 @@ function rgba(color: readonly [number, number, number, number], alpha: number): 
 
 function seedPosition(id: string, index: number, total: number): [number, number] {
   const hash = hashString(id);
-  const angle = index * 2.399963229728653 + (hash % 360) * Math.PI / 180;
+  const angle = index * 2.399963229728653 + ((hash % 360) * Math.PI) / 180;
   const radius = 12 + Math.sqrt(index + 1) * Math.max(4.5, 120 / Math.sqrt(Math.max(1, total)));
   const jitter = ((hash >>> 8) % 1000) / 1000;
   return [Math.cos(angle) * radius * (0.85 + jitter * 0.3), Math.sin(angle) * radius * (0.85 + (1 - jitter) * 0.3)];
@@ -1052,7 +1096,12 @@ function hashString(value: string): number {
 }
 
 function inside(container: HTMLElement, point: [number, number], padding: number): boolean {
-  return point[0] >= -padding && point[1] >= -padding && point[0] <= container.clientWidth + padding && point[1] <= container.clientHeight + padding;
+  return (
+    point[0] >= -padding &&
+    point[1] >= -padding &&
+    point[0] <= container.clientWidth + padding &&
+    point[1] <= container.clientHeight + padding
+  );
 }
 
 function truncate(value: string, limit: number): string {
@@ -1060,7 +1109,10 @@ function truncate(value: string, limit: number): string {
 }
 
 function humanize(value: string): string {
-  return value.replace(/_/g, " ").replace(/([a-z])([A-Z])/g, "$1 $2").replace(/^./, (letter) => letter.toUpperCase());
+  return value
+    .replace(/_/g, " ")
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/^./, (letter) => letter.toUpperCase());
 }
 
 window.JinaOntologyGraph = {
