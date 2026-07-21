@@ -26,6 +26,7 @@ const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini";
 const WORK_DIR = "/home/daytona/ontology";
 const REPO_DIR = `${WORK_DIR}/repo`;
+const CODEX_LOCAL_BIN = `${WORK_DIR}/node_modules/.bin/codex`;
 const SCHEMA_PATH = `${WORK_DIR}/ontology-schema.json`;
 const EVIDENCE_PATH = `${WORK_DIR}/source-evidence.json`;
 const RESULT_PATH = `${WORK_DIR}/ontology-result.json`;
@@ -62,21 +63,33 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
     const daytona = new Daytona({ apiKey: daytonaApiKey });
     let sandbox: Sandbox | undefined;
     try {
-      sandbox = await daytona.create(
-        {
-          language: "typescript",
-          image: process.env.DAYTONA_SANDBOX_IMAGE?.trim() || DEFAULT_IMAGE,
-          resources: sandboxResources(),
-          envVars: { NODE_ENV: "production" },
-          autoDeleteInterval: 60
-        },
-        { timeout: positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 300) }
-      );
+      const snapshot = process.env.DAYTONA_SNAPSHOT?.trim();
+      const createOptions = { timeout: positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 300) };
+      sandbox = snapshot
+        ? await daytona.create(
+            {
+              language: "typescript",
+              snapshot,
+              envVars: { NODE_ENV: "production" },
+              autoDeleteInterval: 60
+            },
+            createOptions
+          )
+        : await daytona.create(
+            {
+              language: "typescript",
+              image: process.env.DAYTONA_SANDBOX_IMAGE?.trim() || DEFAULT_IMAGE,
+              resources: sandboxResources(),
+              envVars: { NODE_ENV: "production" },
+              autoDeleteInterval: 60
+            },
+            createOptions
+          );
 
       request.signal?.throwIfAborted();
       await cloneRepository(sandbox, request, cloneToken);
       if (request.commitSha) await checkoutExpectedCommit(sandbox, request.commitSha);
-      await prepareCodex(sandbox);
+      const codexBinary = await prepareCodex(sandbox, Boolean(snapshot));
       const input = await writeInputFiles(sandbox, request, outputSchema, systemPrompt);
       request.signal?.throwIfAborted();
       const basePrompt = input.prompt;
@@ -113,7 +126,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
           );
         }
         const codexCommand = [
-            `${WORK_DIR}/node_modules/.bin/codex`,
+            shellQuote(codexBinary),
             "exec",
             "--json",
             "--ephemeral",
@@ -260,7 +273,18 @@ function selectedModel(provider: "openai" | "openrouter"): string {
 
 async function cloneRepository(sandbox: Sandbox, request: OntologyBuildRequest, token?: string): Promise<void> {
   const url = `https://github.com/${request.repository}.git`;
-  await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, token ? "x-access-token" : undefined, token);
+  const username = token ? "x-access-token" : undefined;
+  try {
+    // Shallow clone of the requested ref; the pinned commit is fetched shallowly
+    // afterwards by checkoutExpectedCommit when the ref has moved past it.
+    await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, username, token, undefined, 1);
+    return;
+  } catch {
+    // Shallow clone is a fast path only: discard any partial checkout and retry
+    // with the original full clone below.
+    await sandbox.process.executeCommand(`rm -rf ${shellQuote(REPO_DIR)}`, undefined, undefined, 60).catch(() => undefined);
+  }
+  await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, username, token);
 }
 
 async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Promise<void> {
@@ -272,7 +296,18 @@ async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Prom
     60
   );
   if (ensureCommit.exitCode !== 0) {
-    throw new Error(`Unable to fetch prepared commit ${commitSha}: ${truncate(ensureCommit.result)}`);
+    // Shallow fetch of the exact SHA can fail on servers that refuse SHA wants;
+    // deepen on demand before giving up. --unshallow itself fails on a full clone,
+    // where the commit was already proven unreachable above.
+    const deepen = await sandbox.process.executeCommand(
+      `git fetch --unshallow origin && git cat-file -e ${shellQuote(`${commitSha}^{commit}`)}`,
+      REPO_DIR,
+      undefined,
+      positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 300)
+    );
+    if (deepen.exitCode !== 0) {
+      throw new Error(`Unable to fetch prepared commit ${commitSha}: ${truncate(ensureCommit.result)}`);
+    }
   }
   const checkout = await sandbox.process.executeCommand(
     `git checkout --detach ${shellQuote(commitSha)}`,
@@ -285,9 +320,13 @@ async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Prom
   }
 }
 
-async function prepareCodex(sandbox: Sandbox): Promise<void> {
+async function prepareCodex(sandbox: Sandbox, preferExistingCodex: boolean): Promise<string> {
   const mkdir = await sandbox.process.executeCommand(`mkdir -p ${shellQuote(WORK_DIR)}`, undefined, undefined, 60);
   if (mkdir.exitCode !== 0) throw new Error(`Daytona workspace setup failed: ${truncate(mkdir.result)}`);
+  if (preferExistingCodex) {
+    const existing = await findExistingCodex(sandbox);
+    if (existing) return existing;
+  }
   const install = await sandbox.process.executeCommand(
     "npm init -y >/dev/null && npm install --silent @openai/codex@0.144.0 >/dev/null",
     WORK_DIR,
@@ -295,6 +334,21 @@ async function prepareCodex(sandbox: Sandbox): Promise<void> {
     positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 600)
   );
   if (install.exitCode !== 0) throw new Error(`Codex installation failed: ${truncate(install.result)}`);
+  return CODEX_LOCAL_BIN;
+}
+
+export async function findExistingCodex(
+  sandbox: { readonly process: Pick<Sandbox["process"], "executeCommand"> }
+): Promise<string | undefined> {
+  const probe = await sandbox.process.executeCommand(
+    `if ${shellQuote(CODEX_LOCAL_BIN)} --version >/dev/null 2>&1; then echo ${shellQuote(CODEX_LOCAL_BIN)}; elif command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1; then command -v codex; fi`,
+    WORK_DIR,
+    undefined,
+    60
+  );
+  if (probe.exitCode !== 0) return undefined;
+  const found = probe.result.trim().split("\n").pop()?.trim();
+  return found?.startsWith("/") ? found : undefined;
 }
 
 async function writeInputFiles(

@@ -47,6 +47,7 @@ import { DomainError } from "@jina/shared-kernel";
 export interface OntologyGraphStore extends OntologyPipelineStore, RepositoryContextOperations {
   save(graph: OntologyGraph, writeFence?: OntologyWriteFence): Promise<void>;
   latest(tenantId: string): Promise<OntologyGraph | undefined>;
+  currentGraphHead(tenantId: string, repository: string, ref: string): Promise<{ readonly graphId: string; readonly commitSha: string } | undefined>;
   get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
   list(tenantId: string): Promise<readonly OntologyGraph[]>;
   listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]>;
@@ -77,6 +78,15 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return (await this.list(tenantId))[0];
   }
 
+  async currentGraphHead(
+    tenantId: string,
+    repository: string,
+    ref: string
+  ): Promise<{ readonly graphId: string; readonly commitSha: string } | undefined> {
+    const head = (await this.list(tenantId)).find((graph) => graph.repository === repository && graph.ref === ref);
+    return head ? { graphId: head.id, commitSha: head.commitSha } : undefined;
+  }
+
   async get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined> {
     const graph = this.graphs.get(graphId);
     return graph?.tenantId === tenantId ? graph : undefined;
@@ -102,26 +112,50 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
 
   async planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan> {
     this.assertRepositoryWritable(snapshot.tenantId, snapshot.repository);
+    const parent = snapshot.parents[0]
+      ? this.snapshots.get(snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.parents[0]))
+      : undefined;
+    // Delta snapshots reconstruct the full tree exactly like the PostgreSQL
+    // store so both backends record identical manifests.
+    let files = snapshot.files;
+    if (snapshot.mode === "delta") {
+      if (!snapshot.parents[0]) throw new DomainError("delta snapshot requires a recorded first parent", "conflict");
+      if (snapshot.files.length > 0) throw new DomainError("delta snapshot must not carry a full tree", "conflict");
+      // The live ref head must always arrive as a full tree so retained blobs
+      // with missing parser analyses are re-discovered every build.
+      if (snapshot.updateRef !== false) {
+        throw new DomainError("delta snapshot cannot move the live ref; head commits require a full tree", "conflict");
+      }
+      if (!parent) throw new DomainError("delta snapshot parent tree is not recorded", "conflict");
+      const tree = new Map(parent.files.map((file) => [file.path, file]));
+      for (const delta of snapshot.deltas ?? []) {
+        if (delta.blobSha === null) tree.delete(delta.path);
+        else tree.set(delta.path, { path: delta.path, blobSha: delta.blobSha, size: delta.size });
+      }
+      files = [...tree.values()];
+    }
     const key = snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.commitSha);
-    if (!this.snapshots.has(key)) this.snapshots.set(key, structuredClone(snapshot));
+    const { mode: _mode, deltas: _deltas, ...snapshotWithoutDelta } = snapshot;
+    if (!this.snapshots.has(key)) this.snapshots.set(key, structuredClone({ ...snapshotWithoutDelta, files }));
+    const blobSource = snapshot.mode === "delta"
+      ? files.filter((file) => (snapshot.deltas ?? []).some((delta) => delta.path === file.path && delta.blobSha !== null))
+      : files;
     const firstPathByBlob = new Map<string, { readonly path: string; readonly size: number }>();
-    for (const file of snapshot.files) {
+    for (const file of blobSource) {
       if (!firstPathByBlob.has(file.blobSha)) firstPathByBlob.set(file.blobSha, { path: file.path, size: file.size });
     }
     const missingBlobs = [...firstPathByBlob].flatMap(([blobSha, file]) =>
       this.blobAnalyses.has(blobKey(snapshot.tenantId, blobSha, ONTOLOGY_PARSER_VERSION)) ? [] : [{ blobSha, ...file }]
     );
-    const parent = snapshot.parents[0]
-      ? this.snapshots.get(snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.parents[0]))
-      : undefined;
-    const changes = computeCommitChanges(snapshot.files, parent?.files);
+    const changes = computeCommitChanges(files, parent?.files);
     const changedPaths = changes.filter((change) => change.change !== "delete").map((change) => change.path);
+    const discoveredBlobCount = new Set(files.map((file) => file.blobSha)).size;
     return {
       observationId: sourceObservationId(snapshot),
       commitSha: snapshot.commitSha,
-      fileCount: snapshot.files.length,
-      discoveredBlobCount: firstPathByBlob.size,
-      reusedBlobCount: firstPathByBlob.size - missingBlobs.length,
+      fileCount: files.length,
+      discoveredBlobCount,
+      reusedBlobCount: discoveredBlobCount - missingBlobs.length,
       changedPaths,
       changes,
       missingBlobs

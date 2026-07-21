@@ -227,6 +227,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           [graph.tenantId, graph.repository, graph.id, graph.generatedAt, graph.commitSha]
         );
       }
+      await reassertPipelineWriteFence(client, writeFence);
       await client.query("commit");
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
@@ -255,6 +256,23 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
        where jina_ontology.repository_acl.role is distinct from excluded.role`,
       [tenantId, principalId, repositories]
     );
+  }
+
+  /** The durable graph generation currently published for a ref, if any. */
+  async currentGraphHead(
+    tenantId: string,
+    repository: string,
+    ref: string
+  ): Promise<{ readonly graphId: string; readonly commitSha: string } | undefined> {
+    await this.initialize();
+    const head = await this.pool.query<{ graph_id: string; commit_sha: string }>(
+      `select head.graph_id,graph.commit_sha from jina_ontology.graph_heads head
+       join jina_ontology.graphs graph on graph.id=head.graph_id
+       where head.tenant_id=$1 and head.repository=$2 and head.ref_name=$3 limit 1`,
+      [tenantId, repository, ref]
+    );
+    const row = head.rows[0];
+    return row ? { graphId: row.graph_id, commitSha: row.commit_sha } : undefined;
   }
 
   async latest(tenantId: string): Promise<OntologyGraph | undefined> {
@@ -328,6 +346,37 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         ...(authorExternalId ? { authorExternalId } : {}),
         ...(message !== undefined ? { message } : {})
       };
+      const parentSha = snapshot.parents[0];
+      const parentManifest = parentSha
+        ? await client.query<{ path: string; blob_sha: string }>(
+            `select path,blob_sha from jina_ontology.commit_manifest($1,$2,$3)`,
+            [snapshot.tenantId, snapshot.repository, parentSha]
+          )
+        : { rows: [] as { path: string; blob_sha: string }[] };
+      let files = snapshot.files;
+      if (snapshot.mode === "delta") {
+        if (!parentSha) throw new DomainError("delta snapshot requires a recorded first parent", "conflict");
+        if (snapshot.files.length > 0) throw new DomainError("delta snapshot must not carry a full tree", "conflict");
+        // Delta planning checks the parser backlog only for changed blobs, so
+        // the live ref head must always arrive as a full tree: that pass is
+        // what re-discovers retained blobs whose analyses are still missing.
+        if (snapshot.updateRef !== false) {
+          throw new DomainError("delta snapshot cannot move the live ref; head commits require a full tree", "conflict");
+        }
+        const parentRecorded = await client.query(
+          `select 1 from jina_ontology.commits where tenant_id=$1 and repository=$2 and sha=$3 and tree_recorded`,
+          [snapshot.tenantId, snapshot.repository, parentSha]
+        );
+        if (parentRecorded.rowCount !== 1) throw new DomainError("delta snapshot parent tree is not recorded", "conflict");
+        const tree = new Map<string, { path: string; blobSha: string; size: number }>(
+          parentManifest.rows.map((row) => [row.path, { path: row.path, blobSha: row.blob_sha, size: 0 }])
+        );
+        for (const delta of snapshot.deltas ?? []) {
+          if (delta.blobSha === null) tree.delete(delta.path);
+          else tree.set(delta.path, { path: delta.path, blobSha: delta.blobSha, size: delta.size });
+        }
+        files = [...tree.values()];
+      }
       const observationId = sourceObservationId(snapshot);
       await client.query(
         `insert into jina_ontology.observations
@@ -337,18 +386,23 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
         [observationId, snapshot.tenantId, `${snapshot.repository}:${snapshot.commitSha}`, snapshot.repository,
           snapshot.recordedAt, JSON.stringify(filteredSnapshot), stableId("sha", JSON.stringify(filteredSnapshot))]
       );
+      if (files.length > 0) {
+        await client.query(
+          `insert into jina_ontology.trees (tenant_id,tree_sha,paths,blob_shas)
+           values ($1,$2,$3,$4) on conflict do nothing`,
+          [snapshot.tenantId, snapshot.treeSha, files.map((file) => file.path), files.map((file) => file.blobSha)]
+        );
+      }
       await client.query(
         `insert into jina_ontology.commits
           (tenant_id,repository,sha,tree_sha,parents,author_external_id,committed_at,message,source_observation_id,
            tree_paths,tree_blob_shas,tree_recorded)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,'{}','{}',true)
         on conflict (tenant_id,repository,sha) do update set
-           tree_paths=case when jina_ontology.commits.tree_recorded then jina_ontology.commits.tree_paths else excluded.tree_paths end,
-           tree_blob_shas=case when jina_ontology.commits.tree_recorded then jina_ontology.commits.tree_blob_shas else excluded.tree_blob_shas end,
+           tree_sha=excluded.tree_sha,
            tree_recorded=true`,
         [snapshot.tenantId, snapshot.repository, snapshot.commitSha, snapshot.treeSha, snapshot.parents,
-          authorExternalId ?? null, snapshot.committedAt ?? null, message ?? null, observationId,
-          snapshot.files.map((file) => file.path), snapshot.files.map((file) => file.blobSha)]
+          authorExternalId ?? null, snapshot.committedAt ?? null, message ?? null, observationId]
       );
       const steadyStateEventAt = snapshot.updateRef !== false ? snapshot.recordedAt : undefined;
       const repositoryEntityId = await ensureEntity(client, snapshot.tenantId, {
@@ -384,8 +438,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           [snapshot.tenantId, snapshot.repository, snapshot.ref, snapshot.commitSha, snapshot.isDefaultRef ?? snapshot.ref === "main", snapshot.recordedAt]
         );
       }
-      if (snapshot.files.length > 0) {
-        const uniqueBlobs = [...new Map(snapshot.files.map((file) => [file.blobSha, file.size])).entries()];
+      const blobSource = snapshot.mode === "delta"
+        ? files.filter((file) => (snapshot.deltas ?? []).some((delta) => delta.path === file.path && delta.blobSha !== null))
+        : files;
+      if (blobSource.length > 0) {
+        const uniqueBlobs = [...new Map(blobSource.map((file) => [file.blobSha, file.size])).entries()];
         await client.query(
           `insert into jina_ontology.blobs (tenant_id,blob_sha,byte_size)
            select $1,source.blob_sha,source.byte_size
@@ -401,17 +458,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          left join jina_ontology.blob_analyses a
            on a.tenant_id=$1 and a.blob_sha=source.blob_sha and a.parser_version=$4
          where a.blob_sha is null order by source.blob_sha,source.path`,
-        [snapshot.tenantId, snapshot.files.map((file) => file.path),
-          snapshot.files.map((file) => file.blobSha), ONTOLOGY_PARSER_VERSION]
+        [snapshot.tenantId, blobSource.map((file) => file.path),
+          blobSource.map((file) => file.blobSha), ONTOLOGY_PARSER_VERSION]
       );
-      const parentFiles = snapshot.parents[0]
-        ? await client.query<{ path: string; blob_sha: string }>(
-            `select path,blob_sha from jina_ontology.commit_manifest($1,$2,$3)`,
-            [snapshot.tenantId, snapshot.repository, snapshot.parents[0]]
-          )
-        : { rows: [] as { path: string; blob_sha: string }[] };
-      const parentTree = parentFiles.rows.map((file) => ({ path: file.path, blobSha: file.blob_sha, size: 0 }));
-      const changes = computeCommitChanges(snapshot.files, parentTree);
+      const parentTree = parentManifest.rows.map((file) => ({ path: file.path, blobSha: file.blob_sha, size: 0 }));
+      const changes = computeCommitChanges(files, parentTree);
       if (changes.length > 0) {
         await client.query(
           `insert into jina_ontology.commit_changes
@@ -437,12 +488,13 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           repoId: snapshot.repository, refName: snapshot.ref, oldSha: oldRefSha ?? null, newSha: snapshot.commitSha
         }, snapshot.recordedAt);
       }
+      await reassertPipelineWriteFence(client, writeFence);
       await client.query("commit");
-      const discoveredBlobCount = new Set(snapshot.files.map((file) => file.blobSha)).size;
+      const discoveredBlobCount = new Set(files.map((file) => file.blobSha)).size;
       return {
         observationId,
         commitSha: snapshot.commitSha,
-        fileCount: snapshot.files.length,
+        fileCount: files.length,
         discoveredBlobCount,
         reusedBlobCount: discoveredBlobCount - missing.rows.length,
         changedPaths: changes.filter((change) => change.change !== "delete").map((change) => change.path),
@@ -548,6 +600,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           );
         }
       }
+      await reassertPipelineWriteFence(client, writeFence);
       await client.query("commit");
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
@@ -752,6 +805,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           }
         }
       }
+      if (observations[0]) await reassertPipelineWriteFence(client, writeFence);
       await client.query("commit");
       return {
         observationCount: observations.length,
@@ -912,6 +966,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           }, batch.generatedAt);
         }
       }
+      await reassertPipelineWriteFence(client, writeFence);
       await client.query("commit");
       const result = await this.assertionResult(
         batch.tenantId,
@@ -1503,6 +1558,89 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
+  /**
+   * Event-scoped search projection: replaces only the documents named by the
+   * drained events instead of deleting and rebuilding the repository's whole
+   * index. Redirect, redaction, and tombstone events still take the full
+   * rebuild path.
+   */
+  private async upsertSearchDocuments(
+    tenantId: string,
+    repository: string,
+    observationIds: readonly string[],
+    entityIds: readonly string[],
+    now: string
+  ): Promise<void> {
+    if (observationIds.length === 0 && entityIds.length === 0) return;
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await assertRepositoryWritable(client, tenantId, repository);
+      const documents = await client.query<{ id: string; title: string; body: string; source_kind: string }>(
+        `select id,source || ':' || type as title,
+                case when type='source_snapshot' then '' else coalesce(payload::text,'') end as body,
+                'observation' as source_kind
+         from jina_ontology.observations
+         where tenant_id=$1 and repository=$2 and redacted_at is null and id=any($3::text[])
+         union all
+         select distinct e.id,e.display_name as title,e.natural_key as body,'entity' as source_kind
+         from jina_ontology.entities e
+         where e.tenant_id=$1 and e.retired_at is null and e.id=any($4::text[]) and (
+           e.natural_key='github:repo:' || $2 or
+           starts_with(e.natural_key,'repo:' || $2 || ':') or
+           starts_with(e.natural_key,'github:pr:' || $2 || '#') or
+           starts_with(e.natural_key,'github:issue:' || $2 || '#') or
+           exists (
+             select 1 from jina_ontology.assertions a
+             where a.tenant_id=$1 and a.repository=$2 and (a.subject_id=e.id or a.object_id=e.id)
+           )
+         )`,
+        [tenantId, repository, observationIds, entityIds]
+      );
+      const redirects = await client.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
+        `select from_entity_id,to_entity_id,kind from jina_ontology.entity_redirects
+         where tenant_id=$1 and from_entity_id=any($2::text[]) order by created_at,id`,
+        [tenantId, entityIds]
+      );
+      const scopedRedirectMap = redirectMap(redirects.rows);
+      const projected = documents.rows.filter((document) =>
+        document.source_kind !== "entity" || resolveRedirect(scopedRedirectMap, document.id) === document.id);
+      await client.query(
+        `delete from jina_ontology.search_documents
+         where tenant_id=$1 and repository=$2 and (
+           (source_kind='observation' and source_id=any($3::text[])) or
+           (source_kind='entity' and source_id=any($4::text[])))`,
+        [tenantId, repository, observationIds, entityIds]
+      );
+      if (projected.length > 0) {
+        await client.query(
+          `insert into jina_ontology.search_documents
+            (id,tenant_id,repository,source_kind,source_id,title,body,embedding,projected_at)
+           select source.id,$1,$2,source.source_kind,source.source_id,source.title,source.body,
+                  (select array_agg(element.value::float8 order by element.ordinality)
+                   from jsonb_array_elements_text(source.embedding) with ordinality as element(value,ordinality)),
+                  $3
+           from unnest($4::text[],$5::text[],$6::text[],$7::text[],$8::text[],$9::jsonb[])
+             as source(id,source_kind,source_id,title,body,embedding)
+           on conflict (tenant_id,repository,source_kind,source_id) do update set
+             title=excluded.title,body=excluded.body,
+             embedding=excluded.embedding,projected_at=excluded.projected_at`,
+          [tenantId, repository, now,
+            projected.map((document) => stableId("search", `${tenantId}:${repository}:${document.source_kind}:${document.id}`)),
+            projected.map((document) => document.source_kind), projected.map((document) => document.id),
+            projected.map((document) => document.title), projected.map((document) => document.body),
+            projected.map((document) => JSON.stringify(embeddingForText(`${document.title} ${document.body}`)))]
+        );
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async drainDerivedProjectionEvents(
     tenantId: string,
     now: string
@@ -1510,10 +1648,19 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     await this.initialize();
     const rebuiltRepositories = new Set<string>();
     let processedEventCount = 0;
+    // A repository whose ingest stage is mid-flight would have its projections
+    // rebuilt once per drain while blob batches stream in; its events stay
+    // pending and retry shortly after the ingest completes.
+    const activeIngests = await this.pool.query<{ repository: string }>(
+      `select distinct repository from jina_board.tasks
+       where tenant_id=$1 and stage='ingest' and status='in_progress'`,
+      [tenantId]
+    ).catch(() => ({ rows: [] as { repository: string }[] }));
+    const suppressedRepositories = new Set(activeIngests.rows.map((row) => row.repository));
     const consumers = ["legacy", "manifest", "search", "reconciliation", "graph"] as const;
     for (const consumer of consumers) {
       const claimOwner = `projection:${consumer}:${randomUUID()}`;
-      const claimed = await this.pool.query<{ id: string; repository: string | null }>(
+      const allClaimed = await this.pool.query<{ id: string; repository: string | null; event_type: string; payload: Record<string, unknown> }>(
         `with candidates as (
            select id,coalesce(payload->>'repoId',payload#>>'{scope,repository}') as repository
            from jina_ontology.outbox
@@ -1523,9 +1670,22 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
          )
          update jina_ontology.outbox o
          set claimed_by=$4,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
-         from candidates where o.id=candidates.id returning o.id,candidates.repository`,
+         from candidates where o.id=candidates.id returning o.id,candidates.repository,o.event_type,o.payload`,
         [tenantId, now, consumer, claimOwner]
       );
+      if (allClaimed.rows.length === 0) continue;
+      const suppressed = allClaimed.rows.filter((row) =>
+        suppressedRepositories.size > 0 && (row.repository === null || suppressedRepositories.has(row.repository)));
+      const suppressedIds = new Set(suppressed.map((row) => row.id));
+      if (suppressedIds.size > 0) {
+        await this.pool.query(
+          `update jina_ontology.outbox
+           set claimed_by=null,claimed_at=null,claim_expires_at=null,available_at=now()+interval '30 seconds'
+           where id=any($1::text[]) and claimed_by=$2`,
+          [[...suppressedIds], claimOwner]
+        );
+      }
+      const claimed = { rows: allClaimed.rows.filter((row) => !suppressedIds.has(row.id)) };
       if (claimed.rows.length === 0) continue;
       const ids = claimed.rows.map((row) => row.id);
       const affectedRepositories = new Set(claimed.rows.flatMap((row) => row.repository ? [row.repository] : []));
@@ -1557,7 +1717,18 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
           );
           if (refs.rows.length === 0) continue;
           if (consumer === "search") {
-            await this.rebuildDerivedProjections(tenantId, repository, refs.rows[0]!.ref_name, now, true, ["search"]);
+            const scopedTypes = new Set(["observation_recorded", "entity_changed", "identity_changed"]);
+            const relevant = claimed.rows.filter((row) => row.repository === null || row.repository === repository);
+            if (relevant.length > 0 && relevant.every((row) => scopedTypes.has(row.event_type))) {
+              await this.upsertSearchDocuments(
+                tenantId, repository,
+                relevant.flatMap((row) => row.event_type === "observation_recorded" && typeof row.payload.observationId === "string" ? [row.payload.observationId] : []),
+                relevant.flatMap((row) => row.event_type === "entity_changed" && typeof row.payload.entityId === "string" ? [row.payload.entityId] : []),
+                now
+              );
+            } else {
+              await this.rebuildDerivedProjections(tenantId, repository, refs.rows[0]!.ref_name, now, true, ["search"]);
+            }
           } else if (consumer === "manifest") {
             for (const row of refs.rows) {
               await this.rebuildDerivedProjections(tenantId, repository, row.ref_name, now, true, ["manifest"]);
@@ -2309,9 +2480,18 @@ async function assertPipelineWriteFence(
   const result = await client.query(
     `select 1 from jina_board.tasks
      where id=$1 and tenant_id=$2 and repository=$3 and topic=$4
-       and lease_id=$5 and status='in_progress' and lease_expires_at>now()
-     for update`,
+       and lease_id=$5 and status='in_progress' and lease_expires_at>now()`,
     [writeFence.stageId, tenantId, repository, topic, writeFence.leaseId]
+  );
+  if (result.rowCount !== 1) throw new DomainError("stale ontology worker lease", "conflict");
+}
+
+async function reassertPipelineWriteFence(client: PoolClient, writeFence?: OntologyWriteFence): Promise<void> {
+  if (!writeFence) return;
+  const result = await client.query(
+    `select 1 from jina_board.tasks
+     where id=$1 and lease_id=$2 and status='in_progress' and lease_expires_at>now()`,
+    [writeFence.stageId, writeFence.leaseId]
   );
   if (result.rowCount !== 1) throw new DomainError("stale ontology worker lease", "conflict");
 }
@@ -3627,6 +3807,20 @@ export const ONTOLOGY_SCHEMA_SQL = `
       alter table jina_ontology.commits drop constraint if exists commits_tree_arrays_match;
       alter table jina_ontology.commits add constraint commits_tree_arrays_match
         check (cardinality(tree_paths)=cardinality(tree_blob_shas));
+      create table if not exists jina_ontology.trees (
+        tenant_id text not null,
+        tree_sha text not null,
+        paths text[] not null,
+        blob_shas text[] not null,
+        primary key (tenant_id,tree_sha),
+        constraint trees_arrays_match check (cardinality(paths)=cardinality(blob_shas))
+      );
+      insert into jina_ontology.trees (tenant_id,tree_sha,paths,blob_shas)
+      select distinct on (tenant_id,tree_sha) tenant_id,tree_sha,tree_paths,tree_blob_shas
+      from jina_ontology.commits
+      where tree_recorded and cardinality(tree_paths) > 0
+      order by tenant_id,tree_sha
+      on conflict do nothing;
       create table if not exists jina_ontology.refs (
         tenant_id text not null,
         repository text not null,
@@ -3676,14 +3870,23 @@ export const ONTOLOGY_SCHEMA_SQL = `
       language sql stable parallel safe
       as $manifest$
         with recursive target as (
-          select tree_paths,tree_blob_shas,tree_recorded
+          select tree_sha,tree_paths,tree_blob_shas,tree_recorded
           from jina_ontology.commits
           where tenant_id=p_tenant_id and repository=p_repository and sha=p_commit_sha
         ), exact_tree as (
           select entry.path,entry.blob_sha
           from target
-          cross join lateral unnest(target.tree_paths,target.tree_blob_shas) as entry(path,blob_sha)
+          join jina_ontology.trees tree on tree.tenant_id=p_tenant_id and tree.tree_sha=target.tree_sha
+          cross join lateral unnest(tree.paths,tree.blob_shas) as entry(path,blob_sha)
           where target.tree_recorded
+          union all
+          select entry.path,entry.blob_sha
+          from target
+          cross join lateral unnest(target.tree_paths,target.tree_blob_shas) as entry(path,blob_sha)
+          where target.tree_recorded and not exists (
+            select 1 from jina_ontology.trees tree
+            where tree.tenant_id=p_tenant_id and tree.tree_sha=target.tree_sha
+          )
         ), ancestry(sha,depth,visited) as (
           select p_commit_sha,0,array[p_commit_sha]
           where not coalesce((select tree_recorded from target),false)

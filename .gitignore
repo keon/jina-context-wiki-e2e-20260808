@@ -8,3 +8,6 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Claude Code agent worktrees (session-local)
+.claude/worktrees/

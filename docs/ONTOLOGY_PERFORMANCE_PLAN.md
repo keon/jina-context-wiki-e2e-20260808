@@ -223,3 +223,19 @@ Risks and mitigations:
   separately if soak surfaces anything; each is independently revertible.
 - Model-call floor: after this train, semantic asserts bound build time; the
   next lever is assert batching/parallelism, out of scope here.
+
+## Operations
+
+One-time IAM grant (owner-run, not CI): the deploy acceptance step dumps
+worker/API logs on failure, and the `github-deployer` service account currently
+gets `PERMISSION_DENIED` from Cloud Logging, so the dump step fails. A project
+owner must run once:
+
+```
+gcloud projects add-iam-policy-binding jina-v2 \
+  --member=serviceAccount:github-deployer@jina-v2.iam.gserviceaccount.com \
+  --role=roles/logging.viewer
+```
+
+We deliberately do not grant IAM from the workflow itself — the deployer should
+not hold `resourcemanager.projects.setIamPolicy`.

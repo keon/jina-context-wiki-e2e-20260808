@@ -130,8 +130,11 @@ export interface OntologyPipelineCoordinator {
     readonly value: Readonly<Record<string, unknown>>;
     readonly now: string;
   }): Promise<boolean>;
-  list(tenantId: string): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]>;
-  listEvents(tenantId: string): Promise<readonly OntologyTaskBoardEvent[]>;
+  list(
+    tenantId: string,
+    filter?: { readonly repositories?: readonly string[] }
+  ): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]>;
+  listEvents(tenantId: string, filter?: { readonly taskIds?: readonly string[] }): Promise<readonly OntologyTaskBoardEvent[]>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }
@@ -303,19 +306,28 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     return true;
   }
 
-  async list(tenantId: string): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]> {
-    return [...this.builds.values()].filter((build) => build.tenantId === tenantId).map((build) => ({
+  async list(
+    tenantId: string,
+    filter?: { readonly repositories?: readonly string[] }
+  ): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]> {
+    const repositories = filter?.repositories ? new Set(filter.repositories) : undefined;
+    return [...this.builds.values()]
+      .filter((build) => build.tenantId === tenantId && (!repositories || repositories.has(build.repository)))
+      .map((build) => ({
       build: structuredClone(build),
       stages: [...this.stages.values()].filter((stage) => stage.buildId === build.id).sort((a, b) => stageOrder(a) - stageOrder(b)).map((stage) => structuredClone(stage))
     }));
   }
 
-  async listEvents(tenantId: string): Promise<readonly OntologyTaskBoardEvent[]> {
+  async listEvents(tenantId: string, filter?: { readonly taskIds?: readonly string[] }): Promise<readonly OntologyTaskBoardEvent[]> {
+    const requested = filter?.taskIds ? new Set(filter.taskIds) : undefined;
     const taskIds = new Set([
       ...[...this.builds.values()].filter((build) => build.tenantId === tenantId).map((build) => build.id),
       ...[...this.stages.values()].filter((stage) => stage.tenantId === tenantId).map((stage) => stage.id)
     ]);
-    return this.events.filter((event) => taskIds.has(event.taskId)).map((event) => structuredClone(event));
+    return this.events
+      .filter((event) => taskIds.has(event.taskId) && (!requested || requested.has(event.taskId)))
+      .map((event) => structuredClone(event));
   }
 
   async ping(): Promise<void> {}

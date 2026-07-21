@@ -1,4 +1,9 @@
+import { execFile } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import {
   REVIEW_FINDINGS_SCHEMA,
   REVIEW_SYSTEM_PROMPT,
@@ -32,7 +37,9 @@ import {
   type OntologyIngestPlan,
   type OntologySourceEvidence,
   type OntologySourceIngestResult,
-  type RepositorySnapshot
+  type RepositorySnapshot,
+  type RepositoryTreeDelta,
+  type RepositoryTreeEntry
 } from "@jina/ontology";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 
@@ -151,12 +158,20 @@ server.listen(port, () => {
   void poll();
 });
 
+const idleDrainIntervalMs = positiveInt(process.env.WORKER_IDLE_DRAIN_INTERVAL_MS, 60_000);
+let lastIdleDrainAt = 0;
+
 async function poll(): Promise<void> {
   while (!stopping) {
     try {
       const work = await claim();
       if (work) await execute(work);
-      if (drainsOntologyProjections) await drainOntologyProjectionEvents();
+      // Drain right after finishing work; while idle, only on the slow safety
+      // interval so empty polls stop paying the projection sweep every tick.
+      if (drainsOntologyProjections && (work || Date.now() - lastIdleDrainAt >= idleDrainIntervalMs)) {
+        lastIdleDrainAt = Date.now();
+        await drainOntologyProjectionEvents();
+      }
     } catch (error) {
       recordApiFailure(error);
       console.error("worker poll failed", lastApiError);
@@ -184,12 +199,18 @@ async function claim(): Promise<ClaimedWork | undefined> {
 async function execute(work: ClaimedWork): Promise<void> {
   active = true;
   activeWork = work;
+  const startedAt = Date.now();
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
   const heartbeat = setInterval(() => {
     void renew(work).catch((error) => {
-      loseLease(lease, error);
-      console.error("worker lease renewal failed", lease.lostReason);
+      if (error instanceof LeaseLostError) {
+        loseLease(lease, error);
+        console.error("worker lease renewal failed", lease.lostReason);
+        return;
+      }
+      recordApiFailure(error);
+      console.error("worker lease renewal failed, retrying on next heartbeat", errorMessage(error));
     });
   }, heartbeatIntervalMs);
   heartbeat.unref();
@@ -206,6 +227,7 @@ async function execute(work: ClaimedWork): Promise<void> {
   try {
     if (lease.lostReason || !result) {
       lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+      logStageOutcome(work, startedAt, undefined, lease.lostReason ?? "lease lost");
       return;
     }
     await complete(work, result);
@@ -215,10 +237,12 @@ async function execute(work: ClaimedWork): Promise<void> {
       finishedAt: new Date().toISOString(),
       ...(result.outcome === "failed" ? { failureCategory: workerFailureCategory(result.reason) } : {})
     };
+    logStageOutcome(work, startedAt, result, undefined);
   } catch (error) {
     if (error instanceof LeaseLostError) {
       loseLease(lease, error);
       lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+      logStageOutcome(work, startedAt, undefined, lease.lostReason ?? "lease lost");
       return;
     }
     throw error;
@@ -229,14 +253,52 @@ async function execute(work: ClaimedWork): Promise<void> {
   }
 }
 
+/**
+ * One structured log line per finished task so stage durations are queryable
+ * in Cloud Logging. Failure reasons reuse the already-redacted error message
+ * (errorMessage + slice) rather than raw exceptions, matching this file's
+ * failure-logging conventions.
+ */
+function logStageOutcome(
+  work: ClaimedWork,
+  startedAt: number,
+  result: WorkResult | undefined,
+  failureReason: string | undefined
+): void {
+  const metadata = work.task.metadata as Record<string, unknown>;
+  const base = {
+    topic: work.message.topic,
+    taskId: work.task.id,
+    ...(typeof metadata.repository === "string" ? { repository: metadata.repository } : {}),
+    ...(typeof metadata.ref === "string" ? { ref: metadata.ref } : {}),
+    durationMs: Date.now() - startedAt
+  };
+  if (failureReason !== undefined || !result) {
+    console.log(JSON.stringify({ event: "stage.failed", ...base, reason: (failureReason ?? "unknown").slice(0, 500) }));
+    return;
+  }
+  if (result.outcome === "failed") {
+    console.log(JSON.stringify({ event: "stage.failed", ...base, reason: result.reason.slice(0, 500) }));
+    return;
+  }
+  const effect = result.result?.effect;
+  console.log(JSON.stringify({ event: "stage.completed", ...base, ...(typeof effect === "string" ? { effect } : {}) }));
+}
+
 async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   switch (work.topic) {
     case "run-ontology-ingest":
       return { outcome: "done", result: await runOntologyIngest(work) };
     case "run-ontology-assert":
       return await runOntologyAssertions(work);
-    case "run-ontology-project":
-      return { outcome: "done", result: { projected: true } };
+    case "run-ontology-project": {
+      // Run the projection on its long-window route so completion stays a
+      // fast status flip instead of racing the 30-second completion timeout.
+      const projected = await internalApiJson<Record<string, unknown>>("/internal/ontology/project/run", {
+        taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId
+      });
+      return { outcome: "done", result: { projected } };
+    }
     case "run-review":
       return { outcome: "done", result: await runReview(work) };
     case "run-research":
@@ -258,6 +320,24 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
 async function runOntologyIngest(work: ClaimedWork<"run-ontology-ingest">): Promise<Record<string, unknown>> {
   const { tenantId, repository, ref } = work.task.metadata;
   const lease = { messageId: work.message.id, leaseId: work.message.leaseId };
+  if ((process.env.ONTOLOGY_INGEST_TRANSPORT?.trim() || "rest") === "git") {
+    activeGitIngestTransport = new GitIngestTransport(repository, ref);
+  }
+  try {
+    return await runOntologyIngestWithTransport(work, tenantId, repository, ref, lease);
+  } finally {
+    await activeGitIngestTransport?.dispose();
+    activeGitIngestTransport = undefined;
+  }
+}
+
+async function runOntologyIngestWithTransport(
+  work: ClaimedWork<"run-ontology-ingest">,
+  tenantId: string,
+  repository: string,
+  ref: string,
+  lease: { readonly messageId: string; readonly leaseId: string }
+): Promise<Record<string, unknown>> {
   const [head, repositoryMetadata] = await Promise.all([
     githubJson(`/repos/${repository}/commits/${encodeURIComponent(ref)}`),
     githubJson(`/repos/${repository}`)
@@ -279,22 +359,30 @@ async function runOntologyIngest(work: ClaimedWork<"run-ontology-ingest">): Prom
   let ownershipObservation: GitHubSourceObservation | undefined;
   const deterministicObservations: RepositorySourceObservation[] = [];
   const workItems = new Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>();
+  const recentTrees = new Map<string, ReadonlyMap<string, RepositoryTreeEntry>>();
   for (const sha of orderedShas) {
     const commit = discovery.commits.get(sha) ?? (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
     const snapshot = await repositorySnapshotFromGitHub({
       tenantId, repository, ref, taskId: work.task.id, commit,
       isHead: sha === commitSha, isDefaultRef: ref === defaultBranch
     });
-    const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", { ...lease, snapshot });
-    changedPathsByCommit.set(sha, plan.changedPaths);
-    const analyses: BlobAnalysis[] = [];
-    for (const missing of plan.missingBlobs) {
-      analyses.push(await analyzeGitHubBlob(repository, missing));
-      if (analyses.length >= 50) {
-        await submitBlobAnalyses(work, snapshot.commitSha, analyses.splice(0));
-      }
+    // Chain commits ship only their first-parent delta; the head keeps the full
+    // tree so the ref manifest and blob backlog are re-checked end to end.
+    const parentTree = snapshot.parents[0] ? recentTrees.get(snapshot.parents[0]) : undefined;
+    const wireSnapshot: RepositorySnapshot = sha !== commitSha && parentTree
+      ? { ...snapshot, mode: "delta", files: [], deltas: computeTreeDeltas(parentTree, snapshot.files) }
+      : snapshot;
+    recentTrees.set(sha, new Map(snapshot.files.map((file) => [file.path, file])));
+    if (recentTrees.size > 8) {
+      const oldest = recentTrees.keys().next().value;
+      if (oldest !== undefined) recentTrees.delete(oldest);
     }
-    if (analyses.length > 0) await submitBlobAnalyses(work, snapshot.commitSha, analyses);
+    const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", { ...lease, snapshot: wireSnapshot });
+    changedPathsByCommit.set(sha, plan.changedPaths);
+    const analyses = await mapWithConcurrency(plan.missingBlobs, 8, (missing) => analyzeGitHubBlob(repository, missing));
+    for (let offset = 0; offset < analyses.length; offset += 50) {
+      await submitBlobAnalyses(work, snapshot.commitSha, analyses.slice(offset, offset + 50));
+    }
     parsedBlobCount += plan.missingBlobs.length;
     reusedBlobCount += plan.reusedBlobCount;
     discoveredBlobCount += plan.discoveredBlobCount;
@@ -458,6 +546,9 @@ async function discoverNewCommits(
       taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId, commitShas: batch
     });
     const knownSet = new Set(known.knownCommitShas);
+    const unknownShas = batch.filter((sha) => !knownSet.has(sha) && !commits.has(sha));
+    const fetchedCommits = new Map(await mapWithConcurrency(unknownShas, 8, async (sha) =>
+      [sha, await githubJson(`/repos/${repository}/commits/${sha}`)] as const));
     for (const sha of batch) {
       expanded.add(sha);
       if (knownSet.has(sha)) {
@@ -465,7 +556,7 @@ async function discoverNewCommits(
         if (sha !== headSha) commits.delete(sha);
         continue;
       }
-      const commit = commits.get(sha) ?? await githubJson(`/repos/${repository}/commits/${sha}`);
+      const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
       commits.set(sha, commit);
       if (commits.size > limit) throw new Error(`reachable Git history exceeds ONTOLOGY_HISTORY_LIMIT=${limit}; refusing a partial backfill`);
       for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
@@ -495,6 +586,121 @@ function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Re
   return ordered;
 }
 
+const execFileAsync = promisify(execFile);
+
+/**
+ * Local-git read transport for ingest code data. One bare clone replaces the
+ * per-commit recursive-tree fetches and per-blob REST reads; commit objects,
+ * PRs, and issues stay on REST because git data carries no GitHub login.
+ * Any failure marks the transport unusable and callers fall back to REST.
+ */
+class GitIngestTransport {
+  private cloneDir: string | undefined;
+  private failed = false;
+  constructor(private readonly repository: string, private readonly ref: string) {}
+
+  private async git(args: readonly string[], maxBuffer = 64 * 1024 * 1024): Promise<string> {
+    assertLeaseOwned();
+    const token = process.env.GITHUB_CLONE_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
+    const basic = Buffer.from(`x-access-token:${token ?? ""}`).toString("base64");
+    const { stdout } = await execFileAsync("git", [...args], {
+      maxBuffer,
+      timeout: 600_000,
+      ...(activeLease ? { signal: activeLease.controller.signal } : {}),
+      env: {
+        ...process.env,
+        GIT_TERMINAL_PROMPT: "0",
+        GIT_CONFIG_COUNT: "1",
+        GIT_CONFIG_KEY_0: "http.extraHeader",
+        GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`
+      }
+    });
+    return stdout;
+  }
+
+  async ensure(): Promise<boolean> {
+    if (this.failed) return false;
+    if (this.cloneDir) return true;
+    const githubUrl = (process.env.GITHUB_CLONE_URL?.trim() || "https://github.com").replace(/\/$/, "");
+    const dir = await mkdtemp(join(tmpdir(), "jina-ingest-"));
+    try {
+      // Bound the transfer to the ingested ref's history and to blobs the
+      // parser would actually read (larger blobs are skipped by analysis and
+      // lazily fetched only if something else needs them).
+      await this.git([
+        "clone", "--bare", "--quiet",
+        "--single-branch", "--branch", this.ref,
+        "--filter=blob:limit=524288",
+        `${githubUrl}/${this.repository}.git`, dir
+      ]);
+      this.cloneDir = dir;
+      return true;
+    } catch (error) {
+      this.failed = true;
+      await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      console.warn(`git ingest transport unavailable for ${this.repository}: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`);
+      return false;
+    }
+  }
+
+  async treeEntries(commitSha: string): Promise<readonly RepositoryTreeEntry[] | undefined> {
+    if (!(await this.ensure()) || !this.cloneDir) return undefined;
+    try {
+      const output = await this.git(["-C", this.cloneDir, "ls-tree", "-r", "-l", "-z", commitSha]);
+      return output.split("\0").flatMap((line) => {
+        if (!line) return [];
+        const tab = line.indexOf("\t");
+        const [, type, sha, size] = line.slice(0, tab).split(/\s+/);
+        if (type !== "blob" || !sha) return [];
+        return [{
+          path: line.slice(tab + 1),
+          blobSha: requiredGitSha(sha, "git tree blob SHA"),
+          size: Number.isSafeInteger(Number(size)) && Number(size) >= 0 ? Number(size) : 0
+        }];
+      });
+    } catch {
+      this.failed = true;
+      return undefined;
+    }
+  }
+
+  async blob(blobSha: string): Promise<string | undefined> {
+    if (!(await this.ensure()) || !this.cloneDir) return undefined;
+    try {
+      return await this.git(["-C", this.cloneDir, "cat-file", "blob", blobSha]);
+    } catch {
+      return undefined;
+    }
+  }
+
+  async dispose(): Promise<void> {
+    if (this.cloneDir) await rm(this.cloneDir, { recursive: true, force: true }).catch(() => undefined);
+    this.cloneDir = undefined;
+  }
+}
+
+/** Ingest-scoped transport; the worker executes one task at a time. */
+let activeGitIngestTransport: GitIngestTransport | undefined;
+
+function computeTreeDeltas(
+  parentTree: ReadonlyMap<string, RepositoryTreeEntry>,
+  files: readonly RepositoryTreeEntry[]
+): readonly RepositoryTreeDelta[] {
+  const deltas: RepositoryTreeDelta[] = [];
+  const currentPaths = new Set<string>();
+  for (const file of files) {
+    currentPaths.add(file.path);
+    const previous = parentTree.get(file.path);
+    if (!previous || previous.blobSha !== file.blobSha) {
+      deltas.push({ path: file.path, blobSha: file.blobSha, size: file.size });
+    }
+  }
+  for (const path of parentTree.keys()) {
+    if (!currentPaths.has(path)) deltas.push({ path, blobSha: null, size: 0 });
+  }
+  return deltas;
+}
+
 async function repositorySnapshotFromGitHub(input: {
   readonly tenantId: string; readonly repository: string; readonly ref: string; readonly taskId: string;
   readonly commit: Record<string, unknown>; readonly isHead: boolean; readonly isDefaultRef: boolean;
@@ -505,9 +711,13 @@ async function repositorySnapshotFromGitHub(input: {
   const authorDetails = isRecord(commitDetails.author) ? commitDetails.author : {};
   const githubAuthor = isRecord(input.commit.author) ? input.commit.author : {};
   const treeSha = requiredGitSha(treeDetails.sha, "GitHub tree SHA");
-  const tree = await githubJson(`/repos/${input.repository}/git/trees/${treeSha}?recursive=1`);
-  if (tree.truncated === true) throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
-  const entries = Array.isArray(tree.tree) ? tree.tree : [];
+  const localEntries = await activeGitIngestTransport?.treeEntries(commitSha);
+  let entries: unknown[] = [];
+  if (localEntries === undefined) {
+    const tree = await githubJson(`/repos/${input.repository}/git/trees/${treeSha}?recursive=1`);
+    if (tree.truncated === true) throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
+    entries = Array.isArray(tree.tree) ? tree.tree : [];
+  }
   return {
     tenantId: input.tenantId,
     repository: input.repository,
@@ -527,7 +737,7 @@ async function repositorySnapshotFromGitHub(input: {
     updateRef: input.isHead,
     recordedAt: new Date().toISOString(),
     taskId: input.taskId,
-    files: entries.flatMap((entry) => {
+    files: localEntries ?? entries.flatMap((entry) => {
       if (!isRecord(entry) || entry.type !== "blob") return [];
       return [{
         path: requiredString(entry.path, "GitHub tree path"),
@@ -792,8 +1002,12 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
   const assertions = assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers });
-  return {
-    outcome: "done",
+  // Persist the batch on the durable long-window route before completing, so
+  // the completion request itself stays a fast status flip.
+  const saved = await internalApiJson<Record<string, unknown>>("/internal/ontology/assertions/save", {
+    taskId: work.task.id,
+    messageId: work.message.id,
+    leaseId: work.message.leaseId,
     assertionBatch: {
       tenantId,
       repository,
@@ -812,7 +1026,8 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
       rawOutput,
       assertions
     }
-  };
+  });
+  return { outcome: "done", result: { saved } };
 }
 
 async function analyzeGitHubBlob(
@@ -828,6 +1043,8 @@ async function analyzeGitHubBlob(
 }
 
 async function readGitHubBlob(repository: string, blobSha: string): Promise<string> {
+  const local = await activeGitIngestTransport?.blob(blobSha);
+  if (local !== undefined) return local;
   const blob = await githubJson(`/repos/${repository}/git/blobs/${blobSha}`);
   if (blob.encoding !== "base64" || typeof blob.content !== "string") throw new Error(`GitHub blob ${blobSha} is not base64 encoded`);
   return Buffer.from(blob.content.replace(/\s/g, ""), "base64").toString("utf8");
@@ -1024,21 +1241,47 @@ async function githubText(path: string, accept: string): Promise<string> {
   return response.text();
 }
 
+const GITHUB_RETRY_ATTEMPTS = Math.max(1, Number(process.env.GITHUB_RETRY_ATTEMPTS ?? 4));
+const GITHUB_RETRY_BASE_MS = Math.max(1, Number(process.env.GITHUB_RETRY_BASE_MS ?? 1_000));
+const GITHUB_RETRY_MAX_WAIT_MS = 60_000;
+
 async function githubRequest(path: string, accept: string): Promise<Response> {
-  assertLeaseOwned();
   const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
-  const response = await fetch(`${githubApiUrl}${path}`, {
-    headers: {
-      accept,
-      "x-github-api-version": "2022-11-28",
-      "user-agent": "jina-review-worker",
-      ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {})
-    },
-    signal: requestSignal(60_000)
-  });
-  if (!response.ok) throw new Error(`GitHub request failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
-  return response;
+  for (let attempt = 0; ; attempt += 1) {
+    assertLeaseOwned();
+    let response: Response;
+    try {
+      response = await fetch(`${githubApiUrl}${path}`, {
+        headers: {
+          accept,
+          "x-github-api-version": "2022-11-28",
+          "user-agent": "jina-review-worker",
+          ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {})
+        },
+        signal: requestSignal(60_000)
+      });
+    } catch (error) {
+      if (attempt >= GITHUB_RETRY_ATTEMPTS - 1) throw error;
+      await delay(Math.min(GITHUB_RETRY_BASE_MS * 2 ** attempt, GITHUB_RETRY_MAX_WAIT_MS));
+      continue;
+    }
+    if (response.ok) return response;
+    const rateLimited = response.status === 429 ||
+      (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0");
+    if (attempt < GITHUB_RETRY_ATTEMPTS - 1 && (rateLimited || response.status >= 500)) {
+      const retryAfterSeconds = Number(response.headers.get("retry-after"));
+      const resetEpochSeconds = Number(response.headers.get("x-ratelimit-reset"));
+      const waitMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+        ? retryAfterSeconds * 1_000
+        : rateLimited && Number.isFinite(resetEpochSeconds) && resetEpochSeconds > 0
+          ? Math.max(resetEpochSeconds * 1_000 - Date.now(), GITHUB_RETRY_BASE_MS)
+          : GITHUB_RETRY_BASE_MS * 2 ** attempt;
+      await delay(Math.min(waitMs, GITHUB_RETRY_MAX_WAIT_MS));
+      continue;
+    }
+    throw new Error(`GitHub request failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
+  }
 }
 
 function extractOutputText(payload: Record<string, unknown>): string {

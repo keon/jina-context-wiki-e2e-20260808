@@ -321,7 +321,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // Published Ontology generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
-    if (!isDirectOntologyRead(request.method, url.pathname)) await synchronize();
+    // Internal ontology data-plane and worker-coordination routes likewise
+    // never read the JSON api_state snapshot outside mutate(), so they skip
+    // the full snapshot reload; completeWork synchronizes its JSON-board
+    // branch itself before validating against the snapshot.
+    if (!isDirectOntologyRead(request.method, url.pathname) &&
+      !isSnapshotExemptInternalRoute(request.method, url.pathname)) await synchronize();
 
     if (request.method === "OPTIONS") {
       json(response, 204, {});
@@ -481,7 +486,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/board") {
       const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
       const board = tenantBoardView(intakeState, publications, tenantId, allowedRepositories);
-      const pipeline = await ontologyCoordinator.list(tenantId);
+      const pipeline = await ontologyCoordinator.list(tenantId,
+        allowedRepositories ? { repositories: [...allowedRepositories] } : undefined);
       json(response, 200, mergePipelineBoardView(board, pipeline, allowedRepositories));
       return;
     }
@@ -592,10 +598,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/events") {
       const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
       const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
-      const workflows = (await ontologyCoordinator.list(tenantId))
-        .filter(({ build }) => !allowedRepositories || allowedRepositories.has(build.repository));
+      const workflows = await ontologyCoordinator.list(tenantId,
+        allowedRepositories ? { repositories: [...allowedRepositories] } : undefined);
       const pipelineTaskIds = new Set(workflows.flatMap(({ build, stages }) => [build.id, ...stages.map((stage) => stage.id)]));
-      const pipelineEvents = (await ontologyCoordinator.listEvents(tenantId))
+      const pipelineEvents = (await ontologyCoordinator.listEvents(tenantId, { taskIds: [...pipelineTaskIds] }))
         .filter((event) => pipelineTaskIds.has(event.taskId))
         .map((event, index) => ({ ...event, seq: index + 1 }));
       json(response, 200, [
@@ -611,6 +617,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/plan") {
       await planOntologyIngestion(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/save") {
+      await saveOntologyAssertions(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/ontology/project/run") {
+      await runOntologyProjection(request, response, tenantId);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/known") {
@@ -678,7 +692,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (result.webhook && isOntologyTrigger(result.webhook.event)) {
       const event = result.webhook.event;
       const ref = event.ref.slice("refs/heads/".length);
-      const builds = await ontologyCoordinator.list(config.tenantId ?? "default");
+      const builds = await ontologyCoordinator.list(config.tenantId ?? "default", { repositories: [result.webhook.repository] });
       const latest = builds
         .filter(({ build }) => build.repository === result.webhook!.repository && build.ref === ref)
         .sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt))[0];
@@ -699,7 +713,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             ...(result.webhook.installationId !== undefined ? { githubInstallationId: result.webhook.installationId } : {})
           }
         });
-        const workflow = (await ontologyCoordinator.list(build.tenantId)).find((candidate) => candidate.build.id === build.id);
+        const workflow = (await ontologyCoordinator.list(build.tenantId, { repositories: [build.repository] }))
+          .find((candidate) => candidate.build.id === build.id);
         createdTaskIds = [build.id, ...(workflow?.stages.map((stage) => stage.id) ?? [])];
       }
       await mutate(async () => {
@@ -755,6 +770,57 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       createdAt: nowIso()
     });
     json(response, 202, { accepted: true, task: pipelineBuildTask(created) });
+  }
+
+  /**
+   * Durable stage work runs on these dedicated long-window routes so that
+   * completion stays a fast status flip; the worker's 30-second completion
+   * timeout no longer races multi-minute canonical writes.
+   */
+  async function saveOntologyAssertions(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
+    const result = await ontologyStore.saveAssertionBatch(
+      parseOntologyAssertionBatch(body.assertionBatch, { id: task.stageId, metadata: task.metadata }, tenantId),
+      { stageId: task.stageId, leaseId: task.leaseId }
+    );
+    json(response, 200, result);
+  }
+
+  async function runOntologyProjection(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-project");
+    const now = nowIso();
+    const repository = requiredString(task.metadata.repository, "task.repository");
+    const ref = requiredString(task.metadata.ref, "task.ref");
+    const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
+    // Drain and rebuild produce disposable, rebuildable read models, so a lease
+    // lost mid-run cannot corrupt canonical state; the graph save below is the
+    // only publication and stays fenced. Still, re-check the lease between the
+    // expensive steps so a superseded worker stops early instead of spending
+    // minutes on work whose publication will be rejected.
+    const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
+    await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-project");
+    const rebuilt = await ontologyStore.rebuildDerivedProjections(tenantId, repository, ref, now);
+    await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-project");
+    const graph = await ontologyStore.project({
+      tenantId, repository, ref,
+      commitSha: requiredGitSha(task.metadata.commitSha, "task.commitSha"),
+      taskId: task.stageId, generatedAt: now,
+      writeFence: { stageId: task.stageId, leaseId: task.leaseId }
+    });
+    json(response, 200, {
+      ...rebuilt,
+      drainedEventCount: drained.processedEventCount,
+      rebuiltRepositories: drained.rebuiltRepositories,
+      effect: rebuilt.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop",
+      graphId: graph.id,
+      nodeCount: graph.nodes.length,
+      edgeCount: graph.edges.length,
+      commitSha: graph.commitSha
+    });
   }
 
   async function planOntologyIngestion(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -977,6 +1043,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
     const taskId = entityId<"task">(rawTaskId) as TaskId;
+    // JSON-board completions validate against the snapshot outside mutate(),
+    // so reload it here; the route-level gate skips it for worker routes.
+    await synchronize();
     const task = findTask(intakeState.board, taskId);
     if (!task || task.metadata.tenantId !== tenantId) {
       throw new ApiError(404, "not_found", "task not found");
@@ -1056,18 +1125,40 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       nextMetadata = ontologyIngestCompletionMetadata(rawResult);
       result = { ...result, ...nextMetadata };
     } else if (stage.topic === "run-ontology-assert") {
-      const cached = isRecord(rawResult.cached) ? rawResult.cached : undefined;
-      const assertionResult = cached
-        ? safeResultPayload(cached)
-        : await ontologyStore.saveAssertionBatch(
+      if (body.assertionBatch !== undefined) {
+        // Legacy in-request save for workers deployed before the API.
+        await ontologyStore.saveAssertionBatch(
           parseOntologyAssertionBatch(body.assertionBatch, { id: stage.stageId, metadata: stage.metadata }, tenantId),
           { stageId, leaseId }
         );
-      result = { ...safeResultPayload(assertionResult), effect: assertionResult.cached ? "confirmed" : "changed" };
+      }
+      // The completion receipt is derived from durable state bound to this
+      // stage's own commit and evidence fingerprint; caller-supplied result
+      // payloads are never trusted for canonical fields.
+      const generation = await ontologyStore.hasAssertionGeneration(
+        tenantId,
+        requiredString(stage.metadata.repository, "task.repository"),
+        requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
+        ONTOLOGY_GENERATOR_VERSION,
+        ONTOLOGY_REGISTRY_VERSION,
+        requiredString(stage.metadata.evidenceFingerprint, "task.evidenceFingerprint")
+      );
+      if (!generation) throw invalidRequest("assertion generation is not durable for this stage");
+      const assertionResult = safeResultPayload(generation as unknown as Record<string, unknown>);
+      result = { ...assertionResult, effect: isRecord(rawResult.cached) ? "confirmed" : "changed" };
       nextMetadata = {
         commitSha: requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
         knowledgeCheckpoint: requiredString(assertionResult.knowledgeCheckpoint, "knowledgeCheckpoint")
       };
+    } else if (isRecord(rawResult.projected)) {
+      // Thin completion: verify the projection is durably published for this
+      // stage's ref and commit before recording it; canonical fields come from
+      // the graph head, not the caller.
+      const headState = await ontologyStore.currentGraphHead(tenantId, stage.repository, stage.ref);
+      if (!headState || headState.commitSha !== requiredGitSha(stage.metadata.commitSha, "task.commitSha")) {
+        throw invalidRequest("projected graph head is not durable for this stage");
+      }
+      result = { ...safeResultPayload(rawResult.projected), graphId: headState.graphId, commitSha: headState.commitSha };
     } else {
       const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
       const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
@@ -1170,6 +1261,21 @@ function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig
 
 function isPublicGraphRoute(pathname: string): boolean {
   return pathname === "/mcp" || pathname === "/v1/graphs" || pathname.startsWith("/v1/graphs/") || pathname === "/v1/graph/query";
+}
+
+function isSnapshotExemptInternalRoute(method: string | undefined, pathname: string): boolean {
+  if (method !== "POST") return false;
+  // Relational ontology data-plane routes never read the JSON board snapshot.
+  if (pathname.startsWith("/internal/ontology/")) return true;
+  // Worker coordination: ontology-stage_* leases bypass the JSON board
+  // entirely, and the JSON-board claim/renew branches only read state inside
+  // mutate(), which restores the stored snapshot before operating. release is
+  // ontology-only. complete re-synchronizes on its JSON-board path before it
+  // validates the task against the snapshot.
+  return pathname === "/internal/worker/claim" ||
+    pathname === "/internal/worker/renew" ||
+    pathname === "/internal/worker/release" ||
+    pathname === "/internal/worker/complete";
 }
 
 function isDirectOntologyRead(method: string | undefined, pathname: string): boolean {
@@ -1403,7 +1509,27 @@ function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySn
   if (!isRecord(value) || !Array.isArray(value.files) || !Array.isArray(value.parents)) {
     throw invalidRequest("snapshot must include files and parents");
   }
+  if (value.mode !== undefined && value.mode !== "tree" && value.mode !== "delta") {
+    throw invalidRequest("snapshot.mode must be tree or delta");
+  }
+  const isDelta = value.mode === "delta";
+  if (isDelta) {
+    if (!Array.isArray(value.deltas)) throw invalidRequest("delta snapshot must include deltas");
+    if (value.files.length > 0) throw invalidRequest("delta snapshot must not carry a full tree");
+  }
+  const deltas = isDelta
+    ? (value.deltas as unknown[]).map((delta) => {
+      if (!isRecord(delta)) throw invalidRequest("snapshot delta must be an object");
+      const size = typeof delta.size === "number" && Number.isSafeInteger(delta.size) && delta.size >= 0 ? delta.size : 0;
+      return {
+        path: requiredRepositoryPath(delta.path, "snapshot.delta.path"),
+        blobSha: delta.blobSha === null ? null : requiredGitSha(delta.blobSha, "snapshot.delta.blobSha"),
+        size
+      };
+    })
+    : undefined;
   return {
+    ...(isDelta && deltas ? { mode: "delta" as const, deltas } : {}),
     tenantId,
     repository: requiredString(value.repository, "snapshot.repository"),
     ref: requiredString(value.ref, "snapshot.ref"),
@@ -1872,7 +1998,7 @@ function json(response: ServerResponse, statusCode: number, payload: unknown): v
     "access-control-allow-headers": "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
     "access-control-allow-methods": "GET, POST, OPTIONS"
   });
-  response.end(statusCode === 204 ? undefined : JSON.stringify(payload, null, 2));
+  response.end(statusCode === 204 ? undefined : JSON.stringify(payload));
 }
 
 class ApiError extends Error {

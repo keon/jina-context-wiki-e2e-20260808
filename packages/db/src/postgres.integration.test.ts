@@ -423,6 +423,78 @@ test("Postgres projections retain reviewed RESOLVED_BY relationships after an up
   }
 });
 
+test("Postgres delta snapshots reconstruct the parent tree and share content-addressed trees", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const pool = new Pool({ connectionString });
+  const suffix = Date.now().toString(36);
+  const tenantId = `delta-${suffix}`;
+  const repository = `omlabs/db-delta-fixture-${suffix}`;
+  const base = {
+    tenantId, repository, ref: "main", parents: [] as readonly string[],
+    recordedAt: "2026-07-19T12:00:00.000Z", isDefaultRef: true, updateRef: true
+  };
+  try {
+    const root = await store.planIngestion({
+      ...base, commitSha: "a".repeat(40), treeSha: "b".repeat(40), taskId: `root-${suffix}`,
+      files: [
+        { path: "README.md", blobSha: "1".repeat(40), size: 10 },
+        { path: "src/app.ts", blobSha: "2".repeat(40), size: 20 }
+      ]
+    });
+    assert.equal(root.fileCount, 2);
+    const delta = await store.planIngestion({
+      ...base, commitSha: "c".repeat(40), treeSha: "d".repeat(40), parents: ["a".repeat(40)],
+      taskId: `delta-${suffix}`, mode: "delta", files: [], updateRef: false,
+      deltas: [
+        { path: "src/app.ts", blobSha: "3".repeat(40), size: 21 },
+        { path: "src/new.ts", blobSha: "4".repeat(40), size: 5 },
+        { path: "README.md", blobSha: null, size: 0 }
+      ]
+    });
+    assert.equal(delta.fileCount, 2, "delta reconstructs the full tree (modify + add - delete)");
+    assert.deepEqual([...delta.changedPaths].sort(), ["src/app.ts", "src/new.ts"]);
+    assert.deepEqual(delta.missingBlobs.map((blob) => blob.blobSha).sort(),
+      ["3".repeat(40), "4".repeat(40)], "only changed blobs are parse candidates in delta mode");
+    const manifest = await pool.query<{ path: string; blob_sha: string }>(
+      `select path,blob_sha from jina_ontology.commit_manifest($1,$2,$3) order by path`,
+      [tenantId, repository, "c".repeat(40)]
+    );
+    assert.deepEqual(manifest.rows, [
+      { path: "src/app.ts", blob_sha: "3".repeat(40) },
+      { path: "src/new.ts", blob_sha: "4".repeat(40) }
+    ], "the recorded manifest matches the reconstructed tree");
+    const trees = await pool.query<{ tree_sha: string }>(
+      `select tree_sha from jina_ontology.trees where tenant_id=$1 order by tree_sha`, [tenantId]
+    );
+    assert.deepEqual(trees.rows.map((row) => row.tree_sha), ["b".repeat(40), "d".repeat(40)],
+      "each distinct tree is stored once, content-addressed");
+    await assert.rejects(
+      store.planIngestion({
+        ...base, commitSha: "e".repeat(40), treeSha: "f".repeat(40), parents: ["9".repeat(40)],
+        taskId: `orphan-${suffix}`, mode: "delta", files: [], updateRef: false,
+        deltas: [{ path: "src/app.ts", blobSha: "5".repeat(40), size: 1 }]
+      }),
+      /delta snapshot parent tree is not recorded/,
+      "a delta against an unrecorded parent is rejected so the worker can fall back to tree mode"
+    );
+    await assert.rejects(
+      store.planIngestion({
+        ...base, commitSha: "e".repeat(40), treeSha: "f".repeat(40), parents: ["c".repeat(40)],
+        taskId: `head-${suffix}`, mode: "delta", files: [],
+        deltas: [{ path: "src/app.ts", blobSha: "5".repeat(40), size: 1 }]
+      }),
+      /delta snapshot cannot move the live ref/,
+      "a ref head must ship a full tree so retained unparsed blobs are re-discovered"
+    );
+  } finally {
+    await pool.end();
+    await store.close();
+  }
+});
+
 test("Postgres batched blob analyses keep first-write-wins dedupe and reject unknown blobs", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { Readable } from "node:stream";
 import { test } from "node:test";
 import type { Sandbox } from "@daytona/sdk";
-import { buildFocusEvidenceBundle, isTransientCodexExecutionFailure } from "./ontology-executor.js";
+import { buildFocusEvidenceBundle, findExistingCodex, isTransientCodexExecutionFailure } from "./ontology-executor.js";
 
 test("classifies retryable provider execution failures", () => {
   assert.equal(isTransientCodexExecutionFailure("stream disconnected before completion: Internal Server Error"), true);
@@ -10,6 +10,36 @@ test("classifies retryable provider execution failures", () => {
   assert.equal(isTransientCodexExecutionFailure("Failed to execute command in sandbox: gateway unavailable"), true);
   assert.equal(isTransientCodexExecutionFailure("ontology output failed schema validation"), false);
   assert.equal(isTransientCodexExecutionFailure("model not found"), false);
+});
+
+test("uses a prebaked codex binary when the probe reports an absolute path", async () => {
+  const commands: string[] = [];
+  const sandbox = {
+    process: {
+      executeCommand: async (command: string) => {
+        commands.push(command);
+        return { exitCode: 0, result: "/home/daytona/ontology/node_modules/.bin/codex\n" };
+      }
+    }
+  } as unknown as { readonly process: Pick<Sandbox["process"], "executeCommand"> };
+  assert.equal(await findExistingCodex(sandbox), "/home/daytona/ontology/node_modules/.bin/codex");
+  assert.equal(commands.length, 1);
+  assert.match(commands[0] ?? "", /command -v codex/);
+});
+
+test("falls back to installing codex when the probe finds nothing or fails", async () => {
+  const missing = {
+    process: { executeCommand: async () => ({ exitCode: 0, result: "" }) }
+  } as unknown as { readonly process: Pick<Sandbox["process"], "executeCommand"> };
+  assert.equal(await findExistingCodex(missing), undefined);
+  const failing = {
+    process: { executeCommand: async () => ({ exitCode: 1, result: "boom" }) }
+  } as unknown as { readonly process: Pick<Sandbox["process"], "executeCommand"> };
+  assert.equal(await findExistingCodex(failing), undefined);
+  const relative = {
+    process: { executeCommand: async () => ({ exitCode: 0, result: "codex" }) }
+  } as unknown as { readonly process: Pick<Sandbox["process"], "executeCommand"> };
+  assert.equal(await findExistingCodex(relative), undefined);
 });
 
 test("focus evidence streaming stops at the configured byte budget", async () => {

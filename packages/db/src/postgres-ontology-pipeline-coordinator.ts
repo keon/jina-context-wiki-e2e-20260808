@@ -66,6 +66,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   private readonly pool: Pool;
   private readonly manageSchema: boolean;
   private initialized?: Promise<void>;
+  private claimsSinceRetentionSweep = 0;
 
   constructor(config: PostgresOntologyPipelineCoordinatorConfig) {
     const { manageSchema = true, ...poolConfig } = config;
@@ -186,6 +187,46 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
          where tenant_id=$2 and status='in_progress' and lease_expires_at <= $1`,
         [input.now, input.tenantId]
       );
+      // Cheap probabilistic retention: roughly one in fifty claims prunes
+      // month-old board events and terminal workflows. Deleting a workflow
+      // cascades to tasks/dependencies/checkpoints via FKs; events carry no FK
+      // and are deleted explicitly. The newest build per (repository, ref) is
+      // always kept so head-SHA dedup keeps working regardless of age.
+      if (this.claimsSinceRetentionSweep++ % 50 === 0) {
+        const retentionCutoff = new Date(Date.parse(input.now) - 30 * 24 * 60 * 60 * 1000).toISOString();
+        await client.query(
+          `with keepers as (
+             select distinct on (repository,ref_name) id
+             from jina_board.workflows where tenant_id=$1
+             order by repository,ref_name,created_at desc,id
+           ),
+           expired_workflows as (
+             select build.id from jina_board.workflows build
+             where build.tenant_id=$1
+               and build.status in ('done','failed','canceled','superseded')
+               and build.updated_at < $2
+               and not exists (select 1 from keepers where keepers.id=build.id)
+           ),
+           expired_stages as (
+             select stage.id from jina_board.tasks stage
+             join expired_workflows on expired_workflows.id=stage.build_id
+           ),
+           pruned_events as (
+             delete from jina_board.events
+             where tenant_id=$1
+               and (task_id in (select id from expired_workflows)
+                 or task_id in (select id from expired_stages)
+                 or (at < $2 and not exists (
+                   select 1 from jina_board.workflows live where live.tenant_id=$1 and live.id=jina_board.events.task_id
+                 ) and not exists (
+                   select 1 from jina_board.tasks stage where stage.tenant_id=$1 and stage.id=jina_board.events.task_id
+                 )))
+           )
+           delete from jina_board.workflows
+           where id in (select id from expired_workflows)`,
+          [input.tenantId, retentionCutoff]
+        );
+      }
       const selected = await client.query<StageRow>(
         `select stage.* from jina_board.tasks stage
          join jina_board.workflows build on build.id=stage.build_id
@@ -438,25 +479,51 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
     return result.rowCount === 1;
   }
 
-  async list(tenantId: string): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]> {
+  async list(
+    tenantId: string,
+    filter?: { readonly repositories?: readonly string[] }
+  ): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]> {
     await this.initialize();
-    const [builds, stages] = await Promise.all([
-      this.pool.query<BuildRow>("select * from jina_board.workflows where tenant_id=$1 order by created_at desc,id", [tenantId]),
-      this.pool.query<StageRow>("select * from jina_board.tasks where tenant_id=$1 order by build_id,ordinal", [tenantId])
-    ]);
+    // The row cap applies after any repository filter so a busy tenant cannot
+    // push an authorized repository's history out of the window.
+    const builds = filter?.repositories
+      ? await this.pool.query<BuildRow>(
+        "select * from jina_board.workflows where tenant_id=$1 and repository=any($2::text[]) order by created_at desc,id limit 200",
+        [tenantId, [...filter.repositories]]
+      )
+      : await this.pool.query<BuildRow>(
+        "select * from jina_board.workflows where tenant_id=$1 order by created_at desc,id limit 200",
+        [tenantId]
+      );
+    const stages = await this.pool.query<StageRow>(
+      "select * from jina_board.tasks where tenant_id=$1 and build_id=any($2::text[]) order by build_id,ordinal",
+      [tenantId, builds.rows.map((build) => build.id)]
+    );
     return builds.rows.map((build) => ({
       build: buildRecord(build),
       stages: stages.rows.filter((stage) => stage.build_id === build.id).map(stageRecord)
     }));
   }
 
-  async listEvents(tenantId: string): Promise<readonly OntologyTaskBoardEvent[]> {
+  async listEvents(
+    tenantId: string,
+    filter?: { readonly taskIds?: readonly string[] }
+  ): Promise<readonly OntologyTaskBoardEvent[]> {
     await this.initialize();
-    const events = await this.pool.query<EventRow>(
-      "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 order by id",
-      [tenantId]
-    );
-    return events.rows.map((event) => ({
+    // Cap the read to the latest 1000 events after any task filter, then
+    // restore ascending insertion order: the /events handler assigns seq
+    // positionally and acceptance tooling reads the tail as the most recent
+    // failures.
+    const events = filter?.taskIds
+      ? await this.pool.query<EventRow>(
+        "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 and task_id=any($2::text[]) order by id desc limit 1000",
+        [tenantId, [...filter.taskIds]]
+      )
+      : await this.pool.query<EventRow>(
+        "select id::text,task_id,type,at,payload from jina_board.events where tenant_id=$1 order by id desc limit 1000",
+        [tenantId]
+      );
+    return events.rows.reverse().map((event) => ({
       id: `task-board-event-${event.id}`,
       taskId: event.task_id,
       type: event.type,

@@ -26,6 +26,13 @@ export interface RepositoryTreeEntry {
   readonly size: number;
 }
 
+export interface RepositoryTreeDelta {
+  readonly path: string;
+  /** A null blobSha removes the path from the first parent's tree. */
+  readonly blobSha: string | null;
+  readonly size: number;
+}
+
 export interface RepositorySnapshot {
   readonly tenantId: string;
   readonly repository: string;
@@ -43,7 +50,14 @@ export interface RepositorySnapshot {
   readonly updateRef?: boolean;
   readonly recordedAt: string;
   readonly taskId: string;
+  /**
+   * Tree mode ships the complete tree in `files`. Delta mode ships only the
+   * paths changed relative to the recorded first parent; the canonical store
+   * reconstructs the full tree, so `files` must be empty.
+   */
+  readonly mode?: "tree" | "delta";
   readonly files: readonly RepositoryTreeEntry[];
+  readonly deltas?: readonly RepositoryTreeDelta[];
 }
 
 export interface CodeSymbolFact {

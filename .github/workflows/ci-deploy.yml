@@ -186,11 +186,17 @@ jobs:
             JINA_API_URL=${{ steps.deploy-api.outputs.url }}
             WORKER_TOPICS=run-ontology-ingest|run-ontology-assert|run-ontology-project
             ONTOLOGY_HISTORY_LIMIT=10000
+            ONTOLOGY_INGEST_TRANSPORT=git
             DAYTONA_RUN_TIMEOUT_SECONDS=2400
             ONTOLOGY_CODEX_PROVIDER=openrouter
             ONTOLOGY_CODEX_MODEL=deepseek/deepseek-v4-flash
             ONTOLOGY_CODEX_CONTEXT_TOKENS=16000
             ONTOLOGY_CODEX_COMPACT_TOKENS=12000
+          # To warm the Daytona assert path, build a snapshot out-of-band with
+          # @openai/codex@0.144.0 preinstalled (at /home/daytona/ontology/node_modules/.bin/codex
+          # or on PATH) and then add its name to env_vars above:
+          #   DAYTONA_SNAPSHOT=<snapshot-name>
+          # Do not enable until the snapshot exists in the Daytona organization.
           secrets: |-
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
             DAYTONA_API_KEY=jina-daytona-api-key:latest
