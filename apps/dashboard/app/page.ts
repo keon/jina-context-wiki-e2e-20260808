@@ -125,22 +125,26 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .graph-node:focus-visible, .graph-edge-label-button:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
   .graph-reset { align-self: start; border-radius: .5rem; background: #151c29; }
   .graph-reset:disabled { opacity: .42; cursor: default; }
+  .graph-control-help { margin: 0; color: #738097; font-size: .64rem; line-height: 1.45; }
+  .graph-control-actions { display: flex; align-items: center; gap: .38rem; }
   .graph-wrap { min-height: 590px; overflow: auto; background: radial-gradient(circle at 50% 50%, #182036, #0d1119 66%); }
-  #ontology-graph { display: block; width: 100%; min-width: 900px; height: 590px; }
+  #ontology-graph { display: block; width: 100%; min-width: 900px; height: 590px; touch-action: pan-x pan-y pinch-zoom; user-select: none; }
   .graph-edge { fill: none; stroke-width: 1.5; opacity: .62; }
-  .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 16; cursor: pointer; }
-  .graph-edge-group { cursor: pointer; }
+  .graph-edge-hit { fill: none; stroke: transparent; stroke-width: 16; }
+  .graph-edge-group, .graph-edge-label-button, .graph-node { cursor: grab; transition: opacity 140ms ease; }
+  .graph-edge-group:active, .graph-edge-label-button:active, .graph-node:active { cursor: grabbing; }
   .graph-edge-group:hover .graph-edge, .graph-edge-group.hovered .graph-edge, .graph-edge-group.selected .graph-edge { stroke-width: 3.5; opacity: 1; }
+  .graph-edge-group.connected:not(.selected) .graph-edge { stroke-width: 2.5; opacity: .94; }
   .graph-edge-code { stroke: #6495ed; }
   .graph-edge-knowledge { stroke: #d88fff; stroke-dasharray: 5 4; }
-  .graph-edge-label-button { cursor: pointer; }
   .graph-edge-label-bg { fill: #111824; stroke: #34415a; stroke-width: 1; }
   .graph-edge-label { fill: #95a2b8; font: 10px ui-monospace, SFMono-Regular, Menlo, monospace; text-anchor: middle; pointer-events: none; }
   .graph-edge-label-button:hover .graph-edge-label-bg, .graph-edge-label-button.selected .graph-edge-label-bg { fill: #1b2639; stroke: #829bd0; }
   .graph-edge-label-button:hover .graph-edge-label, .graph-edge-label-button.selected .graph-edge-label { fill: #f2f5fa; font-weight: 750; }
-  .graph-node { cursor: pointer; }
   .graph-node circle { stroke-width: 2; filter: drop-shadow(0 5px 8px rgb(0 0 0 / 35%)); transition: stroke-width 120ms ease, filter 120ms ease; }
   .graph-node:hover circle, .graph-node.selected circle { stroke-width: 4; filter: drop-shadow(0 0 10px rgb(142 168 255 / 65%)); }
+  .graph-node.connected:not(.selected) circle { stroke-width: 3; filter: drop-shadow(0 0 8px rgb(142 168 255 / 48%)); }
+  .graph-node.dimmed, .graph-edge-group.dimmed, .graph-edge-label-button.dimmed { opacity: .12; }
   .graph-node text { fill: #e8ecf4; font-size: 11px; font-weight: 650; text-anchor: middle; pointer-events: none; }
   .graph-node .node-kind { fill: #8794aa; font-size: 9px; font-weight: 500; letter-spacing: .08em; text-transform: uppercase; }
   .kind-Repository circle { fill: #263d78; stroke: #8ba9ff; }
@@ -335,7 +339,18 @@ let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
 let ontologyState = { latest: null, graphs: [] };
-let ontologyViewState = { selected: null, hiddenNodeKinds: new Set(), hiddenEdgePredicates: new Set() };
+let ontologyViewState = {
+  graphKey: null,
+  selected: null,
+  hiddenNodeKinds: new Set(),
+  hiddenEdgePredicates: new Set(),
+  nodePositions: new Map(),
+  edgeOffsets: new Map(),
+  drag: null,
+  suppressedClick: null
+};
+let graphDragFrame = null;
+let ontologyRefreshSequence = 0;
 let contextState = null;
 let nextPr = 100;
 let nextIssue = 200;
@@ -360,9 +375,12 @@ async function refresh() {
     const showingOntology = location.pathname === "/ontology";
     const showingHistory = location.pathname === "/history";
     if (showingOntology) {
+      const requestSequence = ++ontologyRefreshSequence;
       const response = await fetch(API + "/ontology");
       if (!response.ok) throw new Error("API request failed");
-      ontologyState = await response.json();
+      const nextOntologyState = await response.json();
+      if (requestSequence !== ontologyRefreshSequence || location.pathname !== "/ontology") return;
+      ontologyState = nextOntologyState;
     } else if (showingTaskTypes) {
       const response = await fetch(API + "/task-types");
       if (!response.ok) throw new Error("API request failed");
@@ -416,6 +434,8 @@ function renderOntology() {
   graphControls.replaceChildren();
   renderContextResults();
   const graph = ontologyState.latest;
+  const graphKey = graph ? ontologyGraphIdentity(graph) : null;
+  if (graphKey !== ontologyViewState.graphKey) resetOntologyViewForGraph(graphKey);
   if (!graph) {
     ontologySummary.append(ontologyStat("Status", "No graph yet"));
     ontologyDetails.append(textElement("p", "empty-detail", "Run an ontology_build task to create the first graph."));
@@ -426,6 +446,8 @@ function renderOntology() {
   document.getElementById("ontology-description").textContent = graph.summary;
   const visibleGraph = filterOntologyGraph(graph, ontologyViewState.hiddenNodeKinds, ontologyViewState.hiddenEdgePredicates);
   if (!selectionIsVisible(ontologyViewState.selected, visibleGraph)) ontologyViewState.selected = null;
+  const focus = focusedGraphElements(ontologyViewState.selected, visibleGraph);
+  const focusActive = Boolean(ontologyViewState.selected);
   ontologySummary.append(
     ontologyStat("Repository", graph.repository),
     ontologyStat("Nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
@@ -436,28 +458,29 @@ function renderOntology() {
   );
   renderGraphControls(graph);
 
-  const positions = graphPositions(visibleGraph.nodes);
+  const positions = graphPositions(visibleGraph.nodes, ontologyViewState.nodePositions);
   const edgeLabels = [];
   for (let edgeIndex = 0; edgeIndex < visibleGraph.edges.length; edgeIndex += 1) {
     const edge = visibleGraph.edges[edgeIndex];
     const source = positions.get(edge.source);
     const target = positions.get(edge.target);
     if (!source || !target) continue;
-    const geometry = graphEdgeGeometry(source, target, edgeIndex);
+    const edgeOffset = ontologyViewState.edgeOffsets.get(edge.id) || { x: 0, y: 0 };
+    const geometry = graphEdgeGeometry(source, target, edgeIndex, edgeOffset);
     const selected = ontologyViewState.selected?.kind === "edge" && ontologyViewState.selected.id === edge.id;
-    const group = svgElement("g", "graph-edge-group" + (selected ? " selected" : ""));
+    const focused = focus.edgeIds.has(edge.id);
+    const focusClass = focusActive ? focused ? " connected" : " dimmed" : "";
+    const group = svgElement("g", "graph-edge-group" + (selected ? " selected" : "") + focusClass);
     const hit = svgElement("path", "graph-edge-hit");
     hit.setAttribute("d", geometry.path);
     const line = svgElement("path", "graph-edge graph-edge-" + edge.plane);
     line.setAttribute("d", geometry.path);
     group.append(hit, line);
-    group.addEventListener("click", function(event) {
-      event.stopPropagation();
-      selectGraphItem("edge", edge.id);
-    });
+    makeGraphItemInteractive(group, "edge", edge.id);
+    enableGraphDrag(group, "edge", edge.id, edgeOffset);
     ontologyGraph.append(group);
 
-    const labelGroup = svgElement("g", "graph-edge-label-button" + (selected ? " selected" : ""));
+    const labelGroup = svgElement("g", "graph-edge-label-button" + (selected ? " selected" : "") + focusClass);
     labelGroup.setAttribute("transform", "translate(" + geometry.labelX + " " + geometry.labelY + ")");
     labelGroup.setAttribute("role", "button");
     labelGroup.setAttribute("tabindex", "0");
@@ -470,31 +493,38 @@ function renderOntology() {
     const label = svgElement("text", "graph-edge-label");
     label.setAttribute("y", "2");
     label.textContent = edge.predicate;
+    const sourceNode = graph.nodes.find(function(node) { return node.id === edge.source; });
+    const targetNode = graph.nodes.find(function(node) { return node.id === edge.target; });
     const title = svgElement("title");
-    title.textContent = edge.predicate + " — " + edge.source + " to " + edge.target;
+    title.textContent = edge.predicate + " — " + (sourceNode ? friendlyNodeLabel(sourceNode, graph) : edge.source) + " to " + (targetNode ? friendlyNodeLabel(targetNode, graph) : edge.target) + ". Drag to reroute; click for details.";
     labelGroup.append(background, label, title);
     labelGroup.addEventListener("mouseenter", function() { group.classList.add("hovered"); });
     labelGroup.addEventListener("mouseleave", function() { group.classList.remove("hovered"); });
     labelGroup.addEventListener("focus", function() { group.classList.add("hovered"); });
     labelGroup.addEventListener("blur", function() { group.classList.remove("hovered"); });
     makeGraphItemInteractive(labelGroup, "edge", edge.id);
+    enableGraphDrag(labelGroup, "edge", edge.id, edgeOffset);
     edgeLabels.push(labelGroup);
   }
   for (const node of visibleGraph.nodes) {
     const point = positions.get(node.id);
     if (!point) continue;
     const selected = ontologyViewState.selected?.kind === "node" && ontologyViewState.selected.id === node.id;
-    const group = svgElement("g", "graph-node kind-" + node.kind + (selected ? " selected" : ""));
+    const focused = focus.nodeIds.has(node.id);
+    const focusClass = focusActive ? focused ? " connected" : " dimmed" : "";
+    const group = svgElement("g", "graph-node kind-" + node.kind + (selected ? " selected" : "") + focusClass);
     group.setAttribute("transform", "translate(" + point.x + " " + point.y + ")");
     group.setAttribute("role", "button");
     group.setAttribute("tabindex", "0");
-    group.setAttribute("aria-label", node.kind + " node: " + node.label);
+    const friendlyLabel = friendlyNodeLabel(node, graph);
+    group.setAttribute("aria-label", node.kind + " node: " + friendlyLabel);
     const circle = svgElement("circle"); circle.setAttribute("r", node.kind === "Repository" ? "38" : "30");
-    const label = svgElement("text"); label.setAttribute("y", "3"); label.textContent = truncateLabel(node.label, 18);
+    const label = svgElement("text"); label.setAttribute("y", "3"); label.textContent = truncateLabel(friendlyLabel, 24);
     const kind = svgElement("text", "node-kind"); kind.setAttribute("y", "48"); kind.textContent = node.kind;
-    const title = svgElement("title"); title.textContent = node.label + " — " + node.description;
+    const title = svgElement("title"); title.textContent = friendlyLabel + " — " + friendlyNodeExplanation(node, graph) + " Drag to reposition; click for details.";
     group.append(circle, label, kind, title);
     makeGraphItemInteractive(group, "node", node.id);
+    enableGraphDrag(group, "node", node.id, point);
     ontologyGraph.append(group);
   }
   ontologyGraph.append(...edgeLabels);
@@ -522,6 +552,100 @@ function selectionIsVisible(selection, graph) {
   return items.some(function(item) { return item.id === selection.id; });
 }
 
+function ontologyGraphIdentity(graph) {
+  return [graph.id || "", graph.repository || "", graph.ref || "", graph.commitSha || "", graph.generatedAt || ""].join("|");
+}
+
+function resetOntologyViewForGraph(graphKey) {
+  ontologyViewState.graphKey = graphKey;
+  ontologyViewState.selected = null;
+  ontologyViewState.nodePositions.clear();
+  ontologyViewState.edgeOffsets.clear();
+  ontologyViewState.drag = null;
+  ontologyViewState.suppressedClick = null;
+  if (graphDragFrame !== null) cancelAnimationFrame(graphDragFrame);
+  graphDragFrame = null;
+}
+
+function focusedGraphElements(selection, graph) {
+  const nodeIds = new Set();
+  const edgeIds = new Set();
+  if (!selection) return { nodeIds: nodeIds, edgeIds: edgeIds };
+  if (selection.kind === "node") {
+    nodeIds.add(selection.id);
+    for (const edge of graph.edges) {
+      if (edge.source !== selection.id && edge.target !== selection.id) continue;
+      edgeIds.add(edge.id);
+      nodeIds.add(edge.source);
+      nodeIds.add(edge.target);
+    }
+    return { nodeIds: nodeIds, edgeIds: edgeIds };
+  }
+  const edge = graph.edges.find(function(candidate) { return candidate.id === selection.id; });
+  if (edge) {
+    edgeIds.add(edge.id);
+    nodeIds.add(edge.source);
+    nodeIds.add(edge.target);
+  }
+  return { nodeIds: nodeIds, edgeIds: edgeIds };
+}
+
+function mergePullRequestsForCommit(node, graph) {
+  const pullRequests = [];
+  const seen = new Set();
+  for (const edge of graph.edges) {
+    if (edge.target !== node.id || edge.predicate !== "MERGED_AS" || seen.has(edge.source)) continue;
+    const pullRequest = graph.nodes.find(function(candidate) {
+      return candidate.id === edge.source && candidate.kind === "PullRequest";
+    });
+    if (!pullRequest) continue;
+    seen.add(edge.source);
+    pullRequests.push(pullRequest);
+  }
+  return pullRequests;
+}
+
+function commitShaForNode(node) {
+  const labelSha = String(node.label || "").match(/^[a-f0-9]{7,40}$/i);
+  if (labelSha) return labelSha[0];
+  const canonicalSha = String(node.description || "").match(/(?:^|:)sha:([a-f0-9]{7,40})(?:$|:)/i);
+  return canonicalSha ? canonicalSha[1] : null;
+}
+
+function canonicalNodeContext(description) {
+  const value = String(description || "");
+  const repositoryEntity = value.match(/^repo:([^:]+):(path|moniker):(.+)$/);
+  if (repositoryEntity) return repositoryEntity[1] + " · " + repositoryEntity[3];
+  const url = value.match(/^url:(https?:\\/\\/.+)$/i);
+  if (url) return url[1];
+  return value;
+}
+
+function friendlyNodeLabel(node, graph) {
+  if (node.kind === "Commit") {
+    const pullRequests = mergePullRequestsForCommit(node, graph);
+    if (pullRequests.length === 1) return "Merge commit · " + pullRequests[0].label;
+    const sha = commitShaForNode(node);
+    if (sha) return "Commit · " + sha.slice(0, 12);
+  }
+  const technicalLabel = /^(?:entity:|node[_:]|[a-f0-9]{12,40}$)/i.test(node.label);
+  if (technicalLabel) {
+    const context = canonicalNodeContext(node.description);
+    const kind = String(node.kind).replace(/([a-z])([A-Z])/g, "$1 $2").replace(/[._-]+/g, " ");
+    if (context && context !== node.label) return kind + " · " + context;
+  }
+  return node.label;
+}
+
+function friendlyNodeExplanation(node, graph) {
+  if (node.kind === "Commit") {
+    const pullRequests = mergePullRequestsForCommit(node, graph);
+    if (pullRequests.length === 1) return "This commit records the merge of " + friendlyNodeLabel(pullRequests[0], graph) + ".";
+    if (pullRequests.length > 1) return "Multiple pull requests claim this merge commit. Inspect the visible relationships before attributing it to a pull request.";
+  }
+  return node.description || "No explanation provided for this node.";
+}
+
 function visibleCount(visible, total) {
   return visible === total ? String(total) : visible + " / " + total;
 }
@@ -530,18 +654,29 @@ function renderGraphControls(graph) {
   const nodeKinds = countGraphTypes(graph.nodes, "kind");
   const edgePredicates = countGraphTypes(graph.edges, "predicate");
   graphControls.append(
+    textElement("p", "graph-control-help", "Drag nodes to reposition them. Drag an edge or its label to adjust its curve. Select an item to focus its direct connections."),
     graphFilterRow("Node types", "node", nodeKinds, ontologyViewState.hiddenNodeKinds),
     graphFilterRow("Edge types", "edge", edgePredicates, ontologyViewState.hiddenEdgePredicates)
   );
-  const reset = textElement("button", "graph-reset", "Show all");
-  reset.type = "button";
-  reset.disabled = ontologyViewState.hiddenNodeKinds.size === 0 && ontologyViewState.hiddenEdgePredicates.size === 0;
-  reset.addEventListener("click", function() {
+  const actions = element("div", "graph-control-actions");
+  const showAll = textElement("button", "graph-reset", "Show all");
+  showAll.type = "button";
+  showAll.disabled = ontologyViewState.hiddenNodeKinds.size === 0 && ontologyViewState.hiddenEdgePredicates.size === 0;
+  showAll.addEventListener("click", function() {
     ontologyViewState.hiddenNodeKinds.clear();
     ontologyViewState.hiddenEdgePredicates.clear();
     renderOntology();
   });
-  graphControls.lastElementChild.append(reset);
+  const resetLayout = textElement("button", "graph-reset", "Reset layout");
+  resetLayout.type = "button";
+  resetLayout.disabled = ontologyViewState.nodePositions.size === 0 && ontologyViewState.edgeOffsets.size === 0;
+  resetLayout.addEventListener("click", function() {
+    ontologyViewState.nodePositions.clear();
+    ontologyViewState.edgeOffsets.clear();
+    renderOntology();
+  });
+  actions.append(showAll, resetLayout);
+  graphControls.append(actions);
 }
 
 function countGraphTypes(items, property) {
@@ -576,6 +711,11 @@ function toggleGraphFilter(group, type) {
 function makeGraphItemInteractive(element, kind, id) {
   function select(event) {
     event.stopPropagation();
+    const suppressed = ontologyViewState.suppressedClick;
+    if (event.type === "click" && suppressed && suppressed.kind === kind && suppressed.id === id) {
+      ontologyViewState.suppressedClick = null;
+      return;
+    }
     selectGraphItem(kind, id);
   }
   element.addEventListener("click", select);
@@ -585,6 +725,72 @@ function makeGraphItemInteractive(element, kind, id) {
       select(event);
     }
   });
+}
+
+function enableGraphDrag(element, kind, id, origin) {
+  element.addEventListener("pointerdown", function(event) {
+    if (event.button !== 0 || event.pointerType === "touch") return;
+    event.stopPropagation();
+    ontologyViewState.drag = {
+      kind: kind,
+      id: id,
+      graphKey: ontologyViewState.graphKey,
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startClientY: event.clientY,
+      originX: origin.x,
+      originY: origin.y,
+      moved: false
+    };
+  });
+}
+
+function handleGraphPointerMove(event) {
+  const drag = ontologyViewState.drag;
+  if (!drag || drag.pointerId !== event.pointerId || drag.graphKey !== ontologyViewState.graphKey) return;
+  const bounds = ontologyGraph.getBoundingClientRect();
+  if (!bounds.width || !bounds.height) return;
+  const dx = (event.clientX - drag.startClientX) * 1100 / bounds.width;
+  const dy = (event.clientY - drag.startClientY) * 590 / bounds.height;
+  if (!drag.moved && Math.hypot(dx, dy) < 3) return;
+  event.preventDefault();
+  drag.moved = true;
+  const position = {
+    x: drag.originX + dx,
+    y: drag.originY + dy
+  };
+  if (drag.kind === "node") {
+    ontologyViewState.nodePositions.set(drag.id, {
+      x: Math.max(45, Math.min(1055, position.x)),
+      y: Math.max(50, Math.min(540, position.y))
+    });
+  } else {
+    ontologyViewState.edgeOffsets.set(drag.id, {
+      x: Math.max(-260, Math.min(260, position.x)),
+      y: Math.max(-260, Math.min(260, position.y))
+    });
+  }
+  if (graphDragFrame === null) {
+    const dragGraphKey = drag.graphKey;
+    graphDragFrame = requestAnimationFrame(function() {
+      graphDragFrame = null;
+      if (ontologyViewState.graphKey !== dragGraphKey) return;
+      renderOntology();
+    });
+  }
+}
+
+function finishGraphDrag(event) {
+  const drag = ontologyViewState.drag;
+  if (!drag || drag.pointerId !== event.pointerId) return;
+  if (drag.moved) {
+    const suppressed = { kind: drag.kind, id: drag.id };
+    ontologyViewState.suppressedClick = suppressed;
+    setTimeout(function() {
+      if (ontologyViewState.suppressedClick === suppressed) ontologyViewState.suppressedClick = null;
+    }, 0);
+  }
+  ontologyViewState.drag = null;
 }
 
 function selectGraphItem(kind, id) {
@@ -605,14 +811,19 @@ function renderOntologyInspector(graph, visibleGraph) {
     const node = graph.nodes.find(function(item) { return item.id === selection.id; });
     if (!node) return;
     const relatedEdges = visibleGraph.edges.filter(function(edge) { return edge.source === node.id || edge.target === node.id; });
-    const item = ontologyInspectorItem(node.label, "Node · " + node.kind);
-    item.append(ontologyExplanation(node.description || "No explanation provided for this node."));
-    item.append(ontologyDetailGrid([
+    const friendlyLabel = friendlyNodeLabel(node, graph);
+    const explanation = friendlyNodeExplanation(node, graph);
+    const fields = [
       ["ID", node.id],
-      ["Type", node.kind],
-      ["Path", node.path || "Not applicable"],
-      ["Visible relationships", String(relatedEdges.length)]
-    ]));
+      ["Type", node.kind]
+    ];
+    if (friendlyLabel !== node.label) fields.push(["Stored label", node.label]);
+    fields.push(["Path", node.path || "Not applicable"]);
+    fields.push(["Visible relationships", String(relatedEdges.length)]);
+    if (explanation !== node.description && node.description) fields.push(["Canonical key", node.description]);
+    const item = ontologyInspectorItem(friendlyLabel, "Node · " + node.kind);
+    item.append(ontologyExplanation(explanation));
+    item.append(ontologyDetailGrid(fields));
     const confidence = connectedConfidenceSummary(relatedEdges);
     item.append(ontologyConfidence(
       "Connected relationship confidence",
@@ -630,16 +841,18 @@ function renderOntologyInspector(graph, visibleGraph) {
   if (!edge) return;
   const source = graph.nodes.find(function(node) { return node.id === edge.source; });
   const target = graph.nodes.find(function(node) { return node.id === edge.target; });
+  const sourceLabel = source ? friendlyNodeLabel(source, graph) : edge.source;
+  const targetLabel = target ? friendlyNodeLabel(target, graph) : edge.target;
   const item = ontologyInspectorItem(edge.predicate, "Edge · " + edge.plane + " plane");
   item.append(ontologyExplanation(
-    edge.why || "This relationship states that " + (source?.label || edge.source) + " " + humanize(edge.predicate) + " " + (target?.label || edge.target) + "."
+    edge.why || "This relationship states that " + sourceLabel + " " + humanize(edge.predicate) + " " + targetLabel + "."
   ));
   item.append(ontologyDetailGrid([
     ["ID", edge.id],
     ["Predicate", edge.predicate],
     ["Plane", edge.plane],
-    ["Source", source ? source.kind + " · " + source.label + " (" + source.id + ")" : edge.source],
-    ["Target", target ? target.kind + " · " + target.label + " (" + target.id + ")" : edge.target]
+    ["Source", source ? source.kind + " · " + sourceLabel + " (" + source.id + ")" : edge.source],
+    ["Target", target ? target.kind + " · " + targetLabel + " (" + target.id + ")" : edge.target]
   ]));
   item.append(ontologyConfidence(
     "Relationship confidence",
@@ -744,7 +957,7 @@ function ontologyRelationshipSection(node, edges, graph) {
     const button = element("button", "ontology-relationship");
     button.type = "button";
     button.append(
-      textElement("span", "ontology-relationship-title", (outgoing ? "Outgoing · " : "Incoming · ") + edge.predicate + " · " + (other?.label || otherId)),
+      textElement("span", "ontology-relationship-title", (outgoing ? "Outgoing · " : "Incoming · ") + edge.predicate + " · " + (other ? friendlyNodeLabel(other, graph) : otherId)),
       textElement("span", "ontology-relationship-meta", edge.plane + " · " + confidenceLabel(edge.confidence)),
       textElement("span", "ontology-relationship-explanation", edge.why || "No relationship explanation provided. Select for full details.")
     );
@@ -962,7 +1175,7 @@ function ontologyStat(label, value) {
   return stat;
 }
 
-function graphPositions(nodes) {
+function graphPositions(nodes, overrides) {
   const positions = new Map();
   const center = nodes.find(function(node) { return node.kind === "Repository"; });
   if (center) positions.set(center.id, { x: 550, y: 295 });
@@ -974,17 +1187,24 @@ function graphPositions(nodes) {
     const angle = -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
     positions.set(rest[index].id, { x: 550 + Math.cos(angle) * ring * 1.75, y: 295 + Math.sin(angle) * ring });
   }
+  if (overrides) {
+    for (const node of nodes) {
+      const saved = overrides.get(node.id);
+      if (saved) positions.set(node.id, { x: saved.x, y: saved.y });
+    }
+  }
   return positions;
 }
 
-function graphEdgeGeometry(source, target, index) {
+function graphEdgeGeometry(source, target, index, dragOffset) {
   const dx = target.x - source.x;
   const dy = target.y - source.y;
   const length = Math.max(Math.hypot(dx, dy), 1);
   const direction = index % 2 === 0 ? 1 : -1;
   const offset = (130 + (index % 3) * 20) * direction;
-  const controlX = (source.x + target.x) / 2 - (dy / length) * offset;
-  const controlY = (source.y + target.y) / 2 + (dx / length) * offset;
+  const moved = dragOffset || { x: 0, y: 0 };
+  const controlX = (source.x + target.x) / 2 - (dy / length) * offset + moved.x * 2;
+  const controlY = (source.y + target.y) / 2 + (dx / length) * offset + moved.y * 2;
   return {
     path: "M " + source.x + " " + source.y + " Q " + controlX + " " + controlY + " " + target.x + " " + target.y,
     labelX: (source.x + 2 * controlX + target.x) / 4,
@@ -1453,6 +1673,9 @@ document.getElementById("close-detail").addEventListener("click", closeTask);
 dialog.addEventListener("cancel", function(event) { event.preventDefault(); closeTask(); });
 dialog.addEventListener("click", function(event) { if (event.target === dialog) closeTask(); });
 window.addEventListener("hashchange", renderSelectedTask);
+window.addEventListener("pointermove", handleGraphPointerMove);
+window.addEventListener("pointerup", finishGraphDrag);
+window.addEventListener("pointercancel", finishGraphDrag);
 document.getElementById("toolbar").addEventListener("click", function(event) {
   const action = event.target.dataset.demo;
   if (action === "pr") postDemo({ repository: "omlabs/example", pullRequestNumber: ++nextPr, headSha: "sha-" + nextPr + "-1" });

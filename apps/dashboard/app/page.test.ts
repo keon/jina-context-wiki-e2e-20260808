@@ -42,6 +42,20 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /function filterOntologyGraph/);
   assert.match(html, /function renderGraphControls/);
   assert.match(html, /function graphEdgeGeometry/);
+  assert.match(html, /function focusedGraphElements/);
+  assert.match(html, /function ontologyGraphIdentity/);
+  assert.match(html, /function resetOntologyViewForGraph/);
+  assert.match(html, /function friendlyNodeLabel/);
+  assert.match(html, /function friendlyNodeExplanation/);
+  assert.match(html, /function enableGraphDrag/);
+  assert.match(html, /function handleGraphPointerMove/);
+  assert.match(html, /nodePositions: new Map/);
+  assert.match(html, /edgeOffsets: new Map/);
+  assert.match(html, /ontologyRefreshSequence/);
+  assert.match(html, /requestSequence !== ontologyRefreshSequence/);
+  assert.match(html, /touch-action: pan-x pan-y pinch-zoom/);
+  assert.match(html, /event\.pointerType === "touch"/);
+  assert.doesNotMatch(html, /suppressClickUntil/);
   assert.match(html, /graph-edge-label-button/);
   assert.match(html, /function toggleGraphFilter/);
   assert.match(html, /function makeGraphItemInteractive/);
@@ -61,6 +75,8 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /No relationship explanation provided/);
   assert.match(html, /Evidence · /);
   assert.match(html, /Show all/);
+  assert.match(html, /Reset layout/);
+  assert.match(html, /Select an item to focus its direct connections/);
   assert.match(html, /Ask with citations/);
   assert.match(html, /function renderIssueTrace/);
   assert.match(html, /function issueTraceEntity/);
@@ -125,6 +141,77 @@ test("dashboard page renders clickable task detail affordances", () => {
     "edge relationship types can be hidden independently"
   );
 
+  const focusedSource = script.match(/function focusedGraphElements\(selection, graph\) \{[\s\S]+?\n\}\n\nfunction friendlyNodeLabel/)?.[0]
+    .replace(/\n\nfunction friendlyNodeLabel$/, "");
+  assert.ok(focusedSource);
+  const focusedGraphElements = new Function(`${focusedSource}; return focusedGraphElements;`)() as (
+    selection: { kind: "node" | "edge"; id: string } | null,
+    graph: { nodes: Array<{ id: string; kind: string }>; edges: Array<{ id: string; source: string; target: string; predicate: string }> }
+  ) => { nodeIds: Set<string>; edgeIds: Set<string> };
+  const nodeFocus = focusedGraphElements({ kind: "node", id: "repo" }, graph);
+  assert.deepEqual(Array.from(nodeFocus.nodeIds).sort(), ["file", "issue", "repo"]);
+  assert.deepEqual(Array.from(nodeFocus.edgeIds).sort(), ["contains", "tracks"]);
+  const edgeFocus = focusedGraphElements({ kind: "edge", id: "tracks" }, graph);
+  assert.deepEqual(Array.from(edgeFocus.nodeIds).sort(), ["issue", "repo"]);
+  assert.deepEqual(Array.from(edgeFocus.edgeIds), ["tracks"]);
+
+  const graphIdentitySource = script.match(/function ontologyGraphIdentity\(graph\) \{[\s\S]+?\n\}\n\nfunction resetOntologyViewForGraph/)?.[0]
+    .replace(/\n\nfunction resetOntologyViewForGraph$/, "");
+  assert.ok(graphIdentitySource);
+  const ontologyGraphIdentity = new Function(`${graphIdentitySource}; return ontologyGraphIdentity;`)() as (
+    graph: { id?: string; repository: string; ref: string; commitSha: string; generatedAt: string }
+  ) => string;
+  assert.notEqual(
+    ontologyGraphIdentity({ repository: "org/old", ref: "main", commitSha: "a", generatedAt: "2026-01-01" }),
+    ontologyGraphIdentity({ repository: "org/new", ref: "main", commitSha: "a", generatedAt: "2026-01-01" }),
+    "view state is scoped to the repository graph identity"
+  );
+
+  const friendlyLabelSource = script.match(/function mergePullRequestsForCommit\(node, graph\) \{[\s\S]+?\n\}\n\nfunction friendlyNodeExplanation/)?.[0]
+    .replace(/\n\nfunction friendlyNodeExplanation$/, "");
+  assert.ok(friendlyLabelSource);
+  const friendlyNodeLabel = new Function(`${friendlyLabelSource}; return friendlyNodeLabel;`)() as (
+    node: { id: string; kind: string; label: string; description?: string },
+    graph: { nodes: Array<{ id: string; kind: string; label: string }>; edges: Array<{ source: string; target: string; predicate: string }> }
+  ) => string;
+  const commit = { id: "commit", kind: "Commit", label: "d80aa666dd41", description: "repo:omxyz/jina-ontology-e2e:sha:d80aa666dd41a423d2775b8c0c47ba20d53facef" };
+  const pullRequest = { id: "pr", kind: "PullRequest", label: "#2 Document guest denial semantics" };
+  const commitGraph = {
+    nodes: [commit, pullRequest],
+    edges: [{ source: "pr", target: "commit", predicate: "MERGED_AS" }]
+  };
+  assert.equal(friendlyNodeLabel(commit, commitGraph), "Merge commit · #2 Document guest denial semantics");
+  const secondPullRequest = { id: "pr-2", kind: "PullRequest", label: "#3 Conflicting merge attribution" };
+  const ambiguousCommitGraph = {
+    nodes: [commit, pullRequest, secondPullRequest],
+    edges: [
+      { source: "pr", target: "commit", predicate: "MERGED_AS" },
+      { source: "pr-2", target: "commit", predicate: "MERGED_AS" }
+    ]
+  };
+  assert.equal(friendlyNodeLabel(commit, ambiguousCommitGraph), "Commit · d80aa666dd41");
+  assert.equal(
+    friendlyNodeLabel(commit, { ...ambiguousCommitGraph, edges: ambiguousCommitGraph.edges.slice().reverse() }),
+    "Commit · d80aa666dd41",
+    "ambiguous merge attribution does not depend on edge ordering"
+  );
+  assert.equal(
+    friendlyNodeLabel(
+      { id: "not-sha", kind: "Commit", label: "not-a-sha", description: "ticket 123456789abcde" },
+      { nodes: [], edges: [] }
+    ),
+    "not-a-sha",
+    "arbitrary hexadecimal description text is not treated as a commit SHA"
+  );
+  assert.equal(
+    friendlyNodeLabel(
+      { id: "symbol", kind: "Symbol", label: "entity:symbol-a", description: "repo:omxyz/jina:moniker:src/app.ts:Thing" },
+      { nodes: [], edges: [] }
+    ),
+    "Symbol · omxyz/jina · src/app.ts:Thing",
+    "technical labels retain repository and moniker context"
+  );
+
   const confidenceSource = script.match(/function connectedConfidenceSummary\(edges\) \{[\s\S]+?\n\}\n\nfunction ontologyConfidence/)?.[0]
     .replace(/\n\nfunction ontologyConfidence$/, "");
   assert.ok(confidenceSource);
@@ -142,15 +229,18 @@ test("dashboard page renders clickable task detail affordances", () => {
     "nodes without scored relationships do not invent a confidence value"
   );
 
-  const edgeGeometrySource = script.match(/function graphEdgeGeometry\(source, target, index\) \{[\s\S]+?\n\}\n\nfunction svgElement/)?.[0]
+  const edgeGeometrySource = script.match(/function graphEdgeGeometry\(source, target, index, dragOffset\) \{[\s\S]+?\n\}\n\nfunction svgElement/)?.[0]
     .replace(/\n\nfunction svgElement$/, "");
   assert.ok(edgeGeometrySource);
   const graphEdgeGeometry = new Function(`${edgeGeometrySource}; return graphEdgeGeometry;`)() as (
-    source: { x: number; y: number }, target: { x: number; y: number }, index: number
+    source: { x: number; y: number }, target: { x: number; y: number }, index: number, dragOffset?: { x: number; y: number }
   ) => { path: string; labelX: number; labelY: number };
   const geometry = graphEdgeGeometry({ x: 0, y: 0 }, { x: 0, y: 100 }, 0);
   assert.match(geometry.path, / Q /);
   assert.notEqual(geometry.labelX, 0, "curved edges move their clickable label away from overlapping nodes");
+  const movedGeometry = graphEdgeGeometry({ x: 0, y: 0 }, { x: 0, y: 100 }, 0, { x: 20, y: 10 });
+  assert.equal(movedGeometry.labelX - geometry.labelX, 20, "dragging an edge offsets its curve label horizontally");
+  assert.equal(movedGeometry.labelY - geometry.labelY, 10, "dragging an edge offsets its curve label vertically");
 
   const partitionSource = script.match(/function partitionBoardTasks\(tasks\) \{[\s\S]+?\n\}\n\nfunction renderColumns/)?.[0]
     .replace(/\n\nfunction renderColumns$/, "");
