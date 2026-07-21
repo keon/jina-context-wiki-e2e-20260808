@@ -238,7 +238,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     if (!snapshot) throw new Error("cannot project an ontology before repository ingestion");
     const assertions = dedupeApplicableAssertions(this.allAssertions()
       .filter((assertion) => assertion.tenantId === request.tenantId && assertion.repository === request.repository)
-      .filter((assertion) => assertion.status === "active")
+      .filter((assertion) => assertion.status === "active" || assertion.status === "proposed")
       .filter((assertion) => {
         if (assertion.commitSha === "source") return true;
         const source = this.snapshots.get(snapshotKey(assertion.tenantId, assertion.repository, assertion.commitSha));
@@ -774,7 +774,7 @@ function derivedIssueDescriptionFromBatch(batch: OntologyAssertionBatch, issueNa
   const pullRequestNumber = resolution ? numberFromEntityNaturalKey(resolution.subject.naturalKey) : undefined;
   if (!pullRequestNumber) return undefined;
   return batch.rawOutput.nodes.find((node) =>
-    node.kind === "Issue" && node.id === `virtual:pr:${pullRequestNumber}`
+    node.kind === "Issue" && node.id === `derived:pr:${pullRequestNumber}`
   )?.description;
 }
 
@@ -1056,13 +1056,17 @@ export function createOntologyProjection(
     const target = projectionEntityId(assertion.object);
     ensureAssertionNode(nodes, source, assertion.subject, evidence);
     ensureAssertionNode(nodes, target, assertion.object, evidence);
+    const qualifiers = {
+      ...(assertion.qualifiers ?? {}),
+      assertionStatus: assertion.status
+    };
     edges.push({
       source,
       target,
       predicate: assertion.predicate,
       plane: "knowledge",
       confidence: assertion.confidence,
-      ...(Object.keys(assertion.qualifiers ?? {}).length > 0 ? { qualifiers: assertion.qualifiers } : {}),
+      qualifiers,
       ...(assertion.explanation
         ? { why: assertion.explanation }
         : assertion.predicate === "INTRODUCED_BY" && typeof assertion.qualifiers?.reason === "string"
@@ -1079,7 +1083,7 @@ export function createOntologyProjection(
     model: ONTOLOGY_PROJECTION_VERSION,
     contentAddressed: true,
     generated: {
-      summary: `Projected ${files.length} files, ${[...nodes.values()].filter((node) => node.kind === "Symbol").length} symbols, and ${assertions.length} active semantic assertions from canonical Ontology data.`,
+      summary: `Projected ${files.length} files, ${[...nodes.values()].filter((node) => node.kind === "Symbol").length} symbols, and ${assertions.length} semantic assertions (${assertions.filter((assertion) => assertion.status === "active").length} accepted, ${assertions.filter((assertion) => assertion.status === "proposed").length} proposed) from canonical Ontology data.`,
       nodes: [...nodes.values()],
       edges
     }

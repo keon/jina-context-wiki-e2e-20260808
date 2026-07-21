@@ -27,6 +27,8 @@ import {
   RepositoryContextOrchestrator,
   retrievalTemplateNames,
   ontologyNodeKinds,
+  ontologyStagePrerequisites,
+  ontologyStageRequired,
   ontologyTaskTypeDependencies,
   ontologyTaskTypeDefinitions,
   ontologyTaskTypeTriggers,
@@ -644,6 +646,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await renewWork(request, response, tenantId);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/worker/release") {
+      await releaseWork(request, response, tenantId);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/worker/complete") {
       await completeWork(request, response, tenantId);
       return;
@@ -937,6 +943,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { accepted: true });
   }
 
+  async function releaseWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const messageId = requiredString(body.messageId, "messageId");
+    const leaseId = requiredString(body.leaseId, "leaseId");
+    const reason = requiredString(body.reason, "reason").slice(0, 500);
+    if (!messageId.startsWith("ontology-stage_")) {
+      throw invalidRequest("only ontology task-board leases can be released");
+    }
+    const released = await ontologyCoordinator.release({
+      tenantId,
+      stageId: messageId,
+      leaseId,
+      now: nowIso(),
+      reason
+    });
+    if (!released) throw staleLease();
+    json(response, 200, { accepted: true });
+  }
+
   async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const rawMessageId = requiredString(body.messageId, "messageId");
@@ -1200,13 +1225,21 @@ function mergePipelineBoardView(
     pipelineBuildTask(build),
     ...stages.map((stage) => pipelineStageTask(build, stage))
   ]);
-  const dependencies = visible.flatMap(({ build, stages }) => stages.slice(1).map((stage, index) => ({
-    taskId: stage.id,
-    dependsOnTaskId: stages[index]!.id,
-    relationship: "blocks",
-    required: stage.phase === "snapshot" || !build.snapshotFirst,
-    blocksParentCompletion: stage.phase === "snapshot" || !build.snapshotFirst
-  })));
+  const dependencies = visible.flatMap(({ build, stages }) => stages.flatMap((stage) =>
+    ontologyStagePrerequisites(stage, build.snapshotFirst).map((prerequisite) => {
+      const dependency = stages.find((candidate) =>
+        candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
+      );
+      if (!dependency) throw new Error(`missing ontology stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
+      return {
+        taskId: stage.id,
+        dependsOnTaskId: dependency.id,
+        relationship: "blocks",
+        required: ontologyStageRequired(stage),
+        blocksParentCompletion: ontologyStageRequired(stage)
+      };
+    })
+  ));
   return {
     ...board,
     tasks: [...board.tasks.filter((task) => !task.type.startsWith("ontology_")), ...pipelineTasks],
@@ -1264,7 +1297,7 @@ function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecor
     status: pipelineStageBoardStatus(stage.status),
     assigneeRole: "ontology_worker",
     dedupeKey: `ontology:${stage.buildId}:${stage.phase}:${stage.stage}`,
-    required: stage.phase === "snapshot" || !build.snapshotFirst,
+    required: ontologyStageRequired(stage),
     attempt: stage.attempt,
     metadata: { ...stage.metadata },
     kind: "dispatchable",

@@ -17,8 +17,8 @@ const ontologyTaskSpecs = [
   },
   {
     type: "ontology_project", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "project",
-    dispatchTopic: "run-ontology-project", dependsOn: "ontology_assert",
-    description: "Builds a disposable dashboard graph from canonical code facts and active assertions."
+    dispatchTopic: "run-ontology-project", dependsOn: "ontology_ingest",
+    description: "Builds a disposable dashboard graph from canonical code facts and available assertions."
   }
 ] as const;
 
@@ -51,7 +51,7 @@ export const ontologyTaskTypeTriggers = [
     workflow: "ontology_build",
     taskType: "ontology_project",
     source: "POST /ontology/build",
-    description: "Creates the projection task in a waiting state; ontology_assert completion unblocks it."
+    description: "Creates the projection task in a waiting state; ontology_ingest completion unblocks it independently of model assertions."
   },
   {
     workflow: "ontology_build",
@@ -85,7 +85,7 @@ export const ontologyTaskTypeDependencies = [
     taskType: "ontology_build",
     dependsOnTaskType: spec.type,
     relationship: "blocks",
-    required: true
+    required: spec.type !== "ontology_assert"
   })),
   ...ontologyTaskSpecs.flatMap((spec) => "dependsOn" in spec ? [{
     workflow: "ontology_build",
@@ -118,7 +118,7 @@ export interface OntologyBuildPlan {
     readonly dependsOnTaskId: PlannedOntologyTaskId;
     readonly relationship: "blocks";
     readonly required: true;
-    readonly blocksParentCompletion: true;
+    readonly blocksParentCompletion: boolean;
   }[];
 }
 
@@ -154,7 +154,7 @@ export function planOntologyBuild(input: {
     })),
     dependencies: ontologyTaskSpecs.flatMap((spec) => "dependsOn" in spec ? [{
       taskId: ids[spec.type], dependsOnTaskId: ids[spec.dependsOn], relationship: "blocks" as const,
-      required: true as const, blocksParentCompletion: true as const
+      required: true as const, blocksParentCompletion: spec.type !== "ontology_assert"
     }] : [])
   };
 }

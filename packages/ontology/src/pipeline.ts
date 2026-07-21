@@ -466,10 +466,10 @@ export function assertionsFromGeneratedOntology(
     const subject = nodes.get(edge.source);
     const object = nodes.get(edge.target);
     if (!subject || !object) return [];
-    const isVirtualResolution = (edge.predicate === "RESOLVED_BY" &&
-      subject.kind === "VirtualIssue" && /^virtual:pr:\d+$/i.test(subject.id.trim())) ||
-      (edge.predicate === "RESOLVES" && object.kind === "Issue" && /^virtual:pr:\d+$/i.test(object.id.trim()));
-    const duplicatesExplicitGitHubResolution = !isVirtualResolution && (
+    const isDerivedResolution = (edge.predicate === "RESOLVED_BY" &&
+      subject.kind === "Issue" && /^derived:pr:\d+$/i.test(subject.id.trim())) ||
+      (edge.predicate === "RESOLVES" && object.kind === "Issue" && /^derived:pr:\d+$/i.test(object.id.trim()));
+    const duplicatesExplicitGitHubResolution = !isDerivedResolution && (
       (edge.predicate === "RESOLVES" && subject.kind === "PullRequest" && object.kind === "Issue") ||
       (edge.predicate === "RESOLVED_BY" && subject.kind === "Issue" && object.kind === "PullRequest")
     );
@@ -510,24 +510,24 @@ function validateDerivedIssueNodes(
   const resolved = new Set(resolvedPullRequestNumbers);
   const anchors = new Set<number>();
   for (const node of generated.nodes) {
-    if (node.kind !== "VirtualIssue" && node.kind !== "Issue") continue;
-    const anchorText = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
+    if (node.kind !== "Issue") continue;
+    const anchorText = /^derived:pr:(\d+)$/i.exec(node.id.trim())?.[1];
     if (!anchorText) continue;
     const anchor = Number.parseInt(anchorText, 10);
-    if (!Number.isSafeInteger(anchor) || anchor < 1) throw new Error(`invalid virtual Issue anchor: ${node.id}`);
+    if (!Number.isSafeInteger(anchor) || anchor < 1) throw new Error(`invalid derived Issue anchor: ${node.id}`);
     if (!observed.has(anchor)) throw new Error(`pull request #${anchor} is not present in source evidence`);
-    if (anchors.has(anchor)) throw new Error(`only one virtual Issue is allowed for pull request #${anchor}`);
+    if (anchors.has(anchor)) throw new Error(`only one derived Issue is allowed for pull request #${anchor}`);
     if (resolved.has(anchor)) throw new Error(`pull request #${anchor} already explicitly resolves an issue`);
     anchors.add(anchor);
     const resolutions = generated.edges.filter((edge) =>
       (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
       (edge.predicate === "RESOLVES" && edge.target === node.id)
     );
-    if (resolutions.length !== 1) throw new Error(`virtual Issue ${node.id} requires exactly one RESOLVES edge`);
+    if (resolutions.length !== 1) throw new Error(`derived Issue ${node.id} requires exactly one RESOLVES edge`);
     const resolution = resolutions[0]!;
     const pullRequest = nodes.get(resolution.predicate === "RESOLVED_BY" ? resolution.target : resolution.source);
     const subjectNumber = pullRequest?.kind === "PullRequest" ? canonicalWorkItemId(pullRequest.id, "PullRequest") : undefined;
-    if (subjectNumber !== String(anchor)) throw new Error(`virtual Issue ${node.id} must be resolved by pull request #${anchor}`);
+    if (subjectNumber !== String(anchor)) throw new Error(`derived Issue ${node.id} must be resolved by pull request #${anchor}`);
   }
 }
 
@@ -537,12 +537,6 @@ export function derivedIssueNaturalKey(repository: string, pullRequestNumber: nu
   }
   const pullRequestKey = `github:pr:${repository}#${pullRequestNumber}`;
   return `derived:issue:${repository}:${stableId("candidate", `${pullRequestKey}:${slot}`)}`;
-}
-
-export function virtualIssueNaturalKey(repository: string, label: string, description: string): string {
-  const normalized = `${label}\n${description}`.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
-  if (!normalized) throw new Error("VirtualIssue requires problem content");
-  return `virtual-issue:${repository}:${stableId("content", normalized).slice("content_".length)}`;
 }
 
 export function featureNaturalKey(repository: string, featureId: string): string {
@@ -569,10 +563,9 @@ function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: 
     if (!match?.[1] || !match[2]) throw new Error(`${node.kind} id must use ${prefix}:<source>:<external-id>: ${node.id}`);
     return `${prefix}:${match[1].toLowerCase()}:${match[2]}`;
   }
-  if (node.kind === "VirtualIssue") return virtualIssueNaturalKey(repository, node.label, node.description);
   if (node.kind === "Issue") {
-    const virtualAnchor = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
-    if (virtualAnchor) return derivedIssueNaturalKey(repository, Number.parseInt(virtualAnchor, 10));
+    const derivedAnchor = /^derived:pr:(\d+)$/i.exec(node.id.trim())?.[1];
+    if (derivedAnchor) return derivedIssueNaturalKey(repository, Number.parseInt(derivedAnchor, 10));
     return `github:issue:${repository}#${canonicalWorkItemId(node.id, "Issue")}`;
   }
   return node.id;

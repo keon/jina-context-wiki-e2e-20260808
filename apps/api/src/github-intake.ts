@@ -122,7 +122,7 @@ function ingestOntologyPush(
     {
       id: assertionId, type: "ontology_assert", kind: "dispatchable" as const,
       title: `Derive assertions for ${webhook.repository}@${ref}`, assigneeRole: "ontology_worker",
-      dedupeKey: `ontology:${tenantId}:${webhook.repository}:${ref}:${options.deliveryId}:assert`, required: true,
+      dedupeKey: `ontology:${tenantId}:${webhook.repository}:${ref}:${options.deliveryId}:assert`, required: false,
       dispatchTopic: "run-ontology-assert", parentTaskId: rootId, metadata: commonMetadata
     },
     {
@@ -137,11 +137,11 @@ function ingestOntologyPush(
   }
   board = applyCommand(board, {
     command: "LinkTask",
-    dependency: { taskId: assertionId, dependsOnTaskId: ingestId, relationship: "blocks", required: true, blocksParentCompletion: true }
+    dependency: { taskId: assertionId, dependsOnTaskId: ingestId, relationship: "blocks", required: true, blocksParentCompletion: false }
   }, { actor, now: options.now }).state;
   board = applyCommand(board, {
     command: "LinkTask",
-    dependency: { taskId: projectionId, dependsOnTaskId: assertionId, relationship: "blocks", required: true, blocksParentCompletion: true }
+    dependency: { taskId: projectionId, dependsOnTaskId: ingestId, relationship: "blocks", required: true, blocksParentCompletion: true }
   }, { actor, now: options.now }).state;
   return { ...state, board: reduceBoard(board, options.now) };
 }

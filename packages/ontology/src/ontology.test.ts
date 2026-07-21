@@ -8,7 +8,7 @@ import {
   sourceBackedModelEntityIds,
   validateOntologyEvidence,
   validateRequiredCausalAssertions,
-  validateRequiredVirtualIssues,
+  validateRequiredDerivedIssues,
   validateSourceBackedModelEntities
 } from "./model.js";
 import { MemoryOntologyGraphStore } from "./store.js";
@@ -52,7 +52,7 @@ import { linkedIssueNumbers, normalizeGitHubSourceObservation, normalizeSourceOb
 import { buildCausalTrace, evaluateCounterfactual } from "./causal.js";
 import { MemoryOntologyPipelineCoordinator } from "./pipeline-coordinator.js";
 
-test("snapshot-first ontology builds publish before low-priority history enrichment", async () => {
+test("snapshot-first ontology builds publish and ingest history without waiting for assertions", async () => {
   const coordinator = new MemoryOntologyPipelineCoordinator();
   const createdAt = "2026-07-21T00:00:00.000Z";
   await coordinator.createBuild({
@@ -85,20 +85,20 @@ test("snapshot-first ontology builds publish before low-priority history enrichm
     tenantId: "tenant", stageId: ingest.task.id, leaseId: ingest.message.leaseId,
     outcome: "done", now: "2026-07-21T00:02:00.000Z", nextMetadata: metadata
   }), true);
-  const assertion = await claim("run-ontology-assert", "2026-07-21T00:03:00.000Z");
-  assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
-  assert.equal(await coordinator.complete({
-    tenantId: "tenant", stageId: assertion.task.id, leaseId: assertion.message.leaseId,
-    outcome: "done", now: "2026-07-21T00:04:00.000Z", nextMetadata: metadata
-  }), true);
-  const projection = await claim("run-ontology-project", "2026-07-21T00:05:00.000Z");
+  const ready = (await coordinator.list("tenant"))[0]!.stages.filter((stage) => stage.status === "queued");
+  assert.deepEqual(ready.map((stage) => `${stage.phase}:${stage.stage}`).sort(), [
+    "history:ingest", "snapshot:assert", "snapshot:project"
+  ]);
+  const projection = await claim("run-ontology-project", "2026-07-21T00:03:00.000Z");
   assert.equal(projection.task.metadata.pipelinePhase, "snapshot");
   assert.equal(await coordinator.complete({
     tenantId: "tenant", stageId: projection.task.id, leaseId: projection.message.leaseId,
-    outcome: "done", now: "2026-07-21T00:06:00.000Z"
+    outcome: "done", now: "2026-07-21T00:04:00.000Z"
   }), true);
-  const history = await claim("run-ontology-ingest", "2026-07-21T00:07:00.000Z");
+  const history = await claim("run-ontology-ingest", "2026-07-21T00:05:00.000Z");
   assert.equal(history.task.metadata.pipelinePhase, "history");
+  const assertion = await claim("run-ontology-assert", "2026-07-21T00:05:00.000Z");
+  assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
 });
 
 test("new repository builds fence leases from superseded builds", async () => {
@@ -123,6 +123,31 @@ test("new repository builds fence leases from superseded builds", async () => {
   });
   assert.ok(next);
   assert.notEqual(next.task.id, old.task.id);
+});
+
+test("workers can release ontology leases for immediate task-board recovery", async () => {
+  const coordinator = new MemoryOntologyPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId: "tenant", repository: "omxyz/jina", ref: "main", requestKey: "release",
+    snapshotFirst: true, createdAt: "2026-07-21T00:00:00.000Z"
+  });
+  const first = await coordinator.claim({
+    tenantId: "tenant", workerId: "worker-1", topics: ["run-ontology-ingest"],
+    now: "2026-07-21T00:01:00.000Z", leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+  });
+  assert.ok(first);
+  assert.equal(await coordinator.release({
+    tenantId: "tenant", stageId: first.task.id, leaseId: first.message.leaseId,
+    now: "2026-07-21T00:02:00.000Z", reason: "worker shutdown"
+  }), true);
+  const second = await coordinator.claim({
+    tenantId: "tenant", workerId: "worker-2", topics: ["run-ontology-ingest"],
+    now: "2026-07-21T00:03:00.000Z", leaseExpiresAt: "2026-07-21T01:03:00.000Z"
+  });
+  assert.ok(second);
+  assert.equal(second.task.id, first.task.id);
+  assert.notEqual(second.message.leaseId, first.message.leaseId);
+  assert.equal(second.task.metadata.pipelinePhase, "snapshot");
 });
 
 test("pure structural parsing produces versioned symbols and imports", () => {
@@ -468,7 +493,7 @@ test("registry validates endpoints and qualifier keys and keeps model inferences
   validatePredicateEndpoints(predicateDefinition("DEPLOYS"), "Deployment", "Commit");
   validatePredicateEndpoints(predicateDefinition("TARGETS"), "Deployment", "Service");
   validatePredicateEndpoints(predicateDefinition("INCIDENT_IMPACTS"), "Incident", "Feature");
-  validatePredicateEndpoints(predicateDefinition("RESOLVED_BY"), "VirtualIssue", "PullRequest");
+  validatePredicateEndpoints(predicateDefinition("RESOLVED_BY"), "Issue", "PullRequest");
 });
 
 test("knowledge writer enforces provenance, review, qualifier cardinality, audit, and measured labels", () => {
@@ -1067,7 +1092,7 @@ test("memory repository roles enforce administration boundaries and tombstones b
   await assert.rejects(store.executeCommand(tenantId, "svc:test", assignment, now), /repository is tombstoned/);
 });
 
-test("reviews and retrieves a virtual issue through the generalized Issue assertion", async () => {
+test("reviews and retrieves a derived issue through the generalized Issue assertion", async () => {
   const store = new MemoryOntologyGraphStore();
   const repository = "org/repo";
   const observedAt = "2026-07-20T00:00:00.000Z";
@@ -1095,7 +1120,7 @@ test("reviews and retrieves a virtual issue through the generalized Issue assert
       { id: "repo", kind: "Repository" as const, label: repository, description: "repo", evidence: ["README.md:1"] },
       { id: "42", kind: "PullRequest" as const, label: "PR #42", description: "restores deletion", evidence: ["src/auth.ts:10"] },
       {
-        id: "virtual:pr:42",
+        id: "derived:pr:42",
         kind: "Issue" as const,
         label: "Administrators cannot delete resources",
         description: "Administrator deletion is incorrectly denied.",
@@ -1104,7 +1129,7 @@ test("reviews and retrieves a virtual issue through the generalized Issue assert
     ],
     edges: [{
       source: "42",
-      target: "virtual:pr:42",
+      target: "derived:pr:42",
       predicate: "RESOLVES",
       plane: "knowledge" as const,
       confidence: 0.94,
@@ -1130,11 +1155,6 @@ test("reviews and retrieves a virtual issue through the generalized Issue assert
   });
   const proposal = (await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" }))[0];
   assert.ok(proposal);
-  await store.executeCommand("t", "svc:test", {
-    type: "review_assertion",
-    assertionId: proposal.id,
-    decision: "accept"
-  }, "2026-07-20T00:02:00.000Z");
   await store.planIngestion({
     tenantId: "t", repository, ref: "main", commitSha: "a".repeat(40), treeSha: "b".repeat(40), parents: [],
     updateRef: true, recordedAt: "2026-07-20T00:02:30.000Z", taskId: "virtual-ingest",
@@ -1143,9 +1163,22 @@ test("reviews and retrieves a virtual issue through the generalized Issue assert
       { path: "src/auth.ts", blobSha: "d".repeat(40), size: 20 }
     ]
   });
-  await store.project({
-    tenantId: "t", repository, ref: "main", commitSha: "a".repeat(40), taskId: "virtual-project",
+  const proposedGraph = await store.project({
+    tenantId: "t", repository, ref: "main", commitSha: "a".repeat(40), taskId: "virtual-proposed-project",
     generatedAt: "2026-07-20T00:02:40.000Z"
+  });
+  assert.equal(proposedGraph.nodes.some((node) => node.kind === "Issue"), true);
+  assert.equal(proposedGraph.edges.some((edge) =>
+    edge.predicate === "RESOLVES" && edge.qualifiers?.assertionStatus === "proposed"
+  ), true);
+  await store.executeCommand("t", "svc:test", {
+    type: "review_assertion",
+    assertionId: proposal.id,
+    decision: "accept"
+  }, "2026-07-20T00:03:00.000Z");
+  await store.project({
+    tenantId: "t", repository, ref: "main", commitSha: "a".repeat(40), taskId: "virtual-accepted-project",
+    generatedAt: "2026-07-20T00:03:10.000Z"
   });
 
   const trace = await store.retrieve({
@@ -1199,16 +1232,16 @@ test("resolves derived issue descriptions by PR anchor when titles collide", asy
       { id: "42", kind: "PullRequest" as const, label: "PR #42", description: "fix", evidence: ["src/auth.ts:10"] },
       { id: "43", kind: "PullRequest" as const, label: "PR #43", description: "fix", evidence: ["src/audit.ts:10"] },
       {
-        id: "virtual:pr:42", kind: "Issue" as const, label: "Administrators encounter an authorization error",
+        id: "derived:pr:42", kind: "Issue" as const, label: "Administrators encounter an authorization error",
         description: "Administrator deletion is incorrectly denied.", evidence: ["src/auth.ts:10"]
       },
       {
-        id: "virtual:pr:43", kind: "Issue" as const, label: "Administrators encounter an authorization error",
+        id: "derived:pr:43", kind: "Issue" as const, label: "Administrators encounter an authorization error",
         description: "Administrator audit export is incorrectly denied.", evidence: ["src/audit.ts:10"]
       }
     ],
     edges: [42, 43].map((number) => ({
-      source: String(number), target: `virtual:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
+      source: String(number), target: `derived:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
       confidence: 0.94,
       why: `Pull request #${number} fixes the corresponding authorization regression.`,
       evidence: [number === 42 ? "src/auth.ts:10" : "src/audit.ts:10"]
@@ -1316,7 +1349,7 @@ test("normalizes model output into distinct semantic entity identities", () => {
   }, "omxyz/demo"), /must explain why the evidence supports the relationship/);
 });
 
-test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () => {
+test("normalizes a PR-anchored derived issue as the generalized Issue kind", () => {
   const repository = "omxyz/demo";
   const assertions = assertionsFromGeneratedOntology({
     summary: "PR 42 fixes an authorization regression",
@@ -1324,7 +1357,7 @@ test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () 
       { id: "repo", kind: "Repository", label: repository, description: "repo", evidence: ["README.md:1"] },
       { id: "42", kind: "PullRequest", label: "PR #42", description: "restores deletion", evidence: ["src/auth.ts:10"] },
       {
-        id: "virtual:pr:42",
+        id: "derived:pr:42",
         kind: "Issue",
         label: "Administrators cannot delete resources",
         description: "Administrator deletion is incorrectly denied.",
@@ -1333,7 +1366,7 @@ test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () 
     ],
     edges: [{
       source: "42",
-      target: "virtual:pr:42",
+      target: "derived:pr:42",
       predicate: "RESOLVES",
       plane: "knowledge",
       confidence: 0.94,
@@ -1347,25 +1380,25 @@ test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () 
   assert.equal(assertion?.object.naturalKey, derivedIssueNaturalKey(repository, 42));
   assert.equal(assertion?.object.naturalKey.startsWith("github:issue:"), false);
   assert.throws(
-    () => assertionsFromGeneratedOntology(generatedVirtualIssue(repository, 42), repository),
+    () => assertionsFromGeneratedOntology(generatedDerivedIssue(repository, 42), repository),
     /not present in source evidence/
   );
   assert.throws(
     () => assertionsFromGeneratedOntology({
-      ...generatedVirtualIssue(repository, 42),
+      ...generatedDerivedIssue(repository, 42),
       edges: [{
-        source: "43", target: "virtual:pr:42", predicate: "RESOLVES", plane: "knowledge", confidence: 0.9,
+        source: "43", target: "derived:pr:42", predicate: "RESOLVES", plane: "knowledge", confidence: 0.9,
         evidence: ["src/auth.ts:10"]
       }],
       nodes: [
-        ...generatedVirtualIssue(repository, 42).nodes.filter((node) => node.id !== "42"),
+        ...generatedDerivedIssue(repository, 42).nodes.filter((node) => node.id !== "42"),
         { id: "43", kind: "PullRequest", label: "PR #43", description: "wrong anchor", evidence: ["src/auth.ts:10"] }
       ]
     }, repository, { sourcePullRequestNumbers: [42] }),
     /must be resolved by pull request #42/
   );
   assert.throws(
-    () => assertionsFromGeneratedOntology(generatedVirtualIssue(repository, 42), repository, {
+    () => assertionsFromGeneratedOntology(generatedDerivedIssue(repository, 42), repository, {
       sourcePullRequestNumbers: [42], resolvedPullRequestNumbers: [42]
     }),
     /already explicitly resolves an issue/
@@ -1586,7 +1619,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   assert.equal(oldFeature.items.length, 0, "feature retrieval excludes assertions whose evidence is stale on the requested ref");
 });
 
-function generatedVirtualIssue(repository: string, pullRequestNumber: number) {
+function generatedDerivedIssue(repository: string, pullRequestNumber: number) {
   return {
     summary: `PR ${pullRequestNumber} fixes an authorization regression`,
     nodes: [
@@ -1596,12 +1629,12 @@ function generatedVirtualIssue(repository: string, pullRequestNumber: number) {
         description: "restores deletion", evidence: ["src/auth.ts:10"]
       },
       {
-        id: `virtual:pr:${pullRequestNumber}`, kind: "Issue" as const, label: "Administrators cannot delete resources",
+        id: `derived:pr:${pullRequestNumber}`, kind: "Issue" as const, label: "Administrators cannot delete resources",
         description: "Administrator deletion is incorrectly denied.", evidence: ["src/auth.ts:10"]
       }
     ],
     edges: [{
-      source: String(pullRequestNumber), target: `virtual:pr:${pullRequestNumber}`, predicate: "RESOLVES",
+      source: String(pullRequestNumber), target: `derived:pr:${pullRequestNumber}`, predicate: "RESOLVES",
       plane: "knowledge" as const, confidence: 0.94,
       why: "The pull request fixes the administrator deletion regression represented by this issue.",
       evidence: ["src/auth.ts:10"]
@@ -1649,7 +1682,7 @@ test("requires explicit root-cause records to appear as causal assertions", () =
   ], [11]);
   assert.deepEqual(anchors, [
     { issueId: "8", commitSha: sha, evidencePath: "docs/editor-root-cause.md", startLine: 1, endLine: 2 },
-    { issueId: "virtual:pr:11", commitSha: "b".repeat(40), evidencePath: "docs/audit-root-cause.md", startLine: 1, endLine: 2 }
+    { issueId: "derived:pr:11", commitSha: "b".repeat(40), evidencePath: "docs/audit-root-cause.md", startLine: 1, endLine: 2 }
   ]);
   const generated = parseGeneratedOntology({
     summary: "explicit causes",
@@ -1662,7 +1695,7 @@ test("requires explicit root-cause records to appear as causal assertions", () =
       why: "The change removed editor access.", evidence: ["docs/editor-root-cause.md:1-2"]
     }]
   });
-  assert.throws(() => validateRequiredCausalAssertions(generated, anchors), /virtual:pr:11/);
+  assert.throws(() => validateRequiredCausalAssertions(generated, anchors), /derived:pr:11/);
   validateRequiredCausalAssertions(generated, anchors.slice(0, 1));
   const withoutFullSpan = { ...generated, edges: generated.edges.map((edge) => ({ ...edge, evidence: ["docs/editor-root-cause.md:1"] })) };
   assert.throws(() => validateRequiredCausalAssertions(withoutFullSpan, anchors.slice(0, 1)), /explicit root-cause evidence/);
@@ -1818,13 +1851,13 @@ test("requires causal evidence to name the issue and offending commit", async ()
     summary: "derived root cause",
     nodes: [
       {
-        id: "virtual:pr:42", kind: "VirtualIssue", label: "Administrators cannot delete resources",
+        id: "derived:pr:42", kind: "Issue", label: "Administrators cannot delete resources",
         description: "Administrator deletion is incorrectly denied.", evidence: ["docs/root-cause.md:1"]
       },
       { id: sha, kind: "Commit", label: sha.slice(0, 12), description: "offending change", evidence: ["docs/root-cause.md:1"] }
     ],
     edges: [{
-      source: "virtual:pr:42", target: sha, predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.99,
+      source: "derived:pr:42", target: sha, predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.99,
       why: "The commit removed the administrator bypass.", evidence: ["docs/root-cause.md:1-2"]
     }]
   });
@@ -1835,7 +1868,7 @@ test("requires causal evidence to name the issue and offending commit", async ()
     validateOntologyEvidence(derived, async () =>
       `A deletion bug was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
     ),
-    /explicitly name VirtualIssue Administrators cannot delete resources and commit/
+    /explicitly name Issue Administrators cannot delete resources and commit/
   );
   const incident = parseGeneratedOntology({
     summary: "deployment incident",
@@ -1851,7 +1884,7 @@ test("requires causal evidence to name the issue and offending commit", async ()
   );
 });
 
-test("requires a virtual Issue proposal for an explicit untracked repair", () => {
+test("requires a derived Issue proposal for an explicit untracked repair", () => {
   const repairSha = "a".repeat(40);
   const sourceEvidence = [{
     id: "observation-pr-42",
@@ -1875,31 +1908,31 @@ test("requires a virtual Issue proposal for an explicit untracked repair", () =>
     edges: []
   });
   assert.throws(
-    () => validateRequiredVirtualIssues(base, sourceEvidence, [42]),
-    /requires virtual Issue virtual:pr:42/
+    () => validateRequiredDerivedIssues(base, sourceEvidence, [42]),
+    /requires derived Issue derived:pr:42/
   );
   const complete = parseGeneratedOntology({
     summary: "repair",
     nodes: [
       ...base.nodes,
       { id: "42", kind: "PullRequest", label: "PR #42", description: "repair", evidence: ["tests/regression.test.ts:1"] },
-      { id: "virtual:pr:42", kind: "Issue", label: "Administrators cannot delete resources", description: "Deletion is incorrectly denied.", evidence: ["tests/regression.test.ts:1"] }
+      { id: "derived:pr:42", kind: "Issue", label: "Administrators cannot delete resources", description: "Deletion is incorrectly denied.", evidence: ["tests/regression.test.ts:1"] }
     ],
     edges: [{
-      source: "42", target: "virtual:pr:42", predicate: "RESOLVES", plane: "knowledge", confidence: 0.98,
+      source: "42", target: "derived:pr:42", predicate: "RESOLVES", plane: "knowledge", confidence: 0.98,
       why: null, evidence: ["tests/regression.test.ts:1"]
     }]
   });
-  assert.doesNotThrow(() => validateRequiredVirtualIssues(complete, sourceEvidence, [42]));
-  assert.doesNotThrow(() => validateRequiredVirtualIssues(base, sourceEvidence, [43]),
-    "problem evidence from an unrelated PR must not force a virtual issue");
-  assert.doesNotThrow(() => validateRequiredVirtualIssues(base, [{
+  assert.doesNotThrow(() => validateRequiredDerivedIssues(complete, sourceEvidence, [42]));
+  assert.doesNotThrow(() => validateRequiredDerivedIssues(base, sourceEvidence, [43]),
+    "problem evidence from an unrelated PR must not force a derived issue");
+  assert.doesNotThrow(() => validateRequiredDerivedIssues(base, [{
     ...sourceEvidence[0]!,
     payload: { ...sourceEvidence[0]!.payload, title: "Set up baseline", body: "This is not a bug fix." }
   }], [42]));
 });
 
-test("reuses parsed blobs and projects canonical code facts plus active assertions", async () => {
+test("reuses parsed blobs and projects canonical code facts plus reviewable assertions", async () => {
   const store = new MemoryOntologyGraphStore();
   const snapshot = {
     tenantId: "tenant",
@@ -1991,7 +2024,9 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
   });
   assert.equal(graph.generator.executor, "projection");
   assert.equal(graph.nodes.some((node) => node.kind === "Symbol" && node.label === "main"), true);
-  assert.equal(graph.edges.some((edge) => edge.plane === "knowledge" && edge.predicate === "DOCUMENTED_BY"), false);
+  assert.equal(graph.edges.some((edge) =>
+    edge.plane === "knowledge" && edge.predicate === "DOCUMENTED_BY" && edge.qualifiers?.assertionStatus === "proposed"
+  ), true);
   const repeatedGraph = await store.project({
     tenantId: snapshot.tenantId,
     repository: snapshot.repository,
@@ -2032,7 +2067,9 @@ test("reuses parsed blobs and projects canonical code facts plus active assertio
     taskId: "next-project",
     generatedAt: "2026-07-19T00:03:00.000Z"
   });
-  assert.equal(carried.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"), false, "unreviewed model assertions remain out of active projections");
+  assert.equal(carried.edges.some((edge) =>
+    edge.predicate === "DOCUMENTED_BY" && edge.qualifiers?.assertionStatus === "proposed"
+  ), true, "current unreviewed model assertions remain visible as proposals");
 
   const changedReadme = {
     ...nextSnapshot,

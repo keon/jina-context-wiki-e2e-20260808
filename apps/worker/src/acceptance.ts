@@ -434,11 +434,11 @@ async function verifyV51FixtureQueries(
     pathHasNode(path, "Deployment", "5535522601") || pathHasNode(path, "PullRequest", "#16")
   )) throw new Error("production v5.1 context did not return the later incident resolution");
 
-  const virtualContext = await ask("What virtual issue was inferred for the unlinked fixing PR #11?");
-  const virtualTrace = causalTraceFor(virtualContext, "virtual issue");
-  const virtualRoot = requiredRecord(virtualTrace.root, "v5.1 virtual issue root");
-  if (virtualRoot.kind !== "VirtualIssue" || !tracePaths(virtualTrace.resolutions).some((path) => pathHasNode(path, "PullRequest", "#11"))) {
-    throw new Error("production v5.1 context did not resolve PR #11 through a cited VirtualIssue");
+  const derivedContext = await ask("What issue was derived for the unlinked fixing PR #11?");
+  const derivedTrace = causalTraceFor(derivedContext, "derived issue");
+  const derivedRoot = requiredRecord(derivedTrace.root, "v5.1 derived issue root");
+  if (derivedRoot.kind !== "Issue" || !tracePaths(derivedTrace.resolutions).some((path) => pathHasNode(path, "PullRequest", "#11"))) {
+    throw new Error("production v5.1 context did not resolve PR #11 through a cited derived Issue");
   }
 }
 

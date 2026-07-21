@@ -156,7 +156,6 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .kind-Service circle { fill: #163f3b; stroke: #51d7c9; }
   .kind-Deployment circle { fill: #213d2c; stroke: #63cf87; }
   .kind-Incident circle { fill: #4e2021; stroke: #f2615d; }
-  .kind-VirtualIssue circle { fill: #4b3020; stroke: #ed9a52; }
   .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { fill: #3c2830; stroke: #ef879f; }
   .kind-Engineer circle, .kind-Team circle { fill: #283248; stroke: #91a7d4; }
   .assertion-review { border: 1px solid #252d40; border-radius: .85rem; background: #10151f; overflow: hidden; }
@@ -424,7 +423,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-node .node-kind { fill: #666; font-size: 8px; }
   .kind-Repository circle { stroke: #9d91f0; }
   .kind-File circle, .kind-Symbol circle { stroke: #668f85; }
-  .kind-Document circle, .kind-Feature circle, .kind-Package circle, .kind-Service circle, .kind-Deployment circle, .kind-Incident circle, .kind-VirtualIssue circle { stroke: #88749f; }
+  .kind-Document circle, .kind-Feature circle, .kind-Package circle, .kind-Service circle, .kind-Deployment circle, .kind-Incident circle { stroke: #88749f; }
   .kind-Commit circle, .kind-PullRequest circle, .kind-Issue circle { stroke: #a8787e; }
   .kind-Engineer circle, .kind-Team circle { stroke: #74809a; }
   .graph-node.dimmed, .graph-edge-group.dimmed, .graph-edge-label-button.dimmed { opacity: .1; }
@@ -798,7 +797,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-node .node-kind { fill: #747474; font-size: 8px; letter-spacing: 0; text-anchor: start; text-transform: none; }
   .kind-Repository .node-icon { stroke: #9d91f0; }
   .kind-File .node-icon, .kind-Symbol .node-icon { stroke: #6ea398; }
-  .kind-Document .node-icon, .kind-Feature .node-icon, .kind-Package .node-icon, .kind-Service .node-icon, .kind-Deployment .node-icon, .kind-Incident .node-icon, .kind-VirtualIssue .node-icon { stroke: #9479ad; }
+  .kind-Document .node-icon, .kind-Feature .node-icon, .kind-Package .node-icon, .kind-Service .node-icon, .kind-Deployment .node-icon, .kind-Incident .node-icon { stroke: #9479ad; }
   .kind-Commit .node-icon, .kind-PullRequest .node-icon, .kind-Issue .node-icon { stroke: #78bf8b; }
   .kind-Engineer .node-icon, .kind-Team .node-icon { stroke: #7890bb; }
   .graph-kind-label { fill: #666; font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }

@@ -1,5 +1,7 @@
 import {
   stableId,
+  ontologyStagePrerequisites,
+  ontologyStageRequired,
   type OntologyBuildRecord,
   type OntologyPipelineBuildRequest,
   type OntologyPipelineCoordinator,
@@ -134,8 +136,8 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
           phase: stage.phase
         });
       }
-      for (const [index, stage] of stages.entries()) {
-        const required = stage.phase === "snapshot" || !request.snapshotFirst;
+      for (const stage of stages) {
+        const required = ontologyStageRequired(stage);
         if (required) {
           await client.query(
             `insert into jina_board.dependencies
@@ -144,13 +146,16 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
             [id, stage.id, request.createdAt]
           );
         }
-        const previous = stages[index - 1];
-        if (previous) {
+        for (const prerequisite of ontologyStagePrerequisites(stage, request.snapshotFirst)) {
+          const dependency = stages.find((candidate) =>
+            candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
+          );
+          if (!dependency) throw new Error(`missing ontology stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
           await client.query(
             `insert into jina_board.dependencies
               (workflow_id,task_id,depends_on_task_id,relationship,required,blocks_parent_completion,created_at)
-             values ($1,$2,$3,'blocks',$4,$4,$5) on conflict do nothing`,
-            [id, stage.id, previous.id, required, request.createdAt]
+             values ($1,$2,$3,'blocks',true,$4,$5) on conflict do nothing`,
+            [id, stage.id, dependency.id, required, request.createdAt]
           );
         }
       }
@@ -239,6 +244,46 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
     return result.rowCount === 1;
   }
 
+  async release(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+    readonly now: string;
+    readonly reason: string;
+  }): Promise<boolean> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const released = await client.query<StageRow>(
+        `update jina_board.tasks
+         set status='queued',lease_id=null,worker_id=null,lease_expires_at=null,updated_at=$4
+         where id=$1 and tenant_id=$2 and lease_id=$3 and status='in_progress' and lease_expires_at>$4
+         returning *`,
+        [input.stageId, input.tenantId, input.leaseId, input.now]
+      );
+      const stage = released.rows[0];
+      if (!stage) {
+        await client.query("rollback");
+        return false;
+      }
+      await client.query(
+        `update jina_board.workflows set status=$2,updated_at=$3 where id=$1`,
+        [stage.build_id, stage.phase === "history" ? "enriching" : "in_progress", input.now]
+      );
+      await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
+        fromStatus: "in_progress", toStatus: "queued", reason: input.reason
+      });
+      await client.query("commit");
+      return true;
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async leasedStage(input: {
     readonly tenantId: string;
     readonly stageId: string;
@@ -295,7 +340,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
         fromStatus: "in_progress", toStatus: input.outcome, ...(input.reason ? { reason: input.reason } : {})
       });
-      if (input.outcome === "failed") {
+      if (input.outcome === "failed" && ontologyStageRequired(stage)) {
         await client.query(
           `update jina_board.tasks set status='canceled',updated_at=$2
            where build_id=$1 and status='triage'`,
@@ -304,33 +349,64 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         await client.query("update jina_board.workflows set status='failed',updated_at=$2 where id=$1", [stage.build_id, input.now]);
         await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.transitioned", input.now, { toStatus: "failed" });
       } else {
-        const next = await client.query<StageRow>(
-          `select * from jina_board.tasks
-           where build_id=$1 and status='triage' order by ordinal for update skip locked limit 1`,
-          [stage.build_id]
+        const ready = await client.query<StageRow>(
+          `with ready as (
+             select candidate.id
+             from jina_board.tasks candidate
+             where candidate.build_id=$1 and candidate.status='triage'
+               and not exists (
+                 select 1
+                 from jina_board.dependencies dependency
+                 join jina_board.tasks prerequisite on prerequisite.id=dependency.depends_on_task_id
+                 where dependency.workflow_id=$1 and dependency.task_id=candidate.id
+                   and prerequisite.status<>'done'
+               )
+             order by candidate.ordinal
+             for update of candidate skip locked
+           )
+           update jina_board.tasks candidate
+           set status='queued',
+               metadata=case when candidate.phase=$2 then candidate.metadata || $3::jsonb else candidate.metadata end,
+               updated_at=$4
+           from ready where candidate.id=ready.id returning candidate.*`,
+          [stage.build_id, stage.phase, JSON.stringify(input.nextMetadata ?? {}), input.now]
         );
-        if (next.rows[0]) {
-          await client.query(
-            `update jina_board.tasks
-             set status='queued',metadata=metadata || $2::jsonb,updated_at=$3 where id=$1`,
-            [next.rows[0].id, JSON.stringify(input.nextMetadata ?? {}), input.now]
-          );
-          await insertBoardEvent(client, next.rows[0].tenant_id, next.rows[0].id, "task.transitioned", input.now, {
+        for (const candidate of ready.rows) {
+          await insertBoardEvent(client, candidate.tenant_id, candidate.id, "task.transitioned", input.now, {
             fromStatus: "triage", toStatus: "queued"
           });
-          await client.query(
-            `update jina_board.workflows set status=$2,updated_at=$3 where id=$1`,
-            [stage.build_id, next.rows[0].phase === "history" ? "enriching" : "in_progress", input.now]
-          );
-          if (next.rows[0].phase === "history") {
-            await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.transitioned", input.now, {
-              fromStatus: "in_progress", toStatus: "done", enrichmentContinues: true
-            });
-          }
-        } else {
-          await client.query("update jina_board.workflows set status='done',updated_at=$2 where id=$1", [stage.build_id, input.now]);
-          await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.transitioned", input.now, { toStatus: "done" });
         }
+        const state = await client.query<{
+          snapshot_first: boolean;
+          required_failed: boolean;
+          all_terminal: boolean;
+          snapshot_published: boolean;
+        }>(
+          `select build.snapshot_first,
+                  bool_or(stage.stage<>'assert' and stage.status='failed') as required_failed,
+                  bool_and(stage.status in ('done','failed','canceled','superseded')) as all_terminal,
+                  bool_or(stage.phase='snapshot' and stage.stage='project' and stage.status='done') as snapshot_published
+           from jina_board.workflows build
+           join jina_board.tasks stage on stage.build_id=build.id
+           where build.id=$1 group by build.snapshot_first`,
+          [stage.build_id]
+        );
+        const current = state.rows[0]!;
+        const workflowStatus: OntologyBuildRecord["status"] = current.required_failed
+          ? "failed"
+          : current.all_terminal
+            ? "done"
+            : current.snapshot_first && current.snapshot_published
+              ? "enriching"
+              : "in_progress";
+        await client.query(
+          "update jina_board.workflows set status=$2,updated_at=$3 where id=$1",
+          [stage.build_id, workflowStatus, input.now]
+        );
+        await insertBoardEvent(client, stage.tenant_id, stage.build_id, "task.updated", input.now, {
+          workflowStatus,
+          queuedStageIds: ready.rows.map((candidate) => candidate.id)
+        });
       }
       await client.query("commit");
       return true;

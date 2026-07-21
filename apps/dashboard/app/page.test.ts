@@ -153,7 +153,7 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /await reviewAssertion\(button\.dataset\.assertionId, decision, rejectionCode, reason\)/);
   assert.match(html, /supportingAssertionIds/);
   assert.match(html, /contradictingAssertionIds/);
-  for (const kind of ["Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"]) {
+  for (const kind of ["Feature", "Package", "Service", "Deployment", "Incident", "Issue"]) {
     assert.match(html, new RegExp(`kind-${kind}`));
   }
   assert.match(html, /Cited claims/);

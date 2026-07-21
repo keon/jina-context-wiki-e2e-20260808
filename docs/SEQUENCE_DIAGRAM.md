@@ -105,10 +105,10 @@ sequenceDiagram
     else new content needs semantic analysis
         Worker->>Daytona: Clone and checkout immutable commit SHA
         Worker->>Codex: Analyze bounded current paths with typed causal schema
-        Codex-->>Worker: Cited Feature, VirtualIssue, movement, impact, and causal proposals
+        Codex-->>Worker: Cited Feature, derived Issue, movement, impact, and causal proposals
         Worker->>Daytona: Validate citations and deterministic source identities
         alt output validation fails once
-            Worker->>Codex: Repair citations or required VirtualIssue in the same task
+            Worker->>Codex: Repair citations or required derived Issue in the same task
             Codex-->>Worker: Complete corrected JSON
             Worker->>Daytona: Validate again or fail closed
         end

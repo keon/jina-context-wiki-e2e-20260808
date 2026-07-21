@@ -98,6 +98,13 @@ export interface OntologyPipelineCoordinator {
     readonly now: string;
     readonly leaseExpiresAt: string;
   }): Promise<boolean>;
+  release(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+    readonly now: string;
+    readonly reason: string;
+  }): Promise<boolean>;
   leasedStage(input: {
     readonly tenantId: string;
     readonly stageId: string;
@@ -226,6 +233,24 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     return true;
   }
 
+  async release(input: {
+    readonly tenantId: string; readonly stageId: string; readonly leaseId: string;
+    readonly now: string; readonly reason: string;
+  }): Promise<boolean> {
+    const stage = this.stages.get(input.stageId);
+    if (!validLease(stage, input.tenantId, input.leaseId, input.now)) return false;
+    stage!.status = "queued";
+    stage!.updatedAt = input.now;
+    clearLease(stage!);
+    this.recordEvent(stage!.id, "task.transitioned", input.now, {
+      fromStatus: "in_progress", toStatus: "queued", reason: input.reason
+    });
+    const build = this.builds.get(stage!.buildId)!;
+    build.status = stage!.phase === "history" ? "enriching" : "in_progress";
+    build.updatedAt = input.now;
+    return true;
+  }
+
   async leasedStage(input: {
     readonly tenantId: string; readonly stageId: string; readonly leaseId: string;
     readonly topic?: OntologyWorkerTopic; readonly now: string;
@@ -251,23 +276,18 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     clearLease(stage!);
     const build = this.builds.get(stage!.buildId)!;
     if (input.outcome === "failed") {
-      build.status = "failed";
-      for (const candidate of this.stages.values()) {
-        if (candidate.buildId === build.id && candidate.status === "triage") candidate.status = "canceled";
+      if (ontologyStageRequired(stage!)) {
+        build.status = "failed";
+        for (const candidate of this.stages.values()) {
+          if (candidate.buildId === build.id && candidate.status === "triage") candidate.status = "canceled";
+        }
+      } else {
+        this.queueReadyStages(build, stage!, input.nextMetadata ?? {}, input.now);
+        build.status = this.buildStatus(build);
       }
     } else {
-      const next = [...this.stages.values()]
-        .filter((candidate) => candidate.buildId === build.id && candidate.status === "triage")
-        .sort((left, right) => stageOrder(left) - stageOrder(right))[0];
-      if (next) {
-        next.status = "queued";
-        next.metadata = { ...next.metadata, ...structuredClone(input.nextMetadata ?? {}) };
-        next.updatedAt = input.now;
-        this.recordEvent(next.id, "task.transitioned", input.now, { fromStatus: "triage", toStatus: "queued" });
-        build.status = next.phase === "history" ? "enriching" : "in_progress";
-      } else {
-        build.status = "done";
-      }
+      this.queueReadyStages(build, stage!, input.nextMetadata ?? {}, input.now);
+      build.status = this.buildStatus(build);
     }
     build.updatedAt = input.now;
     return true;
@@ -304,6 +324,37 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
   private recordEvent(taskId: string, type: string, at: string, payload: Readonly<Record<string, unknown>>): void {
     this.events.push({ id: `task-board-event-${this.events.length + 1}`, taskId, type, at, payload: structuredClone(payload) });
   }
+
+  private queueReadyStages(
+    build: MutableBuild,
+    completed: MutableStage,
+    nextMetadata: Readonly<Record<string, unknown>>,
+    now: string
+  ): void {
+    const stages = [...this.stages.values()].filter((candidate) => candidate.buildId === build.id);
+    for (const candidate of stages.filter((item) => item.status === "triage").sort((a, b) => stageOrder(a) - stageOrder(b))) {
+      const ready = ontologyStagePrerequisites(candidate, build.snapshotFirst).every((prerequisite) =>
+        stages.some((item) => item.phase === prerequisite.phase && item.stage === prerequisite.stage && item.status === "done")
+      );
+      if (!ready) continue;
+      candidate.status = "queued";
+      if (candidate.phase === completed.phase) {
+        candidate.metadata = { ...candidate.metadata, ...structuredClone(nextMetadata) };
+      }
+      candidate.updatedAt = now;
+      this.recordEvent(candidate.id, "task.transitioned", now, { fromStatus: "triage", toStatus: "queued" });
+    }
+  }
+
+  private buildStatus(build: MutableBuild): OntologyBuildStatus {
+    const stages = [...this.stages.values()].filter((candidate) => candidate.buildId === build.id);
+    if (stages.some((stage) => ontologyStageRequired(stage) && stage.status === "failed")) return "failed";
+    if (stages.every((stage) => ["done", "failed", "canceled", "superseded"].includes(stage.status))) return "done";
+    if (build.snapshotFirst && stages.some((stage) => stage.phase === "snapshot" && stage.stage === "project" && stage.status === "done")) {
+      return "enriching";
+    }
+    return "in_progress";
+  }
 }
 
 function plannedStages(build: MutableBuild): MutableStage[] {
@@ -337,6 +388,18 @@ function plannedStages(build: MutableBuild): MutableStage[] {
       updatedAt: build.createdAt
     };
   }));
+}
+
+export function ontologyStagePrerequisites(
+  stage: Pick<OntologyStageRecord, "phase" | "stage">,
+  snapshotFirst: boolean
+): readonly Pick<OntologyStageRecord, "phase" | "stage">[] {
+  if (stage.stage !== "ingest") return [{ phase: stage.phase, stage: "ingest" }];
+  return snapshotFirst && stage.phase === "history" ? [{ phase: "snapshot", stage: "ingest" }] : [];
+}
+
+export function ontologyStageRequired(stage: Pick<OntologyStageRecord, "stage">): boolean {
+  return stage.stage !== "assert";
 }
 
 function validLease(stage: MutableStage | undefined, tenantId: string, leaseId: string, now: string): boolean {

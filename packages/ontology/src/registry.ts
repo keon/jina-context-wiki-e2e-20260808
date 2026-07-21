@@ -51,19 +51,19 @@ export const predicateRegistry = {
     cardinality: "many", review: "none", bitemporal: false
   },
   RESOLVED_BY: {
-    name: "RESOLVED_BY", class: "relationship", subjectKinds: ["Issue", "VirtualIssue", "Incident"],
+    name: "RESOLVED_BY", class: "relationship", subjectKinds: ["Issue", "Incident"],
     objectKinds: ["PullRequest", "Deployment"], cardinality: "many", review: "manual", bitemporal: false,
     authority: ["human", "github", "deployment", "model"]
   },
   INTRODUCED_BY: {
-    name: "INTRODUCED_BY", class: "inference", subjectKinds: ["Issue", "VirtualIssue", "Incident"], objectKinds: ["Commit", "Deployment"],
+    name: "INTRODUCED_BY", class: "inference", subjectKinds: ["Issue", "Incident"], objectKinds: ["Commit", "Deployment"],
     cardinality: "many", qualifierKeys: ["reason"], review: "manual", bitemporal: false,
     authority: ["human", "model"]
   },
   REFERENCES: {
     name: "REFERENCES", class: "relationship",
-    subjectKinds: ["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Document", "Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"],
-    objectKinds: ["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Document", "Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"], cardinality: "many",
+    subjectKinds: ["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Document", "Feature", "Package", "Service", "Deployment", "Incident"],
+    objectKinds: ["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Document", "Feature", "Package", "Service", "Deployment", "Incident"], cardinality: "many",
     review: "none", bitemporal: false
   },
   LIKELY_AFFECTS: {
@@ -80,7 +80,7 @@ export const predicateRegistry = {
     objectKinds: ["Feature"], cardinality: "many", review: "manual", bitemporal: false
   },
   DOCUMENTED_BY: {
-    name: "DOCUMENTED_BY", class: "inference", subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest", "Feature", "Service", "Incident", "VirtualIssue"],
+    name: "DOCUMENTED_BY", class: "inference", subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest", "Feature", "Service", "Incident"],
     objectKinds: ["Document"], cardinality: "many", review: "manual", bitemporal: false
   },
   DEPENDS_ON: {

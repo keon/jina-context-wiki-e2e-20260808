@@ -14,8 +14,7 @@ export const ontologyNodeKinds = [
   "Package",
   "Service",
   "Deployment",
-  "Incident",
-  "VirtualIssue"
+  "Incident"
 ] as const;
 
 export type OntologyNodeKind = (typeof ontologyNodeKinds)[number];
@@ -279,20 +278,18 @@ export async function validateOntologyEvidence(
 
 /**
  * A merged PR that explicitly describes an untracked repair and changes a
- * durable problem/evidence file must yield a reviewable virtual Issue proposal.
+ * durable problem/evidence file must yield a reviewable derived Issue proposal.
  * The rule only detects a missing proposal; the model still names the problem,
  * explains it, and supplies repository citations.
  */
-export function validateRequiredVirtualIssues(
+export function validateRequiredDerivedIssues(
   generated: GeneratedOntology,
   sourceEvidence: readonly OntologySourceEvidence[],
   problemEvidencePullRequestNumbers: readonly number[] = []
 ): void {
-  for (const number of requiredVirtualIssuePullRequestNumbers(sourceEvidence, problemEvidencePullRequestNumbers)) {
-    const legacyIssueId = `virtual:pr:${number}`;
-    const node = generated.nodes.find((candidate) =>
-      candidate.kind === "VirtualIssue" && candidate.id === legacyIssueId
-    ) ?? generated.nodes.find((candidate) => candidate.kind === "Issue" && candidate.id === legacyIssueId);
+  for (const number of requiredDerivedIssuePullRequestNumbers(sourceEvidence, problemEvidencePullRequestNumbers)) {
+    const derivedIssueId = `derived:pr:${number}`;
+    const node = generated.nodes.find((candidate) => candidate.kind === "Issue" && candidate.id === derivedIssueId);
     const resolutions = node ? generated.edges.filter((edge) =>
       (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
       (edge.predicate === "RESOLVES" && edge.target === node.id)
@@ -304,12 +301,12 @@ export function validateRequiredVirtualIssues(
       ? /^(?:pr:|#)?(\d+)$/i.exec(pullRequest.id.trim())?.[1]
       : undefined;
     if (!node || resolutions.length !== 1 || pullRequestNumber !== String(number)) {
-      throw new Error(`pull request #${number} explicitly repairs an untracked problem and requires virtual Issue ${legacyIssueId}`);
+      throw new Error(`pull request #${number} explicitly repairs an untracked problem and requires derived Issue ${derivedIssueId}`);
     }
   }
 }
 
-export function requiredVirtualIssuePullRequestNumbers(
+export function requiredDerivedIssuePullRequestNumbers(
   sourceEvidence: readonly OntologySourceEvidence[],
   problemEvidencePullRequestNumbers: readonly number[] = []
 ): readonly number[] {
@@ -347,7 +344,7 @@ export interface RequiredCausalAnchor {
 /** Detect only explicit root-cause records; proximity or PR membership never qualifies. */
 export function requiredCausalAnchors(
   files: readonly CausalEvidenceFile[],
-  virtualIssuePullRequestNumbers: readonly number[] = []
+  derivedIssuePullRequestNumbers: readonly number[] = []
 ): readonly RequiredCausalAnchor[] {
   const anchors: RequiredCausalAnchor[] = [];
   for (const file of files) {
@@ -360,8 +357,8 @@ export function requiredCausalAnchors(
     const issuePattern = /\b(?:github\s+)?issue\s+#(\d+)\b/i;
     const issueNumber = issuePattern.exec(file.content)?.[1];
     const issueId = issueNumber ?? (
-      /\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && virtualIssuePullRequestNumbers.length === 1
-        ? `virtual:pr:${virtualIssuePullRequestNumbers[0]}`
+      /\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && derivedIssuePullRequestNumbers.length === 1
+        ? `derived:pr:${derivedIssuePullRequestNumbers[0]}`
         : undefined
     );
     if (issueId) {
@@ -388,7 +385,7 @@ export function validateRequiredCausalAssertions(
   anchors: readonly RequiredCausalAnchor[]
 ): void {
   for (const anchor of anchors) {
-    const issue = generated.nodes.find((node) => (node.kind === "Issue" || node.kind === "VirtualIssue") && node.id === anchor.issueId);
+    const issue = generated.nodes.find((node) => node.kind === "Issue" && node.id === anchor.issueId);
     const commit = generated.nodes.find((node) => node.kind === "Commit" && node.id.toLowerCase() === anchor.commitSha);
     const edge = issue && commit ? generated.edges.find((candidate) =>
       candidate.predicate === "INTRODUCED_BY" && candidate.source === issue.id && candidate.target === commit.id
@@ -417,13 +414,13 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
     if (edge.predicate !== "INTRODUCED_BY") continue;
     const root = nodes.get(edge.source);
     const cause = nodes.get(edge.target);
-    if (!root || !["Issue", "VirtualIssue", "Incident"].includes(root.kind) ||
+    if (!root || !["Issue", "Incident"].includes(root.kind) ||
       !cause || !["Commit", "Deployment"].includes(cause.kind)) {
-      throw new Error("INTRODUCED_BY evidence must connect an Issue, VirtualIssue, or Incident to a Commit or Deployment");
+      throw new Error("INTRODUCED_BY evidence must connect an Issue or Incident to a Commit or Deployment");
     }
     const issueNumber = root.kind === "Issue" ? /^(?:issue:)?#?(\d+)$/i.exec(root.id.trim())?.[1] : undefined;
-    const virtualAnchor = root.kind === "VirtualIssue" || root.kind === "Issue"
-      ? /^virtual:pr:(\d+)$/i.exec(root.id.trim())?.[1]
+    const derivedAnchor = root.kind === "Issue"
+      ? /^derived:pr:(\d+)$/i.exec(root.id.trim())?.[1]
       : undefined;
     const incidentId = root.kind === "Incident" ? /^incident:[^:]+:.+$/i.test(root.id.trim()) : false;
     const commitSha = cause.kind === "Commit"
@@ -432,7 +429,7 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
     const deploymentId = cause.kind === "Deployment" && /^deployment:[^:]+:.+$/i.test(cause.id.trim())
       ? cause.id.trim()
       : undefined;
-    if ((!issueNumber && !virtualAnchor && !incidentId) || (cause.kind === "Commit" ? !commitSha : !deploymentId)) {
+    if ((!issueNumber && !derivedAnchor && !incidentId) || (cause.kind === "Commit" ? !commitSha : !deploymentId)) {
       throw new Error("INTRODUCED_BY evidence requires valid causal entity identities");
     }
     const citedText = edge.evidence.map((value) => {
@@ -447,7 +444,7 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
       ? citedText.toLowerCase().includes(commitSha)
       : Boolean(deploymentId && (citedText.toLowerCase().includes(deploymentId.toLowerCase()) || citedText.toLowerCase().includes(cause.label.trim().toLowerCase())));
     if (!namesRoot || !namesCause) {
-      const rootReference = issueNumber ? `Issue #${issueNumber}` : virtualAnchor ? `VirtualIssue ${root.label}` : `${root.kind} ${root.label}`;
+      const rootReference = issueNumber ? `Issue #${issueNumber}` : derivedAnchor ? `Issue ${root.label}` : `${root.kind} ${root.label}`;
       const causeReference = commitSha ? `commit ${commitSha}` : `Deployment ${cause.label}`;
       throw new Error(`INTRODUCED_BY evidence must explicitly name ${rootReference} and ${causeReference}`);
     }

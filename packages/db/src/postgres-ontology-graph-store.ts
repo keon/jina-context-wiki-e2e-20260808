@@ -918,7 +918,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
       `select * from jina_ontology.assertions
-       where tenant_id=$1 and repository=$2 and status='active'
+       where tenant_id=$1 and repository=$2 and status in ('active','proposed')
        order by recorded_at,id`,
       [request.tenantId, request.repository]
       ),
@@ -2559,7 +2559,7 @@ function derivedIssueDescription(
     if (!pullRequestNumber || !Array.isArray(rawOutput?.nodes)) continue;
     const node = rawOutput.nodes.find((candidate): candidate is Record<string, unknown> =>
       typeof candidate === "object" && candidate !== null && candidate.kind === "Issue" &&
-        candidate.id === `virtual:pr:${pullRequestNumber}`
+        candidate.id === `derived:pr:${pullRequestNumber}`
     );
     if (typeof node?.description === "string" && node.description.trim()) return node.description;
   }
@@ -3000,7 +3000,7 @@ async function retrieveIssueTrace(
         entityId: stableId("entity", `${request.tenantId}:Issue:${issue.description}`),
         origin: issueNumber ? "github" : "derived",
         title: String(issueObservation?.payload.title ?? issue.label.replace(/^#\d+\s+/, "")),
-        ...(issueNumber ? { number: issueNumber, displayId: `#${issueNumber}` } : { displayId: "virtual" }),
+        ...(issueNumber ? { number: issueNumber, displayId: `#${issueNumber}` } : { displayId: "derived" }),
         ...(!issueNumber ? { description: derivedIssueDescription(issue.description, modelPayloadByObservationId) ?? issue.label } : {}),
         ...(typeof issueObservation?.payload.url === "string" ? { url: issueObservation.payload.url } : issueNumber
           ? { url: `https://github.com/${request.repository}/issues/${issueNumber}` }
@@ -3499,9 +3499,10 @@ export const ONTOLOGY_SCHEMA_SQL = `
         primary key (graph_id, node_id)
       );
       alter table jina_ontology.nodes drop constraint if exists ontology_nodes_kind_check;
+      update jina_ontology.nodes set kind='Issue' where kind='VirtualIssue';
       alter table jina_ontology.nodes add constraint ontology_nodes_kind_check check (kind in (
         'Repository','File','Symbol','Commit','PullRequest','Issue','Engineer','Team','Document','Feature',
-        'Package','Service','Deployment','Incident','VirtualIssue'
+        'Package','Service','Deployment','Incident'
       ));
       create index if not exists ontology_nodes_graph_kind_description
         on jina_ontology.nodes (graph_id,kind,description);
@@ -3714,9 +3715,10 @@ export const ONTOLOGY_SCHEMA_SQL = `
         unique (tenant_id,kind,natural_key)
       );
       alter table jina_ontology.entities drop constraint if exists ontology_entities_kind_check;
+      update jina_ontology.entities set kind='Issue' where kind='VirtualIssue';
       alter table jina_ontology.entities add constraint ontology_entities_kind_check check (kind in (
         'Repository','File','Symbol','Commit','PullRequest','Issue','Engineer','Team','Document','Feature',
-        'Package','Service','Deployment','Incident','VirtualIssue'
+        'Package','Service','Deployment','Incident'
       ));
       create table if not exists jina_ontology.identities (
         id text primary key,

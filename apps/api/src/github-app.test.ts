@@ -131,7 +131,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   assert.equal(taskTypes.find((definition) => definition.type === "publish")?.triggeredBy[0]?.source, "GitHub pull_request webhook");
   assert.deepEqual(
     taskTypes.find((definition) => definition.type === "ontology_project")?.dependsOn,
-    [{ taskType: "ontology_assert", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }]
+    [{ taskType: "ontology_ingest", relationships: ["blocks"], workflows: ["ontology_build"], required: true, conditions: [] }]
   );
   assert.deepEqual(
     taskTypes.find((definition) => definition.type === "review_pass")?.dependsOn,
@@ -402,7 +402,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     const treeSha = "b".repeat(40);
     const readmeSha = "c".repeat(40);
     const sourceSha = "d".repeat(40);
-    const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
+    let ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
     assert.equal(ingestion.message.topic, "run-ontology-ingest");
     assert.equal(ingestion.task.metadata?.pipelinePhase, "snapshot");
 
@@ -418,6 +418,20 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       body: JSON.stringify({ messageId: ingestion.message.id, leaseId: "wrong-lease" })
     });
     assert.equal(staleRenewal.status, 409);
+    const released = await fetch(`${baseUrl}/internal/worker/release`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messageId: ingestion.message.id,
+        leaseId: ingestion.message.leaseId,
+        reason: "worker shutdown"
+      })
+    });
+    assert.equal(released.status, 200);
+    const reclaimed = await claimTopic(baseUrl, "run-ontology-ingest");
+    assert.equal(reclaimed.task.id, ingestion.task.id);
+    assert.notEqual(reclaimed.message.leaseId, ingestion.message.leaseId);
+    ingestion = reclaimed;
 
     const snapshot = {
       tenantId: "default",

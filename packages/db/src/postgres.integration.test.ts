@@ -507,7 +507,9 @@ test("Postgres reuses content-addressed blobs and projects canonical assertions"
       generatedAt: "2026-07-19T12:02:00.000Z"
     });
     assert.equal(graph.generator.executor, "projection");
-    assert.equal(graph.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"), false);
+    const reviewableEdge = graph.edges.find((edge) => edge.predicate === "DOCUMENTED_BY");
+    assert.ok(reviewableEdge);
+    assert.equal(reviewableEdge.qualifiers?.assertionStatus, "proposed");
     assert.equal(graph.nodes.some((node) => node.kind === "Symbol"), true);
   } finally {
     await store.close();
@@ -940,7 +942,7 @@ test("Postgres preserves review and provenance when a new model contract confirm
   }
 });
 
-test("Postgres projects an accepted virtual issue by entity identity", {
+test("Postgres projects an accepted derived issue by entity identity", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
   assert.ok(connectionString);
@@ -1000,14 +1002,14 @@ test("Postgres projects an accepted virtual issue by entity identity", {
           { id: "42", kind: "PullRequest", label: "PR #42", description: "fix", evidence: ["src/auth.ts:1"] },
           { id: "43", kind: "PullRequest", label: "PR #43", description: "fix", evidence: ["src/auth.ts:1"] },
           {
-            id: "virtual:pr:42",
+            id: "derived:pr:42",
             kind: "Issue",
             label: "Administrators encounter an authorization error",
             description: "Administrator deletion is incorrectly denied.",
             evidence: ["src/auth.ts:1"]
           },
           {
-            id: "virtual:pr:43",
+            id: "derived:pr:43",
             kind: "Issue",
             label: "Administrators encounter an authorization error",
             description: "Administrator audit export is incorrectly denied.",
@@ -1015,7 +1017,7 @@ test("Postgres projects an accepted virtual issue by entity identity", {
           }
         ],
         edges: [42, 43].map((number) => ({
-          source: String(number), target: `virtual:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
+          source: String(number), target: `derived:pr:${number}`, predicate: "RESOLVES", plane: "knowledge" as const,
           confidence: 0.95, evidence: ["src/auth.ts:1"]
         }))
       },

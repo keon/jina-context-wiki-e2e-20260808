@@ -39,7 +39,7 @@ export interface RetrievalRequest {
   readonly issueText?: string;
   /** Exact phrase used to resolve an inferred Feature by label or natural key. */
   readonly featureText?: string;
-  /** Exact phrase used to resolve an Incident, Service, Feature, Issue, or VirtualIssue root. */
+  /** Exact phrase used to resolve an Incident, Service, Feature, or Issue root. */
   readonly rootText?: string;
   readonly rootEntityId?: string;
   readonly commitSha?: string;
@@ -222,7 +222,7 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   const commitSha = extractCommitSha(question);
   const causal = isCausalIssueQuestion(question);
   const resolution = /resolv|fix(?:ed|es|ing)?|clos(?:e|ed|es|ing)/.test(value);
-  if (/\b(?:incident|deployment|service|virtual issue|unlinked fix|package)\b/.test(value)) return ["causal_trace"];
+  if (/\b(?:incident|deployment|service|derived issue|unlinked fix|package)\b/.test(value)) return ["causal_trace"];
   if (/\b(?:renamed?|moved?|previously)\b/.test(value)) return ["causal_trace"];
   if ((issueNumber || issueText) && (causal || resolution)) return ["issue_trace"];
   if ((pullRequestNumber || commitSha) && causal) return ["issue_trace"];
@@ -290,7 +290,7 @@ export function extractFeatureText(question: string): string | undefined {
 export function extractCausalRootText(question: string): string | undefined {
   const quoted = /["“]([^"”\n]{2,500})["”]/.exec(question)?.[1];
   if (quoted) return quoted.trim();
-  const named = /\b(?:incident|service|feature|virtual issue)\s+(?:called\s+|named\s+)?([^,?]+?)(?:,|\?|\s+(?:did|does|was|were|would|could)\b|$)/i.exec(question)?.[1];
+  const named = /\b(?:incident|service|feature|issue)\s+(?:called\s+|named\s+)?([^,?]+?)(?:,|\?|\s+(?:did|does|was|were|would|could)\b|$)/i.exec(question)?.[1];
   return named?.trim().replace(/\s+/g, " ") || undefined;
 }
 

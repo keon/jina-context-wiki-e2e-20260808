@@ -121,6 +121,7 @@ const ontologyExecutor = topics.includes("run-ontology-assert")
 let stopping = false;
 let active = false;
 let activeLease: LeaseExecutionState | undefined;
+let activeWork: ClaimedWork | undefined;
 let lastApiSuccessAt: string | undefined;
 let lastApiError: string | undefined;
 let lastApiErrorAt: string | undefined;
@@ -182,6 +183,7 @@ async function claim(): Promise<ClaimedWork | undefined> {
 
 async function execute(work: ClaimedWork): Promise<void> {
   active = true;
+  activeWork = work;
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
   const heartbeat = setInterval(() => {
@@ -222,6 +224,7 @@ async function execute(work: ClaimedWork): Promise<void> {
     throw error;
   } finally {
     activeLease = undefined;
+    activeWork = undefined;
     active = false;
   }
 }
@@ -1245,9 +1248,33 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+async function releaseOntologyLeaseOnShutdown(work: ClaimedWork): Promise<void> {
+  if (!work.message.id.startsWith("ontology-stage_")) return;
+  const response = await fetch(`${apiUrl}/internal/worker/release`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      messageId: work.message.id,
+      leaseId: work.message.leaseId,
+      reason: "worker shutdown"
+    }),
+    signal: AbortSignal.timeout(8_000)
+  });
+  if (!response.ok && response.status !== 409) {
+    throw new Error(`lease release failed with ${response.status}: ${await response.text()}`);
+  }
+}
+
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
     stopping = true;
+    const work = activeWork;
+    if (activeLease) loseLease(activeLease, new LeaseLostError(`worker received ${signal}`));
+    if (work) {
+      void releaseOntologyLeaseOnShutdown(work).catch((error) => {
+        console.error("worker lease release failed", errorMessage(error));
+      });
+    }
     server.close(() => undefined);
   });
 }

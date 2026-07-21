@@ -61,7 +61,6 @@ const NODE_COLORS: Record<string, [number, number, number, number]> = {
   Service: [0.25, 0.75, 0.72, 1],
   Deployment: [0.38, 0.77, 0.52, 0.98],
   Incident: [0.94, 0.35, 0.32, 1],
-  VirtualIssue: [0.93, 0.54, 0.28, 1],
   Commit: [0.38, 0.77, 0.52, 0.98],
   PullRequest: [0.45, 0.82, 0.58, 1],
   Issue: [0.91, 0.58, 0.39, 1],

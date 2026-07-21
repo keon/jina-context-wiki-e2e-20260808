@@ -1,7 +1,7 @@
 import type { OntologyEdge, OntologyGraph, OntologyNode, OntologyNodeKind } from "./model.js";
 import type { RetrievalCitation, RetrievalItem, RetrievalRequest } from "./retrieval.js";
 
-export const causalRootKinds = ["Issue", "VirtualIssue", "Feature", "Incident", "Service"] as const;
+export const causalRootKinds = ["Issue", "Feature", "Incident", "Service"] as const;
 export type CausalRootKind = (typeof causalRootKinds)[number];
 
 export interface CausalTraceNode {
@@ -284,7 +284,7 @@ function selectRoots(graph: OntologyGraph, request: RetrievalRequest): OntologyN
     if (/\bincident\b/.test(query) && node.kind === "Incident") score += 20;
     if (/\bservice\b/.test(query) && node.kind === "Service") score += 20;
     if (/\bfeature\b|implement/.test(query) && node.kind === "Feature") score += 20;
-    if (/virtual issue|unlinked/.test(query) && node.kind === "VirtualIssue") score += 20;
+    if (/derived issue|unlinked/.test(query) && node.kind === "Issue" && node.id.includes("derived:issue:")) score += 20;
     const traceEdges = graph.edges.filter((edge) => edge.source === node.id || edge.target === node.id);
     if (pullRequestNumber && traceEdges.some((edge) => {
       const other = nodeById.get(edge.source === node.id ? edge.target : edge.source);
