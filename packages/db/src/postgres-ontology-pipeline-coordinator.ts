@@ -49,6 +49,10 @@ interface StageRow {
   lease_id: string | null;
   worker_id: string | null;
   lease_expires_at: Date | null;
+  started_at: Date | null;
+  completed_at: Date | null;
+  /** pg returns int8 as a string; stageRecord() normalizes with Number(...). */
+  duration_ms: string | number | null;
   created_at: Date;
   updated_at: Date;
 }
@@ -194,7 +198,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
       await client.query("begin");
       await client.query(
         `update jina_board.tasks
-         set status='queued',lease_id=null,worker_id=null,lease_expires_at=null,updated_at=$1
+         set status='queued',lease_id=null,worker_id=null,lease_expires_at=null,started_at=null,completed_at=null,duration_ms=null,updated_at=$1
          where tenant_id=$2 and status='in_progress' and lease_expires_at <= $1`,
         [input.now, input.tenantId]
       );
@@ -255,13 +259,14 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
       const leased = await client.query<StageRow>(
         `update jina_board.tasks
          set status='in_progress',attempt=attempt+1,lease_id=$2,worker_id=$3,
-             lease_expires_at=$4,updated_at=$5
+             lease_expires_at=$4,started_at=$5,completed_at=null,duration_ms=null,updated_at=$5
          where id=$1 returning *`,
         [stage.id, randomUUID(), input.workerId, input.leaseExpiresAt, input.now]
       );
       const row = leased.rows[0]!;
       await insertBoardEvent(client, row.tenant_id, row.id, "task.transitioned", input.now, {
-        fromStatus: "queued", toStatus: "in_progress", attempt: row.attempt, workerId: input.workerId
+        fromStatus: "queued", toStatus: "in_progress", attempt: row.attempt, workerId: input.workerId,
+        startedAt: input.now
       });
       await client.query(
         `update jina_board.workflows set status=$2,updated_at=$3 where id=$1`,
@@ -324,8 +329,13 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         [stage.build_id, stage.phase === "history" ? "enriching" : "in_progress", input.now]
       );
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
-        fromStatus: "in_progress", toStatus: "queued", reason: input.reason
+        fromStatus: "in_progress", toStatus: "queued", reason: input.reason,
+        attempt: stage.attempt,
+        startedAt: stage.started_at?.toISOString() ?? input.now,
+        completedAt: input.now,
+        durationMs: Math.max(0, Date.parse(input.now) - (stage.started_at?.getTime() ?? Date.parse(input.now)))
       });
+      await client.query("update jina_board.tasks set started_at=null where id=$1", [stage.id]);
       await client.query("commit");
       return true;
     } catch (error) {
@@ -385,12 +395,18 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
       };
       await client.query(
         `update jina_board.tasks
-         set status=$2,metadata=$3::jsonb,lease_id=null,worker_id=null,lease_expires_at=null,updated_at=$4
+         set status=$2,metadata=$3::jsonb,lease_id=null,worker_id=null,lease_expires_at=null,
+             completed_at=$4,duration_ms=greatest(0,round(extract(epoch from ($4::timestamptz-coalesce(started_at,$4::timestamptz)))*1000))::bigint,
+             updated_at=$4
          where id=$1`,
         [stage.id, input.outcome, JSON.stringify(metadata), input.now]
       );
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
-        fromStatus: "in_progress", toStatus: input.outcome, ...(input.reason ? { reason: input.reason } : {})
+        fromStatus: "in_progress", toStatus: input.outcome, attempt: stage.attempt,
+        startedAt: stage.started_at?.toISOString() ?? input.now,
+        completedAt: input.now,
+        durationMs: Math.max(0, Date.parse(input.now) - (stage.started_at?.getTime() ?? Date.parse(input.now))),
+        ...(input.reason ? { reason: input.reason } : {})
       });
       if (input.outcome === "failed" && ontologyStageRequired(stage)) {
         await client.query(
@@ -553,8 +569,42 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   }
 
   private initialize(): Promise<void> {
-    this.initialized ??= this.manageSchema ? this.pool.query(PIPELINE_SCHEMA_SQL).then(() => undefined) : Promise.resolve();
+    this.initialized ??= this.manageSchema ? this.createSchema() : Promise.resolve();
     return this.initialized;
+  }
+
+  // Applying PIPELINE_SCHEMA_SQL as one multi-statement transaction takes
+  // strong relation locks even when every statement is a no-op ("create index
+  // if not exists" holds SHARE on the table, "alter table" ACCESS EXCLUSIVE),
+  // so a coordinator initializing lazily could deadlock against another
+  // instance's in-flight claim transaction (CI hit exactly that: 40P01).
+  // Two guards prevent DDL from ever interleaving with other sessions:
+  // a transaction-scoped advisory lock serializes concurrent schema applies,
+  // and a catalog probe skips the DDL entirely (taking only catalog reads,
+  // no table locks) once the schema is current — first-time DDL then only
+  // runs while the tables it locks cannot be in use yet.
+  private async createSchema(): Promise<void> {
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('jina_board.schema'))");
+      const probe = await client.query<{ ready: boolean }>(
+        `select to_regclass('jina_board.task_checkpoints') is not null
+           and (select count(*) from pg_attribute
+                where attrelid=to_regclass('jina_board.tasks')
+                  and attname in ('started_at','completed_at','duration_ms') and not attisdropped) = 3
+           and exists (select 1 from pg_constraint
+                       where conrelid=to_regclass('jina_board.tasks') and contype='c'
+                         and pg_get_constraintdef(oid) like '%duration_ms%') as ready`
+      );
+      if (!probe.rows[0]?.ready) await client.query(PIPELINE_SCHEMA_SQL);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 }
 
@@ -625,6 +675,9 @@ function stageRecord(row: StageRow): OntologyStageRecord {
     ...(row.lease_id ? { leaseId: row.lease_id } : {}),
     ...(row.worker_id ? { workerId: row.worker_id } : {}),
     ...(row.lease_expires_at ? { leaseExpiresAt: row.lease_expires_at.toISOString() } : {}),
+    ...(row.started_at ? { startedAt: row.started_at.toISOString() } : {}),
+    ...(row.completed_at ? { completedAt: row.completed_at.toISOString() } : {}),
+    ...(row.duration_ms !== null ? { durationMs: Number(row.duration_ms) } : {}),
     createdAt: row.created_at.toISOString(),
     updatedAt: row.updated_at.toISOString()
   };
@@ -700,10 +753,27 @@ const PIPELINE_SCHEMA_SQL = `
     lease_id text,
     worker_id text,
     lease_expires_at timestamptz,
+    started_at timestamptz,
+    completed_at timestamptz,
+    duration_ms bigint check (duration_ms is null or duration_ms>=0),
     created_at timestamptz not null,
     updated_at timestamptz not null,
     unique (build_id,phase,stage)
   );
+  alter table jina_board.tasks add column if not exists started_at timestamptz;
+  alter table jina_board.tasks add column if not exists completed_at timestamptz;
+  alter table jina_board.tasks add column if not exists duration_ms bigint;
+  do $$
+  begin
+    if not exists (
+      select 1 from pg_constraint
+      where conrelid='jina_board.tasks'::regclass and contype='c'
+        and pg_get_constraintdef(oid) like '%duration_ms%'
+    ) then
+      alter table jina_board.tasks
+        add constraint task_board_tasks_duration_ms_check check (duration_ms is null or duration_ms>=0);
+    end if;
+  end $$;
   create index if not exists task_board_tasks_claim_idx
     on jina_board.tasks (tenant_id,status,topic,priority desc,created_at);
   create index if not exists task_board_tasks_lease_idx

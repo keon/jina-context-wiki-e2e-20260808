@@ -561,6 +561,12 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     assert.equal(board.tasks.find((task) => task.type === "ontology_assert")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "ontology_project")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "ontology_project")?.metadata.commitSha, commitSha);
+    const ingestTiming = board.tasks.find((task) => task.type === "ontology_ingest")?.metadata.timing as
+      Record<string, unknown> | undefined;
+    assert.ok(ingestTiming, "a completed stage exposes metadata.timing");
+    assert.equal(typeof ingestTiming.startedAt, "string");
+    assert.equal(typeof ingestTiming.completedAt, "string");
+    assert.equal(typeof ingestTiming.durationMs, "number");
   } finally {
     await close(server);
   }
@@ -587,6 +593,11 @@ test("a new ontology attempt supersedes older active work for the same repositor
     assert.equal(first.every((task) => task.status === "superseded"), true);
     assert.equal(second.length, 7, "an idempotent request key does not duplicate the attempt");
     assert.equal(second.find((task) => task.type === "ontology_ingest")?.status, "queued");
+    assert.equal(
+      "timing" in (second.find((task) => task.type === "ontology_ingest")?.metadata ?? {}),
+      false,
+      "a never-started stage omits metadata.timing entirely"
+    );
     assert.equal(second.some((task) => task.status === "blocked"), false);
   } finally {
     await close(server);

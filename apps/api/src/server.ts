@@ -1402,6 +1402,11 @@ function pipelineBuildTask(build: OntologyBuildRecord): BoardTask {
 }
 
 function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecord): BoardTask {
+  const timing = {
+    ...(stage.startedAt ? { startedAt: stage.startedAt } : {}),
+    ...(stage.completedAt ? { completedAt: stage.completedAt } : {}),
+    ...(stage.durationMs !== undefined ? { durationMs: stage.durationMs } : {})
+  };
   return {
     id: entityId<"task">(stage.id) as TaskId,
     parentTaskId: entityId<"task">(build.id) as TaskId,
@@ -1412,7 +1417,10 @@ function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecor
     dedupeKey: `ontology:${stage.buildId}:${stage.phase}:${stage.stage}`,
     required: ontologyStageRequired(stage),
     attempt: stage.attempt,
-    metadata: { ...stage.metadata },
+    metadata: {
+      ...stage.metadata,
+      ...(Object.keys(timing).length > 0 ? { timing } : {})
+    },
     kind: "dispatchable",
     dispatchTopic: stage.topic,
     createdAt: stage.createdAt,

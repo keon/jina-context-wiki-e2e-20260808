@@ -47,6 +47,9 @@ export interface OntologyStageRecord {
   readonly leaseId?: string;
   readonly workerId?: string;
   readonly leaseExpiresAt?: string;
+  readonly startedAt?: string;
+  readonly completedAt?: string;
+  readonly durationMs?: number;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
@@ -146,7 +149,7 @@ interface MutableBuild extends Omit<OntologyBuildRecord, "status" | "updatedAt">
   updatedAt: string;
 }
 
-interface MutableStage extends Omit<OntologyStageRecord, "status" | "metadata" | "attempt" | "updatedAt"> {
+interface MutableStage extends Omit<OntologyStageRecord, "status" | "metadata" | "attempt" | "updatedAt" | "startedAt" | "completedAt" | "durationMs"> {
   status: OntologyStageStatus;
   metadata: Record<string, unknown>;
   attempt: number;
@@ -154,6 +157,9 @@ interface MutableStage extends Omit<OntologyStageRecord, "status" | "metadata" |
   leaseId?: string;
   workerId?: string;
   leaseExpiresAt?: string;
+  startedAt?: string;
+  completedAt?: string;
+  durationMs?: number;
 }
 
 /** In-memory implementation used by tests and local development. */
@@ -213,6 +219,9 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
       if (stage.status === "in_progress" && stage.leaseExpiresAt && stage.leaseExpiresAt <= input.now) {
         stage.status = "queued";
         clearLease(stage);
+        delete stage.startedAt;
+        delete stage.completedAt;
+        delete stage.durationMs;
       }
     }
     const stage = [...this.stages.values()]
@@ -224,9 +233,13 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     stage.leaseId = randomUUID();
     stage.workerId = input.workerId;
     stage.leaseExpiresAt = input.leaseExpiresAt;
+    stage.startedAt = input.now;
+    delete stage.completedAt;
+    delete stage.durationMs;
     stage.updatedAt = input.now;
     this.recordEvent(stage.id, "task.transitioned", input.now, {
-      fromStatus: "queued", toStatus: "in_progress", attempt: stage.attempt, workerId: input.workerId
+      fromStatus: "queued", toStatus: "in_progress", attempt: stage.attempt, workerId: input.workerId,
+      startedAt: input.now
     });
     const build = this.builds.get(stage.buildId)!;
     build.status = stage.phase === "history" ? "enriching" : "in_progress";
@@ -251,11 +264,15 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
   }): Promise<boolean> {
     const stage = this.stages.get(input.stageId);
     if (!validLease(stage, input.tenantId, input.leaseId, input.now)) return false;
+    const startedAt = stage!.startedAt ?? input.now;
+    const durationMs = Math.max(0, Date.parse(input.now) - Date.parse(startedAt));
     stage!.status = "queued";
     stage!.updatedAt = input.now;
     clearLease(stage!);
+    delete stage!.startedAt;
     this.recordEvent(stage!.id, "task.transitioned", input.now, {
-      fromStatus: "in_progress", toStatus: "queued", reason: input.reason
+      fromStatus: "in_progress", toStatus: "queued", reason: input.reason,
+      attempt: stage!.attempt, startedAt, completedAt: input.now, durationMs
     });
     const build = this.builds.get(stage!.buildId)!;
     build.status = stage!.phase === "history" ? "enriching" : "in_progress";
@@ -282,8 +299,12 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     stage!.status = input.outcome;
     stage!.metadata = { ...stage!.metadata, ...(input.result ? { result: structuredClone(input.result) } : {}), ...(input.reason ? { reason: input.reason } : {}) };
     stage!.updatedAt = input.now;
+    stage!.completedAt = input.now;
+    stage!.durationMs = Math.max(0, Date.parse(input.now) - Date.parse(stage!.startedAt ?? input.now));
     this.recordEvent(stage!.id, "task.transitioned", input.now, {
-      fromStatus: "in_progress", toStatus: input.outcome, ...(input.reason ? { reason: input.reason } : {})
+      fromStatus: "in_progress", toStatus: input.outcome, attempt: stage!.attempt,
+      startedAt: stage!.startedAt ?? input.now, completedAt: input.now, durationMs: stage!.durationMs,
+      ...(input.reason ? { reason: input.reason } : {})
     });
     clearLease(stage!);
     const build = this.builds.get(stage!.buildId)!;

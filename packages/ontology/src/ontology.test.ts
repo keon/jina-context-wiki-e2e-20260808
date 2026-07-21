@@ -73,6 +73,13 @@ test("snapshot-first ontology builds publish and ingest history without waiting 
     tenantId: "tenant", stageId: ingest.task.id, leaseId: ingest.message.leaseId,
     outcome: "done", now: "2026-07-21T00:02:00.000Z", nextMetadata: metadata
   }), true);
+  const completedIngest = (await coordinator.list("tenant"))[0]!.stages.find((stage) =>
+    stage.phase === "snapshot" && stage.stage === "ingest"
+  );
+  assert.deepEqual(
+    { startedAt: completedIngest?.startedAt, completedAt: completedIngest?.completedAt, durationMs: completedIngest?.durationMs },
+    { startedAt: "2026-07-21T00:01:00.000Z", completedAt: "2026-07-21T00:02:00.000Z", durationMs: 60_000 }
+  );
   const ready = (await coordinator.list("tenant"))[0]!.stages.filter((stage) => stage.status === "queued");
   assert.deepEqual(ready.map((stage) => `${stage.phase}:${stage.stage}`).sort(), [
     "history:ingest", "snapshot:assert", "snapshot:project"
@@ -128,6 +135,13 @@ test("workers can release ontology leases for immediate task-board recovery", as
     tenantId: "tenant", stageId: first.task.id, leaseId: first.message.leaseId,
     now: "2026-07-21T00:02:00.000Z", reason: "worker shutdown"
   }), true);
+  const released = (await coordinator.list("tenant"))[0]!.stages.find((stage) => stage.id === first.task.id);
+  assert.equal(released?.status, "queued");
+  assert.deepEqual(
+    { startedAt: released?.startedAt, completedAt: released?.completedAt, durationMs: released?.durationMs },
+    { startedAt: undefined, completedAt: undefined, durationMs: undefined },
+    "a released stage carries no stale timing while queued"
+  );
   const second = await coordinator.claim({
     tenantId: "tenant", workerId: "worker-2", topics: ["run-ontology-ingest"],
     now: "2026-07-21T00:03:00.000Z", leaseExpiresAt: "2026-07-21T01:03:00.000Z"
@@ -136,6 +150,38 @@ test("workers can release ontology leases for immediate task-board recovery", as
   assert.equal(second.task.id, first.task.id);
   assert.notEqual(second.message.leaseId, first.message.leaseId);
   assert.equal(second.task.metadata.pipelinePhase, "snapshot");
+});
+
+test("expired ontology leases requeue without stale stage timing", async () => {
+  const coordinator = new MemoryOntologyPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId: "tenant", repository: "omxyz/jina", ref: "main", requestKey: "expiry",
+    snapshotFirst: true, createdAt: "2026-07-21T00:00:00.000Z"
+  });
+  const first = await coordinator.claim({
+    tenantId: "tenant", workerId: "worker-1", topics: ["run-ontology-ingest"],
+    now: "2026-07-21T00:01:00.000Z", leaseExpiresAt: "2026-07-21T00:05:00.000Z"
+  });
+  assert.ok(first);
+  // A claim for an unrelated topic after the lease deadline sweeps the expired
+  // lease back to queued without immediately re-leasing the stage.
+  assert.equal(await coordinator.claim({
+    tenantId: "tenant", workerId: "worker-2", topics: ["run-ontology-assert"],
+    now: "2026-07-21T00:06:00.000Z", leaseExpiresAt: "2026-07-21T01:06:00.000Z"
+  }), undefined);
+  const requeued = (await coordinator.list("tenant"))[0]!.stages.find((stage) => stage.id === first.task.id);
+  assert.equal(requeued?.status, "queued");
+  assert.deepEqual(
+    { startedAt: requeued?.startedAt, completedAt: requeued?.completedAt, durationMs: requeued?.durationMs },
+    { startedAt: undefined, completedAt: undefined, durationMs: undefined },
+    "an expiry-requeued stage carries no stale timing while queued"
+  );
+  const second = await coordinator.claim({
+    tenantId: "tenant", workerId: "worker-2", topics: ["run-ontology-ingest"],
+    now: "2026-07-21T00:07:00.000Z", leaseExpiresAt: "2026-07-21T01:07:00.000Z"
+  });
+  assert.ok(second);
+  assert.equal(second.task.id, first.task.id);
 });
 
 test("pure structural parsing produces versioned symbols and imports", () => {
