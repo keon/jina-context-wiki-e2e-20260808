@@ -1529,18 +1529,7 @@ function renderAssertionReviewQueue(assertions) {
       textElement("p", "", assertion.explanation || "This legacy assertion has no explanation and should not be accepted without review."),
       textElement("p", "", "Evidence: " + ((assertion.evidence || []).join(", ") || "none"))
     );
-    const fields = element("div", "assertion-review-fields");
-    const code = document.createElement("select");
-    [
-      ["", "Rejection category"],
-      ["incorrect_relationship", "Incorrect relationship"],
-      ["insufficient_evidence", "Insufficient evidence"],
-      ["unsupported_explanation", "Unsupported explanation"],
-      ["other", "Other"]
-    ].forEach(function(entry) { const option = document.createElement("option"); option.value = entry[0]; option.textContent = entry[1]; code.append(option); });
-    const reason = document.createElement("input");
-    reason.placeholder = "Reason for rejection";
-    fields.append(code, reason);
+    const rejection = assertionRejectionFields();
     const actions = element("div", "assertion-review-actions");
     const accept = textElement("button", "secondary-button", "Accept");
     accept.type = "button";
@@ -1548,15 +1537,37 @@ function renderAssertionReviewQueue(assertions) {
     const reject = textElement("button", "danger-button", "Reject");
     reject.type = "button";
     reject.addEventListener("click", function() {
-      if (!code.value || !reason.value.trim()) { reason.setCustomValidity("Choose a category and provide a reason."); reason.reportValidity(); return; }
-      reason.setCustomValidity("");
-      reviewAssertion(assertion.id, "reject", code.value, reason.value.trim());
+      if (!rejection.code.value || !rejection.reason.value.trim()) {
+        rejection.reason.setCustomValidity("Choose a category and provide a reason.");
+        rejection.reason.reportValidity();
+        return;
+      }
+      rejection.reason.setCustomValidity("");
+      reviewAssertion(assertion.id, "reject", rejection.code.value, rejection.reason.value.trim());
     });
     actions.append(accept, reject);
-    card.append(fields, actions);
+    card.append(rejection.fields, actions);
     list.append(card);
   });
   ontologyDetails.append(heading, list);
+}
+
+function assertionRejectionFields() {
+  const fields = element("div", "assertion-review-fields");
+  const code = document.createElement("select");
+  code.className = "assertion-rejection-code";
+  [
+    ["", "Rejection category"],
+    ["incorrect_relationship", "Incorrect relationship"],
+    ["insufficient_evidence", "Insufficient evidence"],
+    ["unsupported_explanation", "Unsupported explanation"],
+    ["other", "Other"]
+  ].forEach(function(entry) { const option = document.createElement("option"); option.value = entry[0]; option.textContent = entry[1]; code.append(option); });
+  const reason = document.createElement("input");
+  reason.className = "assertion-rejection-reason";
+  reason.placeholder = "Reason for rejection";
+  fields.append(code, reason);
+  return { fields: fields, code: code, reason: reason };
 }
 
 async function reviewAssertion(assertionId, decision, rejectionCode, reason) {
@@ -1943,6 +1954,7 @@ function renderAssertionReview() {
       traceEvidence(Array.isArray(assertion.evidence) ? assertion.evidence : []),
       textElement("p", "assertion-relations", "Supports: " + (assertion.supportingAssertionIds || []).join(", ") + " · Contradicts: " + (assertion.contradictingAssertionIds || []).join(", ") )
     );
+    if (assertion.status === "proposed") item.append(assertionRejectionFields().fields);
     const actions = element("footer", "assertion-actions");
     for (const decision of assertion.status === "proposed" ? ["accept", "reject"] : assertion.status === "active" ? ["retract"] : []) {
       const button = textElement("button", decision === "accept" ? "primary-button" : "secondary-button", humanize(decision));
@@ -2971,13 +2983,29 @@ document.getElementById("assertion-kind-filter").addEventListener("change", rend
 assertionReviewList.addEventListener("click", async function(event) {
   const button = event.target.closest("[data-assertion-decision]");
   if (!button) return;
+  const decision = button.dataset.assertionDecision;
+  let rejectionCode;
+  let reason;
+  if (decision === "reject") {
+    const item = button.closest(".assertion-review-item");
+    const codeInput = item?.querySelector(".assertion-rejection-code");
+    const reasonInput = item?.querySelector(".assertion-rejection-reason");
+    rejectionCode = codeInput?.value;
+    reason = reasonInput?.value.trim();
+    if (!rejectionCode || !reason) {
+      reasonInput?.setCustomValidity("Choose a category and provide a reason.");
+      reasonInput?.reportValidity();
+      return;
+    }
+    reasonInput.setCustomValidity("");
+  }
   button.disabled = true;
-  const response = await fetch(API + "/ontology/commands", {
-    method: "POST", headers: { "content-type": "application/json" },
-    body: JSON.stringify({ type: "review_assertion", assertionId: button.dataset.assertionId, decision: button.dataset.assertionDecision })
-  });
-  if (!response.ok) button.title = "Review failed with " + response.status;
-  await refresh();
+  try {
+    await reviewAssertion(button.dataset.assertionId, decision, rejectionCode, reason);
+  } catch (error) {
+    button.disabled = false;
+    button.title = error instanceof Error ? error.message : "Assertion review failed";
+  }
 });
 async function postDemo(body) {
   await fetch(API + "/dev/webhooks/github", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

@@ -21,6 +21,10 @@ test("Postgres schema preserves unknown commit timestamps", () => {
   assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /committed_at\s*=\s*now\(\)/i);
 });
 
+test("Postgres schema backfills projection graph heads without replacing current pointers", () => {
+  assert.match(ONTOLOGY_SCHEMA_SQL, /insert into jina_ontology\.graph_heads[\s\S]+candidate\.executor='projection'[\s\S]+on conflict \(tenant_id,repository,ref_name\) do nothing/);
+});
+
 test("Postgres atomically stores board completion and an immutable graph", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
@@ -66,6 +70,153 @@ test("Postgres atomically stores board completion and an immutable graph", {
   }
 });
 
+test("Postgres causal retrieval follows the current graph head and migrations backfill missing heads", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const suffix = Date.now().toString(36);
+  const tenantId = `graph-head-${suffix}`;
+  const repository = `omlabs/graph-head-${suffix}`;
+  const commitSha = "a".repeat(40);
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const graph = (deploymentId: string, deploymentLabel: string, generatedAt: string) => createOntologyGraph({
+    request: { tenantId, repository, ref: "main", taskId: `project-${deploymentId}` },
+    commitSha,
+    generatedAt,
+    executor: "projection",
+    model: "current-graph-v1",
+    contentAddressed: true,
+    generated: {
+      summary: `${deploymentLabel} caused the outage`,
+      nodes: [
+        { id: "repo", kind: "Repository", label: repository, description: "Repository", evidence: ["README.md:1"] },
+        { id: "incident", kind: "Incident", label: "Checkout outage", description: "Checkout failed", evidence: ["README.md:2"] },
+        { id: deploymentId, kind: "Deployment", label: deploymentLabel, description: "Production deployment", evidence: ["README.md:3"] }
+      ],
+      edges: [{
+        source: "incident", target: deploymentId, predicate: "INTRODUCED_BY", plane: "knowledge",
+        why: `${deploymentLabel} introduced the outage.`, evidence: ["README.md:3"]
+      }]
+    }
+  });
+  const first = graph("deployment-a", "Deployment A", "2026-07-21T01:00:00.000Z");
+  const second = graph("deployment-b", "Deployment B", "2026-07-21T01:01:00.000Z");
+  const request = {
+    tenantId, allowedRepositories: [repository], repository, ref: "main", template: "causal_trace" as const,
+    rootText: "Checkout outage"
+  };
+  try {
+    await store.planIngestion({
+      tenantId, repository, ref: "main", commitSha, treeSha: "b".repeat(40), parents: [],
+      recordedAt: "2026-07-21T00:59:00.000Z", updateRef: true, taskId: `ingest-${suffix}`, files: []
+    });
+    await store.save(first);
+    await store.save(second);
+    await store.save(first);
+    const current = await store.retrieve(request);
+    const currentTrace = current.items[0]?.data as { causes?: readonly { nodes: readonly { label: string }[] }[] };
+    assert.equal(currentTrace.causes?.[0]?.nodes[1]?.label, "Deployment A",
+      "retrieval follows graph_heads when an immutable graph is reused");
+
+    const pool = new Pool({ connectionString });
+    try {
+      await pool.query(
+        "delete from jina_ontology.graph_heads where tenant_id=$1 and repository=$2 and ref_name='main'",
+        [tenantId, repository]
+      );
+    } finally {
+      await pool.end();
+    }
+    const migratedStore = new PostgresOntologyGraphStore({ connectionString });
+    try {
+      const migrated = await migratedStore.retrieve(request);
+      assert.equal(migrated.items.length, 1, "schema initialization backfills a missing legacy graph head");
+    } finally {
+      await migratedStore.close();
+    }
+  } finally {
+    await store.close();
+  }
+});
+
+test("Postgres feature retrieval filters the complete canonical assertion set", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const suffix = Date.now().toString(36);
+  const tenantId = `feature-limit-${suffix}`;
+  const repository = `omlabs/feature-limit-${suffix}`;
+  const commitSha = "c".repeat(40);
+  const now = "2026-07-21T02:00:00.000Z";
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  try {
+    await store.planIngestion({
+      tenantId, repository, ref: "main", commitSha, treeSha: "d".repeat(40), parents: [],
+      recordedAt: now, updateRef: true, taskId: `ingest-${suffix}`, files: []
+    });
+    await store.save(createOntologyGraph({
+      request: { tenantId, repository, ref: "main", taskId: `project-${suffix}` },
+      commitSha, generatedAt: now, executor: "projection", model: "current-graph-v1", contentAddressed: true,
+      generated: {
+        summary: "Repository projection",
+        nodes: [
+          { id: "repo", kind: "Repository", label: repository, description: "Repository", evidence: ["README.md:1"] },
+          { id: "file", kind: "File", label: "src/index.ts", description: "Source", path: "src/index.ts", evidence: ["src/index.ts:1"] }
+        ],
+        edges: [{ source: "repo", target: "file", predicate: "CONTAINS", plane: "code", evidence: ["src/index.ts:1"] }]
+      }
+    }));
+    const pool = new Pool({ connectionString });
+    try {
+      const observation = await pool.query<{ id: string }>(
+        "select id from jina_ontology.observations where tenant_id=$1 and repository=$2 limit 1",
+        [tenantId, repository]
+      );
+      assert.ok(observation.rows[0]);
+      const fileId = `feature-limit-file-${suffix}`;
+      await pool.query(
+        `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+         values ($1,$2,'File',$3,'src/index.ts')`,
+        [fileId, tenantId, `repo:${repository}:path:src/index.ts`]
+      );
+      await pool.query(
+        `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+         select $1 || candidate.index,$2,'Feature',$3 || candidate.index,
+                case when candidate.index=1600 then 'Needle capability' else 'Unrelated capability ' || candidate.index end
+         from generate_series(0,1600) candidate(index)`,
+        [`feature-limit-entity-${suffix}-`, tenantId, `feature:${repository}:`]
+      );
+      await pool.query(
+        `insert into jina_ontology.assertions
+          (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
+           object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,source_observation_id,
+           generator_version,registry_version,recorded_at)
+         select case when candidate.index=1600 then $1 else $2 || lpad(candidate.index::text,4,'0') end,
+                $3,$4,'source',$5,'File',$6,'src/index.ts','IMPLEMENTS',
+                $7 || candidate.index,'Feature',$8 || candidate.index,
+                case when candidate.index=1600 then 'Needle capability' else 'Unrelated capability ' || candidate.index end,
+                'active',0.9,'The source file implements this capability.','[]'::jsonb,$9,$10,$11,$12
+         from generate_series(0,1600) candidate(index)`,
+        [
+          `z-feature-limit-target-${suffix}`, `a-feature-limit-${suffix}-`, tenantId, repository, fileId,
+          `repo:${repository}:path:src/index.ts`, `feature-limit-entity-${suffix}-`, `feature:${repository}:`,
+          observation.rows[0].id, ONTOLOGY_GENERATOR_VERSION, ONTOLOGY_REGISTRY_VERSION, now
+        ]
+      );
+    } finally {
+      await pool.end();
+    }
+    const result = await store.retrieve({
+      tenantId, allowedRepositories: [repository], repository, ref: "main", template: "feature_trace",
+      featureText: "Needle capability"
+    });
+    assert.equal(result.items[0]?.title, "src/index.ts implements Needle capability",
+      "matching happens before the result limit can discard a valid feature");
+  } finally {
+    await store.close();
+  }
+});
+
 test("Postgres ontology roles separate reads and runtime writes from schema ownership", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
@@ -80,17 +231,20 @@ test("Postgres ontology roles separate reads and runtime writes from schema owne
       manifest_writes_manifest: boolean; manifest_writes_blobs: boolean;
       graph_writes_graphs: boolean; graph_writes_assertions: boolean;
       query_writes_metrics: boolean; query_writes_assertions: boolean;
+      knowledge_writes_assertion_relations: boolean;
     }>(`select
       has_table_privilege('jina_ontology_manifest','jina_ontology.ref_manifest','INSERT') as manifest_writes_manifest,
       has_table_privilege('jina_ontology_manifest','jina_ontology.blobs','INSERT') as manifest_writes_blobs,
       has_table_privilege('jina_ontology_graph','jina_ontology.graphs','INSERT') as graph_writes_graphs,
       has_table_privilege('jina_ontology_graph','jina_ontology.assertions','INSERT') as graph_writes_assertions,
       has_table_privilege('jina_ontology_query','jina_ontology.retrieval_metrics','INSERT') as query_writes_metrics,
-      has_table_privilege('jina_ontology_query','jina_ontology.assertions','INSERT') as query_writes_assertions`);
+      has_table_privilege('jina_ontology_query','jina_ontology.assertions','INSERT') as query_writes_assertions,
+      has_table_privilege('jina_ontology_knowledge','jina_ontology.assertion_relations','INSERT') as knowledge_writes_assertion_relations`);
     assert.deepEqual(privileges.rows[0], {
       manifest_writes_manifest: true, manifest_writes_blobs: false,
       graph_writes_graphs: true, graph_writes_assertions: false,
-      query_writes_metrics: true, query_writes_assertions: false
+      query_writes_metrics: true, query_writes_assertions: false,
+      knowledge_writes_assertion_relations: true
     });
 
     const client = await pool.connect();

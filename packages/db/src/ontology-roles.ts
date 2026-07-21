@@ -48,6 +48,7 @@ grant select,insert,update,delete on
   jina_ontology.entities,jina_ontology.identities,jina_ontology.assertions,jina_ontology.entity_redirects,
   jina_ontology.audit_log,jina_ontology.erasure_filters,jina_ontology.repository_acl
   to jina_ontology_knowledge;
+grant select,insert on jina_ontology.assertion_relations to jina_ontology_knowledge;
 grant select,insert,update on jina_ontology.outbox to jina_ontology_knowledge;
 
 grant select on jina_ontology.refs,jina_ontology.commits,jina_ontology.commit_changes to jina_ontology_manifest;

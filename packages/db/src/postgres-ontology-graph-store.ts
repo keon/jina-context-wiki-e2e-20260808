@@ -1699,9 +1699,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
 
   private async retrieveCausalTrace(request: RetrievalRequest, ref: string, commitSha: string): Promise<readonly RetrievalItem[]> {
     const graph = await this.pool.query<GraphRow>(
-      `select * from jina_ontology.graphs
-       where tenant_id=$1 and repository=$2 and ref=$3 and commit_sha=$4 and executor='projection'
-       order by generated_at desc limit 1`,
+      `select graph.* from jina_ontology.graph_heads head
+       join jina_ontology.graphs graph on graph.id=head.graph_id
+       where head.tenant_id=$1 and head.repository=$2 and head.ref_name=$3
+         and graph.commit_sha=$4 and graph.executor='projection'
+       limit 1`,
       [request.tenantId, request.repository, ref, commitSha]
     );
     return graph.rows[0] ? causalTraceItemsFromGraph(await this.hydrate(graph.rows[0]), request) : [];
@@ -3002,9 +3004,8 @@ async function retrieveFeatureTrace(pool: Pool, request: RetrievalRequest, ref: 
          )
        )
      order by case assertion.predicate when 'IMPLEMENTS' then 0 when 'DOCUMENTED_BY' then 1 when 'LIKELY_AFFECTS' then 2 else 3 end,
-              assertion.confidence desc,assertion.id
-     limit $4`,
-    [request.tenantId, request.repository, ref, Math.min(1600, limit * 40)]
+              assertion.confidence desc,assertion.id`,
+    [request.tenantId, request.repository, ref]
   );
   const [redirects, entities] = await Promise.all([
     pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
@@ -3471,6 +3472,18 @@ export const ONTOLOGY_SCHEMA_SQL = `
         primary key (tenant_id,repository,ref_name)
       );
       alter table jina_ontology.refs add column if not exists is_default boolean not null default false;
+      insert into jina_ontology.graph_heads (tenant_id,repository,ref_name,graph_id,updated_at)
+      select ref.tenant_id,ref.repository,ref.ref_name,graph.id,graph.generated_at
+      from jina_ontology.refs ref
+      join lateral (
+        select candidate.id,candidate.generated_at
+        from jina_ontology.graphs candidate
+        where candidate.tenant_id=ref.tenant_id and candidate.repository=ref.repository
+          and candidate.ref=ref.ref_name and candidate.commit_sha=ref.commit_sha and candidate.executor='projection'
+        order by candidate.generated_at desc,candidate.id
+        limit 1
+      ) graph on true
+      on conflict (tenant_id,repository,ref_name) do nothing;
       create table if not exists jina_ontology.blobs (
         tenant_id text not null,
         blob_sha text not null,
