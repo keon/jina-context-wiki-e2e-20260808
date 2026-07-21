@@ -16,7 +16,7 @@
   },
   "dependencies": {
     "@daytona/sdk": "^0.199.0",
-    "@jina/ontology": "workspace:*"
+    "@jina/context-graph": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

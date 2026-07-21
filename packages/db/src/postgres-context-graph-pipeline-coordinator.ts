@@ -1,20 +1,20 @@
 import {
   stableId,
-  ontologyStagePrerequisites,
-  ontologyStageRequired,
-  type OntologyBuildRecord,
-  type OntologyPipelineBuildRequest,
-  type OntologyPipelineCoordinator,
-  type OntologyStageClaim,
-  type OntologyStageLease,
-  type OntologyStageRecord,
-  type OntologyTaskBoardEvent,
-  type OntologyWorkerTopic
-} from "@jina/ontology";
+  contextGraphStagePrerequisites,
+  contextGraphStageRequired,
+  type ContextGraphBuildRecord,
+  type ContextGraphPipelineBuildRequest,
+  type ContextGraphPipelineCoordinator,
+  type ContextGraphStageClaim,
+  type ContextGraphStageLease,
+  type ContextGraphStageRecord,
+  type ContextGraphTaskBoardEvent,
+  type ContextGraphWorkerTopic
+} from "@jina/context-graph";
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 
-export interface PostgresOntologyPipelineCoordinatorConfig extends PoolConfig {
+export interface PostgresContextGraphPipelineCoordinatorConfig extends PoolConfig {
   readonly manageSchema?: boolean;
 }
 
@@ -24,7 +24,7 @@ interface BuildRow {
   repository: string;
   ref_name: string;
   request_key: string;
-  status: OntologyBuildRecord["status"];
+  status: ContextGraphBuildRecord["status"];
   snapshot_first: boolean;
   metadata: Record<string, unknown>;
   created_at: Date;
@@ -38,10 +38,10 @@ interface StageRow {
   repository: string;
   ref_name: string;
   request_key: string;
-  phase: OntologyStageRecord["phase"];
-  stage: OntologyStageRecord["stage"];
-  topic: OntologyWorkerTopic;
-  status: OntologyStageRecord["status"];
+  phase: ContextGraphStageRecord["phase"];
+  stage: ContextGraphStageRecord["stage"];
+  topic: ContextGraphWorkerTopic;
+  status: ContextGraphStageRecord["status"];
   priority: number;
   ordinal: number;
   metadata: Record<string, unknown>;
@@ -65,24 +65,24 @@ interface EventRow {
   payload: Record<string, unknown>;
 }
 
-/** Durable, repository-scoped ontology pipeline control plane. */
-export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoordinator {
+/** Durable, repository-scoped contextGraph pipeline control plane. */
+export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipelineCoordinator {
   private readonly pool: Pool;
   private readonly manageSchema: boolean;
   private initialized?: Promise<void>;
   private claimsSinceRetentionSweep = 0;
 
-  constructor(config: PostgresOntologyPipelineCoordinatorConfig) {
+  constructor(config: PostgresContextGraphPipelineCoordinatorConfig) {
     const { manageSchema = true, ...poolConfig } = config;
     this.manageSchema = manageSchema;
-    this.pool = new Pool({ ...poolConfig, application_name: "jina-ontology-pipeline", max: poolConfig.max ?? 5 });
+    this.pool = new Pool({ ...poolConfig, application_name: "jina-context-graph-pipeline", max: poolConfig.max ?? 5 });
   }
 
-  async createBuild(request: OntologyPipelineBuildRequest): Promise<OntologyBuildRecord> {
+  async createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord> {
     await this.initialize();
     const client = await this.pool.connect();
     const id = stableId(
-      "ontology-job",
+      "context-graph-job",
       `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
     );
     try {
@@ -149,7 +149,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         ]
       );
       await insertBoardEvent(client, request.tenantId, id, "task.created", request.createdAt, {
-        type: "ontology_build"
+        type: "context_graph_build"
       });
       const stages = plannedStages(id, request);
       for (const stage of stages) {
@@ -175,12 +175,12 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
           ]
         );
         await insertBoardEvent(client, request.tenantId, stage.id, "task.created", request.createdAt, {
-          type: `ontology_${stage.stage}`,
+          type: `context_graph_${stage.stage}`,
           phase: stage.phase
         });
       }
       for (const stage of stages) {
-        const required = ontologyStageRequired(stage);
+        const required = contextGraphStageRequired(stage);
         if (required) {
           await client.query(
             `insert into jina_board.dependencies
@@ -189,12 +189,12 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
             [id, stage.id, request.createdAt]
           );
         }
-        for (const prerequisite of ontologyStagePrerequisites(stage, request.snapshotFirst)) {
+        for (const prerequisite of contextGraphStagePrerequisites(stage, request.snapshotFirst)) {
           const dependency = stages.find(
             (candidate) => candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
           );
           if (!dependency)
-            throw new Error(`missing ontology stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
+            throw new Error(`missing contextGraph stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
           await client.query(
             `insert into jina_board.dependencies
               (workflow_id,task_id,depends_on_task_id,relationship,required,blocks_parent_completion,created_at)
@@ -216,10 +216,10 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   async claim(input: {
     readonly tenantId: string;
     readonly workerId: string;
-    readonly topics: readonly OntologyWorkerTopic[];
+    readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
     readonly leaseExpiresAt: string;
-  }): Promise<OntologyStageClaim | undefined> {
+  }): Promise<ContextGraphStageClaim | undefined> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
@@ -385,9 +385,9 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
     readonly tenantId: string;
     readonly stageId: string;
     readonly leaseId: string;
-    readonly topic?: OntologyWorkerTopic;
+    readonly topic?: ContextGraphWorkerTopic;
     readonly now: string;
-  }): Promise<OntologyStageLease | undefined> {
+  }): Promise<ContextGraphStageLease | undefined> {
     await this.initialize();
     const result = await this.pool.query<StageRow>(
       `select * from jina_board.tasks
@@ -445,7 +445,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
         durationMs: Math.max(0, Date.parse(input.now) - (stage.started_at?.getTime() ?? Date.parse(input.now))),
         ...(input.reason ? { reason: input.reason } : {})
       });
-      if (input.outcome === "failed" && ontologyStageRequired(stage)) {
+      if (input.outcome === "failed" && contextGraphStageRequired(stage)) {
         await client.query(
           `update jina_board.tasks set status='canceled',updated_at=$2
            where build_id=$1 and status='triage'`,
@@ -503,7 +503,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
           [stage.build_id]
         );
         const current = state.rows[0]!;
-        const workflowStatus: OntologyBuildRecord["status"] = current.required_failed
+        const workflowStatus: ContextGraphBuildRecord["status"] = current.required_failed
           ? "failed"
           : current.all_terminal
             ? "done"
@@ -553,7 +553,9 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   async list(
     tenantId: string,
     filter?: { readonly repositories?: readonly string[] }
-  ): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]> {
+  ): Promise<
+    readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[]
+  > {
     await this.initialize();
     // The row cap applies after any repository filter so a busy tenant cannot
     // push an authorized repository's history out of the window.
@@ -579,7 +581,7 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
   async listEvents(
     tenantId: string,
     filter?: { readonly taskIds?: readonly string[] }
-  ): Promise<readonly OntologyTaskBoardEvent[]> {
+  ): Promise<readonly ContextGraphTaskBoardEvent[]> {
     await this.initialize();
     // Cap the read to the latest 1000 events after any task filter, then
     // restore ascending insertion order: the /events handler assigns seq
@@ -654,12 +656,12 @@ export class PostgresOntologyPipelineCoordinator implements OntologyPipelineCoor
 
 function plannedStages(
   buildId: string,
-  request: OntologyPipelineBuildRequest
+  request: ContextGraphPipelineBuildRequest
 ): {
   readonly id: string;
   readonly phase: "snapshot" | "history";
   readonly stage: "ingest" | "assert" | "project";
-  readonly topic: OntologyWorkerTopic;
+  readonly topic: ContextGraphWorkerTopic;
   readonly status: "queued" | "triage";
   readonly priority: number;
   readonly ordinal: number;
@@ -673,10 +675,10 @@ function plannedStages(
     : [{ phase: "history" as const, priority: 50 }];
   return phases.flatMap(({ phase, priority }, phaseIndex) =>
     (["ingest", "assert", "project"] as const).map((stage, stageIndex) => ({
-      id: stableId("ontology-stage", `${buildId}:${phase}:${stage}`),
+      id: stableId("context-graph-stage", `${buildId}:${phase}:${stage}`),
       phase,
       stage,
-      topic: `run-ontology-${stage}` as OntologyWorkerTopic,
+      topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
       status: phaseIndex === 0 && stageIndex === 0 ? ("queued" as const) : ("triage" as const),
       priority,
       ordinal: phaseIndex * 3 + stageIndex,
@@ -692,7 +694,7 @@ function plannedStages(
   );
 }
 
-function buildRecord(row: BuildRow): OntologyBuildRecord {
+function buildRecord(row: BuildRow): ContextGraphBuildRecord {
   return {
     id: row.id,
     tenantId: row.tenant_id,
@@ -707,7 +709,7 @@ function buildRecord(row: BuildRow): OntologyBuildRecord {
   };
 }
 
-function stageRecord(row: StageRow): OntologyStageRecord {
+function stageRecord(row: StageRow): ContextGraphStageRecord {
   return {
     id: row.id,
     buildId: row.build_id,
@@ -733,7 +735,7 @@ function stageRecord(row: StageRow): OntologyStageRecord {
   };
 }
 
-function leaseRecord(row: StageRow): OntologyStageLease {
+function leaseRecord(row: StageRow): ContextGraphStageLease {
   return {
     stageId: row.id,
     leaseId: row.lease_id!,
@@ -745,7 +747,7 @@ function leaseRecord(row: StageRow): OntologyStageLease {
   };
 }
 
-function claimRecord(row: StageRow): OntologyStageClaim {
+function claimRecord(row: StageRow): ContextGraphStageClaim {
   return {
     message: {
       id: row.id,
@@ -753,7 +755,7 @@ function claimRecord(row: StageRow): OntologyStageClaim {
       leaseId: row.lease_id!,
       leaseExpiresAt: row.lease_expires_at!.toISOString()
     },
-    task: { id: row.id, type: `ontology_${row.stage}`, status: "in_progress", metadata: row.metadata }
+    task: { id: row.id, type: `context_graph_${row.stage}`, status: "in_progress", metadata: row.metadata }
   };
 }
 
@@ -799,7 +801,7 @@ const PIPELINE_SCHEMA_SQL = `
     request_key text not null,
     phase text not null check (phase in ('snapshot','history')),
     stage text not null check (stage in ('ingest','assert','project')),
-    topic text not null check (topic in ('run-ontology-ingest','run-ontology-assert','run-ontology-project')),
+    topic text not null check (topic in ('run-context-graph-ingest','run-context-graph-assert','run-context-graph-project')),
     status text not null check (status in ('triage','queued','in_progress','done','failed','canceled','superseded')),
     priority integer not null,
     ordinal integer not null,

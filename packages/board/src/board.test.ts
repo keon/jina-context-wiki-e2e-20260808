@@ -29,12 +29,12 @@ test("workers can pass small durable metadata to a dependent task", () => {
       command: "CreateTask",
       task: {
         id: taskId,
-        type: "ontology_assert",
+        type: "context_graph_assert",
         kind: "dispatchable",
         title: "Generate assertions",
-        assigneeRole: "ontology_worker",
-        dedupeKey: "ontology:assert",
-        dispatchTopic: "run-ontology-assert"
+        assigneeRole: "context_graph_worker",
+        dedupeKey: "contextGraph:assert",
+        dispatchTopic: "run-context-graph-assert"
       }
     },
     { actor: { type: "user", id: "test" }, now }
@@ -46,7 +46,7 @@ test("workers can pass small durable metadata to a dependent task", () => {
       taskId,
       metadata: { commitSha: "a".repeat(40) }
     },
-    { actor: { type: "run", id: "ontology-worker" }, now }
+    { actor: { type: "run", id: "context-graph-worker" }, now }
   ).state;
 
   assert.equal(findTask(updated, taskId)?.metadata.commitSha, "a".repeat(40));
@@ -55,10 +55,10 @@ test("workers can pass small durable metadata to a dependent task", () => {
 
 test("failed automated dependencies terminate their workflow without synthetic blockers", () => {
   const now = "2026-01-01T00:00:00.000Z";
-  const rootId = entityId<"task">("ontology-root");
-  const ingestId = entityId<"task">("ontology-ingest");
-  const assertId = entityId<"task">("ontology-assert");
-  const projectId = entityId<"task">("ontology-project");
+  const rootId = entityId<"task">("context-graph-root");
+  const ingestId = entityId<"task">("context-graph-ingest");
+  const assertId = entityId<"task">("context-graph-assert");
+  const projectId = entityId<"task">("context-graph-project");
   let state = createEmptyBoardState();
   const create = (task: Parameters<typeof applyCommand>[1] & { command: "CreateTask" }) => {
     state = applyCommand(state, task, { actor: { type: "system", id: "test" }, now }).state;
@@ -68,23 +68,23 @@ test("failed automated dependencies terminate their workflow without synthetic b
     blocksParentCompletion: false,
     task: {
       id: rootId,
-      type: "ontology_build",
+      type: "context_graph_build",
       kind: "aggregate",
-      title: "Build ontology",
+      title: "Build contextGraph",
       assigneeRole: "system",
-      dedupeKey: "ontology:root"
+      dedupeKey: "contextGraph:root"
     }
   });
   create({
     command: "CreateTask",
     task: {
       id: ingestId,
-      type: "ontology_ingest",
+      type: "context_graph_ingest",
       kind: "dispatchable",
       title: "Ingest",
       assigneeRole: "worker",
-      dedupeKey: "ontology:ingest",
-      dispatchTopic: "run-ontology-ingest",
+      dedupeKey: "contextGraph:ingest",
+      dispatchTopic: "run-context-graph-ingest",
       parentTaskId: rootId
     }
   });
@@ -92,12 +92,12 @@ test("failed automated dependencies terminate their workflow without synthetic b
     command: "CreateTask",
     task: {
       id: assertId,
-      type: "ontology_assert",
+      type: "context_graph_assert",
       kind: "dispatchable",
       title: "Assert",
       assigneeRole: "worker",
-      dedupeKey: "ontology:assert",
-      dispatchTopic: "run-ontology-assert",
+      dedupeKey: "contextGraph:assert",
+      dispatchTopic: "run-context-graph-assert",
       parentTaskId: rootId
     },
     dependencies: [
@@ -114,12 +114,12 @@ test("failed automated dependencies terminate their workflow without synthetic b
     command: "CreateTask",
     task: {
       id: projectId,
-      type: "ontology_project",
+      type: "context_graph_project",
       kind: "dispatchable",
       title: "Project",
       assigneeRole: "worker",
-      dedupeKey: "ontology:project",
-      dispatchTopic: "run-ontology-project",
+      dedupeKey: "contextGraph:project",
+      dispatchTopic: "run-context-graph-project",
       parentTaskId: rootId
     },
     dependencies: [
@@ -223,7 +223,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
       {
         id: entityId<"board_outbox_message">("message-a"),
         taskId: firstTask,
-        topic: "run-ontology-assert",
+        topic: "run-context-graph-assert",
         idempotencyKey: "a:1",
         status: "leased",
         payload: { taskId: firstTask, attempt: 1 },
@@ -235,7 +235,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
       {
         id: entityId<"board_outbox_message">("message-b"),
         taskId: secondTask,
-        topic: "run-ontology-assert",
+        topic: "run-context-graph-assert",
         idempotencyKey: "b:1",
         status: "pending",
         payload: { taskId: secondTask, attempt: 1 },
@@ -245,7 +245,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
   };
 
   const claimed = leaseNextOutboxMessage(state, {
-    topics: ["run-ontology-assert"],
+    topics: ["run-context-graph-assert"],
     taskIds: [firstTask],
     leaseId: "new",
     now: "2026-01-01T00:02:00.000Z",

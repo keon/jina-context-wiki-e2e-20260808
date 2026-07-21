@@ -12,14 +12,14 @@ import {
   prepareDiff,
   type ReviewRequest
 } from "@jina/ai";
-import { DaytonaCodexOntologyExecutor } from "@jina/daytona";
+import { DaytonaCodexContextGraphExecutor } from "@jina/daytona";
 import {
-  ONTOLOGY_GENERATOR_VERSION,
-  ONTOLOGY_PARSER_VERSION,
-  ONTOLOGY_REGISTRY_VERSION,
+  CONTEXT_GRAPH_GENERATOR_VERSION,
+  CONTEXT_GRAPH_PARSER_VERSION,
+  CONTEXT_GRAPH_REGISTRY_VERSION,
   analyzeSourceBlob,
   assertionEvidenceFingerprint,
-  assertionsFromGeneratedOntology,
+  assertionsFromGeneratedContextGraph,
   codeCheckpoint,
   languageForPath,
   linkedIssueNumbers,
@@ -33,14 +33,14 @@ import {
   type BlobAnalysis,
   type GitHubSourceObservation,
   type RepositorySourceObservation,
-  type OntologyAssertionBatch,
-  type OntologyIngestPlan,
-  type OntologySourceEvidence,
-  type OntologySourceIngestResult,
+  type ContextGraphAssertionBatch,
+  type ContextGraphIngestPlan,
+  type ContextGraphSourceEvidence,
+  type ContextGraphSourceIngestResult,
   type RepositorySnapshot,
   type RepositoryTreeDelta,
   type RepositoryTreeEntry
-} from "@jina/ontology";
+} from "@jina/context-graph";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 
 const SUPPORTED_TOPICS = [
@@ -48,9 +48,9 @@ const SUPPORTED_TOPICS = [
   "run-research",
   "run-publish",
   "run-cleanup",
-  "run-ontology-ingest",
-  "run-ontology-assert",
-  "run-ontology-project"
+  "run-context-graph-ingest",
+  "run-context-graph-assert",
+  "run-context-graph-project"
 ] as const;
 type WorkerTopic = (typeof SUPPORTED_TOPICS)[number];
 
@@ -59,13 +59,13 @@ interface WorkMetadataByTopic {
   readonly "run-research": { readonly question?: string; readonly sourceUrls?: readonly string[] };
   readonly "run-publish": Record<string, unknown>;
   readonly "run-cleanup": Record<string, unknown>;
-  readonly "run-ontology-ingest": {
+  readonly "run-context-graph-ingest": {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
     readonly pipelinePhase: "snapshot" | "history";
   };
-  readonly "run-ontology-assert": {
+  readonly "run-context-graph-assert": {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
@@ -76,7 +76,11 @@ interface WorkMetadataByTopic {
     readonly sourcePullRequestNumbers?: readonly number[];
     readonly resolvedPullRequestNumbers?: readonly number[];
   };
-  readonly "run-ontology-project": { readonly tenantId: string; readonly repository: string; readonly ref: string };
+  readonly "run-context-graph-project": {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly ref: string;
+  };
 }
 
 type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic
@@ -98,7 +102,7 @@ type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic
 type WorkResult =
   | {
       readonly outcome: "done";
-      readonly assertionBatch?: OntologyAssertionBatch;
+      readonly assertionBatch?: ContextGraphAssertionBatch;
       readonly result?: Record<string, unknown>;
     }
   | { readonly outcome: "failed"; readonly reason: string };
@@ -121,10 +125,12 @@ const token = requiredEnv("INTERNAL_API_TOKEN");
 const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
-const ontologyApiTimeoutMs = positiveInt(process.env.ONTOLOGY_API_TIMEOUT_MS, 15 * 60_000);
+const contextGraphApiTimeoutMs = positiveInt(process.env.CONTEXT_GRAPH_API_TIMEOUT_MS, 15 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
-const drainsOntologyProjections = topics.some((topic) => topic.startsWith("run-ontology"));
-const ontologyExecutor = topics.includes("run-ontology-assert") ? new DaytonaCodexOntologyExecutor() : undefined;
+const drainsContextGraphProjections = topics.some((topic) => topic.startsWith("run-context-graph"));
+const contextGraphExecutor = topics.includes("run-context-graph-assert")
+  ? new DaytonaCodexContextGraphExecutor()
+  : undefined;
 let stopping = false;
 let active = false;
 let activeLease: LeaseExecutionState | undefined;
@@ -180,9 +186,9 @@ async function poll(): Promise<void> {
       if (work) await execute(work);
       // Drain right after finishing work; while idle, only on the slow safety
       // interval so empty polls stop paying the projection sweep every tick.
-      if (drainsOntologyProjections && (work || Date.now() - lastIdleDrainAt >= idleDrainIntervalMs)) {
+      if (drainsContextGraphProjections && (work || Date.now() - lastIdleDrainAt >= idleDrainIntervalMs)) {
         lastIdleDrainAt = Date.now();
-        await drainOntologyProjectionEvents();
+        await drainContextGraphProjectionEvents();
       }
     } catch (error) {
       recordApiFailure(error);
@@ -192,19 +198,19 @@ async function poll(): Promise<void> {
   }
 }
 
-async function drainOntologyProjectionEvents(): Promise<void> {
-  await internalApiJson("/internal/ontology/outbox/drain", {});
+async function drainContextGraphProjectionEvents(): Promise<void> {
+  await internalApiJson("/internal/context-graph/outbox/drain", {});
   recordApiSuccess();
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
   const response = await apiRequest("/internal/worker/claim", { workerId, topics });
   if (response.status === 204) {
-    recordApiSuccess(!drainsOntologyProjections);
+    recordApiSuccess(!drainsContextGraphProjections);
     return undefined;
   }
   if (!response.ok) throw new Error(`claim failed with ${response.status}: ${await response.text()}`);
-  recordApiSuccess(!drainsOntologyProjections);
+  recordApiSuccess(!drainsContextGraphProjections);
   return parseClaimedWork(await response.json());
 }
 
@@ -299,14 +305,14 @@ function logStageOutcome(
 
 async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   switch (work.topic) {
-    case "run-ontology-ingest":
-      return { outcome: "done", result: await runOntologyIngest(work) };
-    case "run-ontology-assert":
-      return await runOntologyAssertions(work);
-    case "run-ontology-project": {
+    case "run-context-graph-ingest":
+      return { outcome: "done", result: await runContextGraphIngest(work) };
+    case "run-context-graph-assert":
+      return await runContextGraphAssertions(work);
+    case "run-context-graph-project": {
       // Run the projection on its long-window route so completion stays a
       // fast status flip instead of racing the 30-second completion timeout.
-      const projected = await internalApiJson<Record<string, unknown>>("/internal/ontology/project/run", {
+      const projected = await internalApiJson<Record<string, unknown>>("/internal/context-graph/project/run", {
         taskId: work.task.id,
         messageId: work.message.id,
         leaseId: work.message.leaseId
@@ -331,22 +337,22 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   }
 }
 
-async function runOntologyIngest(work: ClaimedWork<"run-ontology-ingest">): Promise<Record<string, unknown>> {
+async function runContextGraphIngest(work: ClaimedWork<"run-context-graph-ingest">): Promise<Record<string, unknown>> {
   const { tenantId, repository, ref } = work.task.metadata;
   const lease = { messageId: work.message.id, leaseId: work.message.leaseId };
-  if ((process.env.ONTOLOGY_INGEST_TRANSPORT?.trim() || "rest") === "git") {
+  if ((process.env.CONTEXT_GRAPH_INGEST_TRANSPORT?.trim() || "rest") === "git") {
     activeGitIngestTransport = new GitIngestTransport(repository, ref);
   }
   try {
-    return await runOntologyIngestWithTransport(work, tenantId, repository, ref, lease);
+    return await runContextGraphIngestWithTransport(work, tenantId, repository, ref, lease);
   } finally {
     await activeGitIngestTransport?.dispose();
     activeGitIngestTransport = undefined;
   }
 }
 
-async function runOntologyIngestWithTransport(
-  work: ClaimedWork<"run-ontology-ingest">,
+async function runContextGraphIngestWithTransport(
+  work: ClaimedWork<"run-context-graph-ingest">,
   tenantId: string,
   repository: string,
   ref: string,
@@ -357,7 +363,7 @@ async function runOntologyIngestWithTransport(
     githubJson(`/repos/${repository}`)
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
-  const historyLimit = positiveInt(process.env.ONTOLOGY_HISTORY_LIMIT, 10_000);
+  const historyLimit = positiveInt(process.env.CONTEXT_GRAPH_HISTORY_LIMIT, 10_000);
   const discovery =
     work.task.metadata.pipelinePhase === "snapshot"
       ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
@@ -365,7 +371,7 @@ async function runOntologyIngestWithTransport(
   const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
   const defaultBranch =
     typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
-  let headPlan: OntologyIngestPlan | undefined;
+  let headPlan: ContextGraphIngestPlan | undefined;
   let parsedBlobCount = 0;
   let reusedBlobCount = 0;
   let discoveredBlobCount = 0;
@@ -401,7 +407,7 @@ async function runOntologyIngestWithTransport(
       const oldest = recentTrees.keys().next().value;
       if (oldest !== undefined) recentTrees.delete(oldest);
     }
-    const plan = await internalApiJson<OntologyIngestPlan>("/internal/ontology/ingest/plan", {
+    const plan = await internalApiJson<ContextGraphIngestPlan>("/internal/context-graph/ingest/plan", {
       ...lease,
       snapshot: wireSnapshot
     });
@@ -542,7 +548,7 @@ async function runOntologyIngestWithTransport(
     ...(await githubIncidentObservations(tenantId, repository))
   ];
   if (ownershipObservation) observations.push(ownershipObservation);
-  let sourceResult: OntologySourceIngestResult = {
+  let sourceResult: ContextGraphSourceIngestResult = {
     observationCount: 0,
     observationIds: [],
     assertionCount: 0,
@@ -551,13 +557,13 @@ async function runOntologyIngestWithTransport(
     confirmedObservationCount: 0
   };
   if (observations.length > 0) {
-    sourceResult = await internalApiJson<OntologySourceIngestResult>("/internal/ontology/ingest/github", {
+    sourceResult = await internalApiJson<ContextGraphSourceIngestResult>("/internal/context-graph/ingest/github", {
       taskId: work.task.id,
       ...lease,
       observations
     });
   }
-  const currentCodeCheckpoint = codeCheckpoint(tenantId, repository, commitSha, ONTOLOGY_PARSER_VERSION);
+  const currentCodeCheckpoint = codeCheckpoint(tenantId, repository, commitSha, CONTEXT_GRAPH_PARSER_VERSION);
   const newCommitCount = orderedShas.filter((sha) => !discovery.knownCommitShas.has(sha)).length;
   const confirmedCommitCount = orderedShas.length - newCommitCount;
   const newlyIngestedHistoricalPaths = orderedShas
@@ -572,7 +578,7 @@ async function runOntologyIngestWithTransport(
     headPlan.changedPaths,
     historicalFocusPaths,
     headPaths,
-    positiveInt(process.env.ONTOLOGY_ASSERTION_FOCUS_LIMIT, 200)
+    positiveInt(process.env.CONTEXT_GRAPH_ASSERTION_FOCUS_LIMIT, 200)
   );
   const evidenceFingerprint = assertionEvidenceFingerprint(currentCodeCheckpoint, observations, {
     focusPaths: analysisPaths,
@@ -611,7 +617,7 @@ async function runOntologyIngestWithTransport(
     analysisPaths,
     problemEvidencePullRequestNumbers,
     changeCount: headPlan.changes.length,
-    parserVersion: ONTOLOGY_PARSER_VERSION,
+    parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
     codeCheckpoint: currentCodeCheckpoint,
     evidenceFingerprint
   };
@@ -632,7 +638,7 @@ async function discoverNewCommits(
     const batch = pending.splice(0, 25).filter((sha) => !expanded.has(sha));
     if (batch.length === 0) continue;
     const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>(
-      "/internal/ontology/ingest/known",
+      "/internal/context-graph/ingest/known",
       {
         taskId: work.task.id,
         messageId: work.message.id,
@@ -659,7 +665,9 @@ async function discoverNewCommits(
       const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
       commits.set(sha, commit);
       if (commits.size > limit)
-        throw new Error(`reachable Git history exceeds ONTOLOGY_HISTORY_LIMIT=${limit}; refusing a partial backfill`);
+        throw new Error(
+          `reachable Git history exceeds CONTEXT_GRAPH_HISTORY_LIMIT=${limit}; refusing a partial backfill`
+        );
       for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
         if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
         const parentSha = requiredGitSha(parent.sha, "GitHub parent SHA");
@@ -834,7 +842,7 @@ async function repositorySnapshotFromGitHub(input: {
   if (localEntries === undefined) {
     const tree = await githubJson(`/repos/${input.repository}/git/trees/${treeSha}?recursive=1`);
     if (tree.truncated === true)
-      throw new Error("GitHub repository tree is truncated; refusing a partial Ontology ingestion");
+      throw new Error("GitHub repository tree is truncated; refusing a partial ContextGraph ingestion");
     entries = Array.isArray(tree.tree) ? tree.tree : [];
   }
   return {
@@ -966,7 +974,7 @@ async function hydrateRecentMergedPullRequestScope(
   });
   const reachable = await mapWithConcurrency(
     candidates,
-    positiveInt(process.env.ONTOLOGY_GITHUB_PR_CONCURRENCY, 4),
+    positiveInt(process.env.CONTEXT_GRAPH_GITHUB_PR_CONCURRENCY, 4),
     async (item) => {
       const mergeCommitSha = requiredGitSha(item.merge_commit_sha, "GitHub pull request merge commit SHA");
       const comparison = await githubJson(`/repos/${repository}/compare/${mergeCommitSha}...${headCommitSha}`);
@@ -1112,7 +1120,7 @@ function isDeterministicSourcePath(path: string): boolean {
   );
 }
 
-async function buildMoveCandidates(repository: string, plan: OntologyIngestPlan) {
+async function buildMoveCandidates(repository: string, plan: ContextGraphIngestPlan) {
   const analyses = new Map<string, BlobAnalysis>();
   const candidates = plan.changes
     .filter(
@@ -1138,7 +1146,7 @@ async function hydratePullRequestScope(
 ): Promise<readonly number[]> {
   const results = await mapWithConcurrency(
     [...pullRequests.entries()],
-    positiveInt(process.env.ONTOLOGY_GITHUB_PR_CONCURRENCY, 4),
+    positiveInt(process.env.CONTEXT_GRAPH_GITHUB_PR_CONCURRENCY, 4),
     async ([number, value]) => {
       const [commitPage, filePage] = await Promise.all([
         githubJsonArrayPages(`/repos/${repository}/pulls/${number}/commits`),
@@ -1164,15 +1172,15 @@ async function hydratePullRequestScope(
   return results.filter((number): number is number => number !== undefined).sort((a, b) => a - b);
 }
 
-async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): Promise<WorkResult> {
-  if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
+async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-assert">): Promise<WorkResult> {
+  if (!contextGraphExecutor) throw new Error("contextGraph executor is not configured for this worker");
   const { tenantId, repository, ref, commitSha, evidenceFingerprint } = work.task.metadata;
   const focusPaths = work.task.metadata.analysisPaths ?? [];
   const problemEvidencePullRequestNumbers = work.task.metadata.problemEvidencePullRequestNumbers ?? [];
   const sourcePullRequestNumbers = work.task.metadata.sourcePullRequestNumbers ?? [];
   const resolvedPullRequestNumbers = work.task.metadata.resolvedPullRequestNumbers ?? [];
   const cache = await internalApiJson<{ readonly cached: Record<string, unknown> | null }>(
-    "/internal/ontology/assertions/cached",
+    "/internal/context-graph/assertions/cached",
     {
       taskId: work.task.id,
       messageId: work.message.id,
@@ -1182,14 +1190,14 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
     }
   );
   if (cache.cached) return { outcome: "done", result: { cached: cache.cached } };
-  const evidence = await internalApiJson<{ readonly evidence: readonly OntologySourceEvidence[] }>(
-    "/internal/ontology/assertions/evidence",
+  const evidence = await internalApiJson<{ readonly evidence: readonly ContextGraphSourceEvidence[] }>(
+    "/internal/context-graph/assertions/evidence",
     { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId }
   );
   // A generator/schema version change intentionally performs one full semantic
   // scan for an unchanged head. The resulting generation is cached, so routine
   // retries and subsequent builds still avoid Daytona entirely.
-  const graph = await ontologyExecutor.buildAssertions({
+  const graph = await contextGraphExecutor.buildAssertions({
     tenantId,
     repository,
     ref,
@@ -1203,13 +1211,13 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
   assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
-  const assertions = assertionsFromGeneratedOntology(rawOutput, repository, {
+  const assertions = assertionsFromGeneratedContextGraph(rawOutput, repository, {
     sourcePullRequestNumbers,
     resolvedPullRequestNumbers
   });
   // Persist the batch on the durable long-window route before completing, so
   // the completion request itself stays a fast status flip.
-  const saved = await internalApiJson<Record<string, unknown>>("/internal/ontology/assertions/save", {
+  const saved = await internalApiJson<Record<string, unknown>>("/internal/context-graph/assertions/save", {
     taskId: work.task.id,
     messageId: work.message.id,
     leaseId: work.message.leaseId,
@@ -1220,8 +1228,8 @@ async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): 
       commitSha,
       taskId: work.task.id,
       generatedAt: graph.generatedAt,
-      generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-      registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+      registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
       evidenceFingerprint,
       evidenceObservationIds: evidence.evidence.map((observation) => observation.id),
       model: graph.generator.model,
@@ -1241,7 +1249,7 @@ async function analyzeGitHubBlob(
 ): Promise<BlobAnalysis> {
   const language = languageForPath(input.path);
   if (!language || input.size > 512_000) {
-    return { blobSha: input.blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, symbols: [], imports: [], edges: [] };
+    return { blobSha: input.blobSha, parserVersion: CONTEXT_GRAPH_PARSER_VERSION, symbols: [], imports: [], edges: [] };
   }
   const source = await readGitHubBlob(repository, input.blobSha);
   return analyzeSourceBlob(input.blobSha, language, source);
@@ -1270,7 +1278,7 @@ async function submitBlobAnalyses(
   commitSha: string,
   analyses: readonly BlobAnalysis[]
 ): Promise<void> {
-  await internalApiJson("/internal/ontology/ingest/blobs", {
+  await internalApiJson("/internal/context-graph/ingest/blobs", {
     taskId: work.task.id,
     messageId: work.message.id,
     leaseId: work.message.leaseId,
@@ -1280,11 +1288,12 @@ async function submitBlobAnalyses(
 }
 
 async function internalApiJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
-  // Ontology mutations can persist large content-addressed blob batches. Keep
+  // ContextGraph mutations can persist large content-addressed blob batches. Keep
   // claim and completion calls on the short default timeout, but allow these durable
   // data calls to use the API service's longer processing window.
-  const response = await apiRequest(path, body, ontologyApiTimeoutMs);
-  if (!response.ok) throw new Error(`Ontology API ${path} failed with ${response.status}: ${await response.text()}`);
+  const response = await apiRequest(path, body, contextGraphApiTimeoutMs);
+  if (!response.ok)
+    throw new Error(`ContextGraph API ${path} failed with ${response.status}: ${await response.text()}`);
   return (await response.json()) as T;
 }
 
@@ -1346,14 +1355,14 @@ async function renew(work: ClaimedWork): Promise<void> {
       messageId: work.message.id,
       leaseId: work.message.leaseId
     },
-    ontologyApiTimeoutMs
+    contextGraphApiTimeoutMs
   );
   if (!response.ok) {
     const message = `renewal failed with ${response.status}: ${await response.text()}`;
     if (response.status === 409) throw new LeaseLostError(message);
     throw new Error(message);
   }
-  recordApiSuccess(!drainsOntologyProjections);
+  recordApiSuccess(!drainsContextGraphProjections);
 }
 
 async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
@@ -1369,7 +1378,7 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   if (!response.ok) {
     throw new Error(`completion failed with ${response.status}: ${await response.text()}`);
   }
-  recordApiSuccess(!drainsOntologyProjections);
+  recordApiSuccess(!drainsContextGraphProjections);
 }
 
 function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Response> {
@@ -1571,19 +1580,19 @@ function parseClaimedWork(value: unknown): ClaimedWork {
           }
         }
       };
-    case "run-ontology-ingest":
+    case "run-context-graph-ingest":
       return {
         topic,
         message: { ...message, topic },
-        task: { id: taskId, metadata: ontologyIngestMetadata(metadata) }
+        task: { id: taskId, metadata: contextGraphIngestMetadata(metadata) }
       };
-    case "run-ontology-project":
+    case "run-context-graph-project":
       return {
         topic,
         message: { ...message, topic },
         task: { id: taskId, metadata: repositoryMetadata(metadata) }
       };
-    case "run-ontology-assert":
+    case "run-context-graph-assert":
       return {
         topic,
         message: { ...message, topic },
@@ -1642,7 +1651,9 @@ function repositoryMetadata(metadata: Record<string, unknown>): {
   };
 }
 
-function ontologyIngestMetadata(metadata: Record<string, unknown>): WorkMetadataByTopic["run-ontology-ingest"] {
+function contextGraphIngestMetadata(
+  metadata: Record<string, unknown>
+): WorkMetadataByTopic["run-context-graph-ingest"] {
   const repository = repositoryMetadata(metadata);
   const pipelinePhase = requiredString(metadata.pipelinePhase, "task pipelinePhase");
   if (pipelinePhase !== "snapshot" && pipelinePhase !== "history") throw new Error("task pipelinePhase is invalid");
@@ -1740,8 +1751,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function releaseOntologyLeaseOnShutdown(work: ClaimedWork): Promise<void> {
-  if (!work.message.id.startsWith("ontology-stage_")) return;
+async function releaseContextGraphLeaseOnShutdown(work: ClaimedWork): Promise<void> {
+  if (!work.message.id.startsWith("context-graph-stage_")) return;
   const response = await fetch(`${apiUrl}/internal/worker/release`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
@@ -1763,7 +1774,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const work = activeWork;
     if (activeLease) loseLease(activeLease, new LeaseLostError(`worker received ${signal}`));
     if (work) {
-      void releaseOntologyLeaseOnShutdown(work).catch((error) => {
+      void releaseContextGraphLeaseOnShutdown(work).catch((error) => {
         console.error("worker lease release failed", errorMessage(error));
       });
     }

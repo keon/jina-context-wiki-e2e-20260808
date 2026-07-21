@@ -9,18 +9,18 @@ test("dashboard page renders its main views and valid client script", () => {
     ["/", "board"],
     ["/history", "history"],
     ["/tasks", "task-types"],
-    ["/ontology", "ontology"]
+    ["/context-graph", "contextGraph"]
   ]) {
     assert.match(html, new RegExp(`href="${path}" data-page="${page}"`));
   }
 
   assert.match(html, /aria-label="Task board"/);
   assert.match(html, /aria-label="Task dependency trees"/);
-  assert.match(html, /aria-label="Repository ontology graph"/);
+  assert.match(html, /aria-label="Repository contextGraph graph"/);
   assert.match(html, /aria-label="Search with citations"/);
   assert.match(html, /Review proposed knowledge/);
   assert.match(html, /Explanation/);
-  assert.match(html, /assets\/ontology-graph-client\.js/);
+  assert.match(html, /assets\/context-graph-client\.js/);
   assert.match(html, /https:\/\/api\.example\.test/);
 
   const script = /<script>([\s\S]+)<\/script>/.exec(html)?.[1];
@@ -28,16 +28,16 @@ test("dashboard page renders its main views and valid client script", () => {
   assert.doesNotThrow(() => new Function(script));
 });
 
-test("filterOntologyGraph hides node kinds, their edges, and hidden edge predicates", () => {
+test("filterContextGraph hides node kinds, their edges, and hidden edge predicates", () => {
   const html = renderDashboardPage("https://api.example.test");
   const script = /<script>([\s\S]+)<\/script>/.exec(html)?.[1];
   assert.ok(script);
   const filterSource =
-    /function filterOntologyGraph\(graph, hiddenNodeKinds, hiddenEdgePredicates\) \{[\s\S]+?\n\}\n\nfunction selectionIsVisible/
+    /function filterContextGraph\(graph, hiddenNodeKinds, hiddenEdgePredicates\) \{[\s\S]+?\n\}\n\nfunction selectionIsVisible/
       .exec(script)?.[0]
       .replace(/\n\nfunction selectionIsVisible$/, "");
   assert.ok(filterSource);
-  const filterOntologyGraph = new Function(`${filterSource}; return filterOntologyGraph;`)() as (
+  const filterContextGraph = new Function(`${filterSource}; return filterContextGraph;`)() as (
     graph: {
       nodes: { id: string; kind: string }[];
       edges: { id: string; source: string; target: string; predicate: string }[];
@@ -57,16 +57,16 @@ test("filterOntologyGraph hides node kinds, their edges, and hidden edge predica
     ]
   };
   assert.deepEqual(
-    filterOntologyGraph(graph, new Set(["File"]), new Set()).nodes.map((node) => node.id),
+    filterContextGraph(graph, new Set(["File"]), new Set()).nodes.map((node) => node.id),
     ["repo", "issue"]
   );
   assert.deepEqual(
-    filterOntologyGraph(graph, new Set(["File"]), new Set()).edges.map((edge) => edge.id),
+    filterContextGraph(graph, new Set(["File"]), new Set()).edges.map((edge) => edge.id),
     ["tracks"],
     "edges connected to hidden nodes are also hidden"
   );
   assert.deepEqual(
-    filterOntologyGraph(graph, new Set(), new Set(["TRACKS"])).edges.map((edge) => edge.id),
+    filterContextGraph(graph, new Set(), new Set(["TRACKS"])).edges.map((edge) => edge.id),
     ["contains"],
     "edge relationship types can be hidden independently"
   );

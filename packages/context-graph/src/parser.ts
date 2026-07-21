@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Lang, parse, type SgNode } from "@ast-grep/napi";
 import {
-  ONTOLOGY_PARSER_VERSION,
+  CONTEXT_GRAPH_PARSER_VERSION,
   type BlobAnalysis,
   type CodeSymbolEdgeFact,
   type CodeSymbolFact
@@ -96,7 +96,7 @@ export function analyzeSourceBlob(blobSha: string, language: string, source: str
   }
   return {
     blobSha,
-    parserVersion: ONTOLOGY_PARSER_VERSION,
+    parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
     language,
     symbols: dedupe(symbols, (symbol) => symbol.moniker).slice(0, 2_000),
     imports: dedupe(imports, (item) => `${item.specifier}:${item.line}`).slice(0, 2_000),
@@ -198,7 +198,7 @@ function lexicalFallback(blobSha: string, language: string, source: string): Blo
   });
   return {
     blobSha,
-    parserVersion: ONTOLOGY_PARSER_VERSION,
+    parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
     language,
     symbols: dedupe(symbols, (symbol) => symbol.moniker).slice(0, 2_000),
     imports: dedupe(imports, (item) => `${item.specifier}:${item.line}`).slice(0, 2_000),

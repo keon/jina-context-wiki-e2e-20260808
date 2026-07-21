@@ -1,5 +1,5 @@
 import { Graph } from "@cosmos.gl/graph";
-import { canvasFallbackStatus, canvasGraphSlice, chooseRendererMode } from "./ontology-renderer-policy.js";
+import { canvasFallbackStatus, canvasGraphSlice, chooseRendererMode } from "./context-graph-renderer-policy.js";
 
 interface GraphNode {
   id: string;
@@ -46,7 +46,7 @@ interface PublicRenderer {
 
 declare global {
   interface Window {
-    JinaOntologyGraph?: { create(options: RendererOptions): PublicRenderer };
+    JinaContextGraph?: { create(options: RendererOptions): PublicRenderer };
   }
 }
 
@@ -73,7 +73,7 @@ const KNOWLEDGE_LINK_COLOR: [number, number, number, number] = [0.58, 0.43, 0.73
 const GRAPH_SPACE_SIZE = 4096;
 const GRAPH_SPACE_CENTER = GRAPH_SPACE_SIZE / 2;
 
-class OntologyGraphRenderer implements PublicRenderer {
+class ContextGraphRenderer implements PublicRenderer {
   private readonly options: RendererOptions;
   private readonly graph: Graph;
   private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
@@ -745,7 +745,7 @@ function topologyLinkDistance(nodeCount: number): number {
   return 64;
 }
 
-class CanvasOntologyGraphRenderer implements PublicRenderer {
+class CanvasContextGraphRenderer implements PublicRenderer {
   private readonly options: RendererOptions;
   private readonly canvas: HTMLCanvasElement;
   private readonly resizeObserver: ResizeObserver;
@@ -759,8 +759,8 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
   constructor(options: RendererOptions) {
     this.options = options;
     this.canvas = document.createElement("canvas");
-    this.canvas.className = "ontology-canvas-fallback";
-    this.canvas.setAttribute("aria-label", "Canvas ontology graph fallback");
+    this.canvas.className = "context-graph-canvas-fallback";
+    this.canvas.setAttribute("aria-label", "Canvas contextGraph graph fallback");
     options.container.prepend(this.canvas);
     this.canvas.addEventListener("pointerdown", this.selectAtPointer);
     this.resizeObserver = new ResizeObserver(() => {
@@ -976,7 +976,7 @@ class CanvasOntologyGraphRenderer implements PublicRenderer {
   }
 }
 
-class AdaptiveOntologyGraphRenderer implements PublicRenderer {
+class AdaptiveContextGraphRenderer implements PublicRenderer {
   private renderer: PublicRenderer;
   private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
   private selection: GraphSelection = null;
@@ -1021,15 +1021,15 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
   private createRenderer(): PublicRenderer {
     if (chooseRendererMode(webglAvailable()) === "canvas") {
       this.usingCanvas = true;
-      return new CanvasOntologyGraphRenderer(this.options);
+      return new CanvasContextGraphRenderer(this.options);
     }
     try {
-      return new OntologyGraphRenderer(this.options, () => {
+      return new ContextGraphRenderer(this.options, () => {
         this.fallbackToCanvas();
       });
     } catch {
       this.usingCanvas = true;
-      return new CanvasOntologyGraphRenderer(this.options);
+      return new CanvasContextGraphRenderer(this.options);
     }
   }
 
@@ -1037,7 +1037,7 @@ class AdaptiveOntologyGraphRenderer implements PublicRenderer {
     if (this.destroyed || this.usingCanvas) return;
     this.usingCanvas = true;
     this.renderer.destroy();
-    this.renderer = new CanvasOntologyGraphRenderer(this.options);
+    this.renderer = new CanvasContextGraphRenderer(this.options);
     this.renderer.setData(this.data);
     this.renderer.setSelection(this.selection);
     this.renderer.setSearchMatches(this.matches);
@@ -1115,9 +1115,9 @@ function humanize(value: string): string {
     .replace(/^./, (letter) => letter.toUpperCase());
 }
 
-window.JinaOntologyGraph = {
+window.JinaContextGraph = {
   create(options: RendererOptions): PublicRenderer {
-    return new AdaptiveOntologyGraphRenderer(options);
+    return new AdaptiveContextGraphRenderer(options);
   }
 };
 

@@ -82,14 +82,14 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .type-description { display: block; margin-top: .35rem; color: #8793a8; font-size: .72rem; line-height: 1.45; }
   .superseded { opacity: .48; }
   .empty { padding: 1.5rem .5rem; color: #586277; text-align: center; font-size: .72rem; }
-  .ontology-shell { display: grid; gap: 1rem; }
-  .ontology-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .65rem; }
-  .ontology-stat { border: 1px solid #283149; border-radius: .8rem; background: linear-gradient(145deg, #151b29, #10151f); padding: .8rem; }
-  .ontology-stat strong { display: block; margin-top: .35rem; font-size: 1.05rem; }
-  .ontology-card { border: 1px solid #252d40; border-radius: .9rem; background: rgb(14 18 27 / 84%); overflow: hidden; }
-  .ontology-card header { display: flex; justify-content: space-between; gap: 1rem; padding: .9rem 1rem; border-bottom: 1px solid #252d40; }
-  .ontology-card h2 { margin: 0; font-size: .82rem; }
-  .ontology-card p { margin: .3rem 0 0; color: #7f8ba1; font-size: .72rem; line-height: 1.45; }
+  .context-graph-shell { display: grid; gap: 1rem; }
+  .context-graph-summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: .65rem; }
+  .context-graph-stat { border: 1px solid #283149; border-radius: .8rem; background: linear-gradient(145deg, #151b29, #10151f); padding: .8rem; }
+  .context-graph-stat strong { display: block; margin-top: .35rem; font-size: 1.05rem; }
+  .context-graph-card { border: 1px solid #252d40; border-radius: .9rem; background: rgb(14 18 27 / 84%); overflow: hidden; }
+  .context-graph-card header { display: flex; justify-content: space-between; gap: 1rem; padding: .9rem 1rem; border-bottom: 1px solid #252d40; }
+  .context-graph-card h2 { margin: 0; font-size: .82rem; }
+  .context-graph-card p { margin: .3rem 0 0; color: #7f8ba1; font-size: .72rem; line-height: 1.45; }
   .graph-controls { display: grid; gap: .65rem; padding: .75rem 1rem; border-bottom: 1px solid #252d40; background: #10151f; }
   .graph-filter-row { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr) auto; align-items: start; gap: .65rem; }
   .graph-filter-label { padding-top: .3rem; color: #7f8ca2; font-size: .62rem; font-weight: 750; letter-spacing: .08em; text-transform: uppercase; }
@@ -106,7 +106,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-reset { align-self: start; border-radius: .5rem; background: #151c29; }
   .graph-reset:disabled { opacity: .42; cursor: default; }
   .graph-wrap { min-height: 590px; overflow: auto; background: radial-gradient(circle at 50% 50%, #182036, #0d1119 66%); }
-  #ontology-graph { display: block; width: 100%; min-width: 900px; height: 590px; touch-action: pan-x pan-y pinch-zoom; user-select: none; }
+  #context-graph { display: block; width: 100%; min-width: 900px; height: 590px; touch-action: pan-x pan-y pinch-zoom; user-select: none; }
   .assertion-review { border: 1px solid #252d40; border-radius: .85rem; background: #10151f; overflow: hidden; }
   .assertion-review > summary { padding: .8rem 1rem; color: #cbd3e1; cursor: pointer; font-size: .72rem; font-weight: 700; }
   .assertion-review-toolbar { display: flex; gap: .55rem; flex-wrap: wrap; padding: .8rem 1rem; }
@@ -114,35 +114,35 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .assertion-review-item header, .assertion-actions { display: flex; align-items: center; justify-content: space-between; gap: .6rem; flex-wrap: wrap; }
   .assertion-review-item p { color: #aeb8c9; font-size: .7rem; }
   .assertion-relations { color: #8e9bb0; font-size: .64rem; }
-  .ontology-details { display: grid; gap: .7rem; padding: 1rem; border-top: 1px solid #252d40; }
-  .ontology-item { border: 1px solid #262e42; border-radius: .7rem; background: #121722; padding: .72rem; }
-  .ontology-item strong { display: block; font-size: .74rem; }
-  .ontology-item span { display: block; margin-top: .3rem; color: #7e8aa0; font-size: .66rem; line-height: 1.45; }
-  .ontology-item-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .7rem; }
-  .ontology-item-type { flex: 0 0 auto; border: 1px solid #36415a; border-radius: 99px; padding: .15rem .4rem; color: #8da1c4; font-size: .58rem; }
-  .ontology-explanation { margin: 0; color: #cbd3e1; font-size: .72rem; line-height: 1.55; }
-  .ontology-inspector-section { margin-top: .85rem; }
-  .ontology-inspector-section h3 { margin: 0 0 .48rem; color: #8d9bb2; font-size: .6rem; letter-spacing: .09em; text-transform: uppercase; }
-  .ontology-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .55rem; margin-top: .7rem; }
-  .ontology-detail-field { border: 1px solid #242d40; border-radius: .55rem; background: #0f141e; padding: .55rem .6rem; }
-  .ontology-detail-field .label { margin-bottom: .25rem; }
-  .ontology-detail-field .value { color: #d3dae6; font-size: .68rem; line-height: 1.45; }
-  .ontology-confidence { border: 1px solid #2d3d59; border-radius: .6rem; background: #101827; padding: .62rem .68rem; }
-  .ontology-confidence-top { display: flex; align-items: baseline; justify-content: space-between; gap: .7rem; }
-  .ontology-confidence-top .label { margin: 0; }
-  .ontology-confidence-value { color: #dce5f5; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 750; }
-  .ontology-confidence-meter { height: .28rem; margin-top: .48rem; border-radius: 99px; background: #252e40; overflow: hidden; }
-  .ontology-confidence-fill { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #6e91e8, #66d6bd); }
-  .ontology-confidence-note { margin: .42rem 0 0; color: #75839a; font-size: .62rem; line-height: 1.45; }
-  .ontology-evidence-list { display: flex; flex-wrap: wrap; gap: .38rem; margin: 0; padding: 0; list-style: none; }
-  .ontology-evidence { border: 1px solid #34425a; border-radius: .42rem; background: #151d2a; padding: .3rem .42rem; color: #aebbd0; font: .62rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
-  .ontology-relationship-list { display: grid; gap: .42rem; }
-  .ontology-relationship { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .7rem; width: 100%; border: 1px solid #2a3449; border-radius: .58rem; background: #111823; padding: .55rem .62rem; color: inherit; text-align: left; cursor: pointer; }
-  .ontology-relationship:hover { border-color: #62769c; background: #172133; }
-  .ontology-relationship:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
-  .ontology-relationship-title { color: #d6deeb; font-size: .67rem; font-weight: 700; }
-  .ontology-relationship-meta { color: #8a99b1; font: .6rem ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
-  .ontology-relationship-explanation { grid-column: 1 / -1; color: #74839b; font-size: .61rem; line-height: 1.42; }
+  .context-graph-details { display: grid; gap: .7rem; padding: 1rem; border-top: 1px solid #252d40; }
+  .context-graph-item { border: 1px solid #262e42; border-radius: .7rem; background: #121722; padding: .72rem; }
+  .context-graph-item strong { display: block; font-size: .74rem; }
+  .context-graph-item span { display: block; margin-top: .3rem; color: #7e8aa0; font-size: .66rem; line-height: 1.45; }
+  .context-graph-item-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: .7rem; }
+  .context-graph-item-type { flex: 0 0 auto; border: 1px solid #36415a; border-radius: 99px; padding: .15rem .4rem; color: #8da1c4; font-size: .58rem; }
+  .context-graph-explanation { margin: 0; color: #cbd3e1; font-size: .72rem; line-height: 1.55; }
+  .context-graph-inspector-section { margin-top: .85rem; }
+  .context-graph-inspector-section h3 { margin: 0 0 .48rem; color: #8d9bb2; font-size: .6rem; letter-spacing: .09em; text-transform: uppercase; }
+  .context-graph-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .55rem; margin-top: .7rem; }
+  .context-graph-detail-field { border: 1px solid #242d40; border-radius: .55rem; background: #0f141e; padding: .55rem .6rem; }
+  .context-graph-detail-field .label { margin-bottom: .25rem; }
+  .context-graph-detail-field .value { color: #d3dae6; font-size: .68rem; line-height: 1.45; }
+  .context-graph-confidence { border: 1px solid #2d3d59; border-radius: .6rem; background: #101827; padding: .62rem .68rem; }
+  .context-graph-confidence-top { display: flex; align-items: baseline; justify-content: space-between; gap: .7rem; }
+  .context-graph-confidence-top .label { margin: 0; }
+  .context-graph-confidence-value { color: #dce5f5; font: .8rem ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 750; }
+  .context-graph-confidence-meter { height: .28rem; margin-top: .48rem; border-radius: 99px; background: #252e40; overflow: hidden; }
+  .context-graph-confidence-fill { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, #6e91e8, #66d6bd); }
+  .context-graph-confidence-note { margin: .42rem 0 0; color: #75839a; font-size: .62rem; line-height: 1.45; }
+  .context-graph-evidence-list { display: flex; flex-wrap: wrap; gap: .38rem; margin: 0; padding: 0; list-style: none; }
+  .context-graph-evidence { border: 1px solid #34425a; border-radius: .42rem; background: #151d2a; padding: .3rem .42rem; color: #aebbd0; font: .62rem/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+  .context-graph-relationship-list { display: grid; gap: .42rem; }
+  .context-graph-relationship { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .3rem .7rem; width: 100%; border: 1px solid #2a3449; border-radius: .58rem; background: #111823; padding: .55rem .62rem; color: inherit; text-align: left; cursor: pointer; }
+  .context-graph-relationship:hover { border-color: #62769c; background: #172133; }
+  .context-graph-relationship:focus-visible { outline: 2px solid #9bb2ff; outline-offset: 2px; }
+  .context-graph-relationship-title { color: #d6deeb; font-size: .67rem; font-weight: 700; }
+  .context-graph-relationship-meta { color: #8a99b1; font: .6rem ui-monospace, SFMono-Regular, Menlo, monospace; text-align: right; }
+  .context-graph-relationship-explanation { grid-column: 1 / -1; color: #74839b; font-size: .61rem; line-height: 1.42; }
   .assertion-review-list { display: grid; gap: .65rem; padding: .8rem; }
   .assertion-review-card { display: grid; gap: .55rem; border: 1px solid #292929; border-radius: .55rem; background: #101010; padding: .75rem; }
   .assertion-review-card strong { color: #ddd; font-size: .7rem; }
@@ -150,7 +150,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .assertion-review-fields { display: grid; grid-template-columns: 1fr 1fr; gap: .4rem; }
   .assertion-review-fields select, .assertion-review-fields input { min-width: 0; border: 1px solid #303030; border-radius: .35rem; background: #0b0b0b; color: #bbb; padding: .45rem; font-size: .62rem; }
   .assertion-review-actions { display: flex; gap: .4rem; }
-  .ontology-item .ontology-item-type, .ontology-item .ontology-confidence span, .ontology-item .ontology-relationship span { margin-top: 0; }
+  .context-graph-item .context-graph-item-type, .context-graph-item .context-graph-confidence span, .context-graph-item .context-graph-relationship span { margin-top: 0; }
   .plane-key { display: flex; gap: .8rem; align-items: center; color: #7f8ca2; font-size: .66rem; }
   .plane-key span::before { content: ""; display: inline-block; width: 1.4rem; margin-right: .35rem; border-top: 2px solid #6495ed; vertical-align: middle; }
   .plane-key .knowledge::before { border-top-color: #d88fff; border-top-style: dashed; }
@@ -280,7 +280,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .count { min-width: 18px; height: 18px; border: 1px solid var(--border); border-radius: 5px; background: #111; color: #777; font-size: 9px; }
   .card { margin-bottom: 6px; border-color: var(--border); border-radius: 6px; background: var(--surface); padding: 10px; box-shadow: none; }
   .card:hover { transform: none; border-color: #3b3b3b; background: var(--surface-hover); }
-  .card:focus-visible, .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .ontology-relationship:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .card:focus-visible, .graph-filter-chip:focus-visible, .graph-reset:focus-visible, .context-graph-relationship:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .card-title { color: #d8d8d8; font-size: 12px; font-weight: 540; line-height: 1.4; }
   .card-meta { gap: 6px; margin-top: 8px; color: #6f6f6f; font-size: 9px; }
   .chip, .workflow-node-badge { border-color: #292929; border-radius: 4px; background: #0e0e0e; padding: 2px 5px; }
@@ -318,15 +318,15 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .type-name { color: #d3d3d3; font-size: 11px; }
   .type-description { color: #797979; font-size: 10px; }
 
-  .ontology-shell { gap: 12px; }
-  .ontology-summary { gap: 8px; }
-  .ontology-stat { border-color: var(--border); border-radius: 6px; background: var(--panel); padding: 11px 12px; }
-  .ontology-stat .label { margin: 0; }
-  .ontology-stat strong { margin-top: 7px; color: #dcdcdc; font-size: 15px; font-weight: 560; letter-spacing: -.02em; }
-  .ontology-card { border-color: var(--border); border-radius: var(--radius); background: var(--panel); }
-  .ontology-card header { align-items: center; padding: 12px 14px; border-color: var(--border); }
-  .ontology-card h2 { color: #dcdcdc; font-size: 12px; font-weight: 560; }
-  .ontology-card p { color: #6f6f6f; font-size: 10px; }
+  .context-graph-shell { gap: 12px; }
+  .context-graph-summary { gap: 8px; }
+  .context-graph-stat { border-color: var(--border); border-radius: 6px; background: var(--panel); padding: 11px 12px; }
+  .context-graph-stat .label { margin: 0; }
+  .context-graph-stat strong { margin-top: 7px; color: #dcdcdc; font-size: 15px; font-weight: 560; letter-spacing: -.02em; }
+  .context-graph-card { border-color: var(--border); border-radius: var(--radius); background: var(--panel); }
+  .context-graph-card header { align-items: center; padding: 12px 14px; border-color: var(--border); }
+  .context-graph-card h2 { color: #dcdcdc; font-size: 12px; font-weight: 560; }
+  .context-graph-card p { color: #6f6f6f; font-size: 10px; }
   .plane-key { color: #666; font-size: 9px; }
   .plane-key span::before { width: 14px; border-color: #7485bf; }
   .plane-key .knowledge::before { border-color: #9b83bc; }
@@ -341,25 +341,25 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip:hover { border-color: #3b3b3b; background: #171717; color: #d0d0d0; }
   .graph-reset { font-size: 9px; }
   .graph-wrap { min-height: 590px; background-color: #0a0a0a; background-image: radial-gradient(circle, #292929 1px, transparent 1px); background-size: 20px 20px; }
-  .ontology-details { gap: 8px; padding: 12px 14px; border-color: var(--border); background: #0b0b0b; }
-  .ontology-item { border-color: var(--border); border-radius: 6px; background: #101010; padding: 11px; }
-  .ontology-item strong { font-size: 11px; font-weight: 560; }
-  .ontology-item span { color: #777; font-size: 9px; }
-  .ontology-item-type { border-color: #303030; border-radius: 4px; color: #888; }
-  .ontology-explanation { color: #b9b9b9; font-size: 10px; }
-  .ontology-inspector-section h3 { color: #666; font-size: 8px; }
-  .ontology-detail-field { border-color: #222; border-radius: 5px; background: #0b0b0b; }
-  .ontology-detail-field .value { color: #c7c7c7; font-size: 9px; }
-  .ontology-confidence { border-color: #292735; border-radius: 5px; background: #0e0d12; }
-  .ontology-confidence-value { color: #d2d2d2; font-size: 11px; }
-  .ontology-confidence-meter { background: #242424; }
-  .ontology-confidence-fill { background: var(--accent); }
-  .ontology-confidence-note { color: #6d6d6d; font-size: 9px; }
-  .ontology-evidence { border-color: #292929; border-radius: 4px; background: #0c0c0c; color: #929292; font-size: 9px; }
-  .ontology-relationship { border-color: #252525; border-radius: 5px; background: #0d0d0d; }
-  .ontology-relationship:hover { border-color: #3b3b3b; background: #131313; }
-  .ontology-relationship-title { color: #c7c7c7; font-size: 9px; }
-  .ontology-relationship-meta, .ontology-relationship-explanation { color: #6d6d6d; font-size: 9px; }
+  .context-graph-details { gap: 8px; padding: 12px 14px; border-color: var(--border); background: #0b0b0b; }
+  .context-graph-item { border-color: var(--border); border-radius: 6px; background: #101010; padding: 11px; }
+  .context-graph-item strong { font-size: 11px; font-weight: 560; }
+  .context-graph-item span { color: #777; font-size: 9px; }
+  .context-graph-item-type { border-color: #303030; border-radius: 4px; color: #888; }
+  .context-graph-explanation { color: #b9b9b9; font-size: 10px; }
+  .context-graph-inspector-section h3 { color: #666; font-size: 8px; }
+  .context-graph-detail-field { border-color: #222; border-radius: 5px; background: #0b0b0b; }
+  .context-graph-detail-field .value { color: #c7c7c7; font-size: 9px; }
+  .context-graph-confidence { border-color: #292735; border-radius: 5px; background: #0e0d12; }
+  .context-graph-confidence-value { color: #d2d2d2; font-size: 11px; }
+  .context-graph-confidence-meter { background: #242424; }
+  .context-graph-confidence-fill { background: var(--accent); }
+  .context-graph-confidence-note { color: #6d6d6d; font-size: 9px; }
+  .context-graph-evidence { border-color: #292929; border-radius: 4px; background: #0c0c0c; color: #929292; font-size: 9px; }
+  .context-graph-relationship { border-color: #252525; border-radius: 5px; background: #0d0d0d; }
+  .context-graph-relationship:hover { border-color: #3b3b3b; background: #131313; }
+  .context-graph-relationship-title { color: #c7c7c7; font-size: 9px; }
+  .context-graph-relationship-meta, .context-graph-relationship-explanation { color: #6d6d6d; font-size: 9px; }
 
   .context-answer, .context-call, .trace-chain, .trace-fact { border-color: var(--border); border-radius: 6px; background: var(--panel); }
   .context-answer-label, .trace-answer-label-cause, .trace-fact-label { color: #9e94ec; }
@@ -412,7 +412,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     #connection-text { max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .workflow-grid, .type-row, .graph-filter-row { grid-template-columns: 1fr; }
     .graph-filter-label { padding-top: 0; }
-    .ontology-card header { align-items: flex-start; flex-direction: column; }
+    .context-graph-card header { align-items: flex-start; flex-direction: column; }
   }
 </style>
 <style>
@@ -480,7 +480,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .detail-body { overflow-y: auto; max-height: calc(100vh - 145px); }
 
   /* History */
-  .history-layout, .task-type-layout, .ontology-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 370px; gap: 14px; align-items: stretch; }
+  .history-layout, .task-type-layout, .context-graph-workspace { display: grid; grid-template-columns: minmax(0, 1fr) 370px; gap: 14px; align-items: stretch; }
   .history-table, .side-inspector, .task-panel { min-width: 0; border: 1px solid var(--border); border-radius: 7px; background: #0b0d0d; overflow: hidden; }
   .history-table-head, .history-row { display: grid; grid-template-columns: 86px minmax(210px, 1.4fr) 92px 120px minmax(190px, 1.2fr) 135px; align-items: center; gap: 14px; }
   .history-table-head { min-height: 42px; padding: 0 14px; border-bottom: 1px solid var(--border); color: #767676; font-size: 9px; }
@@ -499,8 +499,8 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .side-inspector { max-height: calc(100vh - 182px); overflow-y: auto; background: #0c0e0e; }
   .inspector-heading { display: grid; gap: 8px; padding: 17px 18px; border-bottom: 1px solid var(--border); color: #eee; font-size: 13px; font-weight: 590; }
   .event-state { color: #a597ff; font-size: 10px; font-weight: 500; }
-  .history-inspector > .ontology-detail-grid { grid-template-columns: 1fr; padding: 8px 18px 0; }
-  .history-inspector > .ontology-inspector-section { margin: 0; padding: 15px 18px; border-top: 1px solid var(--border); }
+  .history-inspector > .context-graph-detail-grid { grid-template-columns: 1fr; padding: 8px 18px 0; }
+  .history-inspector > .context-graph-inspector-section { margin: 0; padding: 15px 18px; border-top: 1px solid var(--border); }
   .inspector-payload { overflow: auto; margin: 0; color: #898989; font: 9px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
   .inspector-empty { margin: auto; padding: 28px; color: #666; font-size: 10px; line-height: 1.6; text-align: center; }
 
@@ -539,17 +539,17 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .configuration-list { padding-bottom: 12px; }
   .configuration-row { display: flex; justify-content: space-between; min-height: 38px; margin-top: -1px; padding: 11px; color: #777; font-size: 9px; }
   .configuration-row strong { max-width: 58%; color: #bbb; font-weight: 520; text-align: right; overflow-wrap: anywhere; }
-  .inspector-actions, .ontology-inspector-actions { position: sticky; bottom: 0; display: flex; gap: 8px; padding: 12px 15px; border-top: 1px solid var(--border); background: rgb(12 14 14 / 94%); backdrop-filter: blur(12px); }
+  .inspector-actions, .context-graph-inspector-actions { position: sticky; bottom: 0; display: flex; gap: 8px; padding: 12px 15px; border-top: 1px solid var(--border); background: rgb(12 14 14 / 94%); backdrop-filter: blur(12px); }
   .inspector-actions button { flex: 1; }
 
-  /* Ontology graph explorer */
-  body[data-page="ontology"] .app-header { margin-bottom: 14px; }
-  .ontology-toolbar { display: grid; gap: 6px; margin-bottom: 10px; }
-  .ontology-toolbar-meta { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
+  /* ContextGraph graph explorer */
+  body[data-page="contextGraph"] .app-header { margin-bottom: 14px; }
+  .context-graph-toolbar { display: grid; gap: 6px; margin-bottom: 10px; }
+  .context-graph-toolbar-meta { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
   .repository-button { display: flex; align-items: center; width: auto; min-width: 200px; max-width: min(420px, 44vw); height: 32px; min-height: 32px; border-color: transparent; background: transparent; padding: 0 8px; color: #999; line-height: 1; text-align: left; }
   .repository-button::after { content: "⌄"; margin-left: auto; color: #5f5f5f; }
   .repository-button:hover { border-color: transparent; background: #111; }
-  .ontology-search-hero { display: grid; justify-items: center; padding: 0 16px 2px; }
+  .context-graph-search-hero { display: grid; justify-items: center; padding: 0 16px 2px; }
   .context-search-shell { position: relative; z-index: 30; width: min(680px, 100%); height: 44px; margin: 0 auto; text-align: left; }
   .context-search { display: flex; align-items: center; width: 100%; height: 44px; min-height: 44px; box-sizing: border-box; border: 1px solid #303136; border-radius: 7px; background: #101114; padding: 0 8px; overflow: visible; transition: border-color 120ms ease, background 120ms ease; }
   .context-search:hover { border-color: #3b3c42; background: #121317; }
@@ -587,9 +587,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .context-full-evidence > summary::-webkit-details-marker { display: none; }
   .context-full-evidence[open] > summary { border-bottom: 1px solid #25262a; }
   .context-full-evidence-body { display: grid; gap: 8px; padding: 12px 17px 16px; }
-  .ontology-workspace { grid-template-columns: minmax(0, 1fr) 365px; gap: 10px; }
-  .ontology-card { min-width: 0; border-radius: 7px; }
-  .ontology-toolbar-meta > .graph-controls { position: relative; z-index: 8; display: flex; align-items: center; min-height: 32px; border: 0; background: transparent; padding: 0; }
+  .context-graph-workspace { grid-template-columns: minmax(0, 1fr) 365px; gap: 10px; }
+  .context-graph-card { min-width: 0; border-radius: 7px; }
+  .context-graph-toolbar-meta > .graph-controls { position: relative; z-index: 8; display: flex; align-items: center; min-height: 32px; border: 0; background: transparent; padding: 0; }
   .graph-control-toolbar { display: flex; align-items: center; gap: 2px; min-height: 32px; }
   .graph-filter-menu { position: relative; height: 32px; margin: 0; }
   .graph-filter-menu > summary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 32px; box-sizing: border-box; border-color: transparent; background: transparent; padding: 0 9px; cursor: pointer; line-height: 1; list-style: none; }
@@ -611,7 +611,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-zoom-group { display: inline-flex; align-items: center; height: 32px; margin-left: 5px; border-left: 1px solid #242424; padding-left: 5px; }
   .graph-control-button[aria-label="Zoom out"], .graph-control-button[aria-label="Zoom in"] { width: 30px; padding: 0; font-size: 13px; }
   .graph-zoom { min-width: 48px; padding: 0 5px; font-variant-numeric: tabular-nums; }
-  .ontology-toolbar-meta > .repository-button,
+  .context-graph-toolbar-meta > .repository-button,
   .graph-control-toolbar > .graph-filter-menu,
   .graph-control-toolbar > .graph-filter-menu > summary,
   .graph-control-toolbar > .graph-reset,
@@ -622,9 +622,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     max-block-size: 32px;
   }
   .graph-wrap { position: relative; height: calc(100vh - 164px); min-height: 560px; overflow: hidden; background-color: #090a0a; background-image: radial-gradient(circle, #202222 1px, transparent 1px); background-size: 24px 24px; }
-  #ontology-graph { position: absolute; inset: 0; min-width: 0; height: 100%; overflow: hidden; touch-action: none; }
-  #ontology-graph canvas { position: absolute; inset: 0; display: block; }
-  .ontology-label-layer { position: absolute; z-index: 4; inset: 0; overflow: hidden; pointer-events: none; }
+  #context-graph { position: absolute; inset: 0; min-width: 0; height: 100%; overflow: hidden; touch-action: none; }
+  #context-graph canvas { position: absolute; inset: 0; display: block; }
+  .context-graph-label-layer { position: absolute; z-index: 4; inset: 0; overflow: hidden; pointer-events: none; }
   .cosmos-node-label, .cosmos-edge-label { position: absolute; top: 0; left: 0; pointer-events: auto; }
   .cosmos-node-label { display: grid; gap: 2px; max-width: 260px; border: 1px solid #2d3030; border-radius: 6px; background: rgb(12 14 14 / 88%); padding: 6px 8px; color: #e8e8e8; font: inherit; text-align: left; box-shadow: 0 6px 22px rgb(0 0 0 / 35%); backdrop-filter: blur(8px); transform-origin: 0 50%; translate: 11px -50%; }
   .cosmos-node-label:hover, .cosmos-node-label.selected { border-color: #8b7cf6; background: rgb(18 18 21 / 96%); }
@@ -633,59 +633,59 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .cosmos-edge-label { border: 1px solid #39343f; border-radius: 999px; background: rgb(15 14 17 / 92%); padding: 4px 7px; color: #a89cc3; font: 550 8px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; translate: -50% -50%; cursor: grab; backdrop-filter: blur(8px); }
   .cosmos-edge-label:hover, .cosmos-edge-label.selected { border-color: #8b7cf6; color: #eeeaff; }
   .cosmos-edge-label:active { cursor: grabbing; }
-  .ontology-minimap { position: absolute; z-index: 5; right: 12px; bottom: 12px; width: 142px; height: 92px; border: 1px solid #292b2b; border-radius: 6px; background: rgb(8 9 9 / 82%); pointer-events: none; backdrop-filter: blur(8px); }
+  .context-graph-minimap { position: absolute; z-index: 5; right: 12px; bottom: 12px; width: 142px; height: 92px; border: 1px solid #292b2b; border-radius: 6px; background: rgb(8 9 9 / 82%); pointer-events: none; backdrop-filter: blur(8px); }
   .graph-runtime-status { position: absolute; z-index: 5; top: 12px; right: 12px; display: flex; align-items: center; gap: 6px; border: 1px solid #252727; border-radius: 999px; background: rgb(8 9 9 / 78%); padding: 5px 8px; color: #727575; font-size: 8px; pointer-events: none; backdrop-filter: blur(8px); }
   .graph-runtime-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #53c78f; }
   .graph-runtime-status.active::before { animation: graph-pulse 1.2s ease-in-out infinite; }
   @keyframes graph-pulse { 50% { opacity: .25; transform: scale(.75); } }
   .graph-empty-state { position: absolute; z-index: 3; inset: 0; display: grid; place-items: center; color: #666; font-size: 10px; pointer-events: none; }
   .graph-empty-state[hidden] { display: none; }
-  .ontology-summary { position: absolute; right: 12px; bottom: 12px; left: 12px; display: flex; gap: 6px; pointer-events: none; }
-  .ontology-summary[hidden] { display: none; }
-  .ontology-stat { flex: 0 1 145px; border-color: #222; background: rgb(10 11 11 / 82%); padding: 7px 9px; backdrop-filter: blur(10px); }
-  .ontology-stat strong { margin-top: 3px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  .context-graph-summary { position: absolute; right: 12px; bottom: 12px; left: 12px; display: flex; gap: 6px; pointer-events: none; }
+  .context-graph-summary[hidden] { display: none; }
+  .context-graph-stat { flex: 0 1 145px; border-color: #222; background: rgb(10 11 11 / 82%); padding: 7px 9px; backdrop-filter: blur(10px); }
+  .context-graph-stat strong { margin-top: 3px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
   .plane-key { position: absolute; z-index: 5; bottom: 69px; left: 12px; padding: 8px 10px; border: 1px solid #222; border-radius: 5px; background: rgb(10 11 11 / 84%); backdrop-filter: blur(10px); pointer-events: none; }
-  .ontology-details { max-height: calc(100vh - 91px); padding: 0; border-top: 1px solid var(--border); background: #0c0e0e; }
-  .ontology-workspace:not(.has-selection) { grid-template-columns: minmax(0, 1fr); }
-  .ontology-workspace:not(.has-selection) .ontology-details { display: none; }
-  .ontology-details > .empty-detail { padding: 30px 22px; text-align: center; }
-  .ontology-item { min-height: 100%; border: 0; border-radius: 0; background: transparent; padding: 0; }
-  .ontology-item-heading { position: sticky; top: 0; z-index: 3; align-items: flex-start; padding: 17px 17px; border-bottom: 1px solid var(--border); background: rgb(12 14 14 / 96%); }
-  .ontology-heading-copy { display: grid; gap: 7px; min-width: 0; }
-  .ontology-item-heading strong { color: #f0f0f0; font-size: 14px; line-height: 1.35; }
-  .ontology-item-type { justify-self: start; border: 0; padding: 0; color: #777; font-size: 9px; }
+  .context-graph-details { max-height: calc(100vh - 91px); padding: 0; border-top: 1px solid var(--border); background: #0c0e0e; }
+  .context-graph-workspace:not(.has-selection) { grid-template-columns: minmax(0, 1fr); }
+  .context-graph-workspace:not(.has-selection) .context-graph-details { display: none; }
+  .context-graph-details > .empty-detail { padding: 30px 22px; text-align: center; }
+  .context-graph-item { min-height: 100%; border: 0; border-radius: 0; background: transparent; padding: 0; }
+  .context-graph-item-heading { position: sticky; top: 0; z-index: 3; align-items: flex-start; padding: 17px 17px; border-bottom: 1px solid var(--border); background: rgb(12 14 14 / 96%); }
+  .context-graph-heading-copy { display: grid; gap: 7px; min-width: 0; }
+  .context-graph-item-heading strong { color: #f0f0f0; font-size: 14px; line-height: 1.35; }
+  .context-graph-item-type { justify-self: start; border: 0; padding: 0; color: #777; font-size: 9px; }
   .inspector-close { width: 28px; height: 28px; border: 0; background: transparent; color: #8a8a8a; cursor: pointer; font-size: 18px; }
-  .ontology-detail-grid { grid-template-columns: 1fr; gap: 0; margin: 0; padding: 10px 17px; }
-  .ontology-detail-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: start; min-height: 34px; border: 0; border-radius: 0; background: transparent; padding: 8px 0; }
-  .ontology-detail-field .label { margin: 0; text-transform: none; }
-  .ontology-detail-field .value { color: #bbb; font-size: 9px; overflow-wrap: anywhere; }
-  .ontology-inspector-section { margin: 0; padding: 14px 17px; border-top: 1px solid var(--border); }
-  .ontology-inspector-section h3 { color: #aaa; font-size: 9px; letter-spacing: 0; text-transform: none; }
-  .ontology-confidence { border: 0; background: transparent; padding: 0; }
-  .ontology-confidence-top .label { color: #777; font-size: 9px; text-transform: none; }
-  .ontology-confidence-value { color: #a799ff; font-size: 17px; }
-  .ontology-confidence-meter { height: 3px; }
-  .ontology-evidence-list { display: grid; }
-  .ontology-evidence { padding: 8px; line-height: 1.5; }
-  .ontology-explanation { color: #aaa; font-size: 9px; }
-  .ontology-relationship { padding: 9px; }
-  .ontology-endpoint { position: relative; display: grid; gap: 5px; margin: 12px 17px 0; padding: 12px; border: 1px solid #262626; border-radius: 6px; background: #0e1010; }
-  .ontology-endpoint strong { padding-right: 70px; color: #ddd; font-size: 10px; line-height: 1.45; }
-  .ontology-endpoint .ontology-item-type { position: absolute; right: 12px; bottom: 12px; }
-  .ontology-inspector-actions { flex-wrap: wrap; }
-  .ontology-inspector-actions button { flex: 1 1 auto; min-height: 30px; }
+  .context-graph-detail-grid { grid-template-columns: 1fr; gap: 0; margin: 0; padding: 10px 17px; }
+  .context-graph-detail-field { display: grid; grid-template-columns: 110px minmax(0, 1fr); align-items: start; min-height: 34px; border: 0; border-radius: 0; background: transparent; padding: 8px 0; }
+  .context-graph-detail-field .label { margin: 0; text-transform: none; }
+  .context-graph-detail-field .value { color: #bbb; font-size: 9px; overflow-wrap: anywhere; }
+  .context-graph-inspector-section { margin: 0; padding: 14px 17px; border-top: 1px solid var(--border); }
+  .context-graph-inspector-section h3 { color: #aaa; font-size: 9px; letter-spacing: 0; text-transform: none; }
+  .context-graph-confidence { border: 0; background: transparent; padding: 0; }
+  .context-graph-confidence-top .label { color: #777; font-size: 9px; text-transform: none; }
+  .context-graph-confidence-value { color: #a799ff; font-size: 17px; }
+  .context-graph-confidence-meter { height: 3px; }
+  .context-graph-evidence-list { display: grid; }
+  .context-graph-evidence { padding: 8px; line-height: 1.5; }
+  .context-graph-explanation { color: #aaa; font-size: 9px; }
+  .context-graph-relationship { padding: 9px; }
+  .context-graph-endpoint { position: relative; display: grid; gap: 5px; margin: 12px 17px 0; padding: 12px; border: 1px solid #262626; border-radius: 6px; background: #0e1010; }
+  .context-graph-endpoint strong { padding-right: 70px; color: #ddd; font-size: 10px; line-height: 1.45; }
+  .context-graph-endpoint .context-graph-item-type { position: absolute; right: 12px; bottom: 12px; }
+  .context-graph-inspector-actions { flex-wrap: wrap; }
+  .context-graph-inspector-actions button { flex: 1 1 auto; min-height: 30px; }
   .context-search-results .context-results { margin: 0; }
 
 
   @media (max-width: 1100px) {
     .page-filters { overflow-x: auto; padding-bottom: 4px; }
     .page-filters > * { flex: 0 0 auto; }
-    .history-layout, .task-type-layout, .ontology-workspace { grid-template-columns: minmax(0, 1fr); }
-    .side-inspector, .ontology-details { max-height: none; }
+    .history-layout, .task-type-layout, .context-graph-workspace { grid-template-columns: minmax(0, 1fr); }
+    .side-inspector, .context-graph-details { max-height: none; }
     .history-table { overflow-x: auto; }
     .history-table-head, .history-row { min-width: 900px; }
     .task-type-inspector { max-height: none; }
-    .ontology-details { min-height: 380px; }
+    .context-graph-details { min-height: 380px; }
   }
   @media (max-width: 700px) {
     .topbar { gap: 8px; }
@@ -704,10 +704,10 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     .type-row > .type-steps { display: block; }
     .graph-zoom { display: none; }
     .graph-filter-popover { width: min(410px, calc(100vw - 44px)); }
-    .ontology-toolbar-meta { align-items: flex-start; flex-direction: column; gap: 5px; }
-    .ontology-toolbar-meta > .graph-controls { align-self: stretch; overflow-x: auto; }
+    .context-graph-toolbar-meta { align-items: flex-start; flex-direction: column; gap: 5px; }
+    .context-graph-toolbar-meta > .graph-controls { align-self: stretch; overflow-x: auto; }
     .repository-button { min-width: 150px; }
-    .ontology-search-hero { padding-inline: 0; }
+    .context-graph-search-hero { padding-inline: 0; }
     .context-search-shell { display: block; }
     .context-search-results { width: calc(100vw - 28px); }
     .context-causal-trace { align-items: flex-start; flex-direction: column; }
@@ -726,7 +726,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
         <a href="/" data-page="board">Board</a>
         <a href="/history" data-page="history">History</a>
         <a href="/tasks" data-page="task-types">Task types</a>
-        <a href="/ontology" data-page="ontology">Ontology</a>
+        <a href="/context-graph" data-page="contextGraph">ContextGraph</a>
       </nav>
       <div id="connection"><span class="pulse" id="connection-dot"></span><span id="connection-text">Connecting…</span></div>
     </div>
@@ -776,14 +776,14 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
       <div class="workflow-grid" id="workflow-tree-list" aria-label="Task dependency trees"></div>
     </section>
   </section>
-  <section id="ontology-page" hidden>
-    <div class="ontology-shell">
-      <header class="ontology-toolbar"><div class="ontology-toolbar-meta"><button type="button" class="repository-button" id="ontology-title">Repository graph</button><div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div></div><section class="ontology-search-hero"><div class="context-search-shell" id="context-search-shell"><form class="context-search" id="context-query"><span class="context-search-icon" aria-hidden="true">⌕</span><label class="sr-only" for="context-question">Search this repository with citations</label><input id="context-question" name="question" placeholder="Ask anything about this repository…" aria-label="Search this repository with citations" aria-controls="context-search-results" aria-expanded="false" autocomplete="off" required><button type="button" class="context-search-clear" id="context-search-clear" aria-label="Clear cited search">×</button><button type="submit" class="context-search-submit" id="context-search-submit" aria-label="Search with citations" title="Search with citations">↵</button></form><div class="context-search-results" id="context-search-results" hidden><section class="context-results" id="context-results" aria-live="polite"></section></div></div></section></header>
-      <section class="ontology-workspace" id="ontology-workspace">
-        <section class="ontology-card">
-          <div class="graph-wrap"><div id="ontology-graph" role="application" aria-label="Repository ontology graph"><div class="ontology-label-layer" id="ontology-label-layer"></div></div><div class="graph-empty-state" id="ontology-graph-empty" hidden></div><canvas class="ontology-minimap" id="ontology-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="ontology-summary" id="ontology-summary" hidden></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
+  <section id="context-graph-page" hidden>
+    <div class="context-graph-shell">
+      <header class="context-graph-toolbar"><div class="context-graph-toolbar-meta"><button type="button" class="repository-button" id="context-graph-title">Repository graph</button><div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div></div><section class="context-graph-search-hero"><div class="context-search-shell" id="context-search-shell"><form class="context-search" id="context-query"><span class="context-search-icon" aria-hidden="true">⌕</span><label class="sr-only" for="context-question">Search this repository with citations</label><input id="context-question" name="question" placeholder="Ask anything about this repository…" aria-label="Search this repository with citations" aria-controls="context-search-results" aria-expanded="false" autocomplete="off" required><button type="button" class="context-search-clear" id="context-search-clear" aria-label="Clear cited search">×</button><button type="submit" class="context-search-submit" id="context-search-submit" aria-label="Search with citations" title="Search with citations">↵</button></form><div class="context-search-results" id="context-search-results" hidden><section class="context-results" id="context-results" aria-live="polite"></section></div></div></section></header>
+      <section class="context-graph-workspace" id="context-graph-workspace">
+        <section class="context-graph-card">
+          <div class="graph-wrap"><div id="context-graph" role="application" aria-label="Repository contextGraph graph"><div class="context-graph-label-layer" id="context-graph-label-layer"></div></div><div class="graph-empty-state" id="context-graph-empty" hidden></div><canvas class="context-graph-minimap" id="context-graph-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="context-graph-summary" id="context-graph-summary" hidden></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
         </section>
-        <aside class="ontology-details side-inspector" id="ontology-details" aria-live="polite"></aside>
+        <aside class="context-graph-details side-inspector" id="context-graph-details" aria-live="polite"></aside>
       </section>
       <details class="assertion-review"><summary>Review proposed knowledge</summary><div class="assertion-review-toolbar"><select id="assertion-predicate-filter" aria-label="Filter assertions by predicate"><option value="">All predicates</option></select><select id="assertion-kind-filter" aria-label="Filter assertions by entity kind"><option value="">All entity kinds</option></select></div><section class="assertion-review-list" id="assertion-review-list" aria-live="polite"></section></details>
     </div>
@@ -798,16 +798,16 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   <div class="detail-body" id="detail-body"></div>
 </dialog>
 
-<script src="/assets/ontology-graph-client.js?v=freeform-1"></script>
+<script src="/assets/context-graph-client.js?v=freeform-1"></script>
 <script>
 const API = ${JSON.stringify(apiUrl)};
 const API_LABEL = ${JSON.stringify(apiLabel)};
 let boardState = { tasks: [], dependencies: [], publications: [] };
 let boardEvents = [];
 let taskTypes = [];
-let ontologyState = { latest: null, assertions: [] };
+let contextGraphState = { latest: null, assertions: [] };
 let assertionState = [];
-let ontologyViewState = {
+let contextGraphViewState = {
   graphKey: null,
   selected: null,
   hiddenNodeKinds: new Set(),
@@ -817,8 +817,8 @@ let ontologyViewState = {
   rendererLabelKey: null,
   rendererLabels: {}
 };
-let ontologyRenderer = null;
-let ontologyRefreshSequence = 0;
+let contextGraphRenderer = null;
+let contextGraphRefreshSequence = 0;
 let contextState = null;
 let contextSearchOpen = false;
 let contextSearchLoading = false;
@@ -840,14 +840,14 @@ const dialog = document.getElementById("task-dialog");
 const detailTitle = document.getElementById("detail-title");
 const detailEyebrow = document.getElementById("detail-eyebrow");
 const detailBody = document.getElementById("detail-body");
-const ontologyGraph = document.getElementById("ontology-graph");
-const ontologyLabelLayer = document.getElementById("ontology-label-layer");
-const ontologyMinimap = document.getElementById("ontology-minimap");
-const ontologyGraphEmpty = document.getElementById("ontology-graph-empty");
+const contextGraph = document.getElementById("context-graph");
+const contextGraphLabelLayer = document.getElementById("context-graph-label-layer");
+const contextGraphMinimap = document.getElementById("context-graph-minimap");
+const contextGraphEmpty = document.getElementById("context-graph-empty");
 const graphRuntimeStatus = document.getElementById("graph-runtime-status");
-const ontologySummary = document.getElementById("ontology-summary");
-const ontologyDetails = document.getElementById("ontology-details");
-const ontologyWorkspace = document.getElementById("ontology-workspace");
+const contextGraphSummary = document.getElementById("context-graph-summary");
+const contextGraphDetails = document.getElementById("context-graph-details");
+const contextGraphWorkspace = document.getElementById("context-graph-workspace");
 const graphControls = document.getElementById("graph-controls");
 const contextResults = document.getElementById("context-results");
 const contextSearchShell = document.getElementById("context-search-shell");
@@ -859,22 +859,22 @@ const assertionReviewList = document.getElementById("assertion-review-list");
 async function refresh() {
   try {
     const showingTaskTypes = location.pathname === "/tasks";
-    const showingOntology = location.pathname === "/ontology";
+    const showingContextGraph = location.pathname === "/context-graph";
     const showingHistory = location.pathname === "/history";
-    if (showingOntology) {
-      const requestSequence = ++ontologyRefreshSequence;
-      const response = await fetch(API + "/ontology");
+    if (showingContextGraph) {
+      const requestSequence = ++contextGraphRefreshSequence;
+      const response = await fetch(API + "/context-graph");
       if (!response.ok) throw new Error("API request failed");
-      const nextOntologyState = await response.json();
+      const nextContextGraphState = await response.json();
       let nextAssertions = [];
-      if (nextOntologyState.latest?.repository) {
-        const assertionResponse = await fetch(API + "/ontology/assertions?repository=" + encodeURIComponent(nextOntologyState.latest.repository));
+      if (nextContextGraphState.latest?.repository) {
+        const assertionResponse = await fetch(API + "/context-graph/assertions?repository=" + encodeURIComponent(nextContextGraphState.latest.repository));
         if (!assertionResponse.ok) throw new Error("Assertion review request failed");
         nextAssertions = (await assertionResponse.json()).assertions || [];
       }
-      nextOntologyState.assertions = nextAssertions.filter(function(assertion) { return assertion.status === "proposed"; });
-      if (requestSequence !== ontologyRefreshSequence || location.pathname !== "/ontology") return;
-      ontologyState = nextOntologyState;
+      nextContextGraphState.assertions = nextAssertions.filter(function(assertion) { return assertion.status === "proposed"; });
+      if (requestSequence !== contextGraphRefreshSequence || location.pathname !== "/context-graph") return;
+      contextGraphState = nextContextGraphState;
       assertionState = nextAssertions;
     } else if (showingTaskTypes) {
       const responses = await Promise.all([fetch(API + "/task-types"), fetch(API + "/board"), fetch(API + "/events")]);
@@ -890,7 +890,7 @@ async function refresh() {
     }
     setConnection(true);
     renderPage();
-    if (showingOntology) renderOntology();
+    if (showingContextGraph) renderContextGraph();
     else if (showingTaskTypes) renderTaskTypes();
     else if (showingHistory) renderHistory();
     else {
@@ -911,95 +911,95 @@ function setConnection(online) {
 
 function renderPage() {
   const showingTaskTypes = location.pathname === "/tasks";
-  const showingOntology = location.pathname === "/ontology";
+  const showingContextGraph = location.pathname === "/context-graph";
   const showingHistory = location.pathname === "/history";
-  document.getElementById("board-page").hidden = showingTaskTypes || showingOntology || showingHistory;
+  document.getElementById("board-page").hidden = showingTaskTypes || showingContextGraph || showingHistory;
   document.getElementById("history-page").hidden = !showingHistory;
   document.getElementById("task-types-page").hidden = !showingTaskTypes;
-  document.getElementById("ontology-page").hidden = !showingOntology;
-  document.body.dataset.page = showingOntology ? "ontology" : showingTaskTypes ? "task-types" : showingHistory ? "history" : "board";
+  document.getElementById("context-graph-page").hidden = !showingContextGraph;
+  document.body.dataset.page = showingContextGraph ? "contextGraph" : showingTaskTypes ? "task-types" : showingHistory ? "history" : "board";
   for (const link of document.querySelectorAll("[data-page]")) {
-    link.classList.toggle("active", link.dataset.page === (showingOntology ? "ontology" : showingTaskTypes ? "task-types" : showingHistory ? "history" : "board"));
+    link.classList.toggle("active", link.dataset.page === (showingContextGraph ? "contextGraph" : showingTaskTypes ? "task-types" : showingHistory ? "history" : "board"));
   }
 }
 
-function renderOntology() {
-  ontologyWorkspace.classList.remove("has-selection");
-  ontologySummary.replaceChildren();
-  ontologyDetails.replaceChildren();
+function renderContextGraph() {
+  contextGraphWorkspace.classList.remove("has-selection");
+  contextGraphSummary.replaceChildren();
+  contextGraphDetails.replaceChildren();
   graphControls.replaceChildren();
   renderAssertionReview();
-  const graph = ontologyState.latest;
-  const graphKey = graph ? ontologyGraphIdentity(graph) : null;
-  if (graphKey !== ontologyViewState.graphKey) resetOntologyViewForGraph(graphKey);
+  const graph = contextGraphState.latest;
+  const graphKey = graph ? contextGraphIdentity(graph) : null;
+  if (graphKey !== contextGraphViewState.graphKey) resetContextGraphViewForGraph(graphKey);
   renderContextResults();
   if (!graph) {
-    ontologyGraphEmpty.hidden = false;
-    ontologyGraphEmpty.textContent = "Run an ontology build to create the first graph.";
-    if (ontologyRenderer) ontologyRenderer.setData({ key: "empty", nodes: [], edges: [], labels: {} });
-    ontologySummary.append(ontologyStat("Status", "No graph yet"));
-    ontologyDetails.append(textElement("p", "empty-detail", "Run an ontology_build task to create the first graph."));
-    if (ontologyRenderer) ontologyRenderer.setSearchMatches([]);
+    contextGraphEmpty.hidden = false;
+    contextGraphEmpty.textContent = "Run an contextGraph build to create the first graph.";
+    if (contextGraphRenderer) contextGraphRenderer.setData({ key: "empty", nodes: [], edges: [], labels: {} });
+    contextGraphSummary.append(contextGraphStat("Status", "No graph yet"));
+    contextGraphDetails.append(textElement("p", "empty-detail", "Run an context_graph_build task to create the first graph."));
+    if (contextGraphRenderer) contextGraphRenderer.setSearchMatches([]);
     return;
   }
 
-  document.getElementById("ontology-title").textContent = graph.repository + " @ " + graph.ref;
-  const visibleGraph = filterOntologyGraph(graph, ontologyViewState.hiddenNodeKinds, ontologyViewState.hiddenEdgePredicates);
-  if (!selectionIsVisible(ontologyViewState.selected, visibleGraph)) ontologyViewState.selected = null;
-  ontologyWorkspace.classList.toggle("has-selection", Boolean(ontologyViewState.selected));
-  ontologySummary.append(
-    ontologyStat("Repository", graph.repository),
-    ontologyStat("Nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
-    ontologyStat("Edges", visibleCount(visibleGraph.edges.length, graph.edges.length)),
-    ontologyStat("Commit", graph.commitSha.slice(0, 12)),
-    ontologyStat("Generated", formatTime(graph.generatedAt)),
-    ontologyStat("Executor", graph.generator.executor + " · " + graph.generator.model)
+  document.getElementById("context-graph-title").textContent = graph.repository + " @ " + graph.ref;
+  const visibleGraph = filterContextGraph(graph, contextGraphViewState.hiddenNodeKinds, contextGraphViewState.hiddenEdgePredicates);
+  if (!selectionIsVisible(contextGraphViewState.selected, visibleGraph)) contextGraphViewState.selected = null;
+  contextGraphWorkspace.classList.toggle("has-selection", Boolean(contextGraphViewState.selected));
+  contextGraphSummary.append(
+    contextGraphStat("Repository", graph.repository),
+    contextGraphStat("Nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
+    contextGraphStat("Edges", visibleCount(visibleGraph.edges.length, graph.edges.length)),
+    contextGraphStat("Commit", graph.commitSha.slice(0, 12)),
+    contextGraphStat("Generated", formatTime(graph.generatedAt)),
+    contextGraphStat("Executor", graph.generator.executor + " · " + graph.generator.model)
   );
   renderGraphControls(graph);
-  ontologyGraphEmpty.hidden = Boolean(visibleGraph.nodes.length);
-  ontologyGraphEmpty.textContent = "All node types are hidden. Use Filters to bring them back.";
-  ensureOntologyRenderer();
-  if (ontologyRenderer) {
-    if (ontologyViewState.rendererLabelKey !== graphKey) {
-      ontologyViewState.rendererLabelKey = graphKey;
-      ontologyViewState.rendererLabels = friendlyNodeLabels(graph);
+  contextGraphEmpty.hidden = Boolean(visibleGraph.nodes.length);
+  contextGraphEmpty.textContent = "All node types are hidden. Use Filters to bring them back.";
+  ensureContextGraphRenderer();
+  if (contextGraphRenderer) {
+    if (contextGraphViewState.rendererLabelKey !== graphKey) {
+      contextGraphViewState.rendererLabelKey = graphKey;
+      contextGraphViewState.rendererLabels = friendlyNodeLabels(graph);
     }
-    const rendererKey = graphKey + "|nodes:" + Array.from(ontologyViewState.hiddenNodeKinds).sort().join(",") + "|edges:" + Array.from(ontologyViewState.hiddenEdgePredicates).sort().join(",");
-    ontologyRenderer.setData({ key: rendererKey, nodes: visibleGraph.nodes, edges: visibleGraph.edges, labels: ontologyViewState.rendererLabels });
-    ontologyRenderer.setSelection(ontologyViewState.selected);
-    ontologyRenderer.setSearchMatches(contextGraphMatches(contextState, visibleGraph));
+    const rendererKey = graphKey + "|nodes:" + Array.from(contextGraphViewState.hiddenNodeKinds).sort().join(",") + "|edges:" + Array.from(contextGraphViewState.hiddenEdgePredicates).sort().join(",");
+    contextGraphRenderer.setData({ key: rendererKey, nodes: visibleGraph.nodes, edges: visibleGraph.edges, labels: contextGraphViewState.rendererLabels });
+    contextGraphRenderer.setSelection(contextGraphViewState.selected);
+    contextGraphRenderer.setSearchMatches(contextGraphMatches(contextState, visibleGraph));
   }
-  renderOntologyInspector(graph, visibleGraph);
+  renderContextGraphInspector(graph, visibleGraph);
 }
 
-function ensureOntologyRenderer() {
-  if (ontologyRenderer) return ontologyRenderer;
-  if (!window.JinaOntologyGraph) {
+function ensureContextGraphRenderer() {
+  if (contextGraphRenderer) return contextGraphRenderer;
+  if (!window.JinaContextGraph) {
     graphRuntimeStatus.textContent = "GPU renderer unavailable";
     graphRuntimeStatus.classList.remove("active");
-    ontologyGraphEmpty.hidden = false;
-    ontologyGraphEmpty.textContent = "The interactive graph could not start. Use Table view or reload this page.";
+    contextGraphEmpty.hidden = false;
+    contextGraphEmpty.textContent = "The interactive graph could not start. Use Table view or reload this page.";
     return null;
   }
-  ontologyRenderer = window.JinaOntologyGraph.create({
-    container: ontologyGraph,
-    labels: ontologyLabelLayer,
-    minimap: ontologyMinimap,
+  contextGraphRenderer = window.JinaContextGraph.create({
+    container: contextGraph,
+    labels: contextGraphLabelLayer,
+    minimap: contextGraphMinimap,
     status: graphRuntimeStatus,
     onSelect: function(selection) {
-      ontologyViewState.selected = selection;
-      renderOntology();
+      contextGraphViewState.selected = selection;
+      renderContextGraph();
     },
     onZoomChange: function(percent) {
-      ontologyViewState.zoomPercent = percent;
+      contextGraphViewState.zoomPercent = percent;
       const zoom = document.getElementById("graph-zoom-percent");
       if (zoom) zoom.textContent = percent + "%";
     }
   });
-  return ontologyRenderer;
+  return contextGraphRenderer;
 }
 
-function filterOntologyGraph(graph, hiddenNodeKinds, hiddenEdgePredicates) {
+function filterContextGraph(graph, hiddenNodeKinds, hiddenEdgePredicates) {
   const nodes = graph.nodes.filter(function(node) { return !hiddenNodeKinds.has(node.kind); });
   const visibleNodeIds = new Set(nodes.map(function(node) { return node.id; }));
   const edges = graph.edges.filter(function(edge) {
@@ -1014,17 +1014,17 @@ function selectionIsVisible(selection, graph) {
   return items.some(function(item) { return item.id === selection.id; });
 }
 
-function ontologyGraphIdentity(graph) {
+function contextGraphIdentity(graph) {
   return [graph.id || "", graph.repository || "", graph.ref || "", graph.commitSha || "", graph.generatedAt || ""].join("|");
 }
 
-function resetOntologyViewForGraph(graphKey) {
+function resetContextGraphViewForGraph(graphKey) {
   invalidateContextRequest();
-  ontologyViewState.graphKey = graphKey;
-  ontologyViewState.selected = null;
-  ontologyViewState.filterMenuOpen = false;
-  ontologyViewState.rendererLabelKey = null;
-  ontologyViewState.rendererLabels = {};
+  contextGraphViewState.graphKey = graphKey;
+  contextGraphViewState.selected = null;
+  contextGraphViewState.filterMenuOpen = false;
+  contextGraphViewState.rendererLabelKey = null;
+  contextGraphViewState.rendererLabels = {};
   contextState = null;
   contextSearchOpen = false;
   contextEvidenceExpanded = false;
@@ -1229,37 +1229,37 @@ function renderGraphControls(graph) {
   const edgePredicates = countGraphTypes(graph.edges, "predicate");
   const toolbar = element("div", "graph-control-toolbar");
   const filters = element("details", "graph-filter-menu");
-  filters.open = ontologyViewState.filterMenuOpen;
-  filters.addEventListener("toggle", function() { ontologyViewState.filterMenuOpen = filters.open; });
+  filters.open = contextGraphViewState.filterMenuOpen;
+  filters.addEventListener("toggle", function() { contextGraphViewState.filterMenuOpen = filters.open; });
   const filterSummary = textElement("summary", "graph-control-button", "Filters");
   const popover = element("div", "graph-filter-popover");
   const filterColumns = element("div", "graph-filter-columns");
   filterColumns.append(
-    graphFilterRow("Node types", "node", nodeKinds, ontologyViewState.hiddenNodeKinds),
-    graphFilterRow("Relationship types", "edge", edgePredicates, ontologyViewState.hiddenEdgePredicates)
+    graphFilterRow("Node types", "node", nodeKinds, contextGraphViewState.hiddenNodeKinds),
+    graphFilterRow("Relationship types", "edge", edgePredicates, contextGraphViewState.hiddenEdgePredicates)
   );
   popover.append(filterColumns);
   const showAll = textElement("button", "graph-reset", "Show all");
   showAll.type = "button";
-  showAll.disabled = ontologyViewState.hiddenNodeKinds.size === 0 && ontologyViewState.hiddenEdgePredicates.size === 0;
+  showAll.disabled = contextGraphViewState.hiddenNodeKinds.size === 0 && contextGraphViewState.hiddenEdgePredicates.size === 0;
   showAll.addEventListener("click", function() {
-    ontologyViewState.hiddenNodeKinds.clear();
-    ontologyViewState.hiddenEdgePredicates.clear();
-    renderOntology();
+    contextGraphViewState.hiddenNodeKinds.clear();
+    contextGraphViewState.hiddenEdgePredicates.clear();
+    renderContextGraph();
   });
   const removeAll = textElement("button", "graph-reset", "Remove all");
   removeAll.type = "button";
-  removeAll.disabled = nodeKinds.every(function(entry) { return ontologyViewState.hiddenNodeKinds.has(entry[0]); }) &&
-    edgePredicates.every(function(entry) { return ontologyViewState.hiddenEdgePredicates.has(entry[0]); });
+  removeAll.disabled = nodeKinds.every(function(entry) { return contextGraphViewState.hiddenNodeKinds.has(entry[0]); }) &&
+    edgePredicates.every(function(entry) { return contextGraphViewState.hiddenEdgePredicates.has(entry[0]); });
   removeAll.addEventListener("click", function() {
-    for (const entry of nodeKinds) ontologyViewState.hiddenNodeKinds.add(entry[0]);
-    for (const entry of edgePredicates) ontologyViewState.hiddenEdgePredicates.add(entry[0]);
-    renderOntology();
+    for (const entry of nodeKinds) contextGraphViewState.hiddenNodeKinds.add(entry[0]);
+    for (const entry of edgePredicates) contextGraphViewState.hiddenEdgePredicates.add(entry[0]);
+    renderContextGraph();
   });
   const resetLayout = textElement("button", "graph-reset", "Reset");
   resetLayout.type = "button";
   resetLayout.addEventListener("click", function() {
-    if (ontologyRenderer) ontologyRenderer.reset();
+    if (contextGraphRenderer) contextGraphRenderer.reset();
   });
   const popoverActions = element("div", "graph-popover-actions");
   popoverActions.append(showAll, removeAll, resetLayout);
@@ -1267,17 +1267,17 @@ function renderGraphControls(graph) {
   filters.append(filterSummary, popover);
   const fit = textElement("button", "graph-control-button", "Fit");
   fit.type = "button";
-  fit.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.fit(); });
+  fit.addEventListener("click", function() { if (contextGraphRenderer) contextGraphRenderer.fit(); });
   const zoomOut = textElement("button", "graph-control-button", "−");
   zoomOut.type = "button";
   zoomOut.setAttribute("aria-label", "Zoom out");
-  zoomOut.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.zoomBy(0.78); });
-  const zoomPercent = textElement("span", "graph-zoom", ontologyViewState.zoomPercent + "%");
+  zoomOut.addEventListener("click", function() { if (contextGraphRenderer) contextGraphRenderer.zoomBy(0.78); });
+  const zoomPercent = textElement("span", "graph-zoom", contextGraphViewState.zoomPercent + "%");
   zoomPercent.id = "graph-zoom-percent";
   const zoomIn = textElement("button", "graph-control-button", "+");
   zoomIn.type = "button";
   zoomIn.setAttribute("aria-label", "Zoom in");
-  zoomIn.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.zoomBy(1.28); });
+  zoomIn.addEventListener("click", function() { if (contextGraphRenderer) contextGraphRenderer.zoomBy(1.28); });
   const zoomGroup = element("div", "graph-zoom-group");
   zoomGroup.append(zoomOut, zoomPercent, zoomIn);
   toolbar.append(filters, resetLayout, fit, zoomGroup);
@@ -1307,23 +1307,23 @@ function graphFilterRow(label, group, types, hiddenTypes) {
 }
 
 function toggleGraphFilter(group, type) {
-  const hiddenTypes = group === "node" ? ontologyViewState.hiddenNodeKinds : ontologyViewState.hiddenEdgePredicates;
+  const hiddenTypes = group === "node" ? contextGraphViewState.hiddenNodeKinds : contextGraphViewState.hiddenEdgePredicates;
   if (hiddenTypes.has(type)) hiddenTypes.delete(type);
   else hiddenTypes.add(type);
-  renderOntology();
+  renderContextGraph();
 }
 
-function renderOntologyInspector(graph, visibleGraph) {
-  const selection = ontologyViewState.selected;
+function renderContextGraphInspector(graph, visibleGraph) {
+  const selection = contextGraphViewState.selected;
   if (!selection) {
-    if ((ontologyState.assertions || []).length) {
-      renderAssertionReviewQueue(ontologyState.assertions);
+    if ((contextGraphState.assertions || []).length) {
+      renderAssertionReviewQueue(contextGraphState.assertions);
       return;
     }
     const message = visibleGraph.nodes.length
       ? "Select a node or relationship in the graph to inspect its metadata and evidence."
       : "No graph items are visible. Turn on a node type above to continue exploring.";
-    ontologyDetails.append(textElement("p", "empty-detail", message));
+    contextGraphDetails.append(textElement("p", "empty-detail", message));
     return;
   }
   if (selection.kind === "node") {
@@ -1340,21 +1340,21 @@ function renderOntologyInspector(graph, visibleGraph) {
     fields.push(["Path", node.path || "Not applicable"]);
     fields.push(["Visible relationships", String(relatedEdges.length)]);
     if (explanation !== node.description && node.description) fields.push(["Canonical key", node.description]);
-    const item = ontologyInspectorItem(friendlyLabel, "Node · " + node.kind);
-    item.append(ontologyDetailGrid(fields));
+    const item = contextGraphInspectorItem(friendlyLabel, "Node · " + node.kind);
+    item.append(contextGraphDetailGrid(fields));
     const confidence = connectedConfidenceSummary(relatedEdges);
-    item.append(ontologyConfidence(
+    item.append(contextGraphConfidence(
       "Connected relationship confidence",
       confidence.value,
       confidence.scoredCount
         ? "Average of " + confidence.scoredCount + " scored visible relationship" + (confidence.scoredCount === 1 ? "" : "s") + ". Nodes do not carry a direct confidence score."
         : "No visible connected relationships provide confidence scores. Nodes do not carry a direct confidence score."
     ));
-    item.append(ontologyEvidenceSection(node.evidence));
-    item.append(ontologyExplanation(explanation));
-    item.append(ontologyRelationshipSection(node, relatedEdges, graph));
-    item.append(ontologyInspectorActions(["⌖  Pin", "◎  Center", "↗  Open source"]));
-    ontologyDetails.append(item);
+    item.append(contextGraphEvidenceSection(node.evidence));
+    item.append(contextGraphExplanation(explanation));
+    item.append(contextGraphRelationshipSection(node, relatedEdges, graph));
+    item.append(contextGraphInspectorActions(["⌖  Pin", "◎  Center", "↗  Open source"]));
+    contextGraphDetails.append(item);
     return;
   }
   const edge = graph.edges.find(function(item) { return item.id === selection.id; });
@@ -1363,26 +1363,26 @@ function renderOntologyInspector(graph, visibleGraph) {
   const target = graph.nodes.find(function(node) { return node.id === edge.target; });
   const sourceLabel = source ? friendlyNodeLabel(source, graph) : edge.source;
   const targetLabel = target ? friendlyNodeLabel(target, graph) : edge.target;
-  const item = ontologyInspectorItem(edge.predicate, "Edge · " + edge.plane + " plane");
-  item.append(ontologyEndpoint("Source (from)", sourceLabel, source?.kind || "Node"));
-  item.append(ontologyEndpoint("Target (to)", targetLabel, target?.kind || "Node"));
-  item.append(ontologyDetailGrid([["Relationship type", edge.plane], ["Predicate", edge.predicate], ["Relationship ID", edge.id]]));
-  item.append(ontologyConfidence(
+  const item = contextGraphInspectorItem(edge.predicate, "Edge · " + edge.plane + " plane");
+  item.append(contextGraphEndpoint("Source (from)", sourceLabel, source?.kind || "Node"));
+  item.append(contextGraphEndpoint("Target (to)", targetLabel, target?.kind || "Node"));
+  item.append(contextGraphDetailGrid([["Relationship type", edge.plane], ["Predicate", edge.predicate], ["Relationship ID", edge.id]]));
+  item.append(contextGraphConfidence(
     "Relationship confidence",
     edge.confidence,
     edge.confidence === undefined ? "This relationship was stored without a confidence score." : "Direct confidence score stored on this relationship."
   ));
-  item.append(ontologyEvidenceSection(edge.evidence));
-  item.append(ontologyExplanation(edge.why || "This relationship states that " + sourceLabel + " " + humanize(edge.predicate) + " " + targetLabel + "."));
-  item.append(ontologyInspectorActions(["⇄  Reverse direction", "⌁  Reconnect", "◌  Hide type", "⌫  Delete"]));
-  ontologyDetails.append(item);
+  item.append(contextGraphEvidenceSection(edge.evidence));
+  item.append(contextGraphExplanation(edge.why || "This relationship states that " + sourceLabel + " " + humanize(edge.predicate) + " " + targetLabel + "."));
+  item.append(contextGraphInspectorActions(["⇄  Reverse direction", "⌁  Reconnect", "◌  Hide type", "⌫  Delete"]));
+  contextGraphDetails.append(item);
 }
 
 function renderAssertionReviewQueue(assertions) {
-  ontologyWorkspace.classList.add("has-selection");
-  const heading = element("div", "ontology-item-heading");
-  const copy = element("div", "ontology-heading-copy");
-  copy.append(textElement("strong", "", "Assertion review"), textElement("span", "ontology-item-type", assertions.length + " proposed"));
+  contextGraphWorkspace.classList.add("has-selection");
+  const heading = element("div", "context-graph-item-heading");
+  const copy = element("div", "context-graph-heading-copy");
+  copy.append(textElement("strong", "", "Assertion review"), textElement("span", "context-graph-item-type", assertions.length + " proposed"));
   heading.append(copy);
   const list = element("div", "assertion-review-list");
   assertions.forEach(function(assertion) {
@@ -1412,7 +1412,7 @@ function renderAssertionReviewQueue(assertions) {
     card.append(rejection.fields, actions);
     list.append(card);
   });
-  ontologyDetails.append(heading, list);
+  contextGraphDetails.append(heading, list);
 }
 
 function assertionRejectionFields() {
@@ -1437,34 +1437,34 @@ async function reviewAssertion(assertionId, decision, rejectionCode, reason) {
   const body = { type: "review_assertion", assertionId: assertionId, decision: decision };
   if (rejectionCode) body.rejectionCode = rejectionCode;
   if (reason) body.reason = reason;
-  const response = await fetch(API + "/ontology/commands", {
+  const response = await fetch(API + "/context-graph/commands", {
     method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body)
   });
   if (!response.ok) throw new Error("Assertion review failed");
   await refresh();
 }
 
-function ontologyInspectorItem(title, type) {
-  const item = element("article", "ontology-item");
-  const heading = element("div", "ontology-item-heading");
-  const copy = element("div", "ontology-heading-copy");
-  copy.append(textElement("strong", "", title), textElement("span", "ontology-item-type", type));
+function contextGraphInspectorItem(title, type) {
+  const item = element("article", "context-graph-item");
+  const heading = element("div", "context-graph-item-heading");
+  const copy = element("div", "context-graph-heading-copy");
+  copy.append(textElement("strong", "", title), textElement("span", "context-graph-item-type", type));
   const close = textElement("button", "inspector-close", "×");
   close.type = "button"; close.setAttribute("aria-label", "Clear graph selection");
-  close.addEventListener("click", function() { ontologyViewState.selected = null; renderOntology(); });
+  close.addEventListener("click", function() { contextGraphViewState.selected = null; renderContextGraph(); });
   heading.append(copy, close);
   item.append(heading);
   return item;
 }
 
-function ontologyEndpoint(label, value, kind) {
-  const section = element("section", "ontology-endpoint");
-  section.append(textElement("span", "label", label), textElement("strong", "", value), textElement("span", "ontology-item-type", humanize(kind)));
+function contextGraphEndpoint(label, value, kind) {
+  const section = element("section", "context-graph-endpoint");
+  section.append(textElement("span", "label", label), textElement("strong", "", value), textElement("span", "context-graph-item-type", humanize(kind)));
   return section;
 }
 
-function ontologyInspectorActions(labels) {
-  const actions = element("footer", "ontology-inspector-actions");
+function contextGraphInspectorActions(labels) {
+  const actions = element("footer", "context-graph-inspector-actions");
   labels.forEach(function(label) {
     const button = textElement("button", /Delete/.test(label) ? "danger-button" : "secondary-button", label);
     button.type = "button";
@@ -1476,19 +1476,19 @@ function ontologyInspectorActions(labels) {
   return actions;
 }
 
-function ontologyDetailGrid(fields) {
-  const grid = element("div", "ontology-detail-grid");
+function contextGraphDetailGrid(fields) {
+  const grid = element("div", "context-graph-detail-grid");
   for (const field of fields) {
-    const item = element("div", "ontology-detail-field");
+    const item = element("div", "context-graph-detail-field");
     item.append(textElement("span", "label", field[0]), textElement("span", "value", field[1]));
     grid.append(item);
   }
   return grid;
 }
 
-function ontologyExplanation(value) {
-  const section = element("section", "ontology-inspector-section");
-  section.append(textElement("h3", "", "Explanation"), textElement("p", "ontology-explanation", value));
+function contextGraphExplanation(value) {
+  const section = element("section", "context-graph-inspector-section");
+  section.append(textElement("h3", "", "Explanation"), textElement("p", "context-graph-explanation", value));
   return section;
 }
 
@@ -1503,25 +1503,25 @@ function connectedConfidenceSummary(edges) {
   };
 }
 
-function ontologyConfidence(label, value, note) {
-  const section = element("section", "ontology-inspector-section");
+function contextGraphConfidence(label, value, note) {
+  const section = element("section", "context-graph-inspector-section");
   section.append(textElement("h3", "", "Confidence"));
-  const card = element("div", "ontology-confidence");
-  const top = element("div", "ontology-confidence-top");
-  top.append(textElement("span", "label", label), textElement("strong", "ontology-confidence-value", confidenceLabel(value)));
+  const card = element("div", "context-graph-confidence");
+  const top = element("div", "context-graph-confidence-top");
+  top.append(textElement("span", "label", label), textElement("strong", "context-graph-confidence-value", confidenceLabel(value)));
   card.append(top);
   if (typeof value === "number" && Number.isFinite(value)) {
-    const meter = element("div", "ontology-confidence-meter");
+    const meter = element("div", "context-graph-confidence-meter");
     meter.setAttribute("role", "meter");
     meter.setAttribute("aria-label", label);
     meter.setAttribute("aria-valuemin", "0"); meter.setAttribute("aria-valuemax", "100");
     meter.setAttribute("aria-valuenow", String(Math.round(clampConfidence(value) * 100)));
-    const fill = element("span", "ontology-confidence-fill");
+    const fill = element("span", "context-graph-confidence-fill");
     fill.style.width = Math.round(clampConfidence(value) * 100) + "%";
     meter.append(fill);
     card.append(meter);
   }
-  card.append(textElement("p", "ontology-confidence-note", note));
+  card.append(textElement("p", "context-graph-confidence-note", note));
   section.append(card);
   return section;
 }
@@ -1534,42 +1534,42 @@ function confidenceLabel(value) {
 
 function clampConfidence(value) { return Math.max(0, Math.min(1, value)); }
 
-function ontologyEvidenceSection(evidence) {
+function contextGraphEvidenceSection(evidence) {
   const citations = Array.isArray(evidence) ? evidence : [];
-  const section = element("section", "ontology-inspector-section");
+  const section = element("section", "context-graph-inspector-section");
   section.append(textElement("h3", "", "Evidence · " + citations.length));
   if (!citations.length) {
     section.append(textElement("p", "empty-detail", "No evidence citations were provided."));
     return section;
   }
-  const list = element("ul", "ontology-evidence-list");
-  for (const citation of citations) list.append(textElement("li", "ontology-evidence", citation));
+  const list = element("ul", "context-graph-evidence-list");
+  for (const citation of citations) list.append(textElement("li", "context-graph-evidence", citation));
   section.append(list);
   return section;
 }
 
-function ontologyRelationshipSection(node, edges, graph) {
-  const section = element("section", "ontology-inspector-section");
+function contextGraphRelationshipSection(node, edges, graph) {
+  const section = element("section", "context-graph-inspector-section");
   section.append(textElement("h3", "", "Visible relationships · " + edges.length));
   if (!edges.length) {
     section.append(textElement("p", "empty-detail", "No visible relationships connect to this node."));
     return section;
   }
-  const list = element("div", "ontology-relationship-list");
+  const list = element("div", "context-graph-relationship-list");
   for (const edge of edges) {
     const outgoing = edge.source === node.id;
     const otherId = outgoing ? edge.target : edge.source;
     const other = graph.nodes.find(function(candidate) { return candidate.id === otherId; });
-    const button = element("button", "ontology-relationship");
+    const button = element("button", "context-graph-relationship");
     button.type = "button";
     button.append(
-      textElement("span", "ontology-relationship-title", (outgoing ? "Outgoing · " : "Incoming · ") + edge.predicate + " · " + (other ? friendlyNodeLabel(other, graph) : otherId)),
-      textElement("span", "ontology-relationship-meta", edge.plane + " · " + confidenceLabel(edge.confidence)),
-      textElement("span", "ontology-relationship-explanation", edge.why || "No relationship explanation provided. Select for full details.")
+      textElement("span", "context-graph-relationship-title", (outgoing ? "Outgoing · " : "Incoming · ") + edge.predicate + " · " + (other ? friendlyNodeLabel(other, graph) : otherId)),
+      textElement("span", "context-graph-relationship-meta", edge.plane + " · " + confidenceLabel(edge.confidence)),
+      textElement("span", "context-graph-relationship-explanation", edge.why || "No relationship explanation provided. Select for full details.")
     );
     button.addEventListener("click", function() {
-      ontologyViewState.selected = { kind: "edge", id: edge.id };
-      renderOntology();
+      contextGraphViewState.selected = { kind: "edge", id: edge.id };
+      renderContextGraph();
     });
     list.append(button);
   }
@@ -1590,12 +1590,12 @@ function renderContextResults() {
     return;
   }
   if (!contextState) return;
-  const graphMatches = contextGraphMatches(contextState, ontologyState.latest);
+  const graphMatches = contextGraphMatches(contextState, contextGraphState.latest);
   if (contextState.error) {
     contextResults.append(textElement("p", "empty-detail", contextState.error));
     return;
   }
-  contextResults.append(renderContextPrimary(contextState, graphMatches, ontologyState.latest));
+  contextResults.append(renderContextPrimary(contextState, graphMatches, contextGraphState.latest));
   const evidence = element("details", "context-full-evidence");
   evidence.open = contextEvidenceExpanded;
   evidence.addEventListener("toggle", function() {
@@ -1756,7 +1756,7 @@ function renderContextAnswer(state) {
 function renderCounterfactualDetails(value) {
   const details = element("div", "context-claims");
   details.append(textElement("h4", "", "Basis: " + (value.basis || "graph-derived")));
-  details.append(ontologyDetailGrid([
+  details.append(contextGraphDetailGrid([
     ["Intervention", value.intervention ? value.intervention.kind + " · " + value.intervention.label : "Unresolved"],
     ["Outcome", value.outcome ? value.outcome.kind + " · " + value.outcome.label : "Unresolved"],
     ["Known paths removed", String((value.removedPaths || []).length)],
@@ -1979,8 +1979,8 @@ function externalLink(label, url) {
   return link;
 }
 
-function ontologyStat(label, value) {
-  const stat = element("article", "ontology-stat");
+function contextGraphStat(label, value) {
+  const stat = element("article", "context-graph-stat");
   stat.append(textElement("span", "label", label), textElement("strong", "", value));
   return stat;
 }
@@ -2126,17 +2126,17 @@ function renderHistoryInspector(event) {
   const heading = element("header", "inspector-heading");
   heading.append(textElement("div", "", eventLabel(event)), textElement("span", "event-state", humanize(event.type.split(".").pop())));
   historyDetails.append(heading);
-  historyDetails.append(ontologyDetailGrid([
+  historyDetails.append(contextGraphDetailGrid([
     ["Event ID", event.id], ["Timestamp", formatTime(event.at)], ["Actor", humanize(context.actor)],
     ["Repository", context.repository], ["Source task", context.task?.title || "Board event"], ["Sequence", String(event.seq)]
   ]));
   const confidence = historyEventConfidence(event);
-  if (confidence !== undefined) historyDetails.append(ontologyConfidence("Recorded confidence", confidence, "Confidence supplied by the event producer."));
+  if (confidence !== undefined) historyDetails.append(contextGraphConfidence("Recorded confidence", confidence, "Confidence supplied by the event producer."));
   const evidence = Array.isArray(event.payload?.evidence) ? event.payload.evidence : [];
-  historyDetails.append(ontologyEvidenceSection(evidence));
-  historyDetails.append(ontologyExplanation(historyEventExplanation(event, context.task)));
+  historyDetails.append(contextGraphEvidenceSection(evidence));
+  historyDetails.append(contextGraphExplanation(historyEventExplanation(event, context.task)));
   if (event.payload && Object.keys(event.payload).length) {
-    const payload = element("section", "ontology-inspector-section");
+    const payload = element("section", "context-graph-inspector-section");
     payload.append(textElement("h3", "", "Payload"), textElement("pre", "inspector-payload", JSON.stringify(event.payload, null, 2)));
     historyDetails.append(payload);
   }
@@ -2152,7 +2152,7 @@ function historyEventExplanation(event, task) {
 function partitionBoardTasks(tasks) {
   const latestRequestByScope = new Map();
   for (const task of tasks) {
-    if (task.type !== "ontology_build") continue;
+    if (task.type !== "context_graph_build") continue;
     const metadata = task.metadata || {};
     if (!metadata.repository || !metadata.ref || !metadata.requestKey) continue;
     const scope = String(metadata.tenantId || "") + ":" + metadata.repository + ":" + metadata.ref;
@@ -2165,8 +2165,8 @@ function partitionBoardTasks(tasks) {
   const history = [];
   for (const task of tasks) {
     const metadata = task.metadata || {};
-    const ontologyTask = task.type.startsWith("ontology_") && metadata.repository && metadata.ref && metadata.requestKey;
-    if (ontologyTask) {
+    const contextGraphTask = task.type.startsWith("context_graph_") && metadata.repository && metadata.ref && metadata.requestKey;
+    if (contextGraphTask) {
       const scope = String(metadata.tenantId || "") + ":" + metadata.repository + ":" + metadata.ref;
       const latest = latestRequestByScope.get(scope);
       (latest && latest.requestKey === metadata.requestKey ? current : history).push(task);
@@ -2256,7 +2256,7 @@ function taskTypeMetrics(definition) {
 
 function taskTypeIcon(type) {
   if (/review/i.test(type)) return "⑂";
-  if (/ontology|graph/i.test(type)) return "⌘";
+  if (/context-graph|graph/i.test(type)) return "⌘";
   if (/issue|investig/i.test(type)) return "⌕";
   if (/document/i.test(type)) return "▤";
   if (/publish|release/i.test(type)) return "◇";
@@ -2614,7 +2614,7 @@ function eventLabel(event) {
     "task.created": "Task created", "task.queued": "Queued for execution", "task.transitioned": "Status changed",
     "task.dependency_added": "Dependency linked", "run.step": "Run comment", "review.completed": "Review completed",
     "publish.completed": "Publication comment", "github.issue_opened": "GitHub issue received"
-    ,"ontology.graph_created": "Ontology graph created", "ontology.failed": "Ontology build failed"
+    ,"contextGraph.graph_created": "ContextGraph graph created", "contextGraph.failed": "ContextGraph build failed"
   };
   return labels[event.type] || humanize(event.type);
 }
@@ -2670,7 +2670,7 @@ contextQuestion.addEventListener("input", function() {
   if (!contextQuestion.value.trim() && !contextSearchLoading) {
     contextState = null;
     contextSearchOpen = false;
-    renderOntology();
+    renderContextGraph();
   }
 });
 contextQuestion.addEventListener("focus", function() {
@@ -2693,7 +2693,7 @@ document.getElementById("context-search-clear").addEventListener("click", functi
   contextState = null;
   contextSearchOpen = false;
   contextEvidenceExpanded = false;
-  renderOntology();
+  renderContextGraph();
   contextQuestion.focus();
 });
 document.addEventListener("pointerdown", function(event) {
@@ -2735,25 +2735,25 @@ graphControls.addEventListener("click", function(event) {
   const filter = event.target.closest("[data-filter-group]");
   if (filter) {
     const menu = filter.closest("details");
-    ontologyViewState.filterMenuOpen = Boolean(menu?.open);
+    contextGraphViewState.filterMenuOpen = Boolean(menu?.open);
     toggleGraphFilter(filter.dataset.filterGroup, filter.dataset.filterType);
   }
 });
-ontologyGraph.addEventListener("click", function(event) {
-  if (event.target !== ontologyGraph || !ontologyViewState.selected) return;
-  ontologyViewState.selected = null;
-  renderOntology();
+contextGraph.addEventListener("click", function(event) {
+  if (event.target !== contextGraph || !contextGraphViewState.selected) return;
+  contextGraphViewState.selected = null;
+  renderContextGraph();
 });
 document.getElementById("context-query").addEventListener("submit", async function(event) {
   event.preventDefault();
-  const graph = ontologyState.latest;
+  const graph = contextGraphState.latest;
   if (!graph) return;
   const question = contextQuestion.value.trim();
   if (!question || contextSearchLoading) return;
   invalidateContextRequest();
   contextEvidenceExpanded = false;
   const requestSequence = contextRequestSequence;
-  const graphKey = ontologyGraphIdentity(graph);
+  const graphKey = contextGraphIdentity(graph);
   const abortController = new AbortController();
   contextAbortController = abortController;
   contextSearchOpen = true;
@@ -2761,15 +2761,15 @@ document.getElementById("context-query").addEventListener("submit", async functi
   contextState = null;
   renderContextResults();
   try {
-    const response = await fetch(API + "/ontology/ask", {
+    const response = await fetch(API + "/context-graph/ask", {
       method: "POST", headers: { "content-type": "application/json" },
       signal: abortController.signal,
       body: JSON.stringify({ repository: graph.repository, ref: graph.ref, question: question })
     });
     if (!response.ok) throw new Error("Context query failed with " + response.status);
     const nextContextState = await response.json();
-    if (requestSequence !== contextRequestSequence || contextQuestion.value.trim() !== question || !ontologyState.latest ||
-      ontologyGraphIdentity(ontologyState.latest) !== graphKey) return;
+    if (requestSequence !== contextRequestSequence || contextQuestion.value.trim() !== question || !contextGraphState.latest ||
+      contextGraphIdentity(contextGraphState.latest) !== graphKey) return;
     contextState = nextContextState;
   } catch (error) {
     if (requestSequence !== contextRequestSequence || error?.name === "AbortError") return;
@@ -2779,7 +2779,7 @@ document.getElementById("context-query").addEventListener("submit", async functi
   contextAbortController = null;
   contextSearchLoading = false;
   contextSearchOpen = true;
-  renderOntology();
+  renderContextGraph();
 });
 document.getElementById("assertion-predicate-filter").addEventListener("change", renderAssertionReview);
 document.getElementById("assertion-kind-filter").addEventListener("change", renderAssertionReview);

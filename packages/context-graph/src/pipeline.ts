@@ -1,10 +1,10 @@
 import {
   parseEvidenceCitation,
   stableId,
-  type GeneratedOntology,
-  type OntologyGraph,
-  type OntologyNodeKind,
-  type OntologySourceEvidence
+  type GeneratedContextGraph,
+  type ContextGraph,
+  type ContextGraphNodeKind,
+  type ContextGraphSourceEvidence
 } from "./model.js";
 import { canonicalJson, type AssertionStatus } from "./knowledge.js";
 import type { RepositorySourceObservation } from "./normalizers.js";
@@ -15,10 +15,10 @@ import {
   validateQualifiers
 } from "./registry.js";
 
-export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
-export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v13-causal";
-export const ONTOLOGY_PROJECTION_VERSION = "causal-graph-v3";
+export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
+export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
+export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v13-causal";
+export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v3";
 
 export interface RepositoryTreeEntry {
   readonly path: string;
@@ -106,7 +106,7 @@ export interface MovedFromCandidate {
   readonly matchingSignatureHashes: readonly string[];
 }
 
-/** Deterministic candidate generation only; ontology_assert must review MOVED_FROM before it becomes active knowledge. */
+/** Deterministic candidate generation only; context_graph_assert must review MOVED_FROM before it becomes active knowledge. */
 export function movedFromSimilarityCandidates(
   changes: readonly CommitChangeFact[],
   analyses: ReadonlyMap<string, BlobAnalysis>,
@@ -161,7 +161,7 @@ export function movedFromSimilarityCandidates(
   );
 }
 
-export interface OntologyIngestPlan {
+export interface ContextGraphIngestPlan {
   readonly observationId: string;
   readonly commitSha: string;
   readonly fileCount: number;
@@ -173,7 +173,7 @@ export interface OntologyIngestPlan {
   readonly missingBlobs: readonly { readonly blobSha: string; readonly path: string; readonly size: number }[];
 }
 
-export interface OntologySourceIngestResult {
+export interface ContextGraphSourceIngestResult {
   readonly observationCount: number;
   readonly observationIds: readonly string[];
   readonly assertionCount: number;
@@ -182,16 +182,16 @@ export interface OntologySourceIngestResult {
   readonly confirmedObservationCount: number;
 }
 
-export interface OntologyEntityRef {
-  readonly kind: OntologyNodeKind;
+export interface ContextGraphEntityRef {
+  readonly kind: ContextGraphNodeKind;
   readonly naturalKey: string;
   readonly label: string;
 }
 
 export interface GeneratedAssertion {
-  readonly subject: OntologyEntityRef;
+  readonly subject: ContextGraphEntityRef;
   readonly predicate: string;
-  readonly object: OntologyEntityRef;
+  readonly object: ContextGraphEntityRef;
   readonly confidence: number;
   /** Why the cited evidence supports this semantic relationship. */
   readonly explanation: string;
@@ -199,7 +199,7 @@ export interface GeneratedAssertion {
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
 }
 
-export interface OntologyAssertionBatch {
+export interface ContextGraphAssertionBatch {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
@@ -216,7 +216,7 @@ export interface OntologyAssertionBatch {
   readonly summary: string;
   /** Exact parsed model document before graph normalization. */
   readonly modelOutputRaw?: unknown;
-  readonly rawOutput: GeneratedOntology;
+  readonly rawOutput: GeneratedContextGraph;
   readonly assertions: readonly GeneratedAssertion[];
 }
 
@@ -240,7 +240,7 @@ export interface StoredAssertion extends Omit<GeneratedAssertion, "explanation">
   readonly recordedAt: string;
 }
 
-export interface OntologyAssertionResult {
+export interface ContextGraphAssertionResult {
   readonly observationId: string;
   readonly assertionCount: number;
   readonly activeCount: number;
@@ -250,38 +250,38 @@ export interface OntologyAssertionResult {
   readonly warnings: readonly string[];
 }
 
-export interface OntologyProjectionRequest {
+export interface ContextGraphProjectionRequest {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
   readonly commitSha: string;
   readonly taskId: string;
   readonly generatedAt: string;
-  readonly writeFence?: OntologyWriteFence;
+  readonly writeFence?: ContextGraphWriteFence;
 }
 
-export interface OntologyWriteFence {
+export interface ContextGraphWriteFence {
   readonly stageId: string;
   readonly leaseId: string;
 }
 
-export interface OntologyPipelineStore {
+export interface ContextGraphPipelineStore {
   knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]>;
-  planIngestion(snapshot: RepositorySnapshot, writeFence?: OntologyWriteFence): Promise<OntologyIngestPlan>;
+  planIngestion(snapshot: RepositorySnapshot, writeFence?: ContextGraphWriteFence): Promise<ContextGraphIngestPlan>;
   applyBlobAnalyses(
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
     analyses: readonly BlobAnalysis[],
-    writeFence?: OntologyWriteFence
+    writeFence?: ContextGraphWriteFence
   ): Promise<void>;
   applyGitHubObservations(
     observations: readonly RepositorySourceObservation[],
-    writeFence?: OntologyWriteFence
-  ): Promise<OntologySourceIngestResult>;
+    writeFence?: ContextGraphWriteFence
+  ): Promise<ContextGraphSourceIngestResult>;
   loadAssertionEvidence(
     tenantId: string,
     repository: string,
     observationIds: readonly string[]
-  ): Promise<readonly OntologySourceEvidence[]>;
+  ): Promise<readonly ContextGraphSourceEvidence[]>;
   hasAssertionGeneration(
     tenantId: string,
     repository: string,
@@ -289,12 +289,15 @@ export interface OntologyPipelineStore {
     generatorVersion: string,
     registryVersion: string,
     evidenceFingerprint: string
-  ): Promise<OntologyAssertionResult | undefined>;
-  saveAssertionBatch(batch: OntologyAssertionBatch, writeFence?: OntologyWriteFence): Promise<OntologyAssertionResult>;
-  project(request: OntologyProjectionRequest): Promise<OntologyGraph>;
+  ): Promise<ContextGraphAssertionResult | undefined>;
+  saveAssertionBatch(
+    batch: ContextGraphAssertionBatch,
+    writeFence?: ContextGraphWriteFence
+  ): Promise<ContextGraphAssertionResult>;
+  project(request: ContextGraphProjectionRequest): Promise<ContextGraph>;
 }
 
-function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly StoredAssertion[] {
+function normalizeAssertionBatch(batch: ContextGraphAssertionBatch): readonly StoredAssertion[] {
   const observationId = assertionObservationId(batch);
   const seen = new Set<string>();
   return batch.assertions.map((assertion) => {
@@ -309,7 +312,7 @@ function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly Stored
     if (assertion.evidence.length === 0) throw new Error(`${predicate} must include evidence`);
     const evidence = assertion.evidence.map((value) => parseEvidenceCitation(value).value);
     const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
-    if (seen.has(key)) throw new Error(`duplicate ontology assertion: ${key}`);
+    if (seen.has(key)) throw new Error(`duplicate contextGraph assertion: ${key}`);
     seen.add(key);
     return {
       ...assertion,
@@ -333,7 +336,7 @@ function normalizeAssertionBatch(batch: OntologyAssertionBatch): readonly Stored
   });
 }
 
-export function normalizeAssertionBatchLenient(batch: OntologyAssertionBatch): {
+export function normalizeAssertionBatchLenient(batch: ContextGraphAssertionBatch): {
   readonly assertions: readonly StoredAssertion[];
   readonly warnings: readonly string[];
 } {
@@ -346,7 +349,7 @@ export function normalizeAssertionBatchLenient(batch: OntologyAssertionBatch): {
       if (!normalized) continue;
       const key = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}:${canonicalJson(normalized.qualifiers ?? {})}`;
       if (seen.has(key)) {
-        warnings.push(`duplicate ontology assertion ignored: ${key}`);
+        warnings.push(`duplicate contextGraph assertion ignored: ${key}`);
         continue;
       }
       seen.add(key);
@@ -360,7 +363,7 @@ export function normalizeAssertionBatchLenient(batch: OntologyAssertionBatch): {
 
 export function assertionObservationId(
   batch: Pick<
-    OntologyAssertionBatch,
+    ContextGraphAssertionBatch,
     "tenantId" | "repository" | "commitSha" | "generatorVersion" | "registryVersion" | "evidenceFingerprint"
   >
 ): string {
@@ -456,7 +459,7 @@ export function knowledgeCheckpoint(
   );
 }
 
-export function entityKey(entity: OntologyEntityRef): string {
+export function entityKey(entity: ContextGraphEntityRef): string {
   return `${entity.kind}:${entity.naturalKey}`;
 }
 
@@ -502,8 +505,8 @@ export function computeCommitChanges(
 }
 
 /** Pure normalizer from an immutable model observation to proposed assertion intents. */
-export function assertionsFromGeneratedOntology(
-  generated: GeneratedOntology,
+export function assertionsFromGeneratedContextGraph(
+  generated: GeneratedContextGraph,
   repository: string,
   options: {
     readonly sourcePullRequestNumbers?: readonly number[];
@@ -555,8 +558,8 @@ export function assertionsFromGeneratedOntology(
 }
 
 function validateDerivedIssueNodes(
-  generated: GeneratedOntology,
-  nodes: ReadonlyMap<string, GeneratedOntology["nodes"][number]>,
+  generated: GeneratedContextGraph,
+  nodes: ReadonlyMap<string, GeneratedContextGraph["nodes"][number]>,
   sourcePullRequestNumbers: readonly number[],
   resolvedPullRequestNumbers: readonly number[]
 ): void {
@@ -602,7 +605,7 @@ export function featureNaturalKey(repository: string, featureId: string): string
   return `repo:${repository}:feature:${slug.toLowerCase().replaceAll("_", "-")}`;
 }
 
-function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: string): string {
+function entityNaturalKey(node: GeneratedContextGraph["nodes"][number], repository: string): string {
   if (node.kind === "Repository") return `github:repo:${repository}`;
   if ((node.kind === "File" || node.kind === "Document") && node.path) return `repo:${repository}:path:${node.path}`;
   if (node.kind === "Symbol") return `repo:${repository}:moniker:${node.id}`;

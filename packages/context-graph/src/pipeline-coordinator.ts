@@ -1,11 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { stableId } from "./model.js";
 
-export type OntologyWorkerTopic = "run-ontology-ingest" | "run-ontology-assert" | "run-ontology-project";
-export type OntologyStageStatus = "triage" | "queued" | "in_progress" | "done" | "failed" | "canceled" | "superseded";
-export type OntologyBuildStatus = "queued" | "in_progress" | "enriching" | "done" | "failed" | "superseded";
+export type ContextGraphWorkerTopic =
+  "run-context-graph-ingest" | "run-context-graph-assert" | "run-context-graph-project";
+export type ContextGraphStageStatus =
+  "triage" | "queued" | "in_progress" | "done" | "failed" | "canceled" | "superseded";
+export type ContextGraphBuildStatus = "queued" | "in_progress" | "enriching" | "done" | "failed" | "superseded";
 
-export interface OntologyPipelineBuildRequest {
+export interface ContextGraphPipelineBuildRequest {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
@@ -17,20 +19,20 @@ export interface OntologyPipelineBuildRequest {
   readonly dedupeHeadSha?: string;
 }
 
-export interface OntologyBuildRecord {
+export interface ContextGraphBuildRecord {
   readonly id: string;
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
   readonly requestKey: string;
-  readonly status: OntologyBuildStatus;
+  readonly status: ContextGraphBuildStatus;
   readonly snapshotFirst: boolean;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly createdAt: string;
   readonly updatedAt: string;
 }
 
-export interface OntologyStageRecord {
+export interface ContextGraphStageRecord {
   readonly id: string;
   readonly buildId: string;
   readonly tenantId: string;
@@ -39,8 +41,8 @@ export interface OntologyStageRecord {
   readonly requestKey: string;
   readonly phase: "snapshot" | "history";
   readonly stage: "ingest" | "assert" | "project";
-  readonly topic: OntologyWorkerTopic;
-  readonly status: OntologyStageStatus;
+  readonly topic: ContextGraphWorkerTopic;
+  readonly status: ContextGraphStageStatus;
   readonly priority: number;
   readonly metadata: Readonly<Record<string, unknown>>;
   readonly attempt: number;
@@ -54,32 +56,32 @@ export interface OntologyStageRecord {
   readonly updatedAt: string;
 }
 
-export interface OntologyStageClaim {
+export interface ContextGraphStageClaim {
   readonly message: {
     readonly id: string;
-    readonly topic: OntologyWorkerTopic;
+    readonly topic: ContextGraphWorkerTopic;
     readonly leaseId: string;
     readonly leaseExpiresAt: string;
   };
   readonly task: {
     readonly id: string;
-    readonly type: `ontology_${"ingest" | "assert" | "project"}`;
+    readonly type: `context_graph_${"ingest" | "assert" | "project"}`;
     readonly status: "in_progress";
     readonly metadata: Readonly<Record<string, unknown>>;
   };
 }
 
-export interface OntologyStageLease {
+export interface ContextGraphStageLease {
   readonly stageId: string;
   readonly leaseId: string;
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
-  readonly topic: OntologyWorkerTopic;
+  readonly topic: ContextGraphWorkerTopic;
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
-export interface OntologyTaskBoardEvent {
+export interface ContextGraphTaskBoardEvent {
   readonly id: string;
   readonly taskId: string;
   readonly type: string;
@@ -87,15 +89,15 @@ export interface OntologyTaskBoardEvent {
   readonly payload: Readonly<Record<string, unknown>>;
 }
 
-export interface OntologyPipelineCoordinator {
-  createBuild(request: OntologyPipelineBuildRequest): Promise<OntologyBuildRecord>;
+export interface ContextGraphPipelineCoordinator {
+  createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord>;
   claim(input: {
     readonly tenantId: string;
     readonly workerId: string;
-    readonly topics: readonly OntologyWorkerTopic[];
+    readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
     readonly leaseExpiresAt: string;
-  }): Promise<OntologyStageClaim | undefined>;
+  }): Promise<ContextGraphStageClaim | undefined>;
   renew(input: {
     readonly tenantId: string;
     readonly stageId: string;
@@ -114,9 +116,9 @@ export interface OntologyPipelineCoordinator {
     readonly tenantId: string;
     readonly stageId: string;
     readonly leaseId: string;
-    readonly topic?: OntologyWorkerTopic;
+    readonly topic?: ContextGraphWorkerTopic;
     readonly now: string;
-  }): Promise<OntologyStageLease | undefined>;
+  }): Promise<ContextGraphStageLease | undefined>;
   complete(input: {
     readonly tenantId: string;
     readonly stageId: string;
@@ -138,25 +140,27 @@ export interface OntologyPipelineCoordinator {
   list(
     tenantId: string,
     filter?: { readonly repositories?: readonly string[] }
-  ): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]>;
+  ): Promise<
+    readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[]
+  >;
   listEvents(
     tenantId: string,
     filter?: { readonly taskIds?: readonly string[] }
-  ): Promise<readonly OntologyTaskBoardEvent[]>;
+  ): Promise<readonly ContextGraphTaskBoardEvent[]>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }
 
-interface MutableBuild extends Omit<OntologyBuildRecord, "status" | "updatedAt"> {
-  status: OntologyBuildStatus;
+interface MutableBuild extends Omit<ContextGraphBuildRecord, "status" | "updatedAt"> {
+  status: ContextGraphBuildStatus;
   updatedAt: string;
 }
 
 interface MutableStage extends Omit<
-  OntologyStageRecord,
+  ContextGraphStageRecord,
   "status" | "metadata" | "attempt" | "updatedAt" | "startedAt" | "completedAt" | "durationMs"
 > {
-  status: OntologyStageStatus;
+  status: ContextGraphStageStatus;
   metadata: Record<string, unknown>;
   attempt: number;
   updatedAt: string;
@@ -169,13 +173,13 @@ interface MutableStage extends Omit<
 }
 
 /** In-memory implementation used by tests and local development. */
-export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordinator {
+export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipelineCoordinator {
   private readonly builds = new Map<string, MutableBuild>();
   private readonly stages = new Map<string, MutableStage>();
   private readonly checkpoints = new Map<string, Readonly<Record<string, unknown>>>();
-  private readonly events: OntologyTaskBoardEvent[] = [];
+  private readonly events: ContextGraphTaskBoardEvent[] = [];
 
-  async createBuild(request: OntologyPipelineBuildRequest): Promise<OntologyBuildRecord> {
+  async createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord> {
     if (request.dedupeHeadSha) {
       const latest = [...this.builds.values()]
         .filter(
@@ -208,7 +212,7 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
       }
     }
     const id = stableId(
-      "ontology-job",
+      "context-graph-job",
       `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
     );
     const existing = this.builds.get(id);
@@ -221,11 +225,11 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
       updatedAt: request.createdAt
     };
     this.builds.set(id, build);
-    this.recordEvent(id, "task.created", request.createdAt, { type: "ontology_build" });
+    this.recordEvent(id, "task.created", request.createdAt, { type: "context_graph_build" });
     for (const stage of plannedStages(build)) {
       this.stages.set(stage.id, stage);
       this.recordEvent(stage.id, "task.created", request.createdAt, {
-        type: `ontology_${stage.stage}`,
+        type: `context_graph_${stage.stage}`,
         phase: stage.phase
       });
     }
@@ -235,10 +239,10 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
   async claim(input: {
     readonly tenantId: string;
     readonly workerId: string;
-    readonly topics: readonly OntologyWorkerTopic[];
+    readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
     readonly leaseExpiresAt: string;
-  }): Promise<OntologyStageClaim | undefined> {
+  }): Promise<ContextGraphStageClaim | undefined> {
     for (const stage of this.stages.values()) {
       if (stage.status === "in_progress" && stage.leaseExpiresAt && stage.leaseExpiresAt <= input.now) {
         stage.status = "queued";
@@ -332,9 +336,9 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     readonly tenantId: string;
     readonly stageId: string;
     readonly leaseId: string;
-    readonly topic?: OntologyWorkerTopic;
+    readonly topic?: ContextGraphWorkerTopic;
     readonly now: string;
-  }): Promise<OntologyStageLease | undefined> {
+  }): Promise<ContextGraphStageLease | undefined> {
     const stage = this.stages.get(input.stageId);
     if (!validLease(stage, input.tenantId, input.leaseId, input.now) || (input.topic && stage!.topic !== input.topic))
       return undefined;
@@ -374,7 +378,7 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     clearLease(stage!);
     const build = this.builds.get(stage!.buildId)!;
     if (input.outcome === "failed") {
-      if (ontologyStageRequired(stage!)) {
+      if (contextGraphStageRequired(stage!)) {
         build.status = "failed";
         for (const candidate of this.stages.values()) {
           if (candidate.buildId === build.id && candidate.status === "triage") candidate.status = "canceled";
@@ -408,7 +412,9 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
   async list(
     tenantId: string,
     filter?: { readonly repositories?: readonly string[] }
-  ): Promise<readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[]> {
+  ): Promise<
+    readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[]
+  > {
     const repositories = filter?.repositories ? new Set(filter.repositories) : undefined;
     return [...this.builds.values()]
       .filter((build) => build.tenantId === tenantId && (!repositories || repositories.has(build.repository)))
@@ -424,7 +430,7 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
   async listEvents(
     tenantId: string,
     filter?: { readonly taskIds?: readonly string[] }
-  ): Promise<readonly OntologyTaskBoardEvent[]> {
+  ): Promise<readonly ContextGraphTaskBoardEvent[]> {
     const requested = filter?.taskIds ? new Set(filter.taskIds) : undefined;
     const taskIds = new Set([
       ...[...this.builds.values()].filter((build) => build.tenantId === tenantId).map((build) => build.id),
@@ -462,7 +468,7 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     for (const candidate of stages
       .filter((item) => item.status === "triage")
       .sort((a, b) => stageOrder(a) - stageOrder(b))) {
-      const ready = ontologyStagePrerequisites(candidate, build.snapshotFirst).every((prerequisite) =>
+      const ready = contextGraphStagePrerequisites(candidate, build.snapshotFirst).every((prerequisite) =>
         stages.some(
           (item) => item.phase === prerequisite.phase && item.stage === prerequisite.stage && item.status === "done"
         )
@@ -477,9 +483,9 @@ export class MemoryOntologyPipelineCoordinator implements OntologyPipelineCoordi
     }
   }
 
-  private buildStatus(build: MutableBuild): OntologyBuildStatus {
+  private buildStatus(build: MutableBuild): ContextGraphBuildStatus {
     const stages = [...this.stages.values()].filter((candidate) => candidate.buildId === build.id);
-    if (stages.some((stage) => ontologyStageRequired(stage) && stage.status === "failed")) return "failed";
+    if (stages.some((stage) => contextGraphStageRequired(stage) && stage.status === "failed")) return "failed";
     if (stages.every((stage) => ["done", "failed", "canceled", "superseded"].includes(stage.status))) return "done";
     if (
       build.snapshotFirst &&
@@ -500,7 +506,7 @@ function plannedStages(build: MutableBuild): MutableStage[] {
     : [{ phase: "history", priority: 50 }];
   return phases.flatMap(({ phase, priority }, phaseIndex) =>
     (["ingest", "assert", "project"] as const).map((stage, stageIndex) => {
-      const id = stableId("ontology-stage", `${build.id}:${phase}:${stage}`);
+      const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
       return {
         id,
         buildId: build.id,
@@ -510,7 +516,7 @@ function plannedStages(build: MutableBuild): MutableStage[] {
         requestKey: build.requestKey,
         phase,
         stage,
-        topic: `run-ontology-${stage}` as OntologyWorkerTopic,
+        topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
         status: phaseIndex === 0 && stageIndex === 0 ? ("queued" as const) : ("triage" as const),
         priority,
         metadata: {
@@ -529,15 +535,15 @@ function plannedStages(build: MutableBuild): MutableStage[] {
   );
 }
 
-export function ontologyStagePrerequisites(
-  stage: Pick<OntologyStageRecord, "phase" | "stage">,
+export function contextGraphStagePrerequisites(
+  stage: Pick<ContextGraphStageRecord, "phase" | "stage">,
   snapshotFirst: boolean
-): readonly Pick<OntologyStageRecord, "phase" | "stage">[] {
+): readonly Pick<ContextGraphStageRecord, "phase" | "stage">[] {
   if (stage.stage !== "ingest") return [{ phase: stage.phase, stage: "ingest" }];
   return snapshotFirst && stage.phase === "history" ? [{ phase: "snapshot", stage: "ingest" }] : [];
 }
 
-export function ontologyStageRequired(stage: Pick<OntologyStageRecord, "stage">): boolean {
+export function contextGraphStageRequired(stage: Pick<ContextGraphStageRecord, "stage">): boolean {
   return stage.stage !== "assert";
 }
 
@@ -558,11 +564,11 @@ function clearLease(stage: MutableStage): void {
   delete stage.leaseExpiresAt;
 }
 
-function stageOrder(stage: Pick<OntologyStageRecord, "phase" | "stage">): number {
+function stageOrder(stage: Pick<ContextGraphStageRecord, "phase" | "stage">): number {
   return (stage.phase === "snapshot" ? 0 : 3) + (stage.stage === "ingest" ? 0 : stage.stage === "assert" ? 1 : 2);
 }
 
-function leaseView(stage: MutableStage): OntologyStageLease {
+function leaseView(stage: MutableStage): ContextGraphStageLease {
   return {
     stageId: stage.id,
     leaseId: stage.leaseId!,
@@ -574,12 +580,12 @@ function leaseView(stage: MutableStage): OntologyStageLease {
   };
 }
 
-function claimView(stage: MutableStage): OntologyStageClaim {
+function claimView(stage: MutableStage): ContextGraphStageClaim {
   return {
     message: { id: stage.id, topic: stage.topic, leaseId: stage.leaseId!, leaseExpiresAt: stage.leaseExpiresAt! },
     task: {
       id: stage.id,
-      type: `ontology_${stage.stage}`,
+      type: `context_graph_${stage.stage}`,
       status: "in_progress",
       metadata: structuredClone(stage.metadata)
     }

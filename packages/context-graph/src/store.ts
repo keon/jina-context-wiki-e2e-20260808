@@ -1,20 +1,20 @@
 import {
-  createOntologyGraph,
+  createContextGraph,
   stableId,
-  summarizeOntologyGraph,
-  type OntologyEdge,
-  type OntologyGraph,
-  type OntologyGraphSummary,
-  type OntologyNode,
-  type OntologySourceEvidence
+  summarizeContextGraph,
+  type ContextGraphEdge,
+  type ContextGraph,
+  type ContextGraphSummary,
+  type ContextGraphNode,
+  type ContextGraphSourceEvidence
 } from "./model.js";
 import type {
-  OntologyAssertionSummary,
-  OntologyCommand,
-  OntologyCommandResult,
+  ContextGraphAssertionSummary,
+  ContextGraphCommand,
+  ContextGraphCommandResult,
   RepositoryContextOperations
 } from "./operations.js";
-import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
+import type { ContextGraphOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
 import { canonicalJson } from "./knowledge.js";
 import {
   codeownersPatternMatches,
@@ -26,7 +26,7 @@ import {
   type RepositorySourceObservation
 } from "./normalizers.js";
 import {
-  ONTOLOGY_REGISTRY_VERSION,
+  CONTEXT_GRAPH_REGISTRY_VERSION,
   predicateDefinition,
   validatePredicateEndpoints,
   validateQualifiers
@@ -34,8 +34,8 @@ import {
 import type { IssueTraceProjection, RetrievalRequest, RetrievalResult } from "./retrieval.js";
 import { causalTraceItemsFromGraph } from "./causal.js";
 import {
-  ONTOLOGY_PARSER_VERSION,
-  ONTOLOGY_PROJECTION_VERSION,
+  CONTEXT_GRAPH_PARSER_VERSION,
+  CONTEXT_GRAPH_PROJECTION_VERSION,
   assertionObservationId,
   computeCommitChanges,
   entityKey,
@@ -43,47 +43,47 @@ import {
   normalizeAssertionBatchLenient,
   sourceObservationId,
   type BlobAnalysis,
-  type OntologyAssertionBatch,
-  type OntologyAssertionResult,
-  type OntologyIngestPlan,
-  type OntologyPipelineStore,
-  type OntologyProjectionRequest,
-  type OntologySourceIngestResult,
-  type OntologyWriteFence,
+  type ContextGraphAssertionBatch,
+  type ContextGraphAssertionResult,
+  type ContextGraphIngestPlan,
+  type ContextGraphPipelineStore,
+  type ContextGraphProjectionRequest,
+  type ContextGraphSourceIngestResult,
+  type ContextGraphWriteFence,
   type RepositorySnapshot,
   type StoredAssertion
 } from "./pipeline.js";
 import { DomainError } from "@jina/shared-kernel";
 
-export interface OntologyGraphStore extends OntologyPipelineStore, RepositoryContextOperations {
-  save(graph: OntologyGraph, writeFence?: OntologyWriteFence): Promise<void>;
-  latest(tenantId: string): Promise<OntologyGraph | undefined>;
+export interface ContextGraphStore extends ContextGraphPipelineStore, RepositoryContextOperations {
+  save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void>;
+  latest(tenantId: string): Promise<ContextGraph | undefined>;
   currentGraphHead(
     tenantId: string,
     repository: string,
     ref: string
   ): Promise<{ readonly graphId: string; readonly commitSha: string } | undefined>;
-  get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
-  list(tenantId: string): Promise<readonly OntologyGraph[]>;
-  listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]>;
+  get(graphId: string, tenantId: string): Promise<ContextGraph | undefined>;
+  list(tenantId: string): Promise<readonly ContextGraph[]>;
+  listSummaries(tenantId: string): Promise<readonly ContextGraphSummary[]>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
 
-export class MemoryOntologyGraphStore implements OntologyGraphStore {
-  private readonly graphs = new Map<string, OntologyGraph>();
+export class MemoryContextGraphStore implements ContextGraphStore {
+  private readonly graphs = new Map<string, ContextGraph>();
   private readonly snapshots = new Map<string, RepositorySnapshot>();
   private readonly blobAnalyses = new Map<string, BlobAnalysis>();
   private readonly assertionBatches = new Map<
     string,
-    { readonly batch: OntologyAssertionBatch; readonly assertions: readonly StoredAssertion[] }
+    { readonly batch: ContextGraphAssertionBatch; readonly assertions: readonly StoredAssertion[] }
   >();
   private readonly sourceAssertions = new Map<string, StoredAssertion>();
   private readonly humanAssertions = new Map<string, StoredAssertion>();
   private readonly repositoryAcl = new Map<string, Map<string, "reader" | "writer" | "admin">>();
   private readonly repositoryTombstones = new Set<string>();
-  private readonly memoryAudit: OntologyCommandResult[] = [];
+  private readonly memoryAudit: ContextGraphCommandResult[] = [];
   private readonly assertionRelations: {
     readonly sourceAssertionId: string;
     readonly relation: "supports" | "contradicts";
@@ -92,12 +92,12 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }[] = [];
   private readonly sourceObservations: RepositorySourceObservation[] = [];
 
-  async save(graph: OntologyGraph): Promise<void> {
+  async save(graph: ContextGraph): Promise<void> {
     this.assertRepositoryWritable(graph.tenantId, graph.repository);
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
   }
 
-  async latest(tenantId: string): Promise<OntologyGraph | undefined> {
+  async latest(tenantId: string): Promise<ContextGraph | undefined> {
     return (await this.list(tenantId))[0];
   }
 
@@ -110,19 +110,19 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return head ? { graphId: head.id, commitSha: head.commitSha } : undefined;
   }
 
-  async get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined> {
+  async get(graphId: string, tenantId: string): Promise<ContextGraph | undefined> {
     const graph = this.graphs.get(graphId);
     return graph?.tenantId === tenantId ? graph : undefined;
   }
 
-  async list(tenantId: string): Promise<readonly OntologyGraph[]> {
+  async list(tenantId: string): Promise<readonly ContextGraph[]> {
     return [...this.graphs.values()]
       .filter((graph) => graph.tenantId === tenantId)
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
   }
 
-  async listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]> {
-    return (await this.list(tenantId)).map(summarizeOntologyGraph);
+  async listSummaries(tenantId: string): Promise<readonly ContextGraphSummary[]> {
+    return (await this.list(tenantId)).map(summarizeContextGraph);
   }
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void> {
@@ -136,7 +136,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return commitShas.filter((sha) => this.snapshots.has(snapshotKey(tenantId, repository, sha)));
   }
 
-  async planIngestion(snapshot: RepositorySnapshot): Promise<OntologyIngestPlan> {
+  async planIngestion(snapshot: RepositorySnapshot): Promise<ContextGraphIngestPlan> {
     this.assertRepositoryWritable(snapshot.tenantId, snapshot.repository);
     const parent = snapshot.parents[0]
       ? this.snapshots.get(snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.parents[0]))
@@ -174,7 +174,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       if (!firstPathByBlob.has(file.blobSha)) firstPathByBlob.set(file.blobSha, { path: file.path, size: file.size });
     }
     const missingBlobs = [...firstPathByBlob].flatMap(([blobSha, file]) =>
-      this.blobAnalyses.has(blobKey(snapshot.tenantId, blobSha, ONTOLOGY_PARSER_VERSION)) ? [] : [{ blobSha, ...file }]
+      this.blobAnalyses.has(blobKey(snapshot.tenantId, blobSha, CONTEXT_GRAPH_PARSER_VERSION))
+        ? []
+        : [{ blobSha, ...file }]
     );
     const changes = computeCommitChanges(files, parent?.files);
     const changedPaths = changes.filter((change) => change.change !== "delete").map((change) => change.path);
@@ -208,7 +210,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
 
   async applyGitHubObservations(
     observations: readonly RepositorySourceObservation[]
-  ): Promise<OntologySourceIngestResult> {
+  ): Promise<ContextGraphSourceIngestResult> {
     for (const observation of observations) this.assertRepositoryWritable(observation.tenantId, observation.repository);
     let newObservationCount = 0;
     let updatedObservationCount = 0;
@@ -247,7 +249,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     tenantId: string,
     repository: string,
     observationIds: readonly string[]
-  ): Promise<readonly OntologySourceEvidence[]> {
+  ): Promise<readonly ContextGraphSourceEvidence[]> {
     const requested = new Set(observationIds);
     const evidence = this.sourceObservations.flatMap((observation) => {
       const id = sourceObservationIdForRepository(observation);
@@ -275,14 +277,14 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     generatorVersion: string,
     registryVersion: string,
     evidenceFingerprint: string
-  ): Promise<OntologyAssertionResult | undefined> {
+  ): Promise<ContextGraphAssertionResult | undefined> {
     const stored = this.assertionBatches.get(
       assertionKey(tenantId, repository, commitSha, generatorVersion, registryVersion, evidenceFingerprint)
     );
     return stored ? assertionResult(stored.batch, stored.assertions, true) : undefined;
   }
 
-  async saveAssertionBatch(batch: OntologyAssertionBatch): Promise<OntologyAssertionResult> {
+  async saveAssertionBatch(batch: ContextGraphAssertionBatch): Promise<ContextGraphAssertionResult> {
     this.assertRepositoryWritable(batch.tenantId, batch.repository);
     const key = assertionKey(
       batch.tenantId,
@@ -309,10 +311,10 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return assertionResult(batch, assertions, false, normalized.warnings);
   }
 
-  async project(request: OntologyProjectionRequest): Promise<OntologyGraph> {
+  async project(request: ContextGraphProjectionRequest): Promise<ContextGraph> {
     this.assertRepositoryWritable(request.tenantId, request.repository);
     const snapshot = this.snapshots.get(snapshotKey(request.tenantId, request.repository, request.commitSha));
-    if (!snapshot) throw new Error("cannot project an ontology before repository ingestion");
+    if (!snapshot) throw new Error("cannot project an contextGraph before repository ingestion");
     const assertions = dedupeApplicableAssertions(
       this.allAssertions()
         .filter((assertion) => assertion.tenantId === request.tenantId && assertion.repository === request.repository)
@@ -323,7 +325,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
           return source ? assertionEvidenceIsCurrent(assertion, source, snapshot) : false;
         })
     );
-    const graph = createOntologyProjection(snapshot, this.blobAnalyses, assertions, request);
+    const graph = createContextGraphProjection(snapshot, this.blobAnalyses, assertions, request);
     await this.save(graph);
     return graph;
   }
@@ -341,16 +343,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   async executeCommand(
     tenantId: string,
     actorId: string,
-    command: OntologyCommand,
+    command: ContextGraphCommand,
     now: string,
     actorIsTenantAdmin = false
-  ): Promise<OntologyCommandResult> {
+  ): Promise<ContextGraphCommandResult> {
     if (!actorId.startsWith("svc:") && !actorIsTenantAdmin) {
       const repository = "repository" in command ? command.repository : undefined;
       const role = repository ? this.repositoryAcl.get(`${tenantId}:${actorId}`)?.get(repository) : undefined;
       const requiresAdmin = command.type === "grant_repository_access" || command.type === "tombstone_repository";
       if (!role || role === "reader" || (requiresAdmin && role !== "admin")) {
-        throw new DomainError("ontology command access denied", "forbidden");
+        throw new DomainError("contextGraph command access denied", "forbidden");
       }
     }
     const affectedIds: string[] = [];
@@ -494,7 +496,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       command.type === "merge_entities" ||
       command.type === "unmerge_entities"
     ) {
-      throw new DomainError(`${command.type} requires the relational ontology store`, "conflict");
+      throw new DomainError(`${command.type} requires the relational contextGraph store`, "conflict");
     } else if (command.type === "assign_relationship") {
       if (command.repository) this.assertRepositoryWritable(tenantId, command.repository);
       const definition = predicateDefinition(command.predicate);
@@ -533,7 +535,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         status: "proposed",
         lastConfirmedAt: now,
         generatorVersion: "human-command-v1",
-        registryVersion: ONTOLOGY_REGISTRY_VERSION,
+        registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
         recordedAt: now
       });
       affectedIds.push(id);
@@ -581,7 +583,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     return { processedEventCount: 0, rebuiltRepositories: [] };
   }
 
-  async operationalMetrics(tenantId: string): Promise<OntologyOperationalMetrics> {
+  async operationalMetrics(tenantId: string): Promise<ContextGraphOperationalMetrics> {
     return {
       outboxDepth: {},
       outboxDepthByConsumer: {},
@@ -590,7 +592,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       unparsedBlobCount: [...this.snapshots.values()]
         .filter((snapshot) => snapshot.tenantId === tenantId)
         .flatMap((snapshot) => snapshot.files)
-        .filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION))).length,
+        .filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION))).length,
       parsedBlobCountLastHour: 0,
       manifestStalenessSeconds: 0,
       searchStalenessSeconds: 0,
@@ -626,9 +628,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     filter: {
       readonly status?: StoredAssertion["status"];
       readonly predicate?: string;
-      readonly entityKind?: OntologyNode["kind"];
+      readonly entityKind?: ContextGraphNode["kind"];
     } = {}
-  ): Promise<readonly OntologyAssertionSummary[]> {
+  ): Promise<readonly ContextGraphAssertionSummary[]> {
     return this.allAssertions()
       .filter((assertion) => assertion.tenantId === tenantId && assertion.repository === repository)
       .filter((assertion) => !filter.status || assertion.status === filter.status)
@@ -778,7 +780,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
           qualifiers,
           lastConfirmedAt: observation.recordedAt,
           generatorVersion: `${sourceObservationProvider(observation)}-normalizer-v1`,
-          registryVersion: ONTOLOGY_REGISTRY_VERSION,
+          registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
           recordedAt: observation.recordedAt
         });
       }
@@ -797,7 +799,7 @@ function memoryIssueTraceItems(
   observations: readonly GitHubSourceObservation[],
   snapshots: ReadonlyMap<string, RepositorySnapshot>,
   assertions: readonly StoredAssertion[],
-  batches: readonly OntologyAssertionBatch[]
+  batches: readonly ContextGraphAssertionBatch[]
 ): RetrievalResult["items"] {
   const scoped = latestMemorySourceObservations(observations).filter(
     (observation): observation is GitHubWorkItemObservation =>
@@ -1076,7 +1078,10 @@ function numberFromEntityNaturalKey(naturalKey: string): number | undefined {
   return value ? Number.parseInt(value, 10) : undefined;
 }
 
-function derivedIssueDescriptionFromBatch(batch: OntologyAssertionBatch, issueNaturalKey: string): string | undefined {
+function derivedIssueDescriptionFromBatch(
+  batch: ContextGraphAssertionBatch,
+  issueNaturalKey: string
+): string | undefined {
   const resolution = batch.assertions.find(
     (assertion) => assertion.predicate === "RESOLVES" && assertion.object.naturalKey === issueNaturalKey
   );
@@ -1239,7 +1244,7 @@ function memoryRetrievalItems(
     return snapshot.files
       .filter((file) => !request.path || file.path === request.path)
       .flatMap((file) => {
-        const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION));
+        const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
         const definitions = (analysis?.symbols ?? [])
           .filter(
             (symbol) =>
@@ -1354,19 +1359,19 @@ function memoryRetrievalItems(
     }));
 }
 
-export function createOntologyProjection(
+export function createContextGraphProjection(
   snapshot: RepositorySnapshot,
   analyses: ReadonlyMap<string, BlobAnalysis>,
   assertions: readonly StoredAssertion[],
-  request: OntologyProjectionRequest
-): OntologyGraph {
+  request: ContextGraphProjectionRequest
+): ContextGraph {
   const files = [...snapshot.files]
     .sort((a, b) => filePriority(a.path) - filePriority(b.path) || a.path.localeCompare(b.path))
     .slice(0, 80);
   if (files.length === 0) throw new Error("cannot project an empty repository snapshot");
   const fallbackEvidence = `${files[0]!.path}:1`;
-  const nodes = new Map<string, OntologyNode>();
-  const edges: Omit<OntologyEdge, "id">[] = [];
+  const nodes = new Map<string, ContextGraphNode>();
+  const edges: Omit<ContextGraphEdge, "id">[] = [];
   const symbolByScopedName = new Map<string, string>();
   const symbolsByName = new Map<string, string[]>();
   nodes.set("repo", {
@@ -1387,7 +1392,7 @@ export function createOntologyProjection(
       evidence: [`${file.path}:1`]
     });
     edges.push({ source: "repo", target: fileId, predicate: "CONTAINS", plane: "code", evidence: [`${file.path}:1`] });
-    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION));
+    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
     for (const symbol of analysis?.symbols.slice(0, 8) ?? []) {
       if (nodes.size >= 200) break;
       const symbolId = `symbol:${file.path}:${symbol.moniker}`;
@@ -1421,7 +1426,7 @@ export function createOntologyProjection(
     packageBySpecifier.set(assertion.object.label.toLowerCase(), packageId);
   }
   for (const file of files) {
-    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION));
+    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
     for (const item of analysis?.imports ?? []) {
       const targetPath = resolveImportPath(file.path, item.specifier, projectedPaths);
       if (targetPath) {
@@ -1499,7 +1504,7 @@ export function createOntologyProjection(
       evidence
     });
   }
-  return createOntologyGraph({
+  return createContextGraph({
     request: {
       tenantId: request.tenantId,
       repository: request.repository,
@@ -1510,10 +1515,10 @@ export function createOntologyProjection(
     commitSha: request.commitSha,
     generatedAt: request.generatedAt,
     executor: "projection",
-    model: ONTOLOGY_PROJECTION_VERSION,
+    model: CONTEXT_GRAPH_PROJECTION_VERSION,
     contentAddressed: true,
     generated: {
-      summary: `Projected ${files.length} files, ${[...nodes.values()].filter((node) => node.kind === "Symbol").length} symbols, and ${assertions.length} semantic assertions (${assertions.filter((assertion) => assertion.status === "active").length} accepted, ${assertions.filter((assertion) => assertion.status === "proposed").length} proposed) from canonical Ontology data.`,
+      summary: `Projected ${files.length} files, ${[...nodes.values()].filter((node) => node.kind === "Symbol").length} symbols, and ${assertions.length} semantic assertions (${assertions.filter((assertion) => assertion.status === "active").length} accepted, ${assertions.filter((assertion) => assertion.status === "proposed").length} proposed) from canonical ContextGraph data.`,
       nodes: [...nodes.values()],
       edges
     }
@@ -1536,7 +1541,7 @@ function projectionEvidence(assertion: StoredAssertion): readonly string[] {
 }
 
 function ensureAssertionNode(
-  nodes: Map<string, OntologyNode>,
+  nodes: Map<string, ContextGraphNode>,
   id: string,
   entity: StoredAssertion["subject"],
   evidence: readonly string[]
@@ -1566,11 +1571,11 @@ function entityPath(naturalKey: string): string {
 }
 
 function assertionResult(
-  batch: OntologyAssertionBatch,
+  batch: ContextGraphAssertionBatch,
   assertions: readonly StoredAssertion[],
   cached: boolean,
   warnings: readonly string[] = []
-): OntologyAssertionResult {
+): ContextGraphAssertionResult {
   return {
     observationId: assertionObservationId(batch),
     assertionCount: assertions.length,

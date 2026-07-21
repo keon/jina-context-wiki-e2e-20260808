@@ -11,6 +11,6 @@
   "references": [
     { "path": "../../packages/ai" },
     { "path": "../../packages/daytona" },
-    { "path": "../../packages/ontology" }
+    { "path": "../../packages/context-graph" }
   ]
 }

@@ -1,8 +1,8 @@
 # Jina
 
-Jina is a tenant-scoped task board for software-work agents. The current runtime handles GitHub pull-request review and repository Ontology generation.
+Jina is a tenant-scoped task board for software-work agents. The current runtime handles GitHub pull-request review and repository ContextGraph generation.
 
-Signed GitHub events create board tasks and dependencies. The API persists the board and leases ready work to Cloud Run workers. The review worker reads PR diffs and calls the OpenAI Responses API. The Ontology worker incrementally records repository facts, runs cited semantic analysis in Daytona, and builds queryable graph projections. Publication is currently an internal idempotent record; Jina does not yet post findings to GitHub.
+Signed GitHub events create board tasks and dependencies. The API persists the board and leases ready work to Cloud Run workers. The review worker reads PR diffs and calls the OpenAI Responses API. The ContextGraph worker incrementally records repository facts, runs cited semantic analysis in Daytona, and builds queryable graph projections. Publication is currently an internal idempotent record; Jina does not yet post findings to GitHub.
 
 ## Quick start
 
@@ -14,7 +14,7 @@ pnpm test
 pnpm dev
 ```
 
-`pnpm dev` starts the API on port 4000 and dashboard on port 3000. It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-Ontology task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`.
+`pnpm dev` starts the API on port 4000 and dashboard on port 3000. It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-ContextGraph task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`.
 
 To exercise the separate local PR-review harness:
 
@@ -38,9 +38,9 @@ GitHub event
   -> reducer advances dependents
 ```
 
-The board is the orchestrator. PostgreSQL owns board state, delivery deduplication, leases, and Ontology data. Every board mutation loads and writes the JSON snapshot while holding a cross-instance transaction lock, preventing horizontally scaled API instances from overwriting newer state.
+The board is the orchestrator. PostgreSQL owns board state, delivery deduplication, leases, and ContextGraph data. Every board mutation loads and writes the JSON snapshot while holding a cross-instance transaction lock, preventing horizontally scaled API instances from overwriting newer state.
 
-Opened PRs create review and publication tasks. Opened issues create manual triage tasks. Signed branch pushes create the same four-task Ontology workflow as `POST /ontology/build`; unchanged heads dedupe and moved refs supersede stale work.
+Opened PRs create review and publication tasks. Opened issues create manual triage tasks. Signed branch pushes create the same four-task ContextGraph workflow as `POST /context-graph/build`; unchanged heads dedupe and moved refs supersede stale work.
 
 The current review pipeline is:
 
@@ -52,15 +52,15 @@ External publication, automated fixes, test execution, releases, and arbitrary e
 
 ## Repository knowledge
 
-Ontology runs as three board-visible stages:
+ContextGraph runs as three board-visible stages:
 
-1. `ontology_ingest` stores immutable source observations, exact commit trees, first-parent changes, and parsed content-addressed blobs.
-2. `ontology_assert` checks out the pinned commit in Daytona and records cited, explained, typed proposals.
-3. `ontology_project` consumes canonical events and rebuilds the current manifest, search documents, and immutable graph.
+1. `context_graph_ingest` stores immutable source observations, exact commit trees, first-parent changes, and parsed content-addressed blobs.
+2. `context_graph_assert` checks out the pinned commit in Daytona and records cited, explained, typed proposals.
+3. `context_graph_project` consumes canonical events and rebuilds the current manifest, search documents, and immutable graph.
 
 Reviewed assertions retain their evidence, explanation, review state, and provenance when later runs confirm them. Counterfactual queries remove selected paths from the reviewed graph in memory; they do not create facts or tasks.
 
-Local Ontology execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
+Local ContextGraph execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
 
 Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST /mcp`. Its single read-only tool, `query_graph`, accepts a repository, natural-language query, and optional ref. Production requires the internal service credential plus a bound application principal, and every request is repository-ACL scoped. The simulation integration uses a separate `GRAPH_API_TOKEN` for graph reads and exact ACL synchronization without granting board or worker access.
 
@@ -69,13 +69,13 @@ Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST
 ```text
 apps/api/          webhooks, board API, graph API, MCP, commands, leases
 apps/dashboard/    operator UI and authenticated read proxy
-apps/worker/       review and Ontology workers
+apps/worker/       review and ContextGraph workers
 apps/workflows/    local review CLI and deterministic simulation
 packages/board/    tasks, dependencies, commands, reducer
-packages/ontology/ repository facts, assertions, retrieval, projections
+packages/context-graph/ repository facts, assertions, retrieval, projections
 packages/db/       PostgreSQL stores and migrations
 packages/github/   webhook verification and parsing
-packages/daytona/  Ontology sandbox executor
+packages/daytona/  ContextGraph sandbox executor
 packages/ai/       review harnesses and model clients
 ```
 
@@ -84,7 +84,7 @@ Smaller packages contain review planning, context policy, publication, billing p
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Ontology](docs/ONTOLOGY.md)
+- [ContextGraph](docs/CONTEXT_GRAPH.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)

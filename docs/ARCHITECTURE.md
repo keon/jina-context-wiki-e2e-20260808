@@ -1,6 +1,6 @@
 # Architecture
 
-This document describes the runtime in this repository. Domain-specific Ontology details live in [ONTOLOGY.md](ONTOLOGY.md), persisted structures in [DATA_MODELS.md](DATA_MODELS.md), and request flows in [SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md).
+This document describes the runtime in this repository. Domain-specific ContextGraph details live in [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md), persisted structures in [DATA_MODELS.md](DATA_MODELS.md), and request flows in [SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md).
 
 ## Topology
 
@@ -9,7 +9,7 @@ Jina runs as four Cloud Run services backed by PostgreSQL 17:
 - `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
 - `jina-dashboard` serves the operator UI and proxies authenticated reads.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
-- `jina-ontology-worker` handles repository ingest, semantic assertion, and projection topics.
+- `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
 
 ```text
 GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
@@ -23,9 +23,9 @@ The API performs short state transitions. Workers perform external I/O outside t
 
 The board is both the operational source of truth and the orchestrator. A versioned planner creates tasks and dependency edges. The reducer queues a task only after its required dependencies are satisfied and writes its outbox message with the same state change.
 
-Task types and dispatch topics are worker-owned strings. The board remains generic: it validates commands, transitions, dependency readiness, terminal propagation, supersession, and leases without importing GitHub or Ontology behavior.
+Task types and dispatch topics are worker-owned strings. The board remains generic: it validates commands, transitions, dependency readiness, terminal propagation, supersession, and leases without importing GitHub or ContextGraph behavior.
 
-Opened PRs create a `pr_review` aggregate, `review_pass`, and `publish`. A new head SHA increments the epoch and supersedes active work from the old epoch. Opened issues create manual `issue_triage` tasks. Signed branch pushes start the Ontology task tree, dedupe unchanged heads, and supersede stale ref work even when a force-push returns to an earlier SHA.
+Opened PRs create a `pr_review` aggregate, `review_pass`, and `publish`. A new head SHA increments the epoch and supersedes active work from the old epoch. Opened issues create manual `issue_triage` tasks. Signed branch pushes start the ContextGraph task tree, dedupe unchanged heads, and supersede stale ref work even when a force-push returns to an earlier SHA.
 
 Automated dependency failures are terminal: failed work remains `failed`, dispatchable descendants become `canceled`, and the aggregate becomes `failed`. The reducer does not invent recovery tasks. A workflow that supports recovery must declare the human decision and resolution command explicitly.
 
@@ -35,11 +35,11 @@ The board is currently stored as one JSON snapshot. Each mutation holds a cross-
 
 The task worker fetches PR data from GitHub, calls the configured review harness, and records structured findings. Research currently records requested sources without arbitrary network retrieval. Publication currently upserts an internal record.
 
-The Ontology worker runs three stages:
+The ContextGraph worker runs three stages:
 
-1. `ontology_ingest` walks unseen commit history, records exact trees and first-parent changes, parses new blobs, and normalizes explicit repository and GitHub facts.
-2. `ontology_assert` checks out the pinned commit in Daytona and records cited semantic output as proposed assertions.
-3. `ontology_project` drains consumer-owned canonical events and rebuilds manifests, search documents, redirects, and immutable content-addressed graphs.
+1. `context_graph_ingest` walks unseen commit history, records exact trees and first-parent changes, parses new blobs, and normalizes explicit repository and GitHub facts.
+2. `context_graph_assert` checks out the pinned commit in Daytona and records cited semantic output as proposed assertions.
+3. `context_graph_project` drains consumer-owned canonical events and rebuilds manifests, search documents, redirects, and immutable content-addressed graphs.
 
 Only assertion generation uses a model. Assertions must carry checked repository evidence, a relationship explanation, and known typed identities. Reviewed assertions retain evidence, explanation, provenance, and review state when reconfirmed. Exact evidence fingerprints cache unchanged generations; generator-contract changes trigger one bounded refresh.
 
@@ -53,13 +53,13 @@ The simulation-facing graph API uses a dedicated credential and maps each simula
 
 ## Persistence and idempotency
 
-The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in `jina_runtime.github_deliveries`. Ontology uses normalized canonical, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables under `jina_ontology`.
+The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in `jina_runtime.github_deliveries`. ContextGraph uses normalized canonical, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables under `jina_context_graph`.
 
 Source writes, model observations, and projections are independently idempotent. A retry may repeat a stage, but canonical keys, consumer-owned outbox delivery, exact fingerprints, and immutable graph generations make the result converge. Graph identity includes tenant, repository, ref content, projection version, and canonical graph content.
 
 ## Authentication and security
 
-Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and Ontology operations require the internal bearer credential.
+Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and ContextGraph operations require the internal bearer credential.
 
 Cloud Run IAP authenticates dashboard users. The dashboard forwards the verified principal and service credential. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
@@ -72,7 +72,7 @@ Repository credentials remain in the worker boundary. Daytona isolates repositor
 - Duplicate GitHub deliveries are no-ops.
 - Expired leases are reclaimable; replaced leases fence stale completion.
 - Provider transport, timeout, rate-limit, and retryable server failures retry within policy. Schema and evidence validation fail closed.
-- A new PR epoch or Ontology ref attempt supersedes active older work.
+- A new PR epoch or ContextGraph ref attempt supersedes active older work.
 - Public worker health exposes only stable categories; redacted detail remains in authenticated task events and Cloud Logging.
 - Operational metrics cover canonical outbox depth/lag, parser backlog, projection staleness, assertion review, and retrieval latency/truncation.
 
@@ -80,7 +80,7 @@ Repository credentials remain in the worker boundary. Daytona isolates repositor
 
 - `apps/*` owns HTTP, process startup, external I/O, and runtime wiring.
 - `packages/board` owns generic workflow state.
-- `packages/ontology` owns repository facts, assertions, retrieval, and store interfaces.
+- `packages/context-graph` owns repository facts, assertions, retrieval, and store interfaces.
 - `packages/db` implements durable stores, transactions, and migrations.
 - Provider packages such as `github`, `daytona`, and `ai` adapt external systems.
 

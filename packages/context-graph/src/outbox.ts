@@ -7,7 +7,7 @@ export interface ProjectionRebuildResult {
   readonly projectedAt: string;
 }
 
-export interface OntologyOperationalMetrics {
+export interface ContextGraphOperationalMetrics {
   readonly outboxDepth: Readonly<Record<string, number>>;
   readonly outboxDepthByConsumer: Readonly<Record<string, number>>;
   readonly oldestOutboxAgeSeconds: number;

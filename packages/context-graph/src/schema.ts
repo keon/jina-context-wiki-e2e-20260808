@@ -1,15 +1,15 @@
-import { ontologyNodeKinds } from "./model.js";
+import { contextGraphNodeKinds } from "./model.js";
 
-const ontologyNodeProperties = {
+const contextGraphNodeProperties = {
   id: { type: "string" },
-  kind: { type: "string", enum: ontologyNodeKinds },
+  kind: { type: "string", enum: contextGraphNodeKinds },
   label: { type: "string" },
   description: { type: "string" },
   path: { type: ["string", "null"] },
   evidence: { type: "array", minItems: 1, items: { type: "string" } }
 } as const;
 
-export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
+export const CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA = {
   type: "object",
   additionalProperties: false,
   required: ["summary", "nodes", "edges"],
@@ -22,7 +22,7 @@ export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
         type: "object",
         additionalProperties: false,
         required: ["id", "kind", "label", "description", "path", "evidence"],
-        properties: ontologyNodeProperties
+        properties: contextGraphNodeProperties
       }
     },
     edges: {
@@ -59,7 +59,7 @@ export const ONTOLOGY_ASSERTION_OUTPUT_SCHEMA = {
   }
 } as const;
 
-export const ONTOLOGY_ASSERTION_SYSTEM_PROMPT = `You produce cited semantic assertions for a repository knowledge plane.
+export const CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT = `You produce cited semantic assertions for a repository knowledge plane.
 
 The structural code plane is built separately by deterministic parsers. Do not emit CONTAINS, DECLARES, IMPORTS, CALLS, or other mechanical structure. Inspect the checked-out repository with read-only commands and return only semantic relationships supported by explicit repository evidence.
 

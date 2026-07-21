@@ -69,22 +69,22 @@ sequenceDiagram
 
 If a worker crashes, the leased message becomes claimable after expiration. A completion with the wrong, expired, or replaced lease returns `409` and changes no state.
 
-## Incremental Ontology build
+## Incremental ContextGraph build
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant User
     participant API as jina-api
-    participant Worker as jina-ontology-worker
+    participant Worker as jina-context-graph-worker
     participant GitHub
     participant Daytona
     participant Codex
     participant DB as Cloud SQL
 
-    User->>API: POST /ontology/build repository, ref
+    User->>API: POST /context-graph/build repository, ref
     API->>DB: Create aggregate + ingest, assert, project children
-    Worker->>API: Claim run-ontology-ingest lease
+    Worker->>API: Claim run-context-graph-ingest lease
     Worker->>GitHub: Resolve ref and walk the commit DAG
     Worker->>API: Ask which commit SHAs are already canonical
     API-->>Worker: Known-parent boundary
@@ -99,7 +99,7 @@ sequenceDiagram
     end
     Worker->>API: Store versioned symbols/typed edges and normalized explicit facts
     API->>DB: Queue assertion task with bounded cross-commit focus paths
-    Worker->>API: Claim run-ontology-assert and check generation cache
+    Worker->>API: Claim run-context-graph-assert and check generation cache
     alt assertion input already processed
         API-->>Worker: Reuse checkpoint
     else new content needs semantic analysis
@@ -115,7 +115,7 @@ sequenceDiagram
         Worker->>API: Complete with model-output observation
         API->>DB: Store registry-validated model assertions as proposed
     end
-    Worker->>API: Claim run-ontology-project
+    Worker->>API: Claim run-context-graph-project
     API->>DB: Claim repository/ref canonical outbox rows with SKIP LOCKED
     alt unchanged head with no pending scoped events
         API-->>Worker: Reuse manifest/search checkpoint
@@ -145,7 +145,7 @@ sequenceDiagram
     participant DB as Cloud SQL
 
     Browser->>Dashboard: Ask repository question
-    Dashboard->>API: POST /ontology/ask + service credential + verified IAP principal
+    Dashboard->>API: POST /context-graph/ask + service credential + verified IAP principal
     API->>DB: Resolve principal repository scope
     API->>API: Extract typed identifiers and classify fixed templates
     loop selected fixed templates
@@ -197,8 +197,8 @@ sequenceDiagram
     Browser->>IAP: Open dashboard URL
     IAP->>IAP: Google sign-in and access policy
     IAP->>Dashboard: Authenticated request + verified email header
-    Dashboard-->>Browser: Board, task types, or Ontology page
-    Browser->>Dashboard: GET /api/board, /events, /task-types, or /ontology
+    Dashboard-->>Browser: Board, task types, or ContextGraph page
+    Browser->>Dashboard: GET /api/board, /events, /task-types, or /context-graph
     Dashboard->>API: Proxy allowlisted read + bearer + user principal
     API->>API: Resolve omlabs tenant + tenant-admin/repository relationship
     API->>DB: Tenant- and repository-scoped query
@@ -206,8 +206,8 @@ sequenceDiagram
     Dashboard-->>Browser: JSON
 ```
 
-Each page polls only the endpoints it needs. The Ontology list request returns the latest full graph and lightweight summaries for older generations; historical node and edge collections are loaded only through graph detail.
+Each page polls only the endpoints it needs. The ContextGraph list request returns the latest full graph and lightweight summaries for older generations; historical node and edge collections are loaded only through graph detail.
 
 ## Local development difference
 
-`pnpm dev` uses memory stores unless database variables are present. It enables the unsigned `/dev/webhooks/github` endpoint, can seed a demo PR, and may simulate non-Ontology task completion with an in-process timer. All three features are disabled in production; production work is handled only by the durable workers above.
+`pnpm dev` uses memory stores unless database variables are present. It enables the unsigned `/dev/webhooks/github` endpoint, can seed a demo PR, and may simulate non-ContextGraph task completion with an in-process timer. All three features are disabled in production; production work is handled only by the durable workers above.

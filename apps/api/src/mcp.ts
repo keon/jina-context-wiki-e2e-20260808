@@ -5,7 +5,7 @@ import {
   type StreamableHTTPServerTransportOptions
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { OrchestratedContext, RetrievalCitation } from "@jina/ontology";
+import type { OrchestratedContext, RetrievalCitation } from "@jina/context-graph";
 import * as z from "zod/v4";
 
 const citationSchema = z.object({

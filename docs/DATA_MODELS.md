@@ -1,6 +1,6 @@
 # Data models
 
-This document distinguishes deployed storage from planned relational entities. Executable definitions remain authoritative: `ONTOLOGY_SCHEMA_SQL` in `packages/db/src/postgres-ontology-graph-store.ts` and the board types in `packages/board`.
+This document distinguishes deployed storage from planned relational entities. Executable definitions remain authoritative: `CONTEXT_GRAPH_SCHEMA_SQL` in `packages/db/src/postgres-context-graph-store.ts` and the board types in `packages/board`.
 
 ## Implemented runtime state
 
@@ -11,9 +11,9 @@ The generic board currently uses two tables:
 
 The snapshot contains tasks, dependency edges, task events, and durable outbox messages. Task IDs and dedupe keys make planning idempotent. Outbox messages carry renewable lease IDs and expirations; completion requires the current lease. Every mutation is tenant-scoped and runs under a cross-instance transaction lock.
 
-## Implemented Ontology schema
+## Implemented ContextGraph schema
 
-Ontology is normalized under `jina_ontology`:
+ContextGraph is normalized under `jina_context_graph`:
 
 | Area               | Tables                                                                                         |
 | ------------------ | ---------------------------------------------------------------------------------------------- |
@@ -32,7 +32,7 @@ Canonical outbox deliveries are consumer-owned so manifest, search, reconciliati
 
 ## Implemented invariants
 
-- Every Ontology row is tenant-scoped, including relationship and provenance foreign keys.
+- Every ContextGraph row is tenant-scoped, including relationship and provenance foreign keys.
 - Repository reads and mutations pass repository ACL checks.
 - Deliveries, observations, blobs, assertions, outbox events, and graphs use idempotent keys.
 - Live assertion uniqueness and cardinality-one relationships are serialized by partial indexes and locks.
@@ -70,4 +70,4 @@ The target retains these contracts:
 
 Deferred `work_orders` become useful only with a second intake provider. Pipeline/stage-template tables become useful only when tenants can configure pipelines.
 
-See [ONTOLOGY.md](ONTOLOGY.md) for ingestion and retrieval behavior, [BILLING.md](BILLING.md) for the provisional billing design, and [DEPLOYMENT.md](DEPLOYMENT.md) for migration commands and capability roles.
+See [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md) for ingestion and retrieval behavior, [BILLING.md](BILLING.md) for the provisional billing design, and [DEPLOYMENT.md](DEPLOYMENT.md) for migration commands and capability roles.

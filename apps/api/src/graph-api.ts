@@ -1,10 +1,10 @@
 import type {
-  OntologyEdge,
-  OntologyGraph,
-  OntologyGraphSummary,
-  OntologyNode,
+  ContextGraphEdge,
+  ContextGraph,
+  ContextGraphSummary,
+  ContextGraphNode,
   RetrievalCitation
-} from "@jina/ontology";
+} from "@jina/context-graph";
 import type { GraphQueryResult } from "./mcp.js";
 
 export interface PublicGraphSummary {
@@ -19,8 +19,8 @@ export interface PublicGraphSummary {
 }
 
 export interface PublicGraph extends PublicGraphSummary {
-  readonly nodes: readonly OntologyNode[];
-  readonly edges: readonly OntologyEdge[];
+  readonly nodes: readonly ContextGraphNode[];
+  readonly edges: readonly ContextGraphEdge[];
 }
 
 export interface PublicGraphQueryResult extends GraphQueryResult {
@@ -30,7 +30,7 @@ export interface PublicGraphQueryResult extends GraphQueryResult {
 }
 
 /** Removes tenant, worker, model, and executor metadata from a graph listing. */
-export function publicGraphSummary(graph: OntologyGraphSummary): PublicGraphSummary {
+export function publicGraphSummary(graph: ContextGraphSummary): PublicGraphSummary {
   return {
     id: graph.id,
     repository: graph.repository,
@@ -44,7 +44,7 @@ export function publicGraphSummary(graph: OntologyGraphSummary): PublicGraphSumm
 }
 
 /** Public read model used by dashboards. rawModelOutput is never included. */
-export function publicGraph(graph: OntologyGraph): PublicGraph {
+export function publicGraph(graph: ContextGraph): PublicGraph {
   return {
     id: graph.id,
     repository: graph.repository,
@@ -59,7 +59,7 @@ export function publicGraph(graph: OntologyGraph): PublicGraph {
   };
 }
 
-export function publicGraphQueryResult(graph: OntologyGraph, result: GraphQueryResult): PublicGraphQueryResult {
+export function publicGraphQueryResult(graph: ContextGraph, result: GraphQueryResult): PublicGraphQueryResult {
   const citations = result.claims.flatMap((claim) => claim.citations);
   const citedIds = new Set(citations.map((citation) => citation.id));
   return {

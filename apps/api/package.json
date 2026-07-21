@@ -14,7 +14,7 @@
     "@jina/board": "workspace:*",
     "@jina/db": "workspace:*",
     "@jina/github": "workspace:*",
-    "@jina/ontology": "workspace:*",
+    "@jina/context-graph": "workspace:*",
     "@jina/publication": "workspace:*",
     "@jina/review": "workspace:*",
     "@jina/shared-kernel": "workspace:*",

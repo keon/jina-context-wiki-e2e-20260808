@@ -7,14 +7,14 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
-  createOntologyGraph,
-  MemoryOntologyGraphStore,
-  MemoryOntologyPipelineCoordinator,
-  ONTOLOGY_PARSER_VERSION,
+  createContextGraph,
+  MemoryContextGraphStore,
+  MemoryContextGraphPipelineCoordinator,
+  CONTEXT_GRAPH_PARSER_VERSION,
   type BlobAnalysis,
   type RetrievalRequest,
   type RetrievalResult
-} from "@jina/ontology";
+} from "@jina/context-graph";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
 
 const SECRET = "test-webhook-secret";
@@ -113,20 +113,20 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
       "cleanup",
       "issue_triage",
       "human_decision",
-      "ontology_build",
-      "ontology_ingest",
-      "ontology_assert",
-      "ontology_project"
+      "context_graph_build",
+      "context_graph_ingest",
+      "context_graph_assert",
+      "context_graph_project"
     ]
   );
   assert.equal(
     taskTypes.every((definition) => definition.kind.length > 0 && definition.description.length > 0),
     true
   );
-  assert.deepEqual(taskTypes.find((definition) => definition.type === "ontology_ingest")?.triggeredBy, [
+  assert.deepEqual(taskTypes.find((definition) => definition.type === "context_graph_ingest")?.triggeredBy, [
     {
-      source: "POST /ontology/build",
-      description: "Creates and queues the first executable Ontology task.",
+      source: "POST /context-graph/build",
+      description: "Creates and queues the first executable ContextGraph task.",
       conditions: []
     },
     {
@@ -136,22 +136,22 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
     }
   ]);
   assert.equal(
-    taskTypes.find((definition) => definition.type === "ontology_assert")?.triggeredBy[0]?.source,
-    "POST /ontology/build"
+    taskTypes.find((definition) => definition.type === "context_graph_assert")?.triggeredBy[0]?.source,
+    "POST /context-graph/build"
   );
   assert.equal(
-    taskTypes.find((definition) => definition.type === "ontology_project")?.triggeredBy[0]?.source,
-    "POST /ontology/build"
+    taskTypes.find((definition) => definition.type === "context_graph_project")?.triggeredBy[0]?.source,
+    "POST /context-graph/build"
   );
   assert.equal(
     taskTypes.find((definition) => definition.type === "publish")?.triggeredBy[0]?.source,
     "GitHub pull_request webhook"
   );
-  assert.deepEqual(taskTypes.find((definition) => definition.type === "ontology_project")?.dependsOn, [
+  assert.deepEqual(taskTypes.find((definition) => definition.type === "context_graph_project")?.dependsOn, [
     {
-      taskType: "ontology_ingest",
+      taskType: "context_graph_ingest",
       relationships: ["blocks"],
-      workflows: ["ontology_build"],
+      workflows: ["context_graph_build"],
       required: true,
       conditions: []
     }
@@ -173,7 +173,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
 });
 
-test("branch pushes create and supersede the existing ontology workflow", async (context) => {
+test("branch pushes create and supersede the existing contextGraph workflow", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(
@@ -204,23 +204,23 @@ test("branch pushes create and supersede the existing ontology workflow", async 
   const current = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-4");
   const old = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-3");
   assert.deepEqual(current.map((task) => task.type).sort(), [
-    "ontology_assert",
-    "ontology_assert",
-    "ontology_build",
-    "ontology_ingest",
-    "ontology_ingest",
-    "ontology_project",
-    "ontology_project"
+    "context_graph_assert",
+    "context_graph_assert",
+    "context_graph_build",
+    "context_graph_ingest",
+    "context_graph_ingest",
+    "context_graph_project",
+    "context_graph_project"
   ]);
-  assert.equal(current.find((task) => task.type === "ontology_ingest")?.status, "queued");
+  assert.equal(current.find((task) => task.type === "context_graph_ingest")?.status, "queued");
   assert.equal(
     old.every((task) => task.status === "superseded"),
     true
   );
 });
 
-test("ontology retrieval forwards generalized Issue identity and Feature text", async () => {
-  class CapturingOntologyStore extends MemoryOntologyGraphStore {
+test("contextGraph retrieval forwards generalized Issue identity and Feature text", async () => {
+  class CapturingContextGraphStore extends MemoryContextGraphStore {
     request?: RetrievalRequest;
 
     override async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
@@ -236,41 +236,41 @@ test("ontology retrieval forwards generalized Issue identity and Feature text", 
       };
     }
   }
-  const ontologyStore = new CapturingOntologyStore();
-  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", ontologyStore });
+  const contextGraphStore = new CapturingContextGraphStore();
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", contextGraphStore });
   const baseUrl = await listen(server);
   try {
-    const response = await fetch(`${baseUrl}/ontology/retrieve`, {
+    const response = await fetch(`${baseUrl}/context-graph/retrieve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        repository: "omxyz/ontology-fixture",
+        repository: "omxyz/context-graph-fixture",
         template: "issue_trace",
         issueEntityId: "entity_virtual_issue"
       })
     });
     assert.equal(response.status, 200);
-    assert.equal(ontologyStore.request?.issueEntityId, "entity_virtual_issue");
-    const featureResponse = await fetch(`${baseUrl}/ontology/retrieve`, {
+    assert.equal(contextGraphStore.request?.issueEntityId, "entity_virtual_issue");
+    const featureResponse = await fetch(`${baseUrl}/context-graph/retrieve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        repository: "omxyz/ontology-fixture",
+        repository: "omxyz/context-graph-fixture",
         template: "feature_trace",
         featureText: "administrator deletion"
       })
     });
     assert.equal(featureResponse.status, 200);
-    assert.equal(ontologyStore.request?.featureText, "administrator deletion");
+    assert.equal(contextGraphStore.request?.featureText, "administrator deletion");
   } finally {
     await close(server);
   }
 });
 
 test("MCP exposes one authorized graph query with cited structured output", async () => {
-  class QueryOntologyStore extends MemoryOntologyGraphStore {
+  class QueryContextGraphStore extends MemoryContextGraphStore {
     override async repositoriesForPrincipal(_tenantId: string, principalId: string): Promise<readonly string[]> {
-      return principalId === "user:reader@example.com" ? ["omxyz/ontology-fixture"] : [];
+      return principalId === "user:reader@example.com" ? ["omxyz/context-graph-fixture"] : [];
     }
 
     override async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
@@ -306,7 +306,7 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
   }
 
   const server = createApiServer({
-    ontologyStore: new QueryOntologyStore(),
+    contextGraphStore: new QueryContextGraphStore(),
     internalApiToken: INTERNAL_TOKEN,
     tenantId: "tenant-a"
   });
@@ -365,7 +365,7 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
     const result = (await client.callTool({
       name: "query_graph",
       arguments: {
-        repository: "omxyz/ontology-fixture",
+        repository: "omxyz/context-graph-fixture",
         query: "Where is main implemented?"
       }
     })) as CallToolResult;
@@ -380,7 +380,7 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
             {
               kind: "code",
               id: "blob-main:1-3",
-              repository: "omxyz/ontology-fixture",
+              repository: "omxyz/context-graph-fixture",
               commitSha: "a".repeat(40),
               path: "src/index.ts",
               startLine: 1,
@@ -396,7 +396,7 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
     await strangerClient.connect(strangerTransport as unknown as Transport);
     const denied = (await strangerClient.callTool({
       name: "query_graph",
-      arguments: { repository: "omxyz/ontology-fixture", query: "Where is main implemented?" }
+      arguments: { repository: "omxyz/context-graph-fixture", query: "Where is main implemented?" }
     })) as CallToolResult;
     assert.equal(denied.isError, true);
   } finally {
@@ -435,7 +435,7 @@ test("API maps validation failures to typed client errors", async () => {
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
   const baseUrl = await listen(server);
   try {
-    const response = await fetch(`${baseUrl}/ontology/retrieve`, {
+    const response = await fetch(`${baseUrl}/context-graph/retrieve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ template: "structure" })
@@ -451,18 +451,18 @@ test("API maps validation failures to typed client errors", async () => {
   }
 });
 
-test("ontology pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
+test("contextGraph pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
     tenantId: "default"
   });
   const baseUrl = await listen(server);
   try {
-    const created = await fetch(`${baseUrl}/ontology/build`, {
+    const created = await fetch(`${baseUrl}/context-graph/build`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        repository: "omxyz/ontology-fixture",
+        repository: "omxyz/context-graph-fixture",
         ref: "main",
         requestKey: "test",
         snapshotFirst: true
@@ -474,8 +474,8 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     const treeSha = "b".repeat(40);
     const readmeSha = "c".repeat(40);
     const sourceSha = "d".repeat(40);
-    let ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
-    assert.equal(ingestion.message.topic, "run-ontology-ingest");
+    let ingestion = await claimTopic(baseUrl, "run-context-graph-ingest");
+    assert.equal(ingestion.message.topic, "run-context-graph-ingest");
     assert.equal(ingestion.task.metadata?.pipelinePhase, "snapshot");
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
@@ -500,14 +500,14 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       })
     });
     assert.equal(released.status, 200);
-    const reclaimed = await claimTopic(baseUrl, "run-ontology-ingest");
+    const reclaimed = await claimTopic(baseUrl, "run-context-graph-ingest");
     assert.equal(reclaimed.task.id, ingestion.task.id);
     assert.notEqual(reclaimed.message.leaseId, ingestion.message.leaseId);
     ingestion = reclaimed;
 
     const snapshot = {
       tenantId: "default",
-      repository: "omxyz/ontology-fixture",
+      repository: "omxyz/context-graph-fixture",
       ref: "main",
       commitSha,
       treeSha,
@@ -520,21 +520,21 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
       ]
     };
     const lease = { messageId: ingestion.message.id, leaseId: ingestion.message.leaseId };
-    const firstPlan = (await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot })) as {
+    const firstPlan = (await postJson(baseUrl, "/internal/context-graph/ingest/plan", { ...lease, snapshot })) as {
       missingBlobs: unknown[];
       changedPaths: string[];
       observationId: string;
     };
     assert.equal(firstPlan.missingBlobs.length, 2);
     assert.deepEqual(firstPlan.changedPaths, ["README.md", "src/index.ts"]);
-    await postJson(baseUrl, "/internal/ontology/ingest/blobs", {
+    await postJson(baseUrl, "/internal/context-graph/ingest/blobs", {
       taskId: ingestion.task.id,
       ...lease,
       commitSha,
       analyses: [
         {
           blobSha: readmeSha,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "markdown",
           symbols: [],
           imports: [],
@@ -542,7 +542,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
         },
         {
           blobSha: sourceSha,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [
             { moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }
@@ -552,7 +552,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
         }
       ]
     });
-    const secondPlan = (await postJson(baseUrl, "/internal/ontology/ingest/plan", { ...lease, snapshot })) as {
+    const secondPlan = (await postJson(baseUrl, "/internal/context-graph/ingest/plan", { ...lease, snapshot })) as {
       missingBlobs: unknown[];
       reusedBlobCount: number;
     };
@@ -566,15 +566,15 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
         discoveredBlobCount: 2,
         reusedBlobCount: 0,
         parsedBlobCount: 2,
-        parserVersion: ONTOLOGY_PARSER_VERSION,
+        parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
         codeCheckpoint: "code-checkpoint",
         evidenceFingerprint: "evidence-fixture"
       }),
       200
     );
 
-    const assertion = await claimTopic(baseUrl, "run-ontology-assert");
-    assert.equal(assertion.message.topic, "run-ontology-assert");
+    const assertion = await claimTopic(baseUrl, "run-context-graph-assert");
+    assert.equal(assertion.message.topic, "run-context-graph-assert");
     const asserted = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -585,13 +585,13 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
         outcome: "done",
         assertionBatch: {
           tenantId: "default",
-          repository: "omxyz/ontology-fixture",
+          repository: "omxyz/context-graph-fixture",
           ref: "main",
           commitSha,
           taskId: assertion.task.id,
           generatedAt: new Date().toISOString(),
           generatorVersion: "codex-assertions-v2",
-          registryVersion: "ontology-registry-v1",
+          registryVersion: "context-graph-registry-v1",
           evidenceFingerprint: "evidence-fixture",
           evidenceObservationIds: [],
           model: "fixture",
@@ -626,20 +626,20 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     });
     assert.equal(asserted.status, 200);
 
-    const projection = await claimTopic(baseUrl, "run-ontology-project");
+    const projection = await claimTopic(baseUrl, "run-context-graph-project");
     assert.equal(await completeClaim(baseUrl, projection, { projected: true }), 200);
 
-    const ontology = await fetch(`${baseUrl}/ontology`).then(
+    const contextGraph = await fetch(`${baseUrl}/context-graph`).then(
       (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
     );
-    assert.equal((ontology.latest?.nodes.length ?? 0) >= 4, true);
-    assert.equal((ontology.latest?.edges.length ?? 0) >= 3, true);
+    assert.equal((contextGraph.latest?.nodes.length ?? 0) >= 4, true);
+    assert.equal((contextGraph.latest?.edges.length ?? 0) >= 3, true);
 
-    const contextAnswer = await fetch(`${baseUrl}/ontology/ask`, {
+    const contextAnswer = await fetch(`${baseUrl}/context-graph/ask`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
-        repository: "omxyz/ontology-fixture",
+        repository: "omxyz/context-graph-fixture",
         ref: "main",
         question: "Where is main implemented?"
       })
@@ -667,11 +667,11 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
         }>
     );
     assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_ingest")?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_assert")?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_project")?.status, "done");
-    assert.equal(board.tasks.find((task) => task.type === "ontology_project")?.metadata.commitSha, commitSha);
-    const ingestTiming = board.tasks.find((task) => task.type === "ontology_ingest")?.metadata.timing as
+    assert.equal(board.tasks.find((task) => task.type === "context_graph_ingest")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "context_graph_assert")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "context_graph_project")?.status, "done");
+    assert.equal(board.tasks.find((task) => task.type === "context_graph_project")?.metadata.commitSha, commitSha);
+    const ingestTiming = board.tasks.find((task) => task.type === "context_graph_ingest")?.metadata.timing as
       Record<string, unknown> | undefined;
     assert.ok(ingestTiming, "a completed stage exposes metadata.timing");
     assert.equal(typeof ingestTiming.startedAt, "string");
@@ -682,15 +682,15 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
   }
 });
 
-test("a new ontology attempt supersedes older active work for the same repository ref", async () => {
+test("a new contextGraph attempt supersedes older active work for the same repository ref", async () => {
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
   const baseUrl = await listen(server);
   try {
     for (const requestKey of ["first", "second", "second"]) {
-      const response = await fetch(`${baseUrl}/ontology/build`, {
+      const response = await fetch(`${baseUrl}/context-graph/build`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ repository: "omxyz/ontology-fixture", ref: "main", requestKey })
+        body: JSON.stringify({ repository: "omxyz/context-graph-fixture", ref: "main", requestKey })
       });
       assert.equal(response.status, 202);
     }
@@ -708,9 +708,9 @@ test("a new ontology attempt supersedes older active work for the same repositor
       true
     );
     assert.equal(second.length, 7, "an idempotent request key does not duplicate the attempt");
-    assert.equal(second.find((task) => task.type === "ontology_ingest")?.status, "queued");
+    assert.equal(second.find((task) => task.type === "context_graph_ingest")?.status, "queued");
     assert.equal(
-      "timing" in (second.find((task) => task.type === "ontology_ingest")?.metadata ?? {}),
+      "timing" in (second.find((task) => task.type === "context_graph_ingest")?.metadata ?? {}),
       false,
       "a never-started stage omits metadata.timing entirely"
     );
@@ -755,14 +755,14 @@ test("durable workers can drain review and publish topics", async () => {
 });
 
 test("API validation rejects traversal, mixed worker topics, and stale leases with typed errors", async () => {
-  const ontologyStore = new MemoryOntologyGraphStore();
-  await ontologyStore.save(
+  const contextGraphStore = new MemoryContextGraphStore();
+  await contextGraphStore.save(
     fixtureGraph({ tenantId: "default", repository: "owner/repo", ref: "main", taskId: "fixture" })
   );
-  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", ontologyStore });
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", contextGraphStore });
   const baseUrl = await listen(server);
   try {
-    const invalidRepository = await fetch(`${baseUrl}/ontology/build`, {
+    const invalidRepository = await fetch(`${baseUrl}/context-graph/build`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ repository: "owner/..", ref: "main" })
@@ -794,7 +794,7 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
     assert.equal(missingCompletion.status, 404);
     assert.equal(((await missingCompletion.json()) as { code?: string }).code, "not_found");
 
-    const invalidKind = await fetch(`${baseUrl}/ontology/assertions?repository=owner/repo&entityKind=Unknown`);
+    const invalidKind = await fetch(`${baseUrl}/context-graph/assertions?repository=owner/repo&entityKind=Unknown`);
     assert.equal(invalidKind.status, 400);
     assert.equal(((await invalidKind.json()) as { code?: string }).code, "invalid_request");
   } finally {
@@ -802,10 +802,10 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
   }
 });
 
-test("ontology commands require a forwarded principal identity", async () => {
-  const ontologyStore = new MemoryOntologyGraphStore();
+test("contextGraph commands require a forwarded principal identity", async () => {
+  const contextGraphStore = new MemoryContextGraphStore();
   const server = createApiServer({
-    ontologyStore,
+    contextGraphStore,
     internalApiToken: INTERNAL_TOKEN,
     tenantId: "tenant-a",
     tenantAdminPrincipalIds: ["user:admin@example.com"]
@@ -818,13 +818,13 @@ test("ontology commands require a forwarded principal identity", async () => {
       principalId: "user:reader@example.com",
       role: "reader"
     });
-    const withoutIdentity = await fetch(`${baseUrl}/ontology/commands`, {
+    const withoutIdentity = await fetch(`${baseUrl}/context-graph/commands`, {
       method: "POST",
       headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
       body: command
     });
-    assert.equal(withoutIdentity.status, 401, "the svc:api fallback must not execute ontology commands");
-    const withIdentity = await fetch(`${baseUrl}/ontology/commands`, {
+    assert.equal(withoutIdentity.status, 401, "the svc:api fallback must not execute contextGraph commands");
+    const withIdentity = await fetch(`${baseUrl}/context-graph/commands`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${INTERNAL_TOKEN}`,
@@ -839,13 +839,13 @@ test("ontology commands require a forwarded principal identity", async () => {
   }
 });
 
-test("ontology reads require authentication and cannot cross tenant boundaries", async () => {
-  const ontologyStore = new MemoryOntologyGraphStore();
+test("contextGraph reads require authentication and cannot cross tenant boundaries", async () => {
+  const contextGraphStore = new MemoryContextGraphStore();
   const tenantAGraph = fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "main", taskId: "task-a" });
   const tenantBGraph = fixtureGraph({ tenantId: "tenant-b", repository: "omxyz/b", ref: "main", taskId: "task-b" });
-  await ontologyStore.save(tenantAGraph);
-  await ontologyStore.save(tenantBGraph);
-  await ontologyStore.executeCommand(
+  await contextGraphStore.save(tenantAGraph);
+  await contextGraphStore.save(tenantBGraph);
+  await contextGraphStore.executeCommand(
     "tenant-a",
     "svc:test",
     {
@@ -857,41 +857,42 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
     "2026-07-20T00:00:00.000Z"
   );
   const server = createApiServer({
-    ontologyStore,
+    contextGraphStore,
     internalApiToken: INTERNAL_TOKEN,
     tenantId: "tenant-a",
     tenantAdminPrincipalIds: ["user:admin@example.com"]
   });
   const baseUrl = await listen(server);
   try {
-    assert.equal((await fetch(`${baseUrl}/ontology`)).status, 401);
-    const list = await authenticatedFetch(`${baseUrl}/ontology`).then(
+    assert.equal((await fetch(`${baseUrl}/context-graph`)).status, 401);
+    const list = await authenticatedFetch(`${baseUrl}/context-graph`).then(
       (response) => response.json() as Promise<{ graphs: { id: string; tenantId: string }[] }>
     );
     assert.deepEqual(
       list.graphs.map((graph) => graph.tenantId),
       ["tenant-a"]
     );
-    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`)).status, 200);
-    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantBGraph.id}`)).status, 404);
-    const reader = await authenticatedFetch(`${baseUrl}/ontology`, "user:reader@example.com").then(
+    assert.equal((await authenticatedFetch(`${baseUrl}/context-graph/graphs/${tenantAGraph.id}`)).status, 200);
+    assert.equal((await authenticatedFetch(`${baseUrl}/context-graph/graphs/${tenantBGraph.id}`)).status, 404);
+    const reader = await authenticatedFetch(`${baseUrl}/context-graph`, "user:reader@example.com").then(
       (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
     );
     assert.deepEqual(
       reader.graphs.map((graph) => graph.repository),
       ["omxyz/a"]
     );
-    const stranger = await authenticatedFetch(`${baseUrl}/ontology`, "user:stranger@example.com").then(
+    const stranger = await authenticatedFetch(`${baseUrl}/context-graph`, "user:stranger@example.com").then(
       (response) => response.json() as Promise<{ graphs: unknown[] }>
     );
     assert.deepEqual(stranger.graphs, []);
     assert.equal(
-      (await authenticatedFetch(`${baseUrl}/ontology/graphs/${tenantAGraph.id}`, "user:stranger@example.com")).status,
+      (await authenticatedFetch(`${baseUrl}/context-graph/graphs/${tenantAGraph.id}`, "user:stranger@example.com"))
+        .status,
       404
     );
-    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/metrics`, "user:reader@example.com")).status, 403);
-    assert.equal((await authenticatedFetch(`${baseUrl}/ontology/metrics`, "user:admin@example.com")).status, 200);
-    const forbiddenCommand = await fetch(`${baseUrl}/ontology/commands`, {
+    assert.equal((await authenticatedFetch(`${baseUrl}/context-graph/metrics`, "user:reader@example.com")).status, 403);
+    assert.equal((await authenticatedFetch(`${baseUrl}/context-graph/metrics`, "user:admin@example.com")).status, 200);
+    const forbiddenCommand = await fetch(`${baseUrl}/context-graph/commands`, {
       method: "POST",
       headers: {
         authorization: `Bearer ${INTERNAL_TOKEN}`,
@@ -901,7 +902,7 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
       body: JSON.stringify({ type: "tombstone_repository", repository: "omxyz/a", reason: "not authorized" })
     });
     assert.equal(forbiddenCommand.status, 403);
-    const drained = await fetch(`${baseUrl}/internal/ontology/outbox/drain`, {
+    const drained = await fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
       method: "POST",
       headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
     });
@@ -912,15 +913,15 @@ test("ontology reads require authentication and cannot cross tenant boundaries",
 });
 
 test("public graph REST API exposes authorized topology and cited queries without internal metadata", async () => {
-  const ontologyStore = new MemoryOntologyGraphStore();
+  const contextGraphStore = new MemoryContextGraphStore();
   const graph = fixtureGraph({
     tenantId: "tenant-a",
     repository: "omxyz/a",
     ref: "refs/heads/main",
     taskId: "public-graph"
   });
-  await ontologyStore.save(graph);
-  await ontologyStore.executeCommand(
+  await contextGraphStore.save(graph);
+  await contextGraphStore.executeCommand(
     "tenant-a",
     "svc:test",
     {
@@ -931,7 +932,7 @@ test("public graph REST API exposes authorized topology and cited queries withou
     },
     "2026-07-20T00:00:00.000Z"
   );
-  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
+  const server = createApiServer({ contextGraphStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
   const baseUrl = await listen(server);
   try {
     assert.equal((await fetch(`${baseUrl}/v1/graphs`)).status, 401);
@@ -990,16 +991,16 @@ test("public graph REST API exposes authorized topology and cited queries withou
 });
 
 test("graph API binds simulation tenants to exact repository ACLs", async () => {
-  const ontologyStore = new MemoryOntologyGraphStore();
+  const contextGraphStore = new MemoryContextGraphStore();
   const tenantId = "tenant-a";
   const principalA = "tenant:11111111-1111-4111-8111-111111111111";
   const principalB = "tenant:22222222-2222-4222-8222-222222222222";
   const graphA = fixtureGraph({ tenantId, repository: "omxyz/a", ref: "main", taskId: "tenant-graph-a" });
   const graphB = fixtureGraph({ tenantId, repository: "other/b", ref: "main", taskId: "tenant-graph-b" });
-  await ontologyStore.save(graphA);
-  await ontologyStore.save(graphB);
+  await contextGraphStore.save(graphA);
+  await contextGraphStore.save(graphB);
   const server = createApiServer({
-    ontologyStore,
+    contextGraphStore,
     internalApiToken: INTERNAL_TOKEN,
     graphApiToken: GRAPH_TOKEN,
     tenantId
@@ -1041,7 +1042,7 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
     );
 
     const build = (principalId: string | undefined, repository: string) =>
-      fetch(`${baseUrl}/ontology/build`, {
+      fetch(`${baseUrl}/context-graph/build`, {
         method: "POST",
         headers: {
           authorization: `Bearer ${GRAPH_TOKEN}`,
@@ -1107,12 +1108,12 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
-test("ontology task-board state is independent of the legacy JSON board snapshot", async () => {
+test("contextGraph task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
-  const ontologyCoordinator = new MemoryOntologyPipelineCoordinator();
-  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyCoordinator });
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, contextGraphCoordinator });
   const firstUrl = await listen(first);
-  const created = await fetch(`${firstUrl}/ontology/build`, {
+  const created = await fetch(`${firstUrl}/context-graph/build`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ repository: "omxyz/legacy", ref: "main", requestKey: "legacy" })
@@ -1122,7 +1123,12 @@ test("ontology task-board state is independent of the legacy JSON board snapshot
 
   assert.equal(stateStore.current(), undefined);
 
-  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyCoordinator });
+  const second = createApiServer({
+    enableDevEndpoints: true,
+    tenantId: "default",
+    stateStore,
+    contextGraphCoordinator
+  });
   const secondUrl = await listen(second);
   try {
     const board = await fetch(`${secondUrl}/board`).then(
@@ -1134,7 +1140,7 @@ test("ontology task-board state is independent of the legacy JSON board snapshot
     );
     assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 7);
     assert.equal(
-      board.outbox.some((message) => message.topic === "run-ontology-ingest" && message.status === "pending"),
+      board.outbox.some((message) => message.topic === "run-context-graph-ingest" && message.status === "pending"),
       true
     );
   } finally {
@@ -1178,7 +1184,7 @@ test("concurrent API instances mutate the latest durable snapshot", async () => 
 });
 
 test("repository builds supersede immediately without waiting for an ingestion data write", async () => {
-  class GatedOntologyStore extends MemoryOntologyGraphStore {
+  class GatedContextGraphStore extends MemoryContextGraphStore {
     private signalEntered!: () => void;
     readonly entered = new Promise<void>((resolve) => {
       this.signalEntered = resolve;
@@ -1203,34 +1209,34 @@ test("repository builds supersede immediately without waiting for an ingestion d
   }
 
   const stateStore = new MemoryStateStore();
-  const ontologyStore = new GatedOntologyStore();
-  const ontologyCoordinator = new MemoryOntologyPipelineCoordinator();
+  const contextGraphStore = new GatedContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
   const first = createApiServer({
     enableDevEndpoints: true,
     tenantId: "default",
     stateStore,
-    ontologyStore,
-    ontologyCoordinator
+    contextGraphStore,
+    contextGraphCoordinator
   });
   const second = createApiServer({
     enableDevEndpoints: true,
     tenantId: "default",
     stateStore,
-    ontologyStore,
-    ontologyCoordinator
+    contextGraphStore,
+    contextGraphCoordinator
   });
   const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
   try {
-    const build = await fetch(`${firstUrl}/ontology/build`, {
+    const build = await fetch(`${firstUrl}/context-graph/build`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "first" })
     });
     assert.equal(build.status, 202);
-    const ingestion = await claimTopic(firstUrl, "run-ontology-ingest");
+    const ingestion = await claimTopic(firstUrl, "run-context-graph-ingest");
     const commitSha = "a".repeat(40);
     const blobSha = "b".repeat(40);
-    await postJson(firstUrl, "/internal/ontology/ingest/plan", {
+    await postJson(firstUrl, "/internal/context-graph/ingest/plan", {
       messageId: ingestion.message.id,
       leaseId: ingestion.message.leaseId,
       snapshot: {
@@ -1245,7 +1251,7 @@ test("repository builds supersede immediately without waiting for an ingestion d
       }
     });
 
-    const write = fetch(`${firstUrl}/internal/ontology/ingest/blobs`, {
+    const write = fetch(`${firstUrl}/internal/context-graph/ingest/blobs`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -1256,7 +1262,7 @@ test("repository builds supersede immediately without waiting for an ingestion d
         analyses: [
           {
             blobSha,
-            parserVersion: ONTOLOGY_PARSER_VERSION,
+            parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
             language: "typescript",
             symbols: [],
             imports: [],
@@ -1265,9 +1271,9 @@ test("repository builds supersede immediately without waiting for an ingestion d
         ]
       })
     });
-    await ontologyStore.entered;
+    await contextGraphStore.entered;
     let replacementSettled = false;
-    const replacement = fetch(`${secondUrl}/ontology/build`, {
+    const replacement = fetch(`${secondUrl}/context-graph/build`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "second" })
@@ -1278,7 +1284,7 @@ test("repository builds supersede immediately without waiting for an ingestion d
     await new Promise((resolve) => setTimeout(resolve, 30));
     assert.equal(replacementSettled, true, "repository-scoped supersession is independent of the data write");
 
-    ontologyStore.release();
+    contextGraphStore.release();
     assert.equal((await write).status, 200);
     assert.equal((await replacement).status, 202);
     assert.equal(
@@ -1294,20 +1300,20 @@ test("repository builds supersede immediately without waiting for an ingestion d
   }
 });
 
-test("ontology completion does not depend on the legacy board snapshot", async () => {
+test("contextGraph completion does not depend on the legacy board snapshot", async () => {
   const stateStore = new MemoryStateStore();
-  const ontologyStore = new MemoryOntologyGraphStore();
-  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const contextGraphStore = new MemoryContextGraphStore();
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, contextGraphStore });
   const baseUrl = await listen(server);
   try {
-    const created = await fetch(`${baseUrl}/ontology/build`, {
+    const created = await fetch(`${baseUrl}/context-graph/build`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ repository: "omxyz/resumable", ref: "main", requestKey: "resumable" })
     });
     assert.equal(created.status, 202);
     const commitSha = "a".repeat(40);
-    const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
+    const ingestion = await claimTopic(baseUrl, "run-context-graph-ingest");
     assert.equal(
       await completeClaim(baseUrl, ingestion, {
         commitSha,
@@ -1316,7 +1322,7 @@ test("ontology completion does not depend on the legacy board snapshot", async (
       }),
       200
     );
-    const assertion = await claimTopic(baseUrl, "run-ontology-assert");
+    const assertion = await claimTopic(baseUrl, "run-context-graph-assert");
     const firstCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1333,7 +1339,7 @@ test("ontology completion does not depend on the legacy board snapshot", async (
           taskId: assertion.task.id,
           generatedAt: "2026-07-20T00:00:00.000Z",
           generatorVersion: "codex-assertions-v2",
-          registryVersion: "ontology-registry-v1",
+          registryVersion: "context-graph-registry-v1",
           evidenceFingerprint: "evidence-fingerprint",
           evidenceObservationIds: [],
           model: "fixture",
@@ -1377,20 +1383,20 @@ test("ontology completion does not depend on the legacy board snapshot", async (
       (response) => response.json() as Promise<{ tasks: { id: string; status: string }[] }>
     );
     assert.equal(board.tasks.find((task) => task.id === assertion.task.id)?.status, "done");
-    assert.equal((await ontologyStore.listAssertions("default", "omxyz/resumable")).length > 0, true);
+    assert.equal((await contextGraphStore.listAssertions("default", "omxyz/resumable")).length > 0, true);
   } finally {
     await close(server);
   }
 });
 
-test("configured aliases migrate existing tasks and ontology graphs to the canonical tenant", async () => {
+test("configured aliases migrate existing tasks and contextGraph graphs to the canonical tenant", async () => {
   const stateStore = new MemoryStateStore();
-  const ontologyStore = new MemoryOntologyGraphStore();
+  const contextGraphStore = new MemoryContextGraphStore();
   const oldTenant = "github:unscoped";
   const first = createApiServer({
     githubWebhookSecret: SECRET,
     stateStore,
-    ontologyStore,
+    contextGraphStore,
     internalApiToken: INTERNAL_TOKEN,
     tenantId: oldTenant
   });
@@ -1399,7 +1405,7 @@ test("configured aliases migrate existing tasks and ontology graphs to the canon
     (await deliver(firstUrl, "pull_request", "delivery-old-tenant", pullRequestPayload(55, "old-sha"))).status,
     202
   );
-  await ontologyStore.save(
+  await contextGraphStore.save(
     fixtureGraph({ tenantId: oldTenant, repository: "omlabs/example", ref: "main", taskId: "old-task" })
   );
   await close(first);
@@ -1407,7 +1413,7 @@ test("configured aliases migrate existing tasks and ontology graphs to the canon
   const second = createApiServer({
     githubWebhookSecret: SECRET,
     stateStore,
-    ontologyStore,
+    contextGraphStore,
     internalApiToken: INTERNAL_TOKEN,
     tenantId: "omlabs",
     tenantAliases: [oldTenant]
@@ -1422,11 +1428,11 @@ test("configured aliases migrate existing tasks and ontology graphs to the canon
       board.tasks.every((task) => task.metadata.tenantId === "omlabs"),
       true
     );
-    const ontology = await authenticatedFetch(`${secondUrl}/ontology`).then(
+    const contextGraph = await authenticatedFetch(`${secondUrl}/context-graph`).then(
       (response) => response.json() as Promise<{ graphs: { tenantId: string }[] }>
     );
     assert.deepEqual(
-      ontology.graphs.map((graph) => graph.tenantId),
+      contextGraph.graphs.map((graph) => graph.tenantId),
       ["omlabs"]
     );
   } finally {
@@ -1561,7 +1567,7 @@ function fixtureGraph(request: {
   taskId: string;
   commitSha?: string;
 }) {
-  return createOntologyGraph({
+  return createContextGraph({
     request,
     commitSha: request.commitSha ?? "fixture-sha",
     generatedAt: new Date().toISOString(),

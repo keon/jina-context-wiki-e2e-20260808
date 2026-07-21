@@ -13,7 +13,7 @@
     { "path": "../../packages/db" },
     { "path": "../../packages/github" },
     { "path": "../../packages/publication" },
-    { "path": "../../packages/ontology" },
+    { "path": "../../packages/context-graph" },
     { "path": "../../packages/review" },
     { "path": "../../packages/shared-kernel" }
   ]

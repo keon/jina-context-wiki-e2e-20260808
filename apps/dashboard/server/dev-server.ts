@@ -9,19 +9,19 @@ const port = Number(process.env.PORT ?? 3000);
 const apiUrl = process.env.JINA_API_URL ?? "http://localhost:4000";
 const internalApiToken = process.env.INTERNAL_API_TOKEN?.trim();
 const page = renderDashboardPage("/api", apiUrl);
-const ontologyGraphClient = readFileSync(fileURLToPath(new URL("../app/ontology-graph-client.js", import.meta.url)));
+const contextGraphClient = readFileSync(fileURLToPath(new URL("../app/context-graph-client.js", import.meta.url)));
 
 const server = createServer((request, response) => {
   if ((request.url ?? "").startsWith("/api/")) {
     proxyApiRequest(request, response);
     return;
   }
-  if ((request.url ?? "").startsWith("/assets/ontology-graph-client.js")) {
+  if ((request.url ?? "").startsWith("/assets/context-graph-client.js")) {
     response.writeHead(200, {
       "content-type": "text/javascript; charset=utf-8",
       "cache-control": "no-cache"
     });
-    response.end(request.method === "HEAD" ? undefined : ontologyGraphClient);
+    response.end(request.method === "HEAD" ? undefined : contextGraphClient);
     return;
   }
   response.writeHead(200, {

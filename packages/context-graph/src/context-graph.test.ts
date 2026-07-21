@@ -1,23 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  createOntologyGraph,
+  createContextGraph,
   isProblemEvidencePath,
-  parseGeneratedOntology,
+  parseGeneratedContextGraph,
   requiredCausalAnchors,
   sourceBackedModelEntityIds,
-  validateOntologyEvidence,
+  validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
   validateSourceBackedModelEntities
 } from "./model.js";
-import { MemoryOntologyGraphStore } from "./store.js";
+import { MemoryContextGraphStore } from "./store.js";
 import {
-  ONTOLOGY_GENERATOR_VERSION,
-  ONTOLOGY_PARSER_VERSION,
-  ONTOLOGY_REGISTRY_VERSION,
+  CONTEXT_GRAPH_GENERATOR_VERSION,
+  CONTEXT_GRAPH_PARSER_VERSION,
+  CONTEXT_GRAPH_REGISTRY_VERSION,
   assertionEvidenceFingerprint,
-  assertionsFromGeneratedOntology,
+  assertionsFromGeneratedContextGraph,
   computeCommitChanges,
   derivedIssueNaturalKey,
   featureNaturalKey,
@@ -45,10 +45,10 @@ import {
   parseServiceDefinitions
 } from "./normalizers.js";
 import { buildCausalTrace, evaluateCounterfactual } from "./causal.js";
-import { MemoryOntologyPipelineCoordinator } from "./pipeline-coordinator.js";
+import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js";
 
-test("snapshot-first ontology builds publish and ingest history without waiting for assertions", async () => {
-  const coordinator = new MemoryOntologyPipelineCoordinator();
+test("snapshot-first contextGraph builds publish and ingest history without waiting for assertions", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
   const createdAt = "2026-07-21T00:00:00.000Z";
   await coordinator.createBuild({
     tenantId: "tenant",
@@ -63,7 +63,10 @@ test("snapshot-first ontology builds publish and ingest history without waiting 
     codeCheckpoint: "code",
     evidenceFingerprint: "evidence"
   };
-  const claim = async (topic: "run-ontology-ingest" | "run-ontology-assert" | "run-ontology-project", now: string) => {
+  const claim = async (
+    topic: "run-context-graph-ingest" | "run-context-graph-assert" | "run-context-graph-project",
+    now: string
+  ) => {
     const value = await coordinator.claim({
       tenantId: "tenant",
       workerId: "worker",
@@ -74,7 +77,7 @@ test("snapshot-first ontology builds publish and ingest history without waiting 
     assert.ok(value);
     return value;
   };
-  const ingest = await claim("run-ontology-ingest", "2026-07-21T00:01:00.000Z");
+  const ingest = await claim("run-context-graph-ingest", "2026-07-21T00:01:00.000Z");
   assert.equal(ingest.task.metadata.pipelinePhase, "snapshot");
   assert.equal(
     await coordinator.complete({
@@ -104,7 +107,7 @@ test("snapshot-first ontology builds publish and ingest history without waiting 
     "snapshot:assert",
     "snapshot:project"
   ]);
-  const projection = await claim("run-ontology-project", "2026-07-21T00:03:00.000Z");
+  const projection = await claim("run-context-graph-project", "2026-07-21T00:03:00.000Z");
   assert.equal(projection.task.metadata.pipelinePhase, "snapshot");
   assert.equal(
     await coordinator.complete({
@@ -116,14 +119,14 @@ test("snapshot-first ontology builds publish and ingest history without waiting 
     }),
     true
   );
-  const history = await claim("run-ontology-ingest", "2026-07-21T00:05:00.000Z");
+  const history = await claim("run-context-graph-ingest", "2026-07-21T00:05:00.000Z");
   assert.equal(history.task.metadata.pipelinePhase, "history");
-  const assertion = await claim("run-ontology-assert", "2026-07-21T00:05:00.000Z");
+  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:05:00.000Z");
   assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
 });
 
 test("new repository builds fence leases from superseded builds", async () => {
-  const coordinator = new MemoryOntologyPipelineCoordinator();
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
   const request = {
     tenantId: "tenant",
     repository: "omxyz/jina",
@@ -135,7 +138,7 @@ test("new repository builds fence leases from superseded builds", async () => {
   const old = await coordinator.claim({
     tenantId: "tenant",
     workerId: "old-worker",
-    topics: ["run-ontology-ingest"],
+    topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:01:00.000Z",
     leaseExpiresAt: "2026-07-21T01:00:00.000Z"
   });
@@ -153,7 +156,7 @@ test("new repository builds fence leases from superseded builds", async () => {
   const next = await coordinator.claim({
     tenantId: "tenant",
     workerId: "new-worker",
-    topics: ["run-ontology-ingest"],
+    topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:03:00.000Z",
     leaseExpiresAt: "2026-07-21T01:00:00.000Z"
   });
@@ -161,8 +164,8 @@ test("new repository builds fence leases from superseded builds", async () => {
   assert.notEqual(next.task.id, old.task.id);
 });
 
-test("workers can release ontology leases for immediate task-board recovery", async () => {
-  const coordinator = new MemoryOntologyPipelineCoordinator();
+test("workers can release contextGraph leases for immediate task-board recovery", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
   await coordinator.createBuild({
     tenantId: "tenant",
     repository: "omxyz/jina",
@@ -174,7 +177,7 @@ test("workers can release ontology leases for immediate task-board recovery", as
   const first = await coordinator.claim({
     tenantId: "tenant",
     workerId: "worker-1",
-    topics: ["run-ontology-ingest"],
+    topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:01:00.000Z",
     leaseExpiresAt: "2026-07-21T01:00:00.000Z"
   });
@@ -199,7 +202,7 @@ test("workers can release ontology leases for immediate task-board recovery", as
   const second = await coordinator.claim({
     tenantId: "tenant",
     workerId: "worker-2",
-    topics: ["run-ontology-ingest"],
+    topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:03:00.000Z",
     leaseExpiresAt: "2026-07-21T01:03:00.000Z"
   });
@@ -209,8 +212,8 @@ test("workers can release ontology leases for immediate task-board recovery", as
   assert.equal(second.task.metadata.pipelinePhase, "snapshot");
 });
 
-test("expired ontology leases requeue without stale stage timing", async () => {
-  const coordinator = new MemoryOntologyPipelineCoordinator();
+test("expired contextGraph leases requeue without stale stage timing", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
   await coordinator.createBuild({
     tenantId: "tenant",
     repository: "omxyz/jina",
@@ -222,7 +225,7 @@ test("expired ontology leases requeue without stale stage timing", async () => {
   const first = await coordinator.claim({
     tenantId: "tenant",
     workerId: "worker-1",
-    topics: ["run-ontology-ingest"],
+    topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:01:00.000Z",
     leaseExpiresAt: "2026-07-21T00:05:00.000Z"
   });
@@ -233,7 +236,7 @@ test("expired ontology leases requeue without stale stage timing", async () => {
     await coordinator.claim({
       tenantId: "tenant",
       workerId: "worker-2",
-      topics: ["run-ontology-assert"],
+      topics: ["run-context-graph-assert"],
       now: "2026-07-21T00:06:00.000Z",
       leaseExpiresAt: "2026-07-21T01:06:00.000Z"
     }),
@@ -249,7 +252,7 @@ test("expired ontology leases requeue without stale stage timing", async () => {
   const second = await coordinator.claim({
     tenantId: "tenant",
     workerId: "worker-2",
-    topics: ["run-ontology-ingest"],
+    topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:07:00.000Z",
     leaseExpiresAt: "2026-07-21T01:07:00.000Z"
   });
@@ -263,7 +266,7 @@ test("pure structural parsing produces versioned symbols and imports", () => {
     "typescript",
     'import { helper } from "./helper";\nexport function main() {}\n'
   );
-  assert.equal(analysis.parserVersion, ONTOLOGY_PARSER_VERSION);
+  assert.equal(analysis.parserVersion, CONTEXT_GRAPH_PARSER_VERSION);
   assert.deepEqual(analysis.imports, [{ specifier: "./helper", line: 1 }]);
   assert.equal(analysis.symbols[0]?.name, "main");
   assert.equal(analysis.symbols[0]?.signatureHash.length, 64);
@@ -493,7 +496,7 @@ test("rename similarity creates review candidates instead of active facts", () =
         oldBlob,
         {
           blobSha: oldBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           symbols: [
             { moniker: "old", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }
           ],
@@ -505,7 +508,7 @@ test("rename similarity creates review candidates instead of active facts", () =
         newBlob,
         {
           blobSha: newBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           symbols: [
             { moniker: "new", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }
           ],
@@ -528,7 +531,7 @@ test("rename similarity creates review candidates instead of active facts", () =
           oldBlob,
           {
             blobSha: oldBlob,
-            parserVersion: ONTOLOGY_PARSER_VERSION,
+            parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
             symbols: [
               { moniker: "old", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }
             ],
@@ -673,13 +676,13 @@ test("recognizes explicit problem evidence paths without matching incidental sub
 });
 
 test("a new model contract confirms rather than overwrites a reviewed assertion", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const common = {
     tenantId: "tenant",
     repository: "omxyz/demo",
     ref: "main",
     commitSha: "a".repeat(40),
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: "same-input",
     evidenceObservationIds: [],
     model: "fixture",
@@ -728,7 +731,7 @@ test("a new model contract confirms rather than overwrites a reviewed assertion"
 });
 
 test("does not reuse a live model assertion across repositories in the same tenant", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const batch = (repository: string, evidenceFingerprint: string) => ({
     tenantId: "shared-tenant",
     repository,
@@ -736,8 +739,8 @@ test("does not reuse a live model assertion across repositories in the same tena
     commitSha: "a".repeat(40),
     taskId: `assert-${repository}`,
     generatedAt: "2026-07-21T00:00:00.000Z",
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint,
     evidenceObservationIds: [],
     model: "fixture",
@@ -762,7 +765,7 @@ test("does not reuse a live model assertion across repositories in the same tena
 });
 
 test("projects assertions with distinct qualifiers as distinct knowledge edges", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const tenantId = "qualified-tenant";
   const repository = "org/qualified";
   const commitSha = "b".repeat(40);
@@ -785,8 +788,8 @@ test("projects assertions with distinct qualifiers as distinct knowledge edges",
     commitSha,
     taskId: "qualified-assert",
     generatedAt: "2026-07-21T00:01:00.000Z",
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: "qualified",
     evidenceObservationIds: [],
     model: "fixture",
@@ -832,7 +835,7 @@ test("projects assertions with distinct qualifiers as distinct knowledge edges",
 });
 
 test("memory assertion dedup never reuses another tenant's assertion", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const batch = (tenantId: string) => ({
     tenantId,
     repository: "omxyz/shared-name",
@@ -841,7 +844,7 @@ test("memory assertion dedup never reuses another tenant's assertion", async () 
     taskId: `task-${tenantId}`,
     generatedAt: "2026-07-20T00:00:00Z",
     generatorVersion: "model-v1",
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: `evidence-${tenantId}`,
     evidenceObservationIds: [],
     model: "fixture",
@@ -1460,7 +1463,7 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
 });
 
 test("source ingestion distinguishes new, updated, and confirmed GitHub observations", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const issue = {
     tenantId: "t",
     repository: "org/repo",
@@ -1505,7 +1508,7 @@ test("source ingestion distinguishes new, updated, and confirmed GitHub observat
 });
 
 test("memory issue traces preserve ambiguous partial title matches", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const repository = "org/repo";
   const observedAt = "2026-07-20T00:00:00.000Z";
   await store.applyGitHubObservations(
@@ -1536,7 +1539,7 @@ test("memory issue traces preserve ambiguous partial title matches", async () =>
 });
 
 test("memory administration applies supported commands and rejects unsupported commands", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const ingested = await store.applyGitHubObservations([
     {
       tenantId: "t",
@@ -1592,12 +1595,12 @@ test("memory administration applies supported commands and rejects unsupported c
       },
       "2026-07-20T00:03:00.000Z"
     ),
-    /requires the relational ontology store/
+    /requires the relational contextGraph store/
   );
 });
 
 test("memory repository roles enforce administration boundaries and tombstones block replay", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const tenantId = "t";
   const repository = "org/tombstoned";
   const now = "2026-07-20T00:00:00.000Z";
@@ -1714,7 +1717,7 @@ test("memory repository roles enforce administration boundaries and tombstones b
 });
 
 test("reviews and retrieves a derived issue through the generalized Issue assertion", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const repository = "org/repo";
   const observedAt = "2026-07-20T00:00:00.000Z";
   const source = await store.applyGitHubObservations([
@@ -1775,14 +1778,14 @@ test("reviews and retrieves a derived issue through the generalized Issue assert
     commitSha: "a".repeat(40),
     taskId: "assert-virtual",
     generatedAt: "2026-07-20T00:01:00.000Z",
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: "virtual-evidence",
     evidenceObservationIds: source.observationIds,
     model: "fixture",
     summary: rawOutput.summary,
     rawOutput,
-    assertions: assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers: [42] })
+    assertions: assertionsFromGeneratedContextGraph(rawOutput, repository, { sourcePullRequestNumbers: [42] })
   });
   const proposal = (await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" }))[0];
   assert.ok(proposal);
@@ -1892,7 +1895,7 @@ test("reviews and retrieves a derived issue through the generalized Issue assert
 });
 
 test("resolves derived issue descriptions by PR anchor when titles collide", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const repository = "org/repo";
   const observedAt = "2026-07-20T00:00:00.000Z";
   const source = await store.applyGitHubObservations(
@@ -1950,14 +1953,14 @@ test("resolves derived issue descriptions by PR anchor when titles collide", asy
     commitSha: "b".repeat(40),
     taskId: "assert-colliding-titles",
     generatedAt: "2026-07-20T00:01:00.000Z",
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: "colliding-title-evidence",
     evidenceObservationIds: source.observationIds,
     model: "fixture",
     summary: rawOutput.summary,
     rawOutput,
-    assertions: assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers: [42, 43] })
+    assertions: assertionsFromGeneratedContextGraph(rawOutput, repository, { sourcePullRequestNumbers: [42, 43] })
   });
   const resolutions = await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" });
   for (const [index, resolution] of resolutions.entries()) {
@@ -2013,7 +2016,7 @@ test("resolves derived issue descriptions by PR anchor when titles collide", asy
 });
 
 test("memory source ingestion applies current deterministic assertions", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   await store.applyGitHubObservations([
     {
       tenantId: "t",
@@ -2067,7 +2070,7 @@ test("memory source ingestion applies current deterministic assertions", async (
 });
 
 test("normalizes model output into distinct semantic entity identities", () => {
-  const assertions = assertionsFromGeneratedOntology(
+  const assertions = assertionsFromGeneratedContextGraph(
     {
       summary: "symbols implement separate documents",
       nodes: [
@@ -2133,7 +2136,7 @@ test("normalizes model output into distinct semantic entity identities", () => {
   );
   assert.throws(
     () =>
-      assertionsFromGeneratedOntology(
+      assertionsFromGeneratedContextGraph(
         {
           summary: "unexplained relationship",
           nodes: [
@@ -2167,7 +2170,7 @@ test("normalizes model output into distinct semantic entity identities", () => {
 
 test("normalizes a PR-anchored derived issue as the generalized Issue kind", () => {
   const repository = "omxyz/demo";
-  const assertions = assertionsFromGeneratedOntology(
+  const assertions = assertionsFromGeneratedContextGraph(
     {
       summary: "PR 42 fixes an authorization regression",
       nodes: [
@@ -2208,12 +2211,12 @@ test("normalizes a PR-anchored derived issue as the generalized Issue kind", () 
   assert.equal(assertion?.object.naturalKey, derivedIssueNaturalKey(repository, 42));
   assert.equal(assertion?.object.naturalKey.startsWith("github:issue:"), false);
   assert.throws(
-    () => assertionsFromGeneratedOntology(generatedDerivedIssue(repository, 42), repository),
+    () => assertionsFromGeneratedContextGraph(generatedDerivedIssue(repository, 42), repository),
     /not present in source evidence/
   );
   assert.throws(
     () =>
-      assertionsFromGeneratedOntology(
+      assertionsFromGeneratedContextGraph(
         {
           ...generatedDerivedIssue(repository, 42),
           edges: [
@@ -2244,7 +2247,7 @@ test("normalizes a PR-anchored derived issue as the generalized Issue kind", () 
   );
   assert.throws(
     () =>
-      assertionsFromGeneratedOntology(generatedDerivedIssue(repository, 42), repository, {
+      assertionsFromGeneratedContextGraph(generatedDerivedIssue(repository, 42), repository, {
         sourcePullRequestNumbers: [42],
         resolvedPullRequestNumbers: [42]
       }),
@@ -2255,7 +2258,7 @@ test("normalizes a PR-anchored derived issue as the generalized Issue kind", () 
 test("ignores model duplicates of deterministic GitHub issue resolutions", () => {
   const repository = "omxyz/demo";
   const sha = "a".repeat(40);
-  const assertions = assertionsFromGeneratedOntology(
+  const assertions = assertionsFromGeneratedContextGraph(
     {
       summary: "PR 5 resolves issue 4 caused by an earlier commit",
       nodes: [
@@ -2315,7 +2318,7 @@ test("ignores model duplicates of deterministic GitHub issue resolutions", () =>
 
 test("keeps reviewed incident deployment resolution outside GitHub issue normalization", () => {
   const repository = "omxyz/demo";
-  const assertions = assertionsFromGeneratedOntology(
+  const assertions = assertionsFromGeneratedContextGraph(
     {
       summary: "The rollback deployment resolved the incident",
       nodes: [
@@ -2360,7 +2363,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   const tenantId = "feature-tenant";
   const repository = "omxyz/feature-fixture";
   const commitSha = "f".repeat(40);
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   assert.equal(extractFeatureText("What implements the administrator deletion feature?"), "administrator deletion");
   assert.deepEqual(classifyTemplates('Which files implement "administrator deletion"?'), ["feature_trace"]);
   await store.planIngestion({
@@ -2381,7 +2384,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   await store.applyBlobAnalyses({ tenantId, repository, commitSha }, [
     {
       blobSha: "b".repeat(40),
-      parserVersion: ONTOLOGY_PARSER_VERSION,
+      parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
       language: "typescript",
       symbols: [],
       imports: [{ specifier: "pg", line: 1 }],
@@ -2473,7 +2476,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
       }
     ]
   };
-  const generatedAssertions = assertionsFromGeneratedOntology(rawOutput, repository);
+  const generatedAssertions = assertionsFromGeneratedContextGraph(rawOutput, repository);
   assert.equal(
     generatedAssertions[0]?.object.naturalKey,
     featureNaturalKey(repository, "feature:administrator-deletion")
@@ -2486,8 +2489,8 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     commitSha,
     taskId: "feature-assert",
     generatedAt: "2026-07-20T00:01:00.000Z",
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: "feature-evidence",
     evidenceObservationIds: [],
     model: "fixture",
@@ -2687,13 +2690,13 @@ test("canonicalizes cited causal model assertions and rejects ambiguous entity i
       }
     ]
   };
-  const [assertion] = assertionsFromGeneratedOntology(generated, "omxyz/demo");
+  const [assertion] = assertionsFromGeneratedContextGraph(generated, "omxyz/demo");
   assert.equal(assertion?.subject.naturalKey, "github:issue:omxyz/demo#7");
   assert.equal(assertion?.object.naturalKey, `repo:omxyz/demo:sha:${sha}`);
   assert.deepEqual(assertion?.qualifiers, { reason: "The commit bypassed the authorization guard." });
   assert.throws(
     () =>
-      assertionsFromGeneratedOntology(
+      assertionsFromGeneratedContextGraph(
         {
           ...generated,
           nodes: generated.nodes.map((node) => (node.kind === "Commit" ? { ...node, id: "commit:short" } : node)),
@@ -2705,7 +2708,7 @@ test("canonicalizes cited causal model assertions and rejects ambiguous entity i
   );
   assert.throws(
     () =>
-      assertionsFromGeneratedOntology(
+      assertionsFromGeneratedContextGraph(
         {
           ...generated,
           edges: [
@@ -2750,7 +2753,7 @@ test("requires explicit root-cause records to appear as causal assertions", () =
       endLine: 2
     }
   ]);
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "explicit causes",
     nodes: [
       {
@@ -2793,7 +2796,7 @@ test("requires explicit root-cause records to appear as causal assertions", () =
 });
 
 test("creates a stable graph and removes dangling edges", () => {
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "A small service",
     nodes: [
       { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
@@ -2811,7 +2814,7 @@ test("creates a stable graph and removes dangling edges", () => {
       { source: "missing", target: "repo", predicate: "references", plane: "knowledge", evidence: ["README.md:1"] }
     ]
   });
-  const graph = createOntologyGraph({
+  const graph = createContextGraph({
     request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId: "task" },
     commitSha: "abc",
     generatedAt: "2026-01-01T00:00:00.000Z",
@@ -2826,7 +2829,7 @@ test("creates a stable graph and removes dangling edges", () => {
 });
 
 test("keeps graph generations immutable per task", () => {
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "repo",
     nodes: [
       { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
@@ -2835,7 +2838,7 @@ test("keeps graph generations immutable per task", () => {
     edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
   });
   const build = (taskId: string) =>
-    createOntologyGraph({
+    createContextGraph({
       request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId },
       commitSha: "abc",
       generatedAt: "2026-01-01T00:00:00.000Z",
@@ -2847,7 +2850,7 @@ test("keeps graph generations immutable per task", () => {
 });
 
 test("content-addresses identical projection generations across worker tasks", () => {
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "repo",
     nodes: [
       { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
@@ -2856,7 +2859,7 @@ test("content-addresses identical projection generations across worker tasks", (
     edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
   });
   const build = (taskId: string) =>
-    createOntologyGraph({
+    createContextGraph({
       request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId },
       commitSha: "abc",
       generatedAt: "2026-01-01T00:00:00.000Z",
@@ -2869,7 +2872,7 @@ test("content-addresses identical projection generations across worker tasks", (
   const reordered = { ...generated, nodes: [...generated.nodes].reverse(), edges: [...generated.edges].reverse() };
   assert.equal(
     build("task-1").id,
-    createOntologyGraph({
+    createContextGraph({
       request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId: "task-3" },
       commitSha: "abc",
       generatedAt: "2026-01-01T00:00:00.000Z",
@@ -2881,7 +2884,7 @@ test("content-addresses identical projection generations across worker tasks", (
   );
   assert.notEqual(
     build("task-1").id,
-    createOntologyGraph({
+    createContextGraph({
       request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId: "task-4" },
       commitSha: "abc",
       generatedAt: "2026-01-01T00:00:00.000Z",
@@ -2897,7 +2900,7 @@ test("content-addresses identical projection generations across worker tasks", (
 });
 
 test("does not overwrite an existing graph generation", async () => {
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "first",
     nodes: [
       { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
@@ -2905,7 +2908,7 @@ test("does not overwrite an existing graph generation", async () => {
     ],
     edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
   });
-  const graph = createOntologyGraph({
+  const graph = createContextGraph({
     request: { tenantId: "tenant", repository: "omxyz/demo", ref: "main", taskId: "task" },
     commitSha: "abc",
     generatedAt: "2026-01-01T00:00:00.000Z",
@@ -2913,14 +2916,14 @@ test("does not overwrite an existing graph generation", async () => {
     model: "fixture",
     generated
   });
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   await store.save(graph);
   await store.save({ ...graph, summary: "replacement" });
   assert.equal((await store.get(graph.id, "tenant"))?.summary, "first");
 });
 
 test("validates citations against repository files", async () => {
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "repo",
     nodes: [
       { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:2"] },
@@ -2935,14 +2938,14 @@ test("validates citations against repository files", async () => {
     ],
     edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
   });
-  await validateOntologyEvidence(generated, async () => "line one\nline two");
+  await validateContextGraphEvidence(generated, async () => "line one\nline two");
   await assert.rejects(
-    validateOntologyEvidence(generated, async () => "one line"),
+    validateContextGraphEvidence(generated, async () => "one line"),
     /outside README\.md/
   );
   assert.throws(
     () =>
-      parseGeneratedOntology({
+      parseGeneratedContextGraph({
         summary: "bad",
         nodes: [{ id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: [] }],
         edges: []
@@ -2953,7 +2956,7 @@ test("validates citations against repository files", async () => {
 
 test("requires causal evidence to name the issue and offending commit", async () => {
   const sha = "3".repeat(40);
-  const generated = parseGeneratedOntology({
+  const generated = parseGeneratedContextGraph({
     summary: "root cause",
     nodes: [
       { id: "4", kind: "Issue", label: "Issue #4", description: "regression", evidence: ["docs/root-cause.md:1"] },
@@ -2977,18 +2980,18 @@ test("requires causal evidence to name the issue and offending commit", async ()
       }
     ]
   });
-  await validateOntologyEvidence(
+  await validateContextGraphEvidence(
     generated,
     async () => `Issue #4 was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
   );
   await assert.rejects(
-    validateOntologyEvidence(
+    validateContextGraphEvidence(
       generated,
       async () => "Issue #4 was caused by an earlier change.\nThe administrator bypass was removed."
     ),
     /explicitly name Issue #4 and commit/
   );
-  const derived = parseGeneratedOntology({
+  const derived = parseGeneratedContextGraph({
     summary: "derived root cause",
     nodes: [
       {
@@ -3018,19 +3021,19 @@ test("requires causal evidence to name the issue and offending commit", async ()
       }
     ]
   });
-  await validateOntologyEvidence(
+  await validateContextGraphEvidence(
     derived,
     async () =>
       `Administrators cannot delete resources was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
   );
   await assert.rejects(
-    validateOntologyEvidence(
+    validateContextGraphEvidence(
       derived,
       async () => `A deletion bug was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
     ),
     /explicitly name Issue Administrators cannot delete resources and commit/
   );
-  const incident = parseGeneratedOntology({
+  const incident = parseGeneratedContextGraph({
     summary: "deployment incident",
     nodes: [
       {
@@ -3060,7 +3063,7 @@ test("requires causal evidence to name the issue and offending commit", async ()
       }
     ]
   });
-  await validateOntologyEvidence(
+  await validateContextGraphEvidence(
     incident,
     async () =>
       "Incident INC-42 deletion outage was introduced by Deployment deployment:github:5535506368 because it shipped the administrator denial path."
@@ -3087,7 +3090,7 @@ test("requires a derived Issue proposal for an explicit untracked repair", () =>
       }
     }
   ];
-  const base = parseGeneratedOntology({
+  const base = parseGeneratedContextGraph({
     summary: "repair",
     nodes: [
       { id: "repo", kind: "Repository", label: "repo", description: "repo", evidence: ["tests/regression.test.ts:1"] }
@@ -3098,7 +3101,7 @@ test("requires a derived Issue proposal for an explicit untracked repair", () =>
     () => validateRequiredDerivedIssues(base, sourceEvidence, [42]),
     /requires derived Issue derived:pr:42/
   );
-  const complete = parseGeneratedOntology({
+  const complete = parseGeneratedContextGraph({
     summary: "repair",
     nodes: [
       ...base.nodes,
@@ -3149,7 +3152,7 @@ test("requires a derived Issue proposal for an explicit untracked repair", () =>
 });
 
 test("reuses parsed blobs and projects canonical code facts plus reviewable assertions", async () => {
-  const store = new MemoryOntologyGraphStore();
+  const store = new MemoryContextGraphStore();
   const snapshot = {
     tenantId: "tenant",
     repository: "omxyz/demo",
@@ -3170,7 +3173,7 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
   await store.applyBlobAnalyses(snapshot, [
     {
       blobSha: "c".repeat(40),
-      parserVersion: ONTOLOGY_PARSER_VERSION,
+      parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
       language: "markdown",
       symbols: [],
       imports: [],
@@ -3178,7 +3181,7 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
     },
     {
       blobSha: "d".repeat(40),
-      parserVersion: ONTOLOGY_PARSER_VERSION,
+      parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
       language: "typescript",
       symbols: [
         { moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }
@@ -3198,8 +3201,8 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
     commitSha: snapshot.commitSha,
     taskId: "assert-task",
     generatedAt: "2026-07-19T00:01:00.000Z",
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint: "evidence-fixture",
     evidenceObservationIds: [],
     model: "fixture",
@@ -3247,8 +3250,8 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
         snapshot.tenantId,
         snapshot.repository,
         snapshot.commitSha,
-        ONTOLOGY_GENERATOR_VERSION,
-        ONTOLOGY_REGISTRY_VERSION,
+        CONTEXT_GRAPH_GENERATOR_VERSION,
+        CONTEXT_GRAPH_REGISTRY_VERSION,
         "evidence-fixture"
       )
     )?.cached,
@@ -3259,8 +3262,8 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
       snapshot.tenantId,
       snapshot.repository,
       snapshot.commitSha,
-      ONTOLOGY_GENERATOR_VERSION,
-      ONTOLOGY_REGISTRY_VERSION,
+      CONTEXT_GRAPH_GENERATOR_VERSION,
+      CONTEXT_GRAPH_REGISTRY_VERSION,
       "different-evidence"
     ),
     undefined
@@ -3270,7 +3273,7 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
       snapshot.tenantId,
       snapshot.repository,
       snapshot.commitSha,
-      ONTOLOGY_GENERATOR_VERSION,
+      CONTEXT_GRAPH_GENERATOR_VERSION,
       "different-registry",
       "evidence-fixture"
     ),
@@ -3331,7 +3334,7 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
   await store.applyBlobAnalyses(nextSnapshot, [
     {
       blobSha: "1".repeat(40),
-      parserVersion: ONTOLOGY_PARSER_VERSION,
+      parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
       language: "typescript",
       symbols: [
         { moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }

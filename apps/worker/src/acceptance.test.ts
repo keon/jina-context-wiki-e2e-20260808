@@ -1,34 +1,38 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { blockedOntologyTaskIds, productionAcceptanceExitCode, runProductionOntologyAcceptance } from "./acceptance.js";
+import {
+  blockedContextGraphTaskIds,
+  productionAcceptanceExitCode,
+  runProductionContextGraphAcceptance
+} from "./acceptance.js";
 
 test("production acceptance exposes coarse failure categories without log access", () => {
-  assert.equal(productionAcceptanceExitCode(new Error("production ontology task task-1 ended as failed")), 20);
-  assert.equal(productionAcceptanceExitCode(new Error("production board retains blocked ontology tasks")), 20);
-  assert.equal(productionAcceptanceExitCode(new Error("latest ontology graph does not match")), 21);
-  assert.equal(productionAcceptanceExitCode(new Error("production ontology graph is empty")), 22);
-  assert.equal(productionAcceptanceExitCode(new Error("production ontology graph contains uncited items")), 23);
+  assert.equal(productionAcceptanceExitCode(new Error("production contextGraph task task-1 ended as failed")), 20);
+  assert.equal(productionAcceptanceExitCode(new Error("production board retains blocked contextGraph tasks")), 20);
+  assert.equal(productionAcceptanceExitCode(new Error("latest contextGraph graph does not match")), 21);
+  assert.equal(productionAcceptanceExitCode(new Error("production contextGraph graph is empty")), 22);
+  assert.equal(productionAcceptanceExitCode(new Error("production contextGraph graph contains uncited items")), 23);
   assert.equal(
     productionAcceptanceExitCode(new Error("production context retrieval did not return cited results")),
     24
   );
-  assert.equal(productionAcceptanceExitCode(new Error("production ontology backlog is not empty")), 25);
-  assert.equal(productionAcceptanceExitCode(new Error("/ontology returned invalid JSON")), 26);
+  assert.equal(productionAcceptanceExitCode(new Error("production contextGraph backlog is not empty")), 25);
+  assert.equal(productionAcceptanceExitCode(new Error("/context-graph returned invalid JSON")), 26);
 });
 
-test("blocked ontology detection is scoped to the accepted repository and ref", () => {
+test("blocked contextGraph detection is scoped to the accepted repository and ref", () => {
   assert.deepEqual(
-    blockedOntologyTaskIds(
+    blockedContextGraphTaskIds(
       [
         {
           id: "same",
-          type: "ontology_project",
+          type: "context_graph_project",
           status: "blocked",
           metadata: { repository: "omxyz/repo", ref: "main" }
         },
         {
           id: "other-ref",
-          type: "ontology_project",
+          type: "context_graph_project",
           status: "blocked",
           metadata: { repository: "omxyz/repo", ref: "dev" }
         },
@@ -40,7 +44,7 @@ test("blocked ontology detection is scoped to the accepted repository and ref", 
         },
         {
           id: "historical",
-          type: "ontology_project",
+          type: "context_graph_project",
           status: "superseded",
           metadata: { repository: "omxyz/repo", ref: "main" }
         }
@@ -60,38 +64,38 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     requests.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
-    if (url.endsWith("/ontology/build")) return json({ task: { id: "ontology-root" } }, 202);
+    if (url.endsWith("/context-graph/build")) return json({ task: { id: "context-graph-root" } }, 202);
     if (url.endsWith("/board")) {
       boardReads += 1;
       return json({
         tasks: [
           {
-            id: "ontology-root",
-            type: "ontology_build",
+            id: "context-graph-root",
+            type: "context_graph_build",
             status: boardReads === 1 ? "in_progress" : "done"
           },
           {
-            id: "ontology-ingest",
-            parentTaskId: "ontology-root",
-            type: "ontology_ingest",
+            id: "context-graph-ingest",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_ingest",
             status: "done"
           },
           {
-            id: "ontology-assert",
-            parentTaskId: "ontology-root",
-            type: "ontology_assert",
+            id: "context-graph-assert",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_assert",
             status: boardReads === 1 ? "in_progress" : "done"
           },
           {
-            id: "ontology-project",
-            parentTaskId: "ontology-root",
-            type: "ontology_project",
+            id: "context-graph-project",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_project",
             status: boardReads === 1 ? "triage" : "done"
           }
         ]
       });
     }
-    if (url.endsWith("/ontology/ask")) {
+    if (url.endsWith("/context-graph/ask")) {
       askReads += 1;
       if (askReads === 2)
         return json({
@@ -123,11 +127,11 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
         ]
       });
     }
-    if (url.endsWith("/ontology/metrics")) return json({ outboxDepth: {}, unparsedBlobCount: 0 });
-    if (url.endsWith("/ontology")) {
+    if (url.endsWith("/context-graph/metrics")) return json({ outboxDepth: {}, unparsedBlobCount: 0 });
+    if (url.endsWith("/context-graph")) {
       return json({
         latest: {
-          repository: "omxyz/jina-ontology-e2e",
+          repository: "omxyz/jina-context-graph-e2e",
           ref: "main",
           commitSha: "a".repeat(40),
           nodes: [{ evidence: ["src/index.ts:1"] }],
@@ -138,11 +142,12 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     return json({ error: "not found" }, 404);
   };
 
-  const result = await runProductionOntologyAcceptance(
+  const result = await runProductionContextGraphAcceptance(
     {
       apiUrl: "https://api.example.test",
       token: "secret",
       requestKey: "deploy-1",
+      repository: "omxyz/jina-context-graph-e2e",
       pollIntervalMs: 1,
       timeoutMs: 100,
       log: (message) => logs.push(message)
@@ -151,79 +156,79 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   );
 
   assert.deepEqual(result, {
-    taskId: "ontology-root",
-    repository: "omxyz/jina-ontology-e2e",
+    taskId: "context-graph-root",
+    repository: "omxyz/jina-context-graph-e2e",
     commitSha: "a".repeat(40),
     nodeCount: 1,
     edgeCount: 1,
     citationCount: 3
   });
   assert.deepEqual(requests, [
-    "POST /ontology/build",
+    "POST /context-graph/build",
     "GET /board",
     "GET /board",
-    "GET /ontology",
-    "POST /ontology/ask",
-    "POST /ontology/ask",
-    "GET /ontology/metrics"
+    "GET /context-graph",
+    "POST /context-graph/ask",
+    "POST /context-graph/ask",
+    "GET /context-graph/metrics"
   ]);
   assert.deepEqual(logs, [
-    "Production ontology task ontology-root: root=in_progress, ontology_ingest=done, ontology_assert=in_progress, ontology_project=triage",
-    "Production ontology task ontology-root: root=done, ontology_ingest=done, ontology_assert=done, ontology_project=done"
+    "Production contextGraph task context-graph-root: root=in_progress, context_graph_ingest=done, context_graph_assert=in_progress, context_graph_project=triage",
+    "Production contextGraph task context-graph-root: root=done, context_graph_ingest=done, context_graph_assert=done, context_graph_project=done"
   ]);
 });
 
 test("production acceptance reviews causality, queries it in both directions, and verifies the graph edge", async () => {
   const causingCommitSha = "c".repeat(40);
   let buildCount = 0;
-  let ontologyReads = 0;
+  let contextGraphReads = 0;
   let reviewed = false;
   const causalQuestions: string[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
-    if (url.pathname === "/ontology/build") return json({ task: { id: `ontology-${++buildCount}` } }, 202);
+    if (url.pathname === "/context-graph/build") return json({ task: { id: `context-graph-${++buildCount}` } }, 202);
     if (url.pathname === "/board") {
-      const taskId = buildCount === 1 ? "ontology-1" : "ontology-2";
+      const taskId = buildCount === 1 ? "context-graph-1" : "context-graph-2";
       return json({
         tasks: [
-          { id: taskId, type: "ontology_build", status: "done" },
-          { id: `${taskId}-ingest`, parentTaskId: taskId, type: "ontology_ingest", status: "done" },
-          { id: `${taskId}-assert`, parentTaskId: taskId, type: "ontology_assert", status: "done" },
+          { id: taskId, type: "context_graph_build", status: "done" },
+          { id: `${taskId}-ingest`, parentTaskId: taskId, type: "context_graph_ingest", status: "done" },
+          { id: `${taskId}-assert`, parentTaskId: taskId, type: "context_graph_assert", status: "done" },
           {
             id: `${taskId}-project`,
             parentTaskId: taskId,
-            type: "ontology_project",
+            type: "context_graph_project",
             status: "done"
           }
         ]
       });
     }
-    if (url.pathname === "/ontology") {
-      ontologyReads += 1;
+    if (url.pathname === "/context-graph") {
+      contextGraphReads += 1;
       return json({
         latest: {
-          repository: "omxyz/jina-ontology-e2e",
+          repository: "omxyz/jina-context-graph-e2e",
           ref: "main",
           commitSha: "a".repeat(40),
           nodes:
-            ontologyReads === 1
+            contextGraphReads === 1
               ? [{ id: "repo", kind: "Repository", evidence: ["README.md:1"] }]
               : [
                   {
                     id: "issue",
                     kind: "Issue",
-                    description: "github:issue:omxyz/jina-ontology-e2e#7",
+                    description: "github:issue:omxyz/jina-context-graph-e2e#7",
                     evidence: ["ROOT_CAUSE.md:2"]
                   },
                   {
                     id: "commit",
                     kind: "Commit",
-                    description: `repo:omxyz/jina-ontology-e2e:sha:${causingCommitSha}`,
+                    description: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
                     evidence: ["ROOT_CAUSE.md:2"]
                   }
                 ],
           edges:
-            ontologyReads === 1
+            contextGraphReads === 1
               ? [
                   {
                     source: "repo",
@@ -244,24 +249,24 @@ test("production acceptance reviews causality, queries it in both directions, an
         }
       });
     }
-    if (url.pathname === "/ontology/assertions")
+    if (url.pathname === "/context-graph/assertions")
       return json({
         assertions: [
           {
             id: "cause-assertion",
             status: "proposed",
-            subjectNaturalKey: "github:issue:omxyz/jina-ontology-e2e#7",
-            objectNaturalKey: `repo:omxyz/jina-ontology-e2e:sha:${causingCommitSha}`,
+            subjectNaturalKey: "github:issue:omxyz/jina-context-graph-e2e#7",
+            objectNaturalKey: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
             evidence: ["ROOT_CAUSE.md:2"],
             qualifiers: { reason: "The guard was bypassed." }
           }
         ]
       });
-    if (url.pathname === "/ontology/commands") {
+    if (url.pathname === "/context-graph/commands") {
       reviewed = true;
       return json({ affectedIds: ["cause-assertion"] });
     }
-    if (url.pathname === "/ontology/ask") {
+    if (url.pathname === "/context-graph/ask") {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         question?: string;
         operation?: string;
@@ -328,7 +333,7 @@ test("production acceptance reviews causality, queries it in both directions, an
                           {
                             number: 6,
                             title: "Introduce regression",
-                            url: "https://github.com/omxyz/jina-ontology-e2e/pull/6"
+                            url: "https://github.com/omxyz/jina-context-graph-e2e/pull/6"
                           }
                         ]
                       }
@@ -353,15 +358,16 @@ test("production acceptance reviews causality, queries it in both directions, an
         citations: [{ kind: "assertion", id: "change" }]
       });
     }
-    if (url.pathname === "/ontology/metrics") return json({ outboxDepth: {}, unparsedBlobCount: 0 });
+    if (url.pathname === "/context-graph/metrics") return json({ outboxDepth: {}, unparsedBlobCount: 0 });
     return json({ error: "not found" }, 404);
   };
 
-  const result = await runProductionOntologyAcceptance(
+  const result = await runProductionContextGraphAcceptance(
     {
       apiUrl: "https://api.example.test",
       token: "secret",
       requestKey: "deploy-causal",
+      repository: "omxyz/jina-context-graph-e2e",
       expectedIssueNumber: 7,
       expectedResolutionPullRequestNumber: 8,
       causality: { causingCommitSha, causingPullRequestNumber: 6, reasonIncludes: "guard" },
@@ -385,13 +391,13 @@ test("production acceptance reviews causality, queries it in both directions, an
 test("production acceptance fails on a terminal task failure", async () => {
   const fetchImpl: typeof fetch = async (input) => {
     const url = String(input);
-    if (url.endsWith("/ontology/build")) return json({ task: { id: "ontology-root" } }, 202);
+    if (url.endsWith("/context-graph/build")) return json({ task: { id: "context-graph-root" } }, 202);
     if (url.endsWith("/events")) return json([]);
-    return json({ tasks: [{ id: "ontology-root", status: "failed" }] });
+    return json({ tasks: [{ id: "context-graph-root", status: "failed" }] });
   };
 
   await assert.rejects(
-    runProductionOntologyAcceptance(
+    runProductionContextGraphAcceptance(
       {
         apiUrl: "https://api.example.test",
         token: "secret",
@@ -409,38 +415,39 @@ test("production acceptance fails on a terminal task failure", async () => {
 test("production acceptance rejects lingering blocked tasks from an older attempt", async () => {
   const fetchImpl: typeof fetch = async (input) => {
     const url = String(input);
-    if (url.endsWith("/ontology/build")) return json({ task: { id: "ontology-root" } }, 202);
+    if (url.endsWith("/context-graph/build")) return json({ task: { id: "context-graph-root" } }, 202);
     return json({
       tasks: [
         {
-          id: "ontology-root",
-          type: "ontology_build",
+          id: "context-graph-root",
+          type: "context_graph_build",
           status: "done",
-          metadata: { repository: "omxyz/jina-ontology-e2e", ref: "main" }
+          metadata: { repository: "omxyz/jina-context-graph-e2e", ref: "main" }
         },
         {
           id: "old-project",
-          type: "ontology_project",
+          type: "context_graph_project",
           status: "blocked",
-          metadata: { repository: "omxyz/jina-ontology-e2e", ref: "main" }
+          metadata: { repository: "omxyz/jina-context-graph-e2e", ref: "main" }
         }
       ]
     });
   };
 
   await assert.rejects(
-    runProductionOntologyAcceptance(
+    runProductionContextGraphAcceptance(
       {
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-stale",
+        repository: "omxyz/jina-context-graph-e2e",
         pollIntervalMs: 1,
         timeoutMs: 100,
         log: () => undefined
       },
       fetchImpl
     ),
-    /retains blocked ontology tasks.*old-project/
+    /retains blocked contextGraph tasks.*old-project/
   );
 });
 
@@ -449,35 +456,35 @@ test("production acceptance treats a blocked aggregate as terminal and reports i
   const fetchImpl: typeof fetch = async (input) => {
     const url = String(input);
     requests.push(new URL(url).pathname);
-    if (url.endsWith("/ontology/build")) return json({ task: { id: "ontology-root" } }, 202);
+    if (url.endsWith("/context-graph/build")) return json({ task: { id: "context-graph-root" } }, 202);
     if (url.endsWith("/events")) {
       return json([
         {
-          taskId: "ontology-assert",
-          type: "run-ontology-assert.failed",
+          taskId: "context-graph-assert",
+          type: "run-context-graph-assert.failed",
           payload: { reason: "Daytona assertion failed\nwithout leaking credentials" }
         }
       ]);
     }
     return json({
       tasks: [
-        { id: "ontology-root", type: "ontology_build", status: "blocked" },
+        { id: "context-graph-root", type: "context_graph_build", status: "blocked" },
         {
-          id: "ontology-ingest",
-          parentTaskId: "ontology-root",
-          type: "ontology_ingest",
+          id: "context-graph-ingest",
+          parentTaskId: "context-graph-root",
+          type: "context_graph_ingest",
           status: "done"
         },
         {
-          id: "ontology-assert",
-          parentTaskId: "ontology-root",
-          type: "ontology_assert",
+          id: "context-graph-assert",
+          parentTaskId: "context-graph-root",
+          type: "context_graph_assert",
           status: "failed"
         },
         {
-          id: "ontology-project",
-          parentTaskId: "ontology-root",
-          type: "ontology_project",
+          id: "context-graph-project",
+          parentTaskId: "context-graph-root",
+          type: "context_graph_project",
           status: "blocked"
         }
       ]
@@ -485,7 +492,7 @@ test("production acceptance treats a blocked aggregate as terminal and reports i
   };
 
   await assert.rejects(
-    runProductionOntologyAcceptance(
+    runProductionContextGraphAcceptance(
       {
         apiUrl: "https://api.example.test",
         token: "secret",
@@ -496,9 +503,9 @@ test("production acceptance treats a blocked aggregate as terminal and reports i
       },
       fetchImpl
     ),
-    /ended as blocked .*failures: ontology_assert: Daytona assertion failed without leaking credentials/
+    /ended as blocked .*failures: context_graph_assert: Daytona assertion failed without leaking credentials/
   );
-  assert.deepEqual(requests, ["/ontology/build", "/board", "/events"]);
+  assert.deepEqual(requests, ["/context-graph/build", "/board", "/events"]);
 });
 
 function json(body: unknown, status = 200): Response {

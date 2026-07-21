@@ -8,11 +8,11 @@ export function isAllowedDashboardApiRequest(
     (pathname === "/api/board" ||
       pathname === "/api/events" ||
       pathname === "/api/task-types" ||
-      pathname === "/api/ontology" ||
-      pathname === "/api/ontology/assertions");
+      pathname === "/api/context-graph" ||
+      pathname === "/api/context-graph/assertions");
   const allowedLocalDemo = !hasInternalApiToken && method === "POST" && pathname === "/api/dev/webhooks/github";
-  const allowedOntologyQuery =
-    method === "POST" && (pathname === "/api/ontology/ask" || pathname === "/api/ontology/commands");
+  const allowedContextGraphQuery =
+    method === "POST" && (pathname === "/api/context-graph/ask" || pathname === "/api/context-graph/commands");
 
-  return allowedRead || allowedLocalDemo || allowedOntologyQuery;
+  return allowedRead || allowedLocalDemo || allowedContextGraphQuery;
 }

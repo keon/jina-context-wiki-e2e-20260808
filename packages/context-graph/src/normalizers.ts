@@ -1,4 +1,4 @@
-import type { OntologyNodeKind } from "./model.js";
+import type { ContextGraphNodeKind } from "./model.js";
 
 export function codeownersPatternMatches(rawPattern: string, path: string): boolean {
   const pattern = rawPattern.trim();
@@ -132,7 +132,7 @@ export type RepositorySourceObservation =
   | MoveCandidateObservation;
 
 export interface SourceEntityIntent {
-  readonly kind: OntologyNodeKind;
+  readonly kind: ContextGraphNodeKind;
   readonly key: string;
   readonly displayName: string;
 }

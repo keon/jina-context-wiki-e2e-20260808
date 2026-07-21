@@ -1,21 +1,21 @@
-# Ontology Build Performance — Implementation Plan
+# ContextGraph Build Performance — Implementation Plan
 
 Status: proposed 2026-07-21. Grounded in production measurements taken the same
 day (Cloud Logging request traces 16:30–18:40 UTC) and a local benchmark harness
-running the real `PostgresOntologyGraphStore` code against PostgreSQL.
+running the real `PostgresContextGraphStore` code against PostgreSQL.
 
 ## Measured baseline
 
 Production, per internal API call (Cloud Run request logs):
 
-| Call                                                         | Typical  | Worst observed          | Local benchmark (same code, unix socket) |
-| ------------------------------------------------------------ | -------- | ----------------------- | ---------------------------------------- |
-| `/internal/ontology/ingest/blobs` (50 analyses)              | ~12 s    | 495 s, one 504 at 300 s | 0.85 s                                   |
-| `/internal/ontology/ingest/plan` (one commit)                | 4–29 s   | 67 s (930 KB response)  | 45 ms (2k tree) / 159 ms (10k tree)      |
-| `/internal/ontology/ingest/github` (one repo's PR/issue set) | 10–70 s  | 131.7 s                 | 1.4 s / 100 observations                 |
-| `/internal/worker/complete`                                  | 1–27 s   | 250 s                   | —                                        |
-| `/internal/worker/claim` (empty poll)                        | 0.6–13 s | 70 s                    | —                                        |
-| `/internal/ontology/outbox/drain`                            | 3–16 s   | 572 s                   | 3.0 s with events / 4 ms empty           |
+| Call                                                              | Typical  | Worst observed          | Local benchmark (same code, unix socket) |
+| ----------------------------------------------------------------- | -------- | ----------------------- | ---------------------------------------- |
+| `/internal/context-graph/ingest/blobs` (50 analyses)              | ~12 s    | 495 s, one 504 at 300 s | 0.85 s                                   |
+| `/internal/context-graph/ingest/plan` (one commit)                | 4–29 s   | 67 s (930 KB response)  | 45 ms (2k tree) / 159 ms (10k tree)      |
+| `/internal/context-graph/ingest/github` (one repo's PR/issue set) | 10–70 s  | 131.7 s                 | 1.4 s / 100 observations                 |
+| `/internal/worker/complete`                                       | 1–27 s   | 250 s                   | —                                        |
+| `/internal/worker/claim` (empty poll)                             | 0.6–13 s | 70 s                    | —                                        |
+| `/internal/context-graph/outbox/drain`                            | 3–16 s   | 572 s                   | 3.0 s with events / 4 ms empty           |
 
 Whole tasks, production:
 
@@ -32,7 +32,7 @@ Whole tasks, production:
 Root causes, ranked (each verified by both code reading and the numbers above):
 
 1. Row-at-a-time SQL: a 50-blob batch issues ~4,100 sequential queries
-   (`postgres-ontology-graph-store.ts` — per-symbol/import/edge INSERT loops,
+   (`postgres-context-graph-store.ts` — per-symbol/import/edge INSERT loops,
    plus one `commit_manifest()` tree-unnest per blob). Cloud SQL round-trip
    latency turns 0.85 s of SQL into 231–495 s.
 2. Full-tree-per-commit protocol: every `/ingest/plan` ships and stores the
@@ -56,7 +56,7 @@ Root causes, ranked (each verified by both code reading and the numbers above):
 Two workloads, two shapes. Much of today's cost is the delta path running
 through backfill-shaped code and vice versa.
 
-- **Batch initialization** (first build; up to `ONTOLOGY_HISTORY_LIMIT`
+- **Batch initialization** (first build; up to `CONTEXT_GRAPH_HISTORY_LIMIT`
   commits): optimize for throughput. One clone, local history walk, bulk
   set-based loads, no per-event projection during the load, one terminal
   rebuild, one bounded semantic generation.
@@ -77,7 +77,7 @@ the backfill path never emits per-commit projection work.
 | e2e acceptance build (deploy gate)             | 20–40+ min | ≤ 5 min               |
 | Empty claim poll                               | 0.6–70 s   | ≤ 100 ms              |
 
-These align with the SLOs already declared in ONTOLOGY.md (ref-to-manifest p95
+These align with the SLOs already declared in CONTEXT_GRAPH.md (ref-to-manifest p95
 ≤ 30 s, observation-to-search p95 ≤ 60 s), currently missed by an order of
 magnitude.
 
@@ -114,7 +114,7 @@ acceptance duration.
   backfills `trees` from existing commit rows; `commit_manifest()` becomes a
   join. Column drop of `tree_paths`/`tree_blob_shas` ships as a separate
   follow-up migration after a soak period (rollback = keep reading old columns).
-- API: `/internal/ontology/ingest/plan` accepts
+- API: `/internal/context-graph/ingest/plan` accepts
   `{mode:"delta", parentSha, changes:[…]}` or `{mode:"tree", treeSha, files}`;
   tree mode only when the tree is unseen (root commits, unknown parents).
 - Worker: sends deltas computed from git for chain commits; the full tree only
@@ -131,7 +131,7 @@ acceptance duration.
 - Keep REST for PRs/issues/CODEOWNERS-adjacent data; wrap `githubRequest` with
   rate-limit-aware retry (`Retry-After`, `x-ratelimit-remaining`), exponential
   backoff, and bounded concurrency (reuse `mapWithConcurrency`, default 10).
-- Feature flag `ONTOLOGY_INGEST_TRANSPORT=git|rest` for rollback.
+- Feature flag `CONTEXT_GRAPH_INGEST_TRANSPORT=git|rest` for rollback.
 - Expected: the 2–3 minute serial-read gap at the start of every ingest → tens
   of seconds; backfills stop consuming the REST rate budget for code data.
 
@@ -158,7 +158,7 @@ acceptance duration.
 - Worker: renew failures retry with backoff; the lease is treated as lost only
   on an explicit 409. Internal `/internal/*` routes are exempt from the API
   rate limiter (renew/claim 429s observed in production are self-inflicted).
-- Exempt internal ontology routes from the `api_state` `synchronize()` reload;
+- Exempt internal contextGraph routes from the `api_state` `synchronize()` reload;
   add retention (age + count caps) for board events in both stores.
 - Scale out: worker `max-instances` 2–4 with topic sharding; split the per-repo
   advisory lock per plane (code / knowledge / projection) so batched writers

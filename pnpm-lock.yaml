@@ -41,15 +41,15 @@ importers:
       '@jina/board':
         specifier: workspace:*
         version: link:../../packages/board
+      '@jina/context-graph':
+        specifier: workspace:*
+        version: link:../../packages/context-graph
       '@jina/db':
         specifier: workspace:*
         version: link:../../packages/db
       '@jina/github':
         specifier: workspace:*
         version: link:../../packages/github
-      '@jina/ontology':
-        specifier: workspace:*
-        version: link:../../packages/ontology
       '@jina/publication':
         specifier: workspace:*
         version: link:../../packages/publication
@@ -88,12 +88,12 @@ importers:
       '@jina/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@jina/context-graph':
+        specifier: workspace:*
+        version: link:../../packages/context-graph
       '@jina/daytona':
         specifier: workspace:*
         version: link:../../packages/daytona
-      '@jina/ontology':
-        specifier: workspace:*
-        version: link:../../packages/ontology
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -156,14 +156,27 @@ importers:
         specifier: ^26.1.0
         version: 26.1.1
 
+  packages/context-graph:
+    dependencies:
+      '@ast-grep/napi':
+        specifier: ^0.44.1
+        version: 0.44.1
+      '@jina/shared-kernel':
+        specifier: workspace:*
+        version: link:../shared-kernel
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+
   packages/daytona:
     dependencies:
       '@daytona/sdk':
         specifier: ^0.199.0
         version: 0.199.0(debug@4.4.3)(ws@8.21.1)
-      '@jina/ontology':
+      '@jina/context-graph':
         specifier: workspace:*
-        version: link:../ontology
+        version: link:../context-graph
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
@@ -171,9 +184,9 @@ importers:
 
   packages/db:
     dependencies:
-      '@jina/ontology':
+      '@jina/context-graph':
         specifier: workspace:*
-        version: link:../ontology
+        version: link:../context-graph
       '@jina/shared-kernel':
         specifier: workspace:*
         version: link:../shared-kernel
@@ -186,19 +199,6 @@ importers:
         version: 8.20.0
 
   packages/github:
-    devDependencies:
-      '@types/node':
-        specifier: ^26.1.1
-        version: 26.1.1
-
-  packages/ontology:
-    dependencies:
-      '@ast-grep/napi':
-        specifier: ^0.44.1
-        version: 0.44.1
-      '@jina/shared-kernel':
-        specifier: workspace:*
-        version: link:../shared-kernel
     devDependencies:
       '@types/node':
         specifier: ^26.1.1

@@ -1,20 +1,20 @@
-# Ontology — Repository Context Architecture
+# ContextGraph — Repository Context Architecture
 
 ## Status
 
-This document describes the implementation in this repository as of 2026-07-21. Ontology is one workflow on Jina's generic task board. The board controls work; Ontology owns repository facts and cited retrieval. The graph shown on `/ontology` is a disposable read model, not the canonical store.
+This document describes the implementation in this repository as of 2026-07-21. ContextGraph is one workflow on Jina's generic task board. The board controls work; ContextGraph owns repository facts and cited retrieval. The graph shown on `/context-graph` is a disposable read model, not the canonical store.
 
 The implementation contains the Repository Context Architecture v5.1 causal model (registry contract `repository-context-v5.7-causal`) with three board-visible chunks rather than a card per internal mechanism:
 
-| Task type          | Internal responsibilities                                                                                                                                                                                       | Durable completion                                                                    |
-| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| `ontology_ingest`  | Immutable GitHub/Git intake, exact commit trees, new reachable commits, first-parent deltas, content-addressed parsing, and deterministic PR/issue/CODEOWNERS/package/service/deployment/incident normalization | Observations, code-plane rows, explicit source facts, and code checkpoint are durable |
-| `ontology_assert`  | Daytona checkout, Codex semantic analysis, citation validation, model observation, and registry validation, including derived Issue, Feature, movement, impact, documentation, and causal proposals             | Raw model output is recorded and every supported inference is stored as `proposed`    |
-| `ontology_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest/search rebuild, relational graph materialization, retention                                                                            | Projection checkpoint and immutable graph generation are durable                      |
+| Task type               | Internal responsibilities                                                                                                                                                                                       | Durable completion                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `context_graph_ingest`  | Immutable GitHub/Git intake, exact commit trees, new reachable commits, first-parent deltas, content-addressed parsing, and deterministic PR/issue/CODEOWNERS/package/service/deployment/incident normalization | Observations, code-plane rows, explicit source facts, and code checkpoint are durable |
+| `context_graph_assert`  | Daytona checkout, Codex semantic analysis, citation validation, model observation, and registry validation, including derived Issue, Feature, movement, impact, documentation, and causal proposals             | Raw model output is recorded and every supported inference is stored as `proposed`    |
+| `context_graph_project` | Ref-scoped canonical outbox claim, redirect reconciliation, ref-manifest/search rebuild, relational graph materialization, retention                                                                            | Projection checkpoint and immutable graph generation are durable                      |
 
-`ontology_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
+`context_graph_build` remains an aggregate parent. Internal stages are not board primitives and do not appear as extra cards.
 
-The Task types page renders this declared topology as a workflow dependency tree, with prerequisite completion **unblocking** the waiting task, conditional links labeled inline, and redundant direct aggregate completion gates called out on the terminal node. Creation triggers are rendered separately on every task type: `POST /ontology/build` and non-deleted GitHub branch pushes create the same aggregate and three stage tasks, queue `ontology_ingest`, and leave assertion/projection waiting on their declared prerequisites. Push intake deduplicates by head SHA and supersedes stale active trees for the same repository/ref. `ontology_ingest` therefore has an intake trigger but no prerequisite **task**; making it depend on `ontology_build` would deadlock because that aggregate waits for ingestion, assertion, and projection to finish. The full registry shows creation triggers, prerequisite tasks, and downstream dependents separately. This catalog view is workflow metadata and does not read or infer dependencies from live board task instances.
+The Task types page renders this declared topology as a workflow dependency tree, with prerequisite completion **unblocking** the waiting task, conditional links labeled inline, and redundant direct aggregate completion gates called out on the terminal node. Creation triggers are rendered separately on every task type: `POST /context-graph/build` and non-deleted GitHub branch pushes create the same aggregate and three stage tasks, queue `context_graph_ingest`, and leave assertion/projection waiting on their declared prerequisites. Push intake deduplicates by head SHA and supersedes stale active trees for the same repository/ref. `context_graph_ingest` therefore has an intake trigger but no prerequisite **task**; making it depend on `context_graph_build` would deadlock because that aggregate waits for ingestion, assertion, and projection to finish. The full registry shows creation triggers, prerequisite tasks, and downstream dependents separately. This catalog view is workflow metadata and does not read or infer dependencies from live board task instances.
 
 ## Separation of concerns
 
@@ -25,7 +25,7 @@ flowchart LR
       D[Required dependencies]
       B[Board outbox leases]
     end
-    subgraph Context[Ontology / repository context]
+    subgraph Context[ContextGraph / repository context]
       I[Immutable observations]
       C[Content-addressed code plane]
       K[Knowledge service]
@@ -47,15 +47,15 @@ flowchart LR
     Context -->|checkpoints, counts, graph ID| Board
 ```
 
-The board stores repository/ref inputs and checkpoint IDs. It does not store observations, symbols, assertions, redirects, search documents, or graph semantics. Ontology never treats task dependencies such as `blocks` or `publishes` as repository predicates.
+The board stores repository/ref inputs and checkpoint IDs. It does not store observations, symbols, assertions, redirects, search documents, or graph semantics. ContextGraph never treats task dependencies such as `blocks` or `publishes` as repository predicates.
 
 ## Runtime flow
 
 ### Intake and incrementality
 
-The ontology worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree it asks the canonical store which SHAs already exist. A repeated build therefore reads only the head tree; a new head ingests only the previously unseen subgraph until it reaches known parents. `ONTOLOGY_HISTORY_LIMIT` is a safety fence (default 10,000 commits); exceeding it fails rather than storing a partial history.
+The contextGraph worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree it asks the canonical store which SHAs already exist. A repeated build therefore reads only the head tree; a new head ingests only the previously unseen subgraph until it reaches known parents. `CONTEXT_GRAPH_HISTORY_LIMIT` is a safety fence (default 10,000 commits); exceeding it fails rather than storing a partial history.
 
-Each commit stores parents, author external ID, commit time, message, its exact observed path/blob tree, and first-parent churn. The root churn is a set of adds; later `commit_changes` rows record add, modify, delete, and exact-content rename. `commit_manifest(tenant, repository, sha)` returns the exact recorded tree independently of parent order; ancestry replay exists only for legacy rows that predate exact-tree recording. `ontology_project` materializes that state only for hot refs. A force-push moves a ref; it does not rewrite commit facts.
+Each commit stores parents, author external ID, commit time, message, its exact observed path/blob tree, and first-parent churn. The root churn is a set of adds; later `commit_changes` rows record add, modify, delete, and exact-content rename. `commit_manifest(tenant, repository, sha)` returns the exact recorded tree independently of parent order; ancestry replay exists only for legacy rows that predate exact-tree recording. `context_graph_project` materializes that state only for hot refs. A force-push moves a ref; it does not rewrite commit facts.
 
 Blobs are tenant-scoped and keyed by Git SHA. Parsing is keyed by `(tenant, blobSha, parserVersion)`, so unchanged content is parsed once across every commit and ref. TypeScript and JavaScript use tree-sitter through `@ast-grep/napi`; the versioned fallback supports deterministic definitions/imports for other recognized languages. Parse rows contain signature hashes and `calls | imports | references | extends` edges.
 
@@ -68,20 +68,20 @@ GitHub PRs and issues remain raw observations. Pure normalizers derive only expl
 - `REFERENCES` from explicit issue mentions;
 - pattern-qualified `OWNED_BY` from CODEOWNERS.
 
-The same intake task deterministically recognizes direct dependencies in npm, Python, Go, Cargo, Ruby, Maven, and Gradle manifests; named services in Compose, Kubernetes, Cloud Run, service catalogs, nested or suffixed Dockerfiles, and explicit Cloud Run deployment workflow commands; GitHub deployments and completed deploy/release workflow runs; GitHub issues explicitly labeled `incident`; and postmortem documents carrying a stable incident ID. A root `Dockerfile` alone does not mint a service because it has no unambiguous service name. These inputs produce stable `Package`, `Service`, `Deployment`, and `Incident` entities plus source-backed `DEPENDS_ON`, `DEPLOYS`, `TARGETS`, `REFERENCES`, and explicit `INCIDENT_IMPACTS` facts. A lockfile confirms resolution but never invents a direct dependency. Removing a manifest, service definition, postmortem, or CODEOWNERS file emits a current-ref tombstone and retracts that source's former live facts; entities and immutable observations remain available for audit. An unavailable optional GitHub Deployments or Actions permission does not block Git/code intake. Ambiguous service mappings and similarity-only rename candidates are observations for `ontology_assert`, not active facts.
+The same intake task deterministically recognizes direct dependencies in npm, Python, Go, Cargo, Ruby, Maven, and Gradle manifests; named services in Compose, Kubernetes, Cloud Run, service catalogs, nested or suffixed Dockerfiles, and explicit Cloud Run deployment workflow commands; GitHub deployments and completed deploy/release workflow runs; GitHub issues explicitly labeled `incident`; and postmortem documents carrying a stable incident ID. A root `Dockerfile` alone does not mint a service because it has no unambiguous service name. These inputs produce stable `Package`, `Service`, `Deployment`, and `Incident` entities plus source-backed `DEPENDS_ON`, `DEPLOYS`, `TARGETS`, `REFERENCES`, and explicit `INCIDENT_IMPACTS` facts. A lockfile confirms resolution but never invents a direct dependency. Removing a manifest, service definition, postmortem, or CODEOWNERS file emits a current-ref tombstone and retracts that source's former live facts; entities and immutable observations remain available for audit. An unavailable optional GitHub Deployments or Actions permission does not block Git/code intake. Ambiguous service mappings and similarity-only rename candidates are observations for `context_graph_assert`, not active facts.
 
 Commit authorship is derived from commits plus accepted identities and is not duplicated as an assertion.
 Ingest reports GitHub snapshots as `new`, `updated`, or `confirmed` independently from new commits and parsed/reused blobs. A PR or issue edit at an unchanged Git head therefore makes the ingest effect `changed` instead of being hidden as a ref confirmation. Ingest also emits a canonical evidence fingerprint over the code checkpoint, source observations, bounded focus paths, and PRs whose complete changed-file lists contain problem evidence. Assertion lookup is exact on tenant, repository, commit, generator, registry, and this fingerprint; any mismatch runs assertion generation instead of risking stale semantic output. A changed semantic input creates a new immutable model-output generation. Re-emitting the same semantic assertion only updates `lastConfirmedAt`; it never overwrites its provenance or human review status. Facts that disappear from a later model output are not silently retracted.
 
 ### Semantic assertion generation
 
-The assertion worker checks out the immutable commit in Daytona and asks Codex about one bounded focus list. Head changes come first; when several commits are newly ingested, still-present documentation/tests and then recent historical changes are included up to `ONTOLOGY_ASSERTION_FOCUS_LIMIT` (default 200). If a new generator has no cached output for an already-known commit, its one uncached run uses the same bounded selector over the current tree, prioritizing documentation and tests, and rehydrates only recent merged PRs that look like untracked repairs so older derived Issue candidates are not lost without scanning every PR. That rehydration is not limited to PRs whose immediate base was the default branch: it verifies that each candidate merge commit is an ancestor of the requested head, so stacked PRs survive a later integration merge while unrelated branch work stays out of scope. Before the model call, the worker streams bounded prefixes from up to 32 prioritized files concurrently and includes a bounded, line-numbered evidence bundle in the prompt (`ONTOLOGY_FOCUS_BUNDLE_MAX_CHARS`, default 16000; `ONTOLOGY_FOCUS_BUNDLE_FILE_CHARS`, default 3000). Each remote stream is aborted at its byte budget, so transfer and memory use are bounded before prompt construction. This removes sequential model tool turns without creating parallel assertion writers; repository tools remain a fallback for unresolved citations. It also rehydrates the exact immutable GitHub/CODEOWNERS observations named by ingestion and supplies them inline as untrusted evidence data. For every PR in scope, ingest fetches its complete commit membership and changed-file list with bounded concurrency (`ONTOLOGY_GITHUB_PR_CONCURRENCY`, default 4) and fails closed if the bounded pagination cannot prove completeness. A PR is required to produce a derived Issue only when its own current changed files contain durable problem evidence; another PR in the same backfill cannot trigger it, and a later GitHub edit cannot replace its canonical `INCLUDES` facts with a partial discovery-frontier list. Problem evidence is recognized only by evidence-oriented path components or complete filename tokens, not substrings such as `debugger.ts` or `regression_metrics.ts`. The host lists those anchors and explicit root-cause anchors found in named root-cause/incident records, plus the exact deterministic Package/Service/Deployment/Incident IDs the model is allowed to reference. Any model-created source identity outside that set is rejected. The model remains responsible for the semantic title, explanation, confidence, relationships, and exact citations. Every semantic edge must include both checked citations and a nonempty `why` that explains how those citations support the relationship rather than restating the predicate. Deterministic source relationships receive explanations directly from their normalizer and do not call the model. Every model-supplied code citation is checked against the checkout before completion. Causal citations must cover the explicit root-cause span naming the Issue, full SHA, and mechanism; semantic agreement between that span and `why` remains part of the required human review rather than a brittle lexical heuristic. The host does not amend model evidence. The exact parsed model document is retained separately from the normalized graph used to create assertion intents. A parse, explanation, line-range, source-identity, causal-citation, omitted explicit root-cause assertion, or required derived-Issue validation failure receives one repair attempt inside the same assertion task and sandbox; a second failure remains fail-closed.
+The assertion worker checks out the immutable commit in Daytona and asks Codex about one bounded focus list. Head changes come first; when several commits are newly ingested, still-present documentation/tests and then recent historical changes are included up to `CONTEXT_GRAPH_ASSERTION_FOCUS_LIMIT` (default 200). If a new generator has no cached output for an already-known commit, its one uncached run uses the same bounded selector over the current tree, prioritizing documentation and tests, and rehydrates only recent merged PRs that look like untracked repairs so older derived Issue candidates are not lost without scanning every PR. That rehydration is not limited to PRs whose immediate base was the default branch: it verifies that each candidate merge commit is an ancestor of the requested head, so stacked PRs survive a later integration merge while unrelated branch work stays out of scope. Before the model call, the worker streams bounded prefixes from up to 32 prioritized files concurrently and includes a bounded, line-numbered evidence bundle in the prompt (`CONTEXT_GRAPH_FOCUS_BUNDLE_MAX_CHARS`, default 16000; `CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_CHARS`, default 3000). Each remote stream is aborted at its byte budget, so transfer and memory use are bounded before prompt construction. This removes sequential model tool turns without creating parallel assertion writers; repository tools remain a fallback for unresolved citations. It also rehydrates the exact immutable GitHub/CODEOWNERS observations named by ingestion and supplies them inline as untrusted evidence data. For every PR in scope, ingest fetches its complete commit membership and changed-file list with bounded concurrency (`CONTEXT_GRAPH_GITHUB_PR_CONCURRENCY`, default 4) and fails closed if the bounded pagination cannot prove completeness. A PR is required to produce a derived Issue only when its own current changed files contain durable problem evidence; another PR in the same backfill cannot trigger it, and a later GitHub edit cannot replace its canonical `INCLUDES` facts with a partial discovery-frontier list. Problem evidence is recognized only by evidence-oriented path components or complete filename tokens, not substrings such as `debugger.ts` or `regression_metrics.ts`. The host lists those anchors and explicit root-cause anchors found in named root-cause/incident records, plus the exact deterministic Package/Service/Deployment/Incident IDs the model is allowed to reference. Any model-created source identity outside that set is rejected. The model remains responsible for the semantic title, explanation, confidence, relationships, and exact citations. Every semantic edge must include both checked citations and a nonempty `why` that explains how those citations support the relationship rather than restating the predicate. Deterministic source relationships receive explanations directly from their normalizer and do not call the model. Every model-supplied code citation is checked against the checkout before completion. Causal citations must cover the explicit root-cause span naming the Issue, full SHA, and mechanism; semantic agreement between that span and `why` remains part of the required human review rather than a brittle lexical heuristic. The host does not amend model evidence. The exact parsed model document is retained separately from the normalized graph used to create assertion intents. A parse, explanation, line-range, source-identity, causal-citation, omitted explicit root-cause assertion, or required derived-Issue validation failure receives one repair attempt inside the same assertion task and sandbox; a second failure remains fail-closed.
 
 An Issue is the generalized problem entity. It may come directly from a provider or be derived from repository evidence such as a PR, commit, review finding, or incident. A GitHub issue uses a `github:issue:<repository>#<number>` natural key, and its explicit `RESOLVES` relationships come only from deterministic intake. When a merged PR has no linked issue, explicitly repairs a bug/regression, and changes durable problem evidence, the assertion contract derives one `Issue` candidate and an `Issue RESOLVED_BY PullRequest` relationship. Its natural key is `derived:issue:<repository>:<anchor-digest>`. Refactors, dependency updates, documentation, chores, feature-only work, and text explicitly saying the PR is not a fix do not qualify. The model cannot mint a GitHub issue number, create more than one candidate for a PR, change the PR anchor, or create one when intake found an explicit resolution. A later provider-backed Issue can be joined through the existing entity-redirect mechanism without rewriting history.
 
 A Feature is a repository-scoped, model-inferred identity for a named externally observable capability, never a synonym for a file, component, or task. Its host-validated natural key is `repo:<repository>:feature:<stable-slug>`. Explicit repository evidence may propose `File | Symbol IMPLEMENTS Feature`, `Feature DOCUMENTED_BY Document`, `Commit | PullRequest | Issue LIKELY_AFFECTS Feature`, and reviewed Feature/Service ownership. Deterministic old/new blob similarity supplies only `MOVED_FROM` candidates; the model must cite continuity before the assertion can be reviewed. These predicates remain manual-review inferences. Acceptance makes them canonical knowledge; the existing project task renders them in the disposable dashboard graph without adding another board task.
 
-Models never activate knowledge. All model relationships, including `INTRODUCED_BY`, enter as `proposed`. Causality requires an Issue or Incident identity; a full Commit or explicit Deployment identity; a nonempty reason; and checked evidence including an explicit root-cause span. Temporal proximity or membership in a resolving PR is insufficient. A human reviewer decides whether the stated reason is semantically supported. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row; rejection requires a reason and one of `incorrect_relationship`, `insufficient_evidence`, `unsupported_explanation`, or `other`. `assertion_relations` records evidence-backed `supports` and `contradicts` links between assertion IDs without inventing necessity/sufficiency predicates. The dashboard displays proposed assertions, explanations, evidence, confidence, related assertions, and review controls. `GET /ontology/assertions` exposes the same redirect-resolved repository summaries for production verification.
+Models never activate knowledge. All model relationships, including `INTRODUCED_BY`, enter as `proposed`. Causality requires an Issue or Incident identity; a full Commit or explicit Deployment identity; a nonempty reason; and checked evidence including an explicit root-cause span. Temporal proximity or membership in a resolving PR is insufficient. A human reviewer decides whether the stated reason is semantically supported. An authenticated `review_assertion` command accepts, rejects, or retracts model facts and appends an audit row; rejection requires a reason and one of `incorrect_relationship`, `insufficient_evidence`, `unsupported_explanation`, or `other`. `assertion_relations` records evidence-backed `supports` and `contradicts` links between assertion IDs without inventing necessity/sufficiency predicates. The dashboard displays proposed assertions, explanations, evidence, confidence, related assertions, and review controls. `GET /context-graph/assertions` exposes the same redirect-resolved repository summaries for production verification.
 
 ### Projection
 
@@ -94,7 +94,7 @@ The canonical outbox fans one aggregate event into consumer-owned delivery rows 
 5. acknowledges repository-wide outbox events only after every tracked ref has rebuilt successfully;
 6. creates or reuses the immutable, content-addressed relational graph generation for the commit, projection version, and resulting canonical content.
 
-`causal_trace` generalizes causal traversal over roots of kind `Issue`, `Feature`, `Incident`, or `Service`. It reads the latest graph materialized by `ontology_project`, preserves every reviewed causal path, and groups causes, resolutions, implementations, impacts, direct dependencies, deployments, documentation, ownership, movement, and structural CALLS/IMPORTS paths. Every path carries assertion/observation and code citations. `issue_trace` and `feature_trace` remain compatibility templates over the same projected graph; there is no per-root JSON cache. Retrieval is read-only and cannot create knowledge or repair a missing graph; `ontology_project` remains the exclusive graph writer.
+`causal_trace` generalizes causal traversal over roots of kind `Issue`, `Feature`, `Incident`, or `Service`. It reads the latest graph materialized by `context_graph_project`, preserves every reviewed causal path, and groups causes, resolutions, implementations, impacts, direct dependencies, deployments, documentation, ownership, movement, and structural CALLS/IMPORTS paths. Every path carries assertion/observation and code citations. `issue_trace` and `feature_trace` remain compatibility templates over the same projected graph; there is no per-root JSON cache. Retrieval is read-only and cannot create knowledge or repair a missing graph; `context_graph_project` remains the exclusive graph writer.
 
 The former `issue_traces` JSON table was evaluated rather than retained speculatively. Direct traversal measured 5.9 ms p95 on the real validation repository and 35.7 ms p95 on a synthetic 5,000-issue graph, below the 100 ms database budget. The cache was therefore removed. See [ISSUE_TRACE_BENCHMARK.md](ISSUE_TRACE_BENCHMARK.md).
 
@@ -106,13 +106,13 @@ that provenance is excluded instead of relying on an empty-evidence shortcut.
 
 Bulk history ingestion bypasses per-blob outbox fan-out; the final project rebuild is the bulk recovery path. Steady-state canonical changes emit aggregate events transactionally.
 
-The ontology worker drains canonical events before completing a project task and while idle. Ref-specific events may be handled by that ref alone. Repository-wide events receive one durable fanout lease, force every tracked ref to rebuild, and are acknowledged only after all those ref projections and graphs succeed; a failed fanout releases the lease for retry. Tenant-global identity or redirect events fan out across current repositories. Tombstones with no remaining ref are acknowledged after their command transaction has purged the projections. A single-ref rebuild cannot claim a ref-less event or acknowledge another repository's pending event.
+The contextGraph worker drains canonical events before completing a project task and while idle. Ref-specific events may be handled by that ref alone. Repository-wide events receive one durable fanout lease, force every tracked ref to rebuild, and are acknowledged only after all those ref projections and graphs succeed; a failed fanout releases the lease for retry. Tenant-global identity or redirect events fan out across current repositories. Tombstones with no remaining ref are acknowledged after their command transaction has purged the projections. A single-ref rebuild cannot claim a ref-less event or acknowledge another repository's pending event.
 
 Once an exact semantic scope has been generated, an unchanged ref is a no-op through the expensive path: the head is reported as confirmed, every blob analysis is reused, the exact generator checkpoint returns cached proposals without starting Daytona, and manifest/search rebuilding is skipped when no scoped canonical event is pending. A cold history backfill may intentionally run one later bounded current-tree generation when its traversal scope converges; subsequent identical requests are exact-cache hits. Stage results carry `effect: changed | confirmed | noop`. Projection content is addressed independently of its worker task, so an unchanged result returns the existing graph ID and the graph store performs no duplicate write.
 
 ## Canonical storage
 
-All tables are in PostgreSQL under `jina_ontology`, and every row is tenant-scoped.
+All tables are in PostgreSQL under `jina_context_graph`, and every row is tenant-scoped.
 
 | Plane                   | Tables                                                                                                        |
 | ----------------------- | ------------------------------------------------------------------------------------------------------------- |
@@ -124,7 +124,7 @@ All tables are in PostgreSQL under `jina_ontology`, and every row is tenant-scop
 
 Exact trees on `commits` are canonical historical state; `commit_changes` is the compact, queryable first-parent delta record. `commit_manifest(...)` returns a requested commit tree, and `ref_manifest` stores the hot-ref result used by retrieval and projection. Schema upgrades drop the superseded `commit_files` table. Graph rows are immutable and content-addressed by commit, projection version, and canonical graph content; `graph_heads` records which immutable generation is current for each ref, so reverting content to an older graph ID remains ref-correct.
 
-PostgreSQL, rather than application convention, enforces same-tenant references for entities, identities, observations, assertions, audit records, refs, manifests, and blobs. Partial unique indexes enforce one live cardinality-one assertion and one exact live candidate. A trigger requires a nonempty immutable explanation on every new assertion while allowing audited backfill of legacy nulls. Schema migrations run separately from application roles. Intake, code, knowledge, manifest, search, reconciliation, graph, and query services have table-specific NOLOGIN roles; `jina_ontology_writer` is their compatibility aggregate, and `jina_ontology_reader` is read-only.
+PostgreSQL, rather than application convention, enforces same-tenant references for entities, identities, observations, assertions, audit records, refs, manifests, and blobs. Partial unique indexes enforce one live cardinality-one assertion and one exact live candidate. A trigger requires a nonempty immutable explanation on every new assertion while allowing audited backfill of legacy nulls. Schema migrations run separately from application roles. Intake, code, knowledge, manifest, search, reconciliation, graph, and query services have table-specific NOLOGIN roles; `jina_context_graph_writer` is their compatibility aggregate, and `jina_context_graph_reader` is read-only.
 
 Upgrades drop the former `model_outputs` and `issue_traces` tables because their content duplicates canonical observations and graph traversal. The immutable `model_output` observation is the sole model-generation record. Current projection accepts both deterministic `PullRequest RESOLVES Issue` and reviewed `Issue | Incident RESOLVED_BY PullRequest | Deployment` relationships.
 
@@ -140,7 +140,7 @@ Only `status`, `validTo`, `supersededBy`, and `lastConfirmedAt` mutate after ins
 
 ### Registry
 
-The typed registry is [registry.ts](../packages/ontology/src/registry.ts). It declares endpoint kinds, predicate class, cardinality, qualifiers, review policy, bitemporality, and authority. It is versioned in Git and stamped on assertions.
+The typed registry is [registry.ts](../packages/context-graph/src/registry.ts). It declares endpoint kinds, predicate class, cardinality, qualifiers, review policy, bitemporality, and authority. It is versioned in Git and stamped on assertions.
 
 The implemented predicate set is:
 
@@ -182,7 +182,7 @@ Models cannot compose database queries. The API exposes eight deterministic temp
 
 Every item carries code, commit-change, assertion, entity, or observation citations plus score and explicit truncation. Expansion is limited to 200 items. Issue and Feature retrieval require a materialized graph for the resolved ref and admit model assertions only when every cited blob is unchanged in that ref; stale or missing evidence produces no relationship rather than leaking a claim from another branch. Repository permission is checked before querying and again before results leave the API.
 
-`POST /ontology/ask` chooses only those fixed templates. Its conservative planner extracts issue/root text, features, PRs, commits, packages, deployments, repository paths, and identifier-shaped symbols. Counterfactual phrasing selects the fixed `counterfactual` template, loads a materialized causal trace, removes every path containing the resolved intervention, and recomputes the known paths in memory. The response includes `basis: graph-derived`, intervention, outcome, removed/remaining paths, cited claims, ambiguities, and coverage gaps. It says that all _currently known reviewed_ paths disappear; it never claims an outcome was impossible through an unknown path. The endpoint remains synchronous and read-only and creates no board task or stored counterfactual fact.
+`POST /context-graph/ask` chooses only those fixed templates. Its conservative planner extracts issue/root text, features, PRs, commits, packages, deployments, repository paths, and identifier-shaped symbols. Counterfactual phrasing selects the fixed `counterfactual` template, loads a materialized causal trace, removes every path containing the resolved intervention, and recomputes the known paths in memory. The response includes `basis: graph-derived`, intervention, outcome, removed/remaining paths, cited claims, ambiguities, and coverage gaps. It says that all _currently known reviewed_ paths disappear; it never claims an outcome was impossible through an unknown path. The endpoint remains synchronous and read-only and creates no board task or stored counterfactual fact.
 
 The external MCP contract intentionally hides those internal templates. `POST /mcp`
 advertises only `query_graph(repository, query, ref?)` and returns an answer, cited
@@ -228,7 +228,7 @@ Ingest and rebuild consult `erasure_filters`, so replay cannot resurrect removed
 
 ## Operational signals
 
-`GET /ontology/metrics` reports:
+`GET /context-graph/metrics` reports:
 
 - outbox depth by event and consumer, oldest age, and reconciliation lag;
 - unparsed blob backlog and blobs parsed in the last hour;
@@ -243,26 +243,26 @@ The service-level targets originally defined in v5.1 remain unchanged in v5.6: r
 ## APIs
 
 ```text
-POST /ontology/build
-GET  /ontology
-GET  /ontology/graphs/:id
-GET  /ontology/metrics
-GET  /ontology/assertions?repository=:repository
-POST /ontology/retrieve
-POST /ontology/ask
-POST /ontology/commands
+POST /context-graph/build
+GET  /context-graph
+GET  /context-graph/graphs/:id
+GET  /context-graph/metrics
+GET  /context-graph/assertions?repository=:repository
+POST /context-graph/retrieve
+POST /context-graph/ask
+POST /context-graph/commands
 ```
 
 Internal worker routes are lease-fenced:
 
 ```text
-POST /internal/ontology/ingest/known
-POST /internal/ontology/ingest/plan
-POST /internal/ontology/ingest/blobs
-POST /internal/ontology/ingest/github
-POST /internal/ontology/assertions/cached
-POST /internal/ontology/assertions/evidence
-POST /internal/ontology/outbox/drain
+POST /internal/context-graph/ingest/known
+POST /internal/context-graph/ingest/plan
+POST /internal/context-graph/ingest/blobs
+POST /internal/context-graph/ingest/github
+POST /internal/context-graph/assertions/cached
+POST /internal/context-graph/assertions/evidence
+POST /internal/context-graph/outbox/drain
 ```
 
 ## Verification contract

@@ -1,25 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  ONTOLOGY_GENERATOR_VERSION,
-  ONTOLOGY_PARSER_VERSION,
-  ONTOLOGY_REGISTRY_VERSION,
+  CONTEXT_GRAPH_GENERATOR_VERSION,
+  CONTEXT_GRAPH_PARSER_VERSION,
+  CONTEXT_GRAPH_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
-  createOntologyGraph,
+  createContextGraph,
   derivedIssueNaturalKey,
   featureNaturalKey,
   stableId
-} from "@jina/ontology";
+} from "@jina/context-graph";
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
-import { PostgresOntologyGraphStore } from "./postgres-ontology-graph-store.js";
-import { ONTOLOGY_ROLES_SQL } from "./ontology-roles.js";
-import { PostgresOntologyPipelineCoordinator } from "./postgres-ontology-pipeline-coordinator.js";
+import { PostgresContextGraphStore } from "./postgres-context-graph-store.js";
+import { CONTEXT_GRAPH_ROLES_SQL } from "./context-graph-roles.js";
+import { PostgresContextGraphPipelineCoordinator } from "./postgres-context-graph-pipeline-coordinator.js";
 import { Pool } from "pg";
 
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test(
-  "Postgres ontology pipeline claims once and fences superseded leases",
+  "Postgres contextGraph pipeline claims once and fences superseded leases",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -28,9 +28,9 @@ test(
     const suffix = Date.now().toString(36);
     const tenantId = `pipeline-${suffix}`;
     const repository = `omxyz/pipeline-${suffix}`;
-    const first = new PostgresOntologyPipelineCoordinator({ connectionString });
-    const second = new PostgresOntologyPipelineCoordinator({ connectionString });
-    const graphStore = new PostgresOntologyGraphStore({ connectionString });
+    const first = new PostgresContextGraphPipelineCoordinator({ connectionString });
+    const second = new PostgresContextGraphPipelineCoordinator({ connectionString });
+    const graphStore = new PostgresContextGraphStore({ connectionString });
     const cleanup = new Pool({ connectionString });
     try {
       await first.createBuild({
@@ -46,7 +46,7 @@ test(
           coordinator.claim({
             tenantId,
             workerId: `worker-${index}`,
-            topics: ["run-ontology-ingest"],
+            topics: ["run-context-graph-ingest"],
             now: "2026-07-21T00:01:00.000Z",
             leaseExpiresAt: "2026-07-21T01:00:00.000Z"
           })
@@ -98,7 +98,7 @@ test(
           },
           { stageId: claimed.task.id, leaseId: claimed.message.leaseId }
         ),
-        /stale ontology worker lease/
+        /stale contextGraph worker lease/
       );
     } finally {
       await cleanup.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]);
@@ -118,7 +118,7 @@ test(
     const suffix = Date.now().toString(36);
     const tenantId = `acl-replace-${suffix}`;
     const principalId = "tenant:11111111-1111-4111-8111-111111111111";
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const cleanup = new Pool({ connectionString });
     try {
       await store.replaceRepositoryAccess(tenantId, principalId, ["omxyz/a", "omxyz/b"]);
@@ -130,7 +130,7 @@ test(
       await store.replaceRepositoryAccess(tenantId, principalId, []);
       assert.deepEqual(await store.repositoriesForPrincipal(tenantId, principalId), []);
     } finally {
-      await cleanup.query(`delete from jina_ontology.repository_acl where tenant_id=$1 and principal_id=$2`, [
+      await cleanup.query(`delete from jina_context_graph.repository_acl where tenant_id=$1 and principal_id=$2`, [
         tenantId,
         principalId
       ]);
@@ -183,9 +183,9 @@ test(
     const tenantId = `graph-head-${suffix}`;
     const repository = `omlabs/graph-head-${suffix}`;
     const commitSha = "a".repeat(40);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const graph = (deploymentId: string, deploymentLabel: string, generatedAt: string) =>
-      createOntologyGraph({
+      createContextGraph({
         request: { tenantId, repository, ref: "main", taskId: `project-${deploymentId}` },
         commitSha,
         generatedAt,
@@ -260,13 +260,13 @@ test(
       const pool = new Pool({ connectionString });
       try {
         await pool.query(
-          "delete from jina_ontology.graph_heads where tenant_id=$1 and repository=$2 and ref_name='main'",
+          "delete from jina_context_graph.graph_heads where tenant_id=$1 and repository=$2 and ref_name='main'",
           [tenantId, repository]
         );
       } finally {
         await pool.end();
       }
-      const migratedStore = new PostgresOntologyGraphStore({ connectionString });
+      const migratedStore = new PostgresContextGraphStore({ connectionString });
       try {
         const migrated = await migratedStore.retrieve(request);
         assert.equal(migrated.items.length, 1, "schema initialization backfills a missing legacy graph head");
@@ -291,7 +291,7 @@ test(
     const repository = `omlabs/feature-limit-${suffix}`;
     const commitSha = "c".repeat(40);
     const now = "2026-07-21T02:00:00.000Z";
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     try {
       await store.planIngestion({
         tenantId,
@@ -306,7 +306,7 @@ test(
         files: []
       });
       await store.save(
-        createOntologyGraph({
+        createContextGraph({
           request: { tenantId, repository, ref: "main", taskId: `project-${suffix}` },
           commitSha,
           generatedAt: now,
@@ -341,25 +341,25 @@ test(
       const pool = new Pool({ connectionString });
       try {
         const observation = await pool.query<{ id: string }>(
-          "select id from jina_ontology.observations where tenant_id=$1 and repository=$2 limit 1",
+          "select id from jina_context_graph.observations where tenant_id=$1 and repository=$2 limit 1",
           [tenantId, repository]
         );
         assert.ok(observation.rows[0]);
         const fileId = `feature-limit-file-${suffix}`;
         await pool.query(
-          `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+          `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name)
          values ($1,$2,'File',$3,'src/index.ts')`,
           [fileId, tenantId, `repo:${repository}:path:src/index.ts`]
         );
         await pool.query(
-          `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+          `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name)
          select $1 || candidate.index,$2,'Feature',$3 || candidate.index,
                 case when candidate.index=1600 then 'Needle capability' else 'Unrelated capability ' || candidate.index end
          from generate_series(0,1600) candidate(index)`,
           [`feature-limit-entity-${suffix}-`, tenantId, `feature:${repository}:`]
         );
         await pool.query(
-          `insert into jina_ontology.assertions
+          `insert into jina_context_graph.assertions
           (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
            object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,source_observation_id,
            generator_version,registry_version,recorded_at)
@@ -379,8 +379,8 @@ test(
             `feature-limit-entity-${suffix}-`,
             `feature:${repository}:`,
             observation.rows[0].id,
-            ONTOLOGY_GENERATOR_VERSION,
-            ONTOLOGY_REGISTRY_VERSION,
+            CONTEXT_GRAPH_GENERATOR_VERSION,
+            CONTEXT_GRAPH_REGISTRY_VERSION,
             now
           ]
         );
@@ -407,17 +407,17 @@ test(
 );
 
 test(
-  "Postgres ontology roles separate reads and runtime writes from schema ownership",
+  "Postgres contextGraph roles separate reads and runtime writes from schema ownership",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const pool = new Pool({ connectionString, max: 1 });
     try {
       await store.list("role-fixture");
-      await pool.query(ONTOLOGY_ROLES_SQL);
+      await pool.query(CONTEXT_GRAPH_ROLES_SQL);
 
       const privileges = await pool.query<{
         manifest_writes_manifest: boolean;
@@ -428,13 +428,13 @@ test(
         query_writes_assertions: boolean;
         knowledge_writes_assertion_relations: boolean;
       }>(`select
-      has_table_privilege('jina_ontology_manifest','jina_ontology.ref_manifest','INSERT') as manifest_writes_manifest,
-      has_table_privilege('jina_ontology_manifest','jina_ontology.blobs','INSERT') as manifest_writes_blobs,
-      has_table_privilege('jina_ontology_graph','jina_ontology.graphs','INSERT') as graph_writes_graphs,
-      has_table_privilege('jina_ontology_graph','jina_ontology.assertions','INSERT') as graph_writes_assertions,
-      has_table_privilege('jina_ontology_query','jina_ontology.retrieval_metrics','INSERT') as query_writes_metrics,
-      has_table_privilege('jina_ontology_query','jina_ontology.assertions','INSERT') as query_writes_assertions,
-      has_table_privilege('jina_ontology_knowledge','jina_ontology.assertion_relations','INSERT') as knowledge_writes_assertion_relations`);
+      has_table_privilege('jina_context_graph_manifest','jina_context_graph.ref_manifest','INSERT') as manifest_writes_manifest,
+      has_table_privilege('jina_context_graph_manifest','jina_context_graph.blobs','INSERT') as manifest_writes_blobs,
+      has_table_privilege('jina_context_graph','jina_context_graph.graphs','INSERT') as graph_writes_graphs,
+      has_table_privilege('jina_context_graph','jina_context_graph.assertions','INSERT') as graph_writes_assertions,
+      has_table_privilege('jina_context_graph_query','jina_context_graph.retrieval_metrics','INSERT') as query_writes_metrics,
+      has_table_privilege('jina_context_graph_query','jina_context_graph.assertions','INSERT') as query_writes_assertions,
+      has_table_privilege('jina_context_graph_knowledge','jina_context_graph.assertion_relations','INSERT') as knowledge_writes_assertion_relations`);
       assert.deepEqual(privileges.rows[0], {
         manifest_writes_manifest: true,
         manifest_writes_blobs: false,
@@ -448,24 +448,24 @@ test(
       const client = await pool.connect();
       try {
         await client.query("begin");
-        await client.query("set local role jina_ontology_reader");
-        await client.query("select count(*) from jina_ontology.graphs");
+        await client.query("set local role jina_context_graph_reader");
+        await client.query("select count(*) from jina_context_graph.graphs");
         await assert.rejects(
           client.query(
-            "insert into jina_ontology.blobs (tenant_id,blob_sha,byte_size) values ('role-fixture','reader-write',1)"
+            "insert into jina_context_graph.blobs (tenant_id,blob_sha,byte_size) values ('role-fixture','reader-write',1)"
           ),
           /permission denied/
         );
         await client.query("rollback");
 
         await client.query("begin");
-        await client.query("set local role jina_ontology_query");
+        await client.query("set local role jina_context_graph_query");
         await client.query(
-          `insert into jina_ontology.retrieval_metrics (tenant_id,repository,template,duration_ms,truncated,recorded_at)
+          `insert into jina_context_graph.retrieval_metrics (tenant_id,repository,template,duration_ms,truncated,recorded_at)
          values ('role-fixture','omlabs/role-fixture','structure',1,false,now())`
         );
         await assert.rejects(
-          client.query(`insert into jina_ontology.assertions
+          client.query(`insert into jina_context_graph.assertions
           (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,
            object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,generator_version,registry_version,recorded_at)
           values ('denied','role-fixture','omlabs/role-fixture','source','none','File','none','none','REFERENCES',
@@ -475,12 +475,12 @@ test(
         await client.query("rollback");
 
         await client.query("begin");
-        await client.query("set local role jina_ontology_writer");
+        await client.query("set local role jina_context_graph_writer");
         await client.query(
-          "insert into jina_ontology.blobs (tenant_id,blob_sha,byte_size) values ('role-fixture','writer-write',1)"
+          "insert into jina_context_graph.blobs (tenant_id,blob_sha,byte_size) values ('role-fixture','writer-write',1)"
         );
         await assert.rejects(
-          client.query("create table jina_ontology.writer_must_not_migrate (id integer)"),
+          client.query("create table jina_context_graph.writer_must_not_migrate (id integer)"),
           /permission denied/
         );
         await client.query("rollback");
@@ -501,7 +501,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const pool = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `legacy-inverse-${suffix}`;
@@ -525,12 +525,12 @@ test(
         files: [{ path: "README.md", blobSha: "9".repeat(40), size: 1 }]
       });
       await pool.query(
-        `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+        `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name)
        values ($1,$3,'Issue',$4,'Legacy issue'),($2,$3,'PullRequest',$5,'PR #2')`,
         [issueId, pullRequestId, tenantId, `github:issue:${repository}#1`, `github:pr:${repository}#2`]
       );
       await pool.query(
-        `insert into jina_ontology.assertions
+        `insert into jina_context_graph.assertions
         (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
          predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
          explanation,source_observation_id,asserted_by,generator_version,registry_version,recorded_at)
@@ -555,7 +555,7 @@ test(
       assert.equal(listed.length, 1);
       assert.equal(listed[0]?.predicate, "RESOLVED_BY");
       const legacy = await pool.query<{ status: string }>(
-        `select status from jina_ontology.assertions where tenant_id=$1 and predicate='RESOLVED_BY'`,
+        `select status from jina_context_graph.assertions where tenant_id=$1 and predicate='RESOLVED_BY'`,
         [tenantId]
       );
       assert.equal(legacy.rows[0]?.status, "active", "reviewed inverse relationships remain current causal knowledge");
@@ -573,7 +573,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const pool = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `delta-${suffix}`;
@@ -622,7 +622,7 @@ test(
         "only changed blobs are parse candidates in delta mode"
       );
       const manifest = await pool.query<{ path: string; blob_sha: string }>(
-        `select path,blob_sha from jina_ontology.commit_manifest($1,$2,$3) order by path`,
+        `select path,blob_sha from jina_context_graph.commit_manifest($1,$2,$3) order by path`,
         [tenantId, repository, "c".repeat(40)]
       );
       assert.deepEqual(
@@ -634,7 +634,7 @@ test(
         "the recorded manifest matches the reconstructed tree"
       );
       const trees = await pool.query<{ tree_sha: string }>(
-        `select tree_sha from jina_ontology.trees where tenant_id=$1 order by tree_sha`,
+        `select tree_sha from jina_context_graph.trees where tenant_id=$1 order by tree_sha`,
         [tenantId]
       );
       assert.deepEqual(
@@ -685,7 +685,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const pool = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `blob-batch-${suffix}`;
@@ -702,7 +702,7 @@ test(
     };
     const analysisFor = (moniker: string) => ({
       blobSha: "3".repeat(40),
-      parserVersion: ONTOLOGY_PARSER_VERSION,
+      parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
       language: "typescript",
       symbols: [{ moniker, name: moniker, kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 2 }],
       imports: [],
@@ -712,7 +712,7 @@ test(
       await store.planIngestion(snapshot);
       await store.applyBlobAnalyses(snapshot, [analysisFor("first"), analysisFor("second")]);
       const symbols = await pool.query<{ moniker: string }>(
-        `select moniker from jina_ontology.blob_symbols where tenant_id=$1 and blob_sha=$2`,
+        `select moniker from jina_context_graph.blob_symbols where tenant_id=$1 and blob_sha=$2`,
         [tenantId, "3".repeat(40)]
       );
       assert.deepEqual(
@@ -726,7 +726,7 @@ test(
         "an analysis outside the recorded snapshot rejects the batch before writing"
       );
       const afterRejection = await pool.query<{ moniker: string }>(
-        `select moniker from jina_ontology.blob_symbols where tenant_id=$1`,
+        `select moniker from jina_context_graph.blob_symbols where tenant_id=$1`,
         [tenantId]
       );
       assert.deepEqual(
@@ -748,7 +748,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const snapshot = {
       tenantId: `pipeline-${suffix}`,
@@ -771,7 +771,7 @@ test(
       await store.applyBlobAnalyses(snapshot, [
         {
           blobSha: "c".repeat(40),
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "markdown",
           symbols: [],
           imports: [],
@@ -779,7 +779,7 @@ test(
         },
         {
           blobSha: "d".repeat(40),
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [
             { moniker: "main", name: "main", kind: "function", signatureHash: "f".repeat(64), startLine: 1, endLine: 1 }
@@ -796,8 +796,8 @@ test(
         commitSha: snapshot.commitSha,
         taskId: `assert-${suffix}`,
         generatedAt: "2026-07-19T12:01:00.000Z",
-        generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-        registryVersion: ONTOLOGY_REGISTRY_VERSION,
+        generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+        registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
         evidenceFingerprint: "evidence-fixture",
         evidenceObservationIds: [],
         model: "fixture",
@@ -845,8 +845,8 @@ test(
             snapshot.tenantId,
             snapshot.repository,
             snapshot.commitSha,
-            ONTOLOGY_GENERATOR_VERSION,
-            ONTOLOGY_REGISTRY_VERSION,
+            CONTEXT_GRAPH_GENERATOR_VERSION,
+            CONTEXT_GRAPH_REGISTRY_VERSION,
             "evidence-fixture"
           )
         )?.cached,
@@ -881,7 +881,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `causal-v56-${suffix}`;
     const repository = `omlabs/causal-v56-${suffix}`;
@@ -1073,7 +1073,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `assertion-scope-${suffix}`;
     const firstRepository = `omlabs/assertion-one-${suffix}`;
@@ -1087,8 +1087,8 @@ test(
       commitSha: batchCommitSha,
       taskId: `assert-${repository}`,
       generatedAt: "2026-07-21T00:01:00.000Z",
-      generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-      registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+      registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
       evidenceFingerprint: fingerprint,
       evidenceObservationIds: [],
       model: "fixture",
@@ -1173,7 +1173,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const pool = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `churn-${suffix}`;
@@ -1247,7 +1247,7 @@ test(
       );
 
       const churn = await pool.query<{ count: string }>(
-        `select count(*) from jina_ontology.commit_changes where tenant_id=$1 and repository=$2`,
+        `select count(*) from jina_context_graph.commit_changes where tenant_id=$1 and repository=$2`,
         [tenantId, repository]
       );
       assert.equal(
@@ -1258,7 +1258,7 @@ test(
       const manifest = async (sha: string) =>
         (
           await pool.query<{ path: string; blob_sha: string }>(
-            `select path,blob_sha from jina_ontology.commit_manifest($1,$2,$3)`,
+            `select path,blob_sha from jina_context_graph.commit_manifest($1,$2,$3)`,
             [tenantId, repository, sha]
           )
         ).rows.map((row) => [row.path, row.blob_sha]);
@@ -1277,7 +1277,7 @@ test(
         ["src/app.ts", newAppBlob]
       ]);
       await pool.query(
-        `delete from jina_ontology.commit_changes where tenant_id=$1 and repository=$2 and commit_sha=$3`,
+        `delete from jina_context_graph.commit_changes where tenant_id=$1 and repository=$2 and commit_sha=$3`,
         [tenantId, repository, childSha]
       );
       assert.deepEqual(
@@ -1303,7 +1303,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `generation-${suffix}`;
     const repository = "omlabs/db-generation-fixture";
@@ -1312,7 +1312,7 @@ test(
       repository,
       ref: "main",
       commitSha: "e".repeat(40),
-      registryVersion: ONTOLOGY_REGISTRY_VERSION,
+      registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
       evidenceFingerprint: "same-input",
       evidenceObservationIds: [],
       model: "fixture",
@@ -1375,10 +1375,10 @@ test(
       assert.equal(assertions[0]?.status, "active");
       const guardPool = new Pool({ connectionString });
       await assert.rejects(
-        guardPool.query(`update jina_ontology.assertions set explanation='rewritten' where tenant_id=$1 and id=$2`, [
-          tenantId,
-          proposal.id
-        ]),
+        guardPool.query(
+          `update jina_context_graph.assertions set explanation='rewritten' where tenant_id=$1 and id=$2`,
+          [tenantId, proposal.id]
+        ),
         /explanation is immutable/
       );
       await guardPool.end();
@@ -1563,34 +1563,34 @@ test(
       const constraintPool = new Pool({ connectionString });
       try {
         const active = await constraintPool.query<{ id: string; object_id: string }>(
-          `select id,object_id from jina_ontology.assertions
+          `select id,object_id from jina_context_graph.assertions
          where tenant_id=$1 and repository=$2 and predicate='OWNED_BY' and status='active'`,
           [tenantId, cardinalityRepository]
         );
         await assert.rejects(
           constraintPool.query(
-            `insert into jina_ontology.assertions
+            `insert into jina_context_graph.assertions
             (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
              predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
              explanation,asserted_by,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at)
            select $1,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
                   predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,evidence,
                   explanation,asserted_by,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,last_confirmed_at
-           from jina_ontology.assertions where tenant_id=$2 and id=$3`,
+           from jina_context_graph.assertions where tenant_id=$2 and id=$3`,
             [stableId("assertion", `${tenantId}:duplicate-active`), tenantId, active.rows[0]?.id]
           ),
-          /ontology_assertions_one_(?:active|live_candidate)/
+          /context_graph_assertions_one_(?:active|live_candidate)/
         );
         const foreignTenant = `${tenantId}-foreign`;
         const foreignEntityId = stableId("entity", `${foreignTenant}:Team:foreign`);
         await constraintPool.query(
-          `insert into jina_ontology.entities (id,tenant_id,kind,natural_key,display_name)
+          `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name)
          values ($1,$2,'Team','team:foreign','Foreign')`,
           [foreignEntityId, foreignTenant]
         );
         await assert.rejects(
           constraintPool.query(
-            `insert into jina_ontology.identities
+            `insert into jina_context_graph.identities
             (id,tenant_id,source,external_id,entity_id,status,created_at)
            values ($1,$2,'test','foreign',$3,'proposed',now())`,
             [stableId("identity", `${tenantId}:foreign`), tenantId, foreignEntityId]
@@ -1613,7 +1613,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `virtual-${suffix}`;
     const repository = `omlabs/virtual-${suffix}`;
@@ -1658,8 +1658,8 @@ test(
         commitSha,
         taskId: `assert-${suffix}`,
         generatedAt: "2026-07-20T00:01:00.000Z",
-        generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-        registryVersion: ONTOLOGY_REGISTRY_VERSION,
+        generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+        registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
         evidenceFingerprint: `evidence-${suffix}`,
         evidenceObservationIds: source.observationIds,
         model: "fixture",
@@ -1744,7 +1744,7 @@ test(
           })
         ).items.length,
         0,
-        "issue traces do not materialize outside ontology_project"
+        "issue traces do not materialize outside context_graph_project"
       );
       await store.project({
         tenantId,
@@ -1832,7 +1832,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `feature-${suffix}`;
     const repository = `omlabs/feature-${suffix}`;
@@ -1862,8 +1862,8 @@ test(
         commitSha,
         taskId: `feature-assert-${suffix}`,
         generatedAt: "2026-07-20T00:01:00.000Z",
-        generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-        registryVersion: ONTOLOGY_REGISTRY_VERSION,
+        generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+        registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
         evidenceFingerprint: `feature-evidence-${suffix}`,
         evidenceObservationIds: [],
         model: "fixture",
@@ -2012,7 +2012,7 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const store = new PostgresOntologyGraphStore({ connectionString });
+    const store = new PostgresContextGraphStore({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `v51-${suffix}`;
     const repository = `omlabs/v51-${suffix}`;
@@ -2077,7 +2077,7 @@ test(
       await store.applyBlobAnalyses(parent, [
         {
           blobSha: readmeBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "markdown",
           symbols: [],
           imports: [],
@@ -2085,7 +2085,7 @@ test(
         },
         {
           blobSha: movedBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [],
           imports: [],
@@ -2093,7 +2093,7 @@ test(
         },
         {
           blobSha: oldAppBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [],
           imports: [],
@@ -2101,7 +2101,7 @@ test(
         },
         {
           blobSha: deletedBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [],
           imports: [],
@@ -2118,7 +2118,7 @@ test(
       await store.applyBlobAnalyses(head, [
         {
           blobSha: newAppBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [
             {
@@ -2143,7 +2143,7 @@ test(
         },
         {
           blobSha: addedBlob,
-          parserVersion: ONTOLOGY_PARSER_VERSION,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
           language: "typescript",
           symbols: [],
           imports: [],
@@ -2203,8 +2203,8 @@ test(
         commitSha: headSha,
         taskId: `assert-${suffix}`,
         generatedAt: "2026-07-20T00:03:00.000Z",
-        generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-        registryVersion: ONTOLOGY_REGISTRY_VERSION,
+        generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+        registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
         evidenceFingerprint: "evidence-causal-fixture",
         evidenceObservationIds: [],
         model: "fixture",
@@ -2290,11 +2290,11 @@ test(
       assert.equal(proposed.proposedCount, 2);
       const assertionId = stableId(
         "assertion",
-        `${tenantId}:${repository}:${headSha}:${ONTOLOGY_REGISTRY_VERSION}:evidence-causal-fixture:Repository:github:repo:${repository}:DOCUMENTED_BY:Document:repo:${repository}:path:README.md:{}`
+        `${tenantId}:${repository}:${headSha}:${CONTEXT_GRAPH_REGISTRY_VERSION}:evidence-causal-fixture:Repository:github:repo:${repository}:DOCUMENTED_BY:Document:repo:${repository}:path:README.md:{}`
       );
       const causalAssertionId = stableId(
         "assertion",
-        `${tenantId}:${repository}:${headSha}:${ONTOLOGY_REGISTRY_VERSION}:evidence-causal-fixture:Issue:github:issue:${repository}#7:INTRODUCED_BY:Commit:repo:${repository}:sha:${headSha}:{"reason":"The commit bypassed the app guard."}`
+        `${tenantId}:${repository}:${headSha}:${CONTEXT_GRAPH_REGISTRY_VERSION}:evidence-causal-fixture:Issue:github:issue:${repository}#7:INTRODUCED_BY:Commit:repo:${repository}:sha:${headSha}:{"reason":"The commit bypassed the app guard."}`
       );
       await store.executeCommand(
         tenantId,
@@ -2365,7 +2365,7 @@ test(
 
       const fanoutPool = new Pool({ connectionString });
       const repositoryWideEvents = await fanoutPool.query<{ id: string }>(
-        `select id from jina_ontology.outbox
+        `select id from jina_context_graph.outbox
        where tenant_id=$1 and processed_at is null
          and coalesce(payload->>'repoId',payload#>>'{scope,repository}')=$2
          and payload->>'refName' is null`,
@@ -2376,7 +2376,7 @@ test(
       assert.equal(rebuilt.manifestFileCount, 4);
       assert.equal(rebuilt.searchDocumentCount > 0, true);
       const prematurelyAcknowledged = await fanoutPool.query<{ count: string }>(
-        `select count(*) from jina_ontology.outbox where id=any($1::text[]) and processed_at is not null`,
+        `select count(*) from jina_context_graph.outbox where id=any($1::text[]) and processed_at is not null`,
         [repositoryWideEvents.rows.map((row) => row.id)]
       );
       assert.equal(
@@ -2387,7 +2387,7 @@ test(
       const initialFanout = await store.drainDerivedProjectionEvents(tenantId, "2026-07-20T00:06:00.500Z");
       assert.equal(initialFanout.rebuiltRepositories.includes(repository), true);
       const projectedRefs = await fanoutPool.query<{ ref_name: string }>(
-        `select distinct ref_name from jina_ontology.ref_manifest
+        `select distinct ref_name from jina_context_graph.ref_manifest
        where tenant_id=$1 and repository=$2 order by ref_name`,
         [tenantId, repository]
       );
@@ -2562,7 +2562,7 @@ test(
       const legacyLabelPool = new Pool({ connectionString });
       try {
         await legacyLabelPool.query(
-          `update jina_ontology.entities set display_name='Model paraphrase'
+          `update jina_context_graph.entities set display_name='Model paraphrase'
          where tenant_id=$1 and kind='Issue' and natural_key=$2`,
           [tenantId, `github:issue:${repository}#7`]
         );
@@ -2864,6 +2864,46 @@ test(
       );
     } finally {
       await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres contextGraph store adopts a legacy pre-rename schema in place",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const admin = new Pool({ connectionString });
+    try {
+      // Simulate a database bootstrapped before the context-graph rename:
+      // all data lives in the old jina_ontology schema and the new schema
+      // does not exist yet. The marker table stands in for production data
+      // that the rename must carry over instead of orphaning.
+      await admin.query("drop schema if exists jina_context_graph cascade");
+      await admin.query("drop schema if exists jina_ontology cascade");
+      await admin.query("create schema jina_ontology");
+      await admin.query("create table jina_ontology.legacy_marker (id text primary key)");
+      await admin.query("insert into jina_ontology.legacy_marker (id) values ('pre-rename-row')");
+
+      const store = new PostgresContextGraphStore({ connectionString });
+      try {
+        // Any read triggers the lazy schema bootstrap, which must adopt the
+        // legacy schema via rename before applying the current DDL.
+        assert.equal(await store.latest("adoption-tenant"), undefined);
+      } finally {
+        await store.close();
+      }
+
+      const adopted = await admin.query<{ id: string }>("select id from jina_context_graph.legacy_marker");
+      assert.deepEqual(adopted.rows, [{ id: "pre-rename-row" }]);
+      const legacy = await admin.query<{ present: boolean }>(
+        "select exists (select 1 from pg_namespace where nspname = 'jina_ontology') as present"
+      );
+      assert.equal(legacy.rows[0]?.present, false, "the legacy schema is renamed, not left behind");
+    } finally {
+      await admin.end();
     }
   }
 );

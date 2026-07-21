@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-export const ontologyNodeKinds = [
+export const contextGraphNodeKinds = [
   "Repository",
   "File",
   "Symbol",
@@ -17,24 +17,24 @@ export const ontologyNodeKinds = [
   "Incident"
 ] as const;
 
-export type OntologyNodeKind = (typeof ontologyNodeKinds)[number];
-export type OntologyPlane = "code" | "knowledge";
+export type ContextGraphNodeKind = (typeof contextGraphNodeKinds)[number];
+export type ContextGraphPlane = "code" | "knowledge";
 
-export interface OntologyNode {
+export interface ContextGraphNode {
   readonly id: string;
-  readonly kind: OntologyNodeKind;
+  readonly kind: ContextGraphNodeKind;
   readonly label: string;
   readonly description: string;
   readonly path?: string;
   readonly evidence: readonly string[];
 }
 
-export interface OntologyEdge {
+export interface ContextGraphEdge {
   readonly id: string;
   readonly source: string;
   readonly target: string;
   readonly predicate: string;
-  readonly plane: OntologyPlane;
+  readonly plane: ContextGraphPlane;
   readonly confidence?: number;
   /** Canonical assertion qualifiers retained by materialized knowledge projections. */
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
@@ -43,7 +43,7 @@ export interface OntologyEdge {
   readonly evidence: readonly string[];
 }
 
-export interface OntologyGraph {
+export interface ContextGraph {
   readonly id: string;
   readonly tenantId: string;
   readonly repository: string;
@@ -56,23 +56,23 @@ export interface OntologyGraph {
     readonly sandboxId?: string;
   };
   readonly summary: string;
-  readonly nodes: readonly OntologyNode[];
-  readonly edges: readonly OntologyEdge[];
+  readonly nodes: readonly ContextGraphNode[];
+  readonly edges: readonly ContextGraphEdge[];
   /** Exact parsed JSON downloaded from a model run; omitted from projections and persisted graph reads. */
   readonly rawModelOutput?: unknown;
 }
 
-export interface OntologyGraphSummary extends Omit<OntologyGraph, "nodes" | "edges"> {
+export interface ContextGraphSummary extends Omit<ContextGraph, "nodes" | "edges"> {
   readonly nodeCount: number;
   readonly edgeCount: number;
 }
 
-export function summarizeOntologyGraph(graph: OntologyGraph): OntologyGraphSummary {
+export function summarizeContextGraph(graph: ContextGraph): ContextGraphSummary {
   const { nodes, edges, ...summary } = graph;
   return { ...summary, nodeCount: nodes.length, edgeCount: edges.length };
 }
 
-export interface OntologyBuildRequest {
+export interface ContextGraphBuildRequest {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
@@ -81,13 +81,13 @@ export interface OntologyBuildRequest {
   /** PRs whose complete changed-file list contains durable regression/problem evidence. */
   readonly problemEvidencePullRequestNumbers?: readonly number[];
   /** Immutable source observations included in this generation's evidence fingerprint. */
-  readonly sourceEvidence?: readonly OntologySourceEvidence[];
+  readonly sourceEvidence?: readonly ContextGraphSourceEvidence[];
   readonly taskId: string;
   /** Cancels further external work when the caller loses its execution lease. */
   readonly signal?: AbortSignal;
 }
 
-export interface OntologySourceEvidence {
+export interface ContextGraphSourceEvidence {
   readonly id: string;
   readonly source: string;
   readonly type: string;
@@ -96,10 +96,10 @@ export interface OntologySourceEvidence {
   readonly payload: unknown;
 }
 
-export interface GeneratedOntology {
+export interface GeneratedContextGraph {
   readonly summary: string;
-  readonly nodes: readonly OntologyNode[];
-  readonly edges: readonly Omit<OntologyEdge, "id">[];
+  readonly nodes: readonly ContextGraphNode[];
+  readonly edges: readonly Omit<ContextGraphEdge, "id">[];
 }
 
 export interface EvidenceCitation {
@@ -109,23 +109,23 @@ export interface EvidenceCitation {
   readonly endLine: number;
 }
 
-export interface OntologyExecutor {
-  buildAssertions(request: OntologyBuildRequest): Promise<OntologyGraph>;
+export interface ContextGraphExecutor {
+  buildAssertions(request: ContextGraphBuildRequest): Promise<ContextGraph>;
 }
 
-export function createOntologyGraph(input: {
-  readonly request: OntologyBuildRequest;
+export function createContextGraph(input: {
+  readonly request: ContextGraphBuildRequest;
   readonly commitSha: string;
   readonly generatedAt: string;
   readonly executor: "daytona" | "fixture" | "projection";
   readonly model: string;
   readonly sandboxId?: string;
-  readonly generated: GeneratedOntology;
+  readonly generated: GeneratedContextGraph;
   /** Projection read models are keyed by their canonical content instead of the worker task that rebuilt them. */
   readonly contentAddressed?: boolean;
   /** Assertion-generation observations may be valid with no supported semantic relationship. */
   readonly allowEmptyEdges?: boolean;
-}): OntologyGraph {
+}): ContextGraph {
   const nodes = dedupeNodes(input.generated.nodes);
   const nodeIds = new Set(nodes.map((node) => node.id));
   const edges = input.generated.edges
@@ -140,10 +140,10 @@ export function createOntologyGraph(input: {
     }));
 
   if (!nodes.some((node) => node.kind === "Repository")) {
-    throw new Error("generated ontology must contain a Repository node");
+    throw new Error("generated contextGraph must contain a Repository node");
   }
   if (!input.allowEmptyEdges && (nodes.length < 2 || edges.length < 1)) {
-    throw new Error("generated ontology must contain at least two nodes and one valid edge");
+    throw new Error("generated contextGraph must contain at least two nodes and one valid edge");
   }
 
   const generationIdentity = input.contentAddressed
@@ -182,14 +182,14 @@ function canonicalGraphJson(value: unknown): string {
   return value === undefined ? "undefined" : JSON.stringify(value);
 }
 
-export function parseGeneratedOntology(value: unknown): GeneratedOntology {
+export function parseGeneratedContextGraph(value: unknown): GeneratedContextGraph {
   if (
     !isRecord(value) ||
     typeof value.summary !== "string" ||
     !Array.isArray(value.nodes) ||
     !Array.isArray(value.edges)
   ) {
-    throw new Error("Codex returned an invalid ontology document");
+    throw new Error("Codex returned an invalid contextGraph document");
   }
 
   const nodes = value.nodes.map(parseNode);
@@ -202,7 +202,7 @@ export function parseGeneratedOntology(value: unknown): GeneratedOntology {
  * model may connect them, but cannot mint a Package, Service, Deployment, or
  * Incident that was absent from the pinned evidence bundle.
  */
-export function sourceBackedModelEntityIds(evidence: readonly OntologySourceEvidence[]): ReadonlySet<string> {
+export function sourceBackedModelEntityIds(evidence: readonly ContextGraphSourceEvidence[]): ReadonlySet<string> {
   const ids = new Set<string>();
   for (const item of evidence) {
     if (!isRecord(item.payload) || item.payload.removed === true) continue;
@@ -264,8 +264,8 @@ export function sourceBackedModelEntityIds(evidence: readonly OntologySourceEvid
 }
 
 export function validateSourceBackedModelEntities(
-  generated: GeneratedOntology,
-  evidence: readonly OntologySourceEvidence[]
+  generated: GeneratedContextGraph,
+  evidence: readonly ContextGraphSourceEvidence[]
 ): void {
   const allowed = sourceBackedModelEntityIds(evidence);
   for (const node of generated.nodes) {
@@ -279,7 +279,7 @@ export function stableId(prefix: string, value: string): string {
   return `${prefix}_${createHash("sha256").update(value).digest("hex").slice(0, 20)}`;
 }
 
-export function ontologyEvidenceCitations(generated: GeneratedOntology): readonly EvidenceCitation[] {
+export function contextGraphEvidenceCitations(generated: GeneratedContextGraph): readonly EvidenceCitation[] {
   const values = new Set([
     ...generated.nodes.flatMap((node) => node.evidence),
     ...generated.edges.flatMap((edge) => edge.evidence)
@@ -287,24 +287,24 @@ export function ontologyEvidenceCitations(generated: GeneratedOntology): readonl
   return [...values].map(parseEvidenceCitation);
 }
 
-export async function validateOntologyEvidence(
-  generated: GeneratedOntology,
+export async function validateContextGraphEvidence(
+  generated: GeneratedContextGraph,
   readFile: (path: string) => Promise<string>
 ): Promise<void> {
   const files = new Map<string, string>();
-  for (const citation of ontologyEvidenceCitations(generated)) {
+  for (const citation of contextGraphEvidenceCitations(generated)) {
     let source = files.get(citation.path);
     if (source === undefined) {
       try {
         source = await readFile(citation.path);
       } catch {
-        throw new Error(`ontology evidence file does not exist: ${citation.path}`);
+        throw new Error(`contextGraph evidence file does not exist: ${citation.path}`);
       }
       files.set(citation.path, source);
     }
     const lineCount = source.split(/\r?\n/).length;
     if (citation.startLine > lineCount || citation.endLine > lineCount) {
-      throw new Error(`ontology evidence is outside ${citation.path}: ${citation.value}`);
+      throw new Error(`contextGraph evidence is outside ${citation.path}: ${citation.value}`);
     }
   }
   validateCausalEvidenceContents(generated, files);
@@ -317,8 +317,8 @@ export async function validateOntologyEvidence(
  * explains it, and supplies repository citations.
  */
 export function validateRequiredDerivedIssues(
-  generated: GeneratedOntology,
-  sourceEvidence: readonly OntologySourceEvidence[],
+  generated: GeneratedContextGraph,
+  sourceEvidence: readonly ContextGraphSourceEvidence[],
   problemEvidencePullRequestNumbers: readonly number[] = []
 ): void {
   for (const number of requiredDerivedIssuePullRequestNumbers(sourceEvidence, problemEvidencePullRequestNumbers)) {
@@ -345,7 +345,7 @@ export function validateRequiredDerivedIssues(
 }
 
 export function requiredDerivedIssuePullRequestNumbers(
-  sourceEvidence: readonly OntologySourceEvidence[],
+  sourceEvidence: readonly ContextGraphSourceEvidence[],
   problemEvidencePullRequestNumbers: readonly number[] = []
 ): readonly number[] {
   const problemPullRequests = new Set(problemEvidencePullRequestNumbers);
@@ -421,7 +421,7 @@ export function requiredCausalAnchors(
 }
 
 export function validateRequiredCausalAssertions(
-  generated: GeneratedOntology,
+  generated: GeneratedContextGraph,
   anchors: readonly RequiredCausalAnchor[]
 ): void {
   for (const anchor of anchors) {
@@ -462,7 +462,7 @@ export function isProblemEvidencePath(path: string): boolean {
   );
 }
 
-function validateCausalEvidenceContents(generated: GeneratedOntology, files: ReadonlyMap<string, string>): void {
+function validateCausalEvidenceContents(generated: GeneratedContextGraph, files: ReadonlyMap<string, string>): void {
   const nodes = new Map(generated.nodes.map((node) => [node.id, node]));
   for (const edge of generated.edges) {
     if (edge.predicate !== "INTRODUCED_BY") continue;
@@ -521,18 +521,18 @@ function validateCausalEvidenceContents(generated: GeneratedOntology, files: Rea
   }
 }
 
-function parseNode(value: unknown): OntologyNode {
+function parseNode(value: unknown): ContextGraphNode {
   if (!isRecord(value)) {
-    throw new Error("ontology node must be an object");
+    throw new Error("contextGraph node must be an object");
   }
   const kind = requiredString(value.kind, "node.kind");
-  if (!ontologyNodeKinds.includes(kind as OntologyNodeKind)) {
-    throw new Error(`unsupported ontology node kind: ${kind}`);
+  if (!contextGraphNodeKinds.includes(kind as ContextGraphNodeKind)) {
+    throw new Error(`unsupported contextGraph node kind: ${kind}`);
   }
   const id = requiredString(value.id, "node.id");
   return {
     id,
-    kind: kind as OntologyNodeKind,
+    kind: kind as ContextGraphNodeKind,
     label: requiredString(value.label, "node.label"),
     description: requiredString(value.description, "node.description"),
     ...(typeof value.path === "string" && value.path ? { path: value.path } : {}),
@@ -540,13 +540,13 @@ function parseNode(value: unknown): OntologyNode {
   };
 }
 
-function parseEdge(value: unknown): Omit<OntologyEdge, "id"> {
+function parseEdge(value: unknown): Omit<ContextGraphEdge, "id"> {
   if (!isRecord(value)) {
-    throw new Error("ontology edge must be an object");
+    throw new Error("contextGraph edge must be an object");
   }
   const plane = requiredString(value.plane, "edge.plane");
   if (plane !== "code" && plane !== "knowledge") {
-    throw new Error(`unsupported ontology plane: ${plane}`);
+    throw new Error(`unsupported contextGraph plane: ${plane}`);
   }
   const confidence = typeof value.confidence === "number" ? value.confidence : undefined;
   if (confidence !== undefined && (!Number.isFinite(confidence) || confidence < 0 || confidence > 1)) {
@@ -563,7 +563,7 @@ function parseEdge(value: unknown): Omit<OntologyEdge, "id"> {
   };
 }
 
-function dedupeNodes(nodes: readonly OntologyNode[]): readonly OntologyNode[] {
+function dedupeNodes(nodes: readonly ContextGraphNode[]): readonly ContextGraphNode[] {
   const seen = new Set<string>();
   return nodes.filter((node) => {
     if (seen.has(node.id)) return false;
@@ -572,7 +572,7 @@ function dedupeNodes(nodes: readonly OntologyNode[]): readonly OntologyNode[] {
   });
 }
 
-function dedupeEdges(edges: readonly OntologyEdge[]): readonly OntologyEdge[] {
+function dedupeEdges(edges: readonly ContextGraphEdge[]): readonly ContextGraphEdge[] {
   const seen = new Set<string>();
   return edges.filter((edge) => {
     if (seen.has(edge.id)) return false;
@@ -602,14 +602,14 @@ function requiredEvidence(value: unknown, owner: string): readonly string[] {
 
 export function parseEvidenceCitation(value: string): EvidenceCitation {
   const match = /^(.*):(\d+)(?:-(\d+))?$/.exec(value);
-  if (!match?.[1] || !match[2]) throw new Error(`invalid ontology evidence citation: ${value}`);
+  if (!match?.[1] || !match[2]) throw new Error(`invalid contextGraph evidence citation: ${value}`);
   const path = match[1];
   if (path.startsWith("/") || path.split("/").includes("..")) {
-    throw new Error(`ontology evidence path must be repository-relative: ${value}`);
+    throw new Error(`contextGraph evidence path must be repository-relative: ${value}`);
   }
   const startLine = Number.parseInt(match[2], 10);
   const endLine = match[3] ? Number.parseInt(match[3], 10) : startLine;
-  if (startLine < 1 || endLine < startLine) throw new Error(`invalid ontology evidence range: ${value}`);
+  if (startLine < 1 || endLine < startLine) throw new Error(`invalid contextGraph evidence range: ${value}`);
   return { value, path, startLine, endLine };
 }
 

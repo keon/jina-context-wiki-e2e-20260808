@@ -16,7 +16,7 @@
     "test": "pnpm build && node --test dist/postgres.integration.test.js"
   },
   "dependencies": {
-    "@jina/ontology": "workspace:*",
+    "@jina/context-graph": "workspace:*",
     "@jina/shared-kernel": "workspace:*",
     "pg": "^8.22.0"
   },

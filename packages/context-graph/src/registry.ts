@@ -1,6 +1,6 @@
-import type { OntologyNodeKind } from "./model.js";
+import type { ContextGraphNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.7-causal";
+export const CONTEXT_GRAPH_REGISTRY_VERSION = "repository-context-v5.7-causal";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -10,8 +10,8 @@ export type ReviewPolicy = "none" | "manual" | { readonly threshold: number };
 export interface PredicateDefinition {
   readonly name: string;
   readonly class: PredicateClass;
-  readonly subjectKinds: readonly OntologyNodeKind[];
-  readonly objectKinds?: readonly OntologyNodeKind[];
+  readonly subjectKinds: readonly ContextGraphNodeKind[];
+  readonly objectKinds?: readonly ContextGraphNodeKind[];
   readonly literalTypes?: readonly LiteralType[];
   readonly cardinality: "one" | "many";
   readonly qualifierKeys?: readonly string[];
@@ -21,7 +21,7 @@ export interface PredicateDefinition {
 }
 
 /**
- * The ontology is code, not runtime data. Inference predicates stay manual until
+ * The contextGraph is code, not runtime data. Inference predicates stay manual until
  * a measured generator/predicate threshold is installed through calibration.
  */
 export const predicateRegistry = {
@@ -218,7 +218,7 @@ export const predicateRegistry = {
 
 export function predicateDefinition(name: string): PredicateDefinition {
   const definition = (predicateRegistry as Readonly<Record<string, PredicateDefinition>>)[normalizePredicateName(name)];
-  if (!definition) throw new Error(`unsupported ontology predicate: ${name}`);
+  if (!definition) throw new Error(`unsupported contextGraph predicate: ${name}`);
   return definition;
 }
 
@@ -232,8 +232,8 @@ export function normalizePredicateName(value: string): string {
 
 export function validatePredicateEndpoints(
   definition: PredicateDefinition,
-  subjectKind: OntologyNodeKind,
-  objectKind?: OntologyNodeKind,
+  subjectKind: ContextGraphNodeKind,
+  objectKind?: ContextGraphNodeKind,
   literalType?: LiteralType
 ): void {
   if (!definition.subjectKinds.includes(subjectKind)) {

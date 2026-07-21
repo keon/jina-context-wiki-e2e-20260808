@@ -15,40 +15,40 @@ import {
   type CommandActor
 } from "@jina/board";
 import type { ParsedGitHubWebhook } from "@jina/github";
-import { isOntologyTrigger } from "@jina/github";
+import { isContextGraphTrigger } from "@jina/github";
 import {
-  createOntologyGraph,
-  assertionsFromGeneratedOntology,
-  MemoryOntologyPipelineCoordinator,
-  MemoryOntologyGraphStore,
-  ONTOLOGY_GENERATOR_VERSION,
-  ONTOLOGY_PARSER_VERSION,
-  ONTOLOGY_REGISTRY_VERSION,
+  createContextGraph,
+  assertionsFromGeneratedContextGraph,
+  MemoryContextGraphPipelineCoordinator,
+  MemoryContextGraphStore,
+  CONTEXT_GRAPH_GENERATOR_VERSION,
+  CONTEXT_GRAPH_PARSER_VERSION,
+  CONTEXT_GRAPH_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
   retrievalTemplateNames,
-  ontologyNodeKinds,
-  ontologyStagePrerequisites,
-  ontologyStageRequired,
-  ontologyTaskTypeDependencies,
-  ontologyTaskTypeDefinitions,
-  ontologyTaskTypeTriggers,
-  parseGeneratedOntology,
+  contextGraphNodeKinds,
+  contextGraphStagePrerequisites,
+  contextGraphStageRequired,
+  contextGraphTaskTypeDependencies,
+  contextGraphTaskTypeDefinitions,
+  contextGraphTaskTypeTriggers,
+  parseGeneratedContextGraph,
   type BlobAnalysis,
   type RepositorySourceObservation,
-  type OntologyCommand,
-  type OntologyAssertionBatch,
-  type OntologyBuildRecord,
-  type OntologyGraph,
-  type OntologyGraphStore,
-  type OntologyPipelineCoordinator,
-  type OntologyStageLease,
-  type OntologyStageRecord,
-  type OntologyWorkerTopic,
-  type OntologyNodeKind,
+  type ContextGraphCommand,
+  type ContextGraphAssertionBatch,
+  type ContextGraphBuildRecord,
+  type ContextGraph,
+  type ContextGraphStore,
+  type ContextGraphPipelineCoordinator,
+  type ContextGraphStageLease,
+  type ContextGraphStageRecord,
+  type ContextGraphWorkerTopic,
+  type ContextGraphNodeKind,
   type RepositoryContextOperation,
   type RepositorySnapshot,
   type RetrievalRequest
-} from "@jina/ontology";
+} from "@jina/context-graph";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { DomainError, entityId, nowIso } from "@jina/shared-kernel";
@@ -59,8 +59,8 @@ import { handleGraphMcpRequest, publicGraphQueryResult } from "./mcp.js";
 import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publicGraphSummary } from "./graph-api.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
-const MAX_ONTOLOGY_SNAPSHOT_BYTES = 25 * 1024 * 1024;
-// Ontology writes for large repositories can hold the durable mutation transaction
+const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
+// ContextGraph writes for large repositories can hold the durable mutation transaction
 // for several minutes. Keep the lease comfortably beyond that transaction so the
 // owning worker is not fenced while its write is still committing.
 const WORKER_LEASE_MS = 30 * 60 * 1000;
@@ -70,9 +70,9 @@ const WORKER_TOPICS = [
   "run-research",
   "run-publish",
   "run-cleanup",
-  "run-ontology-ingest",
-  "run-ontology-assert",
-  "run-ontology-project"
+  "run-context-graph-ingest",
+  "run-context-graph-assert",
+  "run-context-graph-project"
 ] as const;
 
 export interface ApiServerConfig {
@@ -83,8 +83,8 @@ export interface ApiServerConfig {
   readonly simulateRuns?: boolean;
   readonly seedDemo?: boolean;
   readonly stateStore?: ApiStateStore;
-  readonly ontologyStore?: OntologyGraphStore;
-  readonly ontologyCoordinator?: OntologyPipelineCoordinator;
+  readonly contextGraphStore?: ContextGraphStore;
+  readonly contextGraphCoordinator?: ContextGraphPipelineCoordinator;
   readonly internalApiToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
@@ -117,8 +117,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
   const deliveries = new DeliveryCache(10_000);
-  const ontologyStore = config.ontologyStore ?? new MemoryOntologyGraphStore();
-  const ontologyCoordinator = config.ontologyCoordinator ?? new MemoryOntologyPipelineCoordinator();
+  const contextGraphStore = config.contextGraphStore ?? new MemoryContextGraphStore();
+  const contextGraphCoordinator = config.contextGraphCoordinator ?? new MemoryContextGraphPipelineCoordinator();
   const ready = initializeState();
   let mutations = Promise.resolve();
   let transactionActive = false;
@@ -175,10 +175,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       publications = migrated.snapshot.publications;
       devDeliverySequence = migrated.snapshot.devDeliverySequence;
       if (migrated.changed) await persist();
-      if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
+      if (config.tenantId) await contextGraphStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
       return;
     }
-    if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
+    if (config.tenantId) await contextGraphStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
     if (config.seedDemo) {
       devDeliverySequence += 1;
       acceptWebhook(devPullRequestWebhook("omlabs/example", 42, "abc123"), `dev-seed-${devDeliverySequence}`);
@@ -205,11 +205,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       taskId: "dev-mcp-seed",
       files: [{ path: "src/server.ts", blobSha, size: 640 }]
     };
-    await ontologyStore.planIngestion(snapshot);
-    await ontologyStore.applyBlobAnalyses(snapshot, [
+    await contextGraphStore.planIngestion(snapshot);
+    await contextGraphStore.applyBlobAnalyses(snapshot, [
       {
         blobSha,
-        parserVersion: ONTOLOGY_PARSER_VERSION,
+        parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
         language: "typescript",
         symbols: [
           {
@@ -225,8 +225,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         edges: []
       }
     ]);
-    await ontologyStore.save(
-      createOntologyGraph({
+    await contextGraphStore.save(
+      createContextGraph({
         request: { tenantId, repository: snapshot.repository, ref: snapshot.ref, taskId: snapshot.taskId },
         commitSha,
         generatedAt: snapshot.recordedAt,
@@ -313,10 +313,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return result;
   }
 
-  /** Local demo runner only. Ontology work is always claimed by the durable worker. */
+  /** Local demo runner only. ContextGraph work is always claimed by the durable worker. */
   async function drainOneSimulatedRun(): Promise<void> {
     const message = intakeState.board.outbox.find(
-      (candidate) => candidate.status === "pending" && !candidate.topic.startsWith("run-ontology")
+      (candidate) => candidate.status === "pending" && !candidate.topic.startsWith("run-context-graph")
     );
     if (!message) return;
     let board = markOutboxDispatched(intakeState.board, message.id, nowIso());
@@ -369,15 +369,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
-    // Published Ontology generations and repository ACLs live in their own
+    // Published ContextGraph generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
-    // Internal ontology data-plane and worker-coordination routes likewise
+    // Internal contextGraph data-plane and worker-coordination routes likewise
     // never read the JSON api_state snapshot outside mutate(), so they skip
     // the full snapshot reload; completeWork synchronizes its JSON-board
     // branch itself before validating against the snapshot.
     if (
-      !isDirectOntologyRead(request.method, url.pathname) &&
+      !isDirectContextGraphRead(request.method, url.pathname) &&
       !isSnapshotExemptInternalRoute(request.method, url.pathname)
     )
       await synchronize();
@@ -387,7 +387,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await Promise.all([config.stateStore?.ping(), ontologyCoordinator.ping()]);
+      await Promise.all([config.stateStore?.ping(), contextGraphCoordinator.ping()]);
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
@@ -401,9 +401,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         response,
         200,
         buildTaskTypeCatalog(
-          [...taskTypeDefinitions, ...ontologyTaskTypeDefinitions],
-          [...prReviewTaskTypeDependencies, ...ontologyTaskTypeDependencies],
-          [...prReviewTaskTypeTriggers, ...ontologyTaskTypeTriggers]
+          [...taskTypeDefinitions, ...contextGraphTaskTypeDefinitions],
+          [...prReviewTaskTypeDependencies, ...contextGraphTaskTypeDependencies],
+          [...prReviewTaskTypeTriggers, ...contextGraphTaskTypeTriggers]
         )
       );
       return;
@@ -455,7 +455,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 400, { error: error instanceof Error ? error.message : "invalid graph access sync" });
         return;
       }
-      await ontologyStore.replaceRepositoryAccess(config.tenantId, principalId, repositories);
+      await contextGraphStore.replaceRepositoryAccess(config.tenantId, principalId, repositories);
       json(response, 200, { principalId, repositoryCount: repositories.length });
       return;
     }
@@ -469,7 +469,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     const usesGraphCredential = hasGraphApiCredential(request, config);
     const requiresBoundGraphPrincipal =
-      isPublicGraphRoute(url.pathname) || (url.pathname === "/ontology/build" && usesGraphCredential);
+      isPublicGraphRoute(url.pathname) || (url.pathname === "/context-graph/build" && usesGraphCredential);
     if (
       requiresBoundGraphPrincipal &&
       !config.enableDevEndpoints &&
@@ -491,7 +491,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         response,
         async ({ repository, query, ref }) => {
           const allowedRepositories = await repositoriesForPrincipal(principal);
-          const context = await new RepositoryContextOrchestrator(ontologyStore).answer({
+          const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
             tenantId,
             allowedRepositories,
             repository,
@@ -512,7 +512,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 404, { error: "graph not found" });
         return;
       }
-      const graphs = (await ontologyStore.listSummaries(tenantId))
+      const graphs = (await contextGraphStore.listSummaries(tenantId))
         .filter((graph) => allowedRepositories.includes(graph.repository))
         .filter((graph) => !requestedRepository || graph.repository === requestedRepository)
         .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
@@ -523,7 +523,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "GET" && url.pathname.startsWith("/v1/graphs/")) {
       const graphId = decodeURIComponent(url.pathname.slice("/v1/graphs/".length));
-      const graph = await ontologyStore.get(graphId, tenantId);
+      const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
       if (!graph || !allowedRepositories.includes(graph.repository)) {
         json(response, 404, { error: "graph not found" });
@@ -538,13 +538,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const graphId = requiredString(body.graphId, "graphId");
       const query = requiredString(body.query, "query");
       if (query.length > 4_000) throw new Error("query must not exceed 4000 characters");
-      const graph = await ontologyStore.get(graphId, tenantId);
+      const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
       if (!graph || !allowedRepositories.includes(graph.repository)) {
         json(response, 404, { error: "graph not found" });
         return;
       }
-      const context = await new RepositoryContextOrchestrator(ontologyStore).answer({
+      const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
         tenantId,
         allowedRepositories,
         repository: graph.repository,
@@ -560,18 +560,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? undefined
         : new Set(await repositoriesForPrincipal(principal));
       const board = tenantBoardView(intakeState, publications, tenantId, allowedRepositories);
-      const pipeline = await ontologyCoordinator.list(
+      const pipeline = await contextGraphCoordinator.list(
         tenantId,
         allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
       );
       json(response, 200, mergePipelineBoardView(board, pipeline, allowedRepositories));
       return;
     }
-    if (request.method === "GET" && url.pathname === "/ontology") {
+    if (request.method === "GET" && url.pathname === "/context-graph") {
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const [latest, graphValues] = await Promise.all([
-        ontologyStore.latest(tenantId),
-        ontologyStore.listSummaries(tenantId)
+        contextGraphStore.latest(tenantId),
+        contextGraphStore.listSummaries(tenantId)
       ]);
       const graphs = graphValues.filter((graph) => allowedRepositories.includes(graph.repository));
       json(response, 200, {
@@ -580,23 +580,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
-    if (request.method === "GET" && url.pathname.startsWith("/ontology/graphs/")) {
-      const graphId = decodeURIComponent(url.pathname.slice("/ontology/graphs/".length));
-      const graph = await ontologyStore.get(graphId, tenantId);
+    if (request.method === "GET" && url.pathname.startsWith("/context-graph/graphs/")) {
+      const graphId = decodeURIComponent(url.pathname.slice("/context-graph/graphs/".length));
+      const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const permitted = graph && allowedRepositories.includes(graph.repository) ? graph : undefined;
-      json(response, permitted ? 200 : 404, permitted ?? { error: "ontology graph not found" });
+      json(response, permitted ? 200 : 404, permitted ?? { error: "contextGraph graph not found" });
       return;
     }
-    if (request.method === "GET" && url.pathname === "/ontology/metrics") {
+    if (request.method === "GET" && url.pathname === "/context-graph/metrics") {
       if (!isTenantAdmin(principal)) {
         json(response, 403, { error: "tenant administrator access required" });
         return;
       }
-      json(response, 200, await ontologyStore.operationalMetrics(tenantId, nowIso()));
+      json(response, 200, await contextGraphStore.operationalMetrics(tenantId, nowIso()));
       return;
     }
-    if (request.method === "POST" && url.pathname === "/ontology/retrieve") {
+    if (request.method === "POST" && url.pathname === "/context-graph/retrieve") {
       const body = parseJsonObject(await readRawBody(request));
       const repository = requiredString(body.repository, "repository");
       const allowedRepositories = await repositoriesForPrincipal(principal);
@@ -604,22 +604,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!retrievalTemplateNames.includes(template as (typeof retrievalTemplateNames)[number])) {
         throw invalidRequest("unsupported retrieval template");
       }
-      const result = await ontologyStore.retrieve({
+      const result = await contextGraphStore.retrieve({
         tenantId,
         allowedRepositories,
         repository,
         template: template as (typeof retrievalTemplateNames)[number],
-        ...parseOntologySelectors(body),
+        ...parseContextGraphSelectors(body),
         ...(typeof body.query === "string" ? { query: body.query } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
       json(response, 200, result);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/ontology/ask") {
+    if (request.method === "POST" && url.pathname === "/context-graph/ask") {
       const body = parseJsonObject(await readRawBody(request));
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      const orchestrator = new RepositoryContextOrchestrator(ontologyStore);
+      const orchestrator = new RepositoryContextOrchestrator(contextGraphStore);
       json(
         response,
         200,
@@ -628,7 +628,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           allowedRepositories,
           repository: requiredString(body.repository, "repository"),
           question: requiredString(body.question, "question"),
-          ...parseOntologySelectors(body),
+          ...parseContextGraphSelectors(body),
           ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
           ...(typeof body.tokenBudget === "number"
             ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") }
@@ -637,7 +637,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       return;
     }
-    if (request.method === "GET" && url.pathname === "/ontology/assertions") {
+    if (request.method === "GET" && url.pathname === "/context-graph/assertions") {
       const repository = requiredString(url.searchParams.get("repository"), "repository");
       const allowedRepositories = await repositoriesForPrincipal(principal);
       if (!allowedRepositories.includes(repository)) throw new DomainError("repository access denied", "forbidden");
@@ -646,12 +646,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const predicate = url.searchParams.get("predicate")?.trim().toUpperCase() || undefined;
       const entityKindValue = url.searchParams.get("entityKind")?.trim();
       const entityKind =
-        entityKindValue && ontologyNodeKinds.includes(entityKindValue as (typeof ontologyNodeKinds)[number])
-          ? (entityKindValue as (typeof ontologyNodeKinds)[number])
+        entityKindValue && contextGraphNodeKinds.includes(entityKindValue as (typeof contextGraphNodeKinds)[number])
+          ? (entityKindValue as (typeof contextGraphNodeKinds)[number])
           : undefined;
-      if (entityKindValue && !entityKind) throw invalidRequest("unsupported ontology entity kind");
+      if (entityKindValue && !entityKind) throw invalidRequest("unsupported contextGraph entity kind");
       json(response, 200, {
-        assertions: await ontologyStore.listAssertions(tenantId, repository, {
+        assertions: await contextGraphStore.listAssertions(tenantId, repository, {
           ...(status ? { status } : {}),
           ...(predicate ? { predicate } : {}),
           ...(entityKind ? { entityKind } : {})
@@ -659,8 +659,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/ontology/commands") {
-      // The svc:api fallback is a tenant admin; state-changing ontology commands
+    if (request.method === "POST" && url.pathname === "/context-graph/commands") {
+      // The svc:api fallback is a tenant admin; state-changing contextGraph commands
       // must carry an explicitly forwarded principal identity.
       if (!principal.forwarded) {
         json(response, 401, { accepted: false, error: "a bound principal is required" });
@@ -670,10 +670,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(
         response,
         200,
-        await ontologyStore.executeCommand(
+        await contextGraphStore.executeCommand(
           tenantId,
           principal.principalId,
-          parseOntologyCommand(body),
+          parseContextGraphCommand(body),
           nowIso(),
           isTenantAdmin(principal)
         )
@@ -685,14 +685,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? undefined
         : new Set(await repositoriesForPrincipal(principal));
       const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
-      const workflows = await ontologyCoordinator.list(
+      const workflows = await contextGraphCoordinator.list(
         tenantId,
         allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
       );
       const pipelineTaskIds = new Set(
         workflows.flatMap(({ build, stages }) => [build.id, ...stages.map((stage) => stage.id)])
       );
-      const pipelineEvents = (await ontologyCoordinator.listEvents(tenantId, { taskIds: [...pipelineTaskIds] }))
+      const pipelineEvents = (await contextGraphCoordinator.listEvents(tenantId, { taskIds: [...pipelineTaskIds] }))
         .filter((event) => pipelineTaskIds.has(event.taskId))
         .map((event, index) => ({ ...event, seq: index + 1 }));
       json(
@@ -705,48 +705,48 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       return;
     }
-    if (request.method === "POST" && url.pathname === "/ontology/build") {
+    if (request.method === "POST" && url.pathname === "/context-graph/build") {
       const allowedRepositories = isTenantAdmin(principal)
         ? undefined
         : new Set(await repositoriesForPrincipal(principal));
-      await createOntologyTask(request, response, tenantId, allowedRepositories);
+      await createContextGraphTask(request, response, tenantId, allowedRepositories);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/plan") {
-      await planOntologyIngestion(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/plan") {
+      await planContextGraphIngestion(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/save") {
-      await saveOntologyAssertions(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/save") {
+      await saveContextGraphAssertions(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/project/run") {
-      await runOntologyProjection(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/project/run") {
+      await runContextGraphProjection(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/known") {
-      await findKnownOntologyCommits(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/known") {
+      await findKnownContextGraphCommits(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/blobs") {
-      await applyOntologyBlobAnalyses(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/blobs") {
+      await applyContextGraphBlobAnalyses(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/ingest/github") {
-      await applyOntologyGitHubObservations(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/github") {
+      await applyContextGraphGitHubObservations(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/cached") {
-      await findCachedOntologyAssertions(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/cached") {
+      await findCachedContextGraphAssertions(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/assertions/evidence") {
-      await loadOntologyAssertionEvidence(request, response, tenantId);
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/evidence") {
+      await loadContextGraphAssertionEvidence(request, response, tenantId);
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/ontology/outbox/drain") {
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
       await readRawBody(request);
-      json(response, 200, await ontologyStore.drainDerivedProjectionEvents(tenantId, nowIso()));
+      json(response, 200, await contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso()));
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
@@ -786,10 +786,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
       return;
     }
-    if (result.webhook && isOntologyTrigger(result.webhook.event)) {
+    if (result.webhook && isContextGraphTrigger(result.webhook.event)) {
       const event = result.webhook.event;
       const ref = event.ref.slice("refs/heads/".length);
-      const builds = await ontologyCoordinator.list(config.tenantId ?? "default", {
+      const builds = await contextGraphCoordinator.list(config.tenantId ?? "default", {
         repositories: [result.webhook.repository]
       });
       const latest = builds
@@ -798,7 +798,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const duplicateHead = latest?.build.metadata.githubHeadSha === event.headSha;
       let createdTaskIds: readonly string[] = [];
       if (!duplicateHead) {
-        const build = await ontologyCoordinator.createBuild({
+        const build = await contextGraphCoordinator.createBuild({
           tenantId: config.tenantId ?? "default",
           repository: result.webhook.repository,
           ref,
@@ -815,9 +815,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               : {})
           }
         });
-        const workflow = (await ontologyCoordinator.list(build.tenantId, { repositories: [build.repository] })).find(
-          (candidate) => candidate.build.id === build.id
-        );
+        const workflow = (
+          await contextGraphCoordinator.list(build.tenantId, { repositories: [build.repository] })
+        ).find((candidate) => candidate.build.id === build.id);
         createdTaskIds = [build.id, ...(workflow?.stages.map((stage) => stage.id) ?? [])];
       }
       await mutate(async () => {
@@ -855,7 +855,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, committed.statusCode, committed.payload);
   }
 
-  async function createOntologyTask(
+  async function createContextGraphTask(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string,
@@ -870,7 +870,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const suppliedRequestKey =
       typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
     const requestKey = suppliedRequestKey ?? randomUUID();
-    const created = await ontologyCoordinator.createBuild({
+    const created = await contextGraphCoordinator.createBuild({
       tenantId,
       repository,
       ref,
@@ -886,43 +886,43 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
    * completion stays a fast status flip; the worker's 30-second completion
    * timeout no longer races multi-minute canonical writes.
    */
-  async function saveOntologyAssertions(
+  async function saveContextGraphAssertions(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
+    const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
-    const result = await ontologyStore.saveAssertionBatch(
-      parseOntologyAssertionBatch(body.assertionBatch, { id: task.stageId, metadata: task.metadata }, tenantId),
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
+    const result = await contextGraphStore.saveAssertionBatch(
+      parseContextGraphAssertionBatch(body.assertionBatch, { id: task.stageId, metadata: task.metadata }, tenantId),
       { stageId: task.stageId, leaseId: task.leaseId }
     );
     json(response, 200, result);
   }
 
-  async function runOntologyProjection(
+  async function runContextGraphProjection(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-project");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
     const now = nowIso();
     const repository = requiredString(task.metadata.repository, "task.repository");
     const ref = requiredString(task.metadata.ref, "task.ref");
-    const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
+    const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
     // Drain and rebuild produce disposable, rebuildable read models, so a lease
     // lost mid-run cannot corrupt canonical state; the graph save below is the
     // only publication and stays fenced. Still, re-check the lease between the
     // expensive steps so a superseded worker stops early instead of spending
     // minutes on work whose publication will be rejected.
-    const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
-    await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-project");
-    const rebuilt = await ontologyStore.rebuildDerivedProjections(tenantId, repository, ref, now);
-    await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-project");
-    const graph = await ontologyStore.project({
+    const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
+    await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
+    const rebuilt = await contextGraphStore.rebuildDerivedProjections(tenantId, repository, ref, now);
+    await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
+    const graph = await contextGraphStore.project({
       tenantId,
       repository,
       ref,
@@ -943,33 +943,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
   }
 
-  async function planOntologyIngestion(
+  async function planContextGraphIngestion(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
+    const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES));
     const snapshot = parseRepositorySnapshot(body.snapshot, tenantId);
-    const task = await requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "run-ontology-ingest");
+    const task = await requireLeasedContextGraphTask(body, snapshot.taskId, tenantId, "run-context-graph-ingest");
     if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
-      throw invalidRequest("repository snapshot does not match ontology task");
+      throw invalidRequest("repository snapshot does not match contextGraph task");
     }
-    const plan = await ontologyStore.planIngestion(snapshot, { stageId: task.stageId, leaseId: task.leaseId });
+    const plan = await contextGraphStore.planIngestion(snapshot, { stageId: task.stageId, leaseId: task.leaseId });
     json(response, 200, plan);
   }
 
-  async function findKnownOntologyCommits(
+  async function findKnownContextGraphCommits(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-ingest");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-ingest");
     if (!Array.isArray(body.commitShas)) throw invalidRequest("commitShas must be an array");
     const commitShas = body.commitShas.map((sha) => requiredGitSha(sha, "commitSha"));
     json(response, 200, {
-      knownCommitShas: await ontologyStore.knownCommits(
+      knownCommitShas: await contextGraphStore.knownCommits(
         tenantId,
         requiredString(task.metadata.repository, "task.repository"),
         commitShas
@@ -977,7 +977,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
   }
 
-  async function applyOntologyBlobAnalyses(
+  async function applyContextGraphBlobAnalyses(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
@@ -986,8 +986,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const taskId = requiredString(body.taskId, "taskId");
     const commitSha = requiredGitSha(body.commitSha, "commitSha");
     const analyses = parseBlobAnalyses(body.analyses);
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-ingest");
-    await ontologyStore.applyBlobAnalyses(
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-ingest");
+    await contextGraphStore.applyBlobAnalyses(
       {
         tenantId,
         repository: requiredString(task.metadata.repository, "task.repository"),
@@ -999,7 +999,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { accepted: true, count: analyses.length });
   }
 
-  async function applyOntologyGitHubObservations(
+  async function applyContextGraphGitHubObservations(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
@@ -1008,67 +1008,73 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const taskId = requiredString(body.taskId, "taskId");
     if (!Array.isArray(body.observations)) throw invalidRequest("observations must be an array");
     const observations = body.observations.map((value) => parseRepositorySourceObservation(value, tenantId));
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-ingest");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-ingest");
     const repository = requiredString(task.metadata.repository, "task.repository");
     if (observations.some((observation) => observation.repository !== repository)) {
       throw invalidRequest("GitHub observation repository does not match task");
     }
-    const result = await ontologyStore.applyGitHubObservations(observations, {
+    const result = await contextGraphStore.applyGitHubObservations(observations, {
       stageId: task.stageId,
       leaseId: task.leaseId
     });
     json(response, 200, result);
   }
 
-  async function findCachedOntologyAssertions(
+  async function findCachedContextGraphAssertions(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
     // Generations are content-addressed by (commit, generator, registry, evidence
     // fingerprint), so a batch persisted by a worker that later lost its lease is
     // byte-identical to what a retry would produce; serving it here is safe reuse.
-    const cached = await ontologyStore.hasAssertionGeneration(
+    const cached = await contextGraphStore.hasAssertionGeneration(
       tenantId,
       requiredString(task.metadata.repository, "task.repository"),
       requiredGitSha(body.commitSha, "commitSha"),
-      ONTOLOGY_GENERATOR_VERSION,
-      ONTOLOGY_REGISTRY_VERSION,
+      CONTEXT_GRAPH_GENERATOR_VERSION,
+      CONTEXT_GRAPH_REGISTRY_VERSION,
       requiredString(body.evidenceFingerprint, "evidenceFingerprint")
     );
     json(response, 200, { cached: cached ?? null });
   }
 
-  async function loadOntologyAssertionEvidence(
+  async function loadContextGraphAssertionEvidence(
     request: IncomingMessage,
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedOntologyTask(body, taskId, tenantId, "run-ontology-assert");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
     const repository = requiredString(task.metadata.repository, "task.repository");
     const observationIds = Array.isArray(task.metadata.sourceObservationIds)
       ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
       : [];
-    const evidence = await ontologyStore.loadAssertionEvidence(tenantId, repository, observationIds);
+    const evidence = await contextGraphStore.loadAssertionEvidence(tenantId, repository, observationIds);
     json(response, 200, { evidence });
   }
 
-  async function requireLeasedOntologyTask(
+  async function requireLeasedContextGraphTask(
     body: Record<string, unknown>,
     taskId: string,
     tenantId: string,
-    topic: OntologyWorkerTopic
-  ): Promise<OntologyStageLease & { readonly id: string }> {
+    topic: ContextGraphWorkerTopic
+  ): Promise<ContextGraphStageLease & { readonly id: string }> {
     const messageId = requiredString(body.messageId, "messageId");
-    if (messageId !== taskId) throw new ApiError(409, "stale_lease", "stale ontology worker lease");
+    if (messageId !== taskId) throw new ApiError(409, "stale_lease", "stale contextGraph worker lease");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    const stage = await ontologyCoordinator.leasedStage({ tenantId, stageId: taskId, leaseId, topic, now: nowIso() });
-    if (!stage) throw new ApiError(409, "stale_lease", "stale ontology worker lease");
+    const stage = await contextGraphCoordinator.leasedStage({
+      tenantId,
+      stageId: taskId,
+      leaseId,
+      topic,
+      now: nowIso()
+    });
+    if (!stage) throw new ApiError(409, "stale_lease", "stale contextGraph worker lease");
     return { ...stage, id: stage.stageId };
   }
 
@@ -1084,17 +1090,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (unsupportedTopics.length > 0)
       throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
     const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
-    const ontologyTopics = requestedTopics.filter(isOntologyWorkerTopic);
-    if (ontologyTopics.length > 0) {
+    const contextGraphTopics = requestedTopics.filter(isContextGraphWorkerTopic);
+    if (contextGraphTopics.length > 0) {
       const now = nowIso();
-      const claimed = await ontologyCoordinator.claim({
+      const claimed = await contextGraphCoordinator.claim({
         tenantId,
         workerId,
-        topics: ontologyTopics,
+        topics: contextGraphTopics,
         now,
         leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
       });
-      if (claimed || ontologyTopics.length === requestedTopics.length) {
+      if (claimed || contextGraphTopics.length === requestedTopics.length) {
         json(response, claimed ? 200 : 204, claimed ?? {});
         return;
       }
@@ -1139,9 +1145,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const body = parseJsonObject(await readRawBody(request));
     const rawMessageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    if (rawMessageId.startsWith("ontology-stage_")) {
+    if (rawMessageId.startsWith("context-graph-stage_")) {
       const now = nowIso();
-      const renewed = await ontologyCoordinator.renew({
+      const renewed = await contextGraphCoordinator.renew({
         tenantId,
         stageId: rawMessageId,
         leaseId,
@@ -1179,10 +1185,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const messageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
     const reason = requiredString(body.reason, "reason").slice(0, 500);
-    if (!messageId.startsWith("ontology-stage_")) {
-      throw invalidRequest("only ontology task-board leases can be released");
+    if (!messageId.startsWith("context-graph-stage_")) {
+      throw invalidRequest("only contextGraph task-board leases can be released");
     }
-    const released = await ontologyCoordinator.release({
+    const released = await contextGraphCoordinator.release({
       tenantId,
       stageId: messageId,
       leaseId,
@@ -1200,9 +1206,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const outcome = body.outcome;
     if (outcome !== "done" && outcome !== "failed") throw invalidRequest("outcome must be done or failed");
     const rawTaskId = requiredString(body.taskId, "taskId");
-    if (rawMessageId.startsWith("ontology-stage_") || rawTaskId.startsWith("ontology-stage_")) {
+    if (rawMessageId.startsWith("context-graph-stage_") || rawTaskId.startsWith("context-graph-stage_")) {
       if (rawMessageId !== rawTaskId) throw staleLease();
-      const graph = await completeOntologyStage(body, tenantId, rawTaskId, leaseId, outcome);
+      const graph = await completeContextGraphStage(body, tenantId, rawTaskId, leaseId, outcome);
       json(response, 200, { accepted: true, graphId: graph?.id });
       return;
     }
@@ -1277,18 +1283,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { accepted: true });
   }
 
-  async function completeOntologyStage(
+  async function completeContextGraphStage(
     body: Readonly<Record<string, unknown>>,
     tenantId: string,
     stageId: string,
     leaseId: string,
     outcome: "done" | "failed"
-  ): Promise<OntologyGraph | undefined> {
+  ): Promise<ContextGraph | undefined> {
     const now = nowIso();
-    const stage = await ontologyCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
+    const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
     if (!stage) throw staleLease();
     if (outcome === "failed") {
-      const completed = await ontologyCoordinator.complete({
+      const completed = await contextGraphCoordinator.complete({
         tenantId,
         stageId,
         leaseId,
@@ -1303,27 +1309,31 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const rawResult = isRecord(body.result) ? body.result : {};
     let result: Record<string, unknown> = safeResultPayload(rawResult);
     let nextMetadata: Record<string, unknown> = {};
-    let graph: OntologyGraph | undefined;
-    if (stage.topic === "run-ontology-ingest") {
-      nextMetadata = ontologyIngestCompletionMetadata(rawResult);
+    let graph: ContextGraph | undefined;
+    if (stage.topic === "run-context-graph-ingest") {
+      nextMetadata = contextGraphIngestCompletionMetadata(rawResult);
       result = { ...result, ...nextMetadata };
-    } else if (stage.topic === "run-ontology-assert") {
+    } else if (stage.topic === "run-context-graph-assert") {
       if (body.assertionBatch !== undefined) {
         // Legacy in-request save for workers deployed before the API.
-        await ontologyStore.saveAssertionBatch(
-          parseOntologyAssertionBatch(body.assertionBatch, { id: stage.stageId, metadata: stage.metadata }, tenantId),
+        await contextGraphStore.saveAssertionBatch(
+          parseContextGraphAssertionBatch(
+            body.assertionBatch,
+            { id: stage.stageId, metadata: stage.metadata },
+            tenantId
+          ),
           { stageId, leaseId }
         );
       }
       // The completion receipt is derived from durable state bound to this
       // stage's own commit and evidence fingerprint; caller-supplied result
       // payloads are never trusted for canonical fields.
-      const generation = await ontologyStore.hasAssertionGeneration(
+      const generation = await contextGraphStore.hasAssertionGeneration(
         tenantId,
         requiredString(stage.metadata.repository, "task.repository"),
         requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
-        ONTOLOGY_GENERATOR_VERSION,
-        ONTOLOGY_REGISTRY_VERSION,
+        CONTEXT_GRAPH_GENERATOR_VERSION,
+        CONTEXT_GRAPH_REGISTRY_VERSION,
         requiredString(stage.metadata.evidenceFingerprint, "task.evidenceFingerprint")
       );
       if (!generation) throw invalidRequest("assertion generation is not durable for this stage");
@@ -1337,7 +1347,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       // Thin completion: verify the projection is durably published for this
       // stage's ref and commit before recording it; canonical fields come from
       // the graph head, not the caller.
-      const headState = await ontologyStore.currentGraphHead(tenantId, stage.repository, stage.ref);
+      const headState = await contextGraphStore.currentGraphHead(tenantId, stage.repository, stage.ref);
       if (!headState || headState.commitSha !== requiredGitSha(stage.metadata.commitSha, "task.commitSha")) {
         throw invalidRequest("projected graph head is not durable for this stage");
       }
@@ -1347,10 +1357,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha: headState.commitSha
       };
     } else {
-      const existingGraphIds = new Set((await ontologyStore.listSummaries(tenantId)).map((summary) => summary.id));
-      const drained = await ontologyStore.drainDerivedProjectionEvents(tenantId, now);
-      const rebuilt = await ontologyStore.rebuildDerivedProjections(tenantId, stage.repository, stage.ref, now);
-      graph = await ontologyStore.project({
+      const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
+      const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
+      const rebuilt = await contextGraphStore.rebuildDerivedProjections(tenantId, stage.repository, stage.ref, now);
+      graph = await contextGraphStore.project({
         tenantId,
         repository: stage.repository,
         ref: stage.ref,
@@ -1370,7 +1380,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha: graph.commitSha
       };
     }
-    const completed = await ontologyCoordinator.complete({
+    const completed = await contextGraphCoordinator.complete({
       tenantId,
       stageId,
       leaseId,
@@ -1393,7 +1403,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     readonly tenantId: string;
     readonly principalId: string;
   }): Promise<readonly string[]> {
-    return ontologyStore.repositoriesForPrincipal(
+    return contextGraphStore.repositoriesForPrincipal(
       principal.tenantId,
       isTenantAdmin(principal) ? "svc:tenant-admin" : principal.principalId
     );
@@ -1408,8 +1418,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     server.once("close", () => clearInterval(timer));
   }
   if (config.stateStore) server.once("close", () => void config.stateStore?.close());
-  server.once("close", () => void ontologyCoordinator.close());
-  server.once("close", () => void ontologyStore.close());
+  server.once("close", () => void contextGraphCoordinator.close());
+  server.once("close", () => void contextGraphStore.close());
   return server;
 }
 
@@ -1430,7 +1440,7 @@ function authenticatedPrincipal(
   const hasGraphAccess = Boolean(
     config.graphApiToken &&
     authorization === `Bearer ${config.graphApiToken}` &&
-    (isPublicGraphRoute(pathname) || pathname === "/ontology/build")
+    (isPublicGraphRoute(pathname) || pathname === "/context-graph/build")
   );
   if (!hasInternalAccess && !hasGraphAccess) return undefined;
   if (!config.tenantId) return undefined;
@@ -1464,12 +1474,12 @@ function isPublicGraphRoute(pathname: string): boolean {
 
 function isSnapshotExemptInternalRoute(method: string | undefined, pathname: string): boolean {
   if (method !== "POST") return false;
-  // Relational ontology data-plane routes never read the JSON board snapshot.
-  if (pathname.startsWith("/internal/ontology/")) return true;
-  // Worker coordination: ontology-stage_* leases bypass the JSON board
+  // Relational contextGraph data-plane routes never read the JSON board snapshot.
+  if (pathname.startsWith("/internal/context-graph/")) return true;
+  // Worker coordination: context-graph-stage_* leases bypass the JSON board
   // entirely, and the JSON-board claim/renew branches only read state inside
   // mutate(), which restores the stored snapshot before operating. release is
-  // ontology-only. complete re-synchronizes on its JSON-board path before it
+  // context-graph-only. complete re-synchronizes on its JSON-board path before it
   // validates the task against the snapshot.
   return (
     pathname === "/internal/worker/claim" ||
@@ -1479,7 +1489,7 @@ function isSnapshotExemptInternalRoute(method: string | undefined, pathname: str
   );
 }
 
-function isDirectOntologyRead(method: string | undefined, pathname: string): boolean {
+function isDirectContextGraphRead(method: string | undefined, pathname: string): boolean {
   if (
     method === "OPTIONS" ||
     (method === "GET" && (pathname === "/health" || pathname === "/healthz" || pathname === "/task-types"))
@@ -1489,13 +1499,13 @@ function isDirectOntologyRead(method: string | undefined, pathname: string): boo
   if (isPublicGraphRoute(pathname)) return true;
   if (
     method === "GET" &&
-    (pathname === "/ontology" ||
-      pathname === "/ontology/metrics" ||
-      pathname === "/ontology/assertions" ||
-      pathname.startsWith("/ontology/graphs/"))
+    (pathname === "/context-graph" ||
+      pathname === "/context-graph/metrics" ||
+      pathname === "/context-graph/assertions" ||
+      pathname.startsWith("/context-graph/graphs/"))
   )
     return true;
-  return method === "POST" && (pathname === "/ontology/retrieve" || pathname === "/ontology/ask");
+  return method === "POST" && (pathname === "/context-graph/retrieve" || pathname === "/context-graph/ask");
 }
 
 function tenantTaskIds(
@@ -1542,7 +1552,7 @@ function tenantBoardView(
 
 function mergePipelineBoardView(
   board: ReturnType<typeof tenantBoardView>,
-  pipeline: readonly { readonly build: OntologyBuildRecord; readonly stages: readonly OntologyStageRecord[] }[],
+  pipeline: readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[],
   allowedRepositories?: ReadonlySet<string>
 ) {
   const visible = pipeline.filter(({ build }) => !allowedRepositories || allowedRepositories.has(build.repository));
@@ -1552,34 +1562,35 @@ function mergePipelineBoardView(
   ]);
   const dependencies = visible.flatMap(({ build, stages }) =>
     stages.flatMap((stage) =>
-      ontologyStagePrerequisites(stage, build.snapshotFirst).map((prerequisite) => {
+      contextGraphStagePrerequisites(stage, build.snapshotFirst).map((prerequisite) => {
         const dependency = stages.find(
           (candidate) => candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
         );
         if (!dependency)
-          throw new Error(`missing ontology stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
+          throw new Error(`missing contextGraph stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
         return {
           taskId: stage.id,
           dependsOnTaskId: dependency.id,
           relationship: "blocks",
-          required: ontologyStageRequired(stage),
-          blocksParentCompletion: ontologyStageRequired(stage)
+          required: contextGraphStageRequired(stage),
+          blocksParentCompletion: contextGraphStageRequired(stage)
         };
       })
     )
   );
   return {
     ...board,
-    tasks: [...board.tasks.filter((task) => !task.type.startsWith("ontology_")), ...pipelineTasks],
+    tasks: [...board.tasks.filter((task) => !task.type.startsWith("context_graph_")), ...pipelineTasks],
     dependencies: [
       ...board.dependencies.filter(
-        (dependency) => !board.tasks.some((task) => task.id === dependency.taskId && task.type.startsWith("ontology_"))
+        (dependency) =>
+          !board.tasks.some((task) => task.id === dependency.taskId && task.type.startsWith("context_graph_"))
       ),
       ...dependencies
     ],
     outbox: [
       ...board.outbox.filter(
-        (message) => !board.tasks.some((task) => task.id === message.taskId && task.type.startsWith("ontology_"))
+        (message) => !board.tasks.some((task) => task.id === message.taskId && task.type.startsWith("context_graph_"))
       ),
       ...visible.flatMap(({ stages }) =>
         stages
@@ -1603,14 +1614,14 @@ function mergePipelineBoardView(
   };
 }
 
-function pipelineBuildTask(build: OntologyBuildRecord): BoardTask {
+function pipelineBuildTask(build: ContextGraphBuildRecord): BoardTask {
   return {
     id: entityId<"task">(build.id),
-    type: "ontology_build",
-    title: `Build repository graph for ${build.repository}@${build.ref}`,
+    type: "context_graph_build",
+    title: `Build ContextGraph for ${build.repository}@${build.ref}`,
     status: pipelineBuildBoardStatus(build.status),
     assigneeRole: "system",
-    dedupeKey: `ontology:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}:root`,
+    dedupeKey: `contextGraph:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}:root`,
     required: true,
     attempt: 0,
     metadata: {
@@ -1627,7 +1638,7 @@ function pipelineBuildTask(build: OntologyBuildRecord): BoardTask {
   };
 }
 
-function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecord): BoardTask {
+function pipelineStageTask(build: ContextGraphBuildRecord, stage: ContextGraphStageRecord): BoardTask {
   const timing = {
     ...(stage.startedAt ? { startedAt: stage.startedAt } : {}),
     ...(stage.completedAt ? { completedAt: stage.completedAt } : {}),
@@ -1636,12 +1647,12 @@ function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecor
   return {
     id: entityId<"task">(stage.id),
     parentTaskId: entityId<"task">(build.id),
-    type: `ontology_${stage.stage}`,
+    type: `context_graph_${stage.stage}`,
     title: `${stage.stage === "ingest" ? "Ingest" : stage.stage === "assert" ? "Derive assertions for" : "Project graph for"} ${stage.repository}@${stage.ref} (${stage.phase})`,
     status: stage.status,
-    assigneeRole: "ontology_worker",
-    dedupeKey: `ontology:${stage.buildId}:${stage.phase}:${stage.stage}`,
-    required: ontologyStageRequired(stage),
+    assigneeRole: "context_graph_worker",
+    dedupeKey: `contextGraph:${stage.buildId}:${stage.phase}:${stage.stage}`,
+    required: contextGraphStageRequired(stage),
     attempt: stage.attempt,
     metadata: {
       ...stage.metadata,
@@ -1654,7 +1665,7 @@ function pipelineStageTask(build: OntologyBuildRecord, stage: OntologyStageRecor
   };
 }
 
-function pipelineBuildBoardStatus(status: OntologyBuildRecord["status"]): BoardTask["status"] {
+function pipelineBuildBoardStatus(status: ContextGraphBuildRecord["status"]): BoardTask["status"] {
   if (status === "queued") return "queued";
   if (status === "done" || status === "failed") return status;
   if (status === "superseded") return "superseded";
@@ -1662,11 +1673,15 @@ function pipelineBuildBoardStatus(status: OntologyBuildRecord["status"]): BoardT
   return "in_progress";
 }
 
-function isOntologyWorkerTopic(topic: string): topic is OntologyWorkerTopic {
-  return topic === "run-ontology-ingest" || topic === "run-ontology-assert" || topic === "run-ontology-project";
+function isContextGraphWorkerTopic(topic: string): topic is ContextGraphWorkerTopic {
+  return (
+    topic === "run-context-graph-ingest" ||
+    topic === "run-context-graph-assert" ||
+    topic === "run-context-graph-project"
+  );
 }
 
-function ontologyIngestCompletionMetadata(result: Record<string, unknown>): Record<string, unknown> {
+function contextGraphIngestCompletionMetadata(result: Record<string, unknown>): Record<string, unknown> {
   const positiveIntegers = (value: unknown, field: string) =>
     Array.isArray(value) ? value.map((item) => requiredPositiveInteger(item, field)) : [];
   const strings = (value: unknown, field: string) =>
@@ -1974,7 +1989,7 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
   };
 }
 
-function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
+function parseContextGraphCommand(value: Record<string, unknown>): ContextGraphCommand {
   const type = requiredString(value.type, "command.type");
   const reason = typeof value.reason === "string" && value.reason.trim() ? value.reason.trim() : undefined;
   if (type === "review_assertion") {
@@ -2061,11 +2076,11 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     const entity = (input: unknown, name: string) => {
       if (!isRecord(input)) throw invalidRequest(`${name} must be an object`);
       const kind = requiredString(input.kind, `${name}.kind`);
-      if (!ontologyNodeKinds.includes(kind as OntologyNodeKind)) {
+      if (!contextGraphNodeKinds.includes(kind as ContextGraphNodeKind)) {
         throw invalidRequest(`${name}.kind is unsupported`);
       }
       return {
-        kind: kind as OntologyNodeKind,
+        kind: kind as ContextGraphNodeKind,
         key: requiredString(input.key, `${name}.key`),
         ...(typeof input.displayName === "string" ? { displayName: input.displayName } : {})
       };
@@ -2090,7 +2105,7 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
       reason
     };
   }
-  throw invalidRequest("unsupported ontology command");
+  throw invalidRequest("unsupported contextGraph command");
 }
 
 function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
@@ -2105,7 +2120,7 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
       throw invalidRequest("blob analysis must include symbols, imports, and edges");
     }
     const parserVersion = requiredString(analysis.parserVersion, "analysis.parserVersion");
-    if (parserVersion !== ONTOLOGY_PARSER_VERSION) throw invalidRequest("unsupported ontology parser version");
+    if (parserVersion !== CONTEXT_GRAPH_PARSER_VERSION) throw invalidRequest("unsupported contextGraph parser version");
     return {
       blobSha: requiredGitSha(analysis.blobSha, "analysis.blobSha"),
       parserVersion,
@@ -2148,11 +2163,11 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
   });
 }
 
-function parseOntologyAssertionBatch(
+function parseContextGraphAssertionBatch(
   value: unknown,
   task: { readonly id: string; readonly metadata: Readonly<Record<string, unknown>> },
   tenantId: string
-): OntologyAssertionBatch {
+): ContextGraphAssertionBatch {
   if (!isRecord(value)) throw invalidRequest("assertionBatch must be an object");
   const commitSha = requiredGitSha(value.commitSha, "assertionBatch.commitSha");
   if (commitSha !== task.metadata.commitSha) throw invalidRequest("assertion batch commit does not match task source");
@@ -2169,7 +2184,7 @@ function parseOntologyAssertionBatch(
   if (JSON.stringify([...evidenceObservationIds].sort()) !== JSON.stringify([...expectedObservationIds].sort())) {
     throw invalidRequest("assertion batch source evidence does not match task source");
   }
-  const rawOutput = parseGeneratedOntology(value.rawOutput);
+  const rawOutput = parseGeneratedContextGraph(value.rawOutput);
   const sourcePullRequestNumbers = Array.isArray(task.metadata.sourcePullRequestNumbers)
     ? task.metadata.sourcePullRequestNumbers.map((number) =>
         requiredPositiveInteger(number, "task.sourcePullRequestNumber")
@@ -2187,8 +2202,8 @@ function parseOntologyAssertionBatch(
     commitSha,
     taskId: task.id,
     generatedAt: requiredString(value.generatedAt, "assertionBatch.generatedAt"),
-    generatorVersion: ONTOLOGY_GENERATOR_VERSION,
-    registryVersion: ONTOLOGY_REGISTRY_VERSION,
+    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint,
     evidenceObservationIds,
     model: requiredString(value.model, "assertionBatch.model"),
@@ -2196,7 +2211,7 @@ function parseOntologyAssertionBatch(
     summary: requiredString(value.summary, "assertionBatch.summary"),
     ...(value.modelOutputRaw !== undefined ? { modelOutputRaw: value.modelOutputRaw } : {}),
     rawOutput,
-    assertions: assertionsFromGeneratedOntology(rawOutput, repository, {
+    assertions: assertionsFromGeneratedContextGraph(rawOutput, repository, {
       sourcePullRequestNumbers,
       resolvedPullRequestNumbers
     })
@@ -2210,7 +2225,7 @@ function requiredRepositoryPath(value: unknown, field: string): string {
   return path;
 }
 
-type OntologyRequestSelectors = Pick<
+type ContextGraphRequestSelectors = Pick<
   RetrievalRequest,
   | "ref"
   | "symbol"
@@ -2225,7 +2240,7 @@ type OntologyRequestSelectors = Pick<
   | "commitSha"
 >;
 
-function parseOntologySelectors(body: Record<string, unknown>): OntologyRequestSelectors {
+function parseContextGraphSelectors(body: Record<string, unknown>): ContextGraphRequestSelectors {
   return {
     ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
     ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),

@@ -14,7 +14,7 @@ export interface ProductionAcceptanceConfig {
   readonly timeoutMs?: number;
   readonly expectedIssueNumber?: number;
   readonly expectedResolutionPullRequestNumber?: number;
-  /** Enables the complete v5.1 causal fixture contract on omxyz/jina-ontology-e2e. */
+  /** Enables the complete v5.1 causal fixture contract on the e2e fixture repository. */
   readonly verifyV51Fixture?: boolean;
   readonly causality?: {
     readonly causingCommitSha: string;
@@ -41,21 +41,25 @@ export interface ProductionAcceptanceSummary {
  */
 export function productionAcceptanceExitCode(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
-  if (/ended as|timed out|missing from the board|retains blocked ontology tasks/.test(message)) return 20;
-  if (/latest ontology graph|ontology\.latest/.test(message)) return 21;
-  if (message.includes("ontology graph is empty")) return 22;
-  if (message.includes("ontology graph contains uncited")) return 23;
+  if (/ended as|timed out|missing from the board|retains blocked contextGraph tasks/.test(message)) return 20;
+  if (/latest contextGraph graph|contextGraph\.latest/.test(message)) return 21;
+  if (message.includes("contextGraph graph is empty")) return 22;
+  if (message.includes("contextGraph graph contains uncited")) return 23;
   if (/context retrieval|causal context|causality assertion|INTRODUCED_BY|v5\.1/.test(message)) return 24;
-  if (message.includes("ontology backlog")) return 25;
+  if (message.includes("contextGraph backlog")) return 25;
   return 26;
 }
 
 /** Runs inside Cloud Run so Secret Manager never exposes the service credential to CI. */
-export async function runProductionOntologyAcceptance(
+export async function runProductionContextGraphAcceptance(
   config: ProductionAcceptanceConfig,
   fetchImpl: typeof fetch = fetch
 ): Promise<ProductionAcceptanceSummary> {
   const apiUrl = config.apiUrl.replace(/\/$/, "");
+  // The production e2e fixture still lives at its pre-rename GitHub location;
+  // renaming the omxyz/jina-ontology-e2e repository is a pending ops task, and
+  // pointing at the new name before that rename would break the post-deploy
+  // verify job. Update this default when the repository is renamed.
   const repository = config.repository ?? "omxyz/jina-ontology-e2e";
   const ref = config.ref ?? "main";
   const principalId = config.principalId ?? "user:keon@omlabs.xyz";
@@ -75,7 +79,7 @@ export async function runProductionOntologyAcceptance(
     "x-jina-principal-id": principalId
   };
 
-  const created = await apiJson(fetchImpl, `${apiUrl}/ontology/build`, {
+  const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ repository, ref, requestKey: config.requestKey })
@@ -94,7 +98,7 @@ export async function runProductionOntologyAcceptance(
     const status = requiredString(task.status, "task.status");
     const taskSummary = summarizeWorkflowTasks(tasks, taskId);
     if (taskSummary !== lastTaskSummary) {
-      log(`Production ontology task ${taskId}: ${taskSummary}`);
+      log(`Production contextGraph task ${taskId}: ${taskSummary}`);
       lastTaskSummary = taskSummary;
     }
     if (status !== lastStatus) {
@@ -106,7 +110,7 @@ export async function runProductionOntologyAcceptance(
     }
     if (TERMINAL_FAILURES.has(status)) {
       const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-      throw new Error(`production ontology task ${taskId} ended as ${status} (${taskSummary}${failureSummary})`);
+      throw new Error(`production contextGraph task ${taskId} ended as ${status} (${taskSummary}${failureSummary})`);
     }
     await delay(pollIntervalMs);
   }
@@ -115,27 +119,27 @@ export async function runProductionOntologyAcceptance(
     const tasks = requiredArray(board.tasks, "board.tasks");
     const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
     throw new Error(
-      `production ontology task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`
+      `production contextGraph task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`
     );
   }
-  const blockedTaskIds = blockedOntologyTaskIds(completedBoardTasks ?? [], repository, ref);
+  const blockedTaskIds = blockedContextGraphTaskIds(completedBoardTasks ?? [], repository, ref);
   if (blockedTaskIds.length > 0) {
     throw new Error(
-      `production board retains blocked ontology tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`
+      `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`
     );
   }
 
-  const ontology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
-  let latest = requiredRecord(ontology.latest, "ontology.latest");
+  const contextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
+  let latest = requiredRecord(contextGraph.latest, "contextGraph.latest");
   if (latest.repository !== repository || latest.ref !== ref) {
-    throw new Error("latest ontology graph does not match the acceptance repository and ref");
+    throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
   }
-  let nodes = requiredArray(latest.nodes, "ontology.latest.nodes");
-  let edges = requiredArray(latest.edges, "ontology.latest.edges");
-  if (nodes.length === 0 || edges.length === 0) throw new Error("production ontology graph is empty");
-  if (![...nodes, ...edges].every(hasEvidence)) throw new Error("production ontology graph contains uncited items");
+  let nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
+  let edges = requiredArray(latest.edges, "contextGraph.latest.edges");
+  if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
+  if (![...nodes, ...edges].every(hasEvidence)) throw new Error("production contextGraph graph contains uncited items");
 
-  const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+  const context = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({
@@ -149,7 +153,7 @@ export async function runProductionOntologyAcceptance(
   if (calls.length < 3 || citations.length === 0 || !calls.every(hasCitedItems)) {
     throw new Error("production context retrieval did not return cited change, intent, and ownership results");
   }
-  const issueContext = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+  const issueContext = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ repository, ref, question: `Which PR and commit resolved issue #${expectedIssueNumber}?` })
@@ -183,10 +187,10 @@ export async function runProductionOntologyAcceptance(
     const causingCommitSha = requiredFullGitSha(config.causality.causingCommitSha, "causality.causingCommitSha");
     const assertionResponse = await apiJson(
       fetchImpl,
-      `${apiUrl}/ontology/assertions?repository=${encodeURIComponent(repository)}&predicate=INTRODUCED_BY`,
+      `${apiUrl}/context-graph/assertions?repository=${encodeURIComponent(repository)}&predicate=INTRODUCED_BY`,
       { headers }
     );
-    const assertions = requiredArray(assertionResponse.assertions, "ontology assertions");
+    const assertions = requiredArray(assertionResponse.assertions, "contextGraph assertions");
     const causalAssertion = assertions.find(
       (value) =>
         isRecord(value) &&
@@ -218,7 +222,7 @@ export async function runProductionOntologyAcceptance(
       throw new Error("production causality assertion is missing its expected reason or evidence");
     }
     if (causalAssertion.status === "proposed") {
-      await apiJson(fetchImpl, `${apiUrl}/ontology/commands`, {
+      await apiJson(fetchImpl, `${apiUrl}/context-graph/commands`, {
         method: "POST",
         headers: { ...headers, "content-type": "application/json" },
         body: JSON.stringify({
@@ -273,7 +277,7 @@ export async function runProductionOntologyAcceptance(
       );
     }
 
-    await runFollowupOntologyBuild(
+    await runFollowupContextGraphBuild(
       fetchImpl,
       apiUrl,
       headers,
@@ -284,13 +288,13 @@ export async function runProductionOntologyAcceptance(
       pollIntervalMs,
       log
     );
-    const causalOntology = await apiJson(fetchImpl, `${apiUrl}/ontology`, { headers });
-    latest = requiredRecord(causalOntology.latest, "causal ontology.latest");
+    const causalContextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
+    latest = requiredRecord(causalContextGraph.latest, "causal contextGraph.latest");
     if (latest.repository !== repository || latest.ref !== ref) {
-      throw new Error("latest causal ontology graph does not match the acceptance repository and ref");
+      throw new Error("latest causal contextGraph graph does not match the acceptance repository and ref");
     }
-    nodes = requiredArray(latest.nodes, "causal ontology.latest.nodes");
-    edges = requiredArray(latest.edges, "causal ontology.latest.edges");
+    nodes = requiredArray(latest.nodes, "causal contextGraph.latest.nodes");
+    edges = requiredArray(latest.edges, "causal contextGraph.latest.edges");
     const nodeById = new Map(
       nodes.flatMap((node) => (isRecord(node) && typeof node.id === "string" ? [[node.id, node] as const] : []))
     );
@@ -318,14 +322,14 @@ export async function runProductionOntologyAcceptance(
     });
     if (!causalEdge)
       throw new Error(
-        "production ontology graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason"
+        "production contextGraph graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason"
       );
     if (config.verifyV51Fixture) {
       await verifyV51FixtureQueries(fetchImpl, apiUrl, headers, repository, ref);
     }
   }
 
-  const metrics = await apiJson(fetchImpl, `${apiUrl}/ontology/metrics`, { headers });
+  const metrics = await apiJson(fetchImpl, `${apiUrl}/context-graph/metrics`, { headers });
   const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");
   const pendingEvents = Object.values(outboxDepth).reduce<number>(
     (sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"),
@@ -333,14 +337,14 @@ export async function runProductionOntologyAcceptance(
   );
   if (pendingEvents !== 0 || metrics.unparsedBlobCount !== 0) {
     throw new Error(
-      `production ontology backlog is not empty (outbox=${pendingEvents}, unparsed=${String(metrics.unparsedBlobCount)})`
+      `production contextGraph backlog is not empty (outbox=${pendingEvents}, unparsed=${String(metrics.unparsedBlobCount)})`
     );
   }
 
   return {
     taskId,
     repository,
-    commitSha: requiredString(latest.commitSha, "ontology.latest.commitSha"),
+    commitSha: requiredString(latest.commitSha, "contextGraph.latest.commitSha"),
     nodeCount: nodes.length,
     edgeCount: edges.length,
     citationCount: citations.length
@@ -357,7 +361,7 @@ async function verifyCounterfactualAnswer(
   expectRemainingPaths: boolean
 ): Promise<void> {
   for (let attempt = 0; attempt < 30; attempt += 1) {
-    const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+    const context = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ repository, ref, operation: "counterfactual", question })
@@ -424,7 +428,7 @@ async function reviewFixtureProposals(
     if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
       throw new Error(`production v5.1 proposal ${value.id} has no review evidence`);
     }
-    await apiJson(fetchImpl, `${apiUrl}/ontology/commands`, {
+    await apiJson(fetchImpl, `${apiUrl}/context-graph/commands`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({
@@ -445,7 +449,7 @@ async function verifyV51FixtureQueries(
   ref: string
 ): Promise<void> {
   const ask = (question: string, operation?: "counterfactual") =>
-    apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+    apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ repository, ref, question, ...(operation ? { operation } : {}) })
@@ -578,13 +582,13 @@ function hasCitations(value: unknown): boolean {
   return isRecord(value) && Array.isArray(value.citations) && value.citations.length > 0;
 }
 
-export function blockedOntologyTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
+export function blockedContextGraphTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
   return tasks.flatMap((task) => {
     if (
       !isRecord(task) ||
       task.status !== "blocked" ||
       typeof task.type !== "string" ||
-      !task.type.startsWith("ontology_")
+      !task.type.startsWith("context_graph_")
     )
       return [];
     const metadata = isRecord(task.metadata) ? task.metadata : {};
@@ -609,7 +613,7 @@ async function waitForCausalTrace(
   }
 ): Promise<void> {
   while (Date.now() < expected.deadline) {
-    const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+    const context = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
       method: "POST",
       headers: { ...headers, "content-type": "application/json" },
       body: JSON.stringify({ repository, ref, question })
@@ -652,7 +656,7 @@ async function waitForCausalTrace(
   throw new Error(`production causal context retrieval timed out for: ${question}`);
 }
 
-async function runFollowupOntologyBuild(
+async function runFollowupContextGraphBuild(
   fetchImpl: typeof fetch,
   apiUrl: string,
   headers: Record<string, string>,
@@ -663,7 +667,7 @@ async function runFollowupOntologyBuild(
   pollIntervalMs: number,
   log: (message: string) => void
 ): Promise<void> {
-  const created = await apiJson(fetchImpl, `${apiUrl}/ontology/build`, {
+  const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
     body: JSON.stringify({ repository, ref, requestKey })
@@ -682,10 +686,10 @@ async function runFollowupOntologyBuild(
       lastSummary = summary;
     }
     if (status === "done") {
-      const blocked = blockedOntologyTaskIds(tasks, repository, ref);
+      const blocked = blockedContextGraphTaskIds(tasks, repository, ref);
       if (blocked.length > 0)
         throw new Error(
-          `production board retains blocked ontology tasks for ${repository}@${ref}: ${blocked.join(", ")}`
+          `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blocked.join(", ")}`
         );
       return;
     }
@@ -818,7 +822,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const causingPullRequestNumber = optionalPositiveIntegerEnv("ACCEPTANCE_CAUSING_PR_NUMBER");
     const reasonIncludes = process.env.ACCEPTANCE_CAUSAL_REASON_INCLUDES?.trim();
     const verifyV51Fixture = process.env.ACCEPTANCE_V51_FIXTURE?.trim().toLowerCase() === "true";
-    const summary = await runProductionOntologyAcceptance({
+    const summary = await runProductionContextGraphAcceptance({
       apiUrl: requiredEnv("JINA_API_URL"),
       token: requiredEnv("INTERNAL_API_TOKEN"),
       requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
@@ -836,7 +840,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
           }
         : {})
     });
-    const message = `Production ontology accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`;
+    const message = `Production contextGraph accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`;
     await writeTerminationMessage(message);
     console.log(message);
   } catch (error) {
@@ -886,9 +890,9 @@ function summarizeWorkflowTasks(tasks: readonly unknown[], rootTaskId: string): 
 function taskSortKey(task: Record<string, unknown>, rootTaskId: string): string {
   if (task.id === rootTaskId) return "0-root";
   const order: Record<string, string> = {
-    ontology_ingest: "1-ingest",
-    ontology_assert: "2-assert",
-    ontology_project: "3-project"
+    context_graph_ingest: "1-ingest",
+    context_graph_assert: "2-assert",
+    context_graph_project: "3-project"
   };
   return typeof task.type === "string" ? (order[task.type] ?? `9-${task.type}`) : "9-child";
 }

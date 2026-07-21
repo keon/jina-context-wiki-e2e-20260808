@@ -1,23 +1,23 @@
 import {
   PostgresJsonStateStore,
-  PostgresOntologyGraphStore,
-  PostgresOntologyPipelineCoordinator,
+  PostgresContextGraphStore,
+  PostgresContextGraphPipelineCoordinator,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
 import {
-  MemoryOntologyGraphStore,
-  MemoryOntologyPipelineCoordinator,
-  type OntologyGraphStore,
-  type OntologyPipelineCoordinator
-} from "@jina/ontology";
+  MemoryContextGraphStore,
+  MemoryContextGraphPipelineCoordinator,
+  type ContextGraphStore,
+  type ContextGraphPipelineCoordinator
+} from "@jina/context-graph";
 import { createApiServer } from "./server.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const stateStore = createStateStore();
-const ontologyStore = createOntologyStore();
-const ontologyCoordinator = createOntologyCoordinator();
+const contextGraphStore = createContextGraphStore();
+const contextGraphCoordinator = createContextGraphCoordinator();
 if (
   !enableDevEndpoints &&
   (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_TENANT_ID)
@@ -33,8 +33,8 @@ const server = createApiServer({
   simulateRuns: process.env.JINA_SIMULATE_RUNS === "true",
   seedDemo: enableDevEndpoints && process.env.JINA_SEED_DEMO !== "false",
   ...(stateStore ? { stateStore } : {}),
-  ontologyStore,
-  ontologyCoordinator,
+  contextGraphStore,
+  contextGraphCoordinator,
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
   ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
@@ -44,7 +44,7 @@ const server = createApiServer({
 server.listen(port, () => {
   console.log(`jina api server: http://localhost:${port}`);
   console.log(`  storage: ${stateStore ? "postgres" : "memory"}`);
-  console.log("  GET  /board  /events  /ontology  /health");
+  console.log("  GET  /board  /events  /context-graph  /health");
   console.log("  POST /mcp  (query_graph MCP tool)");
   console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
   if (enableDevEndpoints) {
@@ -72,24 +72,24 @@ function createStateStore(): ApiStateStore | undefined {
   return new PostgresJsonStateStore<ApiSnapshot>(config);
 }
 
-function createOntologyStore(): OntologyGraphStore {
+function createContextGraphStore(): ContextGraphStore {
   const config = databaseConfig();
   return config
-    ? new PostgresOntologyGraphStore({
+    ? new PostgresContextGraphStore({
         ...config,
         manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
       })
-    : new MemoryOntologyGraphStore();
+    : new MemoryContextGraphStore();
 }
 
-function createOntologyCoordinator(): OntologyPipelineCoordinator {
+function createContextGraphCoordinator(): ContextGraphPipelineCoordinator {
   const config = databaseConfig();
   return config
-    ? new PostgresOntologyPipelineCoordinator({
+    ? new PostgresContextGraphPipelineCoordinator({
         ...config,
         manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
       })
-    : new MemoryOntologyPipelineCoordinator();
+    : new MemoryContextGraphPipelineCoordinator();
 }
 
 function databaseConfig(): PostgresJsonStateStoreConfig | undefined {

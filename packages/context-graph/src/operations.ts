@@ -1,9 +1,9 @@
-import type { OntologyNodeKind } from "./model.js";
+import type { ContextGraphNodeKind } from "./model.js";
 import type { AssertionStatus } from "./knowledge.js";
-import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
+import type { ContextGraphOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
 import type { RetrievalExecutor } from "./retrieval.js";
 
-export type OntologyCommand =
+export type ContextGraphCommand =
   | {
       readonly type: "review_assertion";
       readonly assertionId: string;
@@ -42,29 +42,29 @@ export type OntologyCommand =
   | {
       readonly type: "assign_relationship";
       readonly repository?: string;
-      readonly subject: { readonly kind: OntologyNodeKind; readonly key: string; readonly displayName?: string };
+      readonly subject: { readonly kind: ContextGraphNodeKind; readonly key: string; readonly displayName?: string };
       readonly predicate: string;
-      readonly object: { readonly kind: OntologyNodeKind; readonly key: string; readonly displayName?: string };
+      readonly object: { readonly kind: ContextGraphNodeKind; readonly key: string; readonly displayName?: string };
       readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
       readonly reason: string;
     };
 
-export interface OntologyCommandResult {
+export interface ContextGraphCommandResult {
   readonly auditId: string;
   readonly action: string;
   readonly affectedIds: readonly string[];
   readonly outboxEventIds: readonly string[];
 }
 
-export interface OntologyAssertionSummary {
+export interface ContextGraphAssertionSummary {
   readonly id: string;
   readonly repository: string;
   readonly commitSha: string;
-  readonly subjectKind: OntologyNodeKind;
+  readonly subjectKind: ContextGraphNodeKind;
   readonly subjectNaturalKey: string;
   readonly subjectLabel: string;
   readonly predicate: string;
-  readonly objectKind: OntologyNodeKind;
+  readonly objectKind: ContextGraphNodeKind;
   readonly objectNaturalKey: string;
   readonly objectLabel: string;
   readonly status: AssertionStatus;
@@ -83,10 +83,10 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
   executeCommand(
     tenantId: string,
     actorId: string,
-    command: OntologyCommand,
+    command: ContextGraphCommand,
     now: string,
     actorIsTenantAdmin?: boolean
-  ): Promise<OntologyCommandResult>;
+  ): Promise<ContextGraphCommandResult>;
   rebuildDerivedProjections(
     tenantId: string,
     repository: string,
@@ -97,11 +97,15 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
     tenantId: string,
     now: string
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }>;
-  operationalMetrics(tenantId: string, now: string): Promise<OntologyOperationalMetrics>;
+  operationalMetrics(tenantId: string, now: string): Promise<ContextGraphOperationalMetrics>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<readonly string[]>;
   listAssertions(
     tenantId: string,
     repository: string,
-    filter?: { readonly status?: AssertionStatus; readonly predicate?: string; readonly entityKind?: OntologyNodeKind }
-  ): Promise<readonly OntologyAssertionSummary[]>;
+    filter?: {
+      readonly status?: AssertionStatus;
+      readonly predicate?: string;
+      readonly entityKind?: ContextGraphNodeKind;
+    }
+  ): Promise<readonly ContextGraphAssertionSummary[]>;
 }

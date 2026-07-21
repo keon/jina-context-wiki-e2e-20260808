@@ -18,11 +18,11 @@ numbers in this document.
 
 ## Decision
 
-`issue_trace` reads the materialized relational graph directly. The former per-issue JSON cache is not retained because direct traversal meets the 100 ms database p95 target at the tested scale. `ontology_project` remains the exclusive owner of graph materialization; retrieval performs no writes.
+`issue_trace` reads the materialized relational graph directly. The former per-issue JSON cache is not retained because direct traversal meets the 100 ms database p95 target at the tested scale. `context_graph_project` remains the exclusive owner of graph materialization; retrieval performs no writes.
 
 ## Method
 
-Both implementations were exercised through `PostgresOntologyGraphStore.retrieve` against the same PostgreSQL instance, rotating through issue-number, issue-text, pull-request, and commit lookups. Every lookup was required to return exactly one equivalent issue trace before timings were accepted. The real-repository run used 20 warm-ups and 100 measured calls; the scaled run used 10 warm-ups and 70 measured calls.
+Both implementations were exercised through `PostgresContextGraphStore.retrieve` against the same PostgreSQL instance, rotating through issue-number, issue-text, pull-request, and commit lookups. Every lookup was required to return exactly one equivalent issue trace before timings were accepted. The real-repository run used 20 warm-ups and 100 measured calls; the scaled run used 10 warm-ups and 70 measured calls.
 
 The scaled fixture contained one graph generation with 5,000 Issues, 5,000 Pull Requests, 5,000 Commits, and 20,000 causal/resolution/membership edges plus corresponding active assertions. It was deleted after the run. The direct path used indexes on graph kind/identity, edge source/target/predicate, and active assertion endpoints.
 
@@ -39,4 +39,4 @@ The initial unindexed full-graph direct implementation measured 855.2 ms p95 at 
 
 ## Revisit condition
 
-Reconsider a dedicated cache only if production telemetry shows direct `issue_trace` database latency above 100 ms p95 on representative repository sizes after query/index tuning. Any future cache must remain disposable, be written only by `ontology_project`, and pass result-parity tests against direct graph traversal.
+Reconsider a dedicated cache only if production telemetry shows direct `issue_trace` database latency above 100 ms p95 on representative repository sizes after query/index tuning. Any future cache must remain disposable, be written only by `context_graph_project`, and pass result-parity tests against direct graph traversal.

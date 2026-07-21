@@ -1,46 +1,46 @@
 import { Daytona, type Resources, type Sandbox } from "@daytona/sdk";
 import {
-  ONTOLOGY_ASSERTION_OUTPUT_SCHEMA,
-  ONTOLOGY_ASSERTION_SYSTEM_PROMPT,
-  createOntologyGraph,
-  parseGeneratedOntology,
+  CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA,
+  CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
+  createContextGraph,
+  parseGeneratedContextGraph,
   requiredCausalAnchors,
   requiredDerivedIssuePullRequestNumbers,
   sourceBackedModelEntityIds,
-  validateOntologyEvidence,
+  validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
   validateSourceBackedModelEntities,
-  type GeneratedOntology,
-  type OntologyBuildRequest,
-  type OntologyExecutor,
-  type OntologyGraph,
+  type GeneratedContextGraph,
+  type ContextGraphBuildRequest,
+  type ContextGraphExecutor,
+  type ContextGraph,
   type RequiredCausalAnchor
-} from "@jina/ontology";
+} from "@jina/context-graph";
 
 const DEFAULT_IMAGE = "node:22-bookworm";
 const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
 const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini";
-const WORK_DIR = "/home/daytona/ontology";
+const WORK_DIR = "/home/daytona/context-graph";
 const REPO_DIR = `${WORK_DIR}/repo`;
 const CODEX_LOCAL_BIN = `${WORK_DIR}/node_modules/.bin/codex`;
-const SCHEMA_PATH = `${WORK_DIR}/ontology-schema.json`;
+const SCHEMA_PATH = `${WORK_DIR}/context-graph-schema.json`;
 const EVIDENCE_PATH = `${WORK_DIR}/source-evidence.json`;
-const RESULT_PATH = `${WORK_DIR}/ontology-result.json`;
+const RESULT_PATH = `${WORK_DIR}/context-graph-result.json`;
 const PROMPT_PATH = `${WORK_DIR}/prompt.txt`;
 const PROXY_PATH = `${WORK_DIR}/openrouter-proxy.mjs`;
 const PROXY_PORT = 43123;
 
-export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
-  async buildAssertions(request: OntologyBuildRequest): Promise<OntologyGraph> {
-    return this.execute(request, ONTOLOGY_ASSERTION_OUTPUT_SCHEMA, ONTOLOGY_ASSERTION_SYSTEM_PROMPT);
+export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
+  async buildAssertions(request: ContextGraphBuildRequest): Promise<ContextGraph> {
+    return this.execute(request, CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT);
   }
 
   private async execute(
-    request: OntologyBuildRequest,
+    request: ContextGraphBuildRequest,
     outputSchema: object,
     systemPrompt: string
-  ): Promise<OntologyGraph> {
+  ): Promise<ContextGraph> {
     request.signal?.throwIfAborted();
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
     const openaiKey = process.env.OPENAI_API_KEY?.trim();
@@ -49,7 +49,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
     const aiKey = provider === "openai" ? openaiKey : openrouterKey;
     if (!aiKey)
       throw new Error(
-        `${provider === "openai" ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY"} is required for the Daytona Ontology worker`
+        `${provider === "openai" ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY"} is required for the Daytona ContextGraph worker`
       );
     const cloneToken = process.env.GITHUB_CLONE_TOKEN || process.env.GITHUB_TOKEN;
     const model = selectedModel(provider);
@@ -107,7 +107,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
             ];
       const providerEnvironment = provider === "openrouter" ? { OPENROUTER_API_KEY: aiKey } : { OPENAI_API_KEY: aiKey };
 
-      let generated: GeneratedOntology | undefined;
+      let generated: GeneratedContextGraph | undefined;
       let rawModelOutput: unknown;
       let validationFailure = "";
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -126,13 +126,13 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
           `--output-last-message ${shellQuote(RESULT_PATH)}`,
           `-m ${shellQuote(model)}`,
           ...providerArguments,
-          `-c model_context_window=${positiveInt(process.env.ONTOLOGY_CODEX_CONTEXT_TOKENS, 16_000)}`,
-          `-c model_auto_compact_token_limit=${positiveInt(process.env.ONTOLOGY_CODEX_COMPACT_TOKENS, 12_000)}`,
-          `-c model_reasoning_effort=${shellQuote(process.env.ONTOLOGY_CODEX_EFFORT?.trim() || "low")}`,
+          `-c model_context_window=${positiveInt(process.env.CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS, 16_000)}`,
+          `-c model_auto_compact_token_limit=${positiveInt(process.env.CONTEXT_GRAPH_CODEX_COMPACT_TOKENS, 12_000)}`,
+          `-c model_reasoning_effort=${shellQuote(process.env.CONTEXT_GRAPH_CODEX_EFFORT?.trim() || "low")}`,
           "-c model_verbosity=low",
           `"$(cat ${shellQuote(PROMPT_PATH)})"`
         ].join(" ");
-        const executionAttempts = positiveInt(process.env.ONTOLOGY_CODEX_EXECUTION_ATTEMPTS, 2);
+        const executionAttempts = positiveInt(process.env.CONTEXT_GRAPH_CODEX_EXECUTION_ATTEMPTS, 2);
         let run: Awaited<ReturnType<Sandbox["process"]["executeCommand"]>> | undefined;
         for (let executionAttempt = 0; executionAttempt < executionAttempts; executionAttempt += 1) {
           try {
@@ -151,13 +151,13 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
           if (run?.exitCode === 0) break;
           if (run && !isTransientCodexExecutionFailure(run.result)) break;
           if (executionAttempt + 1 >= executionAttempts) break;
-          const delaySeconds = positiveInt(process.env.ONTOLOGY_CODEX_RETRY_DELAY_SECONDS, 10);
+          const delaySeconds = positiveInt(process.env.CONTEXT_GRAPH_CODEX_RETRY_DELAY_SECONDS, 10);
           await sandbox.process.executeCommand(`sleep ${delaySeconds}`, REPO_DIR, undefined, delaySeconds + 5);
           request.signal?.throwIfAborted();
         }
-        if (!run) throw new Error("Codex ontology build failed after a transient Daytona execution error");
+        if (!run) throw new Error("Codex contextGraph build failed after a transient Daytona execution error");
         if (run.exitCode !== 0) {
-          throw new Error(`Codex ontology build failed: ${redact(truncate(run.result), secrets)}`);
+          throw new Error(`Codex contextGraph build failed: ${redact(truncate(run.result), secrets)}`);
         }
         const resultBuffer = await sandbox.fs.downloadFile(
           RESULT_PATH,
@@ -166,10 +166,10 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
         request.signal?.throwIfAborted();
         try {
           const parsedModelOutput = parseJsonResult(resultBuffer.toString("utf8"));
-          const candidate = parseGeneratedOntology(parsedModelOutput);
+          const candidate = parseGeneratedContextGraph(parsedModelOutput);
           const validationErrors: string[] = [];
           try {
-            await validateOntologyEvidence(candidate, async (path) => {
+            await validateContextGraphEvidence(candidate, async (path) => {
               request.signal?.throwIfAborted();
               const contents = await sandbox!.fs.downloadFile(`${REPO_DIR}/${path}`, 120);
               request.signal?.throwIfAborted();
@@ -207,7 +207,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
         }
       }
 
-      if (!generated) throw new Error("Codex ontology build did not produce a validated result");
+      if (!generated) throw new Error("Codex contextGraph build did not produce a validated result");
       request.signal?.throwIfAborted();
       const shaResult = await sandbox.process.executeCommand("git rev-parse HEAD", REPO_DIR, undefined, 60);
       request.signal?.throwIfAborted();
@@ -220,7 +220,7 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
       }
 
       return {
-        ...createOntologyGraph({
+        ...createContextGraph({
           request,
           commitSha,
           generatedAt: new Date().toISOString(),
@@ -251,23 +251,23 @@ export function isTransientCodexExecutionFailure(output: string): boolean {
 }
 
 function selectProvider(openaiKey?: string, openrouterKey?: string): "openai" | "openrouter" {
-  const configured = process.env.ONTOLOGY_CODEX_PROVIDER?.trim().toLowerCase();
+  const configured = process.env.CONTEXT_GRAPH_CODEX_PROVIDER?.trim().toLowerCase();
   if (configured && configured !== "openai" && configured !== "openrouter") {
-    throw new Error("ONTOLOGY_CODEX_PROVIDER must be openai or openrouter");
+    throw new Error("CONTEXT_GRAPH_CODEX_PROVIDER must be openai or openrouter");
   }
   if (configured === "openai" || configured === "openrouter") return configured;
   if (openaiKey) return "openai";
   if (openrouterKey) return "openrouter";
-  throw new Error("OPENAI_API_KEY or OPENROUTER_API_KEY is required for the Daytona Ontology worker");
+  throw new Error("OPENAI_API_KEY or OPENROUTER_API_KEY is required for the Daytona ContextGraph worker");
 }
 
 function selectedModel(provider: "openai" | "openrouter"): string {
-  const configured = process.env.ONTOLOGY_CODEX_MODEL?.trim();
+  const configured = process.env.CONTEXT_GRAPH_CODEX_MODEL?.trim();
   if (configured) return provider === "openai" ? configured.replace(/^openai\//, "") : configured;
   return provider === "openai" ? DEFAULT_OPENAI_MODEL : DEFAULT_OPENROUTER_MODEL;
 }
 
-async function cloneRepository(sandbox: Sandbox, request: OntologyBuildRequest, token?: string): Promise<void> {
+async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildRequest, token?: string): Promise<void> {
   const url = `https://github.com/${request.repository}.git`;
   const username = token ? "x-access-token" : undefined;
   try {
@@ -286,7 +286,7 @@ async function cloneRepository(sandbox: Sandbox, request: OntologyBuildRequest, 
 }
 
 async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Promise<void> {
-  if (!/^[a-f0-9]{40}$/i.test(commitSha)) throw new Error("Ontology source commit must be a full Git SHA");
+  if (!/^[a-f0-9]{40}$/i.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
   const ensureCommit = await sandbox.process.executeCommand(
     `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || git fetch --depth=1 origin ${shellQuote(commitSha)}`,
     REPO_DIR,
@@ -351,7 +351,7 @@ export async function findExistingCodex(sandbox: {
 
 async function writeInputFiles(
   sandbox: Sandbox,
-  request: OntologyBuildRequest,
+  request: ContextGraphBuildRequest,
   outputSchema: object,
   systemPrompt: string
 ): Promise<{ readonly prompt: string; readonly causalAnchors: readonly RequiredCausalAnchor[] }> {
@@ -361,7 +361,7 @@ async function writeInputFiles(
     request.problemEvidencePullRequestNumbers ?? []
   );
   const causalAnchors = requiredCausalAnchors(focusEvidence.files, requiredDerivedIssues);
-  const prompt = ontologyPrompt(systemPrompt, request, focusEvidence.text, requiredDerivedIssues, causalAnchors);
+  const prompt = contextGraphPrompt(systemPrompt, request, focusEvidence.text, requiredDerivedIssues, causalAnchors);
   await Promise.all([
     sandbox.fs.uploadFile(Buffer.from(JSON.stringify(outputSchema)), SCHEMA_PATH, 120),
     sandbox.fs.uploadFile(Buffer.from(prompt), PROMPT_PATH, 120),
@@ -371,9 +371,9 @@ async function writeInputFiles(
   return { prompt, causalAnchors };
 }
 
-function ontologyPrompt(
+function contextGraphPrompt(
   systemPrompt: string,
-  request: OntologyBuildRequest,
+  request: ContextGraphBuildRequest,
   focusEvidence: string,
   requiredDerivedIssues: readonly number[],
   causalAnchors: readonly RequiredCausalAnchor[]
@@ -411,9 +411,9 @@ export async function buildFocusEvidenceBundle(
   sandbox: { readonly fs: Pick<Sandbox["fs"], "downloadFileStream"> },
   paths: readonly string[]
 ): Promise<{ readonly text: string; readonly files: readonly { readonly path: string; readonly content: string }[] }> {
-  const fileLimit = positiveInt(process.env.ONTOLOGY_FOCUS_BUNDLE_FILE_LIMIT, 32);
-  const maximum = positiveInt(process.env.ONTOLOGY_FOCUS_BUNDLE_MAX_CHARS, 16_000);
-  const perFileMaximum = positiveInt(process.env.ONTOLOGY_FOCUS_BUNDLE_FILE_CHARS, 3_000);
+  const fileLimit = positiveInt(process.env.CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_LIMIT, 32);
+  const maximum = positiveInt(process.env.CONTEXT_GRAPH_FOCUS_BUNDLE_MAX_CHARS, 16_000);
+  const perFileMaximum = positiveInt(process.env.CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_CHARS, 3_000);
   const candidates = [...new Set(paths.filter(isSafeRepositoryPath))].slice(0, fileLimit);
   if (candidates.length === 0) return { text: "", files: [] };
   const perFileBudget = Math.min(perFileMaximum, Math.max(1, Math.floor(maximum / candidates.length)));
@@ -491,11 +491,11 @@ function isSafeRepositoryPath(path: string): boolean {
 }
 
 async function startOutputLimitingProxy(sandbox: Sandbox): Promise<void> {
-  const maxOutputTokens = positiveInt(process.env.ONTOLOGY_CODEX_MAX_OUTPUT_TOKENS, 4_000);
+  const maxOutputTokens = positiveInt(process.env.CONTEXT_GRAPH_CODEX_MAX_OUTPUT_TOKENS, 4_000);
   const started = await sandbox.process.executeCommand(
     `nohup node ${shellQuote(PROXY_PATH)} > ${shellQuote(`${WORK_DIR}/proxy.log`)} 2>&1 &`,
     WORK_DIR,
-    { ONTOLOGY_PROXY_PORT: String(PROXY_PORT), ONTOLOGY_MAX_OUTPUT_TOKENS: String(maxOutputTokens) },
+    { CONTEXT_GRAPH_PROXY_PORT: String(PROXY_PORT), CONTEXT_GRAPH_MAX_OUTPUT_TOKENS: String(maxOutputTokens) },
     30
   );
   if (started.exitCode !== 0) throw new Error(`OpenRouter proxy failed to start: ${truncate(started.result)}`);
@@ -512,8 +512,8 @@ function openrouterProxySource(): string {
   return `import http from "node:http";
 import https from "node:https";
 
-const port = Number(process.env.ONTOLOGY_PROXY_PORT || "${PROXY_PORT}");
-const maximum = Number(process.env.ONTOLOGY_MAX_OUTPUT_TOKENS || "4000");
+const port = Number(process.env.CONTEXT_GRAPH_PROXY_PORT || "${PROXY_PORT}");
+const maximum = Number(process.env.CONTEXT_GRAPH_MAX_OUTPUT_TOKENS || "4000");
 
 http.createServer((request, response) => {
   if (request.url === "/health") {
@@ -570,7 +570,7 @@ function parseJsonResult(value: string): unknown {
 
 function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
-  if (!value) throw new Error(`${name} is required for the Daytona Ontology worker`);
+  if (!value) throw new Error(`${name} is required for the Daytona ContextGraph worker`);
   return value;
 }
 

@@ -12,7 +12,7 @@
   "dependencies": {
     "@jina/ai": "workspace:*",
     "@jina/daytona": "workspace:*",
-    "@jina/ontology": "workspace:*"
+    "@jina/context-graph": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

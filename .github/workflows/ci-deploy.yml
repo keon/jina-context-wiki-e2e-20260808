@@ -20,7 +20,7 @@ env:
   GAR_REPOSITORY: jina
   API_SERVICE: jina-api
   DASHBOARD_SERVICE: jina-dashboard
-  WORKER_SERVICE: jina-ontology-worker
+  WORKER_SERVICE: jina-context-graph-worker
   TASK_WORKER_SERVICE: jina-task-worker
 
 jobs:
@@ -154,7 +154,7 @@ jobs:
       - name: Verify API health
         run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/health"
 
-      - name: Build and push ontology worker image
+      - name: Build and push contextGraph worker image
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -166,7 +166,7 @@ jobs:
           cache-from: type=gha,scope=worker
           cache-to: type=gha,mode=max,scope=worker
 
-      - name: Deploy ontology worker
+      - name: Deploy contextGraph worker
         id: deploy-worker
         uses: google-github-actions/deploy-cloudrun@v3
         with:
@@ -184,16 +184,16 @@ jobs:
             --no-cpu-throttling
           env_vars: |-
             JINA_API_URL=${{ steps.deploy-api.outputs.url }}
-            WORKER_TOPICS=run-ontology-ingest|run-ontology-assert|run-ontology-project
-            ONTOLOGY_HISTORY_LIMIT=10000
-            ONTOLOGY_INGEST_TRANSPORT=git
+            WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project
+            CONTEXT_GRAPH_HISTORY_LIMIT=10000
+            CONTEXT_GRAPH_INGEST_TRANSPORT=git
             DAYTONA_RUN_TIMEOUT_SECONDS=2400
-            ONTOLOGY_CODEX_PROVIDER=openrouter
-            ONTOLOGY_CODEX_MODEL=deepseek/deepseek-v4-flash
-            ONTOLOGY_CODEX_CONTEXT_TOKENS=16000
-            ONTOLOGY_CODEX_COMPACT_TOKENS=12000
+            CONTEXT_GRAPH_CODEX_PROVIDER=openrouter
+            CONTEXT_GRAPH_CODEX_MODEL=deepseek/deepseek-v4-flash
+            CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=16000
+            CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=12000
           # To warm the Daytona assert path, build a snapshot out-of-band with
-          # @openai/codex@0.144.0 preinstalled (at /home/daytona/ontology/node_modules/.bin/codex
+          # @openai/codex@0.144.0 preinstalled (at /home/daytona/context-graph/node_modules/.bin/codex
           # or on PATH) and then add its name to env_vars above:
           #   DAYTONA_SNAPSHOT=<snapshot-name>
           # Do not enable until the snapshot exists in the Daytona organization.
@@ -203,9 +203,9 @@ jobs:
             OPENROUTER_API_KEY=jina-openrouter-api-key:latest
             GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
 
-      - name: Verify ontology worker health
+      - name: Verify contextGraph worker health
         run: |
-          curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-worker.outputs.url }}/health" | jq -e '.ok == true and .topics == ["run-ontology-ingest", "run-ontology-assert", "run-ontology-project"] and ((keys - ["active", "consecutiveApiFailures", "lastApiError", "lastApiErrorAt", "lastApiSuccessAt", "lastWork", "ok", "topics", "workerId"]) | length == 0) and (.lastWork == null or ((.lastWork | keys) - ["failureCategory", "finishedAt", "outcome", "topic"] | length == 0))'
+          curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-worker.outputs.url }}/health" | jq -e '.ok == true and .topics == ["run-context-graph-ingest", "run-context-graph-assert", "run-context-graph-project"] and ((keys - ["active", "consecutiveApiFailures", "lastApiError", "lastApiErrorAt", "lastApiSuccessAt", "lastWork", "ok", "topics", "workerId"]) | length == 0) and (.lastWork == null or ((.lastWork | keys) - ["failureCategory", "finishedAt", "outcome", "topic"] | length == 0))'
 
       - name: Deploy task worker
         id: deploy-task-worker
@@ -293,7 +293,7 @@ jobs:
           access_token="$(gcloud auth print-access-token)"
           curl --fail-with-body --silent --show-error --request POST --header "Authorization: Bearer ${access_token}" --header "Content-Type: application/json" --data '{}' "${iap_resource}:getIamPolicy" | jq -e --arg member "user:keon@omlabs.xyz" 'any(.bindings[]?; .role == "roles/iap.httpsResourceAccessor" and any(.members[]?; . == $member))'
 
-      - name: Verify production ontology workflow
+      - name: Verify production contextGraph workflow
         run: |
           gcloud run jobs deploy jina-acceptance \
             --project="${GCP_PROJECT_ID}" \
@@ -356,7 +356,7 @@ jobs:
             echo
             echo "- API: ${{ steps.deploy-api.outputs.url }}"
             echo "- Dashboard: ${{ steps.deploy-dashboard.outputs.url }}"
-            echo "- Ontology worker: ${{ steps.deploy-worker.outputs.url }}"
+            echo "- ContextGraph worker: ${{ steps.deploy-worker.outputs.url }}"
             echo "- Task worker: ${{ steps.deploy-task-worker.outputs.url }}"
             echo "- Revision: \`${{ github.sha }}\`"
           } >> "$GITHUB_STEP_SUMMARY"

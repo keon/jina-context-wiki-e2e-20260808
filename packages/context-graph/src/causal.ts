@@ -1,4 +1,4 @@
-import type { OntologyEdge, OntologyGraph, OntologyNode, OntologyNodeKind } from "./model.js";
+import type { ContextGraphEdge, ContextGraph, ContextGraphNode, ContextGraphNodeKind } from "./model.js";
 import type { RetrievalCitation, RetrievalItem, RetrievalRequest } from "./retrieval.js";
 
 export const causalRootKinds = ["Issue", "Feature", "Incident", "Service"] as const;
@@ -6,7 +6,7 @@ export type CausalRootKind = (typeof causalRootKinds)[number];
 
 export interface CausalTraceNode {
   readonly id: string;
-  readonly kind: OntologyNodeKind;
+  readonly kind: ContextGraphNodeKind;
   readonly label: string;
   readonly description: string;
   readonly path?: string;
@@ -58,7 +58,7 @@ export interface CounterfactualEvaluation {
   readonly coverageGaps: readonly string[];
 }
 
-export function causalTraceItemsFromGraph(graph: OntologyGraph, request: RetrievalRequest): readonly RetrievalItem[] {
+export function causalTraceItemsFromGraph(graph: ContextGraph, request: RetrievalRequest): readonly RetrievalItem[] {
   const roots = selectRoots(graph, request);
   return roots.map((root, index) => {
     const trace = buildCausalTrace(graph, root);
@@ -72,13 +72,17 @@ export function causalTraceItemsFromGraph(graph: OntologyGraph, request: Retriev
   });
 }
 
-export function buildCausalTrace(graph: OntologyGraph, root: OntologyNode): CausalTraceProjection {
+export function buildCausalTrace(graph: ContextGraph, root: ContextGraphNode): CausalTraceProjection {
   if (!causalRootKinds.includes(root.kind as CausalRootKind))
     throw new Error(`${root.kind} cannot root a causal trace`);
   const nodes = new Map(graph.nodes.map((node) => [node.id, node]));
   const outgoing = indexEdges(graph.edges, (edge) => edge.source);
   const incoming = indexEdges(graph.edges, (edge) => edge.target);
-  const direct = (edge: OntologyEdge, kind: CausalTracePath["kind"], reverse = false): CausalTracePath | undefined => {
+  const direct = (
+    edge: ContextGraphEdge,
+    kind: CausalTracePath["kind"],
+    reverse = false
+  ): CausalTracePath | undefined => {
     const other = nodes.get(reverse ? edge.source : edge.target);
     if (!other) return undefined;
     return path(kind, reverse ? [root, other] : [root, other], [edge], graph);
@@ -167,7 +171,7 @@ export function buildCausalTrace(graph: OntologyGraph, root: OntologyNode): Caus
             [
               ...implementation.edgeIds
                 .map((id) => graph.edges.find((edge) => edge.id === id))
-                .filter((edge): edge is OntologyEdge => Boolean(edge)),
+                .filter((edge): edge is ContextGraphEdge => Boolean(edge)),
               ...(fileEdge ? [fileEdge] : []),
               dependencyEdge
             ],
@@ -379,7 +383,7 @@ function counterfactualAnswer(
   return `Removing ${intervention.label} eliminates ${removedPaths.length} currently known reviewed path${removedPaths.length === 1 ? "" : "s"}, but ${remainingPaths.length} alternative known path${remainingPaths.length === 1 ? " remains" : "s remain"} to ${trace.root.label}.`;
 }
 
-function selectRoots(graph: OntologyGraph, request: RetrievalRequest): OntologyNode[] {
+function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGraphNode[] {
   const candidates = graph.nodes.filter((node) => causalRootKinds.includes(node.kind as CausalRootKind));
   if (request.rootEntityId) return candidates.filter((node) => node.id === request.rootEntityId);
   const issue = request.issueNumber ? `#${request.issueNumber}` : undefined;
@@ -526,9 +530,9 @@ function selectInterventionNodes(nodes: readonly CausalTraceNode[], question: st
 
 function path(
   kind: CausalTracePath["kind"],
-  nodes: readonly (OntologyNode | CausalTraceNode)[],
-  edges: readonly OntologyEdge[],
-  graph: OntologyGraph
+  nodes: readonly (ContextGraphNode | CausalTraceNode)[],
+  edges: readonly ContextGraphEdge[],
+  graph: ContextGraph
 ): CausalTracePath {
   const citations = dedupeCitations([
     ...edges.flatMap((edge) => citationsForEdge(edge, graph)),
@@ -545,7 +549,7 @@ function path(
   };
 }
 
-function citationsForEdge(edge: OntologyEdge, graph: OntologyGraph): RetrievalCitation[] {
+function citationsForEdge(edge: ContextGraphEdge, graph: ContextGraph): RetrievalCitation[] {
   return edge.evidence.flatMap((value): RetrievalCitation[] => {
     if (value.startsWith("assertion:"))
       return [
@@ -574,7 +578,7 @@ function citationsForEdge(edge: OntologyEdge, graph: OntologyGraph): RetrievalCi
   });
 }
 
-function causalNode(node: OntologyNode | CausalTraceNode): CausalTraceNode {
+function causalNode(node: ContextGraphNode | CausalTraceNode): CausalTraceNode {
   return {
     id: node.id,
     kind: node.kind,
@@ -584,8 +588,11 @@ function causalNode(node: OntologyNode | CausalTraceNode): CausalTraceNode {
   };
 }
 
-function indexEdges(edges: readonly OntologyEdge[], key: (edge: OntologyEdge) => string): Map<string, OntologyEdge[]> {
-  const index = new Map<string, OntologyEdge[]>();
+function indexEdges(
+  edges: readonly ContextGraphEdge[],
+  key: (edge: ContextGraphEdge) => string
+): Map<string, ContextGraphEdge[]> {
+  const index = new Map<string, ContextGraphEdge[]>();
   for (const edge of edges) index.set(key(edge), [...(index.get(key(edge)) ?? []), edge]);
   return index;
 }

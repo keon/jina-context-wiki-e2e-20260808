@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
-test("worker reviews pull requests and incrementally ingests ontology source blobs", async (context) => {
+test("worker reviews pull requests and incrementally ingests contextGraph source blobs", async (context) => {
   let claimCount = 0;
   let renewals = 0;
   let projectionDrains = 0;
@@ -19,13 +19,13 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
     const body = await readJson(request);
     if (request.url === "/internal/worker/claim") {
       const topics = (body as { topics?: unknown }).topics;
-      assert.deepEqual(topics, ["run-review", "run-ontology-ingest"]);
+      assert.deepEqual(topics, ["run-review", "run-context-graph-ingest"]);
       claimCount += 1;
       if (claimCount === 2) {
         json(response, 200, {
           message: {
             id: "message-2",
-            topic: "run-ontology-ingest",
+            topic: "run-context-graph-ingest",
             leaseId: "lease-2",
             leaseExpiresAt: new Date(Date.now() + 300_000).toISOString()
           },
@@ -65,7 +65,7 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
       json(response, 200, { accepted: true });
       return;
     }
-    if (request.url === "/internal/ontology/ingest/plan") {
+    if (request.url === "/internal/context-graph/ingest/plan") {
       const snapshot = (body as { snapshot: { commitSha: string; files: unknown[] } }).snapshot;
       assert.equal(snapshot.commitSha, "a".repeat(40));
       assert.equal(snapshot.files.length, 1);
@@ -81,23 +81,23 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
       });
       return;
     }
-    if (request.url === "/internal/ontology/ingest/known") {
+    if (request.url === "/internal/context-graph/ingest/known") {
       json(response, 200, { knownCommitShas: ["a".repeat(40)] });
       return;
     }
-    if (request.url === "/internal/ontology/outbox/drain") {
+    if (request.url === "/internal/context-graph/outbox/drain") {
       projectionDrains += 1;
       json(response, 200, { processedEventCount: 0, rebuiltRepositories: [] });
       return;
     }
-    if (request.url === "/internal/ontology/ingest/blobs") {
+    if (request.url === "/internal/context-graph/ingest/blobs") {
       const analyses = (body as { analyses: { symbols: unknown[] }[] }).analyses;
       assert.equal(analyses.length, 1);
       assert.equal(analyses[0]?.symbols.length, 1);
       json(response, 200, { accepted: true, count: 1 });
       return;
     }
-    if (request.url === "/internal/ontology/ingest/github") {
+    if (request.url === "/internal/context-graph/ingest/github") {
       const observations = (body as { observations: { kind: string; number?: number }[] }).observations;
       ingestedPullRequestNumbers = observations.flatMap((observation) =>
         observation.kind === "pull_request" && observation.number ? [observation.number] : []
@@ -223,7 +223,7 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
       PORT: "0",
       JINA_API_URL: mockUrl,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-review|run-ontology-ingest",
+      WORKER_TOPICS: "run-review|run-context-graph-ingest",
       WORKER_HEARTBEAT_INTERVAL_MS: "10",
       WORKER_POLL_INTERVAL_MS: "10",
       GITHUB_API_URL: `${mockUrl}/github`,
@@ -338,7 +338,7 @@ test("worker rejects malformed topic metadata before dispatch", async (context) 
   assert.equal(completions, 0);
 });
 
-test("ontology worker configuration preserves the explicit staged topics", async (context) => {
+test("contextGraph worker configuration preserves the explicit staged topics", async (context) => {
   let resolveClaim!: (topics: unknown) => void;
   const claimed = new Promise<unknown>((resolve) => {
     resolveClaim = resolve;
@@ -349,7 +349,7 @@ test("ontology worker configuration preserves the explicit staged topics", async
       resolveClaim(body.topics);
       return json(response, 204, {});
     }
-    if (request.url === "/internal/ontology/outbox/drain") return json(response, 200, { processedEventCount: 0 });
+    if (request.url === "/internal/context-graph/outbox/drain") return json(response, 200, { processedEventCount: 0 });
     json(response, 404, { error: "not found" });
   });
   await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
@@ -360,7 +360,7 @@ test("ontology worker configuration preserves the explicit staged topics", async
       PORT: "0",
       JINA_API_URL: `http://127.0.0.1:${address.port}`,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-ontology-ingest|run-ontology-assert|run-ontology-project",
+      WORKER_TOPICS: "run-context-graph-ingest|run-context-graph-assert|run-context-graph-project",
       WORKER_POLL_INTERVAL_MS: "10"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -372,7 +372,11 @@ test("ontology worker configuration preserves the explicit staged topics", async
     await closed;
   });
 
-  assert.deepEqual(await claimed, ["run-ontology-ingest", "run-ontology-assert", "run-ontology-project"]);
+  assert.deepEqual(await claimed, [
+    "run-context-graph-ingest",
+    "run-context-graph-assert",
+    "run-context-graph-project"
+  ]);
 });
 
 test("worker aborts active work and never completes after lease renewal is rejected", async (context) => {
@@ -442,11 +446,12 @@ test("worker aborts active work and never completes after lease renewal is rejec
   assert.equal(completions, 0);
 });
 
-test("worker health remains degraded when ontology outbox draining fails", async (context) => {
+test("worker health remains degraded when contextGraph outbox draining fails", async (context) => {
   const mock = createServer(async (request, response) => {
     await readJson(request);
     if (request.url === "/internal/worker/claim") return json(response, 204, {});
-    if (request.url === "/internal/ontology/outbox/drain") return json(response, 500, { error: "drain unavailable" });
+    if (request.url === "/internal/context-graph/outbox/drain")
+      return json(response, 500, { error: "drain unavailable" });
     json(response, 404, { error: "not found" });
   });
   await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
@@ -458,7 +463,7 @@ test("worker health remains degraded when ontology outbox draining fails", async
       PORT: String(workerPort),
       JINA_API_URL: `http://127.0.0.1:${address.port}`,
       INTERNAL_API_TOKEN: "test-token",
-      WORKER_TOPICS: "run-ontology-project",
+      WORKER_TOPICS: "run-context-graph-project",
       WORKER_POLL_INTERVAL_MS: "10"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -473,7 +478,7 @@ test("worker health remains degraded when ontology outbox draining fails", async
   const health = await waitForHealth(workerPort, (payload) => typeof payload.lastApiError === "string");
   assert.equal(health.status, 503);
   assert.equal(health.payload.ok, false);
-  assert.match(String(health.payload.lastApiError), /ontology.*outbox\/drain failed with 500/i);
+  assert.match(String(health.payload.lastApiError), /context-graph.*outbox\/drain failed with 500/i);
   assert.equal(Number(health.payload.consecutiveApiFailures) > 0, true);
 });
 
