@@ -188,6 +188,8 @@ jobs:
             DAYTONA_RUN_TIMEOUT_SECONDS=2400
             ONTOLOGY_CODEX_PROVIDER=openrouter
             ONTOLOGY_CODEX_MODEL=deepseek/deepseek-v4-flash
+            ONTOLOGY_CODEX_CONTEXT_TOKENS=16000
+            ONTOLOGY_CODEX_COMPACT_TOKENS=12000
           secrets: |-
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
             DAYTONA_API_KEY=jina-daytona-api-key:latest

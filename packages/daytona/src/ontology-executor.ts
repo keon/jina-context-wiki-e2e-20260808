@@ -119,8 +119,8 @@ export class DaytonaCodexOntologyExecutor implements OntologyExecutor {
             `--output-last-message ${shellQuote(RESULT_PATH)}`,
             `-m ${shellQuote(model)}`,
             ...providerArguments,
-            `-c model_context_window=${positiveInt(process.env.ONTOLOGY_CODEX_CONTEXT_TOKENS, 6_000)}`,
-            `-c model_auto_compact_token_limit=${positiveInt(process.env.ONTOLOGY_CODEX_COMPACT_TOKENS, 4_500)}`,
+            `-c model_context_window=${positiveInt(process.env.ONTOLOGY_CODEX_CONTEXT_TOKENS, 16_000)}`,
+            `-c model_auto_compact_token_limit=${positiveInt(process.env.ONTOLOGY_CODEX_COMPACT_TOKENS, 12_000)}`,
             `-c model_reasoning_effort=${shellQuote(process.env.ONTOLOGY_CODEX_EFFORT?.trim() || "low")}`,
             "-c model_verbosity=low",
             `"$(cat ${shellQuote(PROMPT_PATH)})"`
