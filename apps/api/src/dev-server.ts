@@ -11,8 +11,8 @@ const port = Number(process.env.PORT ?? 4000);
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 const stateStore = createStateStore();
 const ontologyStore = createOntologyStore();
-if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.JINA_TENANT_ID)) {
-  throw new Error("INTERNAL_API_TOKEN and JINA_TENANT_ID are required in production");
+if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_TENANT_ID)) {
+  throw new Error("INTERNAL_API_TOKEN, GRAPH_API_TOKEN, and JINA_TENANT_ID are required in production");
 }
 
 const server = createApiServer({
@@ -25,6 +25,7 @@ const server = createApiServer({
   ...(stateStore ? { stateStore } : {}),
   ontologyStore,
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
+  ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")
 });

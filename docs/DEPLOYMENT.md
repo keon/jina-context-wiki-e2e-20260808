@@ -58,9 +58,10 @@ principal for graph reads. Its server maps a simulation tenant UUID to
 `tenant:<uuid>`, replaces the principal's repository ACL through
 `POST /internal/graph/access/sync`, and binds every subsequent graph request to
 that principal. The sync is exact so repository removal or App uninstall is
-revoked on the next request. Keep `INTERNAL_API_TOKEN` server-to-server; callers
-that possess it can change graph ACLs and must be treated as trusted provisioning
-services.
+revoked on the next request. A dedicated `GRAPH_API_TOKEN` authenticates public
+graph routes and ACL synchronization without granting worker or board access.
+The production workflow synchronizes it from the `JINA_GRAPH_API_TOKEN` GitHub
+environment secret into Secret Manager; never expose it to browsers or agents.
 
 The API also serves stateless Streamable HTTP MCP at `POST /mcp`. MCP exposes one
 read-only `query_graph` tool and reuses the same repository-scoped retrieval path.

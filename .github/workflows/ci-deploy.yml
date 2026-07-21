@@ -104,6 +104,21 @@ jobs:
       - name: Configure Artifact Registry authentication
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
+      - name: Synchronize graph API credential
+        env:
+          GRAPH_API_TOKEN_VALUE: ${{ secrets.JINA_GRAPH_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${GRAPH_API_TOKEN_VALUE:-}" ]; then
+            echo "production secret JINA_GRAPH_API_TOKEN is required" >&2
+            exit 1
+          fi
+          if ! gcloud secrets describe jina-graph-api-token --project="${GCP_PROJECT_ID}" >/dev/null 2>&1; then
+            gcloud secrets create jina-graph-api-token --project="${GCP_PROJECT_ID}" --replication-policy=automatic
+          fi
+          printf '%s' "$GRAPH_API_TOKEN_VALUE" | gcloud secrets versions add jina-graph-api-token \
+            --project="${GCP_PROJECT_ID}" --data-file=- >/dev/null
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -149,6 +164,7 @@ jobs:
             DB_PASS=jina-db-password:latest
             GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
+            GRAPH_API_TOKEN=jina-graph-api-token:latest
 
       - name: Verify API health
         run: curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-api.outputs.url }}/health"
