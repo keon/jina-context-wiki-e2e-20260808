@@ -849,7 +849,7 @@ async function submitBlobAnalyses(work: ClaimedWork, commitSha: string, analyses
 
 async function internalApiJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
   // Ontology mutations can persist large content-addressed blob batches. Keep
-  // lease-control calls on the short default timeout, but allow these durable
+  // claim and completion calls on the short default timeout, but allow these durable
   // data calls to use the API service's longer processing window.
   const response = await apiRequest(path, body, ontologyApiTimeoutMs);
   if (!response.ok) throw new Error(`Ontology API ${path} failed with ${response.status}: ${await response.text()}`);
@@ -910,7 +910,7 @@ async function renew(work: ClaimedWork): Promise<void> {
   const response = await apiRequest("/internal/worker/renew", {
     messageId: work.message.id,
     leaseId: work.message.leaseId
-  });
+  }, ontologyApiTimeoutMs);
   if (!response.ok) {
     const message = `renewal failed with ${response.status}: ${await response.text()}`;
     if (response.status === 409) throw new LeaseLostError(message);
