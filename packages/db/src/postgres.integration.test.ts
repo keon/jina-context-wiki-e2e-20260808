@@ -37,6 +37,34 @@ test("Postgres schema removes retired persistence surfaces", () => {
   assert.match(ONTOLOGY_SCHEMA_SQL, /parsed_at timestamptz not null default now\(\)/);
 });
 
+test("Postgres atomically replaces a tenant principal's repository access", {
+  skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+}, async () => {
+  assert.ok(connectionString);
+  const suffix = Date.now().toString(36);
+  const tenantId = `acl-replace-${suffix}`;
+  const principalId = "tenant:11111111-1111-4111-8111-111111111111";
+  const store = new PostgresOntologyGraphStore({ connectionString });
+  const cleanup = new Pool({ connectionString });
+  try {
+    await store.replaceRepositoryAccess(tenantId, principalId, ["omxyz/a", "omxyz/b"]);
+    assert.deepEqual(await store.repositoriesForPrincipal(tenantId, principalId), ["omxyz/a", "omxyz/b"]);
+
+    await store.replaceRepositoryAccess(tenantId, principalId, ["omxyz/b"]);
+    assert.deepEqual(await store.repositoriesForPrincipal(tenantId, principalId), ["omxyz/b"]);
+
+    await store.replaceRepositoryAccess(tenantId, principalId, []);
+    assert.deepEqual(await store.repositoriesForPrincipal(tenantId, principalId), []);
+  } finally {
+    await cleanup.query(
+      `delete from jina_ontology.repository_acl where tenant_id=$1 and principal_id=$2`,
+      [tenantId, principalId]
+    );
+    await cleanup.end();
+    await store.close();
+  }
+});
+
 test("Postgres serializes snapshot updates across store instances", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {

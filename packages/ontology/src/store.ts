@@ -49,6 +49,7 @@ export interface OntologyGraphStore extends OntologyPipelineStore, RepositoryCon
   get(graphId: string, tenantId: string): Promise<OntologyGraph | undefined>;
   list(tenantId: string): Promise<readonly OntologyGraph[]>;
   listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]>;
+  replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
   close(): Promise<void>;
 }
@@ -88,6 +89,10 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
 
   async listSummaries(tenantId: string): Promise<readonly OntologyGraphSummary[]> {
     return (await this.list(tenantId)).map(summarizeOntologyGraph);
+  }
+
+  async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void> {
+    this.repositoryAcl.set(`${tenantId}:${principalId}`, new Map(repositories.map((repository) => [repository, "reader"] as const)));
   }
 
   async knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]> {

@@ -370,6 +370,29 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/internal/graph/access/sync") {
+      if (!config.internalApiToken || firstHeader(request.headers.authorization) !== `Bearer ${config.internalApiToken}` || !config.tenantId) {
+        json(response, 401, { error: "unauthorized" });
+        return;
+      }
+      let principalId: string;
+      let repositories: string[];
+      try {
+        const body = parseJsonObject(await readRawBody(request));
+        principalId = requiredTenantPrincipal(body.principalId);
+        if (!Array.isArray(body.repositories) || body.repositories.length > 5_000) {
+          throw new Error("repositories must be an array with at most 5000 entries");
+        }
+        repositories = [...new Set(body.repositories.map((repository) => requiredRepositoryName(repository, "repository")))].sort();
+      } catch (error) {
+        json(response, 400, { error: error instanceof Error ? error.message : "invalid graph access sync" });
+        return;
+      }
+      await ontologyStore.replaceRepositoryAccess(config.tenantId, principalId, repositories);
+      json(response, 200, { principalId, repositoryCount: repositories.length });
+      return;
+    }
+
     const principal = authenticatedPrincipal(request, config);
     if (!principal) {
       json(response, 401, { accepted: false, error: "unauthorized" });
@@ -377,12 +400,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const { tenantId } = principal;
 
+    if (isPublicGraphRoute(url.pathname) && !config.enableDevEndpoints && !config.principalId &&
+      !normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))) {
+      json(response, 401, { error: "a bound principal is required" });
+      return;
+    }
+
     if (url.pathname === "/mcp") {
-      const forwardedPrincipal = firstHeader(request.headers["x-jina-principal-id"]);
-      if (!config.enableDevEndpoints && !config.principalId && !forwardedPrincipal) {
-        json(response, 401, { error: "a bound principal is required" });
-        return;
-      }
       const origin = firstHeader(request.headers.origin);
       if (origin && !(config.mcpAllowedOrigins ?? []).includes(origin)) {
         json(response, 403, { error: "forbidden" });
@@ -1165,11 +1189,23 @@ function authenticatedPrincipal(request: IncomingMessage, config: ApiServerConfi
   }
   if (!config.internalApiToken || firstHeader(request.headers.authorization) !== `Bearer ${config.internalApiToken}`) return undefined;
   if (!config.tenantId) return undefined;
-  const forwardedPrincipal = firstHeader(request.headers["x-jina-principal-id"]);
-  const principalId = forwardedPrincipal && /^user:[^\s@]+@[^\s@]+$/.test(forwardedPrincipal)
-    ? forwardedPrincipal.toLowerCase()
-    : config.principalId ?? "svc:api";
+  const principalId = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))
+    ?? config.principalId
+    ?? "svc:api";
   return { tenantId: config.tenantId, principalId };
+}
+
+function normalizedForwardedPrincipal(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  if (/^user:[^\s@]+@[^\s@]+$/.test(value)) return value.toLowerCase();
+  if (/^tenant:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    return value.toLowerCase();
+  }
+  return undefined;
+}
+
+function isPublicGraphRoute(pathname: string): boolean {
+  return pathname === "/mcp" || pathname === "/v1/graphs" || pathname.startsWith("/v1/graphs/") || pathname === "/v1/graph/query";
 }
 
 function tenantTaskIds(
@@ -1708,6 +1744,14 @@ function firstHeader(value: string | readonly string[] | undefined): string | un
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || value.trim().length === 0) throw invalidRequest(`${field} must be a non-empty string`);
   return value.trim();
+}
+
+function requiredTenantPrincipal(value: unknown): string {
+  const principalId = requiredString(value, "principalId").toLowerCase();
+  if (!/^tenant:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(principalId)) {
+    throw invalidRequest("principalId must be tenant:<uuid>");
+  }
+  return principalId;
 }
 
 function requiredGitSha(value: unknown, field: string): string {

@@ -189,6 +189,15 @@ advertises only `query_graph(repository, query, ref?)` and returns an answer, ci
 claims, and whether coverage was incomplete. It has no mutation, raw graph,
 generation, or free-form query surface.
 
+Simulation tenants use the same graph contract without becoming storage tenants in
+this service. The simulation API maps each tenant UUID to a `tenant:<uuid>`
+principal and atomically synchronizes that principal's exact installed
+`owner/repository` set through `POST /internal/graph/access/sync`. Public graph REST
+and MCP requests require a validated bound principal in production. Listing,
+detail, and query authorization are enforced again against `repository_acl`, so a
+graph ID from another simulation tenant returns not found. Replacing the set with
+an empty list revokes all graph access for that tenant.
+
 The dashboard renders the direct answer and cited claims before the underlying retrieval calls. It also renders ambiguities and coverage gaps explicitly. Causation questions lead with the introducing PR and commit plus dedicated **Why** and **Evidence** fields; any later resolving PR is shown afterward as a later fix. An absent reviewed causal assertion is reported as unavailable rather than inferred from the later fix.
 
 The interactive graph prefers the Cosmos WebGL renderer, including for large graphs. GPU capability is checked before startup and asynchronous WebGL initialization failures are caught. Either case switches to a deterministic Canvas 2D renderer instead of leaving an empty panel. To keep that compatibility path responsive, Canvas ranks nodes by connectivity and caps rendering at 1,200 nodes and 3,000 non-dangling edges. Its status reports rendered and source totals for both nodes and edges, while the summary labels the post-filter graph totals as visible nodes and edges; cited data and the table view remain complete. The renderer policy has a synthetic 5,000-node/20,000-edge regression test, and `?renderer=canvas` provides a deterministic browser-diagnostic path.
@@ -196,6 +205,7 @@ The interactive graph prefers the Cosmos WebGL renderer, including for large gra
 ## Security
 
 - Production data routes require the server-side internal bearer credential and derive `tenantId` from server configuration, never from request payloads.
+- Public graph REST and MCP routes additionally require a validated `user:<email>` or `tenant:<uuid>` principal. The internal graph-access sync route accepts only `tenant:<uuid>` and exact `owner/repository` names; its service credential must never be exposed to browsers or agents.
 - Cloud Run IAP authenticates the browser. The dashboard proxy removes caller authorization/tenant/principal headers, forwards the verified IAP email as a `user:` principal, and adds its service credential server-side.
 - Graph details, retrieval, and context assembly are tenant- and repository-scoped.
 - `JINA_TENANT_ADMIN_PRINCIPALS` supplies the independent Jina tenant-admin relationship. Other users receive only repositories granted through `repository_acl` reader/writer/admin relationships. Board/event reads use the same repository scope; command authorization is rechecked in the canonical writer. Service principals can enumerate the tenant repositories required by workers.
