@@ -57,7 +57,12 @@ interface WorkMetadataByTopic {
   readonly "run-research": { readonly question?: string; readonly sourceUrls?: readonly string[] };
   readonly "run-publish": Record<string, unknown>;
   readonly "run-cleanup": Record<string, unknown>;
-  readonly "run-ontology-ingest": { readonly tenantId: string; readonly repository: string; readonly ref: string };
+  readonly "run-ontology-ingest": {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly ref: string;
+    readonly historyMode?: "snapshot";
+  };
   readonly "run-ontology-assert": {
     readonly tenantId: string;
     readonly repository: string;
@@ -261,7 +266,9 @@ async function runOntologyIngest(work: ClaimedWork<"run-ontology-ingest">): Prom
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
   const historyLimit = positiveInt(process.env.ONTOLOGY_HISTORY_LIMIT, 10_000);
-  const discovery = await discoverNewCommits(work, repository, head, historyLimit);
+  const discovery = work.task.metadata.historyMode === "snapshot"
+    ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
+    : await discoverNewCommits(work, repository, head, historyLimit);
   const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
   const defaultBranch = typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
   let headPlan: OntologyIngestPlan | undefined;
@@ -1104,7 +1111,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       return {
         topic,
         message: { ...message, topic },
-        task: { id: taskId, metadata: repositoryMetadata(metadata) }
+        task: { id: taskId, metadata: ontologyIngestMetadata(metadata) }
       };
     case "run-ontology-project":
       return {
@@ -1149,6 +1156,13 @@ function repositoryMetadata(metadata: Record<string, unknown>): {
     repository: requiredString(metadata.repository, "task repository"),
     ref: requiredString(metadata.ref, "task ref")
   };
+}
+
+function ontologyIngestMetadata(metadata: Record<string, unknown>): WorkMetadataByTopic["run-ontology-ingest"] {
+  const repository = repositoryMetadata(metadata);
+  if (metadata.historyMode === undefined) return repository;
+  if (metadata.historyMode !== "snapshot") throw new Error("task historyMode must be snapshot when provided");
+  return { ...repository, historyMode: "snapshot" };
 }
 
 function requiredStringArray(value: unknown, name: string): readonly string[] {

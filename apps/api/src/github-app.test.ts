@@ -389,7 +389,9 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     const created = await fetch(`${baseUrl}/ontology/build`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test" })
+      body: JSON.stringify({
+        repository: "omxyz/ontology-fixture", ref: "main", requestKey: "test", historyMode: "snapshot"
+      })
     });
     assert.equal(created.status, 202);
     const createdBody = await created.json() as { task: { id: string } };
@@ -399,6 +401,7 @@ test("ontology pipeline ingests, asserts, projects, and reuses content-addressed
     const sourceSha = "d".repeat(40);
     const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
     assert.equal(ingestion.message.topic, "run-ontology-ingest");
+    assert.equal(ingestion.task.metadata?.historyMode, "snapshot");
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
@@ -1205,7 +1208,7 @@ class MemoryStateStore implements ApiStateStore {
 
 interface TestClaim {
   readonly message: { readonly id: string; readonly leaseId: string; readonly topic: string };
-  readonly task: { readonly id: string };
+  readonly task: { readonly id: string; readonly metadata?: Record<string, unknown> };
 }
 
 async function claimTopic(baseUrl: string, topic: string): Promise<TestClaim> {

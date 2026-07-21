@@ -700,6 +700,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
     const suppliedRequestKey = typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
+    const historyMode = body.historyMode;
+    if (historyMode !== undefined && historyMode !== "snapshot") {
+      throw invalidRequest("historyMode must be snapshot when provided");
+    }
     const created = await mutate(async () => {
       devDeliverySequence += 1;
       const nonce = suppliedRequestKey ?? `${Date.now()}-${devDeliverySequence}`;
@@ -715,7 +719,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       for (const task of plan.tasks) {
         board = applyCommand(board, {
           command: "CreateTask",
-          task: { ...task, required: true },
+          task: {
+            ...task,
+            required: true,
+            ...(historyMode ? { metadata: { ...task.metadata, historyMode } } : {})
+          },
           ...(task.id === plan.rootTaskId ? { blocksParentCompletion: false } : {})
         }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
       }
