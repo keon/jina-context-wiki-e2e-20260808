@@ -5,9 +5,11 @@ import {
   isProblemEvidencePath,
   parseGeneratedOntology,
   requiredCausalAnchors,
+  sourceBackedModelEntityIds,
   validateOntologyEvidence,
   validateRequiredCausalAssertions,
-  validateRequiredVirtualIssues
+  validateRequiredVirtualIssues,
+  validateSourceBackedModelEntities
 } from "./model.js";
 import { MemoryOntologyGraphStore } from "./store.js";
 import {
@@ -19,6 +21,7 @@ import {
   computeCommitChanges,
   derivedIssueNaturalKey,
   featureNaturalKey,
+  movedFromSimilarityCandidates,
   selectAssertionFocusPaths
 } from "./pipeline.js";
 import { analyzeSourceBlob } from "./parser.js";
@@ -30,6 +33,7 @@ import {
   emptyKnowledgeState,
   ensureEntity,
   reconcileAssertions,
+  relateAssertions,
   resolveEntityId,
   reviewAssertion,
   upsertIdentity
@@ -44,7 +48,8 @@ import {
   isCounterfactualQuestion,
   type RetrievalRequest
 } from "./retrieval.js";
-import { linkedIssueNumbers, normalizeGitHubSourceObservation } from "./normalizers.js";
+import { linkedIssueNumbers, normalizeGitHubSourceObservation, normalizeSourceObservation, parseIncidentDocument, parsePackageManifest, parseServiceDefinitions } from "./normalizers.js";
+import { buildCausalTrace, evaluateCounterfactual } from "./causal.js";
 
 test("pure structural parsing produces versioned symbols and imports", () => {
   const analysis = analyzeSourceBlob("a".repeat(40), "typescript", 'import { helper } from "./helper";\nexport function main() {}\n');
@@ -71,6 +76,143 @@ test("computes first-parent additions, modifications, deletions, and exact renam
     { path: "deleted.ts", change: "delete", oldBlobSha: "e" },
     { path: "renamed.ts", change: "rename", oldPath: "old.ts", oldBlobSha: "a", newBlobSha: "a" }
   ]);
+});
+
+test("deterministic intake extracts direct packages and stable services", () => {
+  const manifest = parsePackageManifest({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: "package.json",
+    source: JSON.stringify({ dependencies: { pg: "^8.0.0", zod: "4.0.0" }, devDependencies: { typescript: "latest" } }),
+    recordedAt: "2026-01-01T00:00:00Z"
+  });
+  assert.deepEqual(manifest?.dependencies.map((dependency) => dependency.name), ["pg", "zod"]);
+  const normalized = normalizeSourceObservation(manifest!);
+  assert.deepEqual(normalized.assertions.map((assertion) => [assertion.predicate, assertion.object.key]), [
+    ["DEPENDS_ON", "package:npm:pg"], ["DEPENDS_ON", "package:npm:zod"]
+  ]);
+  const services = parseServiceDefinitions({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: "compose.yaml",
+    content: "services:\n  api:\n    image: api\n    depends_on:\n      - database\n  database:\n    image: postgres\n", recordedAt: "2026-01-01T00:00:00Z"
+  });
+  assert.deepEqual(services.map((service) => service.name), ["api", "database"]);
+  assert.deepEqual(normalizeSourceObservation(services[0]!).assertions.map((assertion) => [assertion.predicate, assertion.object.displayName]), [
+    ["DEPENDS_ON", "database"]
+  ]);
+  const incident = parseIncidentDocument({
+    tenantId: "t", repository: "org/repo", path: "docs/postmortems/INC-42.md",
+    content: "---\nincident_id: INC-42\nservice: api\nservice_source: compose\nservice_external_id: org/repo:api\nissue: #7\n---\n# Administrator deletion outage\n",
+    recordedAt: "2026-01-02T00:00:00Z"
+  });
+  assert.equal(incident?.title, "Administrator deletion outage");
+  assert.equal(normalizeSourceObservation(incident!).entities[0]?.key, "incident:github:org/repo#7");
+  assert.deepEqual(normalizeSourceObservation(incident!).assertions.map((assertion) => assertion.predicate), ["REFERENCES", "INCIDENT_IMPACTS"]);
+  assert.deepEqual(normalizeSourceObservation({ ...manifest!, dependencies: [], removed: true }).assertions, []);
+  assert.deepEqual(normalizeSourceObservation({ ...services[0]!, removed: true }).assertions, []);
+  assert.deepEqual(normalizeSourceObservation({ ...incident!, removed: true }).assertions, []);
+  const pyproject = parsePackageManifest({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: "pyproject.toml",
+    source: '[project]\ndependencies = ["fastapi>=0.100", "uvicorn[standard]~=0.30"]\n',
+    recordedAt: "2026-01-01T00:00:00Z"
+  });
+  assert.deepEqual(pyproject?.dependencies, [{ name: "fastapi", version: ">=0.100" }, { name: "uvicorn", version: "~=0.30" }]);
+  const cloudRun = parseServiceDefinitions({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: "deploy/service.yaml",
+    content: "apiVersion: serving.knative.dev/v1\nkind: Service\nmetadata:\n  name: api\n", recordedAt: "2026-01-01T00:00:00Z"
+  });
+  assert.deepEqual(cloudRun.map((service) => service.source), ["cloud-run"]);
+  const dockerfile = parseServiceDefinitions({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: "services/worker/Dockerfile",
+    content: "FROM node:24\n", recordedAt: "2026-01-01T00:00:00Z"
+  });
+  assert.deepEqual(dockerfile.map((service) => [service.source, service.name]), [["dockerfile", "worker"]]);
+  assert.deepEqual(parseServiceDefinitions({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: "Dockerfile",
+    content: "FROM node:24\n", recordedAt: "2026-01-01T00:00:00Z"
+  }), []);
+  const workflowService = parseServiceDefinitions({
+    tenantId: "t", repository: "org/repo", commitSha: "a".repeat(40), path: ".github/workflows/deploy.yaml",
+    content: "steps:\n  - run: gcloud run deploy atlas-api --image image\n",
+    recordedAt: "2026-01-01T00:00:00Z"
+  });
+  assert.deepEqual(workflowService.map((service) => [service.source, service.name]), [["cloud-run", "atlas-api"]]);
+});
+
+test("model source-backed identities must resolve to deterministic evidence", () => {
+  const evidence = [{
+    id: "obs", source: "manifest", type: "source_snapshot", repository: "org/repo", payloadSha: "sha",
+    payload: {
+      kind: "package_manifest", repository: "org/repo", ecosystem: "npm",
+      dependencies: [{ name: "zod" }]
+    }
+  }, {
+    id: "incident", source: "postmortem", type: "source_snapshot", repository: "org/repo", payloadSha: "sha2",
+    payload: { kind: "incident", repository: "org/repo", source: "postmortem", externalId: "org/repo:inc-42", issueNumber: 7 }
+  }];
+  assert.deepEqual([...sourceBackedModelEntityIds(evidence)].sort(), ["incident:github:org/repo#7", "package:npm:zod"]);
+  const base = {
+    summary: "source-backed",
+    nodes: [
+      { id: "repo", kind: "Repository" as const, label: "repo", description: "repo", evidence: ["README.md:1"] },
+      { id: "package:npm:zod", kind: "Package" as const, label: "zod", description: "zod", evidence: ["package.json:1"] }
+    ],
+    edges: []
+  };
+  assert.doesNotThrow(() => validateSourceBackedModelEntities(base, evidence));
+  assert.throws(() => validateSourceBackedModelEntities({
+    ...base,
+    nodes: [...base.nodes, { id: "service:model:invented", kind: "Service" as const, label: "invented", description: "invented", evidence: ["README.md:1"] }]
+  }, evidence), /not anchored by deterministic source evidence/);
+});
+
+test("rename similarity creates review candidates instead of active facts", () => {
+  const oldBlob = "a".repeat(40);
+  const newBlob = "b".repeat(40);
+  const candidates = movedFromSimilarityCandidates([
+    { path: "src/old-auth.ts", change: "delete", oldBlobSha: oldBlob },
+    { path: "src/authz.ts", change: "add", newBlobSha: newBlob }
+  ], new Map([
+    [oldBlob, { blobSha: oldBlob, parserVersion: ONTOLOGY_PARSER_VERSION, symbols: [{ moniker: "old", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }], imports: [], edges: [] }],
+    [newBlob, { blobSha: newBlob, parserVersion: ONTOLOGY_PARSER_VERSION, symbols: [{ moniker: "new", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }], imports: [], edges: [] }]
+  ]));
+  assert.deepEqual(candidates, [{ oldPath: "src/old-auth.ts", newPath: "src/authz.ts", similarity: 1, matchingSignatureHashes: ["sig"] }]);
+  assert.deepEqual(movedFromSimilarityCandidates([
+    { path: "src/authz.ts", oldPath: "src/old-auth.ts", change: "rename", oldBlobSha: oldBlob, newBlobSha: oldBlob }
+  ], new Map([[oldBlob, {
+    blobSha: oldBlob, parserVersion: ONTOLOGY_PARSER_VERSION,
+    symbols: [{ moniker: "old", name: "authorize", kind: "function", signatureHash: "sig", startLine: 1, endLine: 3 }], imports: [], edges: []
+  }]])), [{ oldPath: "src/old-auth.ts", newPath: "src/authz.ts", similarity: 1, matchingSignatureHashes: ["sig"] }]);
+  assert.equal(predicateDefinition("MOVED_FROM").review, "manual");
+});
+
+test("generic causal traces preserve alternative causes and evaluate interventions", () => {
+  const repository = "org/repo";
+  const root = { id: "issue", kind: "Issue" as const, label: "Administrators cannot delete resources", description: "Issue #123", evidence: ["incident.md:1"] };
+  const graph = {
+    id: "graph", tenantId: "t", repository, ref: "main", commitSha: "f".repeat(40), generatedAt: "2026-01-01T00:00:00Z",
+    generator: { executor: "projection" as const, model: "test" }, summary: "causal fixture",
+    nodes: [root,
+      { id: "c3", kind: "Commit" as const, label: "3".repeat(40), description: "3".repeat(40), evidence: ["incident.md:2"] },
+      { id: "c4", kind: "Commit" as const, label: "4".repeat(40), description: "4".repeat(40), evidence: ["incident.md:3"] },
+      { id: "pr3", kind: "PullRequest" as const, label: "PR #3", description: "github:pr:org/repo#3", evidence: ["incident.md:2"] },
+      { id: "pr4", kind: "PullRequest" as const, label: "PR #4", description: "github:pr:org/repo#4", evidence: ["incident.md:3"] }
+    ],
+    edges: [
+      { id: "cause3", source: "issue", target: "c3", predicate: "INTRODUCED_BY", plane: "knowledge" as const, why: "removed the administrator bypass", evidence: ["assertion:cause3", "incident.md:1-2"] },
+      { id: "cause4", source: "issue", target: "c4", predicate: "INTRODUCED_BY", plane: "knowledge" as const, why: "also denied inherited administrators", evidence: ["assertion:cause4", "incident.md:1-3"] },
+      { id: "include3", source: "pr3", target: "c3", predicate: "INCLUDES", plane: "knowledge" as const, evidence: ["observation:pr3"] },
+      { id: "include4", source: "pr4", target: "c4", predicate: "INCLUDES", plane: "knowledge" as const, evidence: ["observation:pr4"] }
+    ]
+  };
+  const trace = buildCausalTrace(graph, root);
+  assert.equal(trace.causes.length, 2);
+  const result = evaluateCounterfactual(trace, "If PR #3 had not merged, would the deletion issue exist?");
+  assert.equal(result.removedPaths.length, 1);
+  assert.equal(result.remainingPaths.length, 1);
+  assert.match(result.answer, /alternative known path remains/);
+  assert.equal(result.basis, "graph-derived");
+});
+
+test("counterfactual classifier recognizes direct package exclusion", () => {
+  assert.equal(isCounterfactualQuestion("Exclude package zod: which implementation paths disappear?"), true);
 });
 
 test("selects bounded assertion focus across newly ingested commits", () => {
@@ -246,6 +388,11 @@ test("registry validates endpoints and qualifier keys and keeps model inferences
   assert.throws(() => validateQualifiers(causality), /requires a nonempty causal reason/);
   assert.throws(() => validateQualifiers(ownership, { branch: "main" }), /does not declare qualifier branch/);
   assert.throws(() => validatePredicateEndpoints(predicateDefinition("INCLUDES"), "Issue", "Commit"), /subject kind Issue/);
+  validatePredicateEndpoints(predicateDefinition("DEPENDS_ON"), "Service", "Package");
+  validatePredicateEndpoints(predicateDefinition("DEPLOYS"), "Deployment", "Commit");
+  validatePredicateEndpoints(predicateDefinition("TARGETS"), "Deployment", "Service");
+  validatePredicateEndpoints(predicateDefinition("INCIDENT_IMPACTS"), "Incident", "Feature");
+  validatePredicateEndpoints(predicateDefinition("RESOLVED_BY"), "VirtualIssue", "PullRequest");
 });
 
 test("knowledge writer enforces provenance, review, qualifier cardinality, audit, and measured labels", () => {
@@ -269,6 +416,19 @@ test("knowledge writer enforces provenance, review, qualifier cardinality, audit
   });
   state = accepted.state;
   assert.equal(accepted.assertion.status, "active");
+
+  const supporting = applyAssertion(state, {
+    tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamB.entity.id,
+    qualifiers: { pattern: "src/special/**" }, confidence: 0.95, sourceObservationId: "obs:support",
+    generator: "model:owner@2", recordedAt: "2026-01-03T00:00:01Z"
+  });
+  state = supporting.state;
+  const relation = relateAssertions(state, {
+    tenantId: "t", sourceAssertionId: supporting.assertion.id, relation: "supports",
+    targetAssertionId: accepted.assertion.id, evidenceObservationId: "obs:support", now: "2026-01-03T00:00:02Z"
+  });
+  state = relation.state;
+  assert.equal(state.assertionRelations[0]?.relation, "supports");
 
   const replacement = applyAssertion(state, {
     tenantId: "t", repoId: "r", subjectId: file.entity.id, predicate: "OWNED_BY", objectId: teamB.entity.id,
@@ -568,22 +728,24 @@ test("counterfactuals use reviewed issue roles instead of generic change rows", 
         totalBeforeLimit: 1,
         limit: request.limit ?? 50,
         items: [{
-          kind: "issue_trace",
+          kind: "causal_trace",
           title: "Issue #123",
           data: {
-            issue: { displayId: "#123", title: "Administrators cannot delete resources" },
-            introducedBy: [{
-              sha: causeSha,
-              why: "the administrator bypass was removed",
-              assertionIds: ["cause"],
-              pullRequests: [{ number: 3 }]
-            }],
-            resolutions: [{
-              pullRequestNumber: 5,
-              commits: [{ sha: fixSha }],
-              assertionIds: ["fix"],
-              observationIds: []
-            }]
+            root: { id: "issue", kind: "Issue", label: "Administrators cannot delete resources", description: "Issue #123" },
+            causes: [{ kind: "cause", nodes: [
+              { id: "issue", kind: "Issue", label: "Administrators cannot delete resources", description: "Issue #123" },
+              { id: "cause-commit", kind: "Commit", label: causeSha, description: causeSha },
+              { id: "pr-3", kind: "PullRequest", label: "PR #3", description: "github:pr:org/repo#3" }
+            ], edgeIds: ["cause"], predicates: ["INTRODUCED_BY"], why: "the administrator bypass was removed",
+              citations: [{ kind: "assertion", id: "cause", repository: request.repository }] }],
+            resolutions: [{ kind: "resolution", nodes: [
+              { id: "issue", kind: "Issue", label: "Administrators cannot delete resources", description: "Issue #123" },
+              { id: "pr-5", kind: "PullRequest", label: "PR #5", description: "github:pr:org/repo#5" },
+              { id: "fix-commit", kind: "Commit", label: fixSha, description: fixSha }
+            ], edgeIds: ["fix"], predicates: ["RESOLVED_BY"],
+              citations: [{ kind: "assertion", id: "fix", repository: request.repository }] }],
+            implementations: [], affectedEntities: [], dependencies: [], deployments: [], documentation: [], ownership: [], movedFrom: [], structuralPaths: [],
+            citations: [{ kind: "assertion", id: "cause", repository: request.repository }, { kind: "assertion", id: "fix", repository: request.repository }]
           },
           citations: [
             { kind: "assertion", id: "cause", repository: request.repository },
@@ -599,9 +761,8 @@ test("counterfactuals use reviewed issue roles instead of generic change rows", 
     operation: "counterfactual", question: "If PR #3 had not merged, would issue #123 exist?"
   });
   assert.equal(cause.operation, "counterfactual");
-  assert.match(cause.answer, /likely not have been introduced by that change/);
-  assert.match(cause.answer, /Why: the administrator bypass was removed/);
-  assert.deepEqual(cause.calls.map((call) => call.template), ["issue_trace"]);
+  assert.match(cause.answer, /eliminates every currently known reviewed path/);
+  assert.deepEqual(cause.calls.map((call) => call.template), ["counterfactual"]);
   assert.deepEqual(cause.citedClaims[0]?.citations.map((citation) => citation.id), ["cause"]);
 
   const fix = await orchestrator.answer({
@@ -609,7 +770,7 @@ test("counterfactuals use reviewed issue roles instead of generic change rows", 
     question: "If PR #5 had not merged, would issue #123 remain?"
   });
   assert.equal(fix.operation, "counterfactual");
-  assert.match(fix.answer, /recorded resolution.*would be absent.*remain unresolved/);
+  assert.match(fix.answer, /eliminates every currently known reviewed path/);
   assert.doesNotMatch(fix.answer, /cited change set|intent\/history/);
 
   const uncited = new RepositoryContextOrchestrator({
@@ -618,10 +779,14 @@ test("counterfactuals use reviewed issue roles instead of generic change rows", 
         template: request.template, repository: request.repository, ref: "main", truncated: false,
         totalBeforeLimit: 1, limit: request.limit ?? 50,
         items: [{
-          kind: "issue_trace", title: "Issue #123", score: 1, citations: [],
+          kind: "causal_trace", title: "Issue #123", score: 1, citations: [],
           data: {
-            issue: { displayId: "#123", title: "Administrators cannot delete resources" },
-            introducedBy: [{ sha: causeSha, why: "the administrator bypass was removed", assertionIds: ["missing"], pullRequests: [{ number: 3 }] }]
+            root: { id: "issue", kind: "Issue", label: "Administrators cannot delete resources", description: "Issue #123" },
+            causes: [{ kind: "cause", nodes: [
+              { id: "issue", kind: "Issue", label: "Administrators cannot delete resources", description: "Issue #123" },
+              { id: "pr-3", kind: "PullRequest", label: "PR #3", description: "github:pr:org/repo#3" }
+            ], edgeIds: ["missing"], predicates: ["INTRODUCED_BY"], why: "the administrator bypass was removed", citations: [] }],
+            resolutions: [], implementations: [], affectedEntities: [], dependencies: [], deployments: [], documentation: [], ownership: [], movedFrom: [], structuralPaths: [], citations: []
           }
         }]
       };
@@ -632,7 +797,7 @@ test("counterfactuals use reviewed issue roles instead of generic change rows", 
     operation: "counterfactual", question: "If PR #3 had not merged, would issue #123 exist?"
   });
   assert.equal(unsupported.citedClaims.length, 0);
-  assert.match(unsupported.coverageGaps[0]?.message ?? "", /evidence is unavailable/);
+  assert.match(unsupported.coverageGaps[0]?.message ?? "", /citation|evidence/i);
 });
 
 test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNERS facts", () => {
@@ -1031,6 +1196,22 @@ test("ignores model duplicates of deterministic GitHub issue resolutions", () =>
   assert.equal(assertions[0]?.object.naturalKey, `repo:${repository}:sha:${sha}`);
 });
 
+test("keeps reviewed incident deployment resolution outside GitHub issue normalization", () => {
+  const repository = "omxyz/demo";
+  const assertions = assertionsFromGeneratedOntology({
+    summary: "The rollback deployment resolved the incident",
+    nodes: [
+      { id: "incident:postmortem:INC-42", kind: "Incident", label: "Deletion outage", description: "incident", evidence: ["docs/postmortems/INC-42.md:1"] },
+      { id: "deployment:github:rollback-42", kind: "Deployment", label: "rollback-42", description: "deployment", evidence: ["docs/postmortems/INC-42.md:2"] }
+    ],
+    edges: [{ source: "incident:postmortem:INC-42", target: "deployment:github:rollback-42", predicate: "RESOLVED_BY", plane: "knowledge", confidence: 0.93,
+      evidence: ["docs/postmortems/INC-42.md:1-2"] }]
+  }, repository);
+  assert.deepEqual(assertions.map((assertion) => assertion.predicate), ["RESOLVED_BY"]);
+  assert.equal(assertions[0]?.subject.kind, "Incident");
+  assert.equal(assertions[0]?.object.kind, "Deployment");
+});
+
 test("infers a reviewed Feature and answers from its projected relationships", async () => {
   const tenantId = "feature-tenant";
   const repository = "omxyz/feature-fixture";
@@ -1053,6 +1234,14 @@ test("infers a reviewed Feature and answers from its projected relationships", a
       { path: "src/audit.ts", blobSha: "c".repeat(40), size: 40 }
     ]
   });
+  await store.applyBlobAnalyses({ tenantId, repository, commitSha }, [{
+    blobSha: "b".repeat(40), parserVersion: ONTOLOGY_PARSER_VERSION, language: "typescript",
+    symbols: [], imports: [{ specifier: "pg", line: 1 }], edges: []
+  }]);
+  await store.applyGitHubObservations([{
+    tenantId, repository, kind: "package_manifest", commitSha, path: "package.json", ecosystem: "npm",
+    dependencies: [{ name: "pg", version: "8" }], recordedAt: "2026-07-20T00:00:30.000Z"
+  }]);
   const rawOutput = {
     summary: "Administrator deletion is a product capability",
     nodes: [
@@ -1134,6 +1323,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   });
   assert.equal(graph.nodes.some((node) => node.kind === "Feature" && node.label === "Administrator deletion"), true);
   assert.equal(graph.edges.some((edge) => edge.predicate === "IMPLEMENTS"), true);
+  assert.equal(graph.edges.some((edge) => edge.predicate === "IMPORTS" && graph.nodes.find((node) => node.id === edge.target)?.kind === "Package"), true);
 
   const answer = await new RepositoryContextOrchestrator(store).answer({
     tenantId,
@@ -1146,6 +1336,19 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   assert.equal(answer.calls[0]?.template, "feature_trace");
   assert.equal(answer.citedClaims[0]?.citations.some((citation) => citation.kind === "assertion"), true);
   assert.equal(answer.citedClaims[0]?.citations.some((citation) => citation.kind === "code" && citation.path === "src/auth.ts"), true);
+  const dependency = await new RepositoryContextOrchestrator(store).answer({
+    tenantId, allowedRepositories: [repository], repository, ref: "main",
+    question: 'What package does the "administrator deletion" implementation depend on?'
+  });
+  assert.equal(dependency.calls[0]?.template, "causal_trace");
+  assert.match(dependency.answer, /pg/);
+  const excludedPackage = await new RepositoryContextOrchestrator(store).answer({
+    tenantId, allowedRepositories: [repository], repository, ref: "main",
+    question: "If package pg were excluded, which implementation paths disappear?"
+  });
+  assert.equal(excludedPackage.calls[0]?.template, "counterfactual");
+  assert.equal(excludedPackage.counterfactual?.removedPaths.length, 1);
+  assert.match(excludedPackage.answer, /removes 1 currently known reviewed implementation dependency path/);
   const ambiguous = await new RepositoryContextOrchestrator(store).answer({
     tenantId,
     allowedRepositories: [repository],
@@ -1405,7 +1608,7 @@ test("requires causal evidence to name the issue and offending commit", async ()
     summary: "derived root cause",
     nodes: [
       {
-        id: "virtual:pr:42", kind: "Issue", label: "Administrators cannot delete resources",
+        id: "virtual:pr:42", kind: "VirtualIssue", label: "Administrators cannot delete resources",
         description: "Administrator deletion is incorrectly denied.", evidence: ["docs/root-cause.md:1"]
       },
       { id: sha, kind: "Commit", label: sha.slice(0, 12), description: "offending change", evidence: ["docs/root-cause.md:1"] }
@@ -1422,7 +1625,19 @@ test("requires causal evidence to name the issue and offending commit", async ()
     validateOntologyEvidence(derived, async () =>
       `A deletion bug was caused by commit ${sha}.\nThe commit removed the administrator bypass.`
     ),
-    /explicitly name derived Issue Administrators cannot delete resources and commit/
+    /explicitly name VirtualIssue Administrators cannot delete resources and commit/
+  );
+  const incident = parseGeneratedOntology({
+    summary: "deployment incident",
+    nodes: [
+      { id: "incident:github:org/repo#14", kind: "Incident", label: "INC-42 deletion outage", description: "incident", evidence: ["docs/postmortem.md:1"] },
+      { id: "deployment:github:5535506368", kind: "Deployment", label: "deployment 5535506368", description: "production deployment", evidence: ["docs/postmortem.md:1"] }
+    ],
+    edges: [{ source: "incident:github:org/repo#14", target: "deployment:github:5535506368", predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.95,
+      why: "The deployment shipped the administrator denial path.", evidence: ["docs/postmortem.md:1"] }]
+  });
+  await validateOntologyEvidence(incident, async () =>
+    "Incident INC-42 deletion outage was introduced by Deployment deployment:github:5535506368 because it shipped the administrator denial path."
   );
 });
 

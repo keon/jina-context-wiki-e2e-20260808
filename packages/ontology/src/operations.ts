@@ -5,6 +5,7 @@ import type { RetrievalExecutor } from "./retrieval.js";
 
 export type OntologyCommand =
   | { readonly type: "review_assertion"; readonly assertionId: string; readonly decision: "accept" | "reject" | "retract"; readonly reason?: string }
+  | { readonly type: "relate_assertions"; readonly sourceAssertionId: string; readonly relation: "supports" | "contradicts"; readonly targetAssertionId: string; readonly evidenceObservationId: string; readonly reason?: string }
   | { readonly type: "merge_entities" | "unmerge_entities"; readonly fromEntityId: string; readonly toEntityId: string; readonly reason?: string }
   | { readonly type: "redact_observation"; readonly observationId: string; readonly reason: string; readonly commitShas?: readonly string[] }
   | { readonly type: "erase_person"; readonly entityId: string; readonly reason: string }
@@ -44,6 +45,8 @@ export interface OntologyAssertionSummary {
   readonly qualifiers: Readonly<Record<string, string | number | boolean>>;
   readonly generator: string;
   readonly registryVersion: string;
+  readonly supportingAssertionIds: readonly string[];
+  readonly contradictingAssertionIds: readonly string[];
 }
 
 export interface RepositoryContextOperations extends RetrievalExecutor {
@@ -55,6 +58,6 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
   listAssertions(
     tenantId: string,
     repository: string,
-    filter?: { readonly status?: AssertionStatus; readonly predicate?: string }
+    filter?: { readonly status?: AssertionStatus; readonly predicate?: string; readonly entityKind?: OntologyNodeKind }
   ): Promise<readonly OntologyAssertionSummary[]>;
 }

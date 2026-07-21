@@ -1,6 +1,6 @@
 import type { OntologyNodeKind } from "./model.js";
 
-export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.5";
+export const ONTOLOGY_REGISTRY_VERSION = "repository-context-v5.6-causal";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -30,7 +30,7 @@ export const predicateRegistry = {
     objectKinds: ["Engineer"], cardinality: "many", review: "none", bitemporal: false
   },
   OWNED_BY: {
-    name: "OWNED_BY", class: "relationship", subjectKinds: ["Repository", "File", "Symbol"],
+    name: "OWNED_BY", class: "relationship", subjectKinds: ["Repository", "File", "Symbol", "Feature", "Service"],
     objectKinds: ["Engineer", "Team"], cardinality: "one", qualifierKeys: ["pattern"],
     review: "manual", bitemporal: true, authority: ["human", "codeowners", "model"]
   },
@@ -50,19 +50,25 @@ export const predicateRegistry = {
     name: "RESOLVES", class: "relationship", subjectKinds: ["PullRequest"], objectKinds: ["Issue"],
     cardinality: "many", review: "none", bitemporal: false
   },
+  RESOLVED_BY: {
+    name: "RESOLVED_BY", class: "relationship", subjectKinds: ["Issue", "VirtualIssue", "Incident"],
+    objectKinds: ["PullRequest", "Deployment"], cardinality: "many", review: "manual", bitemporal: false,
+    authority: ["human", "github", "deployment", "model"]
+  },
   INTRODUCED_BY: {
-    name: "INTRODUCED_BY", class: "inference", subjectKinds: ["Issue"], objectKinds: ["Commit"],
+    name: "INTRODUCED_BY", class: "inference", subjectKinds: ["Issue", "VirtualIssue", "Incident"], objectKinds: ["Commit", "Deployment"],
     cardinality: "many", qualifierKeys: ["reason"], review: "manual", bitemporal: false,
     authority: ["human", "model"]
   },
   REFERENCES: {
-    name: "REFERENCES", class: "relationship", subjectKinds: ["Issue", "PullRequest"],
-    objectKinds: ["File", "Symbol", "Commit", "Issue", "PullRequest", "Feature"], cardinality: "many",
+    name: "REFERENCES", class: "relationship",
+    subjectKinds: ["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Document", "Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"],
+    objectKinds: ["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Document", "Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"], cardinality: "many",
     review: "none", bitemporal: false
   },
   LIKELY_AFFECTS: {
     name: "LIKELY_AFFECTS", class: "inference", subjectKinds: ["Commit", "PullRequest", "Issue"],
-    objectKinds: ["File", "Symbol", "Issue", "Feature"], cardinality: "many", qualifierKeys: ["branch"],
+    objectKinds: ["File", "Symbol", "Issue", "Feature", "Service"], cardinality: "many", qualifierKeys: ["branch"],
     review: "manual", bitemporal: false
   },
   MOVED_FROM: {
@@ -71,11 +77,28 @@ export const predicateRegistry = {
   },
   IMPLEMENTS: {
     name: "IMPLEMENTS", class: "inference", subjectKinds: ["File", "Symbol"],
-    objectKinds: ["Issue", "Document", "Feature"], cardinality: "many", review: "manual", bitemporal: false
+    objectKinds: ["Feature"], cardinality: "many", review: "manual", bitemporal: false
   },
   DOCUMENTED_BY: {
-    name: "DOCUMENTED_BY", class: "inference", subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest", "Feature"],
+    name: "DOCUMENTED_BY", class: "inference", subjectKinds: ["Repository", "File", "Symbol", "Issue", "PullRequest", "Feature", "Service", "Incident", "VirtualIssue"],
     objectKinds: ["Document"], cardinality: "many", review: "manual", bitemporal: false
+  },
+  DEPENDS_ON: {
+    name: "DEPENDS_ON", class: "relationship", subjectKinds: ["Repository", "Service"],
+    objectKinds: ["Package", "Service"], cardinality: "many", review: "none", bitemporal: true,
+    authority: ["manifest", "service_catalog", "human"]
+  },
+  DEPLOYS: {
+    name: "DEPLOYS", class: "relationship", subjectKinds: ["Deployment"], objectKinds: ["Commit"],
+    cardinality: "one", review: "none", bitemporal: false, authority: ["github", "gcloud", "human"]
+  },
+  TARGETS: {
+    name: "TARGETS", class: "relationship", subjectKinds: ["Deployment"], objectKinds: ["Service"],
+    cardinality: "one", review: "none", bitemporal: false, authority: ["github", "gcloud", "human"]
+  },
+  INCIDENT_IMPACTS: {
+    name: "INCIDENT_IMPACTS", class: "relationship", subjectKinds: ["Incident"], objectKinds: ["Service", "Feature"],
+    cardinality: "many", review: "manual", bitemporal: false, authority: ["incident", "human", "model"]
   }
 } as const satisfies Readonly<Record<string, PredicateDefinition>>;
 
