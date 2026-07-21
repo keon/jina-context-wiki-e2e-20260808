@@ -112,7 +112,7 @@ const token = requiredEnv("INTERNAL_API_TOKEN");
 const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
-const ontologyApiTimeoutMs = positiveInt(process.env.ONTOLOGY_API_TIMEOUT_MS, 120_000);
+const ontologyApiTimeoutMs = positiveInt(process.env.ONTOLOGY_API_TIMEOUT_MS, 15 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsOntologyProjections = topics.some((topic) => topic.startsWith("run-ontology"));
 const ontologyExecutor = topics.includes("run-ontology-assert")

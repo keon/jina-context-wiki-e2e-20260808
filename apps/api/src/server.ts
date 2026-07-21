@@ -52,7 +52,10 @@ import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publ
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_ONTOLOGY_SNAPSHOT_BYTES = 25 * 1024 * 1024;
-const WORKER_LEASE_MS = 5 * 60 * 1000;
+// Ontology writes for large repositories can hold the durable mutation transaction
+// for several minutes. Keep the lease comfortably beyond that transaction so the
+// owning worker is not fenced while its write is still committing.
+const WORKER_LEASE_MS = 30 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
   "run-review",
