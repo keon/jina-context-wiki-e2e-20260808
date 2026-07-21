@@ -17,6 +17,8 @@ GitHub event
 
 The board is the source of truth and the orchestrator. PostgreSQL makes board state, delivery deduplication, leases, and Ontology graphs durable. Daytona is used only for Ontology repository inspection in the current runtime. Agents and humans act through the same validated commands.
 
+Every board mutation loads and writes the JSON snapshot while holding one cross-instance PostgreSQL transaction lock. Multiple Cloud Run API instances therefore cannot derive and overwrite state from stale process-local snapshots.
+
 Six concepts carry the whole design: **board**, **task**, **pipeline**, **run**, **gate**, **epoch**. Anything else is introduced only when a second concrete use exists.
 
 ## Quick Start

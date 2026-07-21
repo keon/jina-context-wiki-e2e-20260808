@@ -1,9 +1,17 @@
-import type { OntologyGraph } from "@jina/ontology";
 import { Pool, type PoolConfig } from "pg";
-import { insertOntologyGraph, ONTOLOGY_SCHEMA_SQL } from "./postgres-ontology-graph-store.js";
 
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
+}
+
+export interface StateUpdate<T, R> {
+  readonly state: T;
+  readonly result: R;
+}
+
+export interface StateUpdateResult<R> {
+  readonly committed: boolean;
+  readonly result?: R;
 }
 
 /**
@@ -52,6 +60,58 @@ export class PostgresJsonStateStore<T> {
   }
 
   /**
+   * Loads, changes, and stores state while holding the cross-instance lock.
+   * The callback must keep external side effects idempotent because its database
+   * transaction can still be rolled back by a later failure.
+   */
+  async update<R>(
+    operation: (state: T | undefined) => Promise<StateUpdate<T, R>>,
+    deliveryId?: string
+  ): Promise<StateUpdateResult<R>> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+
+      if (deliveryId) {
+        const delivery = await client.query(
+          `insert into jina_runtime.github_deliveries (delivery_id)
+           values ($1)
+           on conflict do nothing
+           returning delivery_id`,
+          [deliveryId]
+        );
+        if (delivery.rowCount !== 1) {
+          await client.query("rollback");
+          return { committed: false };
+        }
+      }
+
+      const current = await client.query<{ snapshot: T }>(
+        "select snapshot from jina_runtime.api_state where id = 1"
+      );
+      const update = await operation(current.rows[0]?.snapshot);
+      await client.query(
+        `insert into jina_runtime.api_state (id, snapshot)
+         values (1, $1::jsonb)
+         on conflict (id) do update
+           set snapshot = excluded.snapshot,
+               version = jina_runtime.api_state.version + 1,
+               updated_at = now()`,
+        [JSON.stringify(update.state)]
+      );
+      await client.query("commit");
+      return { committed: true, result: update.result };
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
    * Returns false when deliveryId was already committed. In that case the
    * snapshot is intentionally left unchanged.
    */
@@ -95,32 +155,6 @@ export class PostgresJsonStateStore<T> {
     }
   }
 
-  /** Commits an immutable ontology generation and its board completion together. */
-  async saveWithOntologyGraph(snapshot: T, graph: OntologyGraph): Promise<void> {
-    await this.initialize();
-    const client = await this.pool.connect();
-    try {
-      await client.query("begin");
-      await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
-      await insertOntologyGraph(client, graph);
-      await client.query(
-        `insert into jina_runtime.api_state (id, snapshot)
-         values (1, $1::jsonb)
-         on conflict (id) do update
-           set snapshot = excluded.snapshot,
-               version = jina_runtime.api_state.version + 1,
-               updated_at = now()`,
-        [JSON.stringify(snapshot)]
-      );
-      await client.query("commit");
-    } catch (error) {
-      await client.query("rollback").catch(() => undefined);
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
-
   async close(): Promise<void> {
     await this.pool.end();
   }
@@ -145,6 +179,6 @@ export class PostgresJsonStateStore<T> {
         delivery_id text primary key,
         received_at timestamptz not null default now()
       );
-    ${ONTOLOGY_SCHEMA_SQL}`);
+    `);
   }
 }

@@ -357,6 +357,26 @@ test("development seed supports an interactive MCP graph query without credentia
   }
 });
 
+test("API maps validation failures to typed client errors", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    const response = await fetch(`${baseUrl}/ontology/retrieve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ template: "structure" })
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      accepted: false,
+      error: "repository must be a non-empty string",
+      code: "invalid_request"
+    });
+  } finally {
+    await close(server);
+  }
+});
+
 test("ontology pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
@@ -730,6 +750,41 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("concurrent API instances mutate the latest durable snapshot", async () => {
+  const stateStore = new MemoryStateStore();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
+  try {
+    const firstDelivery = await fetch(`${firstUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omlabs/example", pullRequestNumber: 1, headSha: "first" })
+    });
+    assert.equal(firstDelivery.status, 202);
+    const secondDelivery = await fetch(`${secondUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omlabs/example", pullRequestNumber: 2, headSha: "second" })
+    });
+    assert.equal(secondDelivery.status, 202);
+  } finally {
+    await Promise.all([close(first), close(second)]);
+  }
+
+  const restarted = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const restartedUrl = await listen(restarted);
+  try {
+    const board = await fetch(`${restartedUrl}/board`).then(
+      (response) => response.json() as Promise<{ pullRequests: Array<{ number: number }>; tasks: unknown[] }>
+    );
+    assert.deepEqual(board.pullRequests.map((pullRequest) => pullRequest.number).sort(), [1, 2]);
+    assert.equal(board.tasks.length, 6);
+  } finally {
+    await close(restarted);
+  }
+});
+
 test("configured aliases migrate existing tasks and ontology graphs to the canonical tenant", async () => {
   const stateStore = new MemoryStateStore();
   const ontologyStore = new MemoryOntologyGraphStore();
@@ -783,6 +838,7 @@ async function close(server: ReturnType<typeof createApiServer>): Promise<void> 
 class MemoryStateStore implements ApiStateStore {
   private snapshot?: ApiSnapshot;
   private readonly deliveries = new Set<string>();
+  private updates = Promise.resolve();
 
   async load(): Promise<ApiSnapshot | undefined> {
     return this.snapshot;
@@ -803,6 +859,26 @@ class MemoryStateStore implements ApiStateStore {
     }
     this.snapshot = structuredClone(snapshot);
     return true;
+  }
+
+  async update<T>(
+    operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
+    deliveryId?: string
+  ): Promise<{ readonly committed: boolean; readonly result?: T }> {
+    let outcome: { readonly committed: boolean; readonly result?: T } | undefined;
+    const update = this.updates.then(async () => {
+      if (deliveryId && this.deliveries.has(deliveryId)) {
+        outcome = { committed: false };
+        return;
+      }
+      const next = await operation(this.snapshot ? structuredClone(this.snapshot) : undefined);
+      if (deliveryId) this.deliveries.add(deliveryId);
+      this.snapshot = structuredClone(next.state);
+      outcome = { committed: true, result: next.result };
+    });
+    this.updates = update.then(() => undefined, () => undefined);
+    await update;
+    return outcome!;
   }
 
   async close(): Promise<void> {}

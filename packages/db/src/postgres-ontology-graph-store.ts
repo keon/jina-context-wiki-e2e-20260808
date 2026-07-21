@@ -43,6 +43,7 @@ import {
   type StoredAssertion
 } from "@jina/ontology";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { DomainError } from "@jina/shared-kernel";
 
 interface GraphRow {
   id: string;
@@ -1645,7 +1646,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
     await this.initialize();
     const startedAt = performance.now();
-    if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
+    if (!request.allowedRepositories.includes(request.repository)) {
+      throw new DomainError("repository access denied", "forbidden");
+    }
     const limit = Math.max(1, Math.min(request.limit ?? 50, 200));
     const refResult = await this.pool.query<{ ref_name: string; commit_sha: string }>(
       `select ref_name,commit_sha from jina_ontology.refs
@@ -1990,7 +1993,7 @@ async function authorizeOntologyCommand(
 ): Promise<void> {
   if (actorId.startsWith("svc:") || actorIsTenantAdmin) return;
   if (command.type === "merge_entities" || command.type === "unmerge_entities" || command.type === "erase_person") {
-    throw new Error("tenant administrator access required");
+    throw new DomainError("tenant administrator access required", "forbidden");
   }
 
   let repository: string | undefined;
@@ -2018,7 +2021,7 @@ async function authorizeOntologyCommand(
     repository = "repository" in command ? command.repository : undefined;
     requiresAdmin = command.type === "grant_repository_access" || command.type === "tombstone_repository";
   }
-  if (!repository) throw new Error("ontology command access denied");
+  if (!repository) throw new DomainError("ontology command access denied", "forbidden");
   const access = await client.query<{ role: "reader" | "writer" | "admin" }>(
     `select role from jina_ontology.repository_acl
      where tenant_id=$1 and repository=$2 and principal_id=$3`,
@@ -2026,7 +2029,7 @@ async function authorizeOntologyCommand(
   );
   const role = access.rows[0]?.role;
   if (!role || role === "reader" || (requiresAdmin && role !== "admin")) {
-    throw new Error("ontology command access denied");
+    throw new DomainError("ontology command access denied", "forbidden");
   }
 }
 

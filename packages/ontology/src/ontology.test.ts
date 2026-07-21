@@ -905,6 +905,34 @@ test("memory issue traces preserve ambiguous partial title matches", async () =>
   assert.deepEqual(trace.items.map((item) => (item.data as { issue?: { number?: number } }).issue?.number), [101, 102]);
 });
 
+test("memory administration applies supported commands and rejects unsupported commands", async () => {
+  const store = new MemoryOntologyGraphStore();
+  const ingested = await store.applyGitHubObservations([{
+    tenantId: "t", repository: "org/repo", kind: "issue", number: 12, title: "Redact me", state: "open",
+    url: "https://github.com/org/repo/issues/12", occurredAt: "2026-07-20T00:00:00.000Z",
+    recordedAt: "2026-07-20T00:00:01.000Z"
+  }]);
+  const observationId = ingested.observationIds[0];
+  assert.ok(observationId);
+  await store.executeCommand("t", "svc:test", {
+    type: "redact_observation", observationId, reason: "privacy request"
+  }, "2026-07-20T00:01:00.000Z");
+  await assert.rejects(store.loadAssertionEvidence("t", "org/repo", [observationId]), /not found/);
+  const assigned = await store.executeCommand("t", "svc:test", {
+    type: "assign_relationship", repository: "org/repo",
+    subject: { kind: "File", key: "repo:org/repo:path:src/app.ts" }, predicate: "IMPLEMENTS",
+    object: { kind: "Feature", key: "repo:org/repo:feature:example" }
+  }, "2026-07-20T00:02:00.000Z");
+  assert.equal(assigned.affectedIds.length, 1);
+  assert.equal((await store.listAssertions("t", "org/repo", { status: "proposed", predicate: "IMPLEMENTS" })).length, 1);
+  await assert.rejects(
+    store.executeCommand("t", "svc:test", {
+      type: "erase_person", entityId: "person-1", reason: "privacy request"
+    }, "2026-07-20T00:03:00.000Z"),
+    /requires the relational ontology store/
+  );
+});
+
 test("reviews and retrieves a virtual issue through the generalized Issue assertion", async () => {
   const store = new MemoryOntologyGraphStore();
   const repository = "org/repo";

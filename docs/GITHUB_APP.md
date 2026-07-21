@@ -73,4 +73,4 @@ GitHub's App settings also show every delivery, response status, and redelivery 
 
 ## Persistence boundary
 
-Development without database variables uses in-memory stores. Production uses PostgreSQL: the board snapshot is stored in `jina_runtime.api_state`, and `github_deliveries.delivery_id` provides durable webhook deduplication. Delivery insertion and snapshot persistence occur in one transaction, so acknowledged tasks survive API restarts.
+Development without database variables uses in-memory stores. Production uses PostgreSQL: the board snapshot is stored in `jina_runtime.api_state`, and `github_deliveries.delivery_id` provides durable webhook deduplication. Delivery insertion, loading the latest board state, command application, and snapshot persistence occur under one transaction lock, so acknowledged tasks survive API restarts and concurrent API instances cannot overwrite one another.

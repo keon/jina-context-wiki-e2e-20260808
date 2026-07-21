@@ -141,7 +141,11 @@ importers:
         specifier: ^26.1.0
         version: 26.1.0
 
-  packages/context: {}
+  packages/context:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.0
+        version: 26.1.1
 
   packages/daytona:
     dependencies:
@@ -161,6 +165,9 @@ importers:
       '@jina/ontology':
         specifier: workspace:*
         version: link:../ontology
+      '@jina/shared-kernel':
+        specifier: workspace:*
+        version: link:../shared-kernel
       pg:
         specifier: ^8.22.0
         version: 8.22.0
@@ -180,6 +187,9 @@ importers:
       '@ast-grep/napi':
         specifier: ^0.44.1
         version: 0.44.1
+      '@jina/shared-kernel':
+        specifier: workspace:*
+        version: link:../shared-kernel
     devDependencies:
       '@types/node':
         specifier: ^26.1.0
@@ -2950,7 +2960,7 @@ snapshots:
 
   '@types/pg@8.20.0':
     dependencies:
-      '@types/node': 26.1.0
+      '@types/node': 26.1.1
       pg-protocol: 1.15.0
       pg-types: 2.2.0
 

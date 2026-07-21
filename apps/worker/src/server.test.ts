@@ -225,6 +225,63 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
   assert.equal(projectionDrains > 0, true);
 });
 
+test("worker rejects malformed topic metadata before dispatch", async (context) => {
+  let claims = 0;
+  let completions = 0;
+  const mock = createServer(async (request, response) => {
+    await readJson(request);
+    if (request.url === "/internal/worker/claim") {
+      claims += 1;
+      return claims === 1
+        ? json(response, 200, {
+            message: { id: "message", topic: "run-review", leaseId: "lease", leaseExpiresAt: new Date(Date.now() + 60_000).toISOString() },
+            task: { id: "task", metadata: { repository: "omlabs/example" } }
+          })
+        : json(response, 204, {});
+    }
+    if (request.url === "/internal/worker/complete") completions += 1;
+    return json(response, 200, {});
+  });
+  await new Promise<void>((resolve) => mock.listen(0, "127.0.0.1", resolve));
+  context.after(() => new Promise<void>((resolve, reject) => mock.close((error) => error ? reject(error) : resolve())));
+  const address = mock.address() as AddressInfo;
+  const worker = spawn(process.execPath, [new URL("./server.js", import.meta.url).pathname], {
+    env: {
+      ...process.env,
+      PORT: "0",
+      JINA_API_URL: `http://127.0.0.1:${address.port}`,
+      INTERNAL_API_TOKEN: "test-token",
+      WORKER_TOPICS: "run-review",
+      WORKER_POLL_INTERVAL_MS: "10"
+    },
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  let stderr = "";
+  let resolveDiagnostic: (() => void) | undefined;
+  const diagnostic = new Promise<void>((resolve) => { resolveDiagnostic = resolve; });
+  worker.stderr.on("data", (chunk) => {
+    stderr += String(chunk);
+    if (stderr.includes("task pullRequestNumber is required")) resolveDiagnostic?.();
+  });
+  context.after(() => worker.kill("SIGTERM"));
+  let diagnosticTimeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      diagnostic,
+      new Promise<never>((_, reject) => {
+        diagnosticTimeout = setTimeout(
+          () => reject(new Error(`worker diagnostic timed out: ${stderr}`)),
+          5_000
+        );
+      })
+    ]);
+  } finally {
+    if (diagnosticTimeout) clearTimeout(diagnosticTimeout);
+  }
+  assert.match(stderr, /task pullRequestNumber is required/);
+  assert.equal(completions, 0);
+});
+
 async function readJson(request: import("node:http").IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   for await (const chunk of request) chunks.push(Buffer.from(chunk));

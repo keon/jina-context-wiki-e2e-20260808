@@ -41,6 +41,7 @@ import {
   type RepositorySnapshot,
   type StoredAssertion
 } from "./pipeline.js";
+import { DomainError } from "@jina/shared-kernel";
 
 export interface OntologyGraphStore extends OntologyPipelineStore, RepositoryContextOperations {
   save(graph: OntologyGraph): Promise<void>;
@@ -247,7 +248,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     if (!actorId.startsWith("svc:") && !actorIsTenantAdmin) {
       const repository = "repository" in command ? command.repository : undefined;
       if (!repository || !this.repositoryAcl.get(`${tenantId}:${actorId}`)?.has(repository)) {
-        throw new Error("ontology command access denied");
+        throw new DomainError("ontology command access denied", "forbidden");
       }
     }
     const affectedIds: string[] = [];
@@ -260,7 +261,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       if (human?.tenantId === tenantId) {
         const allowed = command.decision === "accept" ? human.status === "proposed"
           : command.decision === "reject" ? human.status === "proposed" : human.status === "active";
-        if (!allowed) throw new Error(`cannot ${command.decision} assertion in ${human.status}`);
+        if (!allowed) throw new DomainError(`cannot ${command.decision} assertion in ${human.status}`, "conflict");
         const status: StoredAssertion["status"] = command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
         this.humanAssertions.set(human.id, { ...human, status, ...(status === "retracted" ? { validTo: now } : {}) });
         affectedIds.push(human.id);
@@ -269,6 +270,10 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       for (const [key, stored] of this.assertionBatches) {
         const current = stored.assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.assertionId);
         if (!current) continue;
+        const allowed = command.decision === "accept" ? current.status === "proposed"
+          : command.decision === "reject" ? current.status === "proposed"
+            : current.status === "active";
+        if (!allowed) throw new DomainError(`cannot ${command.decision} assertion in ${current.status}`, "conflict");
         const status: StoredAssertion["status"] = command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
         const assertions = stored.assertions.map((assertion) => assertion.id === current.id
           ? { ...assertion, status, ...(status === "retracted" ? { validTo: now } : {}) }
@@ -278,16 +283,18 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         affectedIds.push(current.id);
         found = true;
       }
-      if (!found) throw new Error("assertion not found");
+      if (!found) throw new DomainError("assertion not found", "not_found");
     } else if (command.type === "relate_assertions") {
       const assertions = this.allAssertions();
       const source = assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.sourceAssertionId);
       const target = assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.targetAssertionId);
-      if (!source || !target || source.id === target.id) throw new Error("assertion relation endpoints are invalid");
-      if (source.repository !== target.repository) throw new Error("assertion relations must stay within one repository");
+      if (!source || !target) throw new DomainError("assertion relation endpoint not found", "not_found");
+      if (source.id === target.id || source.repository !== target.repository) {
+        throw new DomainError("assertion relation endpoints are invalid", "conflict");
+      }
       if (!this.sourceObservations.some((observation) => observation.repository === source.repository &&
         sourceObservationIdForRepository(observation) === command.evidenceObservationId)) {
-        throw new Error("assertion relation evidence observation was not found");
+        throw new DomainError("assertion relation evidence observation was not found", "not_found");
       }
       if (!this.assertionRelations.some((relation) => relation.sourceAssertionId === source.id && relation.relation === command.relation &&
         relation.targetAssertionId === target.id && relation.evidenceObservationId === command.evidenceObservationId)) {
@@ -305,16 +312,46 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
       affectedIds.push(command.repository);
     } else if (command.type === "tombstone_repository") {
       for (const [key, snapshot] of this.snapshots) if (snapshot.tenantId === tenantId && snapshot.repository === command.repository) this.snapshots.delete(key);
+      for (const [key, graph] of this.graphs) if (graph.tenantId === tenantId && graph.repository === command.repository) this.graphs.delete(key);
+      for (const [key, stored] of this.assertionBatches) if (stored.batch.tenantId === tenantId && stored.batch.repository === command.repository) this.assertionBatches.delete(key);
+      for (const [key, assertion] of this.humanAssertions) {
+        if (assertion.tenantId === tenantId && assertion.repository === command.repository) this.humanAssertions.delete(key);
+      }
+      for (let index = this.sourceObservations.length - 1; index >= 0; index -= 1) {
+        const observation = this.sourceObservations[index];
+        if (observation?.tenantId === tenantId && observation.repository === command.repository) this.sourceObservations.splice(index, 1);
+      }
+      this.rebuildSourceAssertions();
       affectedIds.push(command.repository);
     } else if (command.type === "redact_observation") {
+      const index = this.sourceObservations.findIndex((observation) =>
+        observation.tenantId === tenantId && sourceObservationIdForRepository(observation) === command.observationId
+      );
+      if (index < 0) throw new DomainError("observation not found or already redacted", "not_found");
+      this.sourceObservations.splice(index, 1);
+      this.rebuildSourceAssertions();
+      for (const [key, stored] of this.assertionBatches) {
+        this.assertionBatches.set(key, {
+          ...stored,
+          assertions: stored.assertions.map((assertion) =>
+            assertion.tenantId === tenantId && assertion.sourceObservationId === command.observationId &&
+            (assertion.status === "active" || assertion.status === "proposed")
+              ? { ...assertion, status: "retracted", validTo: now }
+              : assertion
+          )
+        });
+      }
+      for (let index = this.assertionRelations.length - 1; index >= 0; index -= 1) {
+        if (this.assertionRelations[index]?.evidenceObservationId === command.observationId) this.assertionRelations.splice(index, 1);
+      }
       affectedIds.push(command.observationId);
-    } else if (command.type === "erase_person") {
-      affectedIds.push(command.entityId);
-    } else if (command.type === "merge_entities" || command.type === "unmerge_entities") {
-      affectedIds.push(command.fromEntityId, command.toEntityId);
+    } else if (command.type === "erase_person" || command.type === "merge_entities" || command.type === "unmerge_entities") {
+      throw new DomainError(`${command.type} requires the relational ontology store`, "conflict");
     } else if (command.type === "assign_relationship") {
       const definition = predicateDefinition(command.predicate);
-      if (definition.review === "none") throw new Error("explicit-source predicates must enter through intake, not an internal assignment");
+      if (definition.review === "none") {
+        throw new DomainError("explicit-source predicates must enter through intake, not an internal assignment", "conflict");
+      }
       validatePredicateEndpoints(definition, command.subject.kind, command.object.kind);
       validateQualifiers(definition, command.qualifiers);
       const id = stableId("assertion", `${tenantId}:${command.repository ?? ""}:${command.subject.key}:${definition.name}:${command.object.key}:${canonicalJson(command.qualifiers ?? {})}:${now}`);
@@ -422,7 +459,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   }
 
   async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
-    if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
+    if (!request.allowedRepositories.includes(request.repository)) {
+      throw new DomainError("repository access denied", "forbidden");
+    }
     const limit = Math.max(1, Math.min(request.limit ?? 50, 200));
     const snapshot = [...this.snapshots.values()]
       .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && value.updateRef !== false && (!request.ref || value.ref === request.ref))
