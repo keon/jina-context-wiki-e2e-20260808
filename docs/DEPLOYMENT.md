@@ -53,6 +53,15 @@ retrieval checks repository ACL scope at entry and at context assembly. On start
 and `e2e` records into that tenant, so old tasks remain visible. The dashboard
 proxies read requests and adds the credential server-side.
 
+The simulation integration uses that same storage tenant but never its service
+principal for graph reads. Its server maps a simulation tenant UUID to
+`tenant:<uuid>`, replaces the principal's repository ACL through
+`POST /internal/graph/access/sync`, and binds every subsequent graph request to
+that principal. The sync is exact so repository removal or App uninstall is
+revoked on the next request. Keep `INTERNAL_API_TOKEN` server-to-server; callers
+that possess it can change graph ACLs and must be treated as trusted provisioning
+services.
+
 The API also serves stateless Streamable HTTP MCP at `POST /mcp`. MCP exposes one
 read-only `query_graph` tool and reuses the same repository-scoped retrieval path.
 Production MCP traffic must arrive through a trusted identity-aware caller that

@@ -233,6 +233,32 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
+  async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      await client.query(
+        `delete from jina_ontology.repository_acl where tenant_id=$1 and principal_id=$2`,
+        [tenantId, principalId]
+      );
+      if (repositories.length > 0) {
+        await client.query(
+          `insert into jina_ontology.repository_acl (tenant_id,repository,principal_id,role,created_at)
+           select $1, repository, $2, 'reader', now()
+             from unnest($3::text[]) as repository`,
+          [tenantId, principalId, repositories]
+        );
+      }
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
   async latest(tenantId: string): Promise<OntologyGraph | undefined> {
     const graphs = await this.loadGraphs(tenantId, 1);
     return graphs[0];

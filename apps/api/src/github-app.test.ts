@@ -766,6 +766,60 @@ test("public graph REST API exposes authorized topology and cited queries withou
   }
 });
 
+test("graph API binds simulation tenants to exact repository ACLs", async () => {
+  const ontologyStore = new MemoryOntologyGraphStore();
+  const tenantId = "tenant-a";
+  const principalA = "tenant:11111111-1111-4111-8111-111111111111";
+  const principalB = "tenant:22222222-2222-4222-8222-222222222222";
+  const graphA = fixtureGraph({ tenantId, repository: "omxyz/a", ref: "main", taskId: "tenant-graph-a" });
+  const graphB = fixtureGraph({ tenantId, repository: "other/b", ref: "main", taskId: "tenant-graph-b" });
+  await ontologyStore.save(graphA);
+  await ontologyStore.save(graphB);
+  const server = createApiServer({ ontologyStore, internalApiToken: INTERNAL_TOKEN, tenantId });
+  const baseUrl = await listen(server);
+  const sync = (principalId: string, repositories: readonly string[]) => fetch(`${baseUrl}/internal/graph/access/sync`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ principalId, repositories })
+  });
+  try {
+    assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs`)).status, 401);
+    assert.equal((await sync(principalA, ["omxyz/a"])).status, 200);
+    assert.equal((await sync(principalB, ["other/b"])).status, 200);
+
+    const listA = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalA).then(
+      (response) => response.json() as Promise<{ graphs: Array<{ repository: string }> }>
+    );
+    const listB = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalB).then(
+      (response) => response.json() as Promise<{ graphs: Array<{ repository: string }> }>
+    );
+    assert.deepEqual(listA.graphs.map((graph) => graph.repository), ["omxyz/a"]);
+    assert.deepEqual(listB.graphs.map((graph) => graph.repository), ["other/b"]);
+    assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphB.id)}`, principalA)).status, 404);
+    assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphA.id)}`, principalB)).status, 404);
+
+    const crossTenantQuery = await fetch(`${baseUrl}/v1/graph/query`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-principal-id": principalA,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ graphId: graphB.id, query: "What is in this repository?" })
+    });
+    assert.equal(crossTenantQuery.status, 404);
+
+    assert.equal((await sync(principalA, [])).status, 200);
+    const revoked = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalA).then(
+      (response) => response.json() as Promise<{ graphs: unknown[] }>
+    );
+    assert.deepEqual(revoked.graphs, []);
+    assert.equal((await sync("svc:api", ["omxyz/a"])).status, 400);
+  } finally {
+    await close(server);
+  }
+});
+
 test("durable state survives an API server restart", async () => {
   const stateStore = new MemoryStateStore();
   const config = { githubWebhookSecret: SECRET, stateStore, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT };
