@@ -102,8 +102,6 @@ export const predicateRegistry = {
   }
 } as const satisfies Readonly<Record<string, PredicateDefinition>>;
 
-export type PredicateName = keyof typeof predicateRegistry;
-
 export function predicateDefinition(name: string): PredicateDefinition {
   const definition = (predicateRegistry as Readonly<Record<string, PredicateDefinition>>)[normalizePredicateName(name)];
   if (!definition) throw new Error(`unsupported ontology predicate: ${name}`);

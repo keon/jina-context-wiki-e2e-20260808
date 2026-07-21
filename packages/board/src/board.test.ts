@@ -112,7 +112,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
       {
         id: entityId<"board_outbox_message">("message-a"),
         taskId: firstTask,
-        topic: "run-ontology",
+        topic: "run-ontology-assert",
         idempotencyKey: "a:1",
         status: "leased",
         payload: { taskId: firstTask, attempt: 1 },
@@ -124,7 +124,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
       {
         id: entityId<"board_outbox_message">("message-b"),
         taskId: secondTask,
-        topic: "run-ontology",
+        topic: "run-ontology-assert",
         idempotencyKey: "b:1",
         status: "pending",
         payload: { taskId: secondTask, attempt: 1 },
@@ -134,7 +134,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
   };
 
   const claimed = leaseNextOutboxMessage(state, {
-    topics: ["run-ontology"],
+    topics: ["run-ontology-assert"],
     taskIds: [firstTask],
     leaseId: "new",
     now: "2026-01-01T00:02:00.000Z",

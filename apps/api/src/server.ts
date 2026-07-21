@@ -29,6 +29,7 @@ import {
   ontologyTaskTypeDependencies,
   ontologyTaskTypeDefinitions,
   ontologyTaskTypeTriggers,
+  planOntologyBuild,
   parseGeneratedOntology,
   type BlobAnalysis,
   type RepositorySourceObservation,
@@ -42,7 +43,7 @@ import {
 } from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
-import { entityId, nowIso } from "@jina/shared-kernel";
+import { DomainError, entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
@@ -58,13 +59,11 @@ const WORKER_TOPICS = [
   "run-research",
   "run-publish",
   "run-cleanup",
-  "run-ontology",
-  "run-ontology-prepare",
-  "run-ontology-generate",
   "run-ontology-ingest",
   "run-ontology-assert",
   "run-ontology-project"
 ] as const;
+const LEGACY_ONTOLOGY_TOPICS = new Set(["run-ontology", "run-ontology-prepare", "run-ontology-generate"]);
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -87,6 +86,18 @@ export interface ApiSnapshot {
   readonly intakeState: GitHubIntakeState;
   readonly publications: readonly PublicationRecord[];
   readonly devDeliverySequence: number;
+  readonly pendingOntologyCompletions?: readonly PendingOntologyCompletion[];
+}
+
+interface PendingOntologyCompletion {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly messageId: string;
+  readonly leaseId: string;
+  readonly taskId: string;
+  readonly topic: "run-ontology-assert" | "run-ontology-project";
+  readonly body: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
 }
 
 export interface ApiStateStore {
@@ -94,7 +105,10 @@ export interface ApiStateStore {
   ping(): Promise<void>;
   hasDelivery(deliveryId: string): Promise<boolean>;
   save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean>;
-  saveWithOntologyGraph?(snapshot: ApiSnapshot, graph: OntologyGraph): Promise<void>;
+  update<T>(
+    operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
+    deliveryId?: string
+  ): Promise<{ readonly committed: boolean; readonly result?: T }>;
   close(): Promise<void>;
 }
 
@@ -103,15 +117,50 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let intakeState: GitHubIntakeState = createGitHubIntakeState();
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
+  let pendingOntologyCompletions: readonly PendingOntologyCompletion[] = [];
   const deliveries = new DeliveryCache(config.deliveryCacheSize ?? 10_000);
   const ontologyStore = config.ontologyStore ?? new MemoryOntologyGraphStore();
   const ready = initializeState();
   let mutations = Promise.resolve();
+  let transactionActive = false;
 
-  function mutate<T>(operation: () => Promise<T>): Promise<T> {
-    const result = mutations.then(operation);
+  function mutate<T>(operation: () => Promise<T>): Promise<T>;
+  function mutate<T>(operation: () => Promise<T>, deliveryId: string): Promise<T | undefined>;
+  function mutate<T>(operation: () => Promise<T>, deliveryId?: string): Promise<T | undefined> {
+    const result = mutations.then(async () => {
+      if (!config.stateStore) return operation();
+      const updated = await config.stateStore.update(async (stored) => {
+        if (stored) restore(stored);
+        transactionActive = true;
+        try {
+          const value = await operation();
+          return { state: snapshot(), result: value };
+        } finally {
+          transactionActive = false;
+        }
+      }, deliveryId);
+      if (!updated.committed) {
+        await reload();
+        return undefined;
+      }
+      return updated.result;
+    });
     mutations = result.then(() => undefined, () => undefined);
     return result;
+  }
+
+  function restore(stored: ApiSnapshot): void {
+    intakeState = stored.intakeState;
+    publications = stored.publications;
+    devDeliverySequence = stored.devDeliverySequence;
+    pendingOntologyCompletions = stored.pendingOntologyCompletions ?? [];
+  }
+
+  async function synchronize(): Promise<void> {
+    if (!config.stateStore) return;
+    const result = mutations.then(reload);
+    mutations = result.then(() => undefined, () => undefined);
+    await result;
   }
 
   async function initializeState(): Promise<void> {
@@ -121,7 +170,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       intakeState = migrated.snapshot.intakeState;
       publications = migrated.snapshot.publications;
       devDeliverySequence = migrated.snapshot.devDeliverySequence;
-      if (migrated.changed) await persist();
+      pendingOntologyCompletions = migrated.snapshot.pendingOntologyCompletions ?? [];
+      const retiredIntakeState = retireLegacyOntologyWork(intakeState, nowIso());
+      const retiredLegacyWork = retiredIntakeState !== intakeState;
+      intakeState = retiredIntakeState;
+      if (migrated.changed || retiredLegacyWork) await persist();
       if (config.tenantId) await ontologyStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
       return;
     }
@@ -191,10 +244,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   function snapshot(): ApiSnapshot {
-    return { intakeState, publications, devDeliverySequence };
+    return { intakeState, publications, devDeliverySequence, pendingOntologyCompletions };
   }
 
   async function persist(deliveryId?: string): Promise<boolean> {
+    if (transactionActive) return true;
     if (!config.stateStore) {
       if (deliveryId) deliveries.add(deliveryId);
       return true;
@@ -204,11 +258,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function reload(): Promise<void> {
     const stored = await config.stateStore?.load();
-    if (stored) {
-      intakeState = stored.intakeState;
-      publications = stored.publications;
-      devDeliverySequence = stored.devDeliverySequence;
-    }
+    if (stored) restore(stored);
   }
 
   async function hasDelivery(deliveryId: string): Promise<boolean> {
@@ -259,19 +309,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   const server = createServer((request, response) => {
     void route(request, response).catch((error: unknown) => {
-      const isTooLarge = error instanceof RequestBodyTooLargeError;
       const message = error instanceof Error ? error.message : String(error);
-      const isForbidden = /(?:access denied|administrator access required)/i.test(message);
+      const apiError = httpError(error);
       console.error("API request failed", message);
-      json(response, isTooLarge ? 413 : isForbidden ? 403 : 500, {
+      json(response, apiError.statusCode, {
         accepted: false,
-        error: isTooLarge ? error.message : isForbidden ? "forbidden" : "internal server error"
+        error: apiError.expose ? apiError.message : "internal server error",
+        ...(apiError.expose ? { code: apiError.code } : {})
       });
     });
   });
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
+    await synchronize();
     const url = new URL(request.url ?? "/", "http://localhost");
 
     if (request.method === "OPTIONS") {
@@ -303,14 +354,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "POST" && url.pathname === "/dev/webhooks/github" && config.enableDevEndpoints) {
       const body = parseJsonObject(await readRawBody(request));
       const webhook = parseDevWebhook(body);
-      devDeliverySequence += 1;
-      const deliveryId = `dev-${devDeliverySequence}`;
-      const intake = await mutate(async () => {
+      const result = await mutate(async () => {
+        devDeliverySequence += 1;
+        const deliveryId = `dev-${devDeliverySequence}`;
         const accepted = acceptWebhook(webhook, deliveryId);
         await persist(deliveryId);
-        return accepted;
+        return { deliveryId, intake: accepted };
       });
-      json(response, 202, { accepted: true, deliveryId, outcome: intake.outcome, createdTaskIds: intake.createdTaskIds });
+      json(response, 202, {
+        accepted: true,
+        deliveryId: result.deliveryId,
+        outcome: result.intake.outcome,
+        createdTaskIds: result.intake.createdTaskIds
+      });
       return;
     }
 
@@ -433,7 +489,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repository = requiredString(body.repository, "repository");
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const template = requiredString(body.template, "template");
-      if (!retrievalTemplateNames.includes(template as typeof retrievalTemplateNames[number])) throw new Error("unsupported retrieval template");
+      if (!retrievalTemplateNames.includes(template as typeof retrievalTemplateNames[number])) {
+        throw invalidRequest("unsupported retrieval template");
+      }
       const result = await ontologyStore.retrieve({
         tenantId, allowedRepositories, repository, template: template as typeof retrievalTemplateNames[number],
         ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
@@ -479,7 +537,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/ontology/assertions") {
       const repository = requiredString(url.searchParams.get("repository"), "repository");
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!allowedRepositories.includes(repository)) throw new Error("repository access denied");
+      if (!allowedRepositories.includes(repository)) throw new DomainError("repository access denied", "forbidden");
       const statusValue = url.searchParams.get("status");
       const status = statusValue === null ? undefined : requiredAssertionStatus(statusValue);
       const predicate = url.searchParams.get("predicate")?.trim().toUpperCase() || undefined;
@@ -487,7 +545,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const entityKind = entityKindValue && ontologyNodeKinds.includes(entityKindValue as typeof ontologyNodeKinds[number])
         ? entityKindValue as typeof ontologyNodeKinds[number]
         : undefined;
-      if (entityKindValue && !entityKind) throw new Error("unsupported ontology entity kind");
+      if (entityKindValue && !entityKind) throw invalidRequest("unsupported ontology entity kind");
       json(response, 200, { assertions: await ontologyStore.listAssertions(tenantId, repository, {
         ...(status ? { status } : {}), ...(predicate ? { predicate } : {}), ...(entityKind ? { entityKind } : {})
       }) });
@@ -545,6 +603,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
+      await reconcilePendingOntologyCompletions();
       await claimWork(request, response, tenantId);
       return;
     }
@@ -573,24 +632,26 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, result.statusCode, result);
       return;
     }
+    if (await hasDelivery(result.deliveryId)) {
+      json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
+      return;
+    }
     const committed = await mutate(async () => {
-      if (await hasDelivery(result.deliveryId!)) {
-        return { statusCode: 200, payload: { accepted: true, duplicate: true, deliveryId: result.deliveryId } };
-      }
       if (!result.webhook) {
         await persist(result.deliveryId!);
         return { statusCode: result.statusCode, payload: result };
       }
       const intake = acceptWebhook(result.webhook, result.deliveryId!);
-      if (!(await persist(result.deliveryId!))) {
-        await reload();
-        return { statusCode: 200, payload: { accepted: true, duplicate: true, deliveryId: result.deliveryId } };
-      }
+      await persist(result.deliveryId!);
       return {
         statusCode: result.statusCode,
         payload: { accepted: true, deliveryId: result.deliveryId, outcome: intake.outcome, createdTaskIds: intake.createdTaskIds }
       };
-    });
+    }, result.deliveryId);
+    if (!committed) {
+      json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
+      return;
+    }
     json(response, committed.statusCode, committed.payload);
   }
 
@@ -601,26 +662,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     allowedRepositories?: ReadonlySet<string>
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const repository = requiredString(body.repository, "repository");
-    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
-      json(response, 400, { accepted: false, error: "repository must be owner/name" });
-      return;
-    }
+    const repository = requiredRepositoryName(body.repository, "repository");
     if (allowedRepositories && !allowedRepositories.has(repository)) {
-      json(response, 403, { accepted: false, error: "repository access denied" });
-      return;
+      throw new DomainError("repository access denied", "forbidden");
     }
     const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
-    devDeliverySequence += 1;
-    const nonce = typeof body.requestKey === "string" && body.requestKey.trim()
-      ? body.requestKey.trim()
-      : `${Date.now()}-${devDeliverySequence}`;
-    const taskKey = `task_ontology:${tenantId}:${repository}:${ref}:${nonce}`;
-    const taskId = entityId<"task">(`${taskKey}:root`);
-    const ingestTaskId = entityId<"task">(`${taskKey}:ingest`);
-    const assertionTaskId = entityId<"task">(`${taskKey}:assert`);
-    const projectionTaskId = entityId<"task">(`${taskKey}:project`);
+    const suppliedRequestKey = typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
     const created = await mutate(async () => {
+      devDeliverySequence += 1;
+      const nonce = suppliedRequestKey ?? `${Date.now()}-${devDeliverySequence}`;
+      const plan = planOntologyBuild({ tenantId, repository, ref, requestKey: nonce });
       const createdAt = nowIso();
       let board = supersedeTaskTree(intakeState.board, createdAt, (task) =>
         task.type.startsWith("ontology_") &&
@@ -629,83 +680,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         task.metadata.ref === ref &&
         task.metadata.requestKey !== nonce
       );
-      board = applyCommand(board, {
-        command: "CreateTask",
-        task: {
-          id: taskId,
-          type: "ontology_build",
-          kind: "aggregate",
-          title: `Build Ontology for ${repository}@${ref}`,
-          assigneeRole: "system",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:root`,
-          required: true,
-          metadata: { tenantId, repository, ref, requestKey: nonce }
-        },
-        blocksParentCompletion: false
-      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
-      board = applyCommand(board, {
-        command: "CreateTask",
-        task: {
-          id: ingestTaskId,
-          type: "ontology_ingest",
-          kind: "dispatchable",
-          title: `Aggregate raw repository data for ${repository}@${ref}`,
-          assigneeRole: "ontology_worker",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:ingest`,
-          dispatchTopic: "run-ontology-ingest",
-          parentTaskId: taskId,
-          required: true,
-          metadata: { tenantId, repository, ref, requestKey: nonce }
-        }
-      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
-      board = applyCommand(board, {
-        command: "CreateTask",
-        task: {
-          id: assertionTaskId,
-          type: "ontology_assert",
-          kind: "dispatchable",
-          title: `Derive assertions for ${repository}@${ref}`,
-          assigneeRole: "ontology_worker",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:assert`,
-          dispatchTopic: "run-ontology-assert",
-          parentTaskId: taskId,
-          required: true,
-          metadata: { tenantId, repository, ref, requestKey: nonce }
-        },
-        dependencies: [{
-          taskId: assertionTaskId,
-          dependsOnTaskId: ingestTaskId,
-          relationship: "blocks",
-          required: true,
-          blocksParentCompletion: true
-        }]
-      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
-      board = applyCommand(board, {
-        command: "CreateTask",
-        task: {
-          id: projectionTaskId,
-          type: "ontology_project",
-          kind: "dispatchable",
-          title: `Project Ontology for ${repository}@${ref}`,
-          assigneeRole: "ontology_worker",
-          dedupeKey: `ontology:${tenantId}:${repository}:${ref}:${nonce}:project`,
-          dispatchTopic: "run-ontology-project",
-          parentTaskId: taskId,
-          required: true,
-          metadata: { tenantId, repository, ref, requestKey: nonce }
-        },
-        dependencies: [{
-          taskId: projectionTaskId,
-          dependsOnTaskId: assertionTaskId,
-          relationship: "blocks",
-          required: true,
-          blocksParentCompletion: true
-        }]
-      }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
+      for (const task of plan.tasks) {
+        board = applyCommand(board, {
+          command: "CreateTask",
+          task: { ...task, required: true },
+          ...(task.id === plan.rootTaskId ? { blocksParentCompletion: false } : {})
+        }, { actor: { type: "user", id: "ontology-api" }, now: createdAt }).state;
+      }
+      for (const dependency of plan.dependencies) {
+        board = applyCommand(board, { command: "LinkTask", dependency }, {
+          actor: { type: "user", id: "ontology-api" }, now: createdAt
+        }).state;
+      }
       board = reduceBoard(board, createdAt);
       intakeState = { ...intakeState, board };
       await persist();
-      return findTask(board, taskId);
+      return findTask(board, plan.rootTaskId);
     });
     json(response, 202, { accepted: true, task: created });
   }
@@ -713,11 +703,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function planOntologyIngestion(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request, MAX_ONTOLOGY_SNAPSHOT_BYTES));
     const snapshot = parseRepositorySnapshot(body.snapshot, tenantId);
-    const task = requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "ontology_ingest");
-    if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
-      throw new Error("repository snapshot does not match ontology task");
-    }
-    const plan = await ontologyStore.planIngestion(snapshot);
+    const plan = await mutate(async () => {
+      const task = requireLeasedOntologyTask(body, snapshot.taskId, tenantId, "ontology_ingest");
+      if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
+        throw invalidRequest("repository snapshot does not match ontology task");
+      }
+      return ontologyStore.planIngestion(snapshot);
+    });
     json(response, 200, plan);
   }
 
@@ -725,7 +717,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
     const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
-    if (!Array.isArray(body.commitShas)) throw new Error("commitShas must be an array");
+    if (!Array.isArray(body.commitShas)) throw invalidRequest("commitShas must be an array");
     const commitShas = body.commitShas.map((sha) => requiredGitSha(sha, "commitSha"));
     json(response, 200, {
       knownCommitShas: await ontologyStore.knownCommits(tenantId, requiredString(task.metadata.repository, "task.repository"), commitShas)
@@ -735,26 +727,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function applyOntologyBlobAnalyses(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
     const commitSha = requiredGitSha(body.commitSha, "commitSha");
     const analyses = parseBlobAnalyses(body.analyses);
-    await ontologyStore.applyBlobAnalyses({
-      tenantId,
-      repository: requiredString(task.metadata.repository, "task.repository"),
-      commitSha
-    }, analyses);
+    await mutate(async () => {
+      const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+      await ontologyStore.applyBlobAnalyses({
+        tenantId,
+        repository: requiredString(task.metadata.repository, "task.repository"),
+        commitSha
+      }, analyses);
+    });
     json(response, 200, { accepted: true, count: analyses.length });
   }
 
   async function applyOntologyGitHubObservations(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const taskId = requiredString(body.taskId, "taskId");
-    const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
-    if (!Array.isArray(body.observations)) throw new Error("observations must be an array");
+    if (!Array.isArray(body.observations)) throw invalidRequest("observations must be an array");
     const observations = body.observations.map((value) => parseRepositorySourceObservation(value, tenantId));
-    const repository = requiredString(task.metadata.repository, "task.repository");
-    if (observations.some((observation) => observation.repository !== repository)) throw new Error("GitHub observation repository does not match task");
-    json(response, 200, await ontologyStore.applyGitHubObservations(observations));
+    const result = await mutate(async () => {
+      const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
+      const repository = requiredString(task.metadata.repository, "task.repository");
+      if (observations.some((observation) => observation.repository !== repository)) {
+        throw invalidRequest("GitHub observation repository does not match task");
+      }
+      return ontologyStore.applyGitHubObservations(observations);
+    });
+    json(response, 200, result);
   }
 
   async function findCachedOntologyAssertions(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -786,7 +785,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   function requireOntologyTask(taskId: string, tenantId: string, type: string): BoardTask {
     const task = findTask(intakeState.board, entityId<"task">(taskId) as TaskId);
-    if (!task || task.metadata.tenantId !== tenantId || task.type !== type) throw new Error("ontology task not found");
+    if (!task || task.metadata.tenantId !== tenantId || task.type !== type) {
+      throw new ApiError(404, "not_found", "ontology task not found");
+    }
     return task;
   }
 
@@ -804,7 +805,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       !message || message.taskId !== task.id || message.status !== "leased" || message.leaseId !== leaseId ||
       !message.leaseExpiresAt || message.leaseExpiresAt <= nowIso() || task.status !== "in_progress"
     ) {
-      throw new Error("stale ontology worker lease");
+      throw new ApiError(409, "stale_lease", "stale ontology worker lease");
     }
     return task;
   }
@@ -812,13 +813,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerId = requiredString(body.workerId, "workerId");
-    const requestedTopics = Array.isArray(body.topics)
-      ? body.topics.filter((topic): topic is string => typeof topic === "string" && WORKER_TOPICS.includes(topic as typeof WORKER_TOPICS[number]))
-      : [];
-    if (requestedTopics.length === 0) {
-      json(response, 400, { accepted: false, error: "at least one supported topic is required" });
-      return;
-    }
+    if (!Array.isArray(body.topics) || body.topics.length === 0) throw invalidRequest("at least one supported topic is required");
+    const topics = body.topics.map((topic) => requiredString(topic, "topics"));
+    const unsupportedTopics = topics.filter((topic) => !WORKER_TOPICS.includes(topic as typeof WORKER_TOPICS[number]));
+    if (unsupportedTopics.length > 0) throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
+    const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
     const claimed = await mutate(async () => {
       const taskIds = intakeState.board.tasks
         .filter((task) => task.metadata.tenantId === tenantId && (task.status === "queued" || task.status === "in_progress"))
@@ -870,7 +869,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await persist();
       return true;
     });
-    json(response, renewed ? 200 : 409, renewed ? { accepted: true } : { accepted: false, error: "stale lease" });
+    if (!renewed) throw staleLease();
+    json(response, 200, { accepted: true });
   }
 
   async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -878,17 +878,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const messageId = entityId<"board_outbox_message">(requiredString(body.messageId, "messageId")) as BoardOutboxMessageId;
     const leaseId = requiredString(body.leaseId, "leaseId");
     const outcome = body.outcome;
-    if (outcome !== "done" && outcome !== "failed") throw new Error("outcome must be done or failed");
+    if (outcome !== "done" && outcome !== "failed") throw invalidRequest("outcome must be done or failed");
     const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
     const task = findTask(intakeState.board, taskId);
     if (!task || task.metadata.tenantId !== tenantId) {
-      json(response, 404, { accepted: false, error: "task not found" });
-      return;
+      throw new ApiError(404, "not_found", "task not found");
     }
-    const initialMessage = findOutboxMessage(intakeState.board, messageId);
-    let graph = outcome === "done" && (initialMessage?.topic === "run-ontology" || initialMessage?.topic === "run-ontology-generate")
-      ? parseCompletedGraph(body.graph, task, tenantId)
-      : undefined;
+    if (outcome === "done") {
+      const pending = await stageOntologyCompletion(body, messageId, leaseId, taskId, tenantId);
+      if (pending) {
+        const completedGraph = await processPendingOntologyCompletion(pending);
+        json(response, 200, { accepted: true, graphId: completedGraph?.id });
+        return;
+      }
+    }
+    let graph: OntologyGraph | undefined;
     const result = await mutate(async () => {
       const message = findOutboxMessage(intakeState.board, messageId);
       const currentTask = findTask(intakeState.board, taskId);
@@ -903,19 +907,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const previousIntakeState = intakeState;
       const previousPublications = publications;
       let board = markOutboxDispatched(intakeState.board, message.id, now);
-      if (outcome === "done" && message.topic === "run-ontology-prepare") {
-        const resultPayload = isRecord(body.result) ? body.result : {};
-        const commitSha = requiredGitSha(resultPayload.commitSha, "result.commitSha");
-        const generationTask = board.tasks.find((candidate) =>
-          candidate.parentTaskId === currentTask.parentTaskId && candidate.type === "ontology_generate"
-        );
-        if (!generationTask) throw new Error("ontology generation task not found");
-        board = applyCommand(board, {
-          command: "UpdateTask",
-          taskId: generationTask.id,
-          metadata: { commitSha }
-        }, { actor: RUN_ACTOR, now }).state;
-      }
       if (outcome === "done" && message.topic === "run-ontology-ingest") {
         const resultPayload = isRecord(body.result) ? body.result : {};
         const commitSha = requiredGitSha(resultPayload.commitSha, "result.commitSha");
@@ -1020,13 +1011,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }, { actor: RUN_ACTOR, now }).state;
       intakeState = { ...intakeState, board: reduceBoard(board, now) };
       try {
-        if (graph && config.stateStore && message.topic !== "run-ontology-project") {
-          if (!config.stateStore.saveWithOntologyGraph) throw new Error("state store does not support atomic ontology completion");
-          await config.stateStore.saveWithOntologyGraph(snapshot(), graph);
-        } else {
-          if (graph && message.topic !== "run-ontology-project") await ontologyStore.save(graph);
-          await persist();
-        }
+        await persist();
       } catch (error) {
         intakeState = previousIntakeState;
         publications = previousPublications;
@@ -1034,7 +1019,120 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       return true;
     });
-    json(response, result ? 200 : 409, result ? { accepted: true, graphId: graph?.id } : { accepted: false, error: "stale lease" });
+    if (!result) throw staleLease();
+    json(response, 200, { accepted: true, graphId: graph?.id });
+  }
+
+  async function stageOntologyCompletion(
+    body: Readonly<Record<string, unknown>>,
+    messageId: BoardOutboxMessageId,
+    leaseId: string,
+    taskId: TaskId,
+    tenantId: string
+  ): Promise<PendingOntologyCompletion | undefined> {
+    return mutate(async () => {
+      const message = findOutboxMessage(intakeState.board, messageId);
+      const currentTask = findTask(intakeState.board, taskId);
+      const now = nowIso();
+      if (!message || !currentTask || message.taskId !== taskId || message.status !== "leased" ||
+        message.leaseId !== leaseId || !message.leaseExpiresAt || message.leaseExpiresAt <= now ||
+        currentTask.status !== "in_progress" || currentTask.metadata.tenantId !== tenantId) {
+        throw staleLease();
+      }
+      if (message.topic !== "run-ontology-assert" && message.topic !== "run-ontology-project") return undefined;
+      const id = `${message.id}:${leaseId}:${taskId}`;
+      const existing = pendingOntologyCompletions.find((candidate) => candidate.id === id);
+      if (existing) return existing;
+      const pending: PendingOntologyCompletion = {
+        id,
+        tenantId,
+        messageId: message.id,
+        leaseId,
+        taskId,
+        topic: message.topic,
+        body: structuredClone(body),
+        createdAt: now
+      };
+      intakeState = { ...intakeState, board: markOutboxDispatched(intakeState.board, message.id, now) };
+      pendingOntologyCompletions = [...pendingOntologyCompletions, pending];
+      await persist();
+      return pending;
+    });
+  }
+
+  async function reconcilePendingOntologyCompletions(): Promise<void> {
+    for (const pending of [...pendingOntologyCompletions]) await processPendingOntologyCompletion(pending);
+  }
+
+  async function processPendingOntologyCompletion(pending: PendingOntologyCompletion): Promise<OntologyGraph | undefined> {
+    if (!pendingOntologyCompletions.some((candidate) => candidate.id === pending.id)) return undefined;
+    const currentTask = findTask(intakeState.board, entityId<"task">(pending.taskId) as TaskId);
+    if (!currentTask || currentTask.metadata.tenantId !== pending.tenantId) {
+      throw new ApiError(404, "not_found", "pending ontology completion task not found");
+    }
+    const now = nowIso();
+    let graph: OntologyGraph | undefined;
+    let eventPayload: Record<string, unknown>;
+    if (pending.topic === "run-ontology-assert") {
+      const cached = isRecord(pending.body.result) && isRecord(pending.body.result.cached) ? pending.body.result.cached : undefined;
+      const assertionResult = cached
+        ? safeResultPayload(cached)
+        : await ontologyStore.saveAssertionBatch(parseOntologyAssertionBatch(pending.body.assertionBatch, currentTask, pending.tenantId));
+      eventPayload = {
+        ...safeResultPayload(assertionResult),
+        effect: assertionResult.cached ? "confirmed" : "changed"
+      };
+    } else {
+      const existingGraphIds = new Set((await ontologyStore.listSummaries(pending.tenantId)).map((summary) => summary.id));
+      const drained = await ontologyStore.drainDerivedProjectionEvents(pending.tenantId, now);
+      eventPayload = { ...await ontologyStore.rebuildDerivedProjections(
+        pending.tenantId,
+        requiredString(currentTask.metadata.repository, "task.repository"),
+        requiredString(currentTask.metadata.ref, "task.ref"),
+        now
+      ), drainedEventCount: drained.processedEventCount, rebuiltRepositories: drained.rebuiltRepositories };
+      graph = await ontologyStore.project({
+        tenantId: pending.tenantId,
+        repository: requiredString(currentTask.metadata.repository, "task.repository"),
+        ref: requiredString(currentTask.metadata.ref, "task.ref"),
+        commitSha: requiredGitSha(currentTask.metadata.commitSha, "task.commitSha"),
+        taskId: currentTask.id,
+        generatedAt: now
+      });
+      eventPayload = { ...eventPayload, effect: eventPayload.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop" };
+    }
+
+    await mutate(async () => {
+      if (!pendingOntologyCompletions.some((candidate) => candidate.id === pending.id)) return;
+      const taskId = entityId<"task">(pending.taskId) as TaskId;
+      const task = findTask(intakeState.board, taskId);
+      if (!task || task.status !== "in_progress") throw new DomainError("pending ontology completion is no longer applicable", "conflict");
+      let board = intakeState.board;
+      if (pending.topic === "run-ontology-assert") {
+        const projectionTask = board.tasks.find((candidate) =>
+          candidate.parentTaskId === task.parentTaskId && candidate.type === "ontology_project"
+        );
+        if (!projectionTask) throw new Error("ontology_project task not found");
+        board = applyCommand(board, {
+          command: "UpdateTask",
+          taskId: projectionTask.id,
+          metadata: { knowledgeCheckpoint: requiredString(eventPayload.knowledgeCheckpoint, "knowledgeCheckpoint") }
+        }, { actor: RUN_ACTOR, now }).state;
+      }
+      board = applyCommand(board, {
+        command: "CommentTask",
+        taskId,
+        eventType: completionEventType(pending.topic),
+        payload: graph
+          ? { ...eventPayload, graphId: graph.id, nodeCount: graph.nodes.length, edgeCount: graph.edges.length, commitSha: graph.commitSha }
+          : eventPayload
+      }, { actor: RUN_ACTOR, now }).state;
+      board = applyCommand(board, { command: "TransitionTask", taskId, toStatus: "done" }, { actor: RUN_ACTOR, now }).state;
+      intakeState = { ...intakeState, board: reduceBoard(board, now) };
+      pendingOntologyCompletions = pendingOntologyCompletions.filter((candidate) => candidate.id !== pending.id);
+      await persist();
+    });
+    return graph;
   }
 
   function isTenantAdmin(principal: { readonly principalId: string }): boolean {
@@ -1111,9 +1209,6 @@ function completionEventType(topic: string): string {
     case "run-research": return "context.collected";
     case "run-publish": return "publish.completed";
     case "run-cleanup": return "cleanup.completed";
-    case "run-ontology": return "ontology.graph_created";
-    case "run-ontology-prepare": return "ontology.source_prepared";
-    case "run-ontology-generate": return "ontology.graph_created";
     case "run-ontology-ingest": return "ontology.code_ingested";
     case "run-ontology-assert": return "ontology.assertions_recorded";
     case "run-ontology-project": return "ontology.graph_projected";
@@ -1149,6 +1244,11 @@ function migrateSnapshotTenantAliases(
     changed = true;
     return { ...pullRequest, tenantId };
   });
+  const pendingOntologyCompletions = snapshot.pendingOntologyCompletions?.map((pending) => {
+    if (!aliasSet.has(pending.tenantId)) return pending;
+    changed = true;
+    return { ...pending, tenantId };
+  });
   return changed
     ? {
         changed,
@@ -1157,38 +1257,33 @@ function migrateSnapshotTenantAliases(
           intakeState: {
             board: { ...snapshot.intakeState.board, tasks },
             pullRequests
-          }
+          },
+          ...(pendingOntologyCompletions ? { pendingOntologyCompletions } : {})
         }
       }
     : { snapshot, changed };
 }
 
-function parseCompletedGraph(value: unknown, task: BoardTask, tenantId: string): OntologyGraph {
-  if (!isRecord(value) || !isRecord(value.generator)) throw new Error("graph must be an object");
-  const executor = value.generator.executor;
-  if (executor !== "daytona" && executor !== "fixture") throw new Error("unsupported graph executor");
-  const commitSha = requiredString(value.commitSha, "graph.commitSha");
-  const preparedCommitSha = typeof task.metadata.commitSha === "string" ? task.metadata.commitSha : undefined;
-  if (preparedCommitSha && commitSha !== preparedCommitSha) throw new Error("graph commit does not match prepared source");
-  return createOntologyGraph({
-    request: {
-      tenantId,
-      repository: requiredString(task.metadata.repository, "task.repository"),
-      ref: requiredString(task.metadata.ref, "task.ref"),
-      taskId: task.id
-    },
-    commitSha,
-    generatedAt: requiredString(value.generatedAt, "graph.generatedAt"),
-    executor,
-    model: requiredString(value.generator.model, "graph.generator.model"),
-    ...(typeof value.generator.sandboxId === "string" ? { sandboxId: value.generator.sandboxId } : {}),
-    generated: parseGeneratedOntology({ summary: value.summary, nodes: value.nodes, edges: value.edges })
-  });
+function retireLegacyOntologyWork(state: GitHubIntakeState, now: string): GitHubIntakeState {
+  const messages = state.board.outbox.filter((message) =>
+    message.status !== "dispatched" && LEGACY_ONTOLOGY_TOPICS.has(message.topic)
+  );
+  if (messages.length === 0) return state;
+  const workflowRootIds = new Set<TaskId>();
+  for (const message of messages) {
+    let task = findTask(state.board, message.taskId);
+    while (task?.parentTaskId) task = findTask(state.board, task.parentTaskId);
+    if (task) workflowRootIds.add(task.id);
+  }
+  let board = state.board;
+  for (const message of messages) board = markOutboxDispatched(board, message.id, now);
+  board = supersedeTaskTree(board, now, (task) => workflowRootIds.has(task.id));
+  return { ...state, board: reduceBoard(board, now) };
 }
 
 function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySnapshot {
   if (!isRecord(value) || !Array.isArray(value.files) || !Array.isArray(value.parents)) {
-    throw new Error("snapshot must include files and parents");
+    throw invalidRequest("snapshot must include files and parents");
   }
   return {
     tenantId,
@@ -1207,7 +1302,7 @@ function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySn
     recordedAt: requiredString(value.recordedAt, "snapshot.recordedAt"),
     taskId: requiredString(value.taskId, "snapshot.taskId"),
     files: value.files.map((file) => {
-      if (!isRecord(file)) throw new Error("snapshot file must be an object");
+      if (!isRecord(file)) throw invalidRequest("snapshot file must be an object");
       const path = requiredRepositoryPath(file.path, "snapshot.file.path");
       const size = typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0;
       return { path, blobSha: requiredGitSha(file.blobSha, "snapshot.file.blobSha"), size };
@@ -1216,16 +1311,16 @@ function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySn
 }
 
 function parseRepositorySourceObservation(value: unknown, tenantId: string): RepositorySourceObservation {
-  if (!isRecord(value)) throw new Error("GitHub observation must be an object");
+  if (!isRecord(value)) throw invalidRequest("GitHub observation must be an object");
   const kind = requiredString(value.kind, "observation.kind");
   if (kind === "codeowners") {
-    if (!Array.isArray(value.entries)) throw new Error("CODEOWNERS observation entries must be an array");
+    if (!Array.isArray(value.entries)) throw invalidRequest("CODEOWNERS observation entries must be an array");
     return {
       tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
       commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
       path: requiredRepositoryPath(value.path, "observation.path"),
       entries: value.entries.map((entry) => {
-        if (!isRecord(entry) || !Array.isArray(entry.owners)) throw new Error("CODEOWNERS entry is invalid");
+        if (!isRecord(entry) || !Array.isArray(entry.owners)) throw invalidRequest("CODEOWNERS entry is invalid");
         return {
           pattern: requiredString(entry.pattern, "entry.pattern"),
           owners: entry.owners.map((owner) => requiredString(owner, "entry.owner"))
@@ -1235,14 +1330,14 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
     };
   }
   if (kind === "package_manifest") {
-    if (!Array.isArray(value.dependencies)) throw new Error("package manifest dependencies must be an array");
+    if (!Array.isArray(value.dependencies)) throw invalidRequest("package manifest dependencies must be an array");
     return {
       tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
       commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
       path: requiredRepositoryPath(value.path, "observation.path"),
       ecosystem: requiredString(value.ecosystem, "observation.ecosystem"),
       dependencies: value.dependencies.map((dependency) => {
-        if (!isRecord(dependency)) throw new Error("package dependency must be an object");
+        if (!isRecord(dependency)) throw invalidRequest("package dependency must be an object");
         return {
           name: requiredString(dependency.name, "dependency.name"),
           ...(typeof dependency.version === "string" ? { version: dependency.version } : {})
@@ -1254,7 +1349,7 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
   }
   if (kind === "service_definition") {
     const dependsOnServices = Array.isArray(value.dependsOnServices) ? value.dependsOnServices.map((dependency) => {
-      if (!isRecord(dependency)) throw new Error("service dependency must be an object");
+      if (!isRecord(dependency)) throw invalidRequest("service dependency must be an object");
       return {
         source: requiredString(dependency.source, "observation.dependency.source"),
         externalId: requiredString(dependency.externalId, "observation.dependency.externalId"),
@@ -1305,14 +1400,14 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
     };
   }
   if (kind === "move_candidate") {
-    if (!Array.isArray(value.candidates)) throw new Error("move candidates must be an array");
+    if (!Array.isArray(value.candidates)) throw invalidRequest("move candidates must be an array");
     return {
       tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
       commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
       candidates: value.candidates.map((candidate) => {
-        if (!isRecord(candidate) || !Array.isArray(candidate.matchingSignatureHashes)) throw new Error("move candidate is invalid");
+        if (!isRecord(candidate) || !Array.isArray(candidate.matchingSignatureHashes)) throw invalidRequest("move candidate is invalid");
         const similarity = typeof candidate.similarity === "number" ? candidate.similarity : Number.NaN;
-        if (!Number.isFinite(similarity) || similarity < 0 || similarity > 1) throw new Error("move candidate similarity is invalid");
+        if (!Number.isFinite(similarity) || similarity < 0 || similarity > 1) throw invalidRequest("move candidate similarity is invalid");
         return {
           oldPath: requiredRepositoryPath(candidate.oldPath, "candidate.oldPath"),
           newPath: requiredRepositoryPath(candidate.newPath, "candidate.newPath"), similarity,
@@ -1322,7 +1417,9 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
       recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
     };
   }
-  if (kind !== "pull_request" && kind !== "issue") throw new Error("GitHub observation kind must be pull_request, issue, or codeowners");
+  if (kind !== "pull_request" && kind !== "issue") {
+    throw invalidRequest("repository source observation kind is unsupported");
+  }
   const positiveIntegerArray = (input: unknown, name: string): number[] => Array.isArray(input)
     ? input.map((item) => requiredPositiveInteger(item, name))
     : [];
@@ -1351,15 +1448,17 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
   const reason = typeof value.reason === "string" && value.reason.trim() ? value.reason.trim() : undefined;
   if (type === "review_assertion") {
     const decision = requiredString(value.decision, "command.decision");
-    if (decision !== "accept" && decision !== "reject" && decision !== "retract") throw new Error("unsupported assertion review decision");
+    if (decision !== "accept" && decision !== "reject" && decision !== "retract") {
+      throw invalidRequest("unsupported assertion review decision");
+    }
     const rejectionCode = typeof value.rejectionCode === "string" ? value.rejectionCode : undefined;
     if (decision === "reject") {
-      if (!reason) throw new Error("assertion rejection reason is required");
+      if (!reason) throw invalidRequest("assertion rejection reason is required");
       if (!rejectionCode || !["incorrect_relationship", "insufficient_evidence", "unsupported_explanation", "other"].includes(rejectionCode)) {
-        throw new Error("assertion rejection code is required");
+        throw invalidRequest("assertion rejection code is required");
       }
     } else if (rejectionCode) {
-      throw new Error("assertion rejection code is only valid for rejection decisions");
+      throw invalidRequest("assertion rejection code is only valid for rejection decisions");
     }
     return {
       type,
@@ -1371,7 +1470,7 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
   }
   if (type === "relate_assertions") {
     const relation = requiredString(value.relation, "command.relation");
-    if (relation !== "supports" && relation !== "contradicts") throw new Error("unsupported assertion relation");
+    if (relation !== "supports" && relation !== "contradicts") throw invalidRequest("unsupported assertion relation");
     return {
       type, relation,
       sourceAssertionId: requiredString(value.sourceAssertionId, "command.sourceAssertionId"),
@@ -1387,23 +1486,23 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     };
   }
   if (type === "redact_observation") {
-    if (!reason) throw new Error("redaction reason is required");
+    if (!reason) throw invalidRequest("redaction reason is required");
     return {
       type, observationId: requiredString(value.observationId, "command.observationId"), reason,
       ...(Array.isArray(value.commitShas) ? { commitShas: value.commitShas.map((sha) => requiredGitSha(sha, "command.commitSha")) } : {})
     };
   }
   if (type === "erase_person") {
-    if (!reason) throw new Error("erasure reason is required");
+    if (!reason) throw invalidRequest("erasure reason is required");
     return { type, entityId: requiredString(value.entityId, "command.entityId"), reason };
   }
   if (type === "tombstone_repository") {
-    if (!reason) throw new Error("tombstone reason is required");
+    if (!reason) throw invalidRequest("tombstone reason is required");
     return { type, repository: requiredString(value.repository, "command.repository"), reason };
   }
   if (type === "grant_repository_access") {
     const role = requiredString(value.role, "command.role");
-    if (role !== "reader" && role !== "writer" && role !== "admin") throw new Error("unsupported repository role");
+    if (role !== "reader" && role !== "writer" && role !== "admin") throw invalidRequest("unsupported repository role");
     return {
       type, repository: requiredString(value.repository, "command.repository"),
       principalId: requiredString(value.principalId, "command.principalId"), role
@@ -1412,10 +1511,10 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
   if (type === "assign_relationship") {
     if (!reason) throw new Error("relationship explanation is required");
     const entity = (input: unknown, name: string) => {
-      if (!isRecord(input)) throw new Error(`${name} must be an object`);
+      if (!isRecord(input)) throw invalidRequest(`${name} must be an object`);
       const kind = requiredString(input.kind, `${name}.kind`);
       if (!ontologyNodeKinds.includes(kind as OntologyNodeKind)) {
-        throw new Error(`${name}.kind is unsupported`);
+        throw invalidRequest(`${name}.kind is unsupported`);
       }
       return {
         kind: kind as OntologyNodeKind,
@@ -1425,7 +1524,9 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     };
     const qualifiers = isRecord(value.qualifiers)
       ? Object.fromEntries(Object.entries(value.qualifiers).map(([key, item]) => {
-          if (!["string", "number", "boolean"].includes(typeof item)) throw new Error(`qualifier ${key} has an unsupported value`);
+          if (!["string", "number", "boolean"].includes(typeof item)) {
+            throw invalidRequest(`qualifier ${key} has an unsupported value`);
+          }
           return [key, item as string | number | boolean];
         }))
       : undefined;
@@ -1435,23 +1536,23 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
       object: entity(value.object, "command.object"), ...(qualifiers ? { qualifiers } : {}), reason
     };
   }
-  throw new Error("unsupported ontology command");
+  throw invalidRequest("unsupported ontology command");
 }
 
 function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
-  if (!Array.isArray(value)) throw new Error("analyses must be an array");
+  if (!Array.isArray(value)) throw invalidRequest("analyses must be an array");
   return value.map((analysis) => {
     if (!isRecord(analysis) || !Array.isArray(analysis.symbols) || !Array.isArray(analysis.imports) || !Array.isArray(analysis.edges)) {
-      throw new Error("blob analysis must include symbols, imports, and edges");
+      throw invalidRequest("blob analysis must include symbols, imports, and edges");
     }
     const parserVersion = requiredString(analysis.parserVersion, "analysis.parserVersion");
-    if (parserVersion !== ONTOLOGY_PARSER_VERSION) throw new Error("unsupported ontology parser version");
+    if (parserVersion !== ONTOLOGY_PARSER_VERSION) throw invalidRequest("unsupported ontology parser version");
     return {
       blobSha: requiredGitSha(analysis.blobSha, "analysis.blobSha"),
       parserVersion,
       ...(typeof analysis.language === "string" && analysis.language.trim() ? { language: analysis.language.trim() } : {}),
       symbols: analysis.symbols.map((symbol) => {
-        if (!isRecord(symbol)) throw new Error("symbol must be an object");
+        if (!isRecord(symbol)) throw invalidRequest("symbol must be an object");
         return {
           moniker: requiredString(symbol.moniker, "symbol.moniker"),
           name: requiredString(symbol.name, "symbol.name"),
@@ -1462,14 +1563,14 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
         };
       }),
       imports: analysis.imports.map((item) => {
-        if (!isRecord(item)) throw new Error("import must be an object");
+        if (!isRecord(item)) throw invalidRequest("import must be an object");
         return { specifier: requiredString(item.specifier, "import.specifier"), line: requiredPositiveInteger(item.line, "import.line") };
       }),
       edges: analysis.edges.map((edge) => {
-        if (!isRecord(edge)) throw new Error("symbol edge must be an object");
+        if (!isRecord(edge)) throw invalidRequest("symbol edge must be an object");
         const kind = requiredString(edge.kind, "edge.kind");
         if (!(["calls", "imports", "references", "extends"] as const).includes(kind as "calls")) {
-          throw new Error("unsupported symbol edge kind");
+          throw invalidRequest("unsupported symbol edge kind");
         }
         return {
           fromMoniker: requiredString(edge.fromMoniker, "edge.fromMoniker"),
@@ -1484,11 +1585,11 @@ function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
 }
 
 function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: string): OntologyAssertionBatch {
-  if (!isRecord(value)) throw new Error("assertionBatch must be an object");
+  if (!isRecord(value)) throw invalidRequest("assertionBatch must be an object");
   const commitSha = requiredGitSha(value.commitSha, "assertionBatch.commitSha");
-  if (commitSha !== task.metadata.commitSha) throw new Error("assertion batch commit does not match task source");
+  if (commitSha !== task.metadata.commitSha) throw invalidRequest("assertion batch commit does not match task source");
   const evidenceFingerprint = requiredString(value.evidenceFingerprint, "assertionBatch.evidenceFingerprint");
-  if (evidenceFingerprint !== task.metadata.evidenceFingerprint) throw new Error("assertion batch evidence does not match task source");
+  if (evidenceFingerprint !== task.metadata.evidenceFingerprint) throw invalidRequest("assertion batch evidence does not match task source");
   const repository = requiredString(task.metadata.repository, "task.repository");
   const evidenceObservationIds = Array.isArray(value.evidenceObservationIds)
     ? value.evidenceObservationIds.map((id) => requiredString(id, "assertionBatch.evidenceObservationIds"))
@@ -1497,7 +1598,7 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
     ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
     : [];
   if (JSON.stringify([...evidenceObservationIds].sort()) !== JSON.stringify([...expectedObservationIds].sort())) {
-    throw new Error("assertion batch source evidence does not match task source");
+    throw invalidRequest("assertion batch source evidence does not match task source");
   }
   const rawOutput = parseGeneratedOntology(value.rawOutput);
   const sourcePullRequestNumbers = Array.isArray(task.metadata.sourcePullRequestNumbers)
@@ -1528,36 +1629,36 @@ function parseOntologyAssertionBatch(value: unknown, task: BoardTask, tenantId: 
 
 function requiredRepositoryPath(value: unknown, field: string): string {
   const path = requiredString(value, field);
-  if (path.startsWith("/") || path.split("/").includes("..")) throw new Error(`${field} must be repository-relative`);
+  if (path.startsWith("/") || path.split("/").includes("..")) throw invalidRequest(`${field} must be repository-relative`);
   return path;
 }
 
 function requiredIssueText(value: unknown, field: string): string {
   const text = requiredString(value, field).replace(/\s+/g, " ");
-  if (text.length > 500) throw new Error(`${field} must not exceed 500 characters`);
+  if (text.length > 500) throw invalidRequest(`${field} must not exceed 500 characters`);
   return text;
 }
 
 function requiredFeatureText(value: unknown, field: string): string {
   const text = requiredString(value, field).replace(/\s+/g, " ");
-  if (text.length > 200) throw new Error(`${field} must not exceed 200 characters`);
+  if (text.length > 200) throw invalidRequest(`${field} must not exceed 200 characters`);
   return text;
 }
 
 function requiredGitShaPrefix(value: unknown, field: string): string {
   const sha = requiredString(value, field).toLowerCase();
-  if (!/^[a-f0-9]{7,40}$/.test(sha)) throw new Error(`${field} must be a 7-40 character Git SHA`);
+  if (!/^[a-f0-9]{7,40}$/.test(sha)) throw invalidRequest(`${field} must be a 7-40 character Git SHA`);
   return sha;
 }
 
 function requiredAssertionStatus(value: string): "proposed" | "active" | "rejected" | "superseded" | "retracted" {
   if (value === "proposed" || value === "active" || value === "rejected" || value === "superseded" || value === "retracted") return value;
-  throw new Error("unsupported assertion status");
+  throw invalidRequest("unsupported assertion status");
 }
 
 function requiredContextOperation(value: string): RepositoryContextOperation {
   if (value === "lookup" || value === "counterfactual") return value;
-  throw new Error("operation must be lookup or counterfactual");
+  throw invalidRequest("operation must be lookup or counterfactual");
 }
 
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
@@ -1586,13 +1687,13 @@ async function readRawBody(request: IncomingMessage, maximumBytes = MAX_WEBHOOK_
 
 function parseJsonObject(rawBody: Uint8Array): Record<string, unknown> {
   const value = parseJsonValue(rawBody);
-  if (!isRecord(value)) throw new Error("request body must be a JSON object");
+  if (!isRecord(value)) throw invalidRequest("request body must be a JSON object");
   return value;
 }
 
 function parseJsonValue(rawBody: Uint8Array): unknown {
   let value: unknown;
-  try { value = JSON.parse(Buffer.from(rawBody).toString("utf8")); } catch { throw new Error("request body is not valid JSON"); }
+  try { value = JSON.parse(Buffer.from(rawBody).toString("utf8")); } catch { throw invalidRequest("request body is not valid JSON"); }
   return value;
 }
 
@@ -1605,18 +1706,31 @@ function firstHeader(value: string | readonly string[] | undefined): string | un
 }
 
 function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0) throw new Error(`${field} must be a non-empty string`);
+  if (typeof value !== "string" || value.trim().length === 0) throw invalidRequest(`${field} must be a non-empty string`);
   return value.trim();
 }
 
 function requiredGitSha(value: unknown, field: string): string {
   const sha = requiredString(value, field);
-  if (!/^[a-f0-9]{40}$/i.test(sha)) throw new Error(`${field} must be a full Git SHA`);
+  if (!/^[a-f0-9]{40}$/i.test(sha)) throw invalidRequest(`${field} must be a full Git SHA`);
   return sha;
 }
 
+function requiredRepositoryName(value: unknown, field: string): string {
+  const repository = requiredString(value, field);
+  const segments = repository.split("/");
+  if (
+    segments.length !== 2 || segments.some((segment) =>
+      !segment || segment === "." || segment === ".." || !/^[A-Za-z0-9_.-]+$/.test(segment)
+    )
+  ) {
+    throw invalidRequest(`${field} must be owner/name without traversal segments`);
+  }
+  return repository;
+}
+
 function requiredPositiveInteger(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw new Error(`${field} must be a positive integer`);
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) throw invalidRequest(`${field} must be a positive integer`);
   return value;
 }
 
@@ -1631,7 +1745,44 @@ function json(response: ServerResponse, statusCode: number, payload: unknown): v
   response.end(statusCode === 204 ? undefined : JSON.stringify(payload, null, 2));
 }
 
-class RequestBodyTooLargeError extends Error {}
+class ApiError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly code: string,
+    message: string,
+    readonly expose = true
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+class RequestBodyTooLargeError extends ApiError {
+  constructor(message: string) {
+    super(413, "payload_too_large", message);
+    this.name = "RequestBodyTooLargeError";
+  }
+}
+
+function invalidRequest(message: string): ApiError {
+  return new ApiError(400, "invalid_request", message);
+}
+
+function staleLease(): ApiError {
+  return new ApiError(409, "stale_lease", "stale worker lease");
+}
+
+function httpError(error: unknown): ApiError {
+  if (error instanceof ApiError) return error;
+  if (error instanceof DomainError) {
+    const statusCode = error.code === "invalid_argument" ? 400
+      : error.code === "not_found" ? 404
+        : error.code === "forbidden" ? 403
+          : 409;
+    return new ApiError(statusCode, error.code, error.message);
+  }
+  return new ApiError(500, "internal_error", "internal server error", false);
+}
 
 class DeliveryCache {
   private readonly ids = new Set<string>();

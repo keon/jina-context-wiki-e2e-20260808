@@ -21,7 +21,7 @@ sequenceDiagram
     else supported PR or issue event
         API->>API: Plan tasks and dependencies
         API->>API: Reduce readiness and create outbox messages
-        API->>DB: Commit delivery ID + board snapshot
+        API->>DB: Lock, load latest snapshot, commit delivery ID + new snapshot
         API-->>GitHub: 202 accepted
     else ignored event
         API->>DB: Commit delivery ID

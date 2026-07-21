@@ -84,6 +84,8 @@ export interface OntologyBuildRequest {
   /** Immutable source observations included in this generation's evidence fingerprint. */
   readonly sourceEvidence?: readonly OntologySourceEvidence[];
   readonly taskId: string;
+  /** Cancels further external work when the caller loses its execution lease. */
+  readonly signal?: AbortSignal;
 }
 
 export interface OntologySourceEvidence {

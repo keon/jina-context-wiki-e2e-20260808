@@ -1,32 +1,31 @@
-export const ontologyTaskTypeDefinitions = [
+import { entityId, type EntityId } from "@jina/shared-kernel";
+
+const ontologyTaskSpecs = [
   {
-    type: "ontology_build",
-    kind: "aggregate",
-    defaultAssigneeRole: "system",
+    type: "ontology_build", kind: "aggregate", defaultAssigneeRole: "system", keySuffix: "root",
     description: "Coordinates raw-data aggregation, semantic assertion derivation, and graph projection."
   },
   {
-    type: "ontology_ingest",
-    kind: "dispatchable",
-    defaultAssigneeRole: "ontology_worker",
+    type: "ontology_ingest", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "ingest",
     dispatchTopic: "run-ontology-ingest",
     description: "Aggregates an immutable repository snapshot and reuses versioned, content-addressed structural facts."
   },
   {
-    type: "ontology_assert",
-    kind: "dispatchable",
-    defaultAssigneeRole: "ontology_worker",
-    dispatchTopic: "run-ontology-assert",
+    type: "ontology_assert", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "assert",
+    dispatchTopic: "run-ontology-assert", dependsOn: "ontology_ingest",
     description: "Records cited model output and applies registry-validated semantic assertions with provenance."
   },
   {
-    type: "ontology_project",
-    kind: "dispatchable",
-    defaultAssigneeRole: "ontology_worker",
-    dispatchTopic: "run-ontology-project",
+    type: "ontology_project", kind: "dispatchable", defaultAssigneeRole: "ontology_worker", keySuffix: "project",
+    dispatchTopic: "run-ontology-project", dependsOn: "ontology_assert",
     description: "Builds a disposable dashboard graph from canonical code facts and active assertions."
   }
 ] as const;
+
+export const ontologyTaskTypeDefinitions = ontologyTaskSpecs.map(({ type, kind, defaultAssigneeRole, description, ...spec }) => ({
+  type, kind, defaultAssigneeRole, description,
+  ...("dispatchTopic" in spec ? { dispatchTopic: spec.dispatchTopic } : {})
+}));
 
 /** Intake events that create workflow tasks; these are not board task-to-task dependencies. */
 export const ontologyTaskTypeTriggers = [
@@ -80,41 +79,82 @@ export const ontologyTaskTypeTriggers = [
   }
 ] as const;
 
-/** Static topology of the board-visible Ontology workflow chunks. */
 export const ontologyTaskTypeDependencies = [
-  {
+  ...ontologyTaskSpecs.slice(1).map((spec) => ({
     workflow: "ontology_build",
     taskType: "ontology_build",
-    dependsOnTaskType: "ontology_ingest",
+    dependsOnTaskType: spec.type,
     relationship: "blocks",
     required: true
-  },
-  {
+  })),
+  ...ontologyTaskSpecs.flatMap((spec) => "dependsOn" in spec ? [{
     workflow: "ontology_build",
-    taskType: "ontology_build",
-    dependsOnTaskType: "ontology_assert",
+    taskType: spec.type,
+    dependsOnTaskType: spec.dependsOn,
     relationship: "blocks",
     required: true
-  },
-  {
-    workflow: "ontology_build",
-    taskType: "ontology_build",
-    dependsOnTaskType: "ontology_project",
-    relationship: "blocks",
-    required: true
-  },
-  {
-    workflow: "ontology_build",
-    taskType: "ontology_assert",
-    dependsOnTaskType: "ontology_ingest",
-    relationship: "blocks",
-    required: true
-  },
-  {
-    workflow: "ontology_build",
-    taskType: "ontology_project",
-    dependsOnTaskType: "ontology_assert",
-    relationship: "blocks",
-    required: true
-  }
-] as const;
+  }] : [])
+];
+
+export type PlannedOntologyTaskId = EntityId<"task">;
+
+export interface PlannedOntologyTask {
+  readonly id: PlannedOntologyTaskId;
+  readonly type: typeof ontologyTaskSpecs[number]["type"];
+  readonly kind: "aggregate" | "dispatchable";
+  readonly title: string;
+  readonly assigneeRole: string;
+  readonly dedupeKey: string;
+  readonly dispatchTopic?: string;
+  readonly parentTaskId?: PlannedOntologyTaskId;
+  readonly metadata: Readonly<Record<string, unknown>>;
+}
+
+export interface OntologyBuildPlan {
+  readonly rootTaskId: PlannedOntologyTaskId;
+  readonly tasks: readonly PlannedOntologyTask[];
+  readonly dependencies: readonly {
+    readonly taskId: PlannedOntologyTaskId;
+    readonly dependsOnTaskId: PlannedOntologyTaskId;
+    readonly relationship: "blocks";
+    readonly required: true;
+    readonly blocksParentCompletion: true;
+  }[];
+}
+
+export function planOntologyBuild(input: {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly requestKey: string;
+}): OntologyBuildPlan {
+  const prefix = `task_ontology:${input.tenantId}:${input.repository}:${input.ref}:${input.requestKey}`;
+  const ids = {
+    ontology_build: entityId<"task">(`${prefix}:root`),
+    ontology_ingest: entityId<"task">(`${prefix}:ingest`),
+    ontology_assert: entityId<"task">(`${prefix}:assert`),
+    ontology_project: entityId<"task">(`${prefix}:project`)
+  };
+  const titles = {
+    ontology_build: `Build Ontology for ${input.repository}@${input.ref}`,
+    ontology_ingest: `Aggregate raw repository data for ${input.repository}@${input.ref}`,
+    ontology_assert: `Derive assertions for ${input.repository}@${input.ref}`,
+    ontology_project: `Project Ontology for ${input.repository}@${input.ref}`
+  };
+  const metadata = { tenantId: input.tenantId, repository: input.repository, ref: input.ref, requestKey: input.requestKey };
+  return {
+    rootTaskId: ids.ontology_build,
+    tasks: ontologyTaskSpecs.map((spec) => ({
+      id: ids[spec.type], type: spec.type, kind: spec.kind, title: titles[spec.type],
+      assigneeRole: spec.defaultAssigneeRole,
+      dedupeKey: `ontology:${input.tenantId}:${input.repository}:${input.ref}:${input.requestKey}:${spec.keySuffix}`,
+      ...("dispatchTopic" in spec ? { dispatchTopic: spec.dispatchTopic } : {}),
+      ...(spec.type === "ontology_build" ? {} : { parentTaskId: ids.ontology_build }),
+      metadata
+    })),
+    dependencies: ontologyTaskSpecs.flatMap((spec) => "dependsOn" in spec ? [{
+      taskId: ids[spec.type], dependsOnTaskId: ids[spec.dependsOn], relationship: "blocks" as const,
+      required: true as const, blocksParentCompletion: true as const
+    }] : [])
+  };
+}

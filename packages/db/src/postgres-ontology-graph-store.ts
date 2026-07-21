@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_REGISTRY_VERSION,
@@ -43,6 +44,7 @@ import {
   type StoredAssertion
 } from "@jina/ontology";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { DomainError } from "@jina/shared-kernel";
 
 interface GraphRow {
   id: string;
@@ -209,6 +211,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertRepositoryWritable(client, graph.tenantId, graph.repository);
       await insertOntologyGraph(client, graph);
       if (graph.generator.executor === "projection") {
         await client.query(
@@ -282,11 +285,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      const repositoryFilter = await client.query(
-        `select 1 from jina_ontology.erasure_filters where tenant_id=$1 and kind='repository' and value=$2`,
-        [snapshot.tenantId, snapshot.repository]
-      );
-      if (repositoryFilter.rowCount) throw new Error("repository is tombstoned");
+      await assertRepositoryWritable(client, snapshot.tenantId, snapshot.repository);
       const filtered = await client.query<{ kind: string; value: string }>(
         `select kind,value from jina_ontology.erasure_filters
          where tenant_id=$1 and ((kind='identity' and value=$2) or (kind='commit' and value=$3))`,
@@ -432,6 +431,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertRepositoryWritable(client, scope.tenantId, scope.repository);
       for (const analysis of analyses) {
         const known = await client.query(
           `select 1 from jina_ontology.commit_manifest($1,$2,$3)
@@ -491,6 +491,11 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const observationIds: string[] = [];
     try {
       await client.query("begin");
+      const scopes = [...new Set(observations.map((observation) => `${observation.tenantId}\0${observation.repository}`))].sort();
+      for (const scope of scopes) {
+        const [tenantId, repository] = scope.split("\0");
+        await assertRepositoryWritable(client, tenantId!, repository!);
+      }
       for (const observation of observations) {
         const normalized = normalizeSourceObservation(observation);
         const source = sourceObservationProvider(observation);
@@ -750,6 +755,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertRepositoryWritable(client, batch.tenantId, batch.repository);
       const inserted = await client.query(
         `insert into jina_ontology.observations
           (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
@@ -839,7 +845,18 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
 
   async project(request: OntologyProjectionRequest): Promise<OntologyGraph> {
     await this.initialize();
-    await this.pool.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [request.tenantId, request.repository]);
+    const guard = await this.pool.connect();
+    try {
+      await guard.query("begin");
+      await assertRepositoryWritable(guard, request.tenantId, request.repository);
+      await guard.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [request.tenantId, request.repository]);
+      await guard.query("commit");
+    } catch (error) {
+      await guard.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      guard.release();
+    }
     const commit = await this.pool.query<{ tree_sha: string; parents: string[]; source_observation_id: string }>(
       `select tree_sha,parents,source_observation_id from jina_ontology.commits
        where tenant_id=$1 and repository=$2 and sha=$3`,
@@ -917,6 +934,10 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       await authorizeOntologyCommand(client, tenantId, actorId, command, actorIsTenantAdmin);
       if (command.type === "review_assertion" && command.decision === "reject" && (!command.reason || !command.rejectionCode)) {
         throw new Error("assertion rejection requires a reason and rejection code");
+      }
+      if ("repository" in command && command.repository) {
+        if (command.type === "tombstone_repository") await lockRepositoryWrite(client, tenantId, command.repository);
+        else await assertRepositoryWritable(client, tenantId, command.repository);
       }
       await insertAudit(client, {
         id: auditId, tenantId, actorId, action: command.type, input: command, result: "accepted", now,
@@ -1247,7 +1268,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await assertRepositoryWritable(client, tenantId, repository);
       if (consumers.length === 3) await client.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [tenantId, repository]);
+      const claimToken = `projection:${repository}:${randomUUID()}`;
       const claimed = await client.query<{ id: string; event_type: string; consumer: string; payload: Record<string, unknown> }>(
         `with candidates as (
            select id from jina_ontology.outbox
@@ -1258,9 +1281,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
              and payload->>'refName'=$4
            order by created_at,id for update skip locked limit 1000
          )
-         update jina_ontology.outbox o set claimed_by='projection:' || $3,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
+         update jina_ontology.outbox o set claimed_by=$6,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
          from candidates where o.id=candidates.id returning o.id,o.event_type,o.consumer,o.payload`,
-        [tenantId, now, repository, ref, consumers]
+        [tenantId, now, repository, ref, consumers, claimToken]
       );
       const head = await client.query<{ commit_sha: string }>(
         `select commit_sha from jina_ontology.refs where tenant_id=$1 and repository=$2 and ref_name=$3`,
@@ -1359,8 +1382,8 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
       if (claimed.rows.length) {
         await client.query(
           `update jina_ontology.outbox set processed_at=$2,claimed_by=null,claimed_at=null,claim_expires_at=null
-           where id=any($1::text[])`,
-          [claimed.rows.map((row) => row.id), now]
+           where id=any($1::text[]) and claimed_by=$3`,
+          [claimed.rows.map((row) => row.id), now, claimToken]
         );
       }
       await client.query("commit");
@@ -1389,7 +1412,7 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
     let processedEventCount = 0;
     const consumers = ["legacy", "manifest", "search", "reconciliation", "graph"] as const;
     for (const consumer of consumers) {
-      const claimOwner = `projection:${consumer}`;
+      const claimOwner = `projection:${consumer}:${randomUUID()}`;
       const claimed = await this.pool.query<{ id: string; repository: string | null }>(
         `with candidates as (
            select id,coalesce(payload->>'repoId',payload#>>'{scope,repository}') as repository
@@ -1645,7 +1668,9 @@ export class PostgresOntologyGraphStore implements OntologyGraphStore {
   async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
     await this.initialize();
     const startedAt = performance.now();
-    if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
+    if (!request.allowedRepositories.includes(request.repository)) {
+      throw new DomainError("repository access denied", "forbidden");
+    }
     const limit = Math.max(1, Math.min(request.limit ?? 50, 200));
     const refResult = await this.pool.query<{ ref_name: string; commit_sha: string }>(
       `select ref_name,commit_sha from jina_ontology.refs
@@ -1990,7 +2015,7 @@ async function authorizeOntologyCommand(
 ): Promise<void> {
   if (actorId.startsWith("svc:") || actorIsTenantAdmin) return;
   if (command.type === "merge_entities" || command.type === "unmerge_entities" || command.type === "erase_person") {
-    throw new Error("tenant administrator access required");
+    throw new DomainError("tenant administrator access required", "forbidden");
   }
 
   let repository: string | undefined;
@@ -2018,7 +2043,7 @@ async function authorizeOntologyCommand(
     repository = "repository" in command ? command.repository : undefined;
     requiresAdmin = command.type === "grant_repository_access" || command.type === "tombstone_repository";
   }
-  if (!repository) throw new Error("ontology command access denied");
+  if (!repository) throw new DomainError("ontology command access denied", "forbidden");
   const access = await client.query<{ role: "reader" | "writer" | "admin" }>(
     `select role from jina_ontology.repository_acl
      where tenant_id=$1 and repository=$2 and principal_id=$3`,
@@ -2026,7 +2051,7 @@ async function authorizeOntologyCommand(
   );
   const role = access.rows[0]?.role;
   if (!role || role === "reader" || (requiresAdmin && role !== "admin")) {
-    throw new Error("ontology command access denied");
+    throw new DomainError("ontology command access denied", "forbidden");
   }
 }
 
@@ -2156,6 +2181,20 @@ function outboxConsumers(eventType: string): readonly ("manifest" | "search" | "
     case "tombstone": return ["manifest", "search", "reconciliation", "graph"];
     default: return ["graph"];
   }
+}
+
+async function lockRepositoryWrite(client: PoolClient, tenantId: string, repository: string): Promise<void> {
+  await client.query("select pg_advisory_xact_lock(hashtext($1),hashtext($2))", [tenantId, repository]);
+}
+
+async function assertRepositoryWritable(client: PoolClient, tenantId: string, repository: string): Promise<void> {
+  await lockRepositoryWrite(client, tenantId, repository);
+  const tombstone = await client.query(
+    `select 1 from jina_ontology.erasure_filters
+     where tenant_id=$1 and kind='repository' and value=$2`,
+    [tenantId, repository]
+  );
+  if (tombstone.rowCount) throw new DomainError("repository is tombstoned", "conflict");
 }
 
 async function insertAudit(client: PoolClient, input: {
@@ -3360,6 +3399,9 @@ function cosine(left: readonly number[], right: readonly number[]): number {
 
 export const ONTOLOGY_SCHEMA_SQL = `
       create schema if not exists jina_ontology;
+      drop table if exists jina_ontology.commit_files;
+      drop table if exists jina_ontology.model_outputs;
+      drop table if exists jina_ontology.issue_traces;
       create table if not exists jina_ontology.graphs (
         id text primary key,
         tenant_id text not null,
@@ -3441,7 +3483,9 @@ export const ONTOLOGY_SCHEMA_SQL = `
         unique (tenant_id,source,external_id)
       );
       alter table jina_ontology.observations add column if not exists occurred_at timestamptz;
-      alter table jina_ontology.observations add column if not exists supersedes_id text references jina_ontology.observations(id);
+      alter table jina_ontology.observations drop constraint if exists observations_supersedes_same_tenant;
+      alter table jina_ontology.observations drop constraint if exists observations_supersedes_id_fkey;
+      alter table jina_ontology.observations drop column if exists supersedes_id;
       create index if not exists ontology_observations_work_item
         on jina_ontology.observations (tenant_id,repository,source,((payload->>'kind')),((payload->>'number')))
         where redacted_at is null and payload is not null;
@@ -3561,6 +3605,7 @@ export const ONTOLOGY_SCHEMA_SQL = `
         primary key (tenant_id,blob_sha,parser_version),
         foreign key (tenant_id,blob_sha) references jina_ontology.blobs(tenant_id,blob_sha)
       );
+      alter table jina_ontology.blob_analyses add column if not exists parsed_at timestamptz not null default now();
       create table if not exists jina_ontology.blob_symbols (
         tenant_id text not null,
         blob_sha text not null,
@@ -3827,10 +3872,6 @@ export const ONTOLOGY_SCHEMA_SQL = `
         on jina_ontology.assertions (tenant_id,repository,subject_id,predicate,object_id,qualifiers_hash)
         where status in ('proposed','active');
       do $$ begin
-        if not exists (select 1 from pg_constraint where conname='observations_supersedes_same_tenant') then
-          alter table jina_ontology.observations add constraint observations_supersedes_same_tenant
-            foreign key (tenant_id,supersedes_id) references jina_ontology.observations(tenant_id,id) not valid;
-        end if;
         if not exists (select 1 from pg_constraint where conname='commits_observation_same_tenant') then
           alter table jina_ontology.commits add constraint commits_observation_same_tenant
             foreign key (tenant_id,source_observation_id) references jina_ontology.observations(tenant_id,id) not valid;

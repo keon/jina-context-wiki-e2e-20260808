@@ -20,7 +20,6 @@ export interface CanonicalOutboxEvent {
   readonly attempts: number;
   readonly lastError?: string;
 }
-
 export interface ProjectionRebuildResult {
   readonly manifestFileCount: number;
   readonly searchDocumentCount: number;

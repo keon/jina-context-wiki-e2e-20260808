@@ -29,8 +29,6 @@ import {
   type GitHubSourceObservation,
   type RepositorySourceObservation,
   type OntologyAssertionBatch,
-  type OntologyBuildRequest,
-  type OntologyGraph,
   type OntologyIngestPlan,
   type OntologySourceEvidence,
   type OntologySourceIngestResult,
@@ -43,36 +41,70 @@ const SUPPORTED_TOPICS = [
   "run-research",
   "run-publish",
   "run-cleanup",
-  "run-ontology",
-  "run-ontology-prepare",
-  "run-ontology-generate",
   "run-ontology-ingest",
   "run-ontology-assert",
   "run-ontology-project"
 ] as const;
 type WorkerTopic = typeof SUPPORTED_TOPICS[number];
+const LEGACY_TOPIC_REPLACEMENTS: Readonly<Record<string, readonly WorkerTopic[]>> = {
+  "run-ontology": ["run-ontology-ingest", "run-ontology-assert", "run-ontology-project"],
+  "run-ontology-prepare": ["run-ontology-ingest"],
+  "run-ontology-generate": ["run-ontology-assert", "run-ontology-project"]
+};
 
-interface ClaimedWork {
+interface WorkMetadataByTopic {
+  readonly "run-review": { readonly repository: string; readonly pullRequestNumber: number };
+  readonly "run-research": { readonly question?: string; readonly sourceUrls?: readonly string[] };
+  readonly "run-publish": Record<string, unknown>;
+  readonly "run-cleanup": Record<string, unknown>;
+  readonly "run-ontology-ingest": { readonly tenantId: string; readonly repository: string; readonly ref: string };
+  readonly "run-ontology-assert": {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly ref: string;
+    readonly commitSha: string;
+    readonly evidenceFingerprint: string;
+    readonly analysisPaths?: readonly string[];
+    readonly problemEvidencePullRequestNumbers?: readonly number[];
+    readonly sourcePullRequestNumbers?: readonly number[];
+    readonly resolvedPullRequestNumbers?: readonly number[];
+  };
+  readonly "run-ontology-project": { readonly tenantId: string; readonly repository: string; readonly ref: string };
+}
+
+type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic ? {
+  readonly topic: T;
   readonly message: {
     readonly id: string;
-    readonly topic: WorkerTopic;
+    readonly topic: T;
     readonly leaseId: string;
     readonly leaseExpiresAt: string;
   };
   readonly task: {
     readonly id: string;
-    readonly metadata: Record<string, unknown>;
+    readonly metadata: WorkMetadataByTopic[T];
   };
-}
+} : never;
 
 type WorkResult =
   | {
       readonly outcome: "done";
-      readonly graph?: OntologyGraph;
       readonly assertionBatch?: OntologyAssertionBatch;
       readonly result?: Record<string, unknown>;
     }
   | { readonly outcome: "failed"; readonly reason: string };
+
+interface LeaseExecutionState {
+  readonly controller: AbortController;
+  lostReason?: string;
+}
+
+class LeaseLostError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LeaseLostError";
+  }
+}
 
 const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
@@ -82,24 +114,30 @@ const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsOntologyProjections = topics.some((topic) => topic.startsWith("run-ontology"));
-const ontologyExecutor = topics.some((topic) => topic === "run-ontology" || topic === "run-ontology-generate" || topic === "run-ontology-assert")
+const ontologyExecutor = topics.includes("run-ontology-assert")
   ? new DaytonaCodexOntologyExecutor()
   : undefined;
 let stopping = false;
 let active = false;
+let activeLease: LeaseExecutionState | undefined;
 let lastApiSuccessAt: string | undefined;
 let lastApiError: string | undefined;
+let lastApiErrorAt: string | undefined;
+let consecutiveApiFailures = 0;
 let lastWork: {
   readonly topic: WorkerTopic;
-  readonly outcome: WorkResult["outcome"];
+  readonly outcome: WorkResult["outcome"] | "lease_lost";
   readonly finishedAt: string;
   readonly failureCategory?: WorkerFailureCategory;
 } | undefined;
 
 const server = createServer((request, response) => {
   if (request.url === "/health" || request.url === "/healthz") {
-    response.writeHead(lastApiSuccessAt ? 200 : 503, { "content-type": "application/json" });
-    response.end(JSON.stringify({ ok: Boolean(lastApiSuccessAt), workerId, topics, active, lastApiSuccessAt, lastWork }));
+    const ok = Boolean(lastApiSuccessAt) && !lastApiError;
+    response.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      ok, workerId, topics, active, lastApiSuccessAt, lastApiError, lastApiErrorAt, consecutiveApiFailures, lastWork
+    }));
     return;
   }
   response.writeHead(404, { "content-type": "application/json" });
@@ -118,7 +156,7 @@ async function poll(): Promise<void> {
       if (work) await execute(work);
       if (drainsOntologyProjections) await drainOntologyProjectionEvents();
     } catch (error) {
-      lastApiError = errorMessage(error);
+      recordApiFailure(error);
       console.error("worker poll failed", lastApiError);
     }
     if (!stopping) await delay(pollIntervalMs);
@@ -127,88 +165,74 @@ async function poll(): Promise<void> {
 
 async function drainOntologyProjectionEvents(): Promise<void> {
   await internalApiJson("/internal/ontology/outbox/drain", {});
+  recordApiSuccess();
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
   const response = await apiRequest("/internal/worker/claim", { workerId, topics });
   if (response.status === 204) {
-    lastApiSuccessAt = new Date().toISOString();
-    lastApiError = undefined;
+    recordApiSuccess(!drainsOntologyProjections);
     return undefined;
   }
   if (!response.ok) throw new Error(`claim failed with ${response.status}: ${await response.text()}`);
-  lastApiSuccessAt = new Date().toISOString();
-  lastApiError = undefined;
-  return await response.json() as ClaimedWork;
+  recordApiSuccess(!drainsOntologyProjections);
+  return parseClaimedWork(await response.json());
 }
 
 async function execute(work: ClaimedWork): Promise<void> {
   active = true;
+  const lease: LeaseExecutionState = { controller: new AbortController() };
+  activeLease = lease;
   const heartbeat = setInterval(() => {
     void renew(work).catch((error) => {
-      console.error("worker lease renewal failed", errorMessage(error));
+      loseLease(lease, error);
+      console.error("worker lease renewal failed", lease.lostReason);
     });
   }, heartbeatIntervalMs);
   heartbeat.unref();
 
-  let result: WorkResult;
+  let result: WorkResult | undefined;
   try {
     result = await executeTopic(work);
   } catch (error) {
-    result = { outcome: "failed", reason: errorMessage(error).slice(0, 2_000) };
+    if (!lease.lostReason) result = { outcome: "failed", reason: errorMessage(error).slice(0, 2_000) };
   } finally {
     clearInterval(heartbeat);
   }
 
-  lastWork = {
-    topic: work.message.topic,
-    outcome: result.outcome,
-    finishedAt: new Date().toISOString(),
-    ...(result.outcome === "failed" ? { failureCategory: workerFailureCategory(result.reason) } : {})
-  };
-
   try {
+    if (lease.lostReason || !result) {
+      lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+      return;
+    }
     await complete(work, result);
+    lastWork = {
+      topic: work.message.topic,
+      outcome: result.outcome,
+      finishedAt: new Date().toISOString(),
+      ...(result.outcome === "failed" ? { failureCategory: workerFailureCategory(result.reason) } : {})
+    };
+  } catch (error) {
+    if (error instanceof LeaseLostError) {
+      loseLease(lease, error);
+      lastWork = { topic: work.message.topic, outcome: "lease_lost", finishedAt: new Date().toISOString() };
+      return;
+    }
+    throw error;
   } finally {
+    activeLease = undefined;
     active = false;
   }
 }
 
 async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
-  switch (work.message.topic) {
+  switch (work.topic) {
     case "run-ontology-ingest":
       return { outcome: "done", result: await runOntologyIngest(work) };
     case "run-ontology-assert":
       return await runOntologyAssertions(work);
     case "run-ontology-project":
       return { outcome: "done", result: { projected: true } };
-    case "run-ontology-prepare": {
-      const repository = requiredString(work.task.metadata.repository, "task repository");
-      const ref = requiredString(work.task.metadata.ref, "task ref");
-      const commit = await githubJson(`/repos/${repository}/commits/${encodeURIComponent(ref)}`);
-      return { outcome: "done", result: { commitSha: requiredGitSha(commit.sha, "GitHub commit SHA") } };
-    }
-    case "run-ontology": {
-      if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
-      const request: OntologyBuildRequest = {
-        tenantId: requiredString(work.task.metadata.tenantId, "task tenantId"),
-        repository: requiredString(work.task.metadata.repository, "task repository"),
-        ref: requiredString(work.task.metadata.ref, "task ref"),
-        taskId: work.task.id
-      };
-      return { outcome: "done", graph: await ontologyExecutor.build(request) };
-    }
-    case "run-ontology-generate": {
-      if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
-      const request: OntologyBuildRequest = {
-        tenantId: requiredString(work.task.metadata.tenantId, "task tenantId"),
-        repository: requiredString(work.task.metadata.repository, "task repository"),
-        ref: requiredString(work.task.metadata.ref, "task ref"),
-        commitSha: requiredGitSha(work.task.metadata.commitSha, "task commitSha"),
-        taskId: work.task.id
-      };
-      return { outcome: "done", graph: await ontologyExecutor.build(request) };
-    }
     case "run-review":
       return { outcome: "done", result: await runReview(work) };
     case "run-research":
@@ -227,10 +251,8 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   }
 }
 
-async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unknown>> {
-  const tenantId = requiredString(work.task.metadata.tenantId, "task tenantId");
-  const repository = requiredString(work.task.metadata.repository, "task repository");
-  const ref = requiredString(work.task.metadata.ref, "task ref");
+async function runOntologyIngest(work: ClaimedWork<"run-ontology-ingest">): Promise<Record<string, unknown>> {
+  const { tenantId, repository, ref } = work.task.metadata;
   const lease = { messageId: work.message.id, leaseId: work.message.leaseId };
   const [head, repositoryMetadata] = await Promise.all([
     githubJson(`/repos/${repository}/commits/${encodeURIComponent(ref)}`),
@@ -724,25 +746,13 @@ async function hydratePullRequestScope(
   return results.filter((number): number is number => number !== undefined).sort((a, b) => a - b);
 }
 
-async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
+async function runOntologyAssertions(work: ClaimedWork<"run-ontology-assert">): Promise<WorkResult> {
   if (!ontologyExecutor) throw new Error("ontology executor is not configured for this worker");
-  const tenantId = requiredString(work.task.metadata.tenantId, "task tenantId");
-  const repository = requiredString(work.task.metadata.repository, "task repository");
-  const ref = requiredString(work.task.metadata.ref, "task ref");
-  const commitSha = requiredGitSha(work.task.metadata.commitSha, "task commitSha");
-  const evidenceFingerprint = requiredString(work.task.metadata.evidenceFingerprint, "task evidenceFingerprint");
-  const focusPaths = stringArray(work.task.metadata.analysisPaths);
-  const problemEvidencePullRequestNumbers = Array.isArray(work.task.metadata.problemEvidencePullRequestNumbers)
-    ? work.task.metadata.problemEvidencePullRequestNumbers.map((value) =>
-        requiredPositiveInteger(value, "task problemEvidencePullRequestNumber")
-      )
-    : [];
-  const sourcePullRequestNumbers = Array.isArray(work.task.metadata.sourcePullRequestNumbers)
-    ? work.task.metadata.sourcePullRequestNumbers.map((value) => requiredPositiveInteger(value, "task sourcePullRequestNumber"))
-    : [];
-  const resolvedPullRequestNumbers = Array.isArray(work.task.metadata.resolvedPullRequestNumbers)
-    ? work.task.metadata.resolvedPullRequestNumbers.map((value) => requiredPositiveInteger(value, "task resolvedPullRequestNumber"))
-    : [];
+  const { tenantId, repository, ref, commitSha, evidenceFingerprint } = work.task.metadata;
+  const focusPaths = work.task.metadata.analysisPaths ?? [];
+  const problemEvidencePullRequestNumbers = work.task.metadata.problemEvidencePullRequestNumbers ?? [];
+  const sourcePullRequestNumbers = work.task.metadata.sourcePullRequestNumbers ?? [];
+  const resolvedPullRequestNumbers = work.task.metadata.resolvedPullRequestNumbers ?? [];
   const cache = await internalApiJson<{ readonly cached: Record<string, unknown> | null }>(
     "/internal/ontology/assertions/cached",
     {
@@ -769,8 +779,10 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
     focusPaths,
     problemEvidencePullRequestNumbers,
     sourceEvidence: evidence.evidence,
-    taskId: work.task.id
+    taskId: work.task.id,
+    ...(activeLease ? { signal: activeLease.controller.signal } : {})
   });
+  assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
   const assertions = assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers });
@@ -840,9 +852,8 @@ async function internalApiJson<T = Record<string, unknown>>(path: string, body: 
   return await response.json() as T;
 }
 
-async function runReview(work: ClaimedWork): Promise<Record<string, unknown>> {
-  const repository = requiredString(work.task.metadata.repository, "task repository");
-  const pullRequestNumber = requiredPositiveInteger(work.task.metadata.pullRequestNumber, "task pullRequestNumber");
+async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string, unknown>> {
+  const { repository, pullRequestNumber } = work.task.metadata;
   const [pullRequest, diff] = await Promise.all([
     githubJson(`/repos/${repository}/pulls/${pullRequestNumber}`),
     githubText(`/repos/${repository}/pulls/${pullRequestNumber}`, "application/vnd.github.v3.diff")
@@ -876,7 +887,7 @@ async function runReview(work: ClaimedWork): Promise<Record<string, unknown>> {
       },
       store: false
     }),
-    signal: AbortSignal.timeout(10 * 60 * 1000)
+    signal: requestSignal(10 * 60 * 1000)
   });
   if (!response.ok) throw new Error(`OpenAI review failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
   const payload = await response.json() as Record<string, unknown>;
@@ -896,9 +907,12 @@ async function renew(work: ClaimedWork): Promise<void> {
     messageId: work.message.id,
     leaseId: work.message.leaseId
   });
-  if (!response.ok) throw new Error(`renewal failed with ${response.status}: ${await response.text()}`);
-  lastApiSuccessAt = new Date().toISOString();
-  lastApiError = undefined;
+  if (!response.ok) {
+    const message = `renewal failed with ${response.status}: ${await response.text()}`;
+    if (response.status === 409) throw new LeaseLostError(message);
+    throw new Error(message);
+  }
+  recordApiSuccess(!drainsOntologyProjections);
 }
 
 async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
@@ -908,21 +922,22 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
     taskId: work.task.id,
     ...result
   });
-  if (!response.ok && response.status !== 409) {
+  if (response.status === 409) {
+    throw new LeaseLostError(`completion rejected after lease loss: ${await response.text()}`);
+  }
+  if (!response.ok) {
     throw new Error(`completion failed with ${response.status}: ${await response.text()}`);
   }
-  if (response.ok) {
-    lastApiSuccessAt = new Date().toISOString();
-    lastApiError = undefined;
-  }
+  recordApiSuccess(!drainsOntologyProjections);
 }
 
 function apiRequest(path: string, body: unknown): Promise<Response> {
+  assertLeaseOwned();
   return fetch(`${apiUrl}${path}`, {
     method: "POST",
     headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(30_000)
+    signal: requestSignal(30_000)
   });
 }
 
@@ -1001,6 +1016,7 @@ async function githubText(path: string, accept: string): Promise<string> {
 }
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
+  assertLeaseOwned();
   const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   const response = await fetch(`${githubApiUrl}${path}`, {
@@ -1010,7 +1026,7 @@ async function githubRequest(path: string, accept: string): Promise<Response> {
       "user-agent": "jina-review-worker",
       ...(githubToken ? { authorization: `Bearer ${githubToken}` } : {})
     },
-    signal: AbortSignal.timeout(60_000)
+    signal: requestSignal(60_000)
   });
   if (!response.ok) throw new Error(`GitHub request failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
   return response;
@@ -1035,11 +1051,140 @@ function configuredTopics(value: string | undefined): WorkerTopic[] {
     .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
-  const selected = requested.filter((topic): topic is WorkerTopic => SUPPORTED_TOPICS.includes(topic as WorkerTopic));
-  if (selected.length === 0 || selected.length !== requested.length) {
-    throw new Error(`WORKER_TOPICS must contain only: ${SUPPORTED_TOPICS.join(", ")}`);
-  }
+  const unknown = requested.filter((topic) =>
+    !SUPPORTED_TOPICS.includes(topic as WorkerTopic) && !LEGACY_TOPIC_REPLACEMENTS[topic]
+  );
+  if (unknown.length > 0) throw new Error(`WORKER_TOPICS contains unsupported topics: ${unknown.join(", ")}`);
+  const selected = requested.flatMap((topic) =>
+    SUPPORTED_TOPICS.includes(topic as WorkerTopic) ? [topic as WorkerTopic] : LEGACY_TOPIC_REPLACEMENTS[topic] ?? []
+  );
+  if (selected.length === 0) throw new Error(`WORKER_TOPICS must contain at least one topic`);
   return [...new Set(selected)];
+}
+
+function parseClaimedWork(value: unknown): ClaimedWork {
+  if (!isRecord(value) || !isRecord(value.message) || !isRecord(value.task) || !isRecord(value.task.metadata)) {
+    throw new Error("claim response must include message, task, and task metadata objects");
+  }
+  const topicValue = requiredString(value.message.topic, "claim message topic");
+  if (!SUPPORTED_TOPICS.includes(topicValue as WorkerTopic)) throw new Error(`unsupported claimed topic ${topicValue}`);
+  const topic = topicValue as WorkerTopic;
+  const message = {
+    id: requiredString(value.message.id, "claim message id"),
+    leaseId: requiredString(value.message.leaseId, "claim lease id"),
+    leaseExpiresAt: requiredString(value.message.leaseExpiresAt, "claim lease expiry")
+  };
+  const taskId = requiredString(value.task.id, "claim task id");
+  const metadata = value.task.metadata;
+
+  switch (topic) {
+    case "run-review":
+      return {
+        topic,
+        message: { ...message, topic },
+        task: { id: taskId, metadata: {
+          repository: requiredString(metadata.repository, "task repository"),
+          pullRequestNumber: requiredPositiveInteger(metadata.pullRequestNumber, "task pullRequestNumber")
+        } }
+      };
+    case "run-research":
+      return {
+        topic,
+        message: { ...message, topic },
+        task: { id: taskId, metadata: {
+          ...(metadata.question === undefined ? {} : { question: requiredString(metadata.question, "task question") }),
+          ...(metadata.sourceUrls === undefined ? {} : { sourceUrls: requiredStringArray(metadata.sourceUrls, "task sourceUrls") })
+        } }
+      };
+    case "run-ontology-ingest":
+      return {
+        topic,
+        message: { ...message, topic },
+        task: { id: taskId, metadata: repositoryMetadata(metadata) }
+      };
+    case "run-ontology-project":
+      return {
+        topic,
+        message: { ...message, topic },
+        task: { id: taskId, metadata: repositoryMetadata(metadata) }
+      };
+    case "run-ontology-assert":
+      return {
+        topic,
+        message: { ...message, topic },
+        task: { id: taskId, metadata: {
+          ...repositoryMetadata(metadata),
+          commitSha: requiredGitSha(metadata.commitSha, "task commitSha"),
+          evidenceFingerprint: requiredString(metadata.evidenceFingerprint, "task evidenceFingerprint"),
+          ...(metadata.analysisPaths === undefined ? {} : { analysisPaths: requiredStringArray(metadata.analysisPaths, "task analysisPaths") }),
+          ...(metadata.problemEvidencePullRequestNumbers === undefined ? {} : {
+            problemEvidencePullRequestNumbers: requiredPositiveIntegerArray(metadata.problemEvidencePullRequestNumbers, "task problemEvidencePullRequestNumbers")
+          }),
+          ...(metadata.sourcePullRequestNumbers === undefined ? {} : {
+            sourcePullRequestNumbers: requiredPositiveIntegerArray(metadata.sourcePullRequestNumbers, "task sourcePullRequestNumbers")
+          }),
+          ...(metadata.resolvedPullRequestNumbers === undefined ? {} : {
+            resolvedPullRequestNumbers: requiredPositiveIntegerArray(metadata.resolvedPullRequestNumbers, "task resolvedPullRequestNumbers")
+          })
+        } }
+      };
+    case "run-publish":
+      return { topic, message: { ...message, topic }, task: { id: taskId, metadata } };
+    case "run-cleanup":
+      return { topic, message: { ...message, topic }, task: { id: taskId, metadata } };
+  }
+}
+
+function repositoryMetadata(metadata: Record<string, unknown>): {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly ref: string;
+} {
+  return {
+    tenantId: requiredString(metadata.tenantId, "task tenantId"),
+    repository: requiredString(metadata.repository, "task repository"),
+    ref: requiredString(metadata.ref, "task ref")
+  };
+}
+
+function requiredStringArray(value: unknown, name: string): readonly string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) throw new Error(`${name} must be a string array`);
+  return value.map((item) => item.trim()).filter(Boolean);
+}
+
+function requiredPositiveIntegerArray(value: unknown, name: string): readonly number[] {
+  if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
+  return value.map((item) => requiredPositiveInteger(item, name));
+}
+
+function assertLeaseOwned(): void {
+  if (activeLease?.lostReason) throw new LeaseLostError(activeLease.lostReason);
+}
+
+function requestSignal(timeoutMs: number): AbortSignal {
+  const timeout = AbortSignal.timeout(timeoutMs);
+  return activeLease ? AbortSignal.any([activeLease.controller.signal, timeout]) : timeout;
+}
+
+function loseLease(lease: LeaseExecutionState, error: unknown): void {
+  if (lease.lostReason) return;
+  lease.lostReason = errorMessage(error);
+  recordApiFailure(new LeaseLostError(lease.lostReason));
+  lease.controller.abort(new LeaseLostError(lease.lostReason));
+}
+
+function recordApiSuccess(clearError = true): void {
+  lastApiSuccessAt = new Date().toISOString();
+  if (!clearError) return;
+  lastApiError = undefined;
+  lastApiErrorAt = undefined;
+  consecutiveApiFailures = 0;
+}
+
+function recordApiFailure(error: unknown): void {
+  lastApiError = errorMessage(error);
+  lastApiErrorAt = new Date().toISOString();
+  consecutiveApiFailures += 1;
 }
 
 function delay(milliseconds: number): Promise<void> {

@@ -10,6 +10,7 @@ import {
   createOntologyGraph,
   MemoryOntologyGraphStore,
   ONTOLOGY_PARSER_VERSION,
+  type BlobAnalysis,
   type RetrievalRequest,
   type RetrievalResult
 } from "@jina/ontology";
@@ -357,6 +358,26 @@ test("development seed supports an interactive MCP graph query without credentia
   }
 });
 
+test("API maps validation failures to typed client errors", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    const response = await fetch(`${baseUrl}/ontology/retrieve`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ template: "structure" })
+    });
+    assert.equal(response.status, 400);
+    assert.deepEqual(await response.json(), {
+      accepted: false,
+      error: "repository must be a non-empty string",
+      code: "invalid_request"
+    });
+  } finally {
+    await close(server);
+  }
+});
+
 test("ontology pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
@@ -584,6 +605,52 @@ test("durable workers can drain review and publish topics", async () => {
   }
 });
 
+test("API validation rejects traversal, mixed worker topics, and stale leases with typed errors", async () => {
+  const ontologyStore = new MemoryOntologyGraphStore();
+  await ontologyStore.save(fixtureGraph({ tenantId: "default", repository: "owner/repo", ref: "main", taskId: "fixture" }));
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", ontologyStore });
+  const baseUrl = await listen(server);
+  try {
+    const invalidRepository = await fetch(`${baseUrl}/ontology/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "owner/..", ref: "main" })
+    });
+    assert.equal(invalidRepository.status, 400);
+    assert.equal((await invalidRepository.json() as { code?: string }).code, "invalid_request");
+
+    const mixedTopics = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "test", topics: ["run-review", "run-unknown"] })
+    });
+    assert.equal(mixedTopics.status, 400);
+    assert.equal((await mixedTopics.json() as { code?: string }).code, "invalid_request");
+
+    const staleRenewal = await fetch(`${baseUrl}/internal/worker/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageId: "missing", leaseId: "expired" })
+    });
+    assert.equal(staleRenewal.status, 409);
+    assert.equal((await staleRenewal.json() as { code?: string }).code, "stale_lease");
+
+    const missingCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ messageId: "missing", leaseId: "expired", taskId: "missing", outcome: "done" })
+    });
+    assert.equal(missingCompletion.status, 404);
+    assert.equal((await missingCompletion.json() as { code?: string }).code, "not_found");
+
+    const invalidKind = await fetch(`${baseUrl}/ontology/assertions?repository=owner/repo&entityKind=Unknown`);
+    assert.equal(invalidKind.status, 400);
+    assert.equal((await invalidKind.json() as { code?: string }).code, "invalid_request");
+  } finally {
+    await close(server);
+  }
+});
+
 test("ontology reads require authentication and cannot cross tenant boundaries", async () => {
   const ontologyStore = new MemoryOntologyGraphStore();
   const tenantAGraph = fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "main", taskId: "task-a" });
@@ -730,6 +797,226 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("startup terminalizes legacy ontology outbox work instead of stranding it", async () => {
+  const stateStore = new MemoryStateStore();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const firstUrl = await listen(first);
+  const created = await fetch(`${firstUrl}/ontology/build`, {
+    method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ repository: "omxyz/legacy", ref: "main", requestKey: "legacy" })
+  });
+  assert.equal(created.status, 202);
+  await close(first);
+
+  const snapshot = stateStore.current();
+  assert.ok(snapshot);
+  const legacyMessage = snapshot.intakeState.board.outbox.find((message) => message.topic === "run-ontology-ingest");
+  assert.ok(legacyMessage);
+  stateStore.replace({
+    ...snapshot,
+    intakeState: {
+      ...snapshot.intakeState,
+      board: {
+        ...snapshot.intakeState.board,
+        outbox: snapshot.intakeState.board.outbox.map((message) =>
+          message.id === legacyMessage.id ? { ...message, topic: "run-ontology" } : message
+        )
+      }
+    }
+  });
+
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const secondUrl = await listen(second);
+  try {
+    const board = await fetch(`${secondUrl}/board`).then((response) => response.json() as Promise<{
+      tasks: Array<{ status: string; metadata: Record<string, unknown> }>;
+      outbox: Array<{ id: string; status: string }>;
+    }>);
+    assert.equal(board.outbox.find((message) => message.id === legacyMessage.id)?.status, "dispatched");
+    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").every((task) => task.status === "superseded"), true);
+  } finally {
+    await close(second);
+  }
+});
+
+test("concurrent API instances mutate the latest durable snapshot", async () => {
+  const stateStore = new MemoryStateStore();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
+  try {
+    const firstDelivery = await fetch(`${firstUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omlabs/example", pullRequestNumber: 1, headSha: "first" })
+    });
+    assert.equal(firstDelivery.status, 202);
+    const secondDelivery = await fetch(`${secondUrl}/dev/webhooks/github`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omlabs/example", pullRequestNumber: 2, headSha: "second" })
+    });
+    assert.equal(secondDelivery.status, 202);
+  } finally {
+    await Promise.all([close(first), close(second)]);
+  }
+
+  const restarted = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore });
+  const restartedUrl = await listen(restarted);
+  try {
+    const board = await fetch(`${restartedUrl}/board`).then(
+      (response) => response.json() as Promise<{ pullRequests: Array<{ number: number }>; tasks: unknown[] }>
+    );
+    assert.deepEqual(board.pullRequests.map((pullRequest) => pullRequest.number).sort(), [1, 2]);
+    assert.equal(board.tasks.length, 6);
+  } finally {
+    await close(restarted);
+  }
+});
+
+test("repository ingestion writes retain lease ownership until their durable mutation commits", async () => {
+  class GatedOntologyStore extends MemoryOntologyGraphStore {
+    private signalEntered!: () => void;
+    readonly entered = new Promise<void>((resolve) => { this.signalEntered = resolve; });
+    private releaseWrite!: () => void;
+    private readonly released = new Promise<void>((resolve) => { this.releaseWrite = resolve; });
+
+    release(): void { this.releaseWrite(); }
+
+    override async applyBlobAnalyses(
+      scope: { readonly tenantId: string; readonly repository: string; readonly commitSha: string },
+      analyses: readonly BlobAnalysis[]
+    ): Promise<void> {
+      this.signalEntered();
+      await this.released;
+      await super.applyBlobAnalyses(scope, analyses);
+    }
+  }
+
+  const stateStore = new MemoryStateStore();
+  const ontologyStore = new GatedOntologyStore();
+  const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const second = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const [firstUrl, secondUrl] = await Promise.all([listen(first), listen(second)]);
+  try {
+    const build = await fetch(`${firstUrl}/ontology/build`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "first" })
+    });
+    assert.equal(build.status, 202);
+    const ingestion = await claimTopic(firstUrl, "run-ontology-ingest");
+    const commitSha = "a".repeat(40);
+    const blobSha = "b".repeat(40);
+    await postJson(firstUrl, "/internal/ontology/ingest/plan", {
+      messageId: ingestion.message.id,
+      leaseId: ingestion.message.leaseId,
+      snapshot: {
+        repository: "omxyz/fenced", ref: "main", commitSha, treeSha: "c".repeat(40), parents: [],
+        recordedAt: "2026-07-20T00:00:00.000Z", taskId: ingestion.task.id,
+        files: [{ path: "src/index.ts", blobSha, size: 10 }]
+      }
+    });
+
+    const write = fetch(`${firstUrl}/internal/ontology/ingest/blobs`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messageId: ingestion.message.id, leaseId: ingestion.message.leaseId, taskId: ingestion.task.id, commitSha,
+        analyses: [{ blobSha, parserVersion: ONTOLOGY_PARSER_VERSION, language: "typescript", symbols: [], imports: [], edges: [] }]
+      })
+    });
+    await ontologyStore.entered;
+    let replacementSettled = false;
+    const replacement = fetch(`${secondUrl}/ontology/build`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/fenced", ref: "main", requestKey: "second" })
+    }).then((response) => { replacementSettled = true; return response; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(replacementSettled, false, "supersession waits for the lease-fenced ontology write");
+
+    ontologyStore.release();
+    assert.equal((await write).status, 200);
+    assert.equal((await replacement).status, 202);
+  } finally {
+    await Promise.all([close(first), close(second)]);
+  }
+});
+
+test("ontology completion resumes from a durable intent when final board persistence fails", async () => {
+  const stateStore = new MemoryStateStore();
+  const ontologyStore = new MemoryOntologyGraphStore();
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, ontologyStore });
+  const baseUrl = await listen(server);
+  try {
+    const created = await fetch(`${baseUrl}/ontology/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/resumable", ref: "main", requestKey: "resumable" })
+    });
+    assert.equal(created.status, 202);
+    const commitSha = "a".repeat(40);
+    const ingestion = await claimTopic(baseUrl, "run-ontology-ingest");
+    assert.equal(await completeClaim(baseUrl, ingestion, {
+      commitSha,
+      codeCheckpoint: "code-checkpoint",
+      evidenceFingerprint: "evidence-fingerprint"
+    }), 200);
+    const assertion = await claimTopic(baseUrl, "run-ontology-assert");
+    stateStore.failUpdateAfter(1);
+    const firstCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messageId: assertion.message.id,
+        leaseId: assertion.message.leaseId,
+        taskId: assertion.task.id,
+        outcome: "done",
+        assertionBatch: {
+          tenantId: "default",
+          repository: "omxyz/resumable",
+          ref: "main",
+          commitSha,
+          taskId: assertion.task.id,
+          generatedAt: "2026-07-20T00:00:00.000Z",
+          generatorVersion: "codex-assertions-v2",
+          registryVersion: "ontology-registry-v1",
+          evidenceFingerprint: "evidence-fingerprint",
+          evidenceObservationIds: [],
+          model: "fixture",
+          summary: "Repository documentation",
+          rawOutput: {
+            summary: "Repository documentation",
+            nodes: [
+              { id: "repo", kind: "Repository", label: "resumable", description: "repository", evidence: ["README.md:1"] },
+              { id: "readme", kind: "Document", label: "README", description: "documentation", path: "README.md", evidence: ["README.md:1"] }
+            ],
+            edges: [{
+              source: "repo", target: "readme", predicate: "DOCUMENTED_BY", plane: "knowledge", confidence: 0.95,
+              why: "The README explicitly documents this repository.", evidence: ["README.md:1"]
+            }]
+          }
+        }
+      })
+    });
+    assert.equal(firstCompletion.status, 500);
+    assert.equal(stateStore.current()?.pendingOntologyCompletions?.length, 1);
+
+    const recoveryPoll = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "recovery", topics: ["run-review"] })
+    });
+    assert.equal(recoveryPoll.status, 204);
+    const board = await fetch(`${baseUrl}/board`).then(
+      (response) => response.json() as Promise<{ tasks: Array<{ id: string; status: string }> }>
+    );
+    assert.equal(board.tasks.find((task) => task.id === assertion.task.id)?.status, "done");
+    assert.equal(stateStore.current()?.pendingOntologyCompletions?.length, 0);
+    assert.equal((await ontologyStore.listAssertions("default", "omxyz/resumable")).length > 0, true);
+  } finally {
+    await close(server);
+  }
+});
+
 test("configured aliases migrate existing tasks and ontology graphs to the canonical tenant", async () => {
   const stateStore = new MemoryStateStore();
   const ontologyStore = new MemoryOntologyGraphStore();
@@ -783,6 +1070,20 @@ async function close(server: ReturnType<typeof createApiServer>): Promise<void> 
 class MemoryStateStore implements ApiStateStore {
   private snapshot?: ApiSnapshot;
   private readonly deliveries = new Set<string>();
+  private updates = Promise.resolve();
+  private updatesUntilFailure: number | undefined;
+
+  failUpdateAfter(successfulUpdates: number): void {
+    this.updatesUntilFailure = successfulUpdates;
+  }
+
+  current(): ApiSnapshot | undefined {
+    return this.snapshot ? structuredClone(this.snapshot) : undefined;
+  }
+
+  replace(snapshot: ApiSnapshot): void {
+    this.snapshot = structuredClone(snapshot);
+  }
 
   async load(): Promise<ApiSnapshot | undefined> {
     return this.snapshot;
@@ -803,6 +1104,31 @@ class MemoryStateStore implements ApiStateStore {
     }
     this.snapshot = structuredClone(snapshot);
     return true;
+  }
+
+  async update<T>(
+    operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
+    deliveryId?: string
+  ): Promise<{ readonly committed: boolean; readonly result?: T }> {
+    let outcome: { readonly committed: boolean; readonly result?: T } | undefined;
+    const update = this.updates.then(async () => {
+      if (deliveryId && this.deliveries.has(deliveryId)) {
+        outcome = { committed: false };
+        return;
+      }
+      const next = await operation(this.snapshot ? structuredClone(this.snapshot) : undefined);
+      if (this.updatesUntilFailure === 0) {
+        this.updatesUntilFailure = undefined;
+        throw new Error("simulated durable state failure");
+      }
+      if (this.updatesUntilFailure !== undefined) this.updatesUntilFailure -= 1;
+      if (deliveryId) this.deliveries.add(deliveryId);
+      this.snapshot = structuredClone(next.state);
+      outcome = { committed: true, result: next.result };
+    });
+    this.updates = update.then(() => undefined, () => undefined);
+    await update;
+    return outcome!;
   }
 
   async close(): Promise<void> {}

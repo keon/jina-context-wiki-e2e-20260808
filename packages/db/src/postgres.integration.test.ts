@@ -25,38 +25,33 @@ test("Postgres schema backfills projection graph heads without replacing current
   assert.match(ONTOLOGY_SCHEMA_SQL, /insert into jina_ontology\.graph_heads[\s\S]+candidate\.executor='projection'[\s\S]+on conflict \(tenant_id,repository,ref_name\) do nothing/);
 });
 
-test("Postgres atomically stores board completion and an immutable graph", {
+test("Postgres schema removes retired persistence surfaces", () => {
+  for (const table of ["commit_files", "model_outputs", "issue_traces"]) {
+    assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`drop table if exists jina_ontology\\.${table}`));
+    assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, new RegExp(`create table if not exists jina_ontology\\.${table}`));
+  }
+  for (const [table, column] of [["observations", "supersedes_id"]]) {
+    assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`alter table jina_ontology\\.${table} drop column if exists ${column}`));
+  }
+  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /supersedes_id text/);
+  assert.match(ONTOLOGY_SCHEMA_SQL, /parsed_at timestamptz not null default now\(\)/);
+});
+
+test("Postgres serializes snapshot updates across store instances", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {
   assert.ok(connectionString);
-  const stateStore = new PostgresJsonStateStore<unknown>({ connectionString });
-  const graphStore = new PostgresOntologyGraphStore({ connectionString });
+  const stateStore = new PostgresJsonStateStore<{ readonly counter: number }>({ connectionString });
+  const competingStore = new PostgresJsonStateStore<{ readonly counter: number }>({ connectionString });
   const priorState = await stateStore.load();
-  const graph = createOntologyGraph({
-    request: { tenantId: "legacy", repository: "omlabs/db-fixture", ref: "main", taskId: "db-test-generation" },
-    commitSha: "db-test-sha",
-    generatedAt: "2026-07-19T12:00:00.000Z",
-    executor: "fixture",
-    model: "fixture",
-    generated: {
-      summary: "Database fixture",
-      nodes: [
-        { id: "repo", kind: "Repository", label: "Fixture", description: "Fixture", evidence: ["README.md:1"] },
-        { id: "readme", kind: "File", label: "README", description: "Readme", path: "README.md", evidence: ["README.md:1"] }
-      ],
-      edges: [{ source: "repo", target: "readme", predicate: "CONTAINS", plane: "code", evidence: ["README.md:1"] }]
-    }
-  });
 
   try {
-    await stateStore.saveWithOntologyGraph({ boardStatus: "done" }, graph);
-    assert.deepEqual(await stateStore.load(), { boardStatus: "done" });
-    await graphStore.migrateTenantAliases("omlabs", ["legacy"]);
-    const summaries = await graphStore.listSummaries("omlabs");
-    assert.equal(summaries.find((summary) => summary.id === graph.id)?.nodeCount, 2);
-    assert.equal(summaries.find((summary) => summary.id === graph.id)?.edgeCount, 1);
-    assert.equal((await graphStore.get(graph.id, "omlabs"))?.nodes.length, 2);
-    assert.equal(await graphStore.get(graph.id, "legacy"), undefined);
+    await stateStore.save({ counter: 0 });
+    await Promise.all([
+      stateStore.update(async (state) => ({ state: { counter: (state?.counter ?? 0) + 1 }, result: undefined })),
+      competingStore.update(async (state) => ({ state: { counter: (state?.counter ?? 0) + 1 }, result: undefined }))
+    ]);
+    assert.deepEqual(await stateStore.load(), { counter: 2 });
   } finally {
     if (priorState === undefined) {
       const cleanup = new Pool({ connectionString });
@@ -66,7 +61,7 @@ test("Postgres atomically stores board completion and an immutable graph", {
       await stateStore.save(priorState);
     }
     await stateStore.close();
-    await graphStore.close();
+    await competingStore.close();
   }
 });
 
