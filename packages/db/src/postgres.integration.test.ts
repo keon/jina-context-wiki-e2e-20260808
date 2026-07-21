@@ -24,6 +24,20 @@ test("Postgres schema backfills projection graph heads without replacing current
   assert.match(ONTOLOGY_SCHEMA_SQL, /insert into jina_ontology\.graph_heads[\s\S]+candidate\.executor='projection'[\s\S]+on conflict \(tenant_id,repository,ref_name\) do nothing/);
 });
 
+test("Postgres schema removes retired persistence surfaces", () => {
+  for (const table of ["commit_files", "model_outputs", "issue_traces"]) {
+    assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`drop table if exists jina_ontology\\.${table}`));
+    assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, new RegExp(`create table if not exists jina_ontology\\.${table}`));
+  }
+  for (const [table, column] of [
+    ["observations", "supersedes_id"],
+    ["blob_analyses", "parsed_at"]
+  ]) {
+    assert.match(ONTOLOGY_SCHEMA_SQL, new RegExp(`alter table jina_ontology\\.${table} drop column if exists ${column}`));
+  }
+  assert.doesNotMatch(ONTOLOGY_SCHEMA_SQL, /supersedes_id text|parsed_at timestamptz/);
+});
+
 test("Postgres serializes snapshot updates across store instances", {
   skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
 }, async () => {

@@ -3363,6 +3363,9 @@ function cosine(left: readonly number[], right: readonly number[]): number {
 
 export const ONTOLOGY_SCHEMA_SQL = `
       create schema if not exists jina_ontology;
+      drop table if exists jina_ontology.commit_files;
+      drop table if exists jina_ontology.model_outputs;
+      drop table if exists jina_ontology.issue_traces;
       create table if not exists jina_ontology.graphs (
         id text primary key,
         tenant_id text not null,
@@ -3444,7 +3447,9 @@ export const ONTOLOGY_SCHEMA_SQL = `
         unique (tenant_id,source,external_id)
       );
       alter table jina_ontology.observations add column if not exists occurred_at timestamptz;
-      alter table jina_ontology.observations add column if not exists supersedes_id text references jina_ontology.observations(id);
+      alter table jina_ontology.observations drop constraint if exists observations_supersedes_same_tenant;
+      alter table jina_ontology.observations drop constraint if exists observations_supersedes_id_fkey;
+      alter table jina_ontology.observations drop column if exists supersedes_id;
       create index if not exists ontology_observations_work_item
         on jina_ontology.observations (tenant_id,repository,source,((payload->>'kind')),((payload->>'number')))
         where redacted_at is null and payload is not null;
@@ -3560,10 +3565,10 @@ export const ONTOLOGY_SCHEMA_SQL = `
         blob_sha text not null,
         parser_version text not null,
         language text,
-        parsed_at timestamptz not null default now(),
         primary key (tenant_id,blob_sha,parser_version),
         foreign key (tenant_id,blob_sha) references jina_ontology.blobs(tenant_id,blob_sha)
       );
+      alter table jina_ontology.blob_analyses drop column if exists parsed_at;
       create table if not exists jina_ontology.blob_symbols (
         tenant_id text not null,
         blob_sha text not null,
@@ -3830,10 +3835,6 @@ export const ONTOLOGY_SCHEMA_SQL = `
         on jina_ontology.assertions (tenant_id,repository,subject_id,predicate,object_id,qualifiers_hash)
         where status in ('proposed','active');
       do $$ begin
-        if not exists (select 1 from pg_constraint where conname='observations_supersedes_same_tenant') then
-          alter table jina_ontology.observations add constraint observations_supersedes_same_tenant
-            foreign key (tenant_id,supersedes_id) references jina_ontology.observations(tenant_id,id) not valid;
-        end if;
         if not exists (select 1 from pg_constraint where conname='commits_observation_same_tenant') then
           alter table jina_ontology.commits add constraint commits_observation_same_tenant
             foreign key (tenant_id,source_observation_id) references jina_ontology.observations(tenant_id,id) not valid;
