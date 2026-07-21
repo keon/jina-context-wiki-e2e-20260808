@@ -3,16 +3,18 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node scripts/build-client.mjs",
     "typecheck": "tsc -b",
     "lint": "echo \"lint not configured\"",
     "test": "pnpm build && node --test dist/app/page.test.js",
     "dev": "pnpm build && node dist/server/dev-server.js"
   },
   "dependencies": {
+    "@cosmos.gl/graph": "^3.3.0",
     "@jina/shared-kernel": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0"
+    "@types/node": "^26.1.0",
+    "esbuild": "^0.25.12"
   }
 }

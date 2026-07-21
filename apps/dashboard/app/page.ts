@@ -624,18 +624,37 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
 
   /* Ontology graph explorer */
   body[data-page="ontology"] .app-header { margin-bottom: 14px; }
-  .ontology-toolbar { display: flex; align-items: center; gap: 9px; margin-bottom: 12px; }
-  .repository-button { flex: 0 0 auto; min-width: 210px; color: #ddd; text-align: left; }
-  .graph-search { width: 260px; }
-  .ontology-description { min-width: 0; overflow: hidden; color: #5f5f5f; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
-  .ontology-view { flex: 0 0 auto; margin-left: auto; }
+  .ontology-toolbar { display: grid; grid-template-columns: 210px 300px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-height: 36px; margin-bottom: 12px; }
+  .repository-button { display: flex; align-items: center; width: 100%; height: 36px; min-height: 36px; color: #ddd; line-height: 1; text-align: left; }
+  .graph-search { width: 100%; height: 36px; min-height: 36px; box-sizing: border-box; }
+  .graph-search-shell { position: relative; width: 100%; height: 36px; }
+  .graph-search-shell .graph-search { width: 100%; }
+  .graph-search > span { position: relative; display: block; flex: 0 0 14px; width: 14px; height: 14px; font-size: 0; transform: none; }
+  .graph-search > span::before { content: ""; position: absolute; top: 1px; left: 1px; width: 7px; height: 7px; border: 1.5px solid #727272; border-radius: 50%; }
+  .graph-search > span::after { content: ""; position: absolute; top: 9px; left: 9px; width: 5px; height: 1.5px; border-radius: 999px; background: #727272; transform: rotate(45deg); transform-origin: left center; }
+  .graph-search input { height: 34px; line-height: 34px; }
+  .graph-search-clear { display: none; flex: 0 0 22px; width: 22px; height: 22px; border: 0; background: transparent; padding: 0; color: #777; cursor: pointer; line-height: 1; }
+  .graph-search-shell.has-query .graph-search-clear { display: grid; place-items: center; }
+  .graph-search-results { position: absolute; z-index: 40; top: calc(100% + 7px); right: 0; left: 0; max-height: min(420px, 60vh); overflow-y: auto; border: 1px solid #303030; border-radius: 7px; background: #101111; padding: 5px; box-shadow: 0 18px 60px rgb(0 0 0 / 70%); }
+  .graph-search-results[hidden] { display: none; }
+  .graph-search-result { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; width: 100%; border: 0; border-radius: 5px; background: transparent; padding: 8px 9px; color: #d8d8d8; cursor: pointer; text-align: left; }
+  .graph-search-result:hover, .graph-search-result.active { background: #1a1a1b; }
+  .graph-search-result strong { overflow: hidden; font-size: 10px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
+  .graph-search-result small { grid-column: 1; overflow: hidden; color: #727272; font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
+  .graph-search-result-kind { grid-column: 2; grid-row: 1 / span 2; align-self: center; color: #8f82bd; font-size: 8px; }
+  .graph-search-empty { margin: 0; padding: 13px 10px; color: #6f6f6f; font-size: 9px; text-align: center; }
+  .ontology-description { display: flex; align-items: center; min-width: 0; height: 36px; overflow: hidden; color: #5f5f5f; font-size: 9px; line-height: 1; text-overflow: ellipsis; white-space: nowrap; }
+  .ontology-view { align-items: center; height: 36px; box-sizing: border-box; margin-left: 0; }
+  .ontology-view button { display: inline-flex; align-items: center; justify-content: center; height: 28px; min-height: 28px; line-height: 1; }
   .ontology-workspace { grid-template-columns: minmax(0, 1fr) 365px; gap: 10px; }
   .ontology-card { min-width: 0; border-radius: 7px; }
   .graph-controls { position: relative; z-index: 8; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 51px; padding: 7px 10px; }
-  .graph-control-toolbar { display: flex; align-items: center; gap: 7px; }
+  .graph-control-toolbar { display: flex; align-items: center; gap: 7px; min-height: 36px; }
   .graph-control-help { margin-left: auto; max-width: 340px; text-align: right; }
-  .graph-filter-menu { position: relative; }
-  .graph-filter-menu > summary { display: flex; align-items: center; padding: 0 10px; cursor: pointer; list-style: none; }
+  .graph-filter-menu { position: relative; height: 36px; margin: 0; }
+  .graph-filter-menu > summary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; height: 36px; box-sizing: border-box; padding: 0 10px; cursor: pointer; line-height: 1; list-style: none; }
+  .graph-filter-menu > summary::-webkit-details-marker { display: none; }
+  .graph-filter-menu > summary::before { content: ""; width: 6px; height: 6px; border-right: 1px solid currentColor; border-bottom: 1px solid currentColor; transform: translateY(-1px) rotate(45deg); }
   .graph-filter-popover { position: absolute; z-index: 20; top: calc(100% + 7px); left: 0; width: 410px; padding: 12px; border: 1px solid #303030; border-radius: 7px; background: #101111; box-shadow: 0 18px 60px rgb(0 0 0 / 65%); }
   .graph-filter-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .graph-filter-row { display: block; }
@@ -644,17 +663,59 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .graph-filter-chip { border: 0; background: transparent; padding: 5px 6px; text-align: left; }
   .graph-filter-chip:hover { background: #191919; }
   .graph-popover-actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--border); }
-  .graph-control-button { display: grid; place-items: center; min-height: 34px; padding: 0 10px; cursor: pointer; }
-  .graph-zoom, .graph-toggle { display: flex; align-items: center; min-height: 34px; padding: 0 10px; }
+  .graph-control-button, .graph-reset, .graph-zoom, .graph-toggle { display: inline-flex; align-items: center; justify-content: center; height: 36px; min-height: 36px; box-sizing: border-box; margin: 0; line-height: 1; }
+  .graph-control-button { padding: 0 10px; cursor: pointer; }
+  .graph-reset { padding: 0 11px; }
+  .graph-control-toolbar > .graph-reset { font-size: 10px; }
+  .graph-control-button[aria-label="Zoom out"], .graph-control-button[aria-label="Zoom in"] { width: 36px; padding: 0; font-size: 13px; }
+  .graph-zoom { min-width: 58px; padding: 0 10px; font-variant-numeric: tabular-nums; }
+  .graph-physics-control { gap: 7px; }
+  .graph-physics-control::before { content: ""; width: 8px; height: 8px; border: 1px solid #888; border-radius: 50%; box-sizing: border-box; }
+  .graph-physics-control[aria-pressed="true"]::before { border-color: #c4c4c4; background: #c4c4c4; }
+  .graph-toggle { padding: 0 10px; }
+  .ontology-toolbar > .repository-button,
+  .ontology-toolbar > .graph-search-shell,
+  .ontology-toolbar .graph-search,
+  .ontology-toolbar > .ontology-description,
+  .ontology-toolbar > .ontology-view,
+  .graph-control-toolbar > .graph-filter-menu,
+  .graph-control-toolbar > .graph-filter-menu > summary,
+  .graph-control-toolbar > .graph-reset,
+  .graph-control-toolbar > .graph-control-button,
+  .graph-control-toolbar > .graph-zoom {
+    box-sizing: border-box;
+    block-size: 36px;
+    min-block-size: 36px;
+    max-block-size: 36px;
+  }
   .graph-toggle { color: #b8b8b8; }
   .graph-toggle::first-letter { color: var(--accent); }
-  .graph-wrap { position: relative; min-height: calc(100vh - 143px); overflow: hidden; background-color: #090a0a; background-image: radial-gradient(circle, #252727 1px, transparent 1px); background-size: 24px 24px; }
-  #ontology-graph { min-width: 760px; height: calc(100vh - 143px); }
+  .graph-wrap { position: relative; height: calc(100vh - 143px); min-height: 590px; overflow: hidden; background-color: #090a0a; background-image: radial-gradient(circle, #202222 1px, transparent 1px); background-size: 24px 24px; }
+  #ontology-graph { position: absolute; inset: 0; min-width: 0; height: 100%; overflow: hidden; touch-action: none; }
+  #ontology-graph canvas { position: absolute; inset: 0; display: block; }
+  .ontology-label-layer { position: absolute; z-index: 4; inset: 0; overflow: hidden; pointer-events: none; }
+  .cosmos-node-label, .cosmos-edge-label { position: absolute; top: 0; left: 0; pointer-events: auto; }
+  .cosmos-node-label { display: grid; gap: 2px; max-width: 260px; border: 1px solid #2d3030; border-radius: 6px; background: rgb(12 14 14 / 88%); padding: 6px 8px; color: #e8e8e8; font: inherit; text-align: left; box-shadow: 0 6px 22px rgb(0 0 0 / 35%); backdrop-filter: blur(8px); transform-origin: 0 50%; translate: 11px -50%; }
+  .cosmos-node-label:hover, .cosmos-node-label.selected { border-color: #8b7cf6; background: rgb(18 18 21 / 96%); }
+  .cosmos-node-label span { overflow: hidden; font-size: 10px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
+  .cosmos-node-label small { color: #777; font-size: 8px; }
+  .cosmos-edge-label { border: 1px solid #39343f; border-radius: 999px; background: rgb(15 14 17 / 92%); padding: 4px 7px; color: #a89cc3; font: 550 8px ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: .02em; translate: -50% -50%; cursor: grab; backdrop-filter: blur(8px); }
+  .cosmos-edge-label:hover, .cosmos-edge-label.selected { border-color: #8b7cf6; color: #eeeaff; }
+  .cosmos-edge-label:active { cursor: grabbing; }
+  .ontology-minimap { position: absolute; z-index: 5; right: 12px; bottom: 12px; width: 142px; height: 92px; border: 1px solid #292b2b; border-radius: 6px; background: rgb(8 9 9 / 82%); pointer-events: none; backdrop-filter: blur(8px); }
+  .graph-runtime-status { position: absolute; z-index: 5; top: 12px; right: 12px; display: flex; align-items: center; gap: 6px; border: 1px solid #252727; border-radius: 999px; background: rgb(8 9 9 / 78%); padding: 5px 8px; color: #727575; font-size: 8px; pointer-events: none; backdrop-filter: blur(8px); }
+  .graph-runtime-status::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: #53c78f; }
+  .graph-runtime-status.active::before { animation: graph-pulse 1.2s ease-in-out infinite; }
+  @keyframes graph-pulse { 50% { opacity: .25; transform: scale(.75); } }
+  .graph-empty-state { position: absolute; z-index: 3; inset: 0; display: grid; place-items: center; color: #666; font-size: 10px; pointer-events: none; }
+  .graph-empty-state[hidden] { display: none; }
   .ontology-summary { position: absolute; right: 12px; bottom: 12px; left: 12px; display: flex; gap: 6px; pointer-events: none; }
   .ontology-stat { flex: 0 1 145px; border-color: #222; background: rgb(10 11 11 / 82%); padding: 7px 9px; backdrop-filter: blur(10px); }
   .ontology-stat strong { margin-top: 3px; overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  .plane-key { position: absolute; bottom: 69px; left: 12px; padding: 8px 10px; border: 1px solid #222; border-radius: 5px; background: rgb(10 11 11 / 84%); backdrop-filter: blur(10px); }
+  .plane-key { position: absolute; z-index: 5; bottom: 69px; left: 12px; padding: 8px 10px; border: 1px solid #222; border-radius: 5px; background: rgb(10 11 11 / 84%); backdrop-filter: blur(10px); pointer-events: none; }
   .ontology-details { max-height: calc(100vh - 91px); padding: 0; border-top: 1px solid var(--border); background: #0c0e0e; }
+  .ontology-workspace:not(.has-selection) { grid-template-columns: minmax(0, 1fr); }
+  .ontology-workspace:not(.has-selection) .ontology-details { display: none; }
   .ontology-details > .empty-detail { padding: 30px 22px; text-align: center; }
   .ontology-item { min-height: 100%; border: 0; border-radius: 0; background: transparent; padding: 0; }
   .ontology-item-heading { position: sticky; top: 0; z-index: 3; align-items: flex-start; padding: 17px 17px; border-bottom: 1px solid var(--border); background: rgb(12 14 14 / 96%); }
@@ -687,9 +748,13 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .context-results { margin: 0 10px 10px; }
 
   /* Rectangular, human-readable graph nodes */
-  .graph-edge { stroke-width: 1.4; opacity: .55; }
+  .graph-edge { stroke-width: 1.2; opacity: .3; }
   .graph-edge-group.connected .graph-edge { stroke: #9c8eff; stroke-width: 2.2; opacity: 1; }
   .graph-edge-group.selected .graph-edge { stroke: #9c8eff; stroke-width: 3; }
+  .graph-edge-label-button.contextual { opacity: 0; pointer-events: none; }
+  .graph-edge-label-button.contextual.revealed,
+  .graph-edge-label-button.contextual.connected,
+  .graph-edge-label-button.contextual.selected { opacity: 1; pointer-events: auto; }
   .graph-arrow { fill: #686868; }
   .graph-edge-group.connected .graph-arrow, .graph-edge-group.selected .graph-arrow { fill: #9c8eff; }
   .graph-node .node-card { fill: #0f1111; stroke: #303232; stroke-width: 1; filter: drop-shadow(0 8px 18px rgb(0 0 0 / 45%)); }
@@ -704,6 +769,8 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .kind-Document .node-icon, .kind-Feature .node-icon { stroke: #9479ad; }
   .kind-Commit .node-icon, .kind-PullRequest .node-icon, .kind-Issue .node-icon { stroke: #78bf8b; }
   .kind-Engineer .node-icon, .kind-Team .node-icon { stroke: #7890bb; }
+  .graph-kind-label { fill: #666; font-size: 9px; font-weight: 650; letter-spacing: .08em; text-transform: uppercase; }
+  .graph-kind-rule { stroke: #242626; stroke-width: 1; }
 
   @media (max-width: 1100px) {
     .page-filters { overflow-x: auto; padding-bottom: 4px; }
@@ -734,8 +801,9 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
     .graph-control-help, .graph-zoom, .graph-toggle { display: none; }
     .graph-filter-popover { width: min(410px, calc(100vw - 44px)); }
     .ontology-toolbar .ontology-description { display: none; }
+    .ontology-toolbar { grid-template-columns: minmax(150px, 1fr); }
     .repository-button { min-width: 150px; }
-    .graph-search { display: none; }
+    .graph-search-shell { display: none; }
   }
 </style>
 </head>
@@ -802,11 +870,11 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   </section>
   <section id="ontology-page" hidden>
     <div class="ontology-shell">
-      <header class="ontology-toolbar"><button type="button" class="repository-button" id="ontology-title">Repository graph</button><label class="search-control graph-search"><span aria-hidden="true">⌕</span><input placeholder="Search ontology…" aria-label="Search ontology"></label><span class="ontology-description" id="ontology-description">Waiting for an Ontology worker result.</span><div class="view-switch ontology-view"><button type="button" class="active">▣&nbsp; Graph</button><button type="button">☷&nbsp; Table</button></div></header>
-      <section class="ontology-workspace">
+      <header class="ontology-toolbar"><button type="button" class="repository-button" id="ontology-title">Repository graph</button><div class="graph-search-shell" id="ontology-search-shell"><div class="search-control graph-search"><span aria-hidden="true">⌕</span><input id="ontology-search" placeholder="Search nodes and edges…" aria-label="Search nodes and relationships" aria-controls="ontology-search-results" aria-expanded="false" autocomplete="off"><button type="button" class="graph-search-clear" id="ontology-search-clear" aria-label="Clear ontology search">×</button></div><div class="graph-search-results" id="ontology-search-results" role="listbox" aria-label="Ontology search results" hidden></div></div><span class="ontology-description" id="ontology-description">Waiting for an Ontology worker result.</span><div class="view-switch ontology-view"><button type="button" class="active">▣&nbsp; Graph</button><button type="button">☷&nbsp; Table</button></div></header>
+      <section class="ontology-workspace" id="ontology-workspace">
         <section class="ontology-card">
           <div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div>
-          <div class="graph-wrap"><svg id="ontology-graph" viewBox="0 0 1100 590" role="img" aria-label="Repository ontology graph"></svg><section class="ontology-summary" id="ontology-summary"></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
+          <div class="graph-wrap"><div id="ontology-graph" role="application" aria-label="Repository ontology graph"><div class="ontology-label-layer" id="ontology-label-layer"></div></div><div class="graph-empty-state" id="ontology-graph-empty" hidden></div><canvas class="ontology-minimap" id="ontology-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="ontology-summary" id="ontology-summary"></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
         </section>
         <aside class="ontology-details side-inspector" id="ontology-details" aria-live="polite"></aside>
       </section>
@@ -823,6 +891,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   <div class="detail-body" id="detail-body"></div>
 </dialog>
 
+<script src="/assets/ontology-graph-client.js?v=freeform-1"></script>
 <script>
 const API = ${JSON.stringify(apiUrl)};
 const API_LABEL = ${JSON.stringify(apiLabel)};
@@ -836,12 +905,13 @@ let ontologyViewState = {
   hiddenNodeKinds: new Set(),
   hiddenEdgePredicates: new Set(),
   filterMenuOpen: false,
-  nodePositions: new Map(),
-  edgeOffsets: new Map(),
-  drag: null,
-  suppressedClick: null
+  physicsEnabled: true,
+  zoomPercent: 100,
+  rendererLabelKey: null,
+  rendererLabels: {}
 };
-let graphDragFrame = null;
+let ontologyRenderer = null;
+let ontologySearchState = { results: [], activeIndex: 0, open: false };
 let ontologyRefreshSequence = 0;
 let contextState = null;
 let selectedHistoryEventId = null;
@@ -861,8 +931,16 @@ const detailTitle = document.getElementById("detail-title");
 const detailEyebrow = document.getElementById("detail-eyebrow");
 const detailBody = document.getElementById("detail-body");
 const ontologyGraph = document.getElementById("ontology-graph");
+const ontologyLabelLayer = document.getElementById("ontology-label-layer");
+const ontologyMinimap = document.getElementById("ontology-minimap");
+const ontologyGraphEmpty = document.getElementById("ontology-graph-empty");
+const graphRuntimeStatus = document.getElementById("graph-runtime-status");
+const ontologySearch = document.getElementById("ontology-search");
+const ontologySearchShell = document.getElementById("ontology-search-shell");
+const ontologySearchResults = document.getElementById("ontology-search-results");
 const ontologySummary = document.getElementById("ontology-summary");
 const ontologyDetails = document.getElementById("ontology-details");
+const ontologyWorkspace = document.getElementById("ontology-workspace");
 const graphControls = document.getElementById("graph-controls");
 const contextResults = document.getElementById("context-results");
 
@@ -927,8 +1005,7 @@ function renderPage() {
 }
 
 function renderOntology() {
-  ontologyGraph.replaceChildren();
-  appendGraphDefinitions();
+  ontologyWorkspace.classList.remove("has-selection");
   ontologySummary.replaceChildren();
   ontologyDetails.replaceChildren();
   graphControls.replaceChildren();
@@ -937,8 +1014,12 @@ function renderOntology() {
   const graphKey = graph ? ontologyGraphIdentity(graph) : null;
   if (graphKey !== ontologyViewState.graphKey) resetOntologyViewForGraph(graphKey);
   if (!graph) {
+    ontologyGraphEmpty.hidden = false;
+    ontologyGraphEmpty.textContent = "Run an ontology build to create the first graph.";
+    if (ontologyRenderer) ontologyRenderer.setData({ key: "empty", nodes: [], edges: [], labels: {} });
     ontologySummary.append(ontologyStat("Status", "No graph yet"));
     ontologyDetails.append(textElement("p", "empty-detail", "Run an ontology_build task to create the first graph."));
+    renderOntologySearchResults();
     return;
   }
 
@@ -946,8 +1027,7 @@ function renderOntology() {
   document.getElementById("ontology-description").textContent = graph.summary;
   const visibleGraph = filterOntologyGraph(graph, ontologyViewState.hiddenNodeKinds, ontologyViewState.hiddenEdgePredicates);
   if (!selectionIsVisible(ontologyViewState.selected, visibleGraph)) ontologyViewState.selected = null;
-  const focus = focusedGraphElements(ontologyViewState.selected, visibleGraph);
-  const focusActive = Boolean(ontologyViewState.selected);
+  ontologyWorkspace.classList.toggle("has-selection", Boolean(ontologyViewState.selected));
   ontologySummary.append(
     ontologyStat("Repository", graph.repository),
     ontologyStat("Nodes", visibleCount(visibleGraph.nodes.length, graph.nodes.length)),
@@ -957,102 +1037,48 @@ function renderOntology() {
     ontologyStat("Executor", graph.generator.executor + " · " + graph.generator.model)
   );
   renderGraphControls(graph);
-
-  const positions = graphPositions(visibleGraph.nodes, ontologyViewState.nodePositions);
-  const edgeLabels = [];
-  for (let edgeIndex = 0; edgeIndex < visibleGraph.edges.length; edgeIndex += 1) {
-    const edge = visibleGraph.edges[edgeIndex];
-    const source = positions.get(edge.source);
-    const target = positions.get(edge.target);
-    if (!source || !target) continue;
-    const edgeOffset = ontologyViewState.edgeOffsets.get(edge.id) || { x: 0, y: 0 };
-    const geometry = graphEdgeGeometry(source, target, edgeIndex, edgeOffset);
-    const selected = ontologyViewState.selected?.kind === "edge" && ontologyViewState.selected.id === edge.id;
-    const focused = focus.edgeIds.has(edge.id);
-    const focusClass = focusActive ? focused ? " connected" : " dimmed" : "";
-    const group = svgElement("g", "graph-edge-group" + (selected ? " selected" : "") + focusClass);
-    const hit = svgElement("path", "graph-edge-hit");
-    hit.setAttribute("d", geometry.path);
-    const line = svgElement("path", "graph-edge graph-edge-" + edge.plane);
-    line.setAttribute("d", geometry.path);
-    line.setAttribute("marker-end", "url(#graph-arrow)");
-    group.append(hit, line);
-    makeGraphItemInteractive(group, "edge", edge.id);
-    enableGraphDrag(group, "edge", edge.id, edgeOffset);
-    ontologyGraph.append(group);
-
-    const labelGroup = svgElement("g", "graph-edge-label-button" + (selected ? " selected" : "") + focusClass);
-    labelGroup.setAttribute("transform", "translate(" + geometry.labelX + " " + geometry.labelY + ")");
-    labelGroup.setAttribute("role", "button");
-    labelGroup.setAttribute("tabindex", "0");
-    labelGroup.setAttribute("aria-label", edge.predicate + " edge");
-    const labelWidth = Math.max(62, edge.predicate.length * 6.5 + 18);
-    const background = svgElement("rect", "graph-edge-label-bg");
-    background.setAttribute("x", String(-labelWidth / 2)); background.setAttribute("y", "-12");
-    background.setAttribute("width", String(labelWidth)); background.setAttribute("height", "20");
-    background.setAttribute("rx", "6");
-    const label = svgElement("text", "graph-edge-label");
-    label.setAttribute("y", "2");
-    label.textContent = edge.predicate;
-    const sourceNode = graph.nodes.find(function(node) { return node.id === edge.source; });
-    const targetNode = graph.nodes.find(function(node) { return node.id === edge.target; });
-    const title = svgElement("title");
-    title.textContent = edge.predicate + " — " + (sourceNode ? friendlyNodeLabel(sourceNode, graph) : edge.source) + " to " + (targetNode ? friendlyNodeLabel(targetNode, graph) : edge.target) + ". Drag to reroute; click for details.";
-    labelGroup.append(background, label, title);
-    labelGroup.addEventListener("mouseenter", function() { group.classList.add("hovered"); });
-    labelGroup.addEventListener("mouseleave", function() { group.classList.remove("hovered"); });
-    labelGroup.addEventListener("focus", function() { group.classList.add("hovered"); });
-    labelGroup.addEventListener("blur", function() { group.classList.remove("hovered"); });
-    makeGraphItemInteractive(labelGroup, "edge", edge.id);
-    enableGraphDrag(labelGroup, "edge", edge.id, edgeOffset);
-    edgeLabels.push(labelGroup);
+  ontologyGraphEmpty.hidden = Boolean(visibleGraph.nodes.length);
+  ontologyGraphEmpty.textContent = "All node types are hidden. Use Filters to bring them back.";
+  ensureOntologyRenderer();
+  if (ontologyRenderer) {
+    if (ontologyViewState.rendererLabelKey !== graphKey) {
+      ontologyViewState.rendererLabelKey = graphKey;
+      ontologyViewState.rendererLabels = friendlyNodeLabels(graph);
+    }
+    const rendererKey = graphKey + "|nodes:" + Array.from(ontologyViewState.hiddenNodeKinds).sort().join(",") + "|edges:" + Array.from(ontologyViewState.hiddenEdgePredicates).sort().join(",");
+    ontologyRenderer.setData({ key: rendererKey, nodes: visibleGraph.nodes, edges: visibleGraph.edges, labels: ontologyViewState.rendererLabels });
+    ontologyRenderer.setSelection(ontologyViewState.selected);
+    ontologyRenderer.setPhysics(ontologyViewState.physicsEnabled);
   }
-  for (const node of visibleGraph.nodes) {
-    const point = positions.get(node.id);
-    if (!point) continue;
-    const selected = ontologyViewState.selected?.kind === "node" && ontologyViewState.selected.id === node.id;
-    const focused = focus.nodeIds.has(node.id);
-    const focusClass = focusActive ? focused ? " connected" : " dimmed" : "";
-    const group = svgElement("g", "graph-node kind-" + node.kind + (selected ? " selected" : "") + focusClass);
-    group.setAttribute("transform", "translate(" + point.x + " " + point.y + ")");
-    group.setAttribute("role", "button");
-    group.setAttribute("tabindex", "0");
-    const friendlyLabel = friendlyNodeLabel(node, graph);
-    group.setAttribute("aria-label", node.kind + " node: " + friendlyLabel);
-    const cardWidth = node.kind === "Repository" ? 212 : 190;
-    const card = svgElement("rect", "node-card");
-    card.setAttribute("x", String(-cardWidth / 2)); card.setAttribute("y", "-31"); card.setAttribute("width", String(cardWidth)); card.setAttribute("height", "62"); card.setAttribute("rx", "8");
-    const icon = svgElement("circle", "node-icon"); icon.setAttribute("cx", String(-cardWidth / 2 + 25)); icon.setAttribute("r", "14");
-    const iconText = svgElement("text", "node-icon-text"); iconText.setAttribute("x", String(-cardWidth / 2 + 25)); iconText.setAttribute("y", "4"); iconText.textContent = graphNodeIcon(node.kind);
-    const label = svgElement("text", "node-label"); label.setAttribute("x", String(-cardWidth / 2 + 49)); label.setAttribute("y", "-3"); label.textContent = truncateLabel(friendlyLabel, node.kind === "Repository" ? 26 : 22);
-    const kind = svgElement("text", "node-kind"); kind.setAttribute("x", String(-cardWidth / 2 + 49)); kind.setAttribute("y", "15"); kind.textContent = humanize(node.kind);
-    const title = svgElement("title"); title.textContent = friendlyLabel + " — " + friendlyNodeExplanation(node, graph) + " Drag to reposition; click for details.";
-    group.append(card, icon, iconText, label, kind, title);
-    makeGraphItemInteractive(group, "node", node.id);
-    enableGraphDrag(group, "node", node.id, point);
-    ontologyGraph.append(group);
-  }
-  ontologyGraph.append(...edgeLabels);
-  if (!visibleGraph.nodes.length) {
-    const empty = svgElement("text", "graph-empty");
-    empty.setAttribute("x", "550"); empty.setAttribute("y", "295");
-    empty.textContent = "All node types are hidden. Use the controls above to show them.";
-    ontologyGraph.append(empty);
-  }
+  renderOntologySearchResults();
   renderOntologyInspector(graph, visibleGraph);
 }
 
-function appendGraphDefinitions() {
-  const defs = svgElement("defs");
-  const marker = svgElement("marker");
-  marker.setAttribute("id", "graph-arrow"); marker.setAttribute("viewBox", "0 0 10 10"); marker.setAttribute("refX", "9"); marker.setAttribute("refY", "5"); marker.setAttribute("markerWidth", "6"); marker.setAttribute("markerHeight", "6"); marker.setAttribute("orient", "auto-start-reverse");
-  const path = svgElement("path"); path.setAttribute("d", "M 0 0 L 10 5 L 0 10 z"); path.setAttribute("class", "graph-arrow");
-  marker.append(path); defs.append(marker); ontologyGraph.append(defs);
-}
-
-function graphNodeIcon(kind) {
-  const icons = { Repository: "R", File: "F", Symbol: "ƒ", Document: "D", Feature: "◇", Commit: "C", PullRequest: "⑂", Issue: "!", Engineer: "P", Team: "T" };
-  return icons[kind] || "•";
+function ensureOntologyRenderer() {
+  if (ontologyRenderer) return ontologyRenderer;
+  if (!window.JinaOntologyGraph) {
+    graphRuntimeStatus.textContent = "GPU renderer unavailable";
+    graphRuntimeStatus.classList.remove("active");
+    ontologyGraphEmpty.hidden = false;
+    ontologyGraphEmpty.textContent = "The interactive graph could not start. Use Table view or reload this page.";
+    return null;
+  }
+  ontologyRenderer = window.JinaOntologyGraph.create({
+    container: ontologyGraph,
+    labels: ontologyLabelLayer,
+    minimap: ontologyMinimap,
+    status: graphRuntimeStatus,
+    onSelect: function(selection) {
+      ontologyViewState.selected = selection;
+      renderOntology();
+    },
+    onZoomChange: function(percent) {
+      ontologyViewState.zoomPercent = percent;
+      const zoom = document.getElementById("graph-zoom-percent");
+      if (zoom) zoom.textContent = percent + "%";
+    }
+  });
+  return ontologyRenderer;
 }
 
 function filterOntologyGraph(graph, hiddenNodeKinds, hiddenEdgePredicates) {
@@ -1078,35 +1104,10 @@ function resetOntologyViewForGraph(graphKey) {
   ontologyViewState.graphKey = graphKey;
   ontologyViewState.selected = null;
   ontologyViewState.filterMenuOpen = false;
-  ontologyViewState.nodePositions.clear();
-  ontologyViewState.edgeOffsets.clear();
-  ontologyViewState.drag = null;
-  ontologyViewState.suppressedClick = null;
-  if (graphDragFrame !== null) cancelAnimationFrame(graphDragFrame);
-  graphDragFrame = null;
-}
-
-function focusedGraphElements(selection, graph) {
-  const nodeIds = new Set();
-  const edgeIds = new Set();
-  if (!selection) return { nodeIds: nodeIds, edgeIds: edgeIds };
-  if (selection.kind === "node") {
-    nodeIds.add(selection.id);
-    for (const edge of graph.edges) {
-      if (edge.source !== selection.id && edge.target !== selection.id) continue;
-      edgeIds.add(edge.id);
-      nodeIds.add(edge.source);
-      nodeIds.add(edge.target);
-    }
-    return { nodeIds: nodeIds, edgeIds: edgeIds };
-  }
-  const edge = graph.edges.find(function(candidate) { return candidate.id === selection.id; });
-  if (edge) {
-    edgeIds.add(edge.id);
-    nodeIds.add(edge.source);
-    nodeIds.add(edge.target);
-  }
-  return { nodeIds: nodeIds, edgeIds: edgeIds };
+  ontologyViewState.rendererLabelKey = null;
+  ontologyViewState.rendererLabels = {};
+  ontologySearchState = { results: [], activeIndex: 0, open: false };
+  if (ontologySearch) ontologySearch.value = "";
 }
 
 function mergePullRequestsForCommit(node, graph) {
@@ -1156,6 +1157,139 @@ function friendlyNodeLabel(node, graph) {
   return node.label;
 }
 
+function friendlyNodeLabels(graph) {
+  const labels = {};
+  const nodesById = new Map(graph.nodes.map(function(node) { return [node.id, node]; }));
+  const pullRequestsByCommit = new Map();
+  for (const edge of graph.edges) {
+    if (edge.predicate !== "MERGED_AS") continue;
+    const pullRequest = nodesById.get(edge.source);
+    if (!pullRequest || pullRequest.kind !== "PullRequest") continue;
+    if (!pullRequestsByCommit.has(edge.target)) pullRequestsByCommit.set(edge.target, []);
+    pullRequestsByCommit.get(edge.target).push(pullRequest);
+  }
+  for (const node of graph.nodes) {
+    const pullRequests = pullRequestsByCommit.get(node.id);
+    if (node.kind === "Commit" && pullRequests?.length === 1) {
+      labels[node.id] = "Merge commit · " + pullRequests[0].label;
+      continue;
+    }
+    if (node.kind === "Commit") {
+      const sha = commitShaForNode(node);
+      if (sha) {
+        labels[node.id] = "Commit · " + sha.slice(0, 12);
+        continue;
+      }
+    }
+    labels[node.id] = friendlyNodeLabel(node, graph);
+  }
+  return labels;
+}
+
+function ontologySearchMatches(graph, visibleGraph, labels, query, limit) {
+  const normalized = String(query || "").trim().toLocaleLowerCase();
+  if (!normalized) return [];
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  const matches = [];
+  const visibleNodeIds = new Set(visibleGraph.nodes.map(function(node) { return node.id; }));
+  const nodesById = new Map(graph.nodes.map(function(node) { return [node.id, node]; }));
+  for (const node of visibleGraph.nodes) {
+    const label = labels[node.id] || node.label;
+    const fields = [label, node.label, node.kind, node.id, node.path, node.description].filter(Boolean).map(function(value) { return String(value).toLocaleLowerCase(); });
+    const haystack = fields.join(" ");
+    if (!tokens.every(function(token) { return haystack.includes(token); })) continue;
+    matches.push({
+      kind: "node",
+      id: node.id,
+      label: label,
+      meta: humanize(node.kind) + (node.path ? " · " + node.path : ""),
+      score: searchMatchScore(label, node.id, normalized)
+    });
+  }
+  for (const edge of visibleGraph.edges) {
+    if (!visibleNodeIds.has(edge.source) || !visibleNodeIds.has(edge.target)) continue;
+    const source = nodesById.get(edge.source);
+    const target = nodesById.get(edge.target);
+    const sourceLabel = source ? labels[source.id] || source.label : edge.source;
+    const targetLabel = target ? labels[target.id] || target.label : edge.target;
+    const label = humanize(edge.predicate);
+    const meta = sourceLabel + " → " + targetLabel;
+    const haystack = [label, edge.predicate, edge.id, edge.plane, sourceLabel, targetLabel].join(" ").toLocaleLowerCase();
+    if (!tokens.every(function(token) { return haystack.includes(token); })) continue;
+    matches.push({ kind: "edge", id: edge.id, label: label, meta: meta, score: searchMatchScore(label, edge.id, normalized) + 1 });
+  }
+  return matches.sort(function(left, right) {
+    return left.score - right.score || left.label.localeCompare(right.label) || left.id.localeCompare(right.id);
+  }).slice(0, limit || 10);
+}
+
+function searchMatchScore(label, id, query) {
+  const normalizedLabel = String(label).toLocaleLowerCase();
+  const normalizedId = String(id).toLocaleLowerCase();
+  if (normalizedLabel === query || normalizedId === query) return 0;
+  if (normalizedLabel.startsWith(query)) return 1;
+  if (normalizedLabel.includes(query)) return 2;
+  return 3;
+}
+
+function renderOntologySearchResults() {
+  const query = ontologySearch.value.trim();
+  ontologySearchShell.classList.toggle("has-query", Boolean(query));
+  if (!query || !ontologyState.latest) {
+    closeOntologySearchResults();
+    return;
+  }
+  const graph = ontologyState.latest;
+  const visibleGraph = filterOntologyGraph(graph, ontologyViewState.hiddenNodeKinds, ontologyViewState.hiddenEdgePredicates);
+  if (ontologyViewState.rendererLabelKey !== ontologyViewState.graphKey) {
+    ontologyViewState.rendererLabelKey = ontologyViewState.graphKey;
+    ontologyViewState.rendererLabels = friendlyNodeLabels(graph);
+  }
+  ontologySearchState.results = ontologySearchMatches(graph, visibleGraph, ontologyViewState.rendererLabels, query, 10);
+  ontologySearchState.activeIndex = Math.max(0, Math.min(ontologySearchState.activeIndex, Math.max(0, ontologySearchState.results.length - 1)));
+  ontologySearchResults.replaceChildren();
+  if (!ontologySearchState.results.length) {
+    ontologySearchResults.append(textElement("p", "graph-search-empty", "No visible nodes or relationships match “" + query + "”."));
+  } else {
+    ontologySearchState.results.forEach(function(result, index) {
+      const button = element("button", "graph-search-result" + (index === ontologySearchState.activeIndex ? " active" : ""));
+      button.type = "button";
+      button.id = "ontology-search-option-" + index;
+      button.dataset.searchResultIndex = String(index);
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(index === ontologySearchState.activeIndex));
+      button.append(
+        textElement("strong", "", result.label),
+        textElement("small", "", result.meta),
+        textElement("span", "graph-search-result-kind", result.kind === "node" ? "Node" : "Edge")
+      );
+      ontologySearchResults.append(button);
+    });
+  }
+  ontologySearchResults.hidden = !ontologySearchState.open;
+  ontologySearch.setAttribute("aria-expanded", String(ontologySearchState.open));
+  if (ontologyRenderer) ontologyRenderer.setSearchMatches(ontologySearchState.open ? ontologySearchState.results.map(function(result) { return { kind: result.kind, id: result.id }; }) : []);
+  if (ontologySearchState.open && ontologySearchState.results.length) ontologySearch.setAttribute("aria-activedescendant", "ontology-search-option-" + ontologySearchState.activeIndex);
+  else ontologySearch.removeAttribute("aria-activedescendant");
+}
+
+function closeOntologySearchResults() {
+  ontologySearchState.open = false;
+  ontologySearchResults.hidden = true;
+  ontologySearch.setAttribute("aria-expanded", "false");
+  ontologySearch.removeAttribute("aria-activedescendant");
+  if (ontologyRenderer) ontologyRenderer.setSearchMatches([]);
+}
+
+function selectOntologySearchResult(index) {
+  const result = ontologySearchState.results[index];
+  if (!result) return;
+  ontologySearch.value = result.label;
+  ontologySearchShell.classList.add("has-query");
+  closeOntologySearchResults();
+  selectGraphItem(result.kind, result.id);
+}
+
 function friendlyNodeExplanation(node, graph) {
   if (node.kind === "Commit") {
     const pullRequests = mergePullRequestsForCommit(node, graph);
@@ -1176,7 +1310,7 @@ function renderGraphControls(graph) {
   const filters = element("details", "graph-filter-menu");
   filters.open = ontologyViewState.filterMenuOpen;
   filters.addEventListener("toggle", function() { ontologyViewState.filterMenuOpen = filters.open; });
-  const filterSummary = textElement("summary", "graph-control-button", "▽  Filters");
+  const filterSummary = textElement("summary", "graph-control-button", "Filters");
   const popover = element("div", "graph-filter-popover");
   const filterColumns = element("div", "graph-filter-columns");
   filterColumns.append(
@@ -1194,25 +1328,36 @@ function renderGraphControls(graph) {
   });
   const resetLayout = textElement("button", "graph-reset", "Reset layout");
   resetLayout.type = "button";
-  resetLayout.disabled = ontologyViewState.nodePositions.size === 0 && ontologyViewState.edgeOffsets.size === 0;
   resetLayout.addEventListener("click", function() {
-    ontologyViewState.nodePositions.clear();
-    ontologyViewState.edgeOffsets.clear();
-    renderOntology();
+    if (ontologyRenderer) ontologyRenderer.reset();
   });
   const popoverActions = element("div", "graph-popover-actions");
   popoverActions.append(showAll, resetLayout);
   popover.append(popoverActions);
   filters.append(filterSummary, popover);
-  const layout = textElement("button", "graph-control-button", "Layout  ⌄"); layout.type = "button";
-  const zoom = textElement("span", "graph-zoom", "−   100%   +");
-  const dragNodes = textElement("span", "graph-toggle", "●  Drag nodes");
-  const dragEdges = textElement("span", "graph-toggle", "●  Edit edges");
-  toolbar.append(filters, layout, resetLayout.cloneNode(true), zoom, dragNodes, dragEdges);
-  toolbar.children[2].addEventListener("click", function() {
-    ontologyViewState.nodePositions.clear(); ontologyViewState.edgeOffsets.clear(); renderOntology();
+  const fit = textElement("button", "graph-control-button", "Fit");
+  fit.type = "button";
+  fit.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.fit(); });
+  const zoomOut = textElement("button", "graph-control-button", "−");
+  zoomOut.type = "button";
+  zoomOut.setAttribute("aria-label", "Zoom out");
+  zoomOut.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.zoomBy(0.78); });
+  const zoomPercent = textElement("span", "graph-zoom", ontologyViewState.zoomPercent + "%");
+  zoomPercent.id = "graph-zoom-percent";
+  const zoomIn = textElement("button", "graph-control-button", "+");
+  zoomIn.type = "button";
+  zoomIn.setAttribute("aria-label", "Zoom in");
+  zoomIn.addEventListener("click", function() { if (ontologyRenderer) ontologyRenderer.zoomBy(1.28); });
+  const physics = textElement("button", "graph-control-button graph-physics-control", "Physics");
+  physics.type = "button";
+  physics.setAttribute("aria-pressed", String(ontologyViewState.physicsEnabled));
+  physics.addEventListener("click", function() {
+    ontologyViewState.physicsEnabled = !ontologyViewState.physicsEnabled;
+    if (ontologyRenderer) ontologyRenderer.setPhysics(ontologyViewState.physicsEnabled);
+    renderOntology();
   });
-  graphControls.append(toolbar, textElement("p", "graph-control-help", "Drag nodes to reposition. Drag a relationship label to adjust its path. Select any item to focus only its direct connections."));
+  toolbar.append(filters, resetLayout, fit, zoomOut, zoomPercent, zoomIn, physics);
+  graphControls.append(toolbar, textElement("p", "graph-control-help", "Scroll to zoom · drag the canvas to pan · drag nodes to pin · select an edge label to drag the relationship."));
 }
 
 function countGraphTypes(items, property) {
@@ -1242,91 +1387,6 @@ function toggleGraphFilter(group, type) {
   if (hiddenTypes.has(type)) hiddenTypes.delete(type);
   else hiddenTypes.add(type);
   renderOntology();
-}
-
-function makeGraphItemInteractive(element, kind, id) {
-  function select(event) {
-    event.stopPropagation();
-    const suppressed = ontologyViewState.suppressedClick;
-    if (event.type === "click" && suppressed && suppressed.kind === kind && suppressed.id === id) {
-      ontologyViewState.suppressedClick = null;
-      return;
-    }
-    selectGraphItem(kind, id);
-  }
-  element.addEventListener("click", select);
-  element.addEventListener("keydown", function(event) {
-    if (event.key === "Enter" || event.key === " ") {
-      event.preventDefault();
-      select(event);
-    }
-  });
-}
-
-function enableGraphDrag(element, kind, id, origin) {
-  element.addEventListener("pointerdown", function(event) {
-    if (event.button !== 0 || event.pointerType === "touch") return;
-    event.stopPropagation();
-    ontologyViewState.drag = {
-      kind: kind,
-      id: id,
-      graphKey: ontologyViewState.graphKey,
-      pointerId: event.pointerId,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      originX: origin.x,
-      originY: origin.y,
-      moved: false
-    };
-  });
-}
-
-function handleGraphPointerMove(event) {
-  const drag = ontologyViewState.drag;
-  if (!drag || drag.pointerId !== event.pointerId || drag.graphKey !== ontologyViewState.graphKey) return;
-  const bounds = ontologyGraph.getBoundingClientRect();
-  if (!bounds.width || !bounds.height) return;
-  const dx = (event.clientX - drag.startClientX) * 1100 / bounds.width;
-  const dy = (event.clientY - drag.startClientY) * 590 / bounds.height;
-  if (!drag.moved && Math.hypot(dx, dy) < 3) return;
-  event.preventDefault();
-  drag.moved = true;
-  const position = {
-    x: drag.originX + dx,
-    y: drag.originY + dy
-  };
-  if (drag.kind === "node") {
-    ontologyViewState.nodePositions.set(drag.id, {
-      x: Math.max(45, Math.min(1055, position.x)),
-      y: Math.max(50, Math.min(540, position.y))
-    });
-  } else {
-    ontologyViewState.edgeOffsets.set(drag.id, {
-      x: Math.max(-260, Math.min(260, position.x)),
-      y: Math.max(-260, Math.min(260, position.y))
-    });
-  }
-  if (graphDragFrame === null) {
-    const dragGraphKey = drag.graphKey;
-    graphDragFrame = requestAnimationFrame(function() {
-      graphDragFrame = null;
-      if (ontologyViewState.graphKey !== dragGraphKey) return;
-      renderOntology();
-    });
-  }
-}
-
-function finishGraphDrag(event) {
-  const drag = ontologyViewState.drag;
-  if (!drag || drag.pointerId !== event.pointerId) return;
-  if (drag.moved) {
-    const suppressed = { kind: drag.kind, id: drag.id };
-    ontologyViewState.suppressedClick = suppressed;
-    setTimeout(function() {
-      if (ontologyViewState.suppressedClick === suppressed) ontologyViewState.suppressedClick = null;
-    }, 0);
-  }
-  ontologyViewState.drag = null;
 }
 
 function selectGraphItem(kind, id) {
@@ -1486,14 +1546,15 @@ function confidenceLabel(value) {
 function clampConfidence(value) { return Math.max(0, Math.min(1, value)); }
 
 function ontologyEvidenceSection(evidence) {
+  const citations = Array.isArray(evidence) ? evidence : [];
   const section = element("section", "ontology-inspector-section");
-  section.append(textElement("h3", "", "Evidence · " + evidence.length));
-  if (!evidence.length) {
+  section.append(textElement("h3", "", "Evidence · " + citations.length));
+  if (!citations.length) {
     section.append(textElement("p", "empty-detail", "No evidence citations were provided."));
     return section;
   }
   const list = element("ul", "ontology-evidence-list");
-  for (const citation of evidence) list.append(textElement("li", "ontology-evidence", citation));
+  for (const citation of citations) list.append(textElement("li", "ontology-evidence", citation));
   section.append(list);
   return section;
 }
@@ -1730,51 +1791,6 @@ function ontologyStat(label, value) {
   stat.append(textElement("span", "label", label), textElement("strong", "", value));
   return stat;
 }
-
-function graphPositions(nodes, overrides) {
-  const positions = new Map();
-  const center = nodes.find(function(node) { return node.kind === "Repository"; });
-  if (center) positions.set(center.id, { x: 550, y: 295 });
-  const rest = nodes.filter(function(node) { return !center || node.id !== center.id; });
-  for (let index = 0; index < rest.length; index += 1) {
-    const ring = index < 10 ? 205 : 265;
-    const ringIndex = index < 10 ? index : index - 10;
-    const ringCount = index < 10 ? Math.min(rest.length, 10) : Math.max(rest.length - 10, 1);
-    const angle = -Math.PI / 2 + (Math.PI * 2 * ringIndex) / ringCount;
-    positions.set(rest[index].id, { x: 550 + Math.cos(angle) * ring * 1.75, y: 295 + Math.sin(angle) * ring });
-  }
-  if (overrides) {
-    for (const node of nodes) {
-      const saved = overrides.get(node.id);
-      if (saved) positions.set(node.id, { x: saved.x, y: saved.y });
-    }
-  }
-  return positions;
-}
-
-function graphEdgeGeometry(source, target, index, dragOffset) {
-  const dx = target.x - source.x;
-  const dy = target.y - source.y;
-  const length = Math.max(Math.hypot(dx, dy), 1);
-  const direction = index % 2 === 0 ? 1 : -1;
-  const offset = (130 + (index % 3) * 20) * direction;
-  const moved = dragOffset || { x: 0, y: 0 };
-  const controlX = (source.x + target.x) / 2 - (dy / length) * offset + moved.x * 2;
-  const controlY = (source.y + target.y) / 2 + (dx / length) * offset + moved.y * 2;
-  return {
-    path: "M " + source.x + " " + source.y + " Q " + controlX + " " + controlY + " " + target.x + " " + target.y,
-    labelX: (source.x + 2 * controlX + target.x) / 4,
-    labelY: (source.y + 2 * controlY + target.y) / 4
-  };
-}
-
-function svgElement(tag, className) {
-  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
-  if (className) node.setAttribute("class", className);
-  return node;
-}
-
-function truncateLabel(value, max) { return value.length <= max ? value : value.slice(0, max - 1) + "…"; }
 
 function populateBoardFilters(tasks) {
   populateSelect("board-repository", "Repository: All", uniqueValues(tasks.map(function(task) { return task.metadata?.repository; })));
@@ -2510,6 +2526,55 @@ historyList.addEventListener("click", function(event) {
   renderHistory();
 });
 document.getElementById("task-type-search").addEventListener("input", renderTaskTypes);
+ontologySearch.addEventListener("input", function() {
+  ontologySearchState.activeIndex = 0;
+  ontologySearchState.open = true;
+  renderOntologySearchResults();
+});
+ontologySearch.addEventListener("focus", function() {
+  if (ontologySearch.value.trim()) {
+    ontologySearchState.open = true;
+    renderOntologySearchResults();
+  }
+});
+ontologySearch.addEventListener("keydown", function(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeOntologySearchResults();
+    return;
+  }
+  if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+    if (!ontologySearchState.open) {
+      ontologySearchState.open = true;
+      renderOntologySearchResults();
+    }
+    if (!ontologySearchState.results.length) return;
+    event.preventDefault();
+    const direction = event.key === "ArrowDown" ? 1 : -1;
+    ontologySearchState.activeIndex = (ontologySearchState.activeIndex + direction + ontologySearchState.results.length) % ontologySearchState.results.length;
+    renderOntologySearchResults();
+    document.getElementById("ontology-search-option-" + ontologySearchState.activeIndex)?.scrollIntoView({ block: "nearest" });
+    return;
+  }
+  if (event.key === "Enter" && ontologySearchState.open) {
+    event.preventDefault();
+    selectOntologySearchResult(ontologySearchState.activeIndex);
+  }
+});
+document.getElementById("ontology-search-clear").addEventListener("click", function() {
+  ontologySearch.value = "";
+  ontologySearchState = { results: [], activeIndex: 0, open: false };
+  ontologySearchShell.classList.remove("has-query");
+  closeOntologySearchResults();
+  ontologySearch.focus();
+});
+ontologySearchResults.addEventListener("click", function(event) {
+  const result = event.target.closest("[data-search-result-index]");
+  if (result) selectOntologySearchResult(Number(result.dataset.searchResultIndex));
+});
+document.addEventListener("pointerdown", function(event) {
+  if (!ontologySearchShell.contains(event.target)) closeOntologySearchResults();
+});
 taskTypeList.addEventListener("click", function(event) {
   const row = event.target.closest("[data-task-type]");
   if (!row) return;
@@ -2524,9 +2589,6 @@ document.getElementById("close-detail").addEventListener("click", closeTask);
 dialog.addEventListener("cancel", function(event) { event.preventDefault(); closeTask(); });
 dialog.addEventListener("click", function(event) { if (event.target === dialog) closeTask(); });
 window.addEventListener("hashchange", renderSelectedTask);
-window.addEventListener("pointermove", handleGraphPointerMove);
-window.addEventListener("pointerup", finishGraphDrag);
-window.addEventListener("pointercancel", finishGraphDrag);
 document.getElementById("toolbar").addEventListener("click", function(event) {
   const action = event.target.dataset.demo;
   if (action === "pr") postDemo({ repository: "omlabs/example", pullRequestNumber: ++nextPr, headSha: "sha-" + nextPr + "-1" });

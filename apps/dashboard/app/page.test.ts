@@ -45,34 +45,30 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /workflow: /);
   assert.match(html, /function renderOntology/);
   assert.match(html, /class="ontology-workspace"/);
-  assert.match(html, /function appendGraphDefinitions/);
+  assert.match(html, /assets\/ontology-graph-client\.js/);
+  assert.match(html, /function ensureOntologyRenderer/);
   assert.match(html, /if \(showingOntology\)/);
   assert.match(html, /aria-label="Repository ontology graph"/);
-  assert.match(html, /\.kind-Feature circle/);
+  assert.match(html, /id="ontology-label-layer"/);
+  assert.match(html, /id="ontology-minimap"/);
+  assert.match(html, /id="graph-runtime-status"/);
   assert.match(html, /aria-label="Graph visibility controls"/);
   assert.match(html, /function filterOntologyGraph/);
   assert.match(html, /function renderGraphControls/);
   assert.match(html, /filterMenuOpen: false/);
   assert.match(html, /filters\.open = ontologyViewState\.filterMenuOpen/);
   assert.match(html, /ontologyViewState\.filterMenuOpen = Boolean\(menu\?\.open\)/);
-  assert.match(html, /function graphEdgeGeometry/);
-  assert.match(html, /function focusedGraphElements/);
   assert.match(html, /function ontologyGraphIdentity/);
   assert.match(html, /function resetOntologyViewForGraph/);
   assert.match(html, /function friendlyNodeLabel/);
   assert.match(html, /function friendlyNodeExplanation/);
-  assert.match(html, /function enableGraphDrag/);
-  assert.match(html, /function handleGraphPointerMove/);
-  assert.match(html, /nodePositions: new Map/);
-  assert.match(html, /edgeOffsets: new Map/);
   assert.match(html, /ontologyRefreshSequence/);
   assert.match(html, /requestSequence !== ontologyRefreshSequence/);
-  assert.match(html, /touch-action: pan-x pan-y pinch-zoom/);
-  assert.match(html, /event\.pointerType === "touch"/);
-  assert.doesNotMatch(html, /suppressClickUntil/);
-  assert.match(html, /graph-edge-label-button/);
+  assert.match(html, /touch-action: none/);
+  assert.match(html, /cosmos-node-label/);
+  assert.match(html, /cosmos-edge-label/);
+  assert.match(html, /ontology-workspace:not\(.has-selection\)/);
   assert.match(html, /function toggleGraphFilter/);
-  assert.match(html, /function makeGraphItemInteractive/);
   assert.match(html, /function renderOntologyInspector/);
   assert.match(html, /button\.disabled = true/);
   assert.match(html, /edit\.disabled = run\.disabled = true/);
@@ -92,7 +88,15 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /Evidence · /);
   assert.match(html, /Show all/);
   assert.match(html, /Reset layout/);
-  assert.match(html, /Select any item to focus only its direct connections/);
+  assert.match(html, /Scroll to zoom · drag the canvas to pan · drag nodes to pin/);
+  assert.match(html, /id="ontology-search"/);
+  assert.match(html, /id="ontology-search-results"/);
+  assert.match(html, /function ontologySearchMatches/);
+  assert.match(html, /function selectOntologySearchResult/);
+  assert.match(html, /ontologyRenderer\.setSearchMatches/);
+  assert.match(html, /event\.key === "ArrowDown"/);
+  assert.doesNotMatch(html, /ontologyRenderer\.find/);
+  assert.doesNotMatch(html, /Grouped layout/);
   assert.match(html, /Ask with citations/);
   assert.match(html, /function renderIssueTrace/);
   assert.match(html, /function issueTraceEntity/);
@@ -157,19 +161,41 @@ test("dashboard page renders clickable task detail affordances", () => {
     "edge relationship types can be hidden independently"
   );
 
-  const focusedSource = script.match(/function focusedGraphElements\(selection, graph\) \{[\s\S]+?\n\}\n\nfunction friendlyNodeLabel/)?.[0]
-    .replace(/\n\nfunction friendlyNodeLabel$/, "");
-  assert.ok(focusedSource);
-  const focusedGraphElements = new Function(`${focusedSource}; return focusedGraphElements;`)() as (
-    selection: { kind: "node" | "edge"; id: string } | null,
-    graph: { nodes: Array<{ id: string; kind: string }>; edges: Array<{ id: string; source: string; target: string; predicate: string }> }
-  ) => { nodeIds: Set<string>; edgeIds: Set<string> };
-  const nodeFocus = focusedGraphElements({ kind: "node", id: "repo" }, graph);
-  assert.deepEqual(Array.from(nodeFocus.nodeIds).sort(), ["file", "issue", "repo"]);
-  assert.deepEqual(Array.from(nodeFocus.edgeIds).sort(), ["contains", "tracks"]);
-  const edgeFocus = focusedGraphElements({ kind: "edge", id: "tracks" }, graph);
-  assert.deepEqual(Array.from(edgeFocus.nodeIds).sort(), ["issue", "repo"]);
-  assert.deepEqual(Array.from(edgeFocus.edgeIds), ["tracks"]);
+  const searchSource = script.match(/function ontologySearchMatches\(graph, visibleGraph, labels, query, limit\) \{[\s\S]+?\n\}\n\nfunction renderOntologySearchResults/)?.[0]
+    .replace(/\n\nfunction renderOntologySearchResults$/, "");
+  assert.ok(searchSource);
+  const ontologySearchMatches = new Function("humanize", `${searchSource}; return ontologySearchMatches;`)(
+    (value: string) => value.replace(/_/g, " ").replace(/^./, (letter) => letter.toUpperCase())
+  ) as (
+    graph: { nodes: Array<Record<string, string>>; edges: Array<Record<string, string>> },
+    visibleGraph: { nodes: Array<Record<string, string>>; edges: Array<Record<string, string>> },
+    labels: Record<string, string>,
+    query: string,
+    limit: number
+  ) => Array<{ kind: string; id: string; label: string }>;
+  const searchableGraph = {
+    nodes: [
+      { id: "repo", kind: "Repository", label: "omxyz/jina", description: "repo:omxyz/jina" },
+      { id: "file", kind: "File", label: "page.ts", path: "apps/dashboard/app/page.ts" },
+      { id: "issue", kind: "Issue", label: "Guest denial semantics" }
+    ],
+    edges: [
+      { id: "contains", source: "repo", target: "file", predicate: "CONTAINS", plane: "code" },
+      { id: "tracks", source: "repo", target: "issue", predicate: "TRACKS", plane: "knowledge" }
+    ]
+  };
+  const labels = { repo: "omxyz/jina", file: "Dashboard page", issue: "Guest denial semantics" };
+  assert.deepEqual(
+    ontologySearchMatches(searchableGraph, searchableGraph, labels, "guest denial", 10).map((result) => [result.kind, result.id]),
+    [["node", "issue"], ["edge", "tracks"]],
+    "search covers friendly node labels and relationship endpoints"
+  );
+  const withoutFiles = filterOntologyGraph(searchableGraph, new Set(["File"]), new Set()) as typeof searchableGraph;
+  assert.deepEqual(
+    ontologySearchMatches(searchableGraph, withoutFiles, labels, "dashboard page", 10),
+    [],
+    "search respects active graph visibility filters"
+  );
 
   const graphIdentitySource = script.match(/function ontologyGraphIdentity\(graph\) \{[\s\S]+?\n\}\n\nfunction resetOntologyViewForGraph/)?.[0]
     .replace(/\n\nfunction resetOntologyViewForGraph$/, "");
@@ -244,19 +270,6 @@ test("dashboard page renders clickable task detail affordances", () => {
     { value: undefined, scoredCount: 0, totalCount: 2 },
     "nodes without scored relationships do not invent a confidence value"
   );
-
-  const edgeGeometrySource = script.match(/function graphEdgeGeometry\(source, target, index, dragOffset\) \{[\s\S]+?\n\}\n\nfunction svgElement/)?.[0]
-    .replace(/\n\nfunction svgElement$/, "");
-  assert.ok(edgeGeometrySource);
-  const graphEdgeGeometry = new Function(`${edgeGeometrySource}; return graphEdgeGeometry;`)() as (
-    source: { x: number; y: number }, target: { x: number; y: number }, index: number, dragOffset?: { x: number; y: number }
-  ) => { path: string; labelX: number; labelY: number };
-  const geometry = graphEdgeGeometry({ x: 0, y: 0 }, { x: 0, y: 100 }, 0);
-  assert.match(geometry.path, / Q /);
-  assert.notEqual(geometry.labelX, 0, "curved edges move their clickable label away from overlapping nodes");
-  const movedGeometry = graphEdgeGeometry({ x: 0, y: 0 }, { x: 0, y: 100 }, 0, { x: 20, y: 10 });
-  assert.equal(movedGeometry.labelX - geometry.labelX, 20, "dragging an edge offsets its curve label horizontally");
-  assert.equal(movedGeometry.labelY - geometry.labelY, 10, "dragging an edge offsets its curve label vertically");
 
   const partitionSource = script.match(/function partitionBoardTasks\(tasks\) \{[\s\S]+?\n\}\n\nfunction renderColumns/)?.[0]
     .replace(/\n\nfunction renderColumns$/, "");
