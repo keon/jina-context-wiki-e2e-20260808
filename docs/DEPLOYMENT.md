@@ -109,9 +109,11 @@ superseded, while their terminal records remain available on the History page.
 Repeated deployments deliberately exercise the unchanged-head cache path; a generator-contract version change performs one full semantic backfill and then returns to cached execution.
 The acceptance poll window is 50 minutes and its Cloud Run task limit is 55
 minutes. This outer wall-clock budget includes sandbox provisioning, repository
-checkout, Codex installation, the ontology worker's 30-minute model-command
-budget, evidence validation, and cleanup. It reports the root, ingest,
-assertion, and projection statuses whenever they change. A blocked aggregate is
+checkout, Codex installation, the ontology worker's model-command budget,
+evidence validation, and cleanup. Production raises the executor's 30-minute
+default command budget to 40 minutes so a slow but active Codex run can complete
+while remaining inside the acceptance job's outer limits. It reports the root,
+ingest, assertion, and projection statuses whenever they change. A blocked aggregate is
 terminal for this automated check: acceptance reads the related board events and
 includes the failed chunk's redacted worker reason instead of waiting for the
 full timeout. On exit it also writes its brief success or failure summary to the
