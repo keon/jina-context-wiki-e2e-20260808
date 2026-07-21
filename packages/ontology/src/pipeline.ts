@@ -7,7 +7,7 @@ import {
   type OntologySourceEvidence
 } from "./model.js";
 import { canonicalJson, type AssertionStatus } from "./knowledge.js";
-import type { GitHubSourceObservation } from "./normalizers.js";
+import type { RepositorySourceObservation } from "./normalizers.js";
 import {
   normalizePredicateName,
   predicateDefinition,
@@ -17,8 +17,8 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v11";
-export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v12-causal";
+export const ONTOLOGY_PROJECTION_VERSION = "causal-graph-v2";
 
 export interface RepositoryTreeEntry {
   readonly path: string;
@@ -83,6 +83,49 @@ export interface CommitChangeFact {
   readonly oldPath?: string;
   readonly oldBlobSha?: string;
   readonly newBlobSha?: string;
+}
+
+export interface MovedFromCandidate {
+  readonly oldPath: string;
+  readonly newPath: string;
+  readonly similarity: number;
+  readonly matchingSignatureHashes: readonly string[];
+}
+
+/** Deterministic candidate generation only; ontology_assert must review MOVED_FROM before it becomes active knowledge. */
+export function movedFromSimilarityCandidates(
+  changes: readonly CommitChangeFact[],
+  analyses: ReadonlyMap<string, BlobAnalysis>,
+  threshold = 0.6
+): readonly MovedFromCandidate[] {
+  const deleted = changes.filter((change) => change.change === "delete" && change.oldBlobSha);
+  const added = changes.filter((change) => change.change === "add" && change.newBlobSha);
+  const candidates: MovedFromCandidate[] = changes.filter((change) =>
+    change.change === "rename" && change.oldPath && change.oldBlobSha && change.newBlobSha
+  ).map((change) => {
+    const oldSignatures = new Set((analyses.get(change.oldBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
+    const newSignatures = new Set((analyses.get(change.newBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
+    return {
+      oldPath: change.oldPath!, newPath: change.path, similarity: 1,
+      matchingSignatureHashes: [...oldSignatures].filter((signature) => newSignatures.has(signature)).sort()
+    };
+  });
+  for (const oldFile of deleted) {
+    const oldSignatures = new Set((analyses.get(oldFile.oldBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
+    if (oldSignatures.size === 0) continue;
+    for (const newFile of added) {
+      const newSignatures = new Set((analyses.get(newFile.newBlobSha!)?.symbols ?? []).map((symbol) => symbol.signatureHash));
+      if (newSignatures.size === 0) continue;
+      const matching = [...oldSignatures].filter((signature) => newSignatures.has(signature));
+      const similarity = matching.length / Math.max(oldSignatures.size, newSignatures.size);
+      if (similarity >= threshold) candidates.push({
+        oldPath: oldFile.path, newPath: newFile.path, similarity,
+        matchingSignatureHashes: matching.sort()
+      });
+    }
+  }
+  return [...new Map(candidates.map((candidate) => [`${candidate.oldPath}:${candidate.newPath}`, candidate])).values()]
+    .sort((left, right) => right.similarity - left.similarity || left.oldPath.localeCompare(right.oldPath) || left.newPath.localeCompare(right.newPath));
 }
 
 export interface OntologyIngestPlan {
@@ -186,7 +229,7 @@ export interface OntologyPipelineStore {
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
     analyses: readonly BlobAnalysis[]
   ): Promise<void>;
-  applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<OntologySourceIngestResult>;
+  applyGitHubObservations(observations: readonly RepositorySourceObservation[]): Promise<OntologySourceIngestResult>;
   loadAssertionEvidence(
     tenantId: string,
     repository: string,
@@ -285,7 +328,7 @@ export function codeCheckpoint(tenantId: string, repository: string, commitSha: 
 
 export function assertionEvidenceFingerprint(
   codeCheckpointValue: string,
-  observations: readonly GitHubSourceObservation[],
+  observations: readonly RepositorySourceObservation[],
   semanticScope: {
     readonly focusPaths?: readonly string[];
     readonly problemEvidencePullRequestNumbers?: readonly number[];
@@ -407,12 +450,17 @@ export function assertionsFromGeneratedOntology(
     const subject = nodes.get(edge.source);
     const object = nodes.get(edge.target);
     if (!subject || !object) return [];
-    const isVirtualResolution = edge.predicate === "RESOLVES" &&
-      object.kind === "Issue" && /^virtual:pr:\d+$/i.test(object.id.trim());
+    const isVirtualResolution = (edge.predicate === "RESOLVED_BY" &&
+      subject.kind === "VirtualIssue" && /^virtual:pr:\d+$/i.test(subject.id.trim())) ||
+      (edge.predicate === "RESOLVES" && object.kind === "Issue" && /^virtual:pr:\d+$/i.test(object.id.trim()));
+    const duplicatesExplicitGitHubResolution = !isVirtualResolution && (
+      (edge.predicate === "RESOLVES" && subject.kind === "PullRequest" && object.kind === "Issue") ||
+      (edge.predicate === "RESOLVED_BY" && subject.kind === "Issue" && object.kind === "PullRequest")
+    );
     // Explicit GitHub issue resolution is an authoritative intake fact. A model
     // may repeat it after reading source evidence, but must not create a second
     // knowledge assertion with independent provenance.
-    if (edge.predicate === "RESOLVES" && !isVirtualResolution) return [];
+    if (duplicatesExplicitGitHubResolution) return [];
     const assertion: GeneratedAssertion = {
       subject: {
         kind: subject.kind,
@@ -445,7 +493,7 @@ function validateDerivedIssueNodes(
   const resolved = new Set(resolvedPullRequestNumbers);
   const anchors = new Set<number>();
   for (const node of generated.nodes) {
-    if (node.kind !== "Issue") continue;
+    if (node.kind !== "VirtualIssue" && node.kind !== "Issue") continue;
     const anchorText = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
     if (!anchorText) continue;
     const anchor = Number.parseInt(anchorText, 10);
@@ -454,10 +502,14 @@ function validateDerivedIssueNodes(
     if (anchors.has(anchor)) throw new Error(`only one virtual Issue is allowed for pull request #${anchor}`);
     if (resolved.has(anchor)) throw new Error(`pull request #${anchor} already explicitly resolves an issue`);
     anchors.add(anchor);
-    const resolutions = generated.edges.filter((edge) => edge.predicate === "RESOLVES" && edge.target === node.id);
+    const resolutions = generated.edges.filter((edge) =>
+      (edge.predicate === "RESOLVED_BY" && edge.source === node.id) ||
+      (edge.predicate === "RESOLVES" && edge.target === node.id)
+    );
     if (resolutions.length !== 1) throw new Error(`virtual Issue ${node.id} requires exactly one RESOLVES edge`);
-    const subject = nodes.get(resolutions[0]!.source);
-    const subjectNumber = subject?.kind === "PullRequest" ? canonicalWorkItemId(subject.id, "PullRequest") : undefined;
+    const resolution = resolutions[0]!;
+    const pullRequest = nodes.get(resolution.predicate === "RESOLVED_BY" ? resolution.target : resolution.source);
+    const subjectNumber = pullRequest?.kind === "PullRequest" ? canonicalWorkItemId(pullRequest.id, "PullRequest") : undefined;
     if (subjectNumber !== String(anchor)) throw new Error(`virtual Issue ${node.id} must be resolved by pull request #${anchor}`);
   }
 }
@@ -468,6 +520,12 @@ export function derivedIssueNaturalKey(repository: string, pullRequestNumber: nu
   }
   const pullRequestKey = `github:pr:${repository}#${pullRequestNumber}`;
   return `derived:issue:${repository}:${stableId("candidate", `${pullRequestKey}:${slot}`)}`;
+}
+
+export function virtualIssueNaturalKey(repository: string, label: string, description: string): string {
+  const normalized = `${label}\n${description}`.normalize("NFKC").trim().toLowerCase().replace(/\s+/g, " ");
+  if (!normalized) throw new Error("VirtualIssue requires problem content");
+  return `virtual-issue:${repository}:${stableId("content", normalized).slice("content_".length)}`;
 }
 
 export function featureNaturalKey(repository: string, featureId: string): string {
@@ -483,6 +541,18 @@ function entityNaturalKey(node: GeneratedOntology["nodes"][number], repository: 
   if (node.kind === "Commit") return `repo:${repository}:sha:${canonicalCommitId(node.id)}`;
   if (node.kind === "PullRequest") return `github:pr:${repository}#${canonicalWorkItemId(node.id, "PullRequest")}`;
   if (node.kind === "Feature") return featureNaturalKey(repository, node.id);
+  if (node.kind === "Package") {
+    const match = /^package:([^:]+):(.+)$/i.exec(node.id.trim());
+    if (!match?.[1] || !match[2]) throw new Error(`Package id must use package:<ecosystem>:<name>: ${node.id}`);
+    return `package:${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
+  }
+  if (node.kind === "Service" || node.kind === "Deployment" || node.kind === "Incident") {
+    const prefix = node.kind.toLowerCase();
+    const match = new RegExp(`^${prefix}:([^:]+):(.+)$`, "i").exec(node.id.trim());
+    if (!match?.[1] || !match[2]) throw new Error(`${node.kind} id must use ${prefix}:<source>:<external-id>: ${node.id}`);
+    return `${prefix}:${match[1].toLowerCase()}:${match[2]}`;
+  }
+  if (node.kind === "VirtualIssue") return virtualIssueNaturalKey(repository, node.label, node.description);
   if (node.kind === "Issue") {
     const virtualAnchor = /^virtual:pr:(\d+)$/i.exec(node.id.trim())?.[1];
     if (virtualAnchor) return derivedIssueNaturalKey(repository, Number.parseInt(virtualAnchor, 10));

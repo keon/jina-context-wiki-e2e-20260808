@@ -42,6 +42,9 @@ Create a private GitHub App under the account or organization that owns the repo
 - Webhook secret: the exact value in `GITHUB_WEBHOOK_SECRET`
 - Repository permission: **Pull requests — Read-only**
 - Repository permission: **Issues — Read-only**
+- Repository permission: **Contents — Read-only**
+- Optional repository permission: **Deployments — Read-only**
+- Optional repository permission: **Actions — Read-only**
 - Subscribe to events: **Pull request** and **Issues**
 
 Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Production sets the canonical `JINA_TENANT_ID=omlabs`; configured aliases are migrated at API startup so historical tasks remain visible.

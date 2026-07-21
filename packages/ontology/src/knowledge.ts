@@ -81,6 +81,18 @@ export interface AuditEntry {
   readonly parentAuditId?: string;
 }
 
+export type AssertionRelationKind = "supports" | "contradicts";
+
+export interface AssertionRelation {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly sourceAssertionId: string;
+  readonly relation: AssertionRelationKind;
+  readonly targetAssertionId: string;
+  readonly evidenceObservationId: string;
+  readonly createdAt: string;
+}
+
 export interface AssertionInput {
   readonly tenantId: string;
   readonly repoId?: string;
@@ -104,11 +116,39 @@ export interface KnowledgeState {
   readonly identities: readonly ExternalIdentity[];
   readonly redirects: readonly EntityRedirect[];
   readonly assertions: readonly KnowledgeAssertion[];
+  readonly assertionRelations: readonly AssertionRelation[];
   readonly auditLog: readonly AuditEntry[];
 }
 
 export function emptyKnowledgeState(): KnowledgeState {
-  return { entities: [], identities: [], redirects: [], assertions: [], auditLog: [] };
+  return { entities: [], identities: [], redirects: [], assertions: [], assertionRelations: [], auditLog: [] };
+}
+
+export function relateAssertions(
+  state: KnowledgeState,
+  input: Omit<AssertionRelation, "id" | "createdAt"> & { readonly now: string }
+): { readonly state: KnowledgeState; readonly relation: AssertionRelation; readonly created: boolean } {
+  const source = state.assertions.find((assertion) => assertion.tenantId === input.tenantId && assertion.id === input.sourceAssertionId);
+  const target = state.assertions.find((assertion) => assertion.tenantId === input.tenantId && assertion.id === input.targetAssertionId);
+  if (!source || !target) throw new Error("assertion relation endpoints must exist in the tenant");
+  if (source.id === target.id) throw new Error("an assertion cannot support or contradict itself");
+  if (!source.repoId || source.repoId !== target.repoId) throw new Error("assertion relations must stay within one repository");
+  const existing = state.assertionRelations.find((relation) =>
+    relation.tenantId === input.tenantId && relation.sourceAssertionId === source.id &&
+    relation.relation === input.relation && relation.targetAssertionId === target.id &&
+    relation.evidenceObservationId === input.evidenceObservationId
+  );
+  if (existing) return { state, relation: existing, created: false };
+  const relation: AssertionRelation = {
+    id: stableId("assertion_relation", `${input.tenantId}:${source.id}:${input.relation}:${target.id}:${input.evidenceObservationId}`),
+    tenantId: input.tenantId,
+    sourceAssertionId: source.id,
+    relation: input.relation,
+    targetAssertionId: target.id,
+    evidenceObservationId: input.evidenceObservationId,
+    createdAt: input.now
+  };
+  return { state: { ...state, assertionRelations: [...state.assertionRelations, relation] }, relation, created: true };
 }
 
 export function ensureEntity(

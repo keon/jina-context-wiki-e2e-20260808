@@ -1,6 +1,6 @@
 # Current Sequence Diagrams
 
-These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-20. They intentionally exclude the Trigger.dev and normalized-board-storage target designs in [ARCHITECTURE.md](ARCHITECTURE.md); the Ontology Repository Context path is current implementation.
+These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-21. They intentionally exclude the Trigger.dev and normalized-board-storage target designs in [ARCHITECTURE.md](ARCHITECTURE.md); the Ontology Repository Context path is current implementation.
 
 The board reducer is the orchestrator. Workers never mutate board state directly: they claim a durable outbox lease through the API, perform external work outside the API mutation lock, renew the lease while active, and complete through the API.
 
@@ -92,7 +92,11 @@ sequenceDiagram
     Worker->>API: Record immutable observations and request blob cache misses
     API->>DB: Write commits, refs, tree state, first-parent changes, entities, identities, outbox
     DB-->>Worker: Previously unseen blob SHAs only
-    Worker->>GitHub: Read missing blobs plus PR/issue/CODEOWNERS sources
+    par deterministic sources
+        Worker->>GitHub: Read missing blobs plus PR/issue/CODEOWNERS sources
+        Worker->>GitHub: Read deployments, deploy workflows, and incident-labeled issues when permitted
+        Worker->>Worker: Parse manifests, named services, move candidates, and stable-ID postmortems/tombstones
+    end
     Worker->>API: Store versioned symbols/typed edges and normalized explicit facts
     API->>DB: Queue assertion task with bounded cross-commit focus paths
     Worker->>API: Claim run-ontology-assert and check generation cache
@@ -100,11 +104,11 @@ sequenceDiagram
         API-->>Worker: Reuse checkpoint
     else new content needs semantic analysis
         Worker->>Daytona: Clone and checkout immutable commit SHA
-        Worker->>Codex: Analyze bounded current paths with semantic-only cited schema
-        Codex-->>Worker: Cited semantic relationships
-        Worker->>Daytona: Validate every cited file and line range
+        Worker->>Codex: Analyze bounded current paths with typed causal schema
+        Codex-->>Worker: Cited Feature, VirtualIssue, movement, impact, and causal proposals
+        Worker->>Daytona: Validate citations and deterministic source identities
         alt output validation fails once
-            Worker->>Codex: Repair citations or required virtual Issue in the same task
+            Worker->>Codex: Repair citations or required VirtualIssue in the same task
             Codex-->>Worker: Complete corrected JSON
             Worker->>Daytona: Validate again or fail closed
         end
@@ -149,8 +153,9 @@ sequenceDiagram
         DB-->>API: Structured rows + citations + truncation
     end
     API->>API: Re-check repository scope at context assembly
-    opt counterfactual operation
-        API->>API: Compare reviewed introducing/resolving/impact role
+    opt fixed counterfactual template
+        API->>DB: Load the materialized causal trace
+        API->>API: Remove resolved intervention paths and recompute known paths in memory
     end
     API-->>Dashboard: Deterministic answer, template calls, and citations
     Dashboard-->>Browser: Cited result cards

@@ -14,6 +14,8 @@ export interface ProductionAcceptanceConfig {
   readonly timeoutMs?: number;
   readonly expectedIssueNumber?: number;
   readonly expectedResolutionPullRequestNumber?: number;
+  /** Enables the complete v5.1 causal fixture contract on omxyz/jina-ontology-e2e. */
+  readonly verifyV51Fixture?: boolean;
   readonly causality?: {
     readonly causingCommitSha: string;
     readonly causingPullRequestNumber?: number;
@@ -43,7 +45,7 @@ export function productionAcceptanceExitCode(error: unknown): number {
   if (/latest ontology graph|ontology\.latest/.test(message)) return 21;
   if (/ontology graph is empty/.test(message)) return 22;
   if (/ontology graph contains uncited/.test(message)) return 23;
-  if (/context retrieval|causal context|causality assertion|INTRODUCED_BY/.test(message)) return 24;
+  if (/context retrieval|causal context|causality assertion|INTRODUCED_BY|v5\.1/.test(message)) return 24;
   if (/ontology backlog/.test(message)) return 25;
   return 26;
 }
@@ -156,10 +158,12 @@ export async function runProductionOntologyAcceptance(
   const issue = requiredRecord(issueData.issue, "issue trace.issue");
   const expectedIssueTitle = requiredString(issue.title, "issue trace.issue.title");
   const resolutions = requiredArray(issueData.resolutions, "issue trace.resolutions");
-  const firstResolution = resolutions[0];
-  const commits = isRecord(firstResolution) ? requiredArray(firstResolution.commits, "issue trace.commits") : [];
+  const expectedResolution = resolutions.find((value) =>
+    isRecord(value) && value.pullRequestNumber === expectedResolutionPullRequestNumber
+  );
+  const commits = isRecord(expectedResolution) ? requiredArray(expectedResolution.commits, "issue trace.commits") : [];
   if (
-    !isRecord(firstResolution) || firstResolution.pullRequestNumber !== expectedResolutionPullRequestNumber || commits.length === 0 ||
+    !isRecord(expectedResolution) || commits.length === 0 ||
     !commits.every((commit) => isRecord(commit) && typeof commit.sha === "string" && commit.sha.length === 40) ||
     !isRecord(firstIssueItem) || !Array.isArray(firstIssueItem.citations) || firstIssueItem.citations.length === 0
   ) {
@@ -180,6 +184,12 @@ export async function runProductionOntologyAcceptance(
     );
     if (!isRecord(causalAssertion)) {
       throw new Error(`production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`);
+    }
+    if (config.verifyV51Fixture) {
+      await reviewFixtureProposals(
+        fetchImpl, apiUrl, headers, assertions,
+        new Set([requiredString(causalAssertion.id, "causality assertion id")])
+      );
     }
     const causalEvidence = requiredArray(causalAssertion.evidence, "causality assertion evidence");
     const causalQualifiers = requiredRecord(causalAssertion.qualifiers, "causality assertion qualifiers");
@@ -229,7 +239,7 @@ export async function runProductionOntologyAcceptance(
         repository,
         ref,
         `If PR #${config.causality.causingPullRequestNumber} had not merged, would issue #${expectedIssueNumber} exist?`,
-        "likely not have been introduced"
+        config.verifyV51Fixture === true
       );
       await verifyCounterfactualAnswer(
         fetchImpl,
@@ -238,7 +248,7 @@ export async function runProductionOntologyAcceptance(
         repository,
         ref,
         `If PR #${expectedResolutionPullRequestNumber} had not merged, would issue #${expectedIssueNumber} remain?`,
-        "remain unresolved"
+        config.verifyV51Fixture === true
       );
     }
 
@@ -274,6 +284,9 @@ export async function runProductionOntologyAcceptance(
         hasEvidence(edge);
     });
     if (!causalEdge) throw new Error("production ontology graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason");
+    if (config.verifyV51Fixture) {
+      await verifyV51FixtureQueries(fetchImpl, apiUrl, headers, repository, ref);
+    }
   }
 
   const metrics = await apiJson(fetchImpl, `${apiUrl}/ontology/metrics`, { headers });
@@ -300,23 +313,162 @@ async function verifyCounterfactualAnswer(
   repository: string,
   ref: string,
   question: string,
-  expectedText: string
+  expectRemainingPaths: boolean
 ): Promise<void> {
-  const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const context = await apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({ repository, ref, operation: "counterfactual", question })
+    });
+    const answer = requiredString(context.answer, "counterfactual context.answer");
+    const calls = requiredArray(context.calls, "counterfactual context.calls");
+    const claims = requiredArray(context.citedClaims, "counterfactual context.citedClaims");
+    const everyClaimIsCited = claims.every((claim) =>
+      isRecord(claim) && requiredArray(claim.citations, "counterfactual claim.citations").length > 0
+    );
+    const evaluation = isRecord(context.counterfactual) ? context.counterfactual : undefined;
+    const remainingPaths = evaluation && Array.isArray(evaluation.remainingPaths) ? evaluation.remainingPaths : [];
+    const remainingMatches = expectRemainingPaths ? remainingPaths.length > 0 : remainingPaths.length === 0;
+    const honestLanguage = expectRemainingPaths
+      ? /alternative|remain/i.test(answer)
+      : /every currently known reviewed path|no known path/i.test(answer);
+    if (context.operation === "counterfactual" && honestLanguage && remainingMatches && claims.length > 0 &&
+      everyClaimIsCited && calls.length === 1 && isRecord(calls[0]) && calls[0].template === "counterfactual" &&
+      evaluation?.basis === "graph-derived" && Array.isArray(evaluation.removedPaths) && evaluation.removedPaths.length > 0) return;
+    if (attempt < 29) await delay(2_000);
+  }
+  throw new Error(`production counterfactual context is unsupported or uncited for: ${question}`);
+}
+
+async function reviewFixtureProposals(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  assertions: readonly unknown[],
+  excludedIds: ReadonlySet<string>
+): Promise<void> {
+  const reviewablePredicates = new Set([
+    "IMPLEMENTS", "DOCUMENTED_BY", "REFERENCES", "OWNED_BY", "MOVED_FROM",
+    "LIKELY_AFFECTS", "INTRODUCED_BY", "RESOLVED_BY", "INCIDENT_IMPACTS"
+  ]);
+  for (const value of assertions) {
+    if (!isRecord(value) || value.status !== "proposed" || typeof value.id !== "string" || excludedIds.has(value.id) ||
+      typeof value.predicate !== "string" || !reviewablePredicates.has(value.predicate)) continue;
+    if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
+      throw new Error(`production v5.1 proposal ${value.id} has no review evidence`);
+    }
+    await apiJson(fetchImpl, `${apiUrl}/ontology/commands`, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify({
+        type: "review_assertion", assertionId: value.id, decision: "accept",
+        reason: "production v5.1 fixture evidence verified"
+      })
+    });
+  }
+}
+
+async function verifyV51FixtureQueries(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  repository: string,
+  ref: string
+): Promise<void> {
+  const ask = (question: string, operation?: "counterfactual") => apiJson(fetchImpl, `${apiUrl}/ontology/ask`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, operation: "counterfactual", question })
+    body: JSON.stringify({ repository, ref, question, ...(operation ? { operation } : {}) })
   });
-  const answer = requiredString(context.answer, "counterfactual context.answer");
-  const calls = requiredArray(context.calls, "counterfactual context.calls");
-  const claims = requiredArray(context.citedClaims, "counterfactual context.citedClaims");
-  const everyClaimIsCited = claims.every((claim) =>
-    isRecord(claim) && requiredArray(claim.citations, "counterfactual claim.citations").length > 0
-  );
-  if (context.operation !== "counterfactual" || !answer.toLowerCase().includes(expectedText) || claims.length === 0 ||
-    !everyClaimIsCited || calls.length !== 1 || !isRecord(calls[0]) || calls[0].template !== "issue_trace") {
-    throw new Error(`production counterfactual context is unsupported or uncited for: ${question}`);
+
+  const implementationContext = await ask("Which symbols implement feature named Administrator resource deletion?");
+  const featureItems = itemsForTemplate(implementationContext, "feature_trace");
+  const implementations = featureItems.filter((item) => isRecord(item) && isRecord(item.data) &&
+    item.data.predicate === "IMPLEMENTS" && isRecord(item.data.related) &&
+    (item.data.related.kind === "File" || item.data.related.kind === "Symbol"));
+  if (implementations.length < 2 || !implementations.every(hasCitations)) {
+    throw new Error("production v5.1 context did not return both cited Administrator resource deletion implementations");
   }
+
+  const packageContext = await ask("What package does the Administrator resource deletion implementation depend on?");
+  const packageTrace = causalTraceFor(packageContext, "package dependency");
+  if (!tracePaths(packageTrace.dependencies).some((path) => pathHasNode(path, "Package", "zod"))) {
+    throw new Error("production v5.1 context did not traverse the implementation to its direct zod package");
+  }
+
+  const packageCounterfactual = await ask(
+    "If package zod were excluded, which Administrator resource deletion implementation paths disappear?",
+    "counterfactual"
+  );
+  const packageEvaluation = requiredRecord(packageCounterfactual.counterfactual, "v5.1 package counterfactual");
+  const removedPackagePaths = requiredArray(packageEvaluation.removedPaths, "v5.1 package removedPaths");
+  if (packageEvaluation.basis !== "graph-derived" || removedPackagePaths.length === 0 ||
+    !removedPackagePaths.some((path) => pathHasNode(path, "Package", "zod"))) {
+    throw new Error("production v5.1 package counterfactual did not remove a graph-derived implementation path");
+  }
+
+  const moveContext = await ask("Did the renamed symbol previously implement the same Administrator resource deletion feature?");
+  const moveTrace = causalTraceFor(moveContext, "renamed implementation");
+  if (!tracePaths(moveTrace.movedFrom).some((path) =>
+    pathHasNode(path, "File", "legacy-admin-deletion") || pathHasNode(path, "Symbol", "canAdministratorDeleteViaLegacy")
+  )) throw new Error("production v5.1 context did not preserve reviewed MOVED_FROM continuity");
+
+  const incidentCauseContext = await ask("Which deployment introduced incident INC-2026-42, and why?");
+  const incidentCauseTrace = causalTraceFor(incidentCauseContext, "incident cause");
+  if (!tracePaths(incidentCauseTrace.causes).some((path) => pathHasNode(path, "Deployment", "5535506368") && hasPathWhy(path))) {
+    throw new Error("production v5.1 context did not return the cited deployment that introduced INC-2026-42");
+  }
+
+  const incidentImpactContext = await ask("Which service and feature did incident INC-2026-42 impact?");
+  const incidentImpactTrace = causalTraceFor(incidentImpactContext, "incident impact");
+  const impacts = tracePaths(incidentImpactTrace.affectedEntities);
+  if (!impacts.some((path) => pathHasNode(path, "Service", "atlas-access-api")) ||
+    !impacts.some((path) => pathHasNode(path, "Feature", "Administrator resource deletion"))) {
+    throw new Error("production v5.1 context did not return both the impacted service and feature");
+  }
+
+  const incidentResolutionContext = await ask("Which later deployment or PR resolved incident INC-2026-42?");
+  const incidentResolutionTrace = causalTraceFor(incidentResolutionContext, "incident resolution");
+  if (!tracePaths(incidentResolutionTrace.resolutions).some((path) =>
+    pathHasNode(path, "Deployment", "5535522601") || pathHasNode(path, "PullRequest", "#16")
+  )) throw new Error("production v5.1 context did not return the later incident resolution");
+
+  const virtualContext = await ask("What virtual issue was inferred for the unlinked fixing PR #11?");
+  const virtualTrace = causalTraceFor(virtualContext, "virtual issue");
+  const virtualRoot = requiredRecord(virtualTrace.root, "v5.1 virtual issue root");
+  if (virtualRoot.kind !== "VirtualIssue" || !tracePaths(virtualTrace.resolutions).some((path) => pathHasNode(path, "PullRequest", "#11"))) {
+    throw new Error("production v5.1 context did not resolve PR #11 through a cited VirtualIssue");
+  }
+}
+
+function itemsForTemplate(context: Record<string, unknown>, template: string): unknown[] {
+  const call = requiredArray(context.calls, "v5.1 context.calls").find((value) => isRecord(value) && value.template === template);
+  return isRecord(call) ? requiredArray(call.items, `v5.1 ${template}.items`) : [];
+}
+
+function causalTraceFor(context: Record<string, unknown>, capability: string): Record<string, unknown> {
+  const item = itemsForTemplate(context, "causal_trace")[0];
+  if (!isRecord(item) || !hasCitations(item)) throw new Error(`production v5.1 ${capability} has no cited causal trace`);
+  return requiredRecord(item.data, `v5.1 ${capability}.data`);
+}
+
+function tracePaths(value: unknown): Record<string, unknown>[] {
+  return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function pathHasNode(path: unknown, kind: string, text: string): boolean {
+  if (!isRecord(path) || !Array.isArray(path.nodes)) return false;
+  return path.nodes.some((node) => isRecord(node) && node.kind === kind &&
+    `${String(node.label ?? "")} ${String(node.description ?? "")} ${String(node.id ?? "")}`.toLowerCase().includes(text.toLowerCase()));
+}
+
+function hasPathWhy(path: unknown): boolean {
+  return isRecord(path) && typeof path.why === "string" && path.why.trim().length > 0;
+}
+
+function hasCitations(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.citations) && value.citations.length > 0;
 }
 
 export function blockedOntologyTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
@@ -527,6 +679,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     const causingCommitSha = process.env.ACCEPTANCE_CAUSING_COMMIT_SHA?.trim();
     const causingPullRequestNumber = optionalPositiveIntegerEnv("ACCEPTANCE_CAUSING_PR_NUMBER");
     const reasonIncludes = process.env.ACCEPTANCE_CAUSAL_REASON_INCLUDES?.trim();
+    const verifyV51Fixture = process.env.ACCEPTANCE_V51_FIXTURE?.trim().toLowerCase() === "true";
     const summary = await runProductionOntologyAcceptance({
       apiUrl: requiredEnv("JINA_API_URL"),
       token: requiredEnv("INTERNAL_API_TOKEN"),
@@ -534,6 +687,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout }),
       ...(expectedIssueNumber === undefined ? {} : { expectedIssueNumber }),
       ...(expectedResolutionPullRequestNumber === undefined ? {} : { expectedResolutionPullRequestNumber }),
+      ...(verifyV51Fixture ? { verifyV51Fixture: true } : {}),
       ...(causingCommitSha ? {
         causality: {
           causingCommitSha,

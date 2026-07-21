@@ -12,12 +12,16 @@ import type { OntologyAssertionSummary, OntologyCommand, OntologyCommandResult, 
 import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
 import { canonicalJson } from "./knowledge.js";
 import {
-  normalizeGitHubSourceObservation,
+  normalizeSourceObservation,
+  sourceObservationExternalId,
+  sourceObservationProvider,
   type GitHubSourceObservation,
-  type GitHubWorkItemObservation
+  type GitHubWorkItemObservation,
+  type RepositorySourceObservation
 } from "./normalizers.js";
-import { ONTOLOGY_REGISTRY_VERSION, predicateDefinition } from "./registry.js";
+import { ONTOLOGY_REGISTRY_VERSION, predicateDefinition, validatePredicateEndpoints, validateQualifiers } from "./registry.js";
 import type { IssueTraceProjection, RetrievalRequest, RetrievalResult } from "./retrieval.js";
+import { causalTraceItemsFromGraph } from "./causal.js";
 import {
   ONTOLOGY_PARSER_VERSION,
   ONTOLOGY_PROJECTION_VERSION,
@@ -54,9 +58,11 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   private readonly blobAnalyses = new Map<string, BlobAnalysis>();
   private readonly assertionBatches = new Map<string, { readonly batch: OntologyAssertionBatch; readonly assertions: readonly StoredAssertion[] }>();
   private readonly sourceAssertions = new Map<string, StoredAssertion>();
+  private readonly humanAssertions = new Map<string, StoredAssertion>();
   private readonly repositoryAcl = new Map<string, Set<string>>();
   private readonly memoryAudit: OntologyCommandResult[] = [];
-  private readonly githubObservations: GitHubSourceObservation[] = [];
+  private readonly assertionRelations: { readonly sourceAssertionId: string; readonly relation: "supports" | "contradicts"; readonly targetAssertionId: string; readonly evidenceObservationId: string }[] = [];
+  private readonly sourceObservations: RepositorySourceObservation[] = [];
 
   async save(graph: OntologyGraph): Promise<void> {
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
@@ -126,37 +132,31 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     }
   }
 
-  async applyGitHubObservations(observations: readonly GitHubSourceObservation[]): Promise<OntologySourceIngestResult> {
+  async applyGitHubObservations(observations: readonly RepositorySourceObservation[]): Promise<OntologySourceIngestResult> {
     let newObservationCount = 0;
     let updatedObservationCount = 0;
     let confirmedObservationCount = 0;
     for (const observation of observations) {
-      const observationId = observation.kind === "codeowners"
-        ? `${observation.repository}:codeowners:${observation.commitSha}:${observation.path}`
-        : sourceGitHubObservationId(observation);
-      const existingIndex = this.githubObservations.findIndex((candidate) => {
-        if (candidate.tenantId !== observation.tenantId || candidate.repository !== observation.repository || candidate.kind !== observation.kind) return false;
-        if (candidate.kind === "codeowners" && observation.kind === "codeowners") return candidate.commitSha === observation.commitSha && candidate.path === observation.path;
-        return candidate.kind !== "codeowners" && observation.kind !== "codeowners" && candidate.number === observation.number && sourceGitHubObservationId(candidate) === observationId;
-      });
+      const observationId = sourceObservationIdForRepository(observation);
+      const existingIndex = this.sourceObservations.findIndex((candidate) =>
+        sourceObservationIdForRepository(candidate) === observationId
+      );
       if (existingIndex >= 0) {
         confirmedObservationCount += 1;
         continue;
       }
-      const hasPriorVersion = this.githubObservations.some((candidate) =>
-        candidate.tenantId === observation.tenantId && candidate.repository === observation.repository && candidate.kind === observation.kind && (
-          candidate.kind === "codeowners" || observation.kind === "codeowners" || candidate.number === observation.number
-        )
+      const hasPriorVersion = this.sourceObservations.some((candidate) =>
+        sourceObservationVersionKey(candidate) === sourceObservationVersionKey(observation)
       );
       if (hasPriorVersion) updatedObservationCount += 1;
       else newObservationCount += 1;
-      this.githubObservations.push(structuredClone(observation));
+      this.sourceObservations.push(structuredClone(observation));
     }
     this.rebuildSourceAssertions();
     return {
       observationCount: observations.length,
-      observationIds: [...new Set(observations.map(sourceObservationIdForGitHub))],
-      assertionCount: observations.reduce((count, observation) => count + normalizeGitHubSourceObservation(observation).assertions.length, 0),
+      observationIds: [...new Set(observations.map(sourceObservationIdForRepository))],
+      assertionCount: observations.reduce((count, observation) => count + normalizeSourceObservation(observation).assertions.length, 0),
       newObservationCount,
       updatedObservationCount,
       confirmedObservationCount
@@ -169,13 +169,13 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     observationIds: readonly string[]
   ): Promise<readonly OntologySourceEvidence[]> {
     const requested = new Set(observationIds);
-    const evidence = this.githubObservations.flatMap((observation) => {
-      const id = sourceObservationIdForGitHub(observation);
+    const evidence = this.sourceObservations.flatMap((observation) => {
+      const id = sourceObservationIdForRepository(observation);
       if (!requested.has(id) || observation.tenantId !== tenantId || observation.repository !== repository) return [];
       const payload = structuredClone(observation);
       return [{
         id,
-        source: "github",
+        source: sourceObservationProvider(observation),
         type: "source_snapshot",
         repository,
         payloadSha: stableId("sha", JSON.stringify(payload)),
@@ -253,6 +253,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     const affectedIds: string[] = [];
     if (command.type === "review_assertion") {
       let found = false;
+      const human = this.humanAssertions.get(command.assertionId);
+      if (human?.tenantId === tenantId) {
+        const allowed = command.decision === "accept" ? human.status === "proposed"
+          : command.decision === "reject" ? human.status === "proposed" : human.status === "active";
+        if (!allowed) throw new Error(`cannot ${command.decision} assertion in ${human.status}`);
+        const status: StoredAssertion["status"] = command.decision === "accept" ? "active" : command.decision === "reject" ? "rejected" : "retracted";
+        this.humanAssertions.set(human.id, { ...human, status, ...(status === "retracted" ? { validTo: now } : {}) });
+        affectedIds.push(human.id);
+        found = true;
+      }
       for (const [key, stored] of this.assertionBatches) {
         const current = stored.assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.assertionId);
         if (!current) continue;
@@ -266,6 +276,24 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         found = true;
       }
       if (!found) throw new Error("assertion not found");
+    } else if (command.type === "relate_assertions") {
+      const assertions = this.allAssertions();
+      const source = assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.sourceAssertionId);
+      const target = assertions.find((assertion) => assertion.tenantId === tenantId && assertion.id === command.targetAssertionId);
+      if (!source || !target || source.id === target.id) throw new Error("assertion relation endpoints are invalid");
+      if (source.repository !== target.repository) throw new Error("assertion relations must stay within one repository");
+      if (!this.sourceObservations.some((observation) => observation.repository === source.repository &&
+        sourceObservationIdForRepository(observation) === command.evidenceObservationId)) {
+        throw new Error("assertion relation evidence observation was not found");
+      }
+      if (!this.assertionRelations.some((relation) => relation.sourceAssertionId === source.id && relation.relation === command.relation &&
+        relation.targetAssertionId === target.id && relation.evidenceObservationId === command.evidenceObservationId)) {
+        this.assertionRelations.push({
+          sourceAssertionId: source.id, relation: command.relation, targetAssertionId: target.id,
+          evidenceObservationId: command.evidenceObservationId
+        });
+      }
+      affectedIds.push(source.id, target.id);
     } else if (command.type === "grant_repository_access") {
       const key = `${tenantId}:${command.principalId}`;
       const repositories = this.repositoryAcl.get(key) ?? new Set<string>();
@@ -284,7 +312,18 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     } else if (command.type === "assign_relationship") {
       const definition = predicateDefinition(command.predicate);
       if (definition.review === "none") throw new Error("explicit-source predicates must enter through intake, not an internal assignment");
-      affectedIds.push(stableId("assertion", `${tenantId}:${command.subject.key}:${definition.name}:${command.object.key}:${now}`));
+      validatePredicateEndpoints(definition, command.subject.kind, command.object.kind);
+      validateQualifiers(definition, command.qualifiers);
+      const id = stableId("assertion", `${tenantId}:${command.repository ?? ""}:${command.subject.key}:${definition.name}:${command.object.key}:${canonicalJson(command.qualifiers ?? {})}:${now}`);
+      this.humanAssertions.set(id, {
+        id, tenantId, repository: command.repository ?? "", commitSha: "command",
+        subject: { kind: command.subject.kind, naturalKey: command.subject.key, label: command.subject.displayName ?? command.subject.key },
+        predicate: definition.name,
+        object: { kind: command.object.kind, naturalKey: command.object.key, label: command.object.displayName ?? command.object.key },
+        confidence: 1, evidence: [], assertedBy: actorId, qualifiers: command.qualifiers ?? {}, status: "proposed",
+        lastConfirmedAt: now, generatorVersion: "human-command-v1", registryVersion: ONTOLOGY_REGISTRY_VERSION, recordedAt: now
+      });
+      affectedIds.push(id);
     }
     const result = {
       auditId: stableId("audit", `${tenantId}:${actorId}:${command.type}:${now}:${JSON.stringify(command)}`),
@@ -337,12 +376,13 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   async listAssertions(
     tenantId: string,
     repository: string,
-    filter: { readonly status?: StoredAssertion["status"]; readonly predicate?: string } = {}
+    filter: { readonly status?: StoredAssertion["status"]; readonly predicate?: string; readonly entityKind?: OntologyNode["kind"] } = {}
   ): Promise<readonly OntologyAssertionSummary[]> {
     return this.allAssertions()
       .filter((assertion) => assertion.tenantId === tenantId && assertion.repository === repository)
       .filter((assertion) => !filter.status || assertion.status === filter.status)
       .filter((assertion) => !filter.predicate || assertion.predicate === filter.predicate)
+      .filter((assertion) => !filter.entityKind || assertion.subject.kind === filter.entityKind || assertion.object.kind === filter.entityKind)
       .map((assertion) => ({
         id: assertion.id,
         repository: assertion.repository,
@@ -358,8 +398,16 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
         ...(assertion.confidence !== undefined ? { confidence: assertion.confidence } : {}),
         evidence: assertion.evidence,
         qualifiers: assertion.qualifiers ?? {},
-        generator: assertion.commitSha === "source" ? "source:github" : `model:${assertion.generatorVersion}`,
-        registryVersion: assertion.registryVersion
+        generator: assertion.commitSha === "source"
+          ? `source:${assertion.generatorVersion.replace(/-normalizer-v1$/, "")}`
+          : assertion.commitSha === "command" ? `human:${assertion.assertedBy ?? "unknown"}` : `model:${assertion.generatorVersion}`,
+        registryVersion: assertion.registryVersion,
+        supportingAssertionIds: this.assertionRelations.filter((relation) =>
+          relation.relation === "supports" && relation.targetAssertionId === assertion.id
+        ).map((relation) => relation.sourceAssertionId),
+        contradictingAssertionIds: this.assertionRelations.filter((relation) =>
+          relation.relation === "contradicts" && relation.targetAssertionId === assertion.id
+        ).map((relation) => relation.sourceAssertionId)
       }));
   }
 
@@ -369,17 +417,21 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
     const snapshot = [...this.snapshots.values()]
       .filter((value) => value.tenantId === request.tenantId && value.repository === request.repository && value.updateRef !== false && (!request.ref || value.ref === request.ref))
       .sort((a, b) => b.recordedAt.localeCompare(a.recordedAt))[0];
-    const hasCurrentProjection = Boolean(snapshot && [...this.graphs.values()].some((graph) =>
+    const currentGraph = snapshot ? [...this.graphs.values()].find((graph) =>
       graph.tenantId === request.tenantId && graph.repository === request.repository &&
       graph.ref === snapshot.ref && graph.commitSha === snapshot.commitSha
-    ));
-    const currentAssertions = snapshot && hasCurrentProjection
+    ) : undefined;
+    const currentAssertions = snapshot && currentGraph
       ? this.allAssertions().filter((assertion) => assertionIsCurrentForSnapshot(assertion, snapshot, this.snapshots))
       : [];
-    const items = request.template === "issue_trace"
+    const items = request.template === "causal_trace" || request.template === "counterfactual"
+      ? currentGraph ? causalTraceItemsFromGraph(currentGraph, request) : []
+      : request.template === "issue_trace"
       ? memoryIssueTraceItems(
           request,
-          this.githubObservations,
+        this.sourceObservations.filter((observation): observation is GitHubSourceObservation =>
+          observation.kind === "pull_request" || observation.kind === "issue" || observation.kind === "codeowners"
+        ),
           this.snapshots,
           currentAssertions,
           [...this.assertionBatches.values()].map((stored) => stored.batch)
@@ -396,6 +448,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
   private allAssertions(): StoredAssertion[] {
     const assertions = [
       ...this.sourceAssertions.values(),
+      ...this.humanAssertions.values(),
       ...[...this.assertionBatches.values()].flatMap((stored) => stored.assertions)
     ];
     const byId = new Map<string, StoredAssertion>();
@@ -408,9 +461,9 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
 
   private rebuildSourceAssertions(): void {
     this.sourceAssertions.clear();
-    for (const observation of latestMemorySourceObservations(this.githubObservations)) {
-      const normalized = normalizeGitHubSourceObservation(observation);
-      const observationId = sourceObservationIdForGitHub(observation);
+    for (const observation of latestMemorySourceObservations(this.sourceObservations)) {
+      const normalized = normalizeSourceObservation(observation);
+      const observationId = sourceObservationIdForRepository(observation);
       for (const intent of normalized.assertions) {
         const subjectId = stableId("entity", `${observation.tenantId}:${intent.subject.kind}:${intent.subject.key}`);
         const objectId = stableId("entity", `${observation.tenantId}:${intent.object.kind}:${intent.object.key}`);
@@ -433,7 +486,7 @@ export class MemoryOntologyGraphStore implements OntologyGraphStore {
           sourceObservationId: observationId,
           qualifiers,
           lastConfirmedAt: observation.recordedAt,
-          generatorVersion: "github-normalizer-v1",
+          generatorVersion: `${sourceObservationProvider(observation)}-normalizer-v1`,
           registryVersion: ONTOLOGY_REGISTRY_VERSION,
           recordedAt: observation.recordedAt
         });
@@ -450,7 +503,8 @@ function memoryIssueTraceItems(
   batches: readonly OntologyAssertionBatch[]
 ): RetrievalResult["items"] {
   const scoped = latestMemorySourceObservations(observations).filter((observation): observation is GitHubWorkItemObservation =>
-    observation.tenantId === request.tenantId && observation.repository === request.repository && observation.kind !== "codeowners"
+    observation.tenantId === request.tenantId && observation.repository === request.repository &&
+    (observation.kind === "pull_request" || observation.kind === "issue")
   );
   const active = assertions.filter((assertion) =>
     assertion.tenantId === request.tenantId && assertion.repository === request.repository && assertion.status === "active"
@@ -714,17 +768,13 @@ function featureRelationshipItem(assertion: StoredAssertion): RetrievalResult["i
   };
 }
 
-function latestMemorySourceObservations(observations: readonly GitHubSourceObservation[]): GitHubSourceObservation[] {
-  const latest = new Map<string, GitHubSourceObservation>();
+function latestMemorySourceObservations(observations: readonly RepositorySourceObservation[]): RepositorySourceObservation[] {
+  const latest = new Map<string, RepositorySourceObservation>();
   for (const observation of observations) {
-    const key = observation.kind === "codeowners"
-      ? `${observation.tenantId}:${observation.repository}:codeowners`
-      : `${observation.tenantId}:${observation.repository}:${observation.kind}:${observation.number}`;
+    const key = sourceObservationVersionKey(observation);
     const current = latest.get(key);
-    const version = observation.kind === "codeowners" ? observation.recordedAt : observation.occurredAt ?? observation.recordedAt;
-    const currentVersion = current
-      ? current.kind === "codeowners" ? current.recordedAt : current.occurredAt ?? current.recordedAt
-      : undefined;
+    const version = "occurredAt" in observation ? observation.occurredAt ?? observation.recordedAt : observation.recordedAt;
+    const currentVersion = current ? "occurredAt" in current ? current.occurredAt ?? current.recordedAt : current.recordedAt : undefined;
     if (!current || !currentVersion || version > currentVersion || (version === currentVersion && observation.recordedAt > current.recordedAt)) {
       latest.set(key, observation);
     }
@@ -732,15 +782,28 @@ function latestMemorySourceObservations(observations: readonly GitHubSourceObser
   return [...latest.values()];
 }
 
-function sourceObservationIdForGitHub(observation: GitHubSourceObservation): string {
-  if (observation.kind !== "codeowners") return sourceGitHubObservationId(observation);
-  const externalId = `${observation.repository}:codeowners:${observation.commitSha}:${observation.path}`;
-  return stableId("observation", `${observation.tenantId}:github:${externalId}`);
+function sourceObservationVersionKey(observation: RepositorySourceObservation): string {
+  if ("number" in observation) {
+    return `${observation.tenantId}:${observation.repository}:${observation.kind}:${observation.number}`;
+  }
+  if (observation.kind === "codeowners") return `${observation.tenantId}:${observation.repository}:codeowners`;
+  if (observation.kind === "package_manifest") return `${observation.tenantId}:${observation.repository}:${observation.kind}:${observation.path}`;
+  if (observation.kind === "move_candidate") return `${observation.tenantId}:${observation.repository}:${observation.kind}:${observation.commitSha}`;
+  if (observation.kind === "service_definition" || observation.kind === "deployment" || observation.kind === "incident") {
+    return `${observation.tenantId}:${observation.repository}:${observation.kind}:${observation.source}:${observation.externalId}`;
+  }
+  throw new Error(`unsupported source observation: ${String((observation as { kind?: unknown }).kind)}`);
+}
+
+function sourceObservationIdForRepository(observation: RepositorySourceObservation): string {
+  return stableId(
+    "observation",
+    `${observation.tenantId}:${sourceObservationProvider(observation)}:${sourceObservationExternalId(observation)}`
+  );
 }
 
 function sourceGitHubObservationId(observation: GitHubWorkItemObservation): string {
-  const externalId = `${observation.repository}:${observation.kind}:${observation.number}:${observation.occurredAt ?? observation.recordedAt}`;
-  return stableId("observation", `${observation.tenantId}:github:${externalId}`);
+  return sourceObservationIdForRepository(observation);
 }
 
 function memoryRetrievalItems(
@@ -860,18 +923,34 @@ export function createOntologyProjection(
     }
   }
   const projectedPaths = new Set(files.map((file) => file.path));
+  const packageBySpecifier = new Map<string, string>();
+  for (const assertion of assertions) {
+    if (assertion.object.kind !== "Package") continue;
+    const packageId = projectionEntityId(assertion.object);
+    ensureAssertionNode(nodes, packageId, assertion.object, projectionEvidence(assertion));
+    const naturalName = assertion.object.naturalKey.split(":").slice(2).join(":").toLowerCase();
+    packageBySpecifier.set(naturalName, packageId);
+    packageBySpecifier.set(assertion.object.label.toLowerCase(), packageId);
+  }
   for (const file of files) {
     const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, ONTOLOGY_PARSER_VERSION));
     for (const item of analysis?.imports ?? []) {
       const targetPath = resolveImportPath(file.path, item.specifier, projectedPaths);
-      if (!targetPath) continue;
-      edges.push({
-        source: `file:${file.path}`,
-        target: `file:${targetPath}`,
-        predicate: "IMPORTS",
-        plane: "code",
-        evidence: [`${file.path}:${item.line}`]
-      });
+      if (targetPath) {
+        edges.push({
+          source: `file:${file.path}`,
+          target: `file:${targetPath}`,
+          predicate: "IMPORTS",
+          plane: "code",
+          evidence: [`${file.path}:${item.line}`]
+        });
+      } else {
+        const packageId = packageBySpecifier.get(packageSpecifier(item.specifier));
+        if (packageId) edges.push({
+          source: `file:${file.path}`, target: packageId, predicate: "IMPORTS", plane: "code",
+          evidence: [`${file.path}:${item.line}`]
+        });
+      }
     }
     for (const item of analysis?.edges ?? []) {
       if (item.kind === "imports") continue;
@@ -929,12 +1008,19 @@ export function createOntologyProjection(
   });
 }
 
+function packageSpecifier(value: string): string {
+  const normalized = value.trim().toLowerCase();
+  if (normalized.startsWith("@")) return normalized.split("/").slice(0, 2).join("/");
+  return normalized.split("/")[0] ?? normalized;
+}
+
 function projectionEvidence(assertion: StoredAssertion): readonly string[] {
-  if (assertion.evidence.length > 0) return assertion.evidence;
-  if (assertion.commitSha === "source" && assertion.sourceObservationId) {
-    return [`observation:${assertion.sourceObservationId}`];
-  }
-  throw new Error(`active assertion ${assertion.id} has no projection evidence`);
+  const provenance = [
+    `assertion:${assertion.id}`,
+    ...(assertion.sourceObservationId ? [`observation:${assertion.sourceObservationId}`] : [])
+  ];
+  if (assertion.evidence.length > 0) return [...assertion.evidence, ...provenance];
+  return provenance;
 }
 
 function ensureAssertionNode(nodes: Map<string, OntologyNode>, id: string, entity: StoredAssertion["subject"], evidence: readonly string[]): void {
@@ -1018,6 +1104,7 @@ function assertionIsCurrentForSnapshot(
 ): boolean {
   if (assertion.tenantId !== current.tenantId || assertion.repository !== current.repository || assertion.status !== "active") return false;
   if (assertion.commitSha === "source") return assertion.evidence.length === 0 && Boolean(assertion.sourceObservationId);
+  if (assertion.commitSha === "command") return assertion.evidence.length === 0 && Boolean(assertion.assertedBy);
   const source = snapshots.get(snapshotKey(assertion.tenantId, assertion.repository, assertion.commitSha));
   return Boolean(source && assertion.evidence.length > 0 && assertionEvidenceIsCurrent(assertion, source, current));
 }

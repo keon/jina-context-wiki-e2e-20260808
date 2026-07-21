@@ -25,16 +25,18 @@ import {
   ONTOLOGY_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
   retrievalTemplateNames,
+  ontologyNodeKinds,
   ontologyTaskTypeDependencies,
   ontologyTaskTypeDefinitions,
   ontologyTaskTypeTriggers,
   parseGeneratedOntology,
   type BlobAnalysis,
-  type GitHubSourceObservation,
+  type RepositorySourceObservation,
   type OntologyCommand,
   type OntologyAssertionBatch,
   type OntologyGraph,
   type OntologyGraphStore,
+  type OntologyNodeKind,
   type RepositoryContextOperation,
   type RepositorySnapshot
 } from "@jina/ontology";
@@ -306,6 +308,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
         ...(typeof body.featureText === "string" ? { featureText: requiredFeatureText(body.featureText, "featureText") } : {}),
+        ...(typeof body.rootText === "string" ? { rootText: requiredFeatureText(body.rootText, "rootText") } : {}),
+        ...(typeof body.rootEntityId === "string" ? { rootEntityId: requiredString(body.rootEntityId, "rootEntityId") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
@@ -328,6 +332,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") } : {}),
         ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
         ...(typeof body.featureText === "string" ? { featureText: requiredFeatureText(body.featureText, "featureText") } : {}),
+        ...(typeof body.rootText === "string" ? { rootText: requiredFeatureText(body.rootText, "rootText") } : {}),
+        ...(typeof body.rootEntityId === "string" ? { rootEntityId: requiredString(body.rootEntityId, "rootEntityId") } : {}),
         ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.tokenBudget === "number" ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") } : {})
       }));
@@ -340,7 +346,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const statusValue = url.searchParams.get("status");
       const status = statusValue === null ? undefined : requiredAssertionStatus(statusValue);
       const predicate = url.searchParams.get("predicate")?.trim().toUpperCase() || undefined;
-      json(response, 200, { assertions: await ontologyStore.listAssertions(tenantId, repository, { ...(status ? { status } : {}), ...(predicate ? { predicate } : {}) }) });
+      const entityKindValue = url.searchParams.get("entityKind")?.trim();
+      const entityKind = entityKindValue && ontologyNodeKinds.includes(entityKindValue as typeof ontologyNodeKinds[number])
+        ? entityKindValue as typeof ontologyNodeKinds[number]
+        : undefined;
+      if (entityKindValue && !entityKind) throw new Error("unsupported ontology entity kind");
+      json(response, 200, { assertions: await ontologyStore.listAssertions(tenantId, repository, {
+        ...(status ? { status } : {}), ...(predicate ? { predicate } : {}), ...(entityKind ? { entityKind } : {})
+      }) });
       return;
     }
     if (request.method === "POST" && url.pathname === "/ontology/commands") {
@@ -601,7 +614,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const taskId = requiredString(body.taskId, "taskId");
     const task = requireLeasedOntologyTask(body, taskId, tenantId, "ontology_ingest");
     if (!Array.isArray(body.observations)) throw new Error("observations must be an array");
-    const observations = body.observations.map((value) => parseGitHubWorkItemObservation(value, tenantId));
+    const observations = body.observations.map((value) => parseRepositorySourceObservation(value, tenantId));
     const repository = requiredString(task.metadata.repository, "task.repository");
     if (observations.some((observation) => observation.repository !== repository)) throw new Error("GitHub observation repository does not match task");
     json(response, 200, await ontologyStore.applyGitHubObservations(observations));
@@ -1065,7 +1078,7 @@ function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySn
   };
 }
 
-function parseGitHubWorkItemObservation(value: unknown, tenantId: string): GitHubSourceObservation {
+function parseRepositorySourceObservation(value: unknown, tenantId: string): RepositorySourceObservation {
   if (!isRecord(value)) throw new Error("GitHub observation must be an object");
   const kind = requiredString(value.kind, "observation.kind");
   if (kind === "codeowners") {
@@ -1079,6 +1092,94 @@ function parseGitHubWorkItemObservation(value: unknown, tenantId: string): GitHu
         return {
           pattern: requiredString(entry.pattern, "entry.pattern"),
           owners: entry.owners.map((owner) => requiredString(owner, "entry.owner"))
+        };
+      }),
+      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
+    };
+  }
+  if (kind === "package_manifest") {
+    if (!Array.isArray(value.dependencies)) throw new Error("package manifest dependencies must be an array");
+    return {
+      tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
+      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
+      path: requiredRepositoryPath(value.path, "observation.path"),
+      ecosystem: requiredString(value.ecosystem, "observation.ecosystem"),
+      dependencies: value.dependencies.map((dependency) => {
+        if (!isRecord(dependency)) throw new Error("package dependency must be an object");
+        return {
+          name: requiredString(dependency.name, "dependency.name"),
+          ...(typeof dependency.version === "string" ? { version: dependency.version } : {})
+        };
+      }),
+      ...(value.removed === true ? { removed: true } : {}),
+      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
+    };
+  }
+  if (kind === "service_definition") {
+    const dependsOnServices = Array.isArray(value.dependsOnServices) ? value.dependsOnServices.map((dependency) => {
+      if (!isRecord(dependency)) throw new Error("service dependency must be an object");
+      return {
+        source: requiredString(dependency.source, "observation.dependency.source"),
+        externalId: requiredString(dependency.externalId, "observation.dependency.externalId"),
+        name: requiredString(dependency.name, "observation.dependency.name")
+      };
+    }) : [];
+    return {
+      tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
+      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
+      path: requiredRepositoryPath(value.path, "observation.path"), source: requiredString(value.source, "observation.source"),
+      externalId: requiredString(value.externalId, "observation.externalId"), name: requiredString(value.name, "observation.name"),
+      ...(dependsOnServices.length > 0 ? { dependsOnServices } : {}),
+      ...(value.removed === true ? { removed: true } : {}),
+      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
+    };
+  }
+  if (kind === "deployment") {
+    const service = isRecord(value.service) ? {
+      source: requiredString(value.service.source, "observation.service.source"),
+      externalId: requiredString(value.service.externalId, "observation.service.externalId"),
+      name: requiredString(value.service.name, "observation.service.name")
+    } : undefined;
+    return {
+      tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
+      source: requiredString(value.source, "observation.source"), externalId: requiredString(value.externalId, "observation.externalId"),
+      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"), environment: requiredString(value.environment, "observation.environment"),
+      status: requiredString(value.status, "observation.status"), ...(service ? { service } : {}),
+      ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
+      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
+    };
+  }
+  if (kind === "incident") {
+    const impactedService = isRecord(value.impactedService) ? {
+      source: requiredString(value.impactedService.source, "observation.impactedService.source"),
+      externalId: requiredString(value.impactedService.externalId, "observation.impactedService.externalId"),
+      name: requiredString(value.impactedService.name, "observation.impactedService.name")
+    } : undefined;
+    return {
+      tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
+      source: requiredString(value.source, "observation.source"), externalId: requiredString(value.externalId, "observation.externalId"),
+      title: requiredString(value.title, "observation.title"),
+      ...(typeof value.url === "string" ? { url: value.url } : {}),
+      ...(typeof value.issueNumber === "number" ? { issueNumber: requiredPositiveInteger(value.issueNumber, "observation.issueNumber") } : {}),
+      ...(impactedService ? { impactedService } : {}),
+      ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
+      ...(value.removed === true ? { removed: true } : {}),
+      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
+    };
+  }
+  if (kind === "move_candidate") {
+    if (!Array.isArray(value.candidates)) throw new Error("move candidates must be an array");
+    return {
+      tenantId, repository: requiredString(value.repository, "observation.repository"), kind,
+      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
+      candidates: value.candidates.map((candidate) => {
+        if (!isRecord(candidate) || !Array.isArray(candidate.matchingSignatureHashes)) throw new Error("move candidate is invalid");
+        const similarity = typeof candidate.similarity === "number" ? candidate.similarity : Number.NaN;
+        if (!Number.isFinite(similarity) || similarity < 0 || similarity > 1) throw new Error("move candidate similarity is invalid");
+        return {
+          oldPath: requiredRepositoryPath(candidate.oldPath, "candidate.oldPath"),
+          newPath: requiredRepositoryPath(candidate.newPath, "candidate.newPath"), similarity,
+          matchingSignatureHashes: candidate.matchingSignatureHashes.map((signature) => requiredString(signature, "candidate.signature"))
         };
       }),
       recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
@@ -1116,6 +1217,17 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     if (decision !== "accept" && decision !== "reject" && decision !== "retract") throw new Error("unsupported assertion review decision");
     return { type, assertionId: requiredString(value.assertionId, "command.assertionId"), decision, ...(reason ? { reason } : {}) };
   }
+  if (type === "relate_assertions") {
+    const relation = requiredString(value.relation, "command.relation");
+    if (relation !== "supports" && relation !== "contradicts") throw new Error("unsupported assertion relation");
+    return {
+      type, relation,
+      sourceAssertionId: requiredString(value.sourceAssertionId, "command.sourceAssertionId"),
+      targetAssertionId: requiredString(value.targetAssertionId, "command.targetAssertionId"),
+      evidenceObservationId: requiredString(value.evidenceObservationId, "command.evidenceObservationId"),
+      ...(reason ? { reason } : {})
+    };
+  }
   if (type === "merge_entities" || type === "unmerge_entities") {
     return {
       type, fromEntityId: requiredString(value.fromEntityId, "command.fromEntityId"),
@@ -1149,11 +1261,11 @@ function parseOntologyCommand(value: Record<string, unknown>): OntologyCommand {
     const entity = (input: unknown, name: string) => {
       if (!isRecord(input)) throw new Error(`${name} must be an object`);
       const kind = requiredString(input.kind, `${name}.kind`);
-      if (!(["Repository", "File", "Symbol", "Commit", "PullRequest", "Issue", "Engineer", "Team", "Document"] as const).includes(kind as "Repository")) {
+      if (!ontologyNodeKinds.includes(kind as OntologyNodeKind)) {
         throw new Error(`${name}.kind is unsupported`);
       }
       return {
-        kind: kind as "Repository" | "File" | "Symbol" | "Commit" | "PullRequest" | "Issue" | "Engineer" | "Team" | "Document",
+        kind: kind as OntologyNodeKind,
         key: requiredString(input.key, `${name}.key`),
         ...(typeof input.displayName === "string" ? { displayName: input.displayName } : {})
       };

@@ -111,6 +111,9 @@ test("worker reviews pull requests and incrementally ingests ontology source blo
         content: Buffer.from("export function main() { return true; }\n").toString("base64")
       });
     }
+    if (request.url === "/github/repos/omlabs/example/deployments?per_page=100") return json(response, 200, []);
+    if (request.url === "/github/repos/omlabs/example/actions/runs?status=completed&per_page=100") return json(response, 200, { workflow_runs: [] });
+    if (request.url === "/github/repos/omlabs/example/issues?state=all&labels=incident&per_page=100") return json(response, 200, []);
     if (request.url === "/github/repos/omlabs/example/pulls/2") {
       if (request.headers.accept?.includes("diff")) {
         response.writeHead(200, { "content-type": "text/plain" });

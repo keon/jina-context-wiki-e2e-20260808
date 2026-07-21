@@ -140,6 +140,20 @@ test("dashboard page renders clickable task detail affordances", () => {
   assert.match(html, /function renderContextResults/);
   assert.match(html, /function renderContextAnswer/);
   assert.match(html, /function renderContextNotices/);
+  assert.match(html, /function renderCounterfactualDetails/);
+  assert.match(html, /Basis: /);
+  assert.match(html, /Known paths removed/);
+  assert.match(html, /Known paths remaining/);
+  assert.match(html, /function renderCausalTrace/);
+  assert.match(html, /Review proposed knowledge/);
+  assert.match(html, /id="assertion-predicate-filter"/);
+  assert.match(html, /id="assertion-kind-filter"/);
+  assert.match(html, /function renderAssertionReview/);
+  assert.match(html, /supportingAssertionIds/);
+  assert.match(html, /contradictingAssertionIds/);
+  for (const kind of ["Feature", "Package", "Service", "Deployment", "Incident", "VirtualIssue"]) {
+    assert.match(html, new RegExp(`kind-${kind}`));
+  }
   assert.match(html, /Cited claims/);
   assert.match(html, /Coverage gap/);
   assert.match(html, /item\.data\.excerpt/);

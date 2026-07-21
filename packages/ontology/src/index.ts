@@ -1,4 +1,5 @@
 export * from "./model.js";
+export * from "./causal.js";
 export * from "./normalizers.js";
 export * from "./knowledge.js";
 export * from "./outbox.js";

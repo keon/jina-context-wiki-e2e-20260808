@@ -19,9 +19,15 @@ import {
   languageForPath,
   linkedIssueNumbers,
   isProblemEvidencePath,
+  movedFromSimilarityCandidates,
+  parseIncidentDocument,
+  parsePackageManifest,
+  parseServiceDefinitions,
   selectAssertionFocusPaths,
+  validateSourceBackedModelEntities,
   type BlobAnalysis,
   type GitHubSourceObservation,
+  type RepositorySourceObservation,
   type OntologyAssertionBatch,
   type OntologyBuildRequest,
   type OntologyGraph,
@@ -243,6 +249,7 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
   let headPaths = new Set<string>();
   const changedPathsByCommit = new Map<string, readonly string[]>();
   let ownershipObservation: GitHubSourceObservation | undefined;
+  const deterministicObservations: RepositorySourceObservation[] = [];
   const workItems = new Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>();
   for (const sha of orderedShas) {
     const commit = discovery.commits.get(sha) ?? (sha === commitSha ? head : await githubJson(`/repos/${repository}/commits/${sha}`));
@@ -276,6 +283,45 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
           tenantId, repository, kind: "codeowners", commitSha, path: codeowners.path,
           entries: parseCodeowners(source), recordedAt: snapshot.recordedAt
         };
+      } else {
+        const removedCodeowners = plan.changes.find((change) =>
+          change.change === "delete" && [".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS"].includes(change.path)
+        );
+        if (removedCodeowners) ownershipObservation = {
+          tenantId, repository, kind: "codeowners", commitSha, path: removedCodeowners.path,
+          entries: [], recordedAt: snapshot.recordedAt
+        };
+      }
+      const deterministicFiles = snapshot.files.filter((file) => isDeterministicSourcePath(file.path)).slice(0, 100);
+      for (const file of deterministicFiles) {
+        const source = await readGitHubBlob(repository, file.blobSha);
+        const manifest = parsePackageManifest({
+          tenantId, repository, commitSha, path: file.path, source, recordedAt: snapshot.recordedAt
+        });
+        if (manifest) deterministicObservations.push(manifest);
+        deterministicObservations.push(...parseServiceDefinitions({
+          tenantId, repository, commitSha, path: file.path, content: source, recordedAt: snapshot.recordedAt
+        }));
+        const incident = parseIncidentDocument({
+          tenantId, repository, path: file.path, content: source, recordedAt: snapshot.recordedAt
+        });
+        if (incident) deterministicObservations.push(incident);
+      }
+      for (const removed of plan.changes.filter((change) =>
+        change.change === "delete" && change.oldBlobSha && isDeterministicSourcePath(change.path)
+      )) {
+        const source = await readGitHubBlob(repository, removed.oldBlobSha!);
+        const manifest = parsePackageManifest({
+          tenantId, repository, commitSha, path: removed.path, source, recordedAt: snapshot.recordedAt
+        });
+        if (manifest) deterministicObservations.push({ ...manifest, dependencies: [], removed: true });
+        deterministicObservations.push(...parseServiceDefinitions({
+          tenantId, repository, commitSha, path: removed.path, content: source, recordedAt: snapshot.recordedAt
+        }).map((service) => ({ ...service, dependsOnServices: [], removed: true })));
+        const incident = parseIncidentDocument({
+          tenantId, repository, path: removed.path, content: source, recordedAt: snapshot.recordedAt
+        });
+        if (incident) deterministicObservations.push({ ...incident, removed: true });
       }
     }
     for (const pullRequest of await githubJsonArray(`/repos/${repository}/commits/${sha}/pulls`)) {
@@ -286,8 +332,21 @@ async function runOntologyIngest(work: ClaimedWork): Promise<Record<string, unkn
     }
   }
   if (!headPlan) throw new Error("head commit was not included in repository history ingestion");
+  const moveCandidates = await buildMoveCandidates(repository, headPlan);
+  if (moveCandidates.length > 0) deterministicObservations.push({
+    tenantId, repository, kind: "move_candidate", commitSha,
+    candidates: moveCandidates, recordedAt: new Date().toISOString()
+  });
+  if (discovery.knownCommitShas.has(commitSha)) {
+    await hydrateRecentMergedPullRequestScope(repository, defaultBranch, workItems);
+  }
   const problemEvidencePullRequestNumbers = await hydratePullRequestScope(repository, workItems, headPaths);
-  const observations: GitHubSourceObservation[] = await githubWorkItemObservations(tenantId, repository, workItems);
+  const observations: RepositorySourceObservation[] = [
+    ...await githubWorkItemObservations(tenantId, repository, workItems),
+    ...deterministicObservations,
+    ...await githubDeploymentObservations(tenantId, repository),
+    ...await githubIncidentObservations(tenantId, repository)
+  ];
   if (ownershipObservation) observations.push(ownershipObservation);
   let sourceResult: OntologySourceIngestResult = {
     observationCount: 0,
@@ -497,6 +556,129 @@ async function githubWorkItemObservations(
   return observations;
 }
 
+async function hydrateRecentMergedPullRequestScope(
+  repository: string,
+  defaultBranch: string,
+  pullRequests: Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>
+): Promise<void> {
+  const recent = await githubJsonArray(
+    `/repos/${repository}/pulls?state=closed&base=${encodeURIComponent(defaultBranch)}&sort=updated&direction=desc&per_page=100`
+  );
+  for (const item of recent) {
+    if (typeof item.number !== "number" || typeof item.merged_at !== "string" || !item.merged_at) continue;
+    const text = `${typeof item.title === "string" ? item.title : ""}\n${typeof item.body === "string" ? item.body : ""}`;
+    const links = linkedIssueNumbers(text);
+    const untrackedRepair = links.resolves.length === 0 && links.references.length === 0 &&
+      /\b(?:fix(?:e[sd])?|repair(?:s|ed|ing)?|restor(?:e[sd]?|ing)|correct(?:s|ed|ing)?)\b/i.test(text) &&
+      /\b(?:bug|regression|incorrect|broken|fail(?:s|ed|ing|ure)?|cannot|can't|unable|denied|wrong)\b/i.test(text);
+    if (!untrackedRepair) continue;
+    const existing = pullRequests.get(item.number);
+    if (existing) continue;
+    const commitShas = new Set<string>();
+    if (typeof item.merge_commit_sha === "string" && /^[a-f0-9]{40}$/i.test(item.merge_commit_sha)) {
+      commitShas.add(item.merge_commit_sha.toLowerCase());
+    }
+    pullRequests.set(item.number, { item, commitShas });
+  }
+}
+
+async function githubDeploymentObservations(
+  tenantId: string,
+  repository: string
+): Promise<RepositorySourceObservation[]> {
+  const recordedAt = new Date().toISOString();
+  const deployments = await githubOptionalJsonArray(`/repos/${repository}/deployments?per_page=100`);
+  const observations: RepositorySourceObservation[] = [];
+  for (const deployment of deployments.slice(0, 50)) {
+    if (typeof deployment.id !== "number" || typeof deployment.sha !== "string" || !/^[a-f0-9]{40}$/i.test(deployment.sha)) continue;
+    const statuses = await githubOptionalJsonArray(`/repos/${repository}/deployments/${deployment.id}/statuses?per_page=1`);
+    const latest = statuses[0] ?? {};
+    const payload = isRecord(deployment.payload) ? deployment.payload : {};
+    const service = isRecord(payload.service)
+      ? {
+          source: requiredString(payload.service.source, "GitHub deployment service source"),
+          externalId: requiredString(payload.service.externalId, "GitHub deployment service external ID"),
+          name: requiredString(payload.service.name, "GitHub deployment service name")
+        }
+      : typeof payload.service === "string" && payload.service.trim()
+        ? { source: "github-deployment", externalId: `${repository}:${payload.service.trim()}`, name: payload.service.trim() }
+        : undefined;
+    observations.push({
+      tenantId, repository, kind: "deployment", source: "github",
+      externalId: `${repository}:${deployment.id}`,
+      commitSha: deployment.sha.toLowerCase(),
+      environment: typeof deployment.environment === "string" && deployment.environment.trim() ? deployment.environment : "unknown",
+      status: typeof latest.state === "string" ? latest.state : "created",
+      ...(service ? { service } : {}),
+      ...(typeof latest.created_at === "string" ? { occurredAt: latest.created_at } : {}),
+      recordedAt
+    });
+  }
+  const workflowResponse = await githubOptionalJson(`/repos/${repository}/actions/runs?status=completed&per_page=100`);
+  const workflowRuns = Array.isArray(workflowResponse.workflow_runs) ? workflowResponse.workflow_runs : [];
+  for (const value of workflowRuns.slice(0, 100)) {
+    if (!isRecord(value) || typeof value.id !== "number" || typeof value.head_sha !== "string" || !/^[a-f0-9]{40}$/i.test(value.head_sha)) continue;
+    const label = `${typeof value.name === "string" ? value.name : ""} ${typeof value.path === "string" ? value.path : ""}`;
+    if (!/deploy|release|cloud\s*run/i.test(label)) continue;
+    observations.push({
+      tenantId, repository, kind: "deployment", source: "github-actions", externalId: `${repository}:${value.id}`,
+      commitSha: value.head_sha.toLowerCase(), environment: "workflow",
+      status: typeof value.conclusion === "string" ? value.conclusion : "completed",
+      ...(typeof value.updated_at === "string" ? { occurredAt: value.updated_at } : {}), recordedAt
+    });
+  }
+  return observations;
+}
+
+async function githubIncidentObservations(
+  tenantId: string,
+  repository: string
+): Promise<RepositorySourceObservation[]> {
+  const recordedAt = new Date().toISOString();
+  const issues = await githubOptionalJsonArray(`/repos/${repository}/issues?state=all&labels=incident&per_page=100`);
+  return issues.flatMap((item): RepositorySourceObservation[] => {
+    if (isRecord(item.pull_request) || typeof item.number !== "number" || typeof item.title !== "string") return [];
+    const user = isRecord(item.user) ? item.user : {};
+    const issue: GitHubSourceObservation = {
+      tenantId, repository, kind: "issue", number: item.number, title: item.title,
+      ...(typeof item.body === "string" ? { body: item.body } : {}),
+      state: typeof item.state === "string" ? item.state : "open",
+      url: typeof item.html_url === "string" ? item.html_url : `https://github.com/${repository}/issues/${item.number}`,
+      ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
+      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}), recordedAt
+    };
+    return [issue, {
+      tenantId, repository, kind: "incident", source: "github",
+      externalId: `${repository}#${item.number}`, title: item.title,
+      url: issue.url, issueNumber: item.number,
+      ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}), recordedAt
+    }];
+  });
+}
+
+function isDeterministicSourcePath(path: string): boolean {
+  return /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|package-lock\.json|requirements\.txt|pyproject\.toml|go\.mod|Cargo\.(?:toml|lock)|Gemfile\.lock|pom\.xml|build\.gradle(?:\.kts)?|settings\.gradle(?:\.kts)?|(?:docker-)?compose(?:\.[^.]+)?\.ya?ml|catalog-info\.ya?ml|service-catalog\.ya?ml)$/i.test(path) ||
+    /(?:^|\/)Dockerfile(?:\.[A-Za-z0-9_.-]+)?$/i.test(path) ||
+    /^\.github\/workflows\/.*\.ya?ml$/i.test(path) ||
+    /(?:^|\/)(?:k8s|kubernetes|deploy|deployment|cloudrun|cloud-run)\/.*\.ya?ml$/i.test(path) ||
+    /(?:^|\/)(?:incidents?|postmortems?)(?:\/|[-_.]).*\.md(?:own)?$/i.test(path);
+}
+
+async function buildMoveCandidates(repository: string, plan: OntologyIngestPlan) {
+  const analyses = new Map<string, BlobAnalysis>();
+  const candidates = plan.changes.filter((change) =>
+    (change.change === "add" && change.newBlobSha) || (change.change === "delete" && change.oldBlobSha) ||
+    (change.change === "rename" && change.oldBlobSha && change.newBlobSha)
+  ).slice(0, 40);
+  for (const change of candidates) {
+    const blobSha = change.newBlobSha ?? change.oldBlobSha;
+    const language = languageForPath(change.path);
+    if (!blobSha || !language) continue;
+    analyses.set(blobSha, analyzeSourceBlob(blobSha, language, await readGitHubBlob(repository, blobSha)));
+  }
+  return movedFromSimilarityCandidates(plan.changes, analyses);
+}
+
 async function hydratePullRequestScope(
   repository: string,
   pullRequests: Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>,
@@ -578,6 +760,7 @@ async function runOntologyAssertions(work: ClaimedWork): Promise<WorkResult> {
     taskId: work.task.id
   });
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
+  validateSourceBackedModelEntities(rawOutput, evidence.evidence);
   const assertions = assertionsFromGeneratedOntology(rawOutput, repository, { sourcePullRequestNumbers, resolvedPullRequestNumbers });
   return {
     outcome: "done",
@@ -741,6 +924,31 @@ async function githubJsonArray(path: string): Promise<Record<string, unknown>[]>
   const value = await response.json() as unknown;
   if (!Array.isArray(value) || value.some((item) => !isRecord(item))) throw new Error(`GitHub response ${path} is not an object array`);
   return value as Record<string, unknown>[];
+}
+
+async function githubOptionalJson(path: string): Promise<Record<string, unknown>> {
+  try {
+    return await githubJson(path);
+  } catch (error) {
+    if (!isUnavailableOptionalGitHubSource(error)) throw error;
+    console.warn(`optional GitHub source unavailable: ${path}`);
+    return {};
+  }
+}
+
+async function githubOptionalJsonArray(path: string): Promise<Record<string, unknown>[]> {
+  try {
+    return await githubJsonArray(path);
+  } catch (error) {
+    if (!isUnavailableOptionalGitHubSource(error)) throw error;
+    console.warn(`optional GitHub source unavailable: ${path}`);
+    return [];
+  }
+}
+
+function isUnavailableOptionalGitHubSource(error: unknown): boolean {
+  const message = errorMessage(error);
+  return /GitHub request failed with (?:403|404):/.test(message);
 }
 
 async function githubJsonArrayPages(

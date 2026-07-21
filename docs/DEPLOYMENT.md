@@ -42,7 +42,7 @@ commit DAG rows, first-parent changes, content-addressed blob analyses, source
 facts, and model-output proposals survive worker retries. Before fetching trees,
 the worker asks which commits are known, so a repeat build reads only the head
 tree and a new head stops at known parents. With an unchanged head, blob parsing and Daytona/Codex generation are reused and manifest/search projection returns a no-op checkpoint when there are no pending scoped events. The project task claims repository-scoped canonical
-outbox rows and rebuilds ref manifests, lexical/vector search, affected issue traces, redirect
+outbox rows and rebuilds ref manifests, lexical/vector search, affected causal graphs, redirect
 reconciliation, retention, and the immutable graph. The ontology worker continuously drains remaining events while idle; global redirect/identity changes fan out across repositories and events are acknowledged only after affected projections succeed. Ontology list polling loads
 the newest full graph plus graph summaries; it does not hydrate historical node
 and edge collections.
@@ -75,9 +75,15 @@ that secret to the workflow or repository files.
 `GITHUB_CLONE_TOKEN` is the worker's temporary private-repository credential
 until installation tokens replace it. A fine-grained PAT must select every
 repository the worker is allowed to process and grant read-only access to
-Contents, Issues, Pull requests, and Metadata. Ingestion intentionally fails
-instead of silently omitting a GitHub source when one of these permissions is
-missing; worker health reports only the safe GitHub failure category.
+Contents, Issues, Pull requests, and Metadata. Deployments and Actions read access
+adds deployment observations; those two enrichments are optional and a 403/404
+does not block core Git/code intake. Required source failures still fail closed,
+and worker health reports only a safe GitHub failure category.
+
+The ontology worker uses OpenRouter model `deepseek/deepseek-v4-flash` through the
+`jina-openrouter-api-key` Secret Manager secret. The provider and model are fixed
+as `ONTOLOGY_CODEX_PROVIDER=openrouter` and
+`ONTOLOGY_CODEX_MODEL=deepseek/deepseek-v4-flash` in the deployment workflow.
 
 ## Verification
 
@@ -120,8 +126,8 @@ while partial unique indexes serialize live assertion candidates and
 cardinality-one relationships.
 
 CI supplies PostgreSQL 17 through a service container, so the `@jina/db`
-integration test exercises commit deltas, parsing caches, GitHub normalization,
-knowledge review, outbox projection, all six cited templates, ACL denial,
+integration test exercises commit deltas, parsing caches, source normalization,
+knowledge review and disagreement, outbox projection, all eight cited templates, ACL denial,
 redaction, erasure, and graph creation. After a `main` deployment, the workflow verifies API health,
 worker-to-API connectivity, the dashboard's IAP annotation, and the IAP access
 policy for `keon@omlabs.xyz`. It then executes the short-lived
@@ -130,7 +136,7 @@ internal credential directly into that job, so the GitHub deployer can never
 read it. The job submits `omxyz/jina-ontology-e2e` to the production three-chunk
 workflow and waits for the aggregate to finish.
 The acceptance check fails the deployment unless the graph has cited nodes and
-edges, the fixed retrieval orchestrator returns cited results, Issue #4 resolves through PR #5, and Codex proposes the documented Issue #4 → PR #3 / commit causality with a reason and checked evidence. The job reviews that fixture assertion, queries causality by issue number, quoted issue title, PR, and commit, and verifies cited counterfactual answers for omitting both the causing and resolving PRs. It then starts a cached projection build and requires a cited `INTRODUCED_BY` graph edge. The canonical outbox and parser backlog must also be empty. It rejects any blocked ontology task
+edges, the fixed retrieval orchestrator returns cited results, Issue #4 resolves through PR #5, and Codex proposes the documented Issue #4 → PR #3 / commit causality with a reason and checked evidence. On the private fixture repository, the job performs the review transitions and proves the complete v5.1 query contract: two Feature implementations; the direct zod dependency; primary and alternative issue causes; PR and package counterfactuals; renamed implementation continuity; incident-introducing and recovery deployments; impacted Service and Feature; and the VirtualIssue resolved by unlinked PR #11. It then starts a cached projection build and requires those active facts plus the cited `INTRODUCED_BY` edge in the materialized graph. The canonical outbox and parser backlog must also be empty. It rejects any blocked ontology task
 left for the accepted repository and ref; older active attempts must have been
 superseded, while their terminal records remain available on the History page.
 Repeated deployments deliberately exercise the unchanged-head cache path; a generator-contract version change performs one full semantic backfill and then returns to cached execution.

@@ -186,10 +186,12 @@ jobs:
             WORKER_TOPICS=run-ontology-ingest|run-ontology-assert|run-ontology-project|run-ontology|run-ontology-prepare|run-ontology-generate
             ONTOLOGY_HISTORY_LIMIT=10000
             DAYTONA_RUN_TIMEOUT_SECONDS=2400
+            ONTOLOGY_CODEX_PROVIDER=openrouter
+            ONTOLOGY_CODEX_MODEL=deepseek/deepseek-v4-flash
           secrets: |-
             INTERNAL_API_TOKEN=jina-internal-api-token:latest
             DAYTONA_API_KEY=jina-daytona-api-key:latest
-            OPENAI_API_KEY=jina-openai-api-key:latest
+            OPENROUTER_API_KEY=jina-openrouter-api-key:latest
             GITHUB_CLONE_TOKEN=jina-github-clone-token:latest
 
       - name: Verify ontology worker health
@@ -289,7 +291,7 @@ jobs:
             --region="${GCP_REGION}" \
             --image="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/worker:${GITHUB_SHA}" \
             --service-account="jina-runtime@jina-v2.iam.gserviceaccount.com" \
-            --set-env-vars="JINA_API_URL=${{ steps.deploy-api.outputs.url }},ACCEPTANCE_REQUEST_KEY=deploy-${GITHUB_SHA},ACCEPTANCE_TIMEOUT_MS=3000000,ACCEPTANCE_ISSUE_NUMBER=4,ACCEPTANCE_RESOLUTION_PR_NUMBER=5,ACCEPTANCE_CAUSING_PR_NUMBER=3,ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2,ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin" \
+            --set-env-vars="JINA_API_URL=${{ steps.deploy-api.outputs.url }},ACCEPTANCE_REQUEST_KEY=deploy-${GITHUB_SHA},ACCEPTANCE_TIMEOUT_MS=3000000,ACCEPTANCE_ISSUE_NUMBER=4,ACCEPTANCE_RESOLUTION_PR_NUMBER=5,ACCEPTANCE_CAUSING_PR_NUMBER=3,ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2,ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin,ACCEPTANCE_V51_FIXTURE=true" \
             --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest" \
             --args=dist/acceptance.js \
             --tasks=1 \
