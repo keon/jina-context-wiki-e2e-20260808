@@ -1,13 +1,13 @@
 export const CANVAS_NODE_LIMIT = 1_200;
 export const CANVAS_EDGE_LIMIT = 3_000;
 
-export type RendererMode = "webgl" | "canvas";
+type RendererMode = "webgl" | "canvas";
 
-export interface SliceNode {
+interface SliceNode {
   readonly id: string;
 }
 
-export interface SliceEdge {
+interface SliceEdge {
   readonly id: string;
   readonly source: string;
   readonly target: string;

@@ -26,11 +26,6 @@ interface OpenRouterResponse {
   readonly error?: { readonly message?: string };
 }
 
-/**
- * OpenRouter chat-completion harness — the managed model gateway path.
- * Captures the gateway's exact usage and cost per call; any model in the
- * OpenRouter catalog is allowed.
- */
 export class OpenRouterReviewHarness implements ReviewHarness {
   readonly type = "openrouter-chat" as const;
 
@@ -67,9 +62,7 @@ export class OpenRouterReviewHarness implements ReviewHarness {
           type: "json_schema",
           json_schema: { name: "review_findings", strict: true, schema: REVIEW_FINDINGS_SCHEMA }
         },
-        // Defensive: usage accounting is the billing source of truth.
         usage: { include: true },
-        // Stable internal identifier, never PII.
         user: `repo_${request.repository}`
       })
     });

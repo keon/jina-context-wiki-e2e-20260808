@@ -5,6 +5,7 @@ import {
   assertionObservationId,
   canonicalJson,
   causalTraceItemsFromGraph,
+  codeownersPatternMatches,
   computeCommitChanges,
   createOntologyProjection,
   knowledgeCheckpoint,
@@ -4925,21 +4926,6 @@ function ownershipAuthority(row: { readonly generator: string | null; readonly a
   if (row.asserted_by) return 0;
   if (row.generator === "source:codeowners") return 1;
   return 2;
-}
-
-function codeownersPatternMatches(rawPattern: string, path: string): boolean {
-  const pattern = rawPattern.trim();
-  if (!pattern || pattern.startsWith("!")) return false;
-  const anchored = pattern.startsWith("/");
-  const normalized = pattern.replace(/^\//, "").replace(/\/$/, "/**");
-  const escaped = normalized
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\uE000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\uE000/g, ".*");
-  if (!anchored && !normalized.includes("/")) return new RegExp(`(?:^|/)${escaped}$`).test(path);
-  return new RegExp(`^${escaped}$`).test(path);
 }
 
 function embeddingForText(text: string, dimensions = 64): number[] {

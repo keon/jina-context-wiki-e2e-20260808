@@ -46,7 +46,8 @@ import {
   type OntologyWorkerTopic,
   type OntologyNodeKind,
   type RepositoryContextOperation,
-  type RepositorySnapshot
+  type RepositorySnapshot,
+  type RetrievalRequest
 } from "@jina/ontology";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
@@ -608,28 +609,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         allowedRepositories,
         repository,
         template: template as (typeof retrievalTemplateNames)[number],
-        ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
+        ...parseOntologySelectors(body),
         ...(typeof body.query === "string" ? { query: body.query } : {}),
-        ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
-        ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
-        ...(typeof body.pullRequestNumber === "number"
-          ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") }
-          : {}),
-        ...(typeof body.issueEntityId === "string"
-          ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") }
-          : {}),
-        ...(typeof body.issueNumber === "number"
-          ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") }
-          : {}),
-        ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
-        ...(typeof body.featureText === "string"
-          ? { featureText: requiredFeatureText(body.featureText, "featureText") }
-          : {}),
-        ...(typeof body.rootText === "string" ? { rootText: requiredFeatureText(body.rootText, "rootText") } : {}),
-        ...(typeof body.rootEntityId === "string"
-          ? { rootEntityId: requiredString(body.rootEntityId, "rootEntityId") }
-          : {}),
-        ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
       json(response, 200, result);
@@ -647,30 +628,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           allowedRepositories,
           repository: requiredString(body.repository, "repository"),
           question: requiredString(body.question, "question"),
+          ...parseOntologySelectors(body),
           ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
-          ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
-          ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
-          ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
-          ...(typeof body.pullRequestNumber === "number"
-            ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") }
-            : {}),
-          ...(typeof body.issueEntityId === "string"
-            ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") }
-            : {}),
-          ...(typeof body.issueNumber === "number"
-            ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") }
-            : {}),
-          ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
-          ...(typeof body.featureText === "string"
-            ? { featureText: requiredFeatureText(body.featureText, "featureText") }
-            : {}),
-          ...(typeof body.rootText === "string" ? { rootText: requiredFeatureText(body.rootText, "rootText") } : {}),
-          ...(typeof body.rootEntityId === "string"
-            ? { rootEntityId: requiredString(body.rootEntityId, "rootEntityId") }
-            : {}),
-          ...(typeof body.commitSha === "string"
-            ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") }
-            : {}),
           ...(typeof body.tokenBudget === "number"
             ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") }
             : {})
@@ -2249,6 +2208,47 @@ function requiredRepositoryPath(value: unknown, field: string): string {
   if (path.startsWith("/") || path.split("/").includes(".."))
     throw invalidRequest(`${field} must be repository-relative`);
   return path;
+}
+
+type OntologyRequestSelectors = Pick<
+  RetrievalRequest,
+  | "ref"
+  | "symbol"
+  | "path"
+  | "pullRequestNumber"
+  | "issueEntityId"
+  | "issueNumber"
+  | "issueText"
+  | "featureText"
+  | "rootText"
+  | "rootEntityId"
+  | "commitSha"
+>;
+
+function parseOntologySelectors(body: Record<string, unknown>): OntologyRequestSelectors {
+  return {
+    ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
+    ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
+    ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
+    ...(typeof body.pullRequestNumber === "number"
+      ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") }
+      : {}),
+    ...(typeof body.issueEntityId === "string"
+      ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") }
+      : {}),
+    ...(typeof body.issueNumber === "number"
+      ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") }
+      : {}),
+    ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
+    ...(typeof body.featureText === "string"
+      ? { featureText: requiredFeatureText(body.featureText, "featureText") }
+      : {}),
+    ...(typeof body.rootText === "string" ? { rootText: requiredFeatureText(body.rootText, "rootText") } : {}),
+    ...(typeof body.rootEntityId === "string"
+      ? { rootEntityId: requiredString(body.rootEntityId, "rootEntityId") }
+      : {}),
+    ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {})
+  };
 }
 
 function requiredIssueText(value: unknown, field: string): string {

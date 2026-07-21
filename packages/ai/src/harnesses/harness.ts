@@ -15,7 +15,6 @@ export interface ReviewFinding {
   readonly category: string;
 }
 
-/** One observable step a harness took; persisted as a run.step task event. */
 export interface HarnessStep {
   readonly seq: number;
   readonly type: "model_call" | "tool_call" | "note";
@@ -23,7 +22,6 @@ export interface HarnessStep {
   readonly model?: string;
 }
 
-/** One model call's exact usage; persisted as a model_usage row. */
 export interface ModelUsageRecord {
   readonly provider: string;
   readonly model: string;
@@ -54,11 +52,6 @@ export interface ReviewResult {
   readonly usage: readonly ModelUsageRecord[];
 }
 
-/**
- * A harness is the executable review strategy. Every harness returns the same
- * shape — summary, findings, ordered steps, usage records — so the board,
- * billing, and observability layers are harness-agnostic.
- */
 export interface ReviewHarness {
   readonly type: HarnessType;
   review(request: ReviewRequest): Promise<ReviewResult>;

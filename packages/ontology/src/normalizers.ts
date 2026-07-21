@@ -1,5 +1,20 @@
 import type { OntologyNodeKind } from "./model.js";
 
+export function codeownersPatternMatches(rawPattern: string, path: string): boolean {
+  const pattern = rawPattern.trim();
+  if (!pattern || pattern.startsWith("!")) return false;
+  const anchored = pattern.startsWith("/");
+  const normalized = pattern.replace(/^\//, "").replace(/\/$/, "/**");
+  const escaped = normalized
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "\uE000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\?/g, "[^/]")
+    .replace(/\uE000/g, ".*");
+  if (!anchored && !normalized.includes("/")) return new RegExp(`(?:^|/)${escaped}$`).test(path);
+  return new RegExp(`^${escaped}$`).test(path);
+}
+
 export interface GitHubWorkItemObservation {
   readonly tenantId: string;
   readonly repository: string;

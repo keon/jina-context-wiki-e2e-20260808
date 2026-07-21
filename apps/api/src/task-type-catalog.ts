@@ -17,7 +17,7 @@ export interface TaskTypeTriggerRule {
   readonly condition?: string;
 }
 
-export interface TaskTypeDependencySummary {
+interface TaskTypeDependencySummary {
   readonly taskType: string;
   readonly relationships: readonly string[];
   readonly workflows: readonly string[];
@@ -25,7 +25,7 @@ export interface TaskTypeDependencySummary {
   readonly conditions: readonly string[];
 }
 
-export interface TaskTypeTriggerSummary {
+interface TaskTypeTriggerSummary {
   readonly source: string;
   readonly description: string;
   readonly conditions: readonly string[];

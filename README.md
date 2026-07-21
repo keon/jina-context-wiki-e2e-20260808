@@ -1,117 +1,92 @@
 # Jina
 
-Jina is a tenant-scoped task board for software-work agents, starting with GitHub pull request review and repository Ontology generation.
+Jina is a tenant-scoped task board for software-work agents. The current runtime handles GitHub pull-request review and repository Ontology generation.
 
-The current implementation receives signed GitHub webhooks, creates review tasks and dependencies, persists the board in PostgreSQL, and leases ready work to Cloud Run workers. The review worker reads a PR diff through the GitHub API and calls the OpenAI Responses API. The Ontology worker records immutable source observations, parses only previously unseen content-addressed blobs, records cited Codex output as provenance-bearing assertions, and projects the dashboard graph from canonical code and knowledge data. The current publish step records an idempotent internal publication; posting findings back to GitHub is not shipped yet.
+Signed GitHub events create board tasks and dependencies. The API persists the board and leases ready work to Cloud Run workers. The review worker reads PR diffs and calls the OpenAI Responses API. The Ontology worker incrementally records repository facts, runs cited semantic analysis in Daytona, and builds queryable graph projections. Publication is currently an internal idempotent record; Jina does not yet post findings to GitHub.
 
-## Core Shape
-
-```text
-GitHub event
-  -> pipeline plans board tasks and dependencies
-  -> readiness reducer queues ready tasks + durable outbox messages
-  -> Cloud Run worker claims a five-minute renewable lease
-  -> topic handler performs review, research, publication, cleanup, or Ontology work
-  -> worker completes through the API; reducer advances dependents
-```
-
-The board is the source of truth and the orchestrator. PostgreSQL makes board state, delivery deduplication, leases, and Ontology graphs durable. Daytona is used only for Ontology repository inspection in the current runtime. Agents and humans act through the same validated commands.
-
-Every board mutation loads and writes the JSON snapshot while holding one cross-instance PostgreSQL transaction lock. Multiple Cloud Run API instances therefore cannot derive and overwrite state from stale process-local snapshots.
-
-Six concepts carry the whole design: **board**, **task**, **pipeline**, **run**, **gate**, **epoch**. Anything else is introduced only when a second concrete use exists.
-
-## Quick Start
+## Quick start
 
 ```sh
 pnpm install
 pnpm lint
 pnpm typecheck
-pnpm test                # unit, API, worker-protocol, and optional Postgres tests
-pnpm dev                 # api dev server :4000 + live board dashboard :3000
-
-# Review a real GitHub PR through the pipeline (needs gh + OPENROUTER_API_KEY):
-pnpm review:pr owner/repo 123 --dry-run              # real PR data, no model call
-pnpm review:pr owner/repo 123                        # openrouter-chat harness (default)
-pnpm review:pr owner/repo 123 --harness codex-cli    # Codex CLI harness
-pnpm review:pr owner/repo 123 --model openai/gpt-5.5 # any OpenRouter catalog model
-pnpm review:pr owner/repo 123 --post                 # also publish as a PR comment
+pnpm test
+pnpm dev
 ```
 
-The CLI review harness is a separate local evaluation path. Its trace and usage output are not the deployed Cloud Run worker's persistence model. See [docs/BILLING.md](docs/BILLING.md) for the target billing design and its implementation status.
+`pnpm dev` starts the API on port 4000 and dashboard on port 3000. It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-Ontology task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`.
 
-`pnpm dev` uses memory stores, enables the unsigned demo endpoint, seeds a PR, and simulates non-Ontology task completion. Production disables demo endpoints and simulation and requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`.
+To exercise the separate local PR-review harness:
 
-## Ontology Worker
+```sh
+pnpm review:pr owner/repo 123 --dry-run
+pnpm review:pr owner/repo 123
+pnpm review:pr owner/repo 123 --harness codex-cli
+pnpm review:pr owner/repo 123 --post
+```
 
-`ontology_build` is an aggregate with three worker-owned children: `ontology_ingest` stores each immutable commit's exact tree plus first-parent churn, parses only blob SHA/parser-version misses, and normalizes explicit work items, ownership, packages, named services, deployments, and incidents; `ontology_assert` runs Codex in Daytona against a bounded cross-commit focus list and records cited Feature, derived Issue, movement, impact, documentation, ownership, and causal proposals; `ontology_project` materializes the hot-ref manifest and builds disposable graph/search read models from the canonical stores. Parser-cache misses and semantic change scope are intentionally separate. Assertion generations are reused only on an exact code/source evidence fingerprint; a generator-contract or evidence change performs one bounded semantic scan and caches that generation. Every new semantic assertion carries checked evidence plus an immutable explanation of how that evidence supports the relationship, and reviewed facts retain their explanation, evidence, review, and provenance when reconfirmed. Generic causal traces root at Issue, Feature, Incident, or Service. Counterfactual questions synchronously remove PR, commit, package, deployment, or implementation paths from that same reviewed graph and report all known paths removed or remaining; they create no task, assertion, or cache row. Internal blob work remains batched and does not create per-file board tasks.
+The harness needs `gh` and `OPENROUTER_API_KEY`. Its local trace and usage model are separate from the deployed worker.
 
-Local execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and either `OPENAI_API_KEY` (preferred) or `OPENROUTER_API_KEY`. Override provider and model with `ONTOLOGY_CODEX_PROVIDER` and `ONTOLOGY_CODEX_MODEL` when needed.
-
-## GitHub App Intake
-
-The API accepts signed GitHub App deliveries at `POST /webhooks/github`. A branch push creates the existing four-task Ontology workflow, skips a redelivery while that ref's latest known head is unchanged, and supersedes stale work when the ref moves—including a force-push back to an earlier SHA. A newly opened pull request creates the review task graph; a newly opened issue creates one manual triage card. See [GitHub App Setup](docs/GITHUB_APP.md).
-
-Repository knowledge is available over stateless MCP at `POST /mcp`. Its complete public surface is one read-only tool, `query_graph`, which accepts a repository, a natural-language query, and an optional ref. Jina selects the graph traversal internally and returns a cited answer; callers do not choose storage, generation, or retrieval details. Production requests require the service credential plus a bound application principal, and repository ACLs are applied to every query.
-
-For a credential-free local MCP smoke test, start `pnpm --filter @jina/api dev`. The development server seeds a small cited `omlabs/example` graph specifically for `query_graph`; it does not represent production data.
-
-## Repo Layout
+## Runtime
 
 ```text
-apps/
-  api/          GitHub webhooks, dashboard API, command application
-  dashboard/    server-rendered operator UI and read-only API proxy
-  worker/       durable polling worker for review and Ontology topics
-  workflows/    local CLI harnesses and deterministic workflow simulations
-
-packages/
-  board/        tasks, dependencies, commands, reducer, gates
-  review/       PR review pipeline, review profiles, findings, dedupe
-  context/      context handoff, source policy, citations, extracted context
-  publication/  publication planning, keys, publish results
-  policy/       billing and budget policies
-  db/           PostgreSQL state/graph stores and schema bootstrap
-  github/       GitHub webhook signatures and payload parsing
-  daytona/      Ontology sandbox executor
-  ontology/     repository graph contract, task type, schema, and store port
-  ai/           model clients and agent harnesses
-  shared-kernel/ small shared primitives: ids, errors, time
+GitHub event
+  -> API plans board tasks and dependencies
+  -> reducer queues ready tasks and durable outbox messages
+  -> worker claims and renews a five-minute lease
+  -> worker completes through the API
+  -> reducer advances dependents
 ```
 
-`apps/*` own runtime wiring. Domain packages own their bounded rules and do not import HTTP, GitHub, Daytona, or model SDKs. `shared-kernel` stays small and contains no business workflows.
+The board is the orchestrator. PostgreSQL owns board state, delivery deduplication, leases, and Ontology data. Every board mutation loads and writes the JSON snapshot while holding a cross-instance transaction lock, preventing horizontally scaled API instances from overwriting newer state.
 
-## Current PR Review Pipeline
+Opened PRs create review and publication tasks. Opened issues create manual triage tasks. Signed branch pushes create the same four-task Ontology workflow as `POST /ontology/build`; unchanged heads dedupe and moved refs supersede stale work.
+
+The current review pipeline is:
 
 ```text
-signed intake -> review pass -> internal publish record -> aggregate completion
+signed intake -> review pass -> internal publication -> aggregate completion
 ```
 
-The board primitives support context handoffs and the simulation package exercises them:
+External publication, automated fixes, test execution, releases, and arbitrary external research are not shipped.
+
+## Repository knowledge
+
+Ontology runs as three board-visible stages:
+
+1. `ontology_ingest` stores immutable source observations, exact commit trees, first-parent changes, and parsed content-addressed blobs.
+2. `ontology_assert` checks out the pinned commit in Daytona and records cited, explained, typed proposals.
+3. `ontology_project` consumes canonical events and rebuilds the current manifest, search documents, and immutable graph.
+
+Reviewed assertions retain their evidence, explanation, review state, and provenance when later runs confirm them. Counterfactual queries remove selected paths from the reviewed graph in memory; they do not create facts or tasks.
+
+Local Ontology execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
+
+Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST /mcp`. Its single read-only tool, `query_graph`, accepts a repository, natural-language query, and optional ref. Production requires the internal service credential plus a bound application principal, and every request is repository-ACL scoped. The simulation integration uses a separate `GRAPH_API_TOKEN` for graph reads and exact ACL synchronization without granting board or worker access.
+
+## Repository layout
 
 ```text
-review_pass R
-  -> creates context task C
-  -> R blocks on C
-  -> researcher attaches cited context
-  -> C completes
-  -> R is requeued and resumes from board state
+apps/api/          webhooks, board API, graph API, MCP, commands, leases
+apps/dashboard/    operator UI and authenticated read proxy
+apps/worker/       review and Ontology workers
+apps/workflows/    local review CLI and deterministic simulation
+packages/board/    tasks, dependencies, commands, reducer
+packages/ontology/ repository facts, assertions, retrieval, projections
+packages/db/       PostgreSQL stores and migrations
+packages/github/   webhook verification and parsing
+packages/daytona/  Ontology sandbox executor
+packages/ai/       review harnesses and model clients
 ```
 
-The production research handler currently records the requested sources; it does not fetch arbitrary external content. External GitHub publication, grounding, fixing, testing, release, and incident work remain unshipped.
+Smaller packages contain review planning, context policy, publication, billing policy, and shared primitives.
 
-## Active Docs
+## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) - deployed architecture followed by the larger target design.
-- [Data Models](docs/DATA_MODELS.md) - target relational model and the currently shipped persistence subset.
-- [Sequence Diagrams](docs/SEQUENCE_DIAGRAM.md) - current webhook, worker lease, Ontology, and dashboard flows.
-- [Billing](docs/BILLING.md) - target OpenRouter/Autumn billing design; not yet a production subsystem.
-- [GitHub App Setup](docs/GITHUB_APP.md) - signed webhook intake for new pull requests and issues.
-- [Deployment](docs/DEPLOYMENT.md) - Cloud Run services, CI/CD, and keyless GitHub authentication.
-
-## Documentation Contract
-
-Runtime changes must update the README plus the affected architecture, sequence,
-deployment, environment, and integration documents in the same pull request.
-Target-design documents must keep an explicit implementation-status block so
-planned capabilities cannot be mistaken for deployed controls.
+- [Architecture](docs/ARCHITECTURE.md)
+- [Ontology](docs/ONTOLOGY.md)
+- [Data models](docs/DATA_MODELS.md)
+- [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
+- [Deployment](docs/DEPLOYMENT.md)
+- [GitHub App setup](docs/GITHUB_APP.md)
+- [Billing](docs/BILLING.md)

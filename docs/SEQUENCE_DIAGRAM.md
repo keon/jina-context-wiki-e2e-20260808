@@ -1,6 +1,6 @@
 # Current Sequence Diagrams
 
-These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-21. They intentionally exclude the Trigger.dev and normalized-board-storage target designs in [ARCHITECTURE.md](ARCHITECTURE.md); the Ontology Repository Context path is current implementation.
+These diagrams describe the implementation deployed by `.github/workflows/ci-deploy.yml` as of 2026-07-21.
 
 The board reducer is the orchestrator. Workers never mutate board state directly: they claim a durable outbox lease through the API, perform external work outside the API mutation lock, renew the lease while active, and complete through the API.
 

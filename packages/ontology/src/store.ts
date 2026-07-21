@@ -17,6 +17,7 @@ import type {
 import type { OntologyOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
 import { canonicalJson } from "./knowledge.js";
 import {
+  codeownersPatternMatches,
   normalizeSourceObservation,
   sourceObservationExternalId,
   sourceObservationProvider,
@@ -1318,7 +1319,7 @@ function memoryRetrievalItems(
           (!target ||
             assertion.subject.naturalKey.includes(target) ||
             (typeof assertion.qualifiers?.pattern === "string" &&
-              memoryCodeownersPatternMatches(assertion.qualifiers.pattern, target)))
+              codeownersPatternMatches(assertion.qualifiers.pattern, target)))
       )
       .map((assertion) => ({
         kind: "ownership",
@@ -1351,21 +1352,6 @@ function memoryRetrievalItems(
         { kind: "assertion" as const, id: assertion.id, repository: request.repository, commitSha: assertion.commitSha }
       ]
     }));
-}
-
-function memoryCodeownersPatternMatches(rawPattern: string, path: string): boolean {
-  const pattern = rawPattern.trim();
-  if (!pattern || pattern.startsWith("!")) return false;
-  const anchored = pattern.startsWith("/");
-  const normalized = pattern.replace(/^\//, "").replace(/\/$/, "/**");
-  const escaped = normalized
-    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
-    .replace(/\*\*/g, "\uE000")
-    .replace(/\*/g, "[^/]*")
-    .replace(/\?/g, "[^/]")
-    .replace(/\uE000/g, ".*");
-  if (!anchored && !normalized.includes("/")) return new RegExp(`(?:^|/)${escaped}$`).test(path);
-  return new RegExp(`^${escaped}$`).test(path);
 }
 
 export function createOntologyProjection(

@@ -1,583 +1,89 @@
-# Jina Architecture
+# Architecture
 
-> **Documentation status (2026-07-21):** The "Current implementation" section and [ONTOLOGY.md](ONTOLOGY.md) are authoritative for the runtime in this repository. The remainder describes the broader board/review target. Trigger.dev, normalized board task/run/finding tables, external GitHub publication, and the expanded gate model are targets; the Repository Context v5.1 causal Ontology path is implemented.
+This document describes the runtime in this repository. Domain-specific Ontology details live in [ONTOLOGY.md](ONTOLOGY.md), persisted structures in [DATA_MODELS.md](DATA_MODELS.md), and request flows in [SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md).
 
-## Current implementation
+## Topology
 
-The current repository implementation is configured to run as four Cloud Run services backed by one Cloud SQL PostgreSQL 17 instance:
+Jina runs as four Cloud Run services backed by PostgreSQL 17:
 
-- `jina-api` verifies GitHub webhooks, applies board commands, runs the readiness reducer, and owns short lease/completion transactions.
-- `jina-dashboard` serves the current board, retained task-attempt history, task-type catalog, task details, Ontology visualization, and fixed-template cited context queries. Direct Cloud Run IAP authenticates browser users; the server-side proxy forwards the verified email as the application principal and adds the API service credential.
-- `jina-task-worker` polls for `run-review`, `run-research`, `run-publish`, and `run-cleanup` messages. Review fetches the PR diff from GitHub and calls OpenAI with a strict findings schema. Publish currently records an internal idempotent publication only.
-- `jina-ontology-worker` runs three board-visible chunks: raw-data aggregation, assertion derivation, and projection. Aggregation walks only the previously unseen commit-DAG portion, records immutable GitHub/Git observations, stores exact commit trees plus first-parent churn, normalizes PR/issue/CODEOWNERS/package/service/deployment/incident facts, and parses only unseen tenant/blob/parser pairs. New source snapshots retract facts that disappeared. Assertion generation is the sole model stage: it checks out the pinned commit in Daytona, validates citations, explanations, and kind-specific IDs, retains raw output, and stores Feature, derived Issue, movement, impact, documentation, ownership, and causal inference as proposed knowledge. Deterministic source facts receive template explanations. A generator-contract change triggers one bounded uncached semantic refresh, then exact-fingerprint retries are cached. Projection carries accepted explanations into a ref-scoped, content-addressed graph through consumer-owned outbox deliveries. Generic causal retrieval roots at Issue, Feature, Incident, or Service, while synchronous counterfactuals remove PR/commit/package/deployment/implementation paths without creating tasks or facts. Stage results distinguish changed work, confirmation, and true no-ops.
-
-The API snapshot contains board tasks, dependencies, events, outbox messages, tracked pull requests, publications, and delivery sequence. It is serialized in `jina_runtime.api_state`; webhook delivery IDs are separately unique in `jina_runtime.github_deliveries`. Signed branch pushes create the same four-task Ontology tree as `POST /ontology/build`, keyed by head SHA and superseding stale ref work. Each command loads and stores the current snapshot under one cross-instance PostgreSQL transaction lock, so horizontally scaled API instances cannot overwrite newer board state. Ontology uses relational canonical intake, code-plane, knowledge, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables in `jina_ontology`. Canonical operations and board completion are independently idempotent and lease-fenced, so a retry converges after a crash between their transactions.
-
-Automated dependency failures are terminal: the failed stage remains `failed`,
-dispatchable descendants become `canceled`, and the aggregate becomes `failed`.
-The generic board reducer never invents manual recovery work; a workflow must
-declare an actual human decision and its resolution command explicitly. Starting
-a new Ontology attempt supersedes older active tasks for the same tenant,
-repository, and ref. The board shows only the latest attempt while `/history`
-retains prior attempts for audit and debugging.
+- `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
+- `jina-dashboard` serves the operator UI and proxies authenticated reads.
+- `jina-task-worker` handles review, research, publication, and cleanup topics.
+- `jina-ontology-worker` handles repository ingest, semantic assertion, and projection topics.
 
 ```text
-GitHub webhook -> API -> PostgreSQL board snapshot/outbox
-                              |
-                       renewable lease
-                              v
-                 task worker or Ontology worker
-                              |
-                       completion through API
-
-Browser -> Cloud Run IAP -> dashboard proxy -> authenticated API reads
+GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
+Browser -> Cloud Run IAP -> dashboard proxy -> API -> PostgreSQL
+Trusted graph caller -> graph API or MCP -> repository-scoped retrieval
 ```
 
-Production is scoped to the canonical `omlabs` tenant. Startup migration rewrites configured legacy tenant aliases. The API exposes only health, signed webhook intake, and the non-tenant `GET /task-types` catalog without the internal bearer credential; tenant reads and worker mutations require it.
+The API performs short state transitions. Workers perform external I/O outside the mutation lock, renew their leases, and complete through the API. Expired work is reclaimable; a stale completion changes no state.
 
-## Broader target architecture and purpose
+## Board and execution
 
-Jina's target is a multi-tenant agent platform for software work. It receives GitHub events, represents work as tasks on a Postgres-backed **board**, schedules specialized AI agents as stateless durable runs, publishes feedback or artifacts to developer systems, and stores durable dashboard read models.
+The board is both the operational source of truth and the orchestrator. A versioned planner creates tasks and dependency edges. The reducer queues a task only after its required dependencies are satisfied and writes its outbox message with the same state change.
 
-Specialized workers keep their domain state outside the generic board. See [ONTOLOGY.md](ONTOLOGY.md) for the complete Ontology worker architecture and implementation strategy.
+Task types and dispatch topics are worker-owned strings. The board remains generic: it validates commands, transitions, dependency readiness, terminal propagation, supersession, and leases without importing GitHub or Ontology behavior.
 
-The system is designed for agent collaboration without handing the whole job to one opaque autonomous agent. A PR review is the first pipeline: a root task plus stage tasks for checkout, review passes, context handoffs, publishing, and human decisions. New GitHub issues enter the board as manual triage cards; automated issue-triage, fix, test, documentation, release, and incident pipelines remain future capabilities.
+Opened PRs create a `pr_review` aggregate, `review_pass`, and `publish`. A new head SHA increments the epoch and supersedes active work from the old epoch. Opened issues create manual `issue_triage` tasks. Signed branch pushes start the Ontology task tree, dedupe unchanged heads, and supersede stale ref work even when a force-push returns to an earlier SHA.
 
-## Vocabulary
+Automated dependency failures are terminal: failed work remains `failed`, dispatchable descendants become `canceled`, and the aggregate becomes `failed`. The reducer does not invent recovery tasks. A workflow that supports recovery must declare the human decision and resolution command explicitly.
 
-Six concepts carry the whole design:
+The board is currently stored as one JSON snapshot. Each mutation holds a cross-instance PostgreSQL transaction lock while loading and saving it, so concurrent API instances cannot derive state from the same stale snapshot.
 
-- **Board** — the Postgres tables (`tasks`, `task_dependencies`, `task_events`, `task_runs`, `outbox`) that are the source of truth _and_ the orchestrator.
-- **Task** — one unit of work; a board card. MVP types: `pr_review`, `review_pass`, `context`, `publish`, `issue_triage`, `human_decision`.
-- **Pipeline** — a versioned template that says which tasks a trigger creates and how they depend on each other. The MVP has one, the PR review pipeline, defined in code (`packages/review`), not in a database table.
-- **Run** — one stateless execution attempt of a task on Trigger.dev, recorded in `task_runs`.
-- **Gate** — an explicit recorded pass/fail/waived result (`gate_results`) required for important transitions: budget, checkout readiness, publication, human approval.
-- **Epoch** — a PR's head-SHA generation counter; the fencing unit for supersession.
+## Worker boundaries
 
-Everything else is introduced only when a second concrete use exists. A normalized intake table (`work_orders`) remains deferred while GitHub PRs and issues can map directly to their subject rows/tasks; it becomes useful when another intake provider or configurable intake workflow ships. A configurable pipeline table is likewise deferred until tenants can configure pipelines.
+The task worker fetches PR data from GitHub, calls the configured review harness, and records structured findings. Research currently records requested sources without arbitrary network retrieval. Publication currently upserts an internal record.
 
-## MVP Boundary
+The Ontology worker runs three stages:
 
-The MVP is the PR review pipeline, but review still requires a repository checkout. Review agents clone and inspect the repository inside short-lived Daytona sandboxes. GCP runtimes orchestrate the sandbox lifecycle and persist results; they do not host PR working trees on their own filesystem.
+1. `ontology_ingest` walks unseen commit history, records exact trees and first-parent changes, parses new blobs, and normalizes explicit repository and GitHub facts.
+2. `ontology_assert` checks out the pinned commit in Daytona and records cited semantic output as proposed assertions.
+3. `ontology_project` drains consumer-owned canonical events and rebuilds manifests, search documents, redirects, and immutable content-addressed graphs.
 
-In scope:
+Only assertion generation uses a model. Assertions must carry checked repository evidence, a relationship explanation, and known typed identities. Reviewed assertions retain evidence, explanation, provenance, and review state when reconfirmed. Exact evidence fingerprints cache unchanged generations; generator-contract changes trigger one bounded refresh.
 
-- Signed GitHub App webhook ingestion for newly opened PRs and issues.
-- Manual `issue_triage` cards for newly opened GitHub issues.
-- PR comment and review-comment commands such as re-review, retry, dismiss, or explain.
-- Root `pr_review` tasks for pull requests, one per active PR epoch.
-- `review_pass` child tasks for specialized review agents.
-- `context` child tasks for board-mediated handoff when a review pass needs dependency docs, external references, or other cited context.
-- Gates for budget, checkout readiness, publication, and human decisions.
-- Daytona sandbox creation for each review pass or review batch.
-- Repository clone/checkout inside Daytona at the PR base and head SHAs.
-- Structured findings with fingerprints and review-run provenance.
-- GitHub review/check/summary publication.
-- Dashboard views for PR review state, findings, review runs, publications, and task timelines.
-- Retry, cancellation, and supersession when a PR updates.
+## Read interfaces
 
-Out of scope for MVP:
+The dashboard reads board, history, task-type, graph, assertion, and fixed-template retrieval endpoints through its authenticated proxy. Historical graph lists contain summaries; full nodes and edges load only when requested.
 
-- Executing untrusted PR code; installing dependencies; running tests/reproduction.
-- Grounding suspected findings; creating fix tasks; pushing commits; opening/updating PRs.
-- Uncontrolled researcher egress. External context fetching requires source allowlists, retention policy, prompt-injection defenses, and explicit `can_fetch_external_docs`.
+`POST /mcp` implements stateless Streamable HTTP MCP with one read-only `query_graph` tool. The server chooses bounded retrieval templates and returns cited results; callers do not choose SQL, graph generations, or internal tools.
 
-Grounding, fixing, testing, documentation, release, and incident-response remain future, capability-gated pipelines. Context research is non-mutating but still capability-gated; its commands exist as rejected/disabled operations until egress, source attribution, retention, gate, permission, and tenant-policy controls are implemented.
+The simulation-facing graph API uses a dedicated credential and maps each simulation tenant to a bound principal. ACL synchronization replaces the complete repository set, so removed repositories are revoked on the next sync.
 
-## Design Principles
+## Persistence and idempotency
 
-1. **The board is the operational source of truth and the orchestrator.**
-   The dashboard, agent handoffs, retry controls, readiness, completion, and audit trail are built around tasks, task dependencies, and task events. No long-lived coordinator workflow holds the graph; the board does. Execution status lives only on `tasks` — every other view of progress is derived.
+The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in `jina_runtime.github_deliveries`. Ontology uses normalized canonical, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables under `jina_ontology`.
 
-2. **Pipelines are versioned code, not configuration.**
-   Each pipeline is a planner function that maps a trigger to tasks, dependencies, required capabilities, gates, and a harness version, stamped with a version string. A pipeline becomes data only when tenants need to configure it.
+Source writes, model observations, and projections are independently idempotent. A retry may repeat a stage, but canonical keys, consumer-owned outbox delivery, exact fingerprints, and immutable graph generations make the result converge. Graph identity includes tenant, repository, ref content, projection version, and canonical graph content.
 
-3. **Gates beat model confidence.**
-   Important transitions depend on explicit gate results: budget, checkout readiness, current-head checks, publication idempotency, tests, approvals, and future release checks. Vendor claims or benchmark scores are inputs to harness evolution, not runtime authority.
+## Authentication and security
 
-4. **Trigger.dev owns scheduling and durable execution.**
-   Each ready task becomes a stateless, durable Trigger.dev run. Trigger.dev owns retries/backoff, delays, scheduled re-reviews, SLA timers, and per-tenant concurrency. Runs perform external side effects; the board decides what is ready to run next.
+Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and Ontology operations require the internal bearer credential.
 
-5. **Postgres owns durable state.**
-   Task state, dependencies, events, review artifacts, findings, finding threads, publications, checkouts, tenant config, the transactional outbox, and dashboard read models live in Postgres.
+Cloud Run IAP authenticates dashboard users. The dashboard forwards the verified principal and service credential. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
-6. **Agents and humans act through generic commands.**
-   A small command set (`CreateTask`, `UpdateTask`, `TransitionTask`, `CommentTask`, `LinkTask`, `AssignTask`, `AttachArtifact`) replaces typed commands. The API validates every command against tenant policy, repository permissions, task state, capabilities, and budget.
+MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
 
-7. **The readiness reducer + transactional outbox is the dispatch boundary.**
-   A task becomes `queued` only when its required `depends_on` edges are satisfied. The transition and an outbox row are written in the same transaction. A relay drains the outbox and triggers the run. Runs and HTTP handlers never mark tasks complete out-of-band; they transition tasks, which re-runs the reducer.
+Repository credentials remain in the worker boundary. Daytona isolates repository inspection. Jina does not execute untrusted repository code, install repository dependencies, or run repository tests.
 
-8. **Stateless runs rehydrate from the board.**
-   A run receives a `task_id`, loads its context from the task thread + linked tasks + PR/diff/policy, executes, writes results back as events/transitions, and may create child tasks. "Resume" is a fresh run reading the thread (restart-with-rehydration), not a held-open process.
+## Failure and observability contracts
 
-   The default agent handoff is same-task resume: a run that needs more context creates a `context` task, links the current task as dependent on it, transitions itself to `blocked`, and exits. When the context task completes, the reducer requeues the original task and the next run rehydrates from the added context.
+- Duplicate GitHub deliveries are no-ops.
+- Expired leases are reclaimable; replaced leases fence stale completion.
+- Provider transport, timeout, rate-limit, and retryable server failures retry within policy. Schema and evidence validation fail closed.
+- A new PR epoch or Ontology ref attempt supersedes active older work.
+- Public worker health exposes only stable categories; redacted detail remains in authenticated task events and Cloud Logging.
+- Operational metrics cover canonical outbox depth/lag, parser backlog, projection staleness, assertion review, and retrieval latency/truncation.
 
-9. **Checkout credentials are brokered.**
-   A checkout broker creates Daytona sandboxes, performs authenticated clone/fetch with scoped credentials, removes credentials from the sandbox, records the checkout lifecycle, and only then lets reviewer agents inspect the working tree.
+## Code boundaries
 
-10. **GitHub webhooks are thin and idempotent.**
-    Webhook handlers verify signatures, dedupe deliveries, store the event, seed/advance the board, and write the outbox transactionally. Heavy review work and product-state transitions never run inline.
+- `apps/*` owns HTTP, process startup, external I/O, and runtime wiring.
+- `packages/board` owns generic workflow state.
+- `packages/ontology` owns repository facts, assertions, retrieval, and store interfaces.
+- `packages/db` implements durable stores, transactions, and migrations.
+- Provider packages such as `github`, `daytona`, and `ai` adapt external systems.
 
-11. **Every external side effect is auditable.**
-    GitHub writes, model calls, comments, checks, labels, and publications produce durable records. Future code execution and repository mutation must produce the same audit trail before being enabled.
+## Planned direction
 
-12. **Untrusted code runs only in isolated sandboxes — distinct from Trigger.dev.**
-    Trigger.dev durably runs trusted Jina code. The Daytona sandbox isolates adversarial PR code. The MVP does not execute PR code at all; future grounding/fix execution is sandboxed, egress-controlled, and policy-gated.
-
-13. **Future powers are policy-gated.**
-    Review-only is the default. Code execution, fixing, pushing, PR creation, and external research require explicit tenant policy, repository policy, and agent capability grants.
-
-## Runtime Topology
-
-```text
-GitHub
-  -> GitHub App Webhook
-  -> API Server on GCP  (verify, dedupe, seed/advance board, write outbox in one tx)
-  -> Postgres Board     (tasks, dependencies, events, runs, gates, outbox = source of truth)
-  -> Outbox Relay       (drains outbox)
-  -> Trigger.dev        (schedules + durably runs stateless per-task runs)
-  -> Agent Runtimes     (run-review, run-publish, capability-gated run-research, future run-grounding/fix)
-  -> Daytona Review Sandbox / GitHub API / AI Providers
-
-Next.js Dashboard on Vercel
-  -> API Server
-  -> Postgres read models
-```
-
-The MVP runtime fleet runs the API server, the outbox relay, and the agent run code. Review work that needs repository files runs inside Daytona-backed sandboxes. Future grounding and fix runs reuse Daytona with additional, stricter permissions.
-
-## Target Codebase Layout
-
-The broader target is split by runtime first, then by reusable domain packages.
-This map is a target organization for the Trigger.dev design, not an inventory of
-the current Cloud Run runtime. The current `apps/worker` and `packages/ontology`
-boundaries are described in the README and the current-implementation section
-above.
-
-```text
-apps/{api,dashboard,worker,workflows}
-packages/{ai,board,context,daytona,db,github,ontology,policy,publication,review,shared-kernel}
-```
-
-Boundaries:
-
-- `apps/api` owns HTTP, webhook verification, identity resolution, and command dispatch.
-- `apps/dashboard` owns UI state and calls only API endpoints; it never imports database repositories.
-- `apps/workflows` owns Trigger.dev task definitions and the outbox relay. It can call domain packages and adapters, but task implementations remain thin.
-- Domain packages (`board`, `review`, `context`, `publication`, `policy`) are pure business logic. They do not import HTTP frameworks, Trigger.dev, GitHub, Daytona, model SDKs, or database clients.
-- `packages/db` owns persistence, migrations, and transactions.
-- Adapter packages (`github`, `daytona`, `ai`) isolate provider SDKs and translate provider payloads into domain inputs/outputs.
-- `packages/shared-kernel` is intentionally small: shared IDs and time helpers only. Domain behavior belongs in bounded domain packages.
-
-Import direction:
-
-```text
-apps/* -> packages/{ai,board,context,daytona,db,github,ontology,policy,publication,review,shared-kernel}
-packages/{ai,board,review} -> packages/shared-kernel
-packages/{daytona,db} -> packages/ontology
-packages/shared-kernel -> no Jina package imports
-```
-
-Cross-domain calls should return intents rather than directly orchestrating other domains. For example, `review` can return `request_context`, and `apps/workflows` applies that through `board` commands.
-
-Package rule:
-
-- Start with the listed packages only; do not create a package just to hold a folder.
-- Keep single-consumer code inside the owning app or domain package.
-- Promote code into a package only when it has a stable public API, tests, and either multiple consumers or a boundary worth enforcing.
-- Keep `policy` narrow: reusable billing and budget predicates. Domain-specific policy stays with its domain package.
-- Keep `shared-kernel` smaller than every domain package. If a file needs domain nouns like task, review, finding, publication, or checkout, it does not belong in `shared-kernel`.
-
-Workspace tooling:
-
-- Use `pnpm` workspaces for `apps/*` and `packages/*`.
-- Use Turborepo for cached `build`, `test`, `lint`, and `typecheck` pipelines.
-- Enforce JavaScript and TypeScript linting with the workspace ESLint flat configuration; CI treats warnings as failures.
-- Use TypeScript project references for package-level type boundaries once the packages are real build units.
-- Add boundary enforcement early, either with Nx's module-boundary ESLint rule or equivalent local ESLint restrictions. The important rule is that domain packages cannot import adapters, runtime apps, or database repositories.
-
-### GCP Services
-
-- **Cloud Run or GKE**: API server, outbox relay, and Trigger.dev run workers. Note: the relay and run workers should not scale to zero on the happy path (they must drain the outbox / hold Trigger.dev concurrency); use min-instances or `LISTEN/NOTIFY`-driven wake-ups.
-- **Daytona**: Short-lived review sandboxes containing cloned repositories at PR base/head SHAs.
-- **Cloud SQL Postgres**: Primary database and the board/outbox.
-- **Secret Manager**: GitHub App private key, webhook secret, AI provider keys, Trigger.dev keys, database credentials, encryption keys.
-- **Cloud Storage**: Large artifacts — diffs, context bundles, logs, reproduction artifacts, generated patches.
-- **Cloud Logging / Error Reporting / Trace**: Structured operational telemetry.
-- **Pub/Sub** (optional): webhook buffer, or the readiness-notify transport instead of `LISTEN/NOTIFY` if ingestion scales.
-
-Trigger.dev may run on Trigger.dev Cloud or self-hosted infrastructure. Cloud is the preferred default unless there is a hard data-residency or operational requirement.
-
-## Trigger Model
-
-Jina is board-driven. A ready task is dispatched by the **transactional outbox + relay**, not by polling an execution-engine queue and not by agents polling the board on the happy path.
-
-Dispatch shape:
-
-```text
-GitHub webhook or dashboard command
-  -> API verifies identity/signature, stores the raw trigger idempotently
-  -> API applies generic commands: upsert PR, plan pipeline tasks for the current epoch, append task_events
-  -> readiness reducer flips newly-ready tasks to queued AND writes an outbox row (same tx)
-  -> outbox relay triggers "run-<type>" on Trigger.dev (idempotencyKey = task_id:attempt)
-  -> the stateless run executes, writes results back, transitions the task
-  -> on terminal transition the reducer re-evaluates dependents + root completion
-```
-
-Supported MVP GitHub triggers:
-
-```text
-pull_request
-issue_comment              # includes comments on PRs
-pull_request_review
-pull_request_review_comment
-installation
-installation_repositories
-```
-
-Future GitHub triggers: `issues`, `check_suite`, `check_run`, `push`, `workflow_run`.
-
-The API routes events by GitHub subject onto board tasks:
-
-```text
-pull_request on PR #42             -> upsert PR, plan/advance pr_review tasks for current epoch
-issue_comment on PR #42            -> parse comment command, create command/human_decision task or re-review pass
-pull_request_review_comment        -> attach to finding thread / create review-comment task
-installation event                 -> upsert installation, enable/suspend repositories
-```
-
-Comment-triggered commands are parsed conservatively and require tenant/repo policy:
-
-```text
-/jina review
-/jina retry
-/jina dismiss <finding-id>
-/jina explain <finding-id>
-```
-
-The parser ignores Jina's own bot comments, resolves the GitHub actor to a durable identity, records a command invocation with the actor snapshot and authorization result, then applies board commands. It never mutates findings/tasks directly from the HTTP path.
-
-## Core Domain Model
-
-The full schema is in [DATA_MODELS.md](DATA_MODELS.md). The board-defining tables:
-
-- **`tasks`** — the central work table (the board cards). Carries `type`, `status`, `root_task_id`/`parent_task_id`, `repo_id`, `github_pr_id`, `head_sha`, `epoch`, `pipeline_slug`/`pipeline_version` (on root tasks), `required_caps`, `dedupe_key`, `assigned_agent_id`, actor snapshot, `metadata`.
-- **`task_dependencies`** — `depends_on` edges; the `required` flag drives readiness and completion.
-- **`task_events`** — append-only timeline; powers audit and the dashboard, and carries agent-posted context (e.g. `context.collected`).
-- **`task_runs`** — one row per Trigger.dev run attempt: `trigger_run_id`, `trigger_task_identifier`, `idempotency_key`, `attempt`, `head_sha`, `runtime_provider`, `runtime_instance_id`, `checkout_ref`, status, input/output, token/cost usage, error.
-- **`outbox`** — transactional dispatch buffer drained by the relay.
-- **`gate_results`** — explicit pass/fail/waived evidence attached to tasks: budget, policy, review, test, approval, publication.
-- **`harness_versions`** — versioned prompts, tools, context rules, eval references, and model policies. Immutable per root task: a new prompt, tool config, model policy, or context rule creates a new row so outcomes can be compared over time.
-
-Task types and kinds:
-
-```text
-MVP/core:         pr_review (aggregate), review_pass, context, publish (dispatchable), issue_triage (manual), human_decision (waitpoint)
-Future/gated:     finding, grounding, fix, plan, build, test, docs, release, incident_triage
-```
-
-Every task type has a declared **kind** that fixes how the reducer treats it:
-
-- **aggregate** — never executes; auto-completes when its required dependency edges are satisfied (`pr_review`).
-- **dispatchable** — queued to Trigger.dev when ready; its dispatch topic is derived from its type.
-- **manual** — remains in triage until a user acts; it has no outbox dispatch (`issue_triage`).
-- **waitpoint** — the reducer may move it `triage -> blocked`, but only a user command completes it (`human_decision`).
-
-`context` is a core handoff task type, but external fetching is enabled only when policy grants controlled egress. Findings are stored as `review_findings` + `finding_threads`. A `finding` task is created only when a finding needs independent workflow, approval, grounding, or fix work.
-
-`dedupe_key` is unique per tenant + task type when present, and is **epoch-scoped**: one root `pr_review` per `(pr, epoch)`, one `review_pass` per `(pr, epoch, review_profile)`, one `publish` task per `(pr, epoch, publication_mode)`, one context task per `(target_task_id, normalized_source_set, question_hash)`. Head SHAs can recur across epochs (force-push away and back), so `head_sha` belongs in _publication_ keys — where "never re-comment for the same SHA" is the desired semantics — not in task dedupe keys.
-
-## Pipelines
-
-A pipeline is a versioned planner: trigger in, tasks + dependencies + gates + harness version out.
-
-Each workflow also exports its task-type dependency and creation-trigger rules as catalog metadata. `GET /task-types` projects those rules into `triggeredBy`, `dependsOn`, and `requiredBy` summaries for the dashboard. A trigger identifies the intake/runtime event that creates a task; a board dependency only gates and unblocks an already-created task. The dashboard keeps those concepts separate and never labels a prerequisite edge as task creation. These are type-level workflow rules only; the board remains the authority for dependency edges between actual task instances.
-
-```text
-PR review (MVP)
-  intake -> policy_snapshot -> checkout -> review_passes -> finding_grouping -> publish -> close
-  optional loop: review_pass -> context -> same review_pass resumes
-
-Context research (capability-gated)
-  intake -> source_allowlist -> fetch -> extract -> cite -> attach_context -> close
-
-Fix (future)
-  intake -> plan -> branch_checkout -> edit -> test -> review_gate -> human_approval -> push_or_pr -> close
-
-Release (future)
-  intake -> changelog -> checks -> risk_summary -> approval -> release_artifacts -> close
-```
-
-Future pipelines are enabled only when their gates, permissions, sandboxing, and rollback story exist. Prefer small composable pipelines over one general-purpose autonomous agent.
-
-## Execution Model
-
-There is no coordinator/child workflow tree; there is a board, a reducer, an outbox, a relay, and stateless runs.
-
-### Readiness reducer
-
-Runs on every task transition, in the same transaction as the transition:
-
-1. For the transitioning task, if it reached a terminal status, find dependents (`task_dependencies.depends_on_task_id = task.id`).
-2. For each dependent whose required deps are all `done`: dispatchable tasks transition `triage|blocked -> queued` and insert an `outbox` row; aggregate tasks transition to `done`.
-3. If a **required** dependency reached `failed` or `canceled`, aggregate dependents transition to `failed` and other automated dependents transition to `canceled`. Manual recovery is workflow-owned and is never inferred from a generic dependency edge.
-
-The reducer is idempotent: a dependent already `queued`/terminal is skipped, and the outbox idempotency key prevents double-dispatch when two deps finish concurrently.
-
-### Completion
-
-Root completion is **purely edge-based**. The root `pr_review` task is an aggregate: it transitions to `done` when every required dependency edge pointing at it is satisfied. There is no descendant scan and no outbox-emptiness check.
-
-The invariant that makes this safe: **every dynamically created child that must block completion gets an edge.** When `CreateTask` creates a child with `blocks_parent_completion = true`, the command layer materializes a required `root -> child` dependency edge in the same transaction. A context task, future finding task, or grounding task can therefore never be invisible to completion. Optional work is simply `required = false` on the edge and never blocks anything.
-
-Epochs still guard currency: all tasks of a superseded epoch (including the root) transition to `superseded` together, so completion never mixes epochs.
-
-### Transactional outbox + relay
-
-```text
--- one transaction (command application or run completion):
-UPDATE tasks SET status='queued' WHERE id=$1;
-INSERT INTO outbox(task_id, attempt, trigger_task) VALUES ($1, $attempt, 'run-'||type);
-
--- relay loop (separate process, LISTEN/NOTIFY + slow safety poll):
-for row in pending outbox:
-  trigger(row.trigger_task, {taskId: row.task_id},
-          { idempotencyKey: row.task_id||':'||row.attempt,
-            concurrencyKey: tenant_id })
-  mark row dispatched
-```
-
-Outbox rows are `pending | dispatched | dead_lettered`. The outbox makes "transition" and "trigger run" atomic. If the relay crashes after commit, the row is still there and is retried; the idempotency key makes the retry exactly-once. A trigger that keeps failing is dead-lettered for repair (see Failure Handling).
-
-### Stateless per-task runs
-
-One Trigger.dev task type per work type: `run-review` and `run-publish` first, capability-gated `run-research`, and future `run-grounding`, `run-fix`. Each run:
-
-1. Loads the task and **validates currency**: the task is still `queued`/`in_progress`, and `task.epoch == pr.current_epoch`. If superseded, no-op exit.
-2. Loads the pipeline stage definition, gates, and `harness_version`.
-3. Transitions the task to `in_progress`, opens a `task_runs` row with the Trigger.dev run id.
-4. Assembles a context bundle from the board (task thread, parent, linked tasks, PR metadata/diff, policy snapshot, prior findings). Large inputs are cached as Cloud Storage artifacts.
-5. Executes agent logic (model + read-only tools; for review, via the Daytona checkout) under the run's token budget.
-6. Writes results back via commands: `task_events`, findings, gate results, `AttachArtifact`, and child tasks (validated). If it needs more context, it can create a `context` task, link the current task as dependent on it, transition the current task to `blocked`, mark the current `task_run` as `deferred`, and exit.
-7. For irreversible side effects (publish; future push/release), **re-checks currency** and uses an idempotency/publication key derived from `(task, head_sha)`.
-8. Transitions the task to a terminal status or a waitpoint status such as `blocked`; the reducer re-evaluates dependents, gates, and root completion.
-9. On failure: Trigger.dev retries per policy; on terminal failure, the run's failure hook marks the task `failed` and lets the reducer terminate its automated dependents. A workflow may separately create an actionable `human_decision` with a concrete resolution command.
-
-### Run responsibilities (review)
-
-`run-review` runs one review profile against a PR SHA:
-
-- Load tenant/repo policy; create a review policy snapshot.
-- Ask the checkout broker for a short-lived Daytona sandbox with the PR base and head checked out (see Security Boundaries for the fetch mechanics).
-- Fetch diff and nearby context from the checkout; run the review model and read-only tools.
-- If required context is missing, create a `context` task, attach the requested sources/questions, link the current `review_pass` with `context_for`, and transition the review task to `blocked`.
-- Create suspected findings; produce review artifacts and rejected-candidate findings.
-- Store checkout lifecycle metadata; tear down the sandbox after artifacts persist (mark `leaked` + schedule cleanup if teardown fails).
-
-Review sandboxes are read-only from Jina's perspective: no dependency installation, code execution, tests, pushes, or persisted credentials. Future `run-grounding`/`run-fix` reuse Daytona with stricter, separately-gated capabilities.
-
-### Context handoff loop
-
-Context handoff is a board-mediated waitpoint, not invisible agent-to-agent memory.
-
-The same review task resumes by default. A follow-up review task is created only when work should branch, such as a separate review profile, a new scope, or a human-requested second opinion. The exact dependency row is defined in [DATA_MODELS.md](DATA_MODELS.md), and the runtime flow is shown in [SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md).
-
-### Concurrency, fairness, and budget
-
-- Per-tenant fairness/concurrency via Trigger.dev `concurrencyKey = tenant_id` and queue concurrency limits — no hand-rolled claim query.
-- Budget is enforced at three points:
-  - **Command time**: `CreateTask` is rejected when the budget is exhausted, bounding runaway spawn chains (e.g. context -> review -> context).
-  - **Dispatch time**: the relay computes remaining budget before triggering a run and passes it in as a hard token cap, so a single runaway run is also bounded.
-  - **Report time**: runs report token/cost into `task_runs`, which increments the PR's spend.
-- Budget ceilings are layered: **per-epoch**, **per-PR cumulative** (never reset on epoch bump), and **per-repo per day**. The cumulative and per-repo ceilings are what bound a hostile or careless force-push loop; fork PRs get lower defaults.
-- Review runs are rate-limited per PR: `synchronize` is debounced (new-epoch outbox rows get a short `next_attempt_at` delay, so another push supersedes them before they dispatch), and a hard cap of N review runs per PR per hour converts excess into a `human_decision`.
-
-### Model gateway, harnesses, and billing
-
-Full design in [BILLING.md](BILLING.md); the architectural commitments:
-
-- **OpenRouter is the managed model gateway.** Managed runs call models through OpenRouter and persist the exact returned usage and cost per call (`model_usage` rows); billing derives from persisted cost, never catalog estimates. Tenants with their own connected key run own-harness: their AI cost bills to their provider, Jina charges infra credits only. Key resolution is fail-closed — a resolution error fails the attempt; it never falls back to the managed key.
-- **Harnesses are pluggable.** A harness is the executable review strategy (model, prompts, orchestration). All harnesses return the same shape — summary, findings, ordered steps, usage records — so the board, billing, and observability are harness-agnostic. The registry lives in `packages/ai` (`openrouter-chat` and `codex-cli` first; multi-pass and other CLI-driven harnesses later). `harness_versions` records which harness type/version/model a run used so outcomes compare across harnesses.
-- **Credits are the billing meter.** Autumn holds plans and the org-level credit balance; `tenant_billing_policy` holds the rate variables (subsidy, infra credits, overage rates) so per-tenant economics change without a deploy. The credit `check` runs as a command guard at dispatch (next to the budget guards), the rate mode is fixed at dispatch, and charging is outcome-gated on the root task's first `done` — failed and superseded epochs charge nothing and their usage rows are waived. The per-PR budget ceilings remain as a defense layer under the org-level meter.
-
-### Scheduling and timers
-
-All "ready later" needs map onto Trigger.dev primitives, not a Postgres `run_after` sweeper:
-
-- retry/backoff -> Trigger.dev retry config
-- recheck-in-N / scheduled re-review -> scheduled tasks / `wait.until`
-- dead run recovery -> Trigger.dev run lifecycle (auto-retried)
-- SLA on stuck tasks -> a scheduled sweep task scanning the board
-
-### Supersession and fencing
-
-On a `synchronize` (or new head SHA), `pull_requests.current_epoch` is incremented and `head_sha` updated. All non-terminal tasks of the prior epoch transition to `superseded`, and their active Trigger.dev runs are cancelled. Even if a cancel races, a run's **currency check** (step 1/7 above) makes it no-op before any side effect, and publication keys keyed on `(task, head_sha)` prevent stale comments. Fresh `review_pass` tasks are seeded for the new epoch.
-
-## Generic Command Model
-
-Agents and humans communicate intent through generic commands. Commands are validated and converted into board mutations and outbox rows.
-
-```text
-CreateTask        create a board card (type, parent, depends_on, required_caps)
-UpdateTask        priority, assignee, metadata
-TransitionTask    lifecycle move (validated by type, actor, capability, policy)
-CommentTask       append a task_event (e.g. extracted context, finding notes)
-LinkTask          depends_on | relates_to | context_for | verifies | fixes | publishes | supersedes
-AssignTask        route to an agent type or a user
-AttachArtifact    link a Cloud Storage artifact
-```
-
-Validation checks at command time:
-
-- tenant scope and actor identity
-- authorization result (membership / GitHub repo permission / policy)
-- task status and transition legality (by task type)
-- parent/child and dependency integrity
-- agent capabilities (and feature-flag/policy for gated types)
-- repository policy and GitHub installation permissions
-- idempotency key
-- budget ceilings
-
-Command application is idempotent: the command is recorded before execution, repeated idempotency keys return the prior result, and each accepted/rejected command emits exactly one `task_event`. Commands for disabled capabilities (e.g. requesting grounding while it is off) are recorded as rejected with a policy error so the audit trail is complete. This prevents a reviewer from silently escalating into a fixer or publisher.
-
-### Transition legality (MVP)
-
-```text
-pr_review (aggregate — never queues or executes):
-  system/reducer: triage|blocked -> done | failed
-  system/github:  triage|blocked -> superseded
-  user/system:    triage|blocked -> canceled
-
-review_pass:
-  reducer/run: queued -> in_progress -> done | blocked | failed
-  reducer:     triage|blocked -> queued when context/human deps complete
-  system:      queued|in_progress|blocked|failed -> superseded
-  user/system: queued|in_progress|blocked|failed -> canceled
-
-context:
-  reducer:     triage|blocked -> queued when source policy/deps satisfied
-  run-research: queued -> in_progress -> done | blocked | failed
-  system:      queued|in_progress|blocked|failed -> superseded
-  user/system: queued|in_progress|blocked|failed -> canceled
-
-publish:
-  reducer/run: queued -> in_progress -> done | failed
-  user/system: queued|in_progress|failed -> canceled
-
-issue_triage (manual — never queues automatically):
-  user/system: triage -> in_progress | done | canceled
-  user/system: in_progress -> done | canceled
-
-human_decision (waitpoint — only a user completes it):
-  system: triage -> blocked
-  user:   blocked -> done | canceled
-  reducer: blocked -> superseded when its parent is terminal
-```
-
-Future task types (`grounding`, `fix`, `finding`, and later build/test/docs/release tasks) need their own transition rules before their commands are enabled. All accepted transitions write one `task_events` row; invalid transitions return a conflict and write no partial state.
-
-## Webhook Ingestion
-
-Webhook handling steps:
-
-1. Verify `X-Hub-Signature-256`.
-2. Parse `X-GitHub-Event` and `X-GitHub-Delivery`.
-3. Store the raw webhook event with a unique delivery ID.
-4. Resolve tenant/installation/repository/subject; ignore Jina's own bot events.
-5. Apply commands in one transaction: upsert the GitHub subject, create an issue triage card or plan/advance the PR pipeline tasks for the current epoch, append `task_events`, run the readiness reducer, and write any outbox rows.
-6. Return quickly to GitHub.
-
-Webhook processing must be idempotent; duplicate deliveries record only that they were seen. Downstream work uses delivery-aware idempotency keys, e.g. `github:{delivery_id}:upsert-pr`. Because the board mutation and the outbox row commit together, there is no separate "signal the engine" step that can be lost — the relay is the durable bridge. If the relay cannot reach Trigger.dev, the outbox row stays `pending` and is retried; persistent failures are dead-lettered (`outbox.status = dead_lettered`) for repair. The API returns a retryable 5xx only if it cannot durably store the webhook + board mutation.
-
-## Dashboard Architecture
-
-The Next.js dashboard is hosted on Vercel and talks only to the API server. It is the shared surface for agents and humans — humans act through the same commands.
-
-Primary views:
-
-- PR review board (task columns)
-- retained workflow-attempt history
-- task tree and dependency graph
-- task detail timeline (`task_events`)
-- gate results and waivers
-- finding detail, evidence, and finding threads
-- review run logs, artifacts, and context manifests
-- checkout records and lifecycle
-- repo configuration; tenant policy and GitHub installation status
-
-The dashboard never queries Postgres directly; API responses are tenant-scoped and shaped for the UI (see read models in DATA_MODELS.md). Per-task timelines page by `(task_id, seq)`; the board-wide live feed pages by the global `task_events.id` cursor.
-
-## Security Boundaries
-
-- GitHub App installation tokens are generated just-in-time and not stored long term.
-- Secrets live in GCP Secret Manager.
-- Tenant data is scoped by `tenant_id`; RLS optional for defense in depth.
-- Source-like artifacts are stored only when tenant policy allows; obey retention.
-- The MVP clones PR code only inside Daytona review sandboxes, via a checkout broker with scoped installation tokens, credential purge before reviewer access, no default secret access, controlled egress, resource limits, ephemeral filesystems, artifact redaction, and reliable teardown.
-- **Fork PRs are fetched as pull refs from the base repository** (`refs/pull/{n}/head`), which the installation token already covers — one credential path, no fork remote, no fork-token-scope question. `head_repo_*` fields are provenance only. For `merge_ref` checkout, GitHub computes mergeability asynchronously: check once with a short retry, fall back to `head_only`, and record the strategy actually used on the checkout row.
-- The MVP does not execute PR code, install dependencies, or run tests.
-- **Trigger.dev is not the sandbox.** Trigger.dev runs trusted Jina code; untrusted PR code runs only in Daytona. Future grounding/fix execution must run in isolated Daytona sandboxes with separate capabilities, per-run service accounts, immutable base images, controlled egress, and reliable teardown.
-- **Researcher egress is an untrusted-input boundary, enforced three times.** The review agent reads untrusted PR content and then proposes context sources, so requested URLs are attacker-influenceable. (1) Command time, authoritative: `CreateTask(context)` normalizes each URL and matches it against the source allowlist from the **policy snapshot pinned on the review task** — not live policy, so a mid-flight policy edit cannot widen an in-progress review's scope. (2) Fetch time: `run-research` re-validates every URL against the same snapshot before fetching and re-checks the allowlist on every redirect hop. (3) Network layer: researcher egress goes through a proxy that only permits allowlisted hosts. Fetched docs are treated like PR content for prompt-injection defense, require source attribution, and are snapshotted only when policy allows.
-- Irreversible side effects (publish; future push) re-check head-SHA currency and use idempotency/publication keys before acting.
-- Commands are validated server-side before mutation; gated capabilities are disabled by default.
-
-## Observability
-
-**Every run must be reconstructible from the board.** A run's behavior — each model call, tool action, and decision — is appended to its task timeline as `run.step` events with ordinal and payload, and every model call has a `model_usage` row with exact tokens, cost, model, harness type, and key source. The dashboard's run view is these two sources joined: what the agent did, in order, and what each step cost. No agent behavior may exist only in provider-side logs.
-
-Every log line should include relevant IDs:
-
-```text
-tenant_id, installation_id, repo_id, pr_id, epoch,
-task_id, task_run_id, agent_id,
-trigger_run_id, checkout_id, runtime_instance_id,
-github_delivery_id, outbox_id
-```
-
-Metrics to track:
-
-- webhook delivery latency; outbox dispatch latency; relay backlog depth
-- Trigger.dev run queue latency and per-tenant concurrency saturation
-- checkout create latency, clone failure rate, leak count
-- pipeline duration by pipeline version and harness version
-- gate pass/fail/waive rates
-- harness version outcome deltas
-- review run duration; findings per PR; findings published/dismissed per PR
-- duplicate finding suppression; average inline comments per PR
-- context handoff count, context task failure rate, source fetch failure rate
-- publication failure rate; GitHub API rate usage
-- AI token and cost usage; budget consumption and rejections per PR
-- future: grounding success/refute rate, fix success rate
-
-## Failure Handling
-
-- Webhook duplicate: no-op by delivery ID.
-- Board mutation committed but relay cannot reach Trigger.dev: the outbox row stays `pending` and retries; persistent failures move to `dead_lettered` and surface a repair task. Return 5xx only if the board mutation itself cannot be durably stored.
-- Trigger.dev run failure: retried per policy; terminal failure marks the task `failed`; the reducer cancels automated descendants and fails their aggregate.
-- Required dependency fails or is canceled: automated descendants terminate; a human decision is created only by a workflow with an explicit recovery command.
-- GitHub API failure inside a run: retry with backoff; surface a `task_event` if exhausted.
-- Daytona sandbox create/clone failure: mark `review_checkouts` failed, mark the `review_pass` failed after retries are exhausted, terminate its automated dependents, and emit `review.checkout_failed`.
-- Daytona teardown failure: mark `review_checkouts` leaked, emit metrics, schedule cleanup retry by `expires_at`.
-- Model failure: retry by provider policy; fail the run if exhausted.
-- Context source failure: retry according to source policy; when exhausted, fail the context task, cancel its automated dependents, fail the aggregate, and surface source URLs, fetch errors, and retry controls on the task timeline.
-- Publication failure: keep findings unpublished, expose retry (publication key makes retry a no-op/update).
-- PR synchronized during review: bump epoch, supersede prior-epoch tasks, cancel their runs, seed fresh review passes; currency checks make any racing run a no-op.
-- Budget exhausted: reject new `CreateTask` commands, emit a `task_event`, optionally create a `human_decision` task to raise the ceiling.
-
-## Open Technical Decisions
-
-- **Budget unit**: tokens, dollars, or task-count (or a combination) for the layered ceilings?
-- **Readiness transport**: `LISTEN/NOTIFY` vs Pub/Sub for waking the relay; both need a slow safety poll for dead-letter recovery.
-- **Context bundle size**: cap and caching strategy for stateless rehydration as a PR's task graph grows.
-- **Pipeline versioning**: how much of a stage-graph change requires a new pipeline version versus a harness-only version bump?
-- **Gate semantics**: which gates can be waived, who can waive them, and what audit evidence is required?
-
-## Open Product Decisions
-
-- Which publication mode is default: review comments, check runs, summary comments, or a combination?
-- Should unverified findings be published as low-confidence advisory feedback?
-- Should findings become visible child tasks in the MVP, or only when they require action?
-- Which tenants can allow researcher agents to fetch external docs?
-- Future: which tenants can allow grounding agents to execute code and fix agents to push commits?
-- Future: which findings require grounding before publication?
-- Future: should manual issue cards gain an automated triage pipeline, or should tests, fixes, release prep, or incident response come next?
+The larger product direction includes normalized relational board/run/finding tables, configurable tenant policy, external GitHub publication, durable usage accounting, and capability-gated context, fix, test, and release work. [DATA_MODELS.md](DATA_MODELS.md) retains the planned entity groups and invariants without presenting them as deployed schema. Open choices include budget units, gate-waiver policy, publication mode, context limits, and which workflows should follow review.

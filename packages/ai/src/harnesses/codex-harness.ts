@@ -14,13 +14,6 @@ import {
 
 const MAX_STEP_EVENTS = 20;
 
-/**
- * Codex CLI harness: `codex exec` with a JSON output schema. When
- * OPENROUTER_API_KEY is set, Codex is pointed at OpenRouter as its model
- * provider (the managed-gateway path); otherwise it uses the user's own
- * Codex auth. Exact cost capture for this harness arrives with the capture
- * proxy (see BILLING.md); here usage is what the event stream exposes.
- */
 export class CodexCliReviewHarness implements ReviewHarness {
   readonly type = "codex-cli" as const;
 

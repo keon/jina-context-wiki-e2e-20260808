@@ -11,7 +11,7 @@ import { isIssueTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina
 import { applyPrReviewPlan, planPrReview } from "@jina/review";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 
-export interface TrackedPullRequest {
+interface TrackedPullRequest {
   readonly tenantId: string;
   readonly repository: string;
   readonly number: number;
@@ -24,13 +24,13 @@ export interface GitHubIntakeState {
   readonly pullRequests: readonly TrackedPullRequest[];
 }
 
-export interface GitHubIntakeOptions {
+interface GitHubIntakeOptions {
   readonly deliveryId: string;
   readonly now: IsoTimestamp;
   readonly tenantId?: string;
 }
 
-export interface GitHubIntakeResult {
+interface GitHubIntakeResult {
   readonly state: GitHubIntakeState;
   readonly outcome: "created" | "duplicate" | "ignored";
   readonly createdTaskIds: readonly TaskId[];
