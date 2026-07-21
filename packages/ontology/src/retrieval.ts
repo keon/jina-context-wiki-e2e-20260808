@@ -268,7 +268,10 @@ export function extractIssueText(question: string): string | undefined {
   const quoted = /["“]([^"”\n]{2,500})["”]/.exec(question)?.[1];
   const temporal = /\bwhen\s+did\s+(?:the\s+)?(?:problem|issue|bug|ticket)?\s*(.+?)\s+first\s+(?:start|begin|appear)\b/i.exec(question)?.[1];
   const unquoted = /\b(?:what|which\s+(?:pr|pull request|commit))?\s*(?:caused|causes|introduced|introduces|root cause of)\s+(.+?)(?:,\s*(?:and\s+)?why\b|\?|$)/i.exec(question)?.[1];
-  const value = (quoted ?? temporal ?? unquoted)?.trim().replace(/["”]$/g, "").replace(/\s+/g, " ");
+  const value = (quoted ?? temporal ?? unquoted)?.trim()
+    .replace(/["”]$/g, "")
+    .replace(/\s+(?:issue|bug|ticket|problem)$/i, "")
+    .replace(/\s+/g, " ");
   return value || undefined;
 }
 

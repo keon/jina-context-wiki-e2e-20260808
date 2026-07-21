@@ -609,6 +609,7 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates("Which PR explains why src/auth.ts exists?"), ["intent"]);
   assert.equal(extractIssueText('What caused “Administrators   cannot delete resources”?'), "Administrators cannot delete resources");
   assert.equal(extractIssueText("Which PR or commit caused Administrators cannot delete resources, and why?"), "Administrators cannot delete resources");
+  assert.equal(extractIssueText("which caused Administrators cannot delete resources issue?"), "Administrators cannot delete resources");
   assert.equal(extractIssueText("When did the problem Administrators cannot delete resources first start?"), "Administrators cannot delete resources");
   assert.equal(extractRepositoryPath("Why was src/access-policy.ts changed?"), "src/access-policy.ts");
   assert.equal(extractSymbol("Where is authorize implemented and what calls it?"), "authorize");
@@ -692,6 +693,15 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   await orchestrator.answer({
     tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
     question: "Which PR or commit caused Administrators cannot delete resources, and why?"
+  });
+  assert.deepEqual(called, ["issue_trace"]);
+  assert.deepEqual(issueTexts, ["Administrators cannot delete resources"]);
+
+  called.length = 0;
+  issueTexts.length = 0;
+  await orchestrator.answer({
+    tenantId: "t", allowedRepositories: ["org/repo"], repository: "org/repo",
+    question: "which caused Administrators cannot delete resources issue?"
   });
   assert.deepEqual(called, ["issue_trace"]);
   assert.deepEqual(issueTexts, ["Administrators cannot delete resources"]);
