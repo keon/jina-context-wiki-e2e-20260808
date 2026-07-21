@@ -46,6 +46,8 @@ import { entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
+import { handleGraphMcpRequest, publicGraphQueryResult } from "./mcp.js";
+import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publicGraphSummary } from "./graph-api.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_ONTOLOGY_SNAPSHOT_BYTES = 25 * 1024 * 1024;
@@ -77,6 +79,8 @@ export interface ApiServerConfig {
   readonly internalApiToken?: string;
   readonly principalId?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
+  /** Browser origins allowed to call the MCP endpoint. Non-browser clients normally omit Origin. */
+  readonly mcpAllowedOrigins?: readonly string[];
 }
 
 export interface ApiSnapshot {
@@ -125,8 +129,65 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (config.seedDemo) {
       devDeliverySequence += 1;
       acceptWebhook(devPullRequestWebhook("omlabs/example", 42, "abc123"), `dev-seed-${devDeliverySequence}`);
+      await seedDemoGraph();
       await persist();
     }
+  }
+
+  async function seedDemoGraph(): Promise<void> {
+    const tenantId = config.tenantId ?? "default";
+    const commitSha = "d".repeat(40);
+    const blobSha = "b".repeat(40);
+    const snapshot: RepositorySnapshot = {
+      tenantId,
+      repository: "omlabs/example",
+      ref: "main",
+      commitSha,
+      treeSha: "e".repeat(40),
+      parents: [],
+      committedAt: "2026-07-21T00:00:00.000Z",
+      message: "Seed the local MCP graph",
+      isDefaultRef: true,
+      recordedAt: "2026-07-21T00:00:00.000Z",
+      taskId: "dev-mcp-seed",
+      files: [{ path: "src/server.ts", blobSha, size: 640 }]
+    };
+    await ontologyStore.planIngestion(snapshot);
+    await ontologyStore.applyBlobAnalyses(snapshot, [{
+      blobSha,
+      parserVersion: ONTOLOGY_PARSER_VERSION,
+      language: "typescript",
+      symbols: [{
+        moniker: "src/server.ts#handleWebhook",
+        name: "handleWebhook",
+        kind: "function",
+        signatureHash: "dev-handle-webhook",
+        startLine: 12,
+        endLine: 34
+      }],
+      imports: [],
+      edges: []
+    }]);
+    await ontologyStore.save(createOntologyGraph({
+      request: { tenantId, repository: snapshot.repository, ref: snapshot.ref, taskId: snapshot.taskId },
+      commitSha,
+      generatedAt: snapshot.recordedAt,
+      executor: "fixture",
+      model: "dev-seed",
+      contentAddressed: true,
+      generated: {
+        summary: "Local MCP development graph",
+        nodes: [
+          { id: "repo", kind: "Repository", label: snapshot.repository, description: "Demo repository", evidence: ["src/server.ts:1"] },
+          { id: "file:src/server.ts", kind: "File", label: "server.ts", description: "Demo API server", path: "src/server.ts", evidence: ["src/server.ts:1"] },
+          { id: "symbol:handleWebhook", kind: "Symbol", label: "handleWebhook", description: "function in src/server.ts", path: "src/server.ts", evidence: ["src/server.ts:12-34"] }
+        ],
+        edges: [
+          { source: "repo", target: "file:src/server.ts", predicate: "CONTAINS", plane: "code", evidence: ["src/server.ts:1"] },
+          { source: "file:src/server.ts", target: "symbol:handleWebhook", predicate: "DECLARES", plane: "code", evidence: ["src/server.ts:12-34"] }
+        ]
+      }
+    }));
   }
 
   function snapshot(): ApiSnapshot {
@@ -259,6 +320,82 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     const { tenantId } = principal;
+
+    if (url.pathname === "/mcp") {
+      const forwardedPrincipal = firstHeader(request.headers["x-jina-principal-id"]);
+      if (!config.enableDevEndpoints && !config.principalId && !forwardedPrincipal) {
+        json(response, 401, { error: "a bound principal is required" });
+        return;
+      }
+      const origin = firstHeader(request.headers.origin);
+      if (origin && !(config.mcpAllowedOrigins ?? []).includes(origin)) {
+        json(response, 403, { error: "forbidden" });
+        return;
+      }
+      const parsedBody = request.method === "POST" ? parseJsonValue(await readRawBody(request)) : undefined;
+      await handleGraphMcpRequest(request, response, async ({ repository, query, ref }) => {
+        const allowedRepositories = await repositoriesForPrincipal(principal);
+        const context = await new RepositoryContextOrchestrator(ontologyStore).answer({
+          tenantId,
+          allowedRepositories,
+          repository,
+          question: query,
+          ...(ref ? { ref } : {})
+        });
+        return publicGraphQueryResult(context);
+      }, parsedBody);
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/v1/graphs") {
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      const requestedRepository = url.searchParams.get("repository")?.trim();
+      if (requestedRepository && !allowedRepositories.includes(requestedRepository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      const graphs = (await ontologyStore.listSummaries(tenantId))
+        .filter((graph) => allowedRepositories.includes(graph.repository))
+        .filter((graph) => !requestedRepository || graph.repository === requestedRepository)
+        .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
+        .map(publicGraphSummary);
+      json(response, 200, { graphs });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/v1/graphs/")) {
+      const graphId = decodeURIComponent(url.pathname.slice("/v1/graphs/".length));
+      const graph = await ontologyStore.get(graphId, tenantId);
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      if (!graph || !allowedRepositories.includes(graph.repository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      json(response, 200, publicGraph(graph));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/graph/query") {
+      const body = parseJsonObject(await readRawBody(request));
+      const graphId = requiredString(body.graphId, "graphId");
+      const query = requiredString(body.query, "query");
+      if (query.length > 4_000) throw new Error("query must not exceed 4000 characters");
+      const graph = await ontologyStore.get(graphId, tenantId);
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      if (!graph || !allowedRepositories.includes(graph.repository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      const context = await new RepositoryContextOrchestrator(ontologyStore).answer({
+        tenantId,
+        allowedRepositories,
+        repository: graph.repository,
+        ref: graph.ref,
+        question: query
+      });
+      json(response, 200, publicRestGraphQueryResult(graph, publicGraphQueryResult(context)));
+      return;
+    }
 
     if (request.method === "GET" && url.pathname === "/board") {
       const allowedRepositories = isTenantAdmin(principal) ? undefined : new Set(await repositoriesForPrincipal(principal));
@@ -1432,9 +1569,14 @@ async function readRawBody(request: IncomingMessage, maximumBytes = MAX_WEBHOOK_
 }
 
 function parseJsonObject(rawBody: Uint8Array): Record<string, unknown> {
+  const value = parseJsonValue(rawBody);
+  if (!isRecord(value)) throw new Error("request body must be a JSON object");
+  return value;
+}
+
+function parseJsonValue(rawBody: Uint8Array): unknown {
   let value: unknown;
   try { value = JSON.parse(Buffer.from(rawBody).toString("utf8")); } catch { throw new Error("request body is not valid JSON"); }
-  if (!isRecord(value)) throw new Error("request body must be a JSON object");
   return value;
 }
 

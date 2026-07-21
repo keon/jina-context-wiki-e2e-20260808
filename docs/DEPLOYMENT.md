@@ -54,6 +54,14 @@ retrieval checks repository ACL scope at entry and at context assembly. On start
 and `e2e` records into that tenant, so old tasks remain visible. The dashboard
 proxies read requests and adds the credential server-side.
 
+The API also serves stateless Streamable HTTP MCP at `POST /mcp`. MCP exposes one
+read-only `query_graph` tool and reuses the same repository-scoped retrieval path.
+Production MCP traffic must arrive through a trusted identity-aware caller that
+adds both the internal service credential and a bound `x-jina-principal-id`; the
+endpoint rejects the service credential alone to prevent an implicit tenant-admin
+fallback. Browser callers are rejected unless their exact origin is listed in
+`JINA_MCP_ALLOWED_ORIGINS`.
+
 Production dashboard ingress uses Cloud Run's direct IAP integration. The IAP
 service agent alone receives Cloud Run invoker access, while
 `keon@omlabs.xyz` receives `roles/iap.httpsResourceAccessor`. Opening the service
