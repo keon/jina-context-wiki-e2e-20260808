@@ -329,10 +329,11 @@ jobs:
             fi
             if [[ "${acceptance_status}" -ne 0 ]]; then
               echo "::group::Acceptance execution logs"
-              gcloud beta run jobs executions logs read "${execution_name}" \
+              gcloud logging read \
+                "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"jina-acceptance\" AND labels.\"run.googleapis.com/execution_name\"=\"${execution_name}\"" \
                 --project="${GCP_PROJECT_ID}" \
-                --region="${GCP_REGION}" \
                 --order=asc \
+                --format='value(timestamp,severity,textPayload,jsonPayload.message)' \
                 --limit=500 || true
               echo "::endgroup::"
             fi
