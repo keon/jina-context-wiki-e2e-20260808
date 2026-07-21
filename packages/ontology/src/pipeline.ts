@@ -18,7 +18,7 @@ import {
 
 export const ONTOLOGY_PARSER_VERSION = "tree-sitter-structural-v2";
 export { ONTOLOGY_REGISTRY_VERSION } from "./registry.js";
-export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v6";
+export const ONTOLOGY_GENERATOR_VERSION = "codex-assertions-v7";
 export const ONTOLOGY_PROJECTION_VERSION = "current-graph-v1";
 
 export interface RepositoryTreeEntry {
@@ -373,6 +373,12 @@ export function assertionsFromGeneratedOntology(
     const subject = nodes.get(edge.source);
     const object = nodes.get(edge.target);
     if (!subject || !object) return [];
+    const isVirtualResolution = edge.predicate === "RESOLVES" &&
+      object.kind === "Issue" && /^virtual:pr:\d+$/i.test(object.id.trim());
+    // Explicit GitHub issue resolution is an authoritative intake fact. A model
+    // may repeat it after reading source evidence, but must not create a second
+    // knowledge assertion with independent provenance.
+    if (edge.predicate === "RESOLVES" && !isVirtualResolution) return [];
     const assertion: GeneratedAssertion = {
       subject: {
         kind: subject.kind,
@@ -391,7 +397,7 @@ export function assertionsFromGeneratedOntology(
         ? { qualifiers: { reason: requiredCausalReason(edge.why) } }
         : {})
     };
-    if (edge.predicate !== "RESOLVES" || !/^virtual:pr:\d+$/i.test(object.id.trim())) return [assertion];
+    if (!isVirtualResolution) return [assertion];
     return [assertion, {
       subject: assertion.object,
       predicate: "RESOLVED_BY",
@@ -426,13 +432,6 @@ function validateDerivedIssueNodes(
     const subject = nodes.get(resolutions[0]!.source);
     const subjectNumber = subject?.kind === "PullRequest" ? canonicalWorkItemId(subject.id, "PullRequest") : undefined;
     if (subjectNumber !== String(anchor)) throw new Error(`virtual Issue ${node.id} must be resolved by pull request #${anchor}`);
-  }
-  for (const edge of generated.edges) {
-    if (edge.predicate !== "RESOLVES") continue;
-    const target = nodes.get(edge.target);
-    if (target?.kind !== "Issue" || !/^virtual:pr:\d+$/i.test(target.id.trim())) {
-      throw new Error("model-generated RESOLVES must target a PR-anchored virtual Issue");
-    }
   }
 }
 

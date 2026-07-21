@@ -664,6 +664,30 @@ test("normalizes a PR-anchored virtual issue as the generalized Issue kind", () 
   );
 });
 
+test("ignores model duplicates of deterministic GitHub issue resolutions", () => {
+  const repository = "omxyz/demo";
+  const sha = "a".repeat(40);
+  const assertions = assertionsFromGeneratedOntology({
+    summary: "PR 5 resolves issue 4 caused by an earlier commit",
+    nodes: [
+      { id: "5", kind: "PullRequest", label: "PR #5", description: "restores deletion", evidence: ["ROOT_CAUSE.md:2"] },
+      { id: "4", kind: "Issue", label: "Issue #4", description: "administrators cannot delete", evidence: ["ROOT_CAUSE.md:2"] },
+      { id: sha, kind: "Commit", label: sha.slice(0, 12), description: "introduced the regression", evidence: ["ROOT_CAUSE.md:2"] }
+    ],
+    edges: [{
+      source: "5", target: "4", predicate: "RESOLVES", plane: "knowledge", confidence: 0.99,
+      evidence: ["ROOT_CAUSE.md:2"]
+    }, {
+      source: "4", target: sha, predicate: "INTRODUCED_BY", plane: "knowledge", confidence: 0.99,
+      why: "The commit bypassed the administrator authorization guard.", evidence: ["ROOT_CAUSE.md:2"]
+    }]
+  }, repository);
+
+  assert.deepEqual(assertions.map((assertion) => assertion.predicate), ["INTRODUCED_BY"]);
+  assert.equal(assertions[0]?.subject.naturalKey, `github:issue:${repository}#4`);
+  assert.equal(assertions[0]?.object.naturalKey, `repo:${repository}:sha:${sha}`);
+});
+
 test("infers a reviewed Feature and answers from its projected relationships", async () => {
   const tenantId = "feature-tenant";
   const repository = "omxyz/feature-fixture";
