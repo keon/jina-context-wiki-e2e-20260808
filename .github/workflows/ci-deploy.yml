@@ -132,7 +132,7 @@ jobs:
             --service-account=jina-runtime@jina-v2.iam.gserviceaccount.com
             --add-cloudsql-instances=jina-v2:us-central1:jina-postgres
             --concurrency=20
-            --timeout=300
+            --timeout=900
             --min-instances=0
             --max-instances=1
           env_vars: |-
