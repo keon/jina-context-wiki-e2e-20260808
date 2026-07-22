@@ -4,16 +4,17 @@ This document describes the runtime in this repository. Domain-specific ContextG
 
 ## Topology
 
-Jina runs as four Cloud Run services backed by PostgreSQL 17:
+The deployed backend runs as three Cloud Run services backed by PostgreSQL 17:
 
 - `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
-- `jina-dashboard` serves the operator UI and proxies authenticated reads.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
 - `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
 
+The dashboard and admin are Next.js applications deployed separately. An existing Cloud Run dashboard remains during the Vercel authentication cutover; see [DEPLOYMENT.md](DEPLOYMENT.md).
+
 ```text
 GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
-Browser -> Cloud Run IAP -> dashboard proxy -> API -> PostgreSQL
+Browser -> authenticated web app -> API -> PostgreSQL
 Trusted graph caller -> graph API or MCP -> repository-scoped retrieval
 ```
 
@@ -61,7 +62,7 @@ Source writes, model observations, and projections are independently idempotent.
 
 Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential.
 
-Cloud Run IAP authenticates dashboard users. The dashboard forwards the verified principal and service credential. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
+The web application must authenticate users before forwarding a verified principal and service credential. The existing Cloud Run dashboard uses IAP; its replacement needs an equivalent identity boundary. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
 MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
 
@@ -83,7 +84,3 @@ Repository credentials remain in the worker boundary. Daytona isolates repositor
 - `packages/context-graph` owns repository facts, assertions, retrieval, and store interfaces.
 - `packages/db` implements durable stores, transactions, and migrations.
 - Provider packages such as `github`, `daytona`, and `ai` adapt external systems.
-
-## Planned direction
-
-The larger product direction includes normalized relational board/run/finding tables, configurable tenant policy, external GitHub publication, durable usage accounting, and capability-gated context, fix, test, and release work. [DATA_MODELS.md](DATA_MODELS.md) retains the planned entity groups and invariants without presenting them as deployed schema. Open choices include budget units, gate-waiver policy, publication mode, context limits, and which workflows should follow review.

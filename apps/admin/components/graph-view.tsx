@@ -2,9 +2,8 @@
 
 import { useMemo, useState } from "react";
 import type { AdminGraphEdge, AdminGraphNode } from "../lib/jina-api";
-
-const WIDTH = 1200;
-const HEIGHT = 560;
+import { GRAPH_HEIGHT, GRAPH_WIDTH, layoutGraph } from "../lib/graph-layout";
+import type { PositionedGraphNode } from "../lib/graph-layout";
 
 const KIND_COLORS: Readonly<Record<string, string>> = {
   Repository: "#5aa9ff",
@@ -25,11 +24,6 @@ const KIND_COLORS: Readonly<Record<string, string>> = {
 
 const FALLBACK_COLOR = "#8b96a8";
 
-interface PositionedNode extends AdminGraphNode {
-  readonly x: number;
-  readonly y: number;
-}
-
 export function GraphView({
   nodes,
   edges
@@ -37,7 +31,7 @@ export function GraphView({
   readonly nodes: readonly AdminGraphNode[];
   readonly edges: readonly AdminGraphEdge[];
 }) {
-  const positioned = useMemo(() => layout(nodes, edges), [nodes, edges]);
+  const positioned = useMemo(() => layoutGraph(nodes, edges), [nodes, edges]);
   const [selectedId, setSelectedId] = useState<string | undefined>(undefined);
   const byId = useMemo(() => new Map(positioned.map((node) => [node.id, node])), [positioned]);
   const selected = selectedId ? byId.get(selectedId) : undefined;
@@ -60,7 +54,7 @@ export function GraphView({
     <>
       <div className="graph-panel">
         <svg
-          viewBox={`0 0 ${WIDTH} ${HEIGHT}`}
+          viewBox={`0 0 ${GRAPH_WIDTH} ${GRAPH_HEIGHT}`}
           role="img"
           aria-label="Context graph visualization"
           onClick={() => setSelectedId(undefined)}
@@ -154,7 +148,7 @@ function EdgeList({
 }: {
   readonly edges: readonly AdminGraphEdge[];
   readonly nodeId: string;
-  readonly byId: ReadonlyMap<string, PositionedNode>;
+  readonly byId: ReadonlyMap<string, PositionedGraphNode>;
 }) {
   const related = edges.filter((edge) => edge.source === nodeId || edge.target === nodeId);
   if (related.length === 0) return null;
@@ -184,81 +178,4 @@ function EdgeList({
       })}
     </ul>
   );
-}
-
-/**
- * Deterministic force-directed layout: seeded circular start, then spring
- * attraction along edges and pairwise repulsion. Small graphs converge in a
- * few hundred iterations; runs once per graph via useMemo.
- */
-function layout(nodes: readonly AdminGraphNode[], edges: readonly AdminGraphEdge[]): readonly PositionedNode[] {
-  const count = nodes.length;
-  if (count === 0) return [];
-  const index = new Map(nodes.map((node, position) => [node.id, position]));
-  const xs = new Float64Array(count);
-  const ys = new Float64Array(count);
-  const radius = Math.min(WIDTH, HEIGHT) * 0.38;
-  for (let i = 0; i < count; i += 1) {
-    const angle = (2 * Math.PI * i) / count + seededJitter(nodes[i]?.id ?? String(i));
-    xs[i] = WIDTH / 2 + radius * Math.cos(angle);
-    ys[i] = HEIGHT / 2 + radius * Math.sin(angle);
-  }
-  const links = edges
-    .map((edge) => [index.get(edge.source), index.get(edge.target)] as const)
-    .filter((pair): pair is readonly [number, number] => pair[0] !== undefined && pair[1] !== undefined);
-
-  const iterations = count > 400 ? 120 : 300;
-  const repulsion = 5200;
-  const springLength = 120;
-  const springStrength = 0.02;
-  for (let step = 0; step < iterations; step += 1) {
-    const cooling = 1 - step / iterations;
-    const fx = new Float64Array(count);
-    const fy = new Float64Array(count);
-    for (let i = 0; i < count; i += 1) {
-      for (let j = i + 1; j < count; j += 1) {
-        const dx = (xs[i] ?? 0) - (xs[j] ?? 0);
-        const dy = (ys[i] ?? 0) - (ys[j] ?? 0);
-        const distanceSquared = Math.max(dx * dx + dy * dy, 64);
-        const force = repulsion / distanceSquared;
-        const distance = Math.sqrt(distanceSquared);
-        fx[i] = (fx[i] ?? 0) + (dx / distance) * force;
-        fy[i] = (fy[i] ?? 0) + (dy / distance) * force;
-        fx[j] = (fx[j] ?? 0) - (dx / distance) * force;
-        fy[j] = (fy[j] ?? 0) - (dy / distance) * force;
-      }
-    }
-    for (const [a, b] of links) {
-      const dx = (xs[b] ?? 0) - (xs[a] ?? 0);
-      const dy = (ys[b] ?? 0) - (ys[a] ?? 0);
-      const distance = Math.max(Math.hypot(dx, dy), 1);
-      const force = (distance - springLength) * springStrength;
-      fx[a] = (fx[a] ?? 0) + (dx / distance) * force;
-      fy[a] = (fy[a] ?? 0) + (dy / distance) * force;
-      fx[b] = (fx[b] ?? 0) - (dx / distance) * force;
-      fy[b] = (fy[b] ?? 0) - (dy / distance) * force;
-    }
-    for (let i = 0; i < count; i += 1) {
-      xs[i] = clamp((xs[i] ?? 0) + (fx[i] ?? 0) * cooling, 40, WIDTH - 40);
-      ys[i] = clamp((ys[i] ?? 0) + (fy[i] ?? 0) * cooling, 40, HEIGHT - 40);
-    }
-  }
-  return nodes.map((node, i) => ({ ...node, x: round1(xs[i] ?? WIDTH / 2), y: round1(ys[i] ?? HEIGHT / 2) }));
-}
-
-function seededJitter(id: string): number {
-  let hash = 2166136261;
-  for (let i = 0; i < id.length; i += 1) {
-    hash ^= id.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return ((hash >>> 0) % 1000) / 1000 - 0.5;
-}
-
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(Math.max(value, min), max);
-}
-
-function round1(value: number): number {
-  return Math.round(value * 10) / 10;
 }

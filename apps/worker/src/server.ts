@@ -753,7 +753,7 @@ class GitIngestTransport {
 
   private async git(args: readonly string[], maxBuffer = 64 * 1024 * 1024): Promise<string> {
     assertLeaseOwned();
-    const token = process.env.GITHUB_CLONE_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
+    const token = process.env.GITHUB_CLONE_TOKEN?.trim();
     const basic = Buffer.from(`x-access-token:${token ?? ""}`).toString("base64");
     const { stdout } = await execFileAsync("git", [...args], {
       maxBuffer,
@@ -1352,11 +1352,12 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
   };
   const prepared = prepareDiff(reviewRequest.diff);
   const model = process.env.REVIEW_MODEL?.trim() || "gpt-5.6-sol";
+  const openAiApiKey = requiredEnv("OPENAI_API_KEY");
   const openAiApiUrl = (process.env.OPENAI_API_URL?.trim() || "https://api.openai.com/v1").replace(/\/$/, "");
   const response = await fetch(`${openAiApiUrl}/responses`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${requiredEnv("OPENAI_API_KEY")}`,
+      authorization: `Bearer ${openAiApiKey}`,
       "content-type": "application/json"
     },
     body: JSON.stringify({
@@ -1376,7 +1377,9 @@ async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string
     signal: requestSignal(10 * 60 * 1000)
   });
   if (!response.ok)
-    throw new Error(`OpenAI review failed with ${response.status}: ${(await response.text()).slice(0, 1_000)}`);
+    throw new Error(
+      `OpenAI review failed with ${response.status}: ${await boundedFailureDetail(response, [openAiApiKey])}`
+    );
   const payload = (await response.json()) as Record<string, unknown>;
   const outputText = extractOutputText(payload);
   const parsed = parseReviewOutput(outputText);
@@ -1512,7 +1515,7 @@ const GITHUB_RETRY_BASE_MS = Math.max(1, Number(process.env.GITHUB_RETRY_BASE_MS
 const GITHUB_RETRY_MAX_WAIT_MS = 60_000;
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
-  const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim() || process.env.GITHUB_TOKEN?.trim();
+  const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   for (let attempt = 0; ; attempt += 1) {
     assertLeaseOwned();
@@ -1772,8 +1775,8 @@ function requiredGitSha(value: unknown, name: string): string {
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
-  const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  const parsed = value ? Number(value) : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function stringArray(value: unknown): string[] {
@@ -1789,8 +1792,12 @@ function stringValue(value: unknown): string {
  * upstream can echo secrets or megabytes); error messages built from them are
  * serialized into durable structured logs, so keep only a short prefix.
  */
-async function boundedFailureDetail(response: Response): Promise<string> {
-  return (await response.text().catch(() => "unreadable body")).slice(0, 200);
+async function boundedFailureDetail(response: Response, secrets: readonly string[] = []): Promise<string> {
+  let detail = (await response.text().catch(() => "unreadable body")).slice(0, 200);
+  for (const secret of secrets) {
+    if (secret) detail = detail.replaceAll(secret, "[REDACTED]");
+  }
+  return detail;
 }
 
 function errorMessage(error: unknown): string {

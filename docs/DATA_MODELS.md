@@ -1,6 +1,6 @@
 # Data models
 
-This document distinguishes deployed storage from planned relational entities. Executable definitions remain authoritative: `CONTEXT_GRAPH_SCHEMA_SQL` in `packages/db/src/postgres-context-graph-store.ts` and the board types in `packages/board`.
+This document summarizes deployed storage. Executable definitions remain authoritative: `CONTEXT_GRAPH_SCHEMA_SQL` in `packages/db/src/context-graph-schema.ts` and the board types in `packages/board`.
 
 ## Implemented runtime state
 
@@ -40,34 +40,4 @@ Canonical outbox deliveries are consumer-owned so manifest, search, reconciliati
 - Schema migration is administrative; runtime capability roles do not own or alter the schema.
 - Source-like content is retained only according to lifecycle/erasure policy.
 
-## Planned relational board model
-
-The following groups are design targets, not current tables:
-
-| Area      | Planned entities                                                           |
-| --------- | -------------------------------------------------------------------------- |
-| Tenancy   | tenants, users, memberships, GitHub identities/installations/repositories  |
-| Intake    | pull requests, GitHub subjects, webhook events, review-policy snapshots    |
-| Board     | tasks, task dependencies, task events, context items, outbox               |
-| Execution | task runs, gates, harness versions, agents, review profiles, checkouts     |
-| Review    | review runs, findings, finding threads, candidate findings                 |
-| Usage     | per-call model usage, run billing, tenant billing policy                   |
-| Effects   | command invocations, publications, artifacts                               |
-| Dashboard | board, timeline, dependency, review, publication, and checkout read models |
-
-The target retains these contracts:
-
-- A pipeline is versioned code until tenant-configurable pipelines have a second real use.
-- Task creation dedupes by tenant, task type, and workflow-owned key; PR task keys are epoch-scoped.
-- Required dependency edges alone determine readiness and aggregate completion.
-- Task events use a per-task sequence for timelines and a global cursor for the board feed.
-- The transition to `queued` and its outbox row commit together.
-- A task describes work; task runs describe individual attempts and preserve head-SHA/epoch fencing.
-- Commands record actor, authorization, idempotency key, input, result, and rejection reason.
-- External effects use stable keys such as task/head/publication target so retries update rather than duplicate.
-- Findings dedupe by normalized fingerprint while threads retain cross-run history.
-- Large prompts, context bundles, tool traces, and patches belong in artifact storage rather than primary rows.
-
-Deferred `work_orders` become useful only with a second intake provider. Pipeline/stage-template tables become useful only when tenants can configure pipelines.
-
-See [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md) for ingestion and retrieval behavior, [BILLING.md](BILLING.md) for the provisional billing design, and [DEPLOYMENT.md](DEPLOYMENT.md) for migration commands and capability roles.
+See [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md) for ingestion and retrieval behavior and [DEPLOYMENT.md](DEPLOYMENT.md) for migration commands and capability roles.

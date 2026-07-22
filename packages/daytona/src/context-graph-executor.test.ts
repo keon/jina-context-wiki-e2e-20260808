@@ -67,7 +67,10 @@ test("focus evidence streaming stops at the configured byte budget", async () =>
     const fs = {
       downloadFileStream: async () => stream
     } as unknown as Pick<Sandbox["fs"], "downloadFileStream">;
-    const result = await buildFocusEvidenceBundle({ fs }, ["src/large.ts"]);
+    const processApi = {
+      executeCommand: async () => ({ exitCode: 0, result: "" })
+    } as unknown as Pick<Sandbox["process"], "executeCommand">;
+    const result = await buildFocusEvidenceBundle({ fs, process: processApi }, ["src/large.ts"]);
     assert.equal(Buffer.byteLength(result.files[0]?.content ?? ""), 64);
     assert.equal(destroyed, true);
     assert.equal(result.files[0]?.content.includes("c"), false);
@@ -77,4 +80,22 @@ test("focus evidence streaming stops at the configured byte budget", async () =>
     if (previousPerFile === undefined) delete process.env.CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_CHARS;
     else process.env.CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_CHARS = previousPerFile;
   }
+});
+
+test("focus evidence rejects symlink escapes before downloading", async () => {
+  let downloaded = false;
+  const fs = {
+    downloadFileStream: async () => {
+      downloaded = true;
+      return Readable.from("secret");
+    }
+  } as unknown as Pick<Sandbox["fs"], "downloadFileStream">;
+  const processApi = {
+    executeCommand: async () => ({ exitCode: 1, result: "symlink" })
+  } as unknown as Pick<Sandbox["process"], "executeCommand">;
+  await assert.rejects(
+    buildFocusEvidenceBundle({ fs, process: processApi }, ["src/escape.ts"]),
+    /not a regular in-repository file/
+  );
+  assert.equal(downloaded, false);
 });

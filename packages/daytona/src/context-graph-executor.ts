@@ -51,7 +51,7 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
       throw new Error(
         `${provider === "openai" ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY"} is required for the Daytona ContextGraph worker`
       );
-    const cloneToken = process.env.GITHUB_CLONE_TOKEN || process.env.GITHUB_TOKEN;
+    const cloneToken = process.env.GITHUB_CLONE_TOKEN;
     const model = selectedModel(provider);
     const secrets = [daytonaApiKey, aiKey, cloneToken].filter((value): value is string => Boolean(value));
 
@@ -171,6 +171,7 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
           try {
             await validateContextGraphEvidence(candidate, async (path) => {
               request.signal?.throwIfAborted();
+              await assertSafeRepositoryFile(sandbox!, path);
               const contents = await sandbox!.fs.downloadFile(`${REPO_DIR}/${path}`, 120);
               request.signal?.throwIfAborted();
               return contents.toString("utf8");
@@ -408,7 +409,10 @@ function repairPrompt(basePrompt: string, failure: string): string {
 }
 
 export async function buildFocusEvidenceBundle(
-  sandbox: { readonly fs: Pick<Sandbox["fs"], "downloadFileStream"> },
+  sandbox: {
+    readonly fs: Pick<Sandbox["fs"], "downloadFileStream">;
+    readonly process: Pick<Sandbox["process"], "executeCommand">;
+  },
   paths: readonly string[]
 ): Promise<{ readonly text: string; readonly files: readonly { readonly path: string; readonly content: string }[] }> {
   const fileLimit = positiveInt(process.env.CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_LIMIT, 32);
@@ -418,10 +422,13 @@ export async function buildFocusEvidenceBundle(
   if (candidates.length === 0) return { text: "", files: [] };
   const perFileBudget = Math.min(perFileMaximum, Math.max(1, Math.floor(maximum / candidates.length)));
   const files = await Promise.all(
-    candidates.map(async (path) => ({
-      path,
-      content: await downloadBoundedUtf8(sandbox.fs, `${REPO_DIR}/${path}`, perFileBudget)
-    }))
+    candidates.map(async (path) => {
+      await assertSafeRepositoryFile(sandbox, path);
+      return {
+        path,
+        content: await downloadBoundedUtf8(sandbox.fs, `${REPO_DIR}/${path}`, perFileBudget)
+      };
+    })
   );
   const sections: string[] = [];
   let remaining = maximum;
@@ -488,6 +495,24 @@ function numberedExcerpt(content: string, maximum: number): string {
 
 function isSafeRepositoryPath(path: string): boolean {
   return Boolean(path) && !path.startsWith("/") && !path.split("/").includes("..");
+}
+
+async function assertSafeRepositoryFile(
+  sandbox: { readonly process: Pick<Sandbox["process"], "executeCommand"> },
+  path: string
+): Promise<void> {
+  if (!isSafeRepositoryPath(path)) throw new Error(`unsafe repository path: ${path}`);
+  const candidate = `${REPO_DIR}/${path}`;
+  const command = [
+    `candidate=${shellQuote(candidate)}`,
+    `root=$(realpath -- ${shellQuote(REPO_DIR)})`,
+    `resolved=$(realpath -- "$candidate")`,
+    `test ! -L "$candidate"`,
+    `test -f "$resolved"`,
+    `case "$resolved" in "$root"/*) ;; *) exit 1 ;; esac`
+  ].join(" && ");
+  const result = await sandbox.process.executeCommand(command, REPO_DIR, undefined, 30);
+  if (result.exitCode !== 0) throw new Error(`repository evidence path is not a regular in-repository file: ${path}`);
 }
 
 async function startOutputLimitingProxy(sandbox: Sandbox): Promise<void> {
@@ -575,8 +600,8 @@ function requiredEnv(name: string): string {
 }
 
 function positiveInt(value: string | undefined, fallback: number): number {
-  const parsed = value ? Number.parseInt(value, 10) : Number.NaN;
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+  const parsed = value ? Number(value) : Number.NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
 function boundedPositiveInt(value: string | undefined, maximum: number): number {

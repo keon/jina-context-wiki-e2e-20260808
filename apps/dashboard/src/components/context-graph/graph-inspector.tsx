@@ -4,13 +4,8 @@ import { useRef } from "react";
 import type { ReactNode, RefObject } from "react";
 import { ConfidenceSection, DetailGrid, EvidenceSection, ExplanationSection } from "../inspector.tsx";
 import { confidenceLabel, humanize } from "../../lib/format.ts";
-import {
-  ASSERTION_REJECTION_CODES,
-  assertionView,
-  connectedConfidenceSummary,
-  friendlyNodeExplanation,
-  friendlyNodeLabel
-} from "../../lib/context-graph.ts";
+import { connectedConfidenceSummary, friendlyNodeExplanation, friendlyNodeLabel } from "../../lib/context-graph.ts";
+import { ASSERTION_REJECTION_CODES, assertionView } from "../../lib/assertions.ts";
 import type { GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
 import type { ContextGraph, ContextGraphAssertion, ContextGraphEdge, ContextGraphNode } from "../../lib/types.ts";
 

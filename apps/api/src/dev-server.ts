@@ -16,6 +16,9 @@ import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
+if (enableDevEndpoints && process.env.K_SERVICE) {
+  throw new Error("JINA_ENABLE_DEV_ENDPOINTS must not be enabled on Cloud Run");
+}
 const stateStore = createStateStore();
 const contextGraphStore = createContextGraphStore();
 const contextGraphCoordinator = createContextGraphCoordinator();
@@ -47,7 +50,7 @@ const server = createApiServer({
 // listing stays dev-only.
 const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
 
-server.listen(port, () => {
+server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
   logger.info(`jina api server listening on ${port}`, {
     event: "api.started",
     port,

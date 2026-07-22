@@ -6,7 +6,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/*.test.js",
+    "test": "pnpm build && node --test dist/acceptance.test.js dist/diagnostics.test.js dist/server.test.js",
     "start": "node dist/server.js"
   },
   "dependencies": {

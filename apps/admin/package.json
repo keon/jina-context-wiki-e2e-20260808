@@ -1,6 +1,7 @@
 {
   "name": "@jina/admin",
   "private": true,
+  "type": "module",
   "scripts": {
     "build": "next build",
     "typecheck": "tsc --noEmit",

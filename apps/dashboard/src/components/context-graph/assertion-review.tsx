@@ -5,7 +5,7 @@ import { AssertionRejectionFields, validateRejection } from "./graph-inspector.t
 import type { ReviewAssertionFn } from "./graph-inspector.tsx";
 import { TraceEvidence } from "./trace.tsx";
 import { confidenceLabel, humanize } from "../../lib/format.ts";
-import { assertionView } from "../../lib/context-graph.ts";
+import { assertionView } from "../../lib/assertions.ts";
 import { uniqueValues } from "../../lib/board.ts";
 import type { ContextGraphAssertion } from "../../lib/types.ts";
 

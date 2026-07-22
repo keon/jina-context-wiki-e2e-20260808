@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "./apps/admin" },
     { "path": "./apps/api" },
     { "path": "./apps/dashboard" },
     { "path": "./apps/workflows" },
@@ -13,6 +14,7 @@
     { "path": "./packages/policy" },
     { "path": "./packages/db" },
     { "path": "./packages/github" },
+    { "path": "./packages/observability" },
     { "path": "./packages/daytona" },
     { "path": "./packages/ai" },
     { "path": "./packages/shared-kernel" }

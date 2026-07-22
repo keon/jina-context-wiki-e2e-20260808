@@ -455,14 +455,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
-    // Clients still calling the retired pre-rename route names get a permanent
-    // redirect that preserves the request method and body.
-    const renamedPathname = retiredContextGraphPath(url.pathname);
-    if (renamedPathname) {
-      response.writeHead(308, { location: `${renamedPathname}${url.search}` });
-      response.end();
-      return;
-    }
     // Published context graph generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
@@ -962,9 +954,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ).find((candidate) => candidate.build.id === build.id);
         createdTaskIds = [build.id, ...(workflow?.stages.map((stage) => stage.id) ?? [])];
       }
-      await mutate(async () => {
+      const committed = await mutate(async () => {
         if (!config.stateStore) await persist(result.deliveryId);
+        return true;
       }, result.deliveryId);
+      if (!committed) {
+        metrics.count("github.webhooks", { outcome: "duplicate" });
+        json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
+        return;
+      }
       const outcome = duplicateHead ? "duplicate" : "created";
       logger.info(`github webhook ${result.deliveryId}: ${outcome}`, {
         event: "github.webhook",
@@ -1714,17 +1712,6 @@ function graphRouteId(pathname: string, prefix: string): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-/** Maps a retired pre-rename "ontology" path to its context-graph replacement. */
-function retiredContextGraphPath(pathname: string): string | undefined {
-  if (pathname === "/ontology" || pathname.startsWith("/ontology/")) {
-    return `/context-graph${pathname.slice("/ontology".length)}`;
-  }
-  if (pathname.startsWith("/internal/ontology/")) {
-    return `/internal/context-graph/${pathname.slice("/internal/ontology/".length)}`;
-  }
-  return undefined;
 }
 
 function isPublicGraphRoute(pathname: string): boolean {

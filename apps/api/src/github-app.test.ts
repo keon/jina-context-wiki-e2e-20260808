@@ -1440,32 +1440,6 @@ test("configured aliases migrate existing tasks and context graph graphs to the 
   }
 });
 
-test("retired ontology routes redirect permanently to their context-graph replacements", async () => {
-  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
-  const baseUrl = await listen(server);
-  try {
-    const page = await fetch(`${baseUrl}/ontology`, { redirect: "manual" });
-    assert.equal(page.status, 308);
-    assert.equal(page.headers.get("location"), "/context-graph");
-
-    const assertions = await fetch(`${baseUrl}/ontology/assertions?repository=omxyz%2Fjina`, { redirect: "manual" });
-    assert.equal(assertions.status, 308);
-    assert.equal(assertions.headers.get("location"), "/context-graph/assertions?repository=omxyz%2Fjina");
-
-    const internal = await fetch(`${baseUrl}/internal/ontology/ingest/plan`, {
-      method: "POST",
-      redirect: "manual"
-    });
-    assert.equal(internal.status, 308);
-    assert.equal(internal.headers.get("location"), "/internal/context-graph/ingest/plan");
-
-    const followed = await fetch(`${baseUrl}/ontology`);
-    assert.equal(followed.status, 200);
-  } finally {
-    await close(server);
-  }
-});
-
 test("overview combines the board and events behind one ETag-validated response", async () => {
   const server = createApiServer({ enableDevEndpoints: true, seedDemo: true, tenantId: "default" });
   const baseUrl = await listen(server);

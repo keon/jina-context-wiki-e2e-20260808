@@ -68,6 +68,7 @@ Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST
 
 ```text
 apps/api/          webhooks, board API, graph API, MCP, commands, leases
+apps/admin/        tenant-wide context graph administration UI
 apps/dashboard/    operator UI and authenticated read proxy
 apps/worker/       review and context graph workers
 apps/workflows/    local review CLI and deterministic simulation
@@ -77,6 +78,7 @@ packages/db/       PostgreSQL stores and migrations
 packages/github/   webhook verification and parsing
 packages/daytona/  context graph sandbox executor
 packages/ai/       review harnesses and model clients
+packages/observability/ structured logging, traces, and in-process metrics
 ```
 
 Smaller packages contain review planning, context policy, publication, billing policy, and shared primitives.

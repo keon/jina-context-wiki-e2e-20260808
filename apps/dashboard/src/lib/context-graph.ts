@@ -1,4 +1,4 @@
-import type { ContextGraph, ContextGraphAssertion, ContextGraphEdge, ContextGraphNode } from "./types.ts";
+import type { ContextGraph, ContextGraphEdge, ContextGraphNode } from "./types.ts";
 
 /**
  * Pure context-graph page logic ported from the previous vanilla-DOM
@@ -508,53 +508,3 @@ export function safeExternalUrl(url: string | undefined): string | undefined {
   }
   return undefined;
 }
-
-/* ------------------------------------------------------------------ */
-/* Assertion review helpers.                                           */
-/* ------------------------------------------------------------------ */
-
-/**
- * The API serves assertion summaries with flat subject/object fields
- * (subjectLabel, subjectKind, …). The scaffold's ContextGraphAssertion type
- * models the nested shape with an index signature, so this view normalizes
- * either representation for rendering.
- */
-export interface AssertionView {
-  readonly subjectLabel: string;
-  readonly subjectKind: string;
-  readonly objectLabel: string;
-  readonly objectKind: string;
-  readonly generator: string;
-  readonly supportingAssertionIds: readonly string[];
-  readonly contradictingAssertionIds: readonly string[];
-}
-
-function assertionString(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
-
-function assertionStringList(value: unknown): readonly string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-export function assertionView(assertion: ContextGraphAssertion): AssertionView {
-  const subject = assertion.subject as { readonly kind?: string; readonly label?: string } | undefined;
-  const object = assertion.object as { readonly kind?: string; readonly label?: string } | undefined;
-  return {
-    subjectLabel: assertionString(assertion.subjectLabel) || subject?.label || "",
-    subjectKind: assertionString(assertion.subjectKind) || subject?.kind || "",
-    objectLabel: assertionString(assertion.objectLabel) || object?.label || "",
-    objectKind: assertionString(assertion.objectKind) || object?.kind || "",
-    generator: assertionString(assertion.generator),
-    supportingAssertionIds: assertionStringList(assertion.supportingAssertionIds),
-    contradictingAssertionIds: assertionStringList(assertion.contradictingAssertionIds)
-  };
-}
-
-export const ASSERTION_REJECTION_CODES: readonly (readonly [string, string])[] = [
-  ["", "Rejection category"],
-  ["incorrect_relationship", "Incorrect relationship"],
-  ["insufficient_evidence", "Insufficient evidence"],
-  ["unsupported_explanation", "Unsupported explanation"],
-  ["other", "Other"]
-];
