@@ -21,6 +21,7 @@ import {
   validateSourceBackedModelEntities,
   type GeneratedContextGraph,
   type ContextGraphBuildRequest,
+  type ContextGraphExecutionCredentials,
   type ContextGraphExecutor,
   type ContextGraph,
   type RequiredCausalAnchor,
@@ -61,19 +62,29 @@ export interface OpenRouterStructuredResult {
 }
 
 export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
-  async buildAssertions(request: ContextGraphBuildRequest): Promise<ContextGraph> {
-    return this.execute(request, CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT);
+  async buildAssertions(
+    request: ContextGraphBuildRequest,
+    credentials: ContextGraphExecutionCredentials
+  ): Promise<ContextGraph> {
+    return this.execute(
+      request,
+      credentials,
+      CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA,
+      CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT
+    );
   }
 
   private async execute(
     request: ContextGraphBuildRequest,
+    credentials: ContextGraphExecutionCredentials,
     outputSchema: object,
     systemPrompt: string
   ): Promise<ContextGraph> {
     request.signal?.throwIfAborted();
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
     const openrouterKey = requiredEnv("OPENROUTER_API_KEY");
-    const cloneToken = process.env.GITHUB_CLONE_TOKEN;
+    const cloneToken = credentials.githubToken.trim();
+    if (!cloneToken) throw new Error("GitHub installation token is required for Daytona repository access");
     const model = selectedModel();
     const secrets = [daytonaApiKey, openrouterKey, cloneToken].filter((value): value is string => Boolean(value));
 

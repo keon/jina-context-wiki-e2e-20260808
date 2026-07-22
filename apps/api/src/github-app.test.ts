@@ -351,8 +351,30 @@ test("branch pushes create and supersede the existing context graph workflow", a
   ]);
   assert.equal(current.find((task) => task.type === "context_graph_ingest")?.status, "queued");
   assert.equal(
+    current.every((task) => task.metadata.githubInstallationId === 99),
+    true,
+    "the webhook installation id is durable across every graph stage"
+  );
+  assert.equal(
     old.every((task) => task.status === "superseded"),
     true
+  );
+
+  const directBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ repository: "omlabs/example", ref: "main", requestKey: "operator-retry" })
+  });
+  assert.equal(directBuild.status, 202);
+  const retriedBoard = await authenticatedFetch(`${baseUrl}/board`).then(
+    (response) => response.json() as Promise<{ tasks: { metadata: Record<string, unknown> }[] }>
+  );
+  const retried = retriedBoard.tasks.filter((task) => task.metadata.requestKey === "operator-retry");
+  assert.equal(retried.length, 7);
+  assert.equal(
+    retried.every((task) => task.metadata.githubInstallationId === 99),
+    true,
+    "operator retries inherit the last recorded installation id for the repository"
   );
 });
 
@@ -1210,9 +1232,24 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
           "content-type": "application/json",
           ...(principalId ? { "x-jina-principal-id": principalId } : {})
         },
-        body: JSON.stringify({ repository, ref: "main", requestKey: `graph-client-${repository}` })
+        body: JSON.stringify({
+          repository,
+          ref: "main",
+          requestKey: `graph-client-${repository}`,
+          metadata: { githubInstallationId: 99 }
+        })
       });
     assert.equal((await build(undefined, "omxyz/a")).status, 401);
+    const missingInstallation = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${GRAPH_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-principal-id": principalA
+      },
+      body: JSON.stringify({ repository: "omxyz/a", ref: "main", requestKey: "missing-installation" })
+    });
+    assert.equal(missingInstallation.status, 400);
     assert.equal((await build(principalA, "omxyz/a")).status, 202);
     assert.equal((await build(principalA, "other/b")).status, 403);
 

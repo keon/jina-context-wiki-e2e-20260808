@@ -4,6 +4,10 @@ import { workerFailureCategory } from "./diagnostics.js";
 
 test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("GitHub request failed with 401: Bad credentials"), "github_authentication");
+  assert.equal(
+    workerFailureCategory("GitHub installation token request failed with 401: Bad credentials"),
+    "github_authentication"
+  );
   assert.equal(workerFailureCategory("GitHub request failed with 403: Resource not accessible"), "github_forbidden");
   assert.equal(workerFailureCategory("GitHub request failed with 403: API rate limit exceeded"), "github_rate_limit");
   assert.equal(workerFailureCategory("GitHub request failed with 404: Not Found"), "github_not_found");

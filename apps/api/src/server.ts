@@ -1174,6 +1174,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
     const requestKey = suppliedRequestKey ?? randomUUID();
     const metadata = parseContextGraphBuildMetadata(body.metadata);
+    const githubInstallationId = await contextGraphInstallationId(body, metadata, tenantId, repository);
     const created = await contextGraphCoordinator.createBuild({
       tenantId,
       repository,
@@ -1181,9 +1182,40 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       requestKey,
       snapshotFirst: body.snapshotFirst !== false,
       createdAt: nowIso(),
-      ...(metadata ? { metadata } : {})
+      metadata: { ...metadata, githubInstallationId }
     });
     json(response, 202, { accepted: true, task: pipelineBuildTask(created) });
+  }
+
+  async function contextGraphInstallationId(
+    body: Record<string, unknown>,
+    metadata: Readonly<Record<string, unknown>> | undefined,
+    tenantId: string,
+    repository: string
+  ): Promise<number> {
+    const supplied = [
+      body.githubInstallationId,
+      body.github_installation_id,
+      body.installationId,
+      metadata?.githubInstallationId
+    ].filter((value) => value !== undefined);
+    if (supplied.length > 0) {
+      const installationIds = supplied.map((value) => requiredPositiveInteger(value, "githubInstallationId"));
+      if (new Set(installationIds).size !== 1) throw invalidRequest("GitHub installation id fields must agree");
+      return installationIds[0]!;
+    }
+
+    const latest = (await contextGraphCoordinator.list(tenantId, { repositories: [repository] }))
+      .filter(({ build }) => build.repository === repository)
+      .sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt))
+      .find(({ build }) => {
+        const value = build.metadata.githubInstallationId;
+        return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
+      });
+    const recorded = latest?.build.metadata.githubInstallationId;
+    if (typeof recorded === "number" && Number.isSafeInteger(recorded) && recorded > 0) return recorded;
+    if (config.enableDevEndpoints) return 1;
+    throw invalidRequest("githubInstallationId is required for context graph builds");
   }
 
   /**

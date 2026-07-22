@@ -54,7 +54,10 @@ Install the App on the repositories Jina should watch. In production shared mode
 
 When intake is enabled, the resolved original tenant UUID scopes every task created by the delivery. In the current production path, the original application sends the same UUID and verified repository/review identity as server-side graph-build metadata. Both paths retain the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types.
 
-The webhook slice does not use an App ID or private key. Workers use `GITHUB_CLONE_TOKEN` for repository cloning and prefer `GITHUB_API_TOKEN` for REST metadata. The production API token needs read access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions; the deployment acceptance fixture depends on Deployments access. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
+The API webhook slice needs only the webhook secret. Context graph workers also receive `GITHUB_APP_ID` and
+`GITHUB_APP_PRIVATE_KEY`; they exchange the installation ID persisted on each build for a short-lived token used by
+REST metadata, local git, and Daytona cloning. Legacy non-graph review tasks may still use `GITHUB_API_TOKEN` and
+`GITHUB_CLONE_TOKEN` until that workflow is migrated separately.
 
 GitHub documents the registration flow in [Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app) and the event setup in [Using webhooks with GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/using-webhooks-with-github-apps).
 

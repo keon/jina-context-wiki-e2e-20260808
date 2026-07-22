@@ -13,6 +13,7 @@
     "@jina/ai": "workspace:*",
     "@jina/context-graph": "workspace:*",
     "@jina/daytona": "workspace:*",
+    "@jina/github": "workspace:*",
     "@jina/observability": "workspace:*"
   },
   "devDependencies": {

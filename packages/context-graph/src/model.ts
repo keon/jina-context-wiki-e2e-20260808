@@ -114,7 +114,15 @@ export interface EvidenceCitation {
 }
 
 export interface ContextGraphExecutor {
-  buildAssertions(request: ContextGraphBuildRequest): Promise<ContextGraph>;
+  buildAssertions(
+    request: ContextGraphBuildRequest,
+    credentials: ContextGraphExecutionCredentials
+  ): Promise<ContextGraph>;
+}
+
+/** Ephemeral credentials supplied by the worker and never persisted in graph data or task metadata. */
+export interface ContextGraphExecutionCredentials {
+  readonly githubToken: string;
 }
 
 export function createContextGraph(input: {

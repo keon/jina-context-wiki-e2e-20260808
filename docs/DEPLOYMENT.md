@@ -86,7 +86,14 @@ The simulation graph integration uses `GRAPH_API_TOKEN` for graph routes and exa
 
 The integration maps each simulation UUID to `tenant:<uuid>` and replaces that principal's complete repository ACL through `POST /internal/graph/access/sync`; repository removal or App uninstall is therefore revoked on the next sync.
 
-`GITHUB_CLONE_TOKEN` is the worker's temporary private-repository clone credential until installation tokens replace it. Production supplies the separate `GITHUB_API_TOKEN` from the `jina-github-api-token` Secret Manager secret; local execution falls back to the clone token when the API token is unset. Give the API token read-only access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions. The production v5.1 acceptance fixture requires Deployments access so its source-backed deployment identities can enter the graph. Other optional-source failures remain fail-closed only where the source is required by the requested contract.
+The context graph worker requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`. Store them as
+`jina-github-app-id` and `jina-github-app-private-key`; the deployment mounts both through Secret Manager. Each
+build's `githubInstallationId` is exchanged for a short-lived installation token used by REST ingestion, local git,
+and Daytona cloning. Do not mount a personal `GITHUB_API_TOKEN` or `GITHUB_CLONE_TOKEN` into this service.
+
+The GitHub App needs read access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions. The production
+v5.1 acceptance fixture requires Deployments access so its source-backed deployment identities can enter the graph.
+Other optional-source failures remain fail-closed only where the source is required by the requested contract.
 
 The production context graph uses the `jina-openrouter-api-key` secret with:
 

@@ -13,6 +13,7 @@ import {
   type ReviewRequest
 } from "@jina/ai";
 import { DaytonaContextGraphExecutor } from "@jina/daytona";
+import { createGitHubInstallationAccessToken, type GitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
@@ -74,6 +75,7 @@ interface WorkMetadataByTopic {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly githubInstallationId: number;
     readonly pipelinePhase: "snapshot" | "history";
     readonly historyLimit?: number;
   };
@@ -81,6 +83,7 @@ interface WorkMetadataByTopic {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly githubInstallationId: number;
     readonly commitSha: string;
     readonly evidenceFingerprint: string;
     readonly analysisPaths?: readonly string[];
@@ -92,6 +95,7 @@ interface WorkMetadataByTopic {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly githubInstallationId: number;
   };
 }
 
@@ -121,6 +125,7 @@ type WorkResult =
 
 interface LeaseExecutionState {
   readonly controller: AbortController;
+  githubToken?: string;
   lostReason?: string;
 }
 
@@ -388,11 +393,31 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   }
 }
 
+async function activateGitHubInstallationAccess(
+  installationId: number,
+  repository: string
+): Promise<GitHubInstallationAccessToken> {
+  assertLeaseOwned();
+  const access = await createGitHubInstallationAccessToken(installationId);
+  assertLeaseOwned();
+  if (!activeLease) throw new Error("GitHub installation token was minted outside an active worker lease");
+  activeLease.githubToken = access.token;
+  logger.info(`GitHub installation access ready for ${repository}`, {
+    event: "github.installation_access_ready",
+    workerId,
+    repository,
+    installationId,
+    ...(access.expiresAt ? { expiresAt: access.expiresAt } : {})
+  });
+  return access;
+}
+
 async function runContextGraphIngest(work: ClaimedWork<"run-context-graph-ingest">): Promise<Record<string, unknown>> {
-  const { tenantId, repository, ref } = work.task.metadata;
+  const { tenantId, repository, ref, githubInstallationId } = work.task.metadata;
+  const access = await activateGitHubInstallationAccess(githubInstallationId, repository);
   const lease = { messageId: work.message.id, leaseId: work.message.leaseId };
   if ((process.env.CONTEXT_GRAPH_INGEST_TRANSPORT?.trim() || "rest") === "git") {
-    activeGitIngestTransport = new GitIngestTransport(repository, ref);
+    activeGitIngestTransport = new GitIngestTransport(repository, ref, access.token);
   }
   try {
     return await runContextGraphIngestWithTransport(work, tenantId, repository, ref, lease);
@@ -774,13 +799,13 @@ class GitIngestTransport {
   private failed = false;
   constructor(
     private readonly repository: string,
-    private readonly ref: string
+    private readonly ref: string,
+    private readonly githubToken: string
   ) {}
 
   private async git(args: readonly string[], maxBuffer = 64 * 1024 * 1024): Promise<string> {
     assertLeaseOwned();
-    const token = process.env.GITHUB_CLONE_TOKEN?.trim();
-    const basic = Buffer.from(`x-access-token:${token ?? ""}`).toString("base64");
+    const basic = Buffer.from(`x-access-token:${this.githubToken}`).toString("base64");
     const { stdout } = await execFileAsync("git", [...args], {
       maxBuffer,
       timeout: 600_000,
@@ -1244,7 +1269,8 @@ async function hydratePullRequestScope(
 
 async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-assert">): Promise<WorkResult> {
   if (!contextGraphExecutor) throw new Error("contextGraph executor is not configured for this worker");
-  const { tenantId, repository, ref, commitSha, evidenceFingerprint } = work.task.metadata;
+  const { tenantId, repository, ref, githubInstallationId, commitSha, evidenceFingerprint } = work.task.metadata;
+  const access = await activateGitHubInstallationAccess(githubInstallationId, repository);
   const focusPaths = work.task.metadata.analysisPaths ?? [];
   const problemEvidencePullRequestNumbers = work.task.metadata.problemEvidencePullRequestNumbers ?? [];
   const sourcePullRequestNumbers = work.task.metadata.sourcePullRequestNumbers ?? [];
@@ -1267,19 +1293,22 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
   // A generator/schema version change intentionally performs one full semantic
   // scan for an unchanged head. The resulting generation is cached, so routine
   // retries and subsequent builds still avoid Daytona entirely.
-  const graph = await contextGraphExecutor.buildAssertions({
-    tenantId,
-    repository,
-    ref,
-    commitSha,
-    focusPaths,
-    problemEvidencePullRequestNumbers,
-    sourcePullRequestNumbers,
-    resolvedPullRequestNumbers,
-    sourceEvidence: evidence.evidence,
-    taskId: work.task.id,
-    ...(activeLease ? { signal: activeLease.controller.signal } : {})
-  });
+  const graph = await contextGraphExecutor.buildAssertions(
+    {
+      tenantId,
+      repository,
+      ref,
+      commitSha,
+      focusPaths,
+      problemEvidencePullRequestNumbers,
+      sourcePullRequestNumbers,
+      resolvedPullRequestNumbers,
+      sourceEvidence: evidence.evidence,
+      taskId: work.task.id,
+      ...(activeLease ? { signal: activeLease.controller.signal } : {})
+    },
+    { githubToken: access.token }
+  );
   assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
@@ -1551,7 +1580,8 @@ const GITHUB_RETRY_BASE_MS = Math.max(1, Number(process.env.GITHUB_RETRY_BASE_MS
 const GITHUB_RETRY_MAX_WAIT_MS = 60_000;
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
-  const githubToken = (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
+  const githubToken =
+    activeLease?.githubToken ?? (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   for (let attempt = 0; ; attempt += 1) {
     assertLeaseOwned();
@@ -1739,11 +1769,13 @@ function repositoryMetadata(metadata: Record<string, unknown>): {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
+  readonly githubInstallationId: number;
 } {
   return {
     tenantId: requiredString(metadata.tenantId, "task tenantId"),
     repository: requiredString(metadata.repository, "task repository"),
-    ref: requiredString(metadata.ref, "task ref")
+    ref: requiredString(metadata.ref, "task ref"),
+    githubInstallationId: requiredPositiveInteger(metadata.githubInstallationId, "task githubInstallationId")
   };
 }
 

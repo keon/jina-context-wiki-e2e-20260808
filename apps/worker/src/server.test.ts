@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
@@ -36,7 +37,10 @@ test("known-head reconciliation includes linked, known-commit, and untracked rep
 });
 
 test("worker reviews pull requests and incrementally ingests context graph source blobs", async (context) => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const githubAppPrivateKey = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   let claimCount = 0;
+  let installationTokenRequests = 0;
   let renewals = 0;
   let projectionDrains = 0;
   let ingestedPullRequestNumbers: number[] = [];
@@ -63,7 +67,13 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
           },
           task: {
             id: "task-2",
-            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main", pipelinePhase: "history" }
+            metadata: {
+              tenantId: "omlabs",
+              repository: "omlabs/example",
+              ref: "main",
+              githubInstallationId: 99,
+              pipelinePhase: "history"
+            }
           }
         });
         return;
@@ -148,7 +158,18 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       });
       return;
     }
+    if (request.url === "/github/app/installations/99/access_tokens") {
+      installationTokenRequests += 1;
+      assert.match(String(request.headers.authorization), /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      json(response, 201, {
+        token: "installation-token",
+        expires_at: "2026-07-22T23:00:00Z",
+        permissions: { contents: "read", pull_requests: "read", issues: "read" }
+      });
+      return;
+    }
     if (request.url === "/github/repos/omlabs/example/commits/main") {
+      assert.equal(request.headers.authorization, "Bearer installation-token");
       json(response, 200, {
         sha: "a".repeat(40),
         commit: { tree: { sha: "b".repeat(40) } },
@@ -299,6 +320,8 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       GITHUB_API_URL: `${mockUrl}/github`,
       OPENAI_API_URL: `${mockUrl}/openai`,
       OPENAI_API_KEY: "test-openai-key",
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_PRIVATE_KEY: githubAppPrivateKey,
       GITHUB_CLONE_TOKEN: "test-github-token"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -324,6 +347,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   }
 
   assert.ok(renewals > 0);
+  assert.equal(installationTokenRequests, 1);
   assert.equal(completions[0]?.outcome, "done");
   assert.equal(completions[0]?.leaseId, "lease-1");
   const reviewResult = completions[0]?.result as Record<string, unknown>;
