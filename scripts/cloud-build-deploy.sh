@@ -106,7 +106,7 @@ gcloud run deploy jina-context-graph-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_GRAPH_CODEX_PROVIDER=openrouter~CONTEXT_GRAPH_CODEX_MODEL=deepseek/deepseek-v4-flash~CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=16000~CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=12000" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_GRAPH_CODEX_PROVIDER=openrouter~CONTEXT_GRAPH_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=16000~CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=12000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
