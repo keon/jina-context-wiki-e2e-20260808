@@ -14,7 +14,7 @@ pnpm test
 pnpm dev
 ```
 
-`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`.
+`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL and `INTERNAL_API_TOKEN`. Fixed mode also requires `JINA_TENANT_ID`; shared mode uses `JINA_TENANCY_MODE=shared-db` and resolves original Jina tenant UUIDs from the database.
 
 To exercise the separate local PR-review harness:
 
@@ -39,6 +39,8 @@ GitHub event
 ```
 
 The board is the orchestrator. PostgreSQL owns board state, delivery deduplication, leases, and context graph data. Every board mutation loads and writes the JSON snapshot while holding a cross-instance transaction lock, preventing horizontally scaled API instances from overwriting newer state.
+
+Production uses the original Jina database as the tenancy and identity source of truth. Signed webhooks resolve an enabled repository and active GitHub App installation to the original tenant UUID before planning work. The tenant's GitHub account login and the webhook author's/sender's GitHub identities are retained on tasks, events, tracked pull requests, dashboard views, and repository observations instead of being replaced by a v2-local user model. See [Shared original Jina database](docs/SHARED_TENANCY.md).
 
 Opened PRs create review and publication tasks. Opened issues create manual triage tasks. Signed branch pushes create the same four-task ContextGraph workflow as `POST /context-graph/build`; unchanged heads dedupe and moved refs supersede stale work.
 

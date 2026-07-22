@@ -10,6 +10,35 @@ Jina v2 remains deployed in `jina-v2/us-central1` and connects directly to the o
 
 Cross-region access adds query latency, network egress, and a dependency on both regions. Monitor it, but do not add a second identity cache or replicated database until measurements justify that complexity.
 
+## Identity resolution and propagation
+
+Signed webhook intake resolves an enabled repository to exactly one original tenant using the GitHub repository ID, installation ID, and `owner/repository` name. Resolution requires a non-suspended installation. If no valid binding exists, intake returns `409 repository_tenant_not_found`; it never falls back to a generated tenant.
+
+The resolved values flow through the system as follows:
+
+```text
+public.tenants/repositories/installations
+  -> original tenant UUID + GitHub account identity
+  -> webhook planning
+  -> tasks, tracked PRs, events, outbox messages
+  -> context graph observations and projections
+  -> dashboard and original-app work overview
+```
+
+`workspaceLabel`, `githubAccountId`, and `githubAccountType` name the original organization/account. Verified webhook payload fields add `authorGithubUserId`, `authorLogin`, `authorAccountType`, `senderGithubUserId`, `senderLogin`, and `senderAccountType`. The dashboard displays and searches workspace and author labels. These are external identity references and provenance, not duplicated user rows.
+
+Shared-mode workers claim across the active tenant UUIDs returned by the original tables. After a claim, every worker request carries the concrete tenant header; workers do not receive a database credential.
+
+## Original application integration
+
+The original application remains responsible for login, sessions, and tenant membership. Its member-only endpoint:
+
+```text
+GET /v1/dashboard/tenants/:tenantId/work-overview
+```
+
+authorizes the caller through the original application, then calls the v2 overview API with `x-jina-tenant-id: <tenantId>` and `x-jina-principal-id: tenant:<tenantId>`. This keeps the original user boundary in one place while returning the shared board and event history associated with that organization.
+
 ## Runtime configuration
 
 The checked-in production substitutions select:
@@ -89,6 +118,8 @@ gcloud secrets add-iam-policy-binding jina-shared-db-password \
 
 ## Cutover
 
+Production has completed this cutover. Keep the procedure below as the replay and disaster-recovery runbook.
+
 Before deployment:
 
 1. Apply the v2 schemas to PostgreSQL 16 and run the full database test suite against a disposable PostgreSQL 16 instance.
@@ -101,6 +132,21 @@ Before deployment:
 8. Deploy the already-built images with the checked-in shared-mode substitutions. Verify `/health`, one signed webhook, tenant-scoped `/board`, a worker claim/completion, and a graph query before resuming normal traffic.
 
 Keep `jina-v2:us-central1:jina-postgres` intact and read-only during the rollback window.
+
+## Verification
+
+Verify configuration and health without printing credentials:
+
+```sh
+gcloud run services describe jina-api \
+  --project=jina-v2 --region=us-central1 --format=json \
+  | jq '{revision:.status.latestReadyRevisionName, cloudSql:.spec.template.metadata.annotations["run.googleapis.com/cloudsql-instances"]}'
+
+curl --fail https://jina-api-m56inn6iva-uc.a.run.app/health
+curl --fail https://api.usejina.com/v1/healthz
+```
+
+For an authenticated tenant read, send the internal credential server-side and use the original UUID for both tenant scope and tenant principal. Confirm that a known PR task contains the expected `workspaceLabel`, `authorLogin`, `senderLogin`, GitHub account ID, and author GitHub user ID. The original work-overview endpoint must return `401` without an original-app session.
 
 ## Rollback
 

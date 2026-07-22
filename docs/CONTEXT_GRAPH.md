@@ -189,9 +189,9 @@ advertises only `query_graph(repository, query, ref?)` and returns an answer, ci
 claims, and whether coverage was incomplete. It has no mutation, raw graph,
 generation, or free-form query surface.
 
-Simulation tenants use the same graph contract without becoming storage tenants in
-this service. The simulation API maps each tenant UUID to a `tenant:<uuid>`
-principal and atomically synchronizes that principal's exact installed
+The original Jina tenant UUID is also the tenant partition key for graph storage.
+The original API maps each tenant UUID to a `tenant:<uuid>` principal and
+atomically synchronizes that principal's exact installed
 `owner/repository` set through `POST /internal/graph/access/sync`. Public graph REST
 and MCP requests require a validated bound principal in production. Listing,
 detail, and query authorization are enforced again against `repository_acl`, so a
@@ -204,7 +204,7 @@ The interactive graph prefers the Cosmos WebGL renderer, including for large gra
 
 ## Security
 
-- Production data routes require the server-side internal bearer credential and derive `tenantId` from server configuration, never from request payloads.
+- Production data routes require the server-side internal bearer credential. Shared mode accepts only a normalized original tenant UUID from `x-jina-tenant-id`; fixed mode uses server configuration. Tenant scope is never accepted from a JSON request body.
 - Public graph REST and MCP routes additionally require a validated `user:<email>` or `tenant:<uuid>` principal. The internal graph-access sync route accepts only `tenant:<uuid>` and exact `owner/repository` names; its service credential must never be exposed to browsers or agents.
 - Cloud Run IAP authenticates the browser. The dashboard proxy removes caller authorization/tenant/principal headers, forwards the verified IAP email as a `user:` principal, and adds its service credential server-side.
 - Graph details, retrieval, and context assembly are tenant- and repository-scoped.
