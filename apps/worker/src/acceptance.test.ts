@@ -557,6 +557,14 @@ test("production acceptance reviews causality, queries it in both directions, an
       return json({
         assertions: [
           {
+            id: "weaker-cause-assertion",
+            status: "proposed",
+            subjectNaturalKey: "github:issue:omxyz/jina-context-graph-e2e#7",
+            objectNaturalKey: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
+            evidence: ["ROOT_CAUSE.md:1"],
+            qualifiers: { reason: "The root-cause record names this commit." }
+          },
+          {
             id: "cause-assertion",
             status: "proposed",
             subjectNaturalKey: "github:issue:omxyz/jina-context-graph-e2e#7",
@@ -628,6 +636,13 @@ test("production acceptance reviews causality, queries it in both directions, an
                   data: {
                     issue: { number: 7 },
                     introducedBy: [
+                      {
+                        sha: causingCommitSha,
+                        why: "The root-cause record names this commit.",
+                        evidence: ["ROOT_CAUSE.md:1"],
+                        evidenceCommitSha: "a".repeat(40),
+                        pullRequests: []
+                      },
                       {
                         sha: causingCommitSha,
                         why: "The guard was bypassed.",

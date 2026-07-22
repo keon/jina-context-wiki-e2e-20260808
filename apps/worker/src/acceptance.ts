@@ -205,12 +205,20 @@ export async function runProductionContextGraphAcceptance(
       { headers }
     );
     const assertions = requiredArray(assertionResponse.assertions, "contextGraph assertions");
-    const causalAssertion = assertions.find(
+    const causalAssertions = assertions.filter(
       (value) =>
         isRecord(value) &&
+        (value.status === "proposed" || value.status === "active") &&
         value.subjectNaturalKey === `github:issue:${repository}#${expectedIssueNumber}` &&
         value.objectNaturalKey === `repo:${repository}:sha:${causingCommitSha}`
     );
+    const causalAssertion = causalAssertions.find((value) => {
+      if (!isRecord(value) || !Array.isArray(value.evidence) || value.evidence.length === 0) return false;
+      const qualifiers = isRecord(value.qualifiers) ? value.qualifiers : {};
+      const reason = typeof qualifiers.reason === "string" ? qualifiers.reason : "";
+      return !config.causality?.reasonIncludes ||
+        reason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase());
+    });
     if (!isRecord(causalAssertion)) {
       throw new Error(
         `production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`
@@ -222,7 +230,11 @@ export async function runProductionContextGraphAcceptance(
         apiUrl,
         headers,
         assertions,
-        new Set([requiredString(causalAssertion.id, "causality assertion id")])
+        new Set(
+          causalAssertions.flatMap((value) =>
+            isRecord(value) && typeof value.id === "string" ? [value.id] : []
+          )
+        )
       );
     }
     const causalEvidence = requiredArray(causalAssertion.evidence, "causality assertion evidence");
@@ -652,22 +664,27 @@ async function waitForCausalTrace(
       const issue = isRecord(item.data.issue) ? item.data.issue : {};
       if (issue.number !== expected.issueNumber) return false;
       const causes = Array.isArray(item.data.introducedBy) ? item.data.introducedBy.filter(isRecord) : [];
-      const cause = causes.find((value) => value.sha === expected.causingCommitSha);
-      if (!isRecord(cause)) return false;
-      if (typeof cause.why !== "string" || !cause.why.trim()) return false;
-      if (expected.reasonIncludes && !cause.why.toLowerCase().includes(expected.reasonIncludes.toLowerCase()))
-        return false;
-      if (!Array.isArray(cause.evidence) || cause.evidence.length === 0) return false;
-      if (typeof cause.evidenceCommitSha !== "string" || !/^[a-f0-9]{40}$/i.test(cause.evidenceCommitSha)) return false;
-      if (expected.causingPullRequestNumber) {
-        const pullRequests = Array.isArray(cause.pullRequests) ? cause.pullRequests : [];
-        if (
-          !pullRequests.some(
-            (pullRequest) => isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber
-          )
-        )
+      const cause = causes.find((value) => {
+        if (value.sha !== expected.causingCommitSha) return false;
+        if (typeof value.why !== "string" || !value.why.trim()) return false;
+        if (expected.reasonIncludes && !value.why.toLowerCase().includes(expected.reasonIncludes.toLowerCase()))
           return false;
-      }
+        if (!Array.isArray(value.evidence) || value.evidence.length === 0) return false;
+        if (typeof value.evidenceCommitSha !== "string" || !/^[a-f0-9]{40}$/i.test(value.evidenceCommitSha))
+          return false;
+        if (expected.causingPullRequestNumber) {
+          const pullRequests = Array.isArray(value.pullRequests) ? value.pullRequests : [];
+          if (
+            !pullRequests.some(
+              (pullRequest) =>
+                isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber
+            )
+          )
+            return false;
+        }
+        return true;
+      });
+      if (!isRecord(cause)) return false;
       const citations = Array.isArray(item.citations) ? item.citations : [];
       return (
         citations.some((citation) => isRecord(citation) && citation.kind === "assertion") &&
