@@ -66,6 +66,8 @@ async function apiGet(pathname: string): Promise<unknown> {
   const headers: Record<string, string> = { accept: "application/json" };
   const token = process.env.INTERNAL_API_TOKEN?.trim();
   if (token) headers.authorization = `Bearer ${token}`;
+  const tenantId = process.env.JINA_TENANT_ID?.trim();
+  if (tenantId) headers["x-jina-tenant-id"] = tenantId;
   let response: Response;
   try {
     response = await fetch(`${apiBaseUrl()}${pathname}`, { headers, cache: "no-store" });

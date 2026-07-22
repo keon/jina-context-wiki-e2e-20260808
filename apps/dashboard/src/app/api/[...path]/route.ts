@@ -28,6 +28,7 @@ const STRIPPED_RESPONSE_HEADERS = new Set(["connection", "transfer-encoding", "c
 async function proxy(request: NextRequest): Promise<Response> {
   const apiUrl = process.env.JINA_API_URL ?? "http://localhost:4000";
   const internalApiToken = process.env.INTERNAL_API_TOKEN?.trim();
+  const tenantId = process.env.JINA_TENANT_ID?.trim();
   const { pathname, search } = request.nextUrl;
   if (!isAllowedDashboardApiRequest(request.method, pathname, Boolean(internalApiToken))) {
     return Response.json({ error: "not found" }, { status: 404 });
@@ -52,6 +53,7 @@ async function proxy(request: NextRequest): Promise<Response> {
   if (internalApiToken) {
     headers.set("authorization", `Bearer ${internalApiToken}`);
     headers.set("x-jina-principal-id", principal!);
+    if (tenantId) headers.set("x-jina-tenant-id", tenantId);
   }
 
   const upstreamUrl = new URL(`${pathname.slice("/api".length)}${search}`, apiUrl);

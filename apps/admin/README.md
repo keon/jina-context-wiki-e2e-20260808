@@ -32,5 +32,6 @@ Environment:
 
 - `JINA_API_URL` — base URL of the Jina API (default `http://localhost:4000`).
 - `INTERNAL_API_TOKEN` — required against a production API; optional locally when the API runs with dev endpoints enabled (`pnpm dev`), where every request is already treated as a dev service principal. Its presence also switches on the inbound IAP authentication boundary described above.
+- `JINA_TENANT_ID` — original tenant UUID forwarded to a shared-database API; omit it for fixed-tenancy or local deployments.
 - `JINA_ADMIN_ALLOWED_EMAILS` — optional comma-separated allowlist of IAP identities permitted to view graphs. When unset, any IAP-authenticated identity is allowed.
 - `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — app-level HTTP credentials for Vercel production.
