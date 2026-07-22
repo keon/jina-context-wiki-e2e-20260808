@@ -1,10 +1,10 @@
-FROM mirror.gcr.io/library/node:22-bookworm-slim AS build
+FROM mirror.gcr.io/library/node:26-bookworm-slim AS build
 
 ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 WORKDIR /workspace
 
-RUN corepack enable && corepack prepare pnpm@11.10.0 --activate
+RUN npm install -g pnpm@11.15.1
 
 COPY . .
 RUN pnpm install --frozen-lockfile \
