@@ -62,7 +62,7 @@ The context graph workflow runs as three board-visible stages:
 
 Reviewed assertions retain their evidence, explanation, review state, and provenance when later runs confirm them. Counterfactual queries remove selected paths from the reviewed graph in memory; they do not create facts or tasks.
 
-Local context graph execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
+Local context graph execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`. Set `GITHUB_API_TOKEN` when REST API access uses a separate credential; it falls back to `GITHUB_CLONE_TOKEN`.
 
 Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST /mcp`. Its single read-only tool, `query_graph`, accepts a repository, natural-language query, and optional ref. Production requires the internal service credential plus a bound application principal, and every request is repository-ACL scoped. The simulation integration uses a separate `GRAPH_API_TOKEN` for graph reads and exact ACL synchronization without granting board or worker access.
 
