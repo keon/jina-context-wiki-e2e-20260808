@@ -45,7 +45,7 @@ Only assertion generation uses a model. Assertions must carry checked repository
 
 ## Read interfaces
 
-The dashboard reads board, history, task-type, graph, assertion, and fixed-template retrieval endpoints through its authenticated proxy. Historical graph lists contain summaries; full nodes and edges load only when requested.
+The dashboard is a Next.js application that reads board, history, task-type, graph, assertion, and fixed-template retrieval endpoints through its authenticated proxy. Its poll uses `GET /overview`, which serves the board and its event history from one ACL lookup and one pipeline listing, and `GET /context-graph?include=assertions`, which inlines the review queue so no dependent request follows. Polled read responses carry ETags: an unchanged poll revalidates to an empty 304, and the API itself skips reloading the board snapshot when its stored version has not moved. Historical graph lists contain summaries with counts denormalized at write time; full nodes and edges load only when requested.
 
 `POST /mcp` implements stateless Streamable HTTP MCP with one read-only `query_graph` tool. The server chooses bounded retrieval templates and returns cited results; callers do not choose SQL, graph generations, or internal tools.
 

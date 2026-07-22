@@ -173,6 +173,40 @@ test(
 );
 
 test(
+  "Postgres versioned snapshot loads skip the blob when nothing changed",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const stateStore = new PostgresJsonStateStore<{ readonly counter: number }>({ connectionString });
+    const priorState = await stateStore.load();
+
+    try {
+      await stateStore.save({ counter: 1 });
+      const first = await stateStore.loadNewer(0);
+      assert.ok(first !== "unchanged" && first !== undefined);
+      assert.deepEqual(first.snapshot, { counter: 1 });
+      assert.equal(await stateStore.loadNewer(first.version), "unchanged");
+      await stateStore.save({ counter: 2 });
+      const second = await stateStore.loadNewer(first.version);
+      assert.ok(second !== "unchanged" && second !== undefined);
+      assert.deepEqual(second.snapshot, { counter: 2 });
+      assert.ok(second.version > first.version);
+    } finally {
+      if (priorState === undefined) {
+        const cleanup = new Pool({ connectionString });
+        await cleanup.query("delete from jina_runtime.api_state where id=1");
+        await cleanup.end();
+      } else {
+        await stateStore.save(priorState);
+      }
+      await stateStore.close();
+    }
+  }
+);
+
+test(
   "Postgres causal retrieval follows the current graph head and migrations backfill missing heads",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"

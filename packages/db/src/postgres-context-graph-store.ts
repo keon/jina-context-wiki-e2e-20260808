@@ -461,10 +461,13 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       parameters.push(filter.ref);
       conditions.push(`head.ref_name=$${parameters.length}`);
     }
+    // Counts come from the denormalized columns written at graph insert;
+    // the correlated count(*) only covers rows saved before those columns
+    // existed (schema application backfills them, so it is rarely taken).
     const result = await this.pool.query<GraphSummaryRow>(
       `select g.*,
-         (select count(*) from jina_context_graph.nodes n where n.graph_id = g.id) as node_count,
-         (select count(*) from jina_context_graph.edges e where e.graph_id = g.id) as edge_count
+         coalesce(g.node_count, (select count(*) from jina_context_graph.nodes n where n.graph_id = g.id)) as node_count,
+         coalesce(g.edge_count, (select count(*) from jina_context_graph.edges e where e.graph_id = g.id)) as edge_count
        from jina_context_graph.graph_heads head
        join jina_context_graph.graphs g on g.id=head.graph_id and g.tenant_id=head.tenant_id
        where ${conditions.join(" and ")}
@@ -3494,8 +3497,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
 async function insertContextGraph(client: PoolClient, graph: ContextGraph): Promise<void> {
   const inserted = await client.query(
     `insert into jina_context_graph.graphs
-      (id, tenant_id, repository, ref, commit_sha, generated_at, executor, model, sandbox_id, summary)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+      (id, tenant_id, repository, ref, commit_sha, generated_at, executor, model, sandbox_id, summary, node_count, edge_count)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
      on conflict (id) do nothing
      returning id`,
     [
@@ -3508,33 +3511,47 @@ async function insertContextGraph(client: PoolClient, graph: ContextGraph): Prom
       graph.generator.executor,
       graph.generator.model,
       graph.generator.sandboxId ?? null,
-      graph.summary
+      graph.summary,
+      graph.nodes.length,
+      graph.edges.length
     ]
   );
   if (inserted.rowCount !== 1) return;
-  for (const node of graph.nodes) {
+  if (graph.nodes.length > 0) {
     await client.query(
-      `insert into jina_context_graph.nodes
-        (graph_id,node_id,kind,label,description,path,evidence) values ($1,$2,$3,$4,$5,$6,$7::jsonb)`,
-      [graph.id, node.id, node.kind, node.label, node.description, node.path ?? null, JSON.stringify(node.evidence)]
+      `insert into jina_context_graph.nodes (graph_id,node_id,kind,label,description,path,evidence)
+       select $1, node_id, kind, label, description, path, evidence
+       from unnest($2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::jsonb[])
+         as node(node_id,kind,label,description,path,evidence)`,
+      [
+        graph.id,
+        graph.nodes.map((node) => node.id),
+        graph.nodes.map((node) => node.kind),
+        graph.nodes.map((node) => node.label),
+        graph.nodes.map((node) => node.description),
+        graph.nodes.map((node) => node.path ?? null),
+        graph.nodes.map((node) => JSON.stringify(node.evidence))
+      ]
     );
   }
-  for (const edge of graph.edges) {
+  if (graph.edges.length > 0) {
     await client.query(
       `insert into jina_context_graph.edges
         (graph_id,edge_id,source_node_id,target_node_id,predicate,plane,confidence,why,qualifiers,evidence)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb)`,
+       select $1, edge_id, source_node_id, target_node_id, predicate, plane, confidence, why, qualifiers, evidence
+       from unnest($2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::float8[],$8::text[],$9::jsonb[],$10::jsonb[])
+         as edge(edge_id,source_node_id,target_node_id,predicate,plane,confidence,why,qualifiers,evidence)`,
       [
         graph.id,
-        edge.id,
-        edge.source,
-        edge.target,
-        edge.predicate,
-        edge.plane,
-        edge.confidence ?? null,
-        edge.why ?? null,
-        JSON.stringify(edge.qualifiers ?? {}),
-        JSON.stringify(edge.evidence)
+        graph.edges.map((edge) => edge.id),
+        graph.edges.map((edge) => edge.source),
+        graph.edges.map((edge) => edge.target),
+        graph.edges.map((edge) => edge.predicate),
+        graph.edges.map((edge) => edge.plane),
+        graph.edges.map((edge) => edge.confidence ?? null),
+        graph.edges.map((edge) => edge.why ?? null),
+        graph.edges.map((edge) => JSON.stringify(edge.qualifiers ?? {})),
+        graph.edges.map((edge) => JSON.stringify(edge.evidence))
       ]
     );
   }
@@ -5677,6 +5694,12 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
         on jina_context_graph.edges (graph_id,predicate,source_node_id);
       create index if not exists context_graph_edges_graph_predicate_target
         on jina_context_graph.edges (graph_id,predicate,target_node_id);
+      alter table jina_context_graph.graphs add column if not exists node_count integer;
+      alter table jina_context_graph.graphs add column if not exists edge_count integer;
+      update jina_context_graph.graphs g
+         set node_count=(select count(*) from jina_context_graph.nodes n where n.graph_id=g.id),
+             edge_count=(select count(*) from jina_context_graph.edges e where e.graph_id=g.id)
+       where g.node_count is null or g.edge_count is null;
       create table if not exists jina_context_graph.observations (
         id text primary key,
         tenant_id text not null,

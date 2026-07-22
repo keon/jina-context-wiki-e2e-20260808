@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   applyCommand,
@@ -108,6 +108,15 @@ export interface ApiSnapshot {
 
 export interface ApiStateStore {
   load(): Promise<ApiSnapshot | undefined>;
+  /**
+   * Optional read-path optimization: return "unchanged" instead of the full
+   * snapshot when the stored version is still sinceVersion. Read-only routes
+   * poll the snapshot on every request, so skipping the blob transfer and
+   * parse when nothing was written dominates their cost.
+   */
+  loadNewer?(
+    sinceVersion: number
+  ): Promise<{ readonly snapshot: ApiSnapshot; readonly version: number } | "unchanged" | undefined>;
   ping(): Promise<void>;
   hasDelivery(deliveryId: string): Promise<boolean>;
   save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean>;
@@ -132,6 +141,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const ready = initializeState();
   let mutations = Promise.resolve();
   let transactionActive = false;
+  /** Version of the last snapshot restored via loadNewer; 0 = never restored. */
+  let restoredVersion = 0;
 
   function mutate<T>(operation: () => Promise<T>): Promise<T>;
   function mutate<T>(operation: () => Promise<T>, deliveryId: string): Promise<T | undefined>;
@@ -305,7 +316,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   async function reload(): Promise<void> {
-    const stored = await config.stateStore?.load();
+    const store = config.stateStore;
+    if (!store) return;
+    if (store.loadNewer) {
+      // Local writes leave restoredVersion stale, so the next reload fetches
+      // the full snapshot once and re-anchors the version; every later poll
+      // with no intervening write is a cheap version probe.
+      const result = await store.loadNewer(restoredVersion);
+      if (result === "unchanged" || result === undefined) return;
+      restore(result.snapshot);
+      restoredVersion = result.version;
+      return;
+    }
+    const stored = await store.load();
     if (stored) restore(stored);
   }
 
@@ -469,9 +492,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/task-types") {
-      json(
+      jsonCacheable(
+        request,
         response,
-        200,
         buildTaskTypeCatalog(
           [...taskTypeDefinitions, ...contextGraphTaskTypeDefinitions],
           [...prReviewTaskTypeDependencies, ...contextGraphTaskTypeDependencies],
@@ -640,7 +663,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         tenantId,
         allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
       );
-      json(response, 200, mergePipelineBoardView(board, pipeline, allowedRepositories));
+      jsonCacheable(request, response, mergePipelineBoardView(board, pipeline, allowedRepositories));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/overview") {
+      // Single round trip for the dashboard poll: the board and its event
+      // history share one ACL lookup and one pipeline listing instead of the
+      // separate /board + /events requests duplicating both.
+      const allowedRepositories = isTenantAdmin(principal)
+        ? undefined
+        : new Set(await repositoriesForPrincipal(principal));
+      const pipeline = await contextGraphCoordinator.list(
+        tenantId,
+        allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
+      );
+      const board = mergePipelineBoardView(
+        tenantBoardView(intakeState, publications, tenantId, allowedRepositories),
+        pipeline,
+        allowedRepositories
+      );
+      const events = await collectBoardEvents(tenantId, allowedRepositories, pipeline);
+      jsonCacheable(request, response, { board, events });
       return;
     }
     if (request.method === "GET" && url.pathname === "/context-graph") {
@@ -665,9 +708,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ? await contextGraphStore.get(graphs[0].id, tenantId)
           : undefined
         : await contextGraphStore.latest(tenantId);
-      json(response, 200, {
-        latest: latest && allowedRepositories.includes(latest.repository) ? latest : null,
-        graphs
+      const permittedLatest = latest && allowedRepositories.includes(latest.repository) ? latest : null;
+      // ?include=assertions folds the assertion-review fetch into this
+      // response so the client does not need a dependent second round trip.
+      const assertions =
+        url.searchParams.get("include") === "assertions"
+          ? permittedLatest
+            ? await contextGraphStore.listAssertions(tenantId, permittedLatest.repository, {})
+            : []
+          : undefined;
+      jsonCacheable(request, response, {
+        latest: permittedLatest,
+        graphs,
+        ...(assertions ? { assertions } : {})
       });
       return;
     }
@@ -745,7 +798,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ? (entityKindValue as (typeof contextGraphNodeKinds)[number])
           : undefined;
       if (entityKindValue && !entityKind) throw invalidRequest("unsupported contextGraph entity kind");
-      json(response, 200, {
+      jsonCacheable(request, response, {
         assertions: await contextGraphStore.listAssertions(tenantId, repository, {
           ...(status ? { status } : {}),
           ...(predicate ? { predicate } : {}),
@@ -779,25 +832,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const allowedRepositories = isTenantAdmin(principal)
         ? undefined
         : new Set(await repositoriesForPrincipal(principal));
-      const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
       const workflows = await contextGraphCoordinator.list(
         tenantId,
         allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
       );
-      const pipelineTaskIds = new Set(
-        workflows.flatMap(({ build, stages }) => [build.id, ...stages.map((stage) => stage.id)])
-      );
-      const pipelineEvents = (await contextGraphCoordinator.listEvents(tenantId, { taskIds: [...pipelineTaskIds] }))
-        .filter((event) => pipelineTaskIds.has(event.taskId))
-        .map((event, index) => ({ ...event, seq: index + 1 }));
-      json(
-        response,
-        200,
-        [
-          ...intakeState.board.events.filter((event) => event.taskId && taskIds.has(event.taskId)),
-          ...pipelineEvents
-        ].sort((left, right) => left.at.localeCompare(right.at))
-      );
+      jsonCacheable(request, response, await collectBoardEvents(tenantId, allowedRepositories, workflows));
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/build") {
@@ -1522,6 +1561,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return (
       principal.principalId.startsWith("svc:") || (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
     );
+  }
+
+  async function collectBoardEvents(
+    tenantId: string,
+    allowedRepositories: ReadonlySet<string> | undefined,
+    workflows: readonly {
+      readonly build: ContextGraphBuildRecord;
+      readonly stages: readonly ContextGraphStageRecord[];
+    }[]
+  ) {
+    const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
+    const pipelineTaskIds = new Set(
+      workflows.flatMap(({ build, stages }) => [build.id, ...stages.map((stage) => stage.id)])
+    );
+    const pipelineEvents = (await contextGraphCoordinator.listEvents(tenantId, { taskIds: [...pipelineTaskIds] }))
+      .filter((event) => pipelineTaskIds.has(event.taskId))
+      .map((event, index) => ({ ...event, seq: index + 1 }));
+    return [
+      ...intakeState.board.events.filter((event) => event.taskId && taskIds.has(event.taskId)),
+      ...pipelineEvents
+    ].sort((left, right) => left.at.localeCompare(right.at));
   }
 
   async function repositoriesForPrincipal(principal: {
@@ -2606,16 +2666,37 @@ function requiredPositiveInteger(value: unknown, field: string): number {
   return value;
 }
 
+const JSON_RESPONSE_HEADERS = {
+  "content-type": "application/json; charset=utf-8",
+  "access-control-allow-origin": "*",
+  "access-control-allow-headers":
+    "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
+  "access-control-allow-methods": "GET, POST, OPTIONS"
+} as const;
+
 function json(response: ServerResponse, statusCode: number, payload: unknown): void {
   if (response.headersSent || response.destroyed) return;
-  response.writeHead(statusCode, {
-    "content-type": "application/json; charset=utf-8",
-    "access-control-allow-origin": "*",
-    "access-control-allow-headers":
-      "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
-    "access-control-allow-methods": "GET, POST, OPTIONS"
-  });
+  response.writeHead(statusCode, JSON_RESPONSE_HEADERS);
   response.end(statusCode === 204 ? undefined : JSON.stringify(payload));
+}
+
+/**
+ * Success response for polled read routes. Dashboard clients revalidate every
+ * few seconds, so a matching ETag turns an unchanged multi-megabyte payload
+ * (board snapshot, full context graph) into an empty 304.
+ */
+function jsonCacheable(request: IncomingMessage, response: ServerResponse, payload: unknown): void {
+  if (response.headersSent || response.destroyed) return;
+  const body = JSON.stringify(payload);
+  const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
+  const headers = { ...JSON_RESPONSE_HEADERS, etag, "cache-control": "no-cache" };
+  if (request.headers["if-none-match"] === etag) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  response.writeHead(200, headers);
+  response.end(body);
 }
 
 class ApiError extends Error {

@@ -3,17 +3,21 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc -b && node scripts/build-client.mjs",
-    "typecheck": "tsc -b",
+    "build": "next build",
+    "typecheck": "tsc --noEmit",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/app/*.test.js dist/server/*.test.js",
-    "dev": "pnpm build && node dist/server/dev-server.js"
+    "test": "node --test src/lib/*.test.ts src/server/*.test.ts",
+    "dev": "next dev -p 3000"
   },
   "dependencies": {
-    "@cosmos.gl/graph": "^3.3.0"
+    "@cosmos.gl/graph": "^3.3.0",
+    "next": "^15.5.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
-    "esbuild": "^0.28.1"
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0"
   }
 }

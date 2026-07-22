@@ -1,53 +1,55 @@
 import { Graph } from "@cosmos.gl/graph";
-import { canvasFallbackStatus, canvasGraphSlice, chooseRendererMode } from "./context-graph-renderer-policy.js";
+import { canvasFallbackStatus, canvasGraphSlice, chooseRendererMode } from "./context-graph-renderer-policy.ts";
+
+/**
+ * Interactive context-graph renderer, ported from the previous dashboard's
+ * standalone context-graph-client bundle. The only change is module plumbing:
+ * instead of attaching a factory to window.JinaContextGraph, the factory is
+ * exported for the React page to import dynamically (it touches window and
+ * WebGL, so it must never run during SSR).
+ */
 
 interface GraphNode {
-  id: string;
-  kind: string;
-  label: string;
-  description?: string;
+  readonly id: string;
+  readonly kind: string;
+  readonly label: string;
+  readonly description?: string;
 }
 
 interface GraphEdge {
-  id: string;
-  source: string;
-  target: string;
-  predicate: string;
-  plane: string;
+  readonly id: string;
+  readonly source: string;
+  readonly target: string;
+  readonly predicate: string;
+  readonly plane: string;
 }
 
-type GraphSelection = { kind: "node" | "edge"; id: string } | null;
+export type RendererSelection = { kind: "node" | "edge"; id: string } | null;
 
-interface RendererData {
-  key: string;
-  nodes: GraphNode[];
-  edges: GraphEdge[];
-  labels: Record<string, string>;
+export interface RendererData {
+  readonly key: string;
+  readonly nodes: readonly GraphNode[];
+  readonly edges: readonly GraphEdge[];
+  readonly labels: Readonly<Record<string, string>>;
 }
 
-interface RendererOptions {
-  container: HTMLDivElement;
-  labels: HTMLElement;
-  minimap: HTMLCanvasElement;
-  status: HTMLElement;
-  onSelect: (selection: GraphSelection) => void;
-  onZoomChange?: (percent: number) => void;
+export interface RendererOptions {
+  readonly container: HTMLDivElement;
+  readonly labels: HTMLElement;
+  readonly minimap: HTMLCanvasElement;
+  readonly status: HTMLElement;
+  readonly onSelect: (selection: RendererSelection) => void;
+  readonly onZoomChange?: (percent: number) => void;
 }
 
-interface PublicRenderer {
+export interface PublicRenderer {
   setData(data: RendererData): void;
-  setSelection(selection: GraphSelection): void;
-  setSearchMatches(matches: Exclude<GraphSelection, null>[]): void;
+  setSelection(selection: RendererSelection): void;
+  setSearchMatches(matches: Exclude<RendererSelection, null>[]): void;
   fit(): void;
   zoomBy(factor: number): void;
   reset(): void;
   destroy(): void;
-}
-
-declare global {
-  interface Window {
-    JinaContextGraph?: { create(options: RendererOptions): PublicRenderer };
-  }
 }
 
 const NODE_COLORS: Record<string, [number, number, number, number]> = {
@@ -78,8 +80,8 @@ class ContextGraphRenderer implements PublicRenderer {
   private readonly graph: Graph;
   private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
   private dataKey = "";
-  private selection: GraphSelection = null;
-  private searchMatches: Exclude<GraphSelection, null>[] = [];
+  private selection: RendererSelection = null;
+  private searchMatches: Exclude<RendererSelection, null>[] = [];
   private nodeIndex = new Map<string, number>();
   private edgeIndex = new Map<string, number>();
   private degree: number[] = [];
@@ -315,14 +317,14 @@ class ContextGraphRenderer implements PublicRenderer {
     this.setSelection(this.selection);
   }
 
-  setSelection(selection: GraphSelection): void {
+  setSelection(selection: RendererSelection): void {
     const selectionChanged = selection?.kind !== this.selection?.kind || selection?.id !== this.selection?.id;
     this.selection = selection;
     if (!this.ready) return;
     this.applyHighlights(selectionChanged, false);
   }
 
-  setSearchMatches(matches: Exclude<GraphSelection, null>[]): void {
+  setSearchMatches(matches: Exclude<RendererSelection, null>[]): void {
     const previousKey = this.searchMatches.map((match) => match.kind + ":" + match.id).join("|");
     const nextKey = matches.map((match) => match.kind + ":" + match.id).join("|");
     this.searchMatches = matches;
@@ -752,8 +754,8 @@ class CanvasContextGraphRenderer implements PublicRenderer {
   private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
   private sourceNodeCount = 0;
   private sourceEdgeCount = 0;
-  private selection: GraphSelection = null;
-  private searchMatches: Exclude<GraphSelection, null>[] = [];
+  private selection: RendererSelection = null;
+  private searchMatches: Exclude<RendererSelection, null>[] = [];
   private zoom = 1;
 
   constructor(options: RendererOptions) {
@@ -779,12 +781,12 @@ class CanvasContextGraphRenderer implements PublicRenderer {
     this.render();
   }
 
-  setSelection(selection: GraphSelection): void {
+  setSelection(selection: RendererSelection): void {
     this.selection = selection;
     this.render();
   }
 
-  setSearchMatches(matches: Exclude<GraphSelection, null>[]): void {
+  setSearchMatches(matches: Exclude<RendererSelection, null>[]): void {
     this.searchMatches = matches;
     this.render();
   }
@@ -979,8 +981,8 @@ class CanvasContextGraphRenderer implements PublicRenderer {
 class AdaptiveContextGraphRenderer implements PublicRenderer {
   private renderer: PublicRenderer;
   private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
-  private selection: GraphSelection = null;
-  private matches: Exclude<GraphSelection, null>[] = [];
+  private selection: RendererSelection = null;
+  private matches: Exclude<RendererSelection, null>[] = [];
   private usingCanvas = false;
   private destroyed = false;
 
@@ -993,12 +995,12 @@ class AdaptiveContextGraphRenderer implements PublicRenderer {
     this.renderer.setData(data);
   }
 
-  setSelection(selection: GraphSelection): void {
+  setSelection(selection: RendererSelection): void {
     this.selection = selection;
     this.renderer.setSelection(selection);
   }
 
-  setSearchMatches(matches: Exclude<GraphSelection, null>[]): void {
+  setSearchMatches(matches: Exclude<RendererSelection, null>[]): void {
     this.matches = matches;
     this.renderer.setSearchMatches(matches);
   }
@@ -1115,10 +1117,6 @@ function humanize(value: string): string {
     .replace(/^./, (letter) => letter.toUpperCase());
 }
 
-window.JinaContextGraph = {
-  create(options: RendererOptions): PublicRenderer {
-    return new AdaptiveContextGraphRenderer(options);
-  }
-};
-
-export {};
+export function createContextGraphRenderer(options: RendererOptions): PublicRenderer {
+  return new AdaptiveContextGraphRenderer(options);
+}

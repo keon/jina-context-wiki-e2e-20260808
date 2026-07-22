@@ -8,6 +8,7 @@ onlyBuiltDependencies:
 allowBuilds:
   esbuild: true
   protobufjs: true
+  sharp: false
 
 overrides:
   "@opentelemetry/propagator-jaeger": ">=2.9.0"

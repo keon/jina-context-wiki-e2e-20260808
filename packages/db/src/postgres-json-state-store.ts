@@ -14,6 +14,11 @@ export interface StateUpdateResult<R> {
   readonly result?: R;
 }
 
+export interface VersionedState<T> {
+  readonly snapshot: T;
+  readonly version: number;
+}
+
 /**
  * Durable MVP state store. The board snapshot and delivery ledger are written
  * in one Postgres transaction so an acknowledged webhook survives restarts.
@@ -41,6 +46,25 @@ export class PostgresJsonStateStore<T> {
     await this.initialize();
     const result = await this.pool.query<{ snapshot: T }>("select snapshot from jina_runtime.api_state where id = 1");
     return result.rows[0]?.snapshot;
+  }
+
+  /**
+   * Read-path optimization for pollers: returns "unchanged" without shipping
+   * or parsing the snapshot blob when the stored version is still
+   * sinceVersion, and undefined when no state has ever been saved. Versions
+   * are monotonic (the writer increments on every save), so callers can cache
+   * the last version they restored.
+   */
+  async loadNewer(sinceVersion: number): Promise<VersionedState<T> | "unchanged" | undefined> {
+    await this.initialize();
+    const result = await this.pool.query<{ snapshot: T; version: string }>(
+      "select snapshot, version from jina_runtime.api_state where id = 1 and version > $1",
+      [sinceVersion]
+    );
+    const row = result.rows[0];
+    if (row) return { snapshot: row.snapshot, version: Number(row.version) };
+    if (sinceVersion > 0) return "unchanged";
+    return undefined;
   }
 
   async hasDelivery(deliveryId: string): Promise<boolean> {

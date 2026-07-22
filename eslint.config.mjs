@@ -5,13 +5,13 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "**/*.tsbuildinfo"]
+    ignores: ["**/dist/**", "**/node_modules/**", "**/.turbo/**", "**/.next/**", "**/next-env.d.ts", "**/*.tsbuildinfo"]
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommendedTypeChecked,
   ...tseslint.configs.stylisticTypeChecked,
   {
-    files: ["**/*.ts"],
+    files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
@@ -42,7 +42,7 @@ export default tseslint.config(
     }
   },
   {
-    files: ["**/*.test.ts"],
+    files: ["**/*.test.ts", "**/*.test.tsx"],
     rules: {
       // node:test returns promises from test registration; they must not be awaited at module scope.
       "@typescript-eslint/no-floating-promises": "off",

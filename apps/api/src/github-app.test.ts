@@ -1466,6 +1466,54 @@ test("retired ontology routes redirect permanently to their context-graph replac
   }
 });
 
+test("overview combines the board and events behind one ETag-validated response", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, seedDemo: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    const overviewResponse = await fetch(`${baseUrl}/overview`);
+    assert.equal(overviewResponse.status, 200);
+    const etag = overviewResponse.headers.get("etag");
+    assert.ok(etag);
+    const overview = (await overviewResponse.json()) as {
+      board: { tasks: { id: string }[] };
+      events: { taskId?: string; at: string }[];
+    };
+    const [board, events] = (await Promise.all(
+      [`${baseUrl}/board`, `${baseUrl}/events`].map((url) => fetch(url).then((response) => response.json()))
+    )) as [unknown, unknown];
+    assert.deepEqual(overview.board, board);
+    assert.deepEqual(overview.events, events);
+    const revalidated = await fetch(`${baseUrl}/overview`, { headers: { "if-none-match": etag } });
+    assert.equal(revalidated.status, 304);
+    assert.equal(await revalidated.text(), "");
+  } finally {
+    await close(server);
+  }
+});
+
+test("context graph responses can inline the assertion review queue", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, seedDemo: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    const plain = (await fetch(`${baseUrl}/context-graph`).then((response) => response.json())) as {
+      latest: { repository: string } | null;
+      assertions?: unknown;
+    };
+    assert.ok(plain.latest);
+    assert.equal(plain.assertions, undefined);
+    const withAssertions = (await fetch(`${baseUrl}/context-graph?include=assertions`).then((response) =>
+      response.json()
+    )) as { latest: { repository: string } | null; assertions: { status: string }[] };
+    assert.ok(Array.isArray(withAssertions.assertions));
+    const direct = (await fetch(
+      `${baseUrl}/context-graph/assertions?repository=${encodeURIComponent(withAssertions.latest?.repository ?? "")}`
+    ).then((response) => response.json())) as { assertions: unknown[] };
+    assert.deepEqual(withAssertions.assertions, direct.assertions);
+  } finally {
+    await close(server);
+  }
+});
+
 async function listen(server: ReturnType<typeof createApiServer>): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;

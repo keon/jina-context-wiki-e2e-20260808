@@ -5,7 +5,7 @@ import {
   CANVAS_NODE_LIMIT,
   canvasFallbackStatus,
   canvasGraphSlice
-} from "./context-graph-renderer-policy.js";
+} from "./context-graph-renderer-policy.ts";
 
 test("Canvas fallback deterministically bounds a large graph without dangling edges", () => {
   const nodes = Array.from({ length: 5_000 }, (_, index) => ({ id: `node-${index}` }));
