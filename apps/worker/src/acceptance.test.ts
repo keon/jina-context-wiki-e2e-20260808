@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   blockedContextGraphTaskIds,
   productionAcceptanceExitCode,
+  reviewFixtureProposals,
   runProductionContextGraphAcceptance
 } from "./acceptance.js";
 
@@ -54,6 +55,52 @@ test("blocked contextGraph detection is scoped to the accepted repository and re
     ),
     ["same"]
   );
+});
+
+test("v5.1 fixture review loads every repository predicate while excluding causal duplicates", async () => {
+  const requestedUrls: URL[] = [];
+  const reviewedIds: string[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    requestedUrls.push(url);
+    if (url.pathname === "/context-graph/assertions") {
+      return json({
+        assertions: [
+          {
+            id: "causal-duplicate",
+            status: "proposed",
+            predicate: "INTRODUCED_BY",
+            evidence: ["ROOT_CAUSE.md:2"]
+          },
+          {
+            id: "feature-implementation",
+            status: "proposed",
+            predicate: "IMPLEMENTS",
+            evidence: ["src/admin.ts:7"]
+          }
+        ]
+      });
+    }
+    if (url.pathname === "/context-graph/commands") {
+      const body = JSON.parse(String(init?.body ?? "{}")) as { assertionId?: string };
+      if (body.assertionId) reviewedIds.push(body.assertionId);
+      return json({ affectedIds: [body.assertionId] });
+    }
+    return json({ error: "not found" }, 404);
+  };
+
+  await reviewFixtureProposals(
+    fetchImpl,
+    "https://api.example.test",
+    { authorization: "Bearer secret" },
+    "omxyz/jina-context-graph-e2e",
+    new Set(["causal-duplicate"])
+  );
+
+  const assertionRequest = requestedUrls.find((url) => url.pathname === "/context-graph/assertions");
+  assert.equal(assertionRequest?.searchParams.get("repository"), "omxyz/jina-context-graph-e2e");
+  assert.equal(assertionRequest?.searchParams.has("predicate"), false);
+  assert.deepEqual(reviewedIds, ["feature-implementation"]);
 });
 
 test("production acceptance waits for all chunks and verifies cited canonical output", async () => {

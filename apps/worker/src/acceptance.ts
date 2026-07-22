@@ -231,7 +231,7 @@ export async function runProductionContextGraphAcceptance(
         fetchImpl,
         apiUrl,
         headers,
-        assertions,
+        repository,
         new Set(
           causalAssertions.flatMap((value) => (isRecord(value) && typeof value.id === "string" ? [value.id] : []))
         )
@@ -435,13 +435,19 @@ async function verifyCounterfactualAnswer(
   throw new Error(`production counterfactual context is unsupported or uncited for: ${question}`);
 }
 
-async function reviewFixtureProposals(
+export async function reviewFixtureProposals(
   fetchImpl: typeof fetch,
   apiUrl: string,
   headers: Record<string, string>,
-  assertions: readonly unknown[],
+  repository: string,
   excludedIds: ReadonlySet<string>
 ): Promise<void> {
+  const response = await apiJson(
+    fetchImpl,
+    `${apiUrl}/context-graph/assertions?repository=${encodeURIComponent(repository)}`,
+    { headers }
+  );
+  const assertions = requiredArray(response.assertions, "v5.1 fixture assertions");
   const reviewablePredicates = new Set([
     "IMPLEMENTS",
     "DOCUMENTED_BY",
