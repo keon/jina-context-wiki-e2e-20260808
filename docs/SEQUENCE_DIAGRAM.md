@@ -4,32 +4,26 @@ These diagrams describe the implementation deployed by `cloudbuild.yaml`.
 
 The board reducer is the orchestrator. Workers never mutate board state directly: they claim a durable outbox lease through the API, perform external work outside the API mutation lock, renew the lease while active, and complete through the API.
 
-## Signed GitHub intake
+## Production review graph intake
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant GitHub
-    participant API as jina-api
+    participant Original as original Jina API
+    participant API as v2 jina-api
     participant DB as Cloud SQL PostgreSQL
 
-    GitHub->>API: POST /webhooks/github
-    API->>API: Verify HMAC, event type, delivery ID
-    API->>DB: Check unique delivery ID
-    alt duplicate delivery
-        API-->>GitHub: 200 duplicate
-    else supported PR or issue event
-        API->>API: Plan tasks and dependencies
-        API->>API: Reduce readiness and create outbox messages
-        API->>DB: Lock, load latest snapshot, commit delivery ID + new snapshot
-        API-->>GitHub: 202 accepted
-    else ignored event
-        API->>DB: Commit delivery ID
-        API-->>GitHub: 202 acknowledged
-    end
+    GitHub->>Original: POST /webhooks/github
+    Original->>Original: Verify HMAC and accept review request
+    Original->>DB: Resolve enabled repository and original tenant UUID
+    Original->>API: POST /context-graph/build with tenant, PR head, deterministic request key
+    API->>DB: Create or reuse graph build and stages
+    API-->>Original: 202 graph task
+    Original-->>GitHub: 200 review + graph accepted
 ```
 
-An opened pull request creates `pr_review`, `review_pass`, and `publish` tasks. A `synchronize` event supersedes non-terminal tasks from the old epoch and creates the next epoch. An opened issue creates one manual `issue_triage` card.
+The original application remains responsible for review execution. V2 creates only the tenant-scoped context graph build for the accepted PR head. Its direct signed webhook route is disabled in production and acknowledges without creating work.
 
 ## Durable review and publication flow
 

@@ -23,6 +23,32 @@ const GRAPH_TOKEN = "test-graph-token";
 const TENANT = "github:installation:99";
 const SHARED_TENANT = "5f4d1548-7e14-4f9e-a6e2-e7d38b61b1c2";
 
+test("disabled GitHub intake acknowledges signed deliveries without creating work", async (context) => {
+  const server = createApiServer({
+    githubWebhookSecret: SECRET,
+    githubWebhookEnabled: false,
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: TENANT
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const response = await deliver(baseUrl, "pull_request", "delivery-disabled", pullRequestPayload(42, "abc123"));
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    accepted: false,
+    reason: "GitHub webhook intake is disabled; original Jina owns review intake"
+  });
+  const board = await authenticatedFetch(`${baseUrl}/board`).then(
+    (value) => value.json() as Promise<{ tasks: unknown[] }>
+  );
+  assert.deepEqual(board.tasks, []);
+});
+
 test("signed GitHub App deliveries create idempotent PR and issue tasks", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -568,7 +594,12 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         repository: "omxyz/context-graph-fixture",
         ref: "main",
         requestKey: "test",
-        snapshotFirst: true
+        snapshotFirst: true,
+        metadata: {
+          source: "jina-v1-review",
+          pullRequestNumber: 42,
+          authorLogin: "alice"
+        }
       })
     });
     assert.equal(created.status, 202);
@@ -770,6 +801,9 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         }>
     );
     assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.source, "jina-v1-review");
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.pullRequestNumber, 42);
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.authorLogin, "alice");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_ingest")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_assert")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_project")?.status, "done");
