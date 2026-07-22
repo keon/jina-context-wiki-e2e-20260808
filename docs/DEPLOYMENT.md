@@ -1,8 +1,19 @@
 # Deployment
 
-Cloud Build validates pull requests and deploys backend changes from `main` to the `jina-v2` Google Cloud project in `us-central1`. Pull-request builds use a validation-only service account and cannot change production. The main trigger requires approval before its build starts.
+Cloud Build validates pull requests and deploys backend changes from `main` to the `jina-v2` Google Cloud project in `us-central1`. Pull-request builds use a validation-only service account and cannot change production. The main trigger requires approval before its build starts. GitHub Actions is not used for CI or backend deployment; `.github` contains only Dependabot configuration.
 
-The Next.js dashboard and admin apps deploy through the Om Labs Vercel projects `jina-dashboard` and `jina-admin`, not this Google Cloud pipeline. Both projects track `omxyz/jina`; pushes to `main` create production deployments from `apps/dashboard` and `apps/admin`. Cloud Build still compiles both production bundles. The existing `jina-dashboard` Cloud Run service remains available during traffic cutover, but Cloud Build does not update it.
+The Next.js dashboard and admin apps deploy through the Om Labs Vercel projects `jina-dashboard` and `jina-admin`, not this Google Cloud pipeline. Both projects track `omxyz/jina`; pushes to `main` create production deployments from `apps/dashboard` and `apps/admin`, and pull requests create previews. Cloud Build still compiles both production bundles. The legacy `jina-dashboard` Cloud Run service remains available during traffic cutover, but Cloud Build does not update it.
+
+## Current delivery paths
+
+| Change                        | System          | Configuration                          | Result                                                                                         |
+| ----------------------------- | --------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Pull request targeting `main` | Cloud Build     | `jina-pr-ci` (`cloudbuild.ci.yaml`)    | Validation only; no production credentials or mutation rights                                  |
+| Push/merge to `main`          | Cloud Build     | `jina-main-deploy` (`cloudbuild.yaml`) | Creates a manually approved backend release, deploys Cloud Run, and runs production acceptance |
+| Pull request                  | Vercel, Om Labs | `jina-dashboard`, `jina-admin`         | Preview deployments for both web apps                                                          |
+| Push/merge to `main`          | Vercel, Om Labs | Production branch `main`               | Automatic production deployments for both web apps                                             |
+
+The Cloud Build GitHub repository connection is `jina-github` in `us-central1`. Trigger IDs are `ad9f5441-6253-4553-8856-75be1aa66174` for PR validation and `92954810-36e3-4b35-8613-83c662d1052d` for approved `main` releases.
 
 ## Resources
 
@@ -26,9 +37,16 @@ See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants,
 
 The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health, task-type definitions, and signed webhooks remain public; tenant data does not.
 
-The current Vercel plan does not provide production Vercel Authentication for new projects, so both web apps enforce app-level HTTP authentication using server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values. Both apps forward the original tenant UUID through `JINA_TENANT_ID` when calling the shared-database API. The dashboard additionally forwards `JINA_WEB_PRINCIPAL_ID=user:keon@omlabs.xyz`; the admin app calls as `svc:api`. Both are tenant administrators, so possession of the web credentials controls access to tenant-wide data. Rotate the shared password through Secret Manager and both Vercel projects together.
+The current Vercel plan does not provide production Vercel Authentication for new projects, so both web apps enforce app-level HTTP authentication using server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values. The configured username is `omlabs`; the password remains secret. Both apps forward the original tenant UUID through `JINA_TENANT_ID` when calling the shared-database API. The dashboard additionally forwards `JINA_WEB_PRINCIPAL_ID=user:keon@omlabs.xyz`; the admin app calls as `svc:api`. Both are tenant administrators, so possession of the web credentials controls access to tenant-wide data. Rotate the shared password through Secret Manager and both Vercel projects together.
 
-Both apps make server-side API calls with `JINA_API_URL` and `INTERNAL_API_TOKEN`. Those values belong only in Vercel Production environment variables and must never use a `NEXT_PUBLIC_` prefix. Preview builds intentionally receive no production API token.
+Both apps make server-side API calls with `JINA_API_URL` and `INTERNAL_API_TOKEN`. Those values must remain server-only and must never use a `NEXT_PUBLIC_` prefix. The current Om Labs projects define the following variables for both Production and Preview so an authenticated preview can exercise the real API:
+
+| Project          | Root directory   | Canonical production URL            | Server environment                                                                                                                  |
+| ---------------- | ---------------- | ----------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| `jina-dashboard` | `apps/dashboard` | `https://jina-dashboard.vercel.app` | `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_TENANT_ID`, `JINA_WEB_AUTH_USERNAME`, `JINA_WEB_AUTH_PASSWORD`, `JINA_WEB_PRINCIPAL_ID` |
+| `jina-admin`     | `apps/admin`     | `https://jina-admin-ten.vercel.app` | `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_TENANT_ID`, `JINA_WEB_AUTH_USERNAME`, `JINA_WEB_AUTH_PASSWORD`                          |
+
+`JINA_API_URL` is `https://jina-api-m56inn6iva-uc.a.run.app`, and `JINA_TENANT_ID` is the original shared-database tenant UUID. The dashboard's `/api/overview` route forwards the bearer credential, tenant ID, and bound principal to the API. A browser request without the web session is expected to return `401`; an authenticated request must return the combined board/event payload and must not use a localhost fallback.
 
 Streamable HTTP MCP at `POST /mcp` requires both the internal credential and a bound principal. Browser origins must be listed exactly in `JINA_MCP_ALLOWED_ORIGINS`.
 
@@ -36,7 +54,7 @@ The simulation graph integration uses `GRAPH_API_TOKEN` for graph routes and exa
 
 The integration maps each simulation UUID to `tenant:<uuid>` and replaces that principal's complete repository ACL through `POST /internal/graph/access/sync`; repository removal or App uninstall is therefore revoked on the next sync.
 
-`GITHUB_CLONE_TOKEN` is the worker's temporary private-repository clone credential until installation tokens replace it. `GITHUB_API_TOKEN` may provide separate REST API access and falls back to the clone token when unset. Give the API token read-only access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions. Deployments and Actions access is optional enrichment; required source failures still fail closed.
+`GITHUB_CLONE_TOKEN` is the worker's temporary private-repository clone credential until installation tokens replace it. Production supplies the separate `GITHUB_API_TOKEN` from the `jina-github-api-token` Secret Manager secret; local execution falls back to the clone token when the API token is unset. Give the API token read-only access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions. The production v5.1 acceptance fixture requires Deployments access so its source-backed deployment identities can enter the graph. Other optional-source failures remain fail-closed only where the source is required by the requested contract.
 
 The production context graph uses the `jina-openrouter-api-key` secret with:
 
@@ -102,8 +120,10 @@ The migration revokes `PUBLIC` access, installs matching default privileges, use
 
 ```sh
 gcloud run services list --project=jina-v2 --region=us-central1
-gcloud run services describe jina-dashboard --project=jina-v2 --region=us-central1 --format=json
+gcloud run jobs executions list --job=jina-acceptance --project=jina-v2 --region=us-central1
 gcloud builds list --project=jina-v2 --region=us-central1
+vercel ls jina-dashboard --scope omlabs
+vercel ls jina-admin --scope omlabs
 ```
 
 Structured logging, trace correlation, metrics, and the recommended Cloud
