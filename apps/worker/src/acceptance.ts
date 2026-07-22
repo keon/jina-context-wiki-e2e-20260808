@@ -216,8 +216,10 @@ export async function runProductionContextGraphAcceptance(
       if (!isRecord(value) || !Array.isArray(value.evidence) || value.evidence.length === 0) return false;
       const qualifiers = isRecord(value.qualifiers) ? value.qualifiers : {};
       const reason = typeof qualifiers.reason === "string" ? qualifiers.reason : "";
-      return !config.causality?.reasonIncludes ||
-        reason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase());
+      return (
+        !config.causality?.reasonIncludes ||
+        reason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())
+      );
     });
     if (!isRecord(causalAssertion)) {
       throw new Error(
@@ -231,9 +233,7 @@ export async function runProductionContextGraphAcceptance(
         headers,
         assertions,
         new Set(
-          causalAssertions.flatMap((value) =>
-            isRecord(value) && typeof value.id === "string" ? [value.id] : []
-          )
+          causalAssertions.flatMap((value) => (isRecord(value) && typeof value.id === "string" ? [value.id] : []))
         )
       );
     }
@@ -676,8 +676,7 @@ async function waitForCausalTrace(
           const pullRequests = Array.isArray(value.pullRequests) ? value.pullRequests : [];
           if (
             !pullRequests.some(
-              (pullRequest) =>
-                isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber
+              (pullRequest) => isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber
             )
           )
             return false;
