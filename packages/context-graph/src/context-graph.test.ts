@@ -4,12 +4,15 @@ import {
   createContextGraph,
   isProblemEvidencePath,
   materializeRequiredCausalAssertions,
+  materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
+  requiredMoveAnchors,
   sourceBackedModelEntityIds,
   validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
+  validateRequiredMoveAssertions,
   validateSourceBackedModelEntities
 } from "./model.js";
 import { MemoryContextGraphStore } from "./store.js";
@@ -56,7 +59,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v15-move-continuity/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v16-materialized-move/);
   assert.match(
     CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
     /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
@@ -3061,6 +3064,13 @@ test("requires explicit root-cause records to appear as causal assertions", () =
       endLine: 2
     }
   ]);
+  assert.deepEqual(
+    requiredMoveAnchors([
+      { path: "README.md", content: "`../../outside.ts` moved from `src/inside.ts`." },
+      { path: "README.md", content: "src/current.ts may resemble src/old.ts." }
+    ]),
+    []
+  );
   const generated = parseGeneratedContextGraph({
     summary: "explicit causes",
     nodes: [
@@ -3149,6 +3159,61 @@ test("materializes explicit causal contracts and drops malformed optional causal
   await validateContextGraphEvidence(materialized, async (path) => {
     if (path === evidencePath) return content;
     if (path === "README.md") return "demo";
+    throw new Error(`unexpected evidence path: ${path}`);
+  });
+});
+
+test("materializes explicit file move continuity from repository evidence", async () => {
+  const evidencePath = "README.md";
+  const content = "`src/admin-deletion.ts` moved from `src/legacy-admin-deletion.ts` while retaining the same feature.";
+  const anchors = requiredMoveAnchors([
+    { path: evidencePath, content },
+    {
+      path: "docs/migration.md",
+      content: "The implementation moved from `src/legacy-admin-deletion.ts` to `src/admin-deletion.ts`."
+    }
+  ]);
+  assert.deepEqual(anchors, [
+    {
+      currentPath: "src/admin-deletion.ts",
+      previousPath: "src/legacy-admin-deletion.ts",
+      evidencePath,
+      startLine: 1,
+      endLine: 1
+    }
+  ]);
+
+  const generated = parseGeneratedContextGraph({
+    summary: "model output omitted explicit move continuity",
+    nodes: [
+      {
+        id: "repo",
+        kind: "Repository",
+        label: "demo",
+        description: "repository",
+        evidence: ["README.md:1"]
+      }
+    ],
+    edges: []
+  });
+  const materialized = materializeRequiredMoveAssertions(generated, anchors);
+  validateRequiredMoveAssertions(materialized, anchors);
+  assert.equal(
+    materialized.edges.some(
+      (edge) =>
+        edge.predicate === "MOVED_FROM" &&
+        edge.source === "file:src/admin-deletion.ts" &&
+        edge.target === "file:src/legacy-admin-deletion.ts"
+    ),
+    true
+  );
+  const assertions = assertionsFromGeneratedContextGraph(materialized, "omxyz/demo");
+  assert.deepEqual(
+    assertions.map((assertion) => [assertion.subject.naturalKey, assertion.predicate, assertion.object.naturalKey]),
+    [["repo:omxyz/demo:path:src/admin-deletion.ts", "MOVED_FROM", "repo:omxyz/demo:path:src/legacy-admin-deletion.ts"]]
+  );
+  await validateContextGraphEvidence(materialized, async (path) => {
+    if (path === evidencePath) return content;
     throw new Error(`unexpected evidence path: ${path}`);
   });
 });

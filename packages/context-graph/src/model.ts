@@ -384,6 +384,14 @@ export interface RequiredCausalAnchor {
   readonly endLine: number;
 }
 
+export interface RequiredMoveAnchor {
+  readonly currentPath: string;
+  readonly previousPath: string;
+  readonly evidencePath: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
 /** Detect only explicit root-cause records; proximity or PR membership never qualifies. */
 export function requiredCausalAnchors(
   files: readonly CausalEvidenceFile[],
@@ -422,6 +430,125 @@ export function requiredCausalAnchors(
         (candidate) => candidate.issueId === anchor.issueId && candidate.commitSha === anchor.commitSha
       ) === index
   );
+}
+
+/** Detect only explicit, repository-authored file continuity statements. */
+export function requiredMoveAnchors(files: readonly CausalEvidenceFile[]): readonly RequiredMoveAnchor[] {
+  const anchors: RequiredMoveAnchor[] = [];
+  for (const file of files) {
+    const lines = file.content.split(/\r?\n/);
+    for (const [index, line] of lines.entries()) {
+      const currentFromPrevious = /`([^`\n]+)`\s+(?:was\s+)?moved\s+from\s+`([^`\n]+)`/i.exec(line);
+      const previousToCurrent = /\bmoved\s+from\s+`([^`\n]+)`\s+to\s+`([^`\n]+)`/i.exec(line);
+      const currentPath = normalizeExplicitMovePath(currentFromPrevious?.[1] ?? previousToCurrent?.[2]);
+      const previousPath = normalizeExplicitMovePath(currentFromPrevious?.[2] ?? previousToCurrent?.[1]);
+      if (!currentPath || !previousPath || currentPath === previousPath) continue;
+      anchors.push({
+        currentPath,
+        previousPath,
+        evidencePath: file.path,
+        startLine: index + 1,
+        endLine: index + 1
+      });
+    }
+  }
+  return anchors.filter(
+    (anchor, index) =>
+      anchors.findIndex(
+        (candidate) => candidate.currentPath === anchor.currentPath && candidate.previousPath === anchor.previousPath
+      ) === index
+  );
+}
+
+/** Materialize explicit move contracts without treating similarity candidates as facts. */
+export function materializeRequiredMoveAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredMoveAnchor[]
+): GeneratedContextGraph {
+  const nodes = [...generated.nodes];
+  const edges = [...generated.edges];
+  const fileNode = (path: string, evidence: string, historical: boolean): ContextGraphNode => {
+    const canonicalId = `file:${path}`;
+    const existingIndex = nodes.findIndex(
+      (node) => node.kind === "File" && (node.path === path || node.id === canonicalId)
+    );
+    const existing = nodes[existingIndex];
+    if (existing?.kind === "File") {
+      if (existing.path === path) return existing;
+      const anchored = { ...existing, path };
+      nodes[existingIndex] = anchored;
+      return anchored;
+    }
+    const node: ContextGraphNode = {
+      id: canonicalId,
+      kind: "File",
+      label: path.split("/").at(-1) ?? path,
+      description: historical
+        ? `Historical file named by explicit repository move-continuity evidence: ${path}`
+        : `Current file named by explicit repository move-continuity evidence: ${path}`,
+      path,
+      evidence: [evidence]
+    };
+    nodes.push(node);
+    return node;
+  };
+
+  for (const anchor of anchors) {
+    const evidence = `${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`;
+    const current = fileNode(anchor.currentPath, evidence, false);
+    const previous = fileNode(anchor.previousPath, evidence, true);
+    const requiredEdge: Omit<ContextGraphEdge, "id"> = {
+      source: current.id,
+      target: previous.id,
+      predicate: "MOVED_FROM",
+      plane: "knowledge",
+      confidence: 1,
+      why: `Repository evidence explicitly states that ${anchor.currentPath} moved from ${anchor.previousPath}.`,
+      evidence: [evidence]
+    };
+    const existing = edges.findIndex(
+      (edge) => edge.predicate === "MOVED_FROM" && edge.source === current.id && edge.target === previous.id
+    );
+    if (existing === -1) edges.push(requiredEdge);
+    else edges[existing] = requiredEdge;
+  }
+  return { ...generated, nodes, edges };
+}
+
+export function validateRequiredMoveAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredMoveAnchor[]
+): void {
+  for (const anchor of anchors) {
+    const current = generated.nodes.find((node) => node.kind === "File" && node.path === anchor.currentPath);
+    const previous = generated.nodes.find((node) => node.kind === "File" && node.path === anchor.previousPath);
+    const edge =
+      current && previous
+        ? generated.edges.find(
+            (candidate) =>
+              candidate.predicate === "MOVED_FROM" &&
+              candidate.source === current.id &&
+              candidate.target === previous.id
+          )
+        : undefined;
+    const spansAnchor = edge?.evidence.some((value) => {
+      const citation = parseEvidenceCitation(value);
+      return (
+        citation.path === anchor.evidencePath &&
+        citation.startLine <= anchor.startLine &&
+        citation.endLine >= anchor.endLine
+      );
+    });
+    if (!edge || !spansAnchor) {
+      throw new Error(`explicit move evidence requires ${anchor.currentPath} MOVED_FROM ${anchor.previousPath}`);
+    }
+  }
+}
+
+function normalizeExplicitMovePath(value: string | undefined): string | undefined {
+  const path = value?.trim().replace(/^\.\//, "");
+  if (!path || path.startsWith("/") || path.split("/").includes("..") || /[\s\\]/.test(path)) return undefined;
+  return path;
 }
 
 /**

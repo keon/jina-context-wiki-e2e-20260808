@@ -17,7 +17,7 @@ import {
 
 export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
 export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
-export const CONTEXT_GRAPH_GENERATOR_VERSION = "direct-assertions-v15-move-continuity";
+export const CONTEXT_GRAPH_GENERATOR_VERSION = "direct-assertions-v16-materialized-move";
 export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v3";
 
 export interface RepositoryTreeEntry {
