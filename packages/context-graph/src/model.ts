@@ -416,21 +416,25 @@ export function requiredCausalAnchors(
     const commitSha = shaMatch?.[1]?.toLowerCase();
     if (!commitSha) continue;
     const issuePattern = /\b(?:github\s+)?issue\s+#(\d+)\b/i;
+    const noIssuePattern = /\bno\s+github\s+issue\s+was\s+opened\b/i;
     const issueNumber = issuePattern.exec(file.content)?.[1];
     const issueId =
       issueNumber ??
-      (/\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && derivedIssuePullRequestNumbers.length === 1
+      (noIssuePattern.test(file.content) && derivedIssuePullRequestNumbers.length === 1
         ? `derived:pr:${derivedIssuePullRequestNumbers[0]}`
         : undefined);
     if (issueId) {
       const shaLine = Math.max(1, lines.findIndex((line) => line.toLowerCase().includes(commitSha)) + 1);
-      const issueLine = issueNumber ? Math.max(1, lines.findIndex((line) => issuePattern.test(line)) + 1) : 1;
+      const issueLine = Math.max(
+        1,
+        lines.findIndex((line) => (issueNumber ? issuePattern.test(line) : noIssuePattern.test(line))) + 1
+      );
       anchors.push({
         issueId,
         commitSha,
         evidencePath: file.path,
         startLine: Math.min(issueLine, shaLine),
-        endLine: Math.min(lines.length, shaLine + 2)
+        endLine: Math.min(lines.length, Math.max(issueLine, shaLine + 2))
       });
     }
   }
@@ -872,7 +876,8 @@ function validateCausalEvidenceContents(generated: GeneratedContextGraph, files:
       ? new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(
           citedText
         )
-      : citedText.toLowerCase().includes(root.label.trim().toLowerCase()) ||
+      : (Boolean(derivedAnchor) && /\bno\s+github\s+issue\s+was\s+opened\b/i.test(citedText)) ||
+        citedText.toLowerCase().includes(root.label.trim().toLowerCase()) ||
         citedText.toLowerCase().includes(root.id.trim().toLowerCase());
     const namesCause = commitSha
       ? citedText.toLowerCase().includes(commitSha)
