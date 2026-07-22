@@ -48,7 +48,9 @@ Create a private GitHub App under the account or organization that owns the repo
 - Optional repository permission: **Actions — Read-only**
 - Subscribe to events: **Push**, **Pull request**, and **Issues**
 
-Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Production sets the canonical `JINA_TENANT_ID=omlabs`; configured aliases are migrated at API startup so historical tasks remain visible.
+Install the App on the repositories Jina should watch. In production shared mode, the original Jina database must already contain the enabled repository, its tenant, and a non-suspended installation. The signed delivery is resolved against those records; an unknown, disabled, suspended, or mismatched repository is rejected instead of receiving a synthetic tenant. Local development and rollback can use fixed mode with `JINA_TENANT_ID`.
+
+The resolved original tenant UUID scopes every task created by the delivery. Task metadata also retains the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types, making those names available on the board and in context graph provenance.
 
 The webhook slice does not use an App ID or private key. The current review worker uses `GITHUB_CLONE_TOKEN` to read PR metadata and diffs. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
 
@@ -63,7 +65,7 @@ curl http://localhost:4000/board
 curl http://localhost:4000/events
 ```
 
-Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>` and always use the configured tenant. Browsers should use the IAP-protected dashboard rather than calling the API credential directly.
+Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>`. Shared-mode callers also send `x-jina-tenant-id: <original-tenant-uuid>`; a forwarded `tenant:<uuid>` principal must match it. The signed webhook endpoint resolves its own tenant and does not accept a caller-supplied tenant override. Browsers should use the authenticated dashboard rather than calling the API credential directly.
 
 GitHub's App settings also show every delivery, response status, and redelivery control.
 

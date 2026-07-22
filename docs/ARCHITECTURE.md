@@ -20,6 +20,19 @@ Trusted graph caller -> graph API or MCP -> repository-scoped retrieval
 
 The API performs short state transitions. Workers perform external I/O outside the mutation lock, renew their leases, and complete through the API. Expired work is reclaimable; a stale completion changes no state.
 
+## Identity and tenancy
+
+Production does not maintain a second user, organization, installation, or repository directory. The original Jina tables in `public` are authoritative:
+
+- `tenants` supplies the tenant UUID and GitHub account identity;
+- `installations` proves that the tenant's GitHub App installation is active;
+- `repositories` binds an enabled GitHub repository to that tenant;
+- `tenant_members` remains owned by the original application and supports its membership boundary.
+
+For signed intake, the API resolves the repository by GitHub repository ID first, with an installation/name fallback, and rejects a delivery that cannot resolve to one enabled original tenant. The original tenant UUID becomes the partition key for the board and every context graph row. The tenant GitHub login becomes `workspaceLabel`; pull-request/issue author and delivery sender IDs, logins, and account types come from the verified webhook payload and remain attached to the planned work and canonical observations.
+
+Workers do not connect to PostgreSQL. An unscoped worker claim asks the API to enumerate active original tenants; all later lease, completion, and graph requests carry the concrete original tenant UUID. The original application exposes its member-authenticated work overview by calling this API with the same UUID and `tenant:<uuid>` principal. Fixed mode remains available only for local development and rollback.
+
 ## Board and execution
 
 The board is both the operational source of truth and the orchestrator. A versioned planner creates tasks and dependency edges. The reducer queues a task only after its required dependencies are satisfied and writes its outbox message with the same state change.
@@ -60,7 +73,7 @@ Source writes, model observations, and projections are independently idempotent.
 
 ## Authentication and security
 
-Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential.
+Production shared mode is scoped by an original tenant UUID on each authenticated request; fixed mode uses the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential. In shared mode, a forwarded `tenant:<uuid>` principal must match the `x-jina-tenant-id` header.
 
 The web application must authenticate users before forwarding a verified principal and service credential. The existing Cloud Run dashboard uses IAP; its replacement needs an equivalent identity boundary. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
