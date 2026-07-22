@@ -1698,7 +1698,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const normalized = normalizeAssertionBatchLenient(batch);
     const assertions = normalized.assertions;
     const candidateObservationId = assertionObservationId(batch);
-    let observationId = candidateObservationId;
+    let observationId: string;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
