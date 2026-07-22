@@ -311,11 +311,14 @@ export function extractFeatureText(question: string): string | undefined {
   if (!/feature|capabilit|implement|affect|impact|break|document/i.test(question)) return undefined;
   const quoted = /["“]([^"”\n]{2,200})["”]/.exec(question)?.[1];
   const named = /\b(?:feature|capabilit(?:y|ies))\s+(?:called\s+|named\s+)(.+?)(?:\?|$)/i.exec(question)?.[1];
+  const beforeImplementation = /\b(?:do(?:es)?|did|which)\s+(?:the\s+)?(.+?)\s+implementation(?:\s+paths?)?\b/i.exec(
+    question
+  )?.[1];
   const beforeKind = /(.+?)\s+(?:feature|capability)\b/i
     .exec(question)?.[1]
     ?.replace(/^.*\b(?:implements?|affects?|impacts?|breaks?|documents?)\s+(?:the\s+)?/i, "")
     .replace(/^(?:what|which|where|how|could|would|might|does|do|is|are|show|describe)\s+(?:the\s+)?/i, "");
-  const value = (quoted ?? named ?? beforeKind)
+  const value = (quoted ?? named ?? beforeImplementation ?? beforeKind)
     ?.trim()
     .replace(/[?.!,]+$/g, "")
     .replace(/\s+/g, " ");

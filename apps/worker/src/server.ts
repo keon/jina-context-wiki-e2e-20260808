@@ -12,7 +12,7 @@ import {
   prepareDiff,
   type ReviewRequest
 } from "@jina/ai";
-import { DaytonaCodexContextGraphExecutor } from "@jina/daytona";
+import { DaytonaContextGraphExecutor } from "@jina/daytona";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
@@ -141,7 +141,7 @@ const contextGraphApiTimeoutMs = positiveInt(process.env.CONTEXT_GRAPH_API_TIMEO
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsContextGraphProjections = topics.some((topic) => topic.startsWith("run-context-graph"));
 const contextGraphExecutor = topics.includes("run-context-graph-assert")
-  ? new DaytonaCodexContextGraphExecutor()
+  ? new DaytonaContextGraphExecutor()
   : undefined;
 let stopping = false;
 let active = false;
@@ -1257,6 +1257,8 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
     commitSha,
     focusPaths,
     problemEvidencePullRequestNumbers,
+    sourcePullRequestNumbers,
+    resolvedPullRequestNumbers,
     sourceEvidence: evidence.evidence,
     taskId: work.task.id,
     ...(activeLease ? { signal: activeLease.controller.signal } : {})

@@ -80,6 +80,10 @@ export interface ContextGraphBuildRequest {
   readonly focusPaths?: readonly string[];
   /** PRs whose complete changed-file list contains durable regression/problem evidence. */
   readonly problemEvidencePullRequestNumbers?: readonly number[];
+  /** PRs present in the immutable source observations for this generation. */
+  readonly sourcePullRequestNumbers?: readonly number[];
+  /** Source PRs that already explicitly resolve a tracked issue. */
+  readonly resolvedPullRequestNumbers?: readonly number[];
   /** Immutable source observations included in this generation's evidence fingerprint. */
   readonly sourceEvidence?: readonly ContextGraphSourceEvidence[];
   readonly taskId: string;
@@ -189,7 +193,7 @@ export function parseGeneratedContextGraph(value: unknown): GeneratedContextGrap
     !Array.isArray(value.nodes) ||
     !Array.isArray(value.edges)
   ) {
-    throw new Error("Codex returned an invalid contextGraph document");
+    throw new Error("The model returned an invalid contextGraph document");
   }
 
   const nodes = value.nodes.map(parseNode);
