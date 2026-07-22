@@ -62,7 +62,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v17-materialized-incident-deployments/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v18-untracked-causal-evidence/);
   assert.match(
     CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
     /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
@@ -3114,6 +3114,73 @@ test("requires explicit root-cause records to appear as causal assertions", () =
     () => validateRequiredCausalAssertions(withoutFullSpan, anchors.slice(0, 1)),
     /explicit root-cause evidence/
   );
+});
+
+test("validates an untracked causal issue through its explicit no-issue statement", async () => {
+  const sha = "08fdf81f84b9db0c0c35e2506dfc151d9236f7ac";
+  const evidencePath = "docs/cf-audit-export-root-cause.md";
+  const content = [
+    "# Audit exports are not chronological",
+    "",
+    `The audit export regression was introduced by PR #10, merged as commit ${sha}.`,
+    "",
+    "That change reversed the sequence comparator and returned row 3 before row 1.",
+    "",
+    "This change restores the ascending comparator and its regression test. No GitHub issue was opened for this repair."
+  ].join("\n");
+  const anchors = requiredCausalAnchors([{ path: evidencePath, content }], [11]);
+  assert.deepEqual(anchors, [
+    {
+      issueId: "derived:pr:11",
+      commitSha: sha,
+      evidencePath,
+      startLine: 3,
+      endLine: 7
+    }
+  ]);
+  const generated = parseGeneratedContextGraph({
+    summary: "untracked audit regression",
+    nodes: [
+      {
+        id: "repo",
+        kind: "Repository",
+        label: "demo",
+        description: "repository",
+        evidence: ["README.md:1"]
+      },
+      {
+        id: "derived:pr:11",
+        kind: "Issue",
+        label: "Chronological audit exports regression",
+        description: "Audit exports were returned newest-first.",
+        evidence: [`${evidencePath}:1-7`]
+      },
+      {
+        id: sha,
+        kind: "Commit",
+        label: sha.slice(0, 12),
+        description: "Reversed the sequence comparator.",
+        evidence: [`${evidencePath}:3-5`]
+      }
+    ],
+    edges: [
+      {
+        source: "derived:pr:11",
+        target: sha,
+        predicate: "INTRODUCED_BY",
+        plane: "knowledge",
+        confidence: 1,
+        why: "The cited change reversed the sequence comparator.",
+        evidence: [`${evidencePath}:3-7`]
+      }
+    ]
+  });
+  validateRequiredCausalAssertions(generated, anchors);
+  await validateContextGraphEvidence(generated, async (path) => {
+    if (path === evidencePath) return content;
+    if (path === "README.md") return "demo";
+    throw new Error(`unexpected evidence path: ${path}`);
+  });
 });
 
 test("materializes explicit causal contracts and drops malformed optional causal edges", async () => {
