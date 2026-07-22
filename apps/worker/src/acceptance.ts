@@ -39,6 +39,35 @@ export interface ProductionAcceptanceSummary {
  * identify the failed acceptance boundary without gaining access to private
  * repository logs.
  */
+/**
+ * The tenant-global newest graph can belong to another repository once many
+ * repositories build; acceptance must validate the graph published for its own
+ * repository and ref. Prefers the API's latest when it already matches,
+ * otherwise resolves the repository's newest summary and fetches that graph.
+ */
+async function repositoryScopedGraph(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  contextGraph: Record<string, unknown>,
+  repository: string,
+  ref: string,
+  label: string
+): Promise<Record<string, unknown>> {
+  const latest = contextGraph.latest;
+  if (isRecord(latest) && latest.repository === repository && latest.ref === ref) return latest;
+  const graphs: readonly unknown[] = Array.isArray(contextGraph.graphs) ? (contextGraph.graphs as readonly unknown[]) : [];
+  const summary = graphs.find((graph) =>
+    isRecord(graph) && graph.repository === repository && graph.ref === ref && typeof graph.id === "string");
+  if (!isRecord(summary)) {
+    throw new Error(`latest contextGraph graph is missing for ${repository}@${ref} (${label})`);
+  }
+  return requiredRecord(
+    await apiJson(fetchImpl, `${apiUrl}/context-graph/graphs/${encodeURIComponent(String(summary.id))}`, { headers }),
+    label
+  );
+}
+
 export function productionAcceptanceExitCode(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   if (/ended as|timed out|missing from the board|retains blocked contextGraph tasks/.test(message)) return 20;
@@ -130,10 +159,7 @@ export async function runProductionContextGraphAcceptance(
   }
 
   const contextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
-  let latest = requiredRecord(contextGraph.latest, "contextGraph.latest");
-  if (latest.repository !== repository || latest.ref !== ref) {
-    throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
-  }
+  let latest = await repositoryScopedGraph(fetchImpl, apiUrl, headers, contextGraph, repository, ref, "contextGraph.latest");
   let nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
   let edges = requiredArray(latest.edges, "contextGraph.latest.edges");
   if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
@@ -289,10 +315,7 @@ export async function runProductionContextGraphAcceptance(
       log
     );
     const causalContextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
-    latest = requiredRecord(causalContextGraph.latest, "causal contextGraph.latest");
-    if (latest.repository !== repository || latest.ref !== ref) {
-      throw new Error("latest causal contextGraph graph does not match the acceptance repository and ref");
-    }
+    latest = await repositoryScopedGraph(fetchImpl, apiUrl, headers, causalContextGraph, repository, ref, "causal contextGraph.latest");
     nodes = requiredArray(latest.nodes, "causal contextGraph.latest.nodes");
     edges = requiredArray(latest.edges, "causal contextGraph.latest.edges");
     const nodeById = new Map(
