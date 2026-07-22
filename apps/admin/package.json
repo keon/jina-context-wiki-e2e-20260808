@@ -11,6 +11,7 @@
     "start": "next start --port 3100"
   },
   "dependencies": {
+    "@jina/graph-renderer": "workspace:*",
     "next": "^15.5.6",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

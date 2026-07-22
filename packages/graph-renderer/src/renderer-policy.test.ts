@@ -1,11 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import {
-  CANVAS_EDGE_LIMIT,
-  CANVAS_NODE_LIMIT,
-  canvasFallbackStatus,
-  canvasGraphSlice
-} from "./context-graph-renderer-policy.ts";
+import { CANVAS_EDGE_LIMIT, CANVAS_NODE_LIMIT, canvasFallbackStatus, canvasGraphSlice } from "./renderer-policy.js";
 
 test("Canvas fallback deterministically bounds a large graph without dangling edges", () => {
   const nodes = Array.from({ length: 5_000 }, (_, index) => ({ id: `node-${index}` }));
