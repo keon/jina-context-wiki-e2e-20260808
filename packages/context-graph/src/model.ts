@@ -420,6 +420,76 @@ export function requiredCausalAnchors(
   );
 }
 
+/**
+ * Materializes host-detected root-cause contracts after model generation.
+ * The model still supplies every non-contract semantic assertion, but an
+ * explicit Issue -> Commit statement in repository evidence is not left to
+ * probabilistic omission. Malformed optional causal edges are discarded here
+ * and well-shaped optional edges still undergo the normal evidence validator.
+ */
+export function materializeRequiredCausalAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredCausalAnchor[]
+): GeneratedContextGraph {
+  const nodes = [...generated.nodes];
+  const nodesById = new Map(nodes.map((node) => [node.id, node]));
+  const edges = generated.edges.filter((edge) => {
+    if (edge.predicate !== "INTRODUCED_BY") return true;
+    const source = nodesById.get(edge.source);
+    const target = nodesById.get(edge.target);
+    return (
+      Boolean(source && (source.kind === "Issue" || source.kind === "Incident")) &&
+      Boolean(target && (target.kind === "Commit" || target.kind === "Deployment"))
+    );
+  });
+
+  for (const anchor of anchors) {
+    const evidence = `${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`;
+    if (!nodesById.has(anchor.issueId)) {
+      const derivedPullRequest = /^derived:pr:(\d+)$/i.exec(anchor.issueId)?.[1];
+      const issue: ContextGraphNode = {
+        id: anchor.issueId,
+        kind: "Issue",
+        label: derivedPullRequest
+          ? `Untracked problem repaired by PR #${derivedPullRequest}`
+          : `Issue #${anchor.issueId}`,
+        description: "An explicit repository root-cause record identifies this issue.",
+        evidence: [evidence]
+      };
+      nodes.push(issue);
+      nodesById.set(issue.id, issue);
+    }
+    if (!nodesById.has(anchor.commitSha)) {
+      const commit: ContextGraphNode = {
+        id: anchor.commitSha,
+        kind: "Commit",
+        label: anchor.commitSha.slice(0, 12),
+        description: "The commit identified by an explicit repository root-cause record.",
+        evidence: [evidence]
+      };
+      nodes.push(commit);
+      nodesById.set(commit.id, commit);
+    }
+
+    const existing = edges.findIndex(
+      (edge) => edge.predicate === "INTRODUCED_BY" && edge.source === anchor.issueId && edge.target === anchor.commitSha
+    );
+    const requiredEdge: Omit<ContextGraphEdge, "id"> = {
+      source: anchor.issueId,
+      target: anchor.commitSha,
+      predicate: "INTRODUCED_BY",
+      plane: "knowledge",
+      confidence: 1,
+      why: `The cited root-cause record explicitly attributes Issue ${anchor.issueId} to commit ${anchor.commitSha}.`,
+      evidence: [evidence]
+    };
+    if (existing === -1) edges.push(requiredEdge);
+    else edges[existing] = requiredEdge;
+  }
+
+  return { ...generated, nodes, edges };
+}
+
 export function validateRequiredCausalAssertions(
   generated: GeneratedContextGraph,
   anchors: readonly RequiredCausalAnchor[]

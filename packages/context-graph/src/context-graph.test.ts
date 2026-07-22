@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   createContextGraph,
   isProblemEvidencePath,
+  materializeRequiredCausalAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
   sourceBackedModelEntityIds,
@@ -3048,6 +3049,56 @@ test("requires explicit root-cause records to appear as causal assertions", () =
     () => validateRequiredCausalAssertions(withoutFullSpan, anchors.slice(0, 1)),
     /explicit root-cause evidence/
   );
+});
+
+test("materializes explicit causal contracts and drops malformed optional causal edges", async () => {
+  const sha = "c".repeat(40);
+  const evidencePath = "docs/audit-root-cause.md";
+  const content = `Issue derived:pr:11 was introduced by commit ${sha}.\nThe comparator reversed chronological order.`;
+  const generated = parseGeneratedContextGraph({
+    summary: "model output with an omitted contract",
+    nodes: [
+      {
+        id: "repo",
+        kind: "Repository",
+        label: "demo",
+        description: "repository",
+        evidence: ["README.md:1"]
+      },
+      {
+        id: "feature:audit-export",
+        kind: "Feature",
+        label: "Audit export",
+        description: "exports audit rows",
+        evidence: ["README.md:1"]
+      }
+    ],
+    edges: [
+      {
+        source: "feature:audit-export",
+        target: "repo",
+        predicate: "INTRODUCED_BY",
+        plane: "knowledge",
+        why: "malformed model edge",
+        evidence: ["README.md:1"]
+      }
+    ]
+  });
+  const anchors = [{ issueId: "derived:pr:11", commitSha: sha, evidencePath, startLine: 1, endLine: 2 }] as const;
+
+  const materialized = materializeRequiredCausalAssertions(generated, anchors);
+
+  assert.equal(materialized.edges.length, 1);
+  assert.equal(materialized.edges[0]?.source, "derived:pr:11");
+  assert.equal(materialized.edges[0]?.target, sha);
+  assert.equal(materialized.nodes.find((node) => node.id === "derived:pr:11")?.kind, "Issue");
+  assert.equal(materialized.nodes.find((node) => node.id === sha)?.kind, "Commit");
+  validateRequiredCausalAssertions(materialized, anchors);
+  await validateContextGraphEvidence(materialized, async (path) => {
+    if (path === evidencePath) return content;
+    if (path === "README.md") return "demo";
+    throw new Error(`unexpected evidence path: ${path}`);
+  });
 });
 
 test("creates a stable graph and removes dangling edges", () => {

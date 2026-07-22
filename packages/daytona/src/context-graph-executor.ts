@@ -3,6 +3,7 @@ import {
   CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA,
   CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
   createContextGraph,
+  materializeRequiredCausalAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
   requiredDerivedIssuePullRequestNumbers,
@@ -166,7 +167,10 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
         request.signal?.throwIfAborted();
         try {
           const parsedModelOutput = parseJsonResult(resultBuffer.toString("utf8"));
-          const candidate = parseGeneratedContextGraph(parsedModelOutput);
+          const candidate = materializeRequiredCausalAssertions(
+            parseGeneratedContextGraph(parsedModelOutput),
+            input.causalAnchors
+          );
           const validationErrors: string[] = [];
           try {
             await validateContextGraphEvidence(candidate, async (path) => {
