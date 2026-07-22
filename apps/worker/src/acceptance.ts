@@ -515,7 +515,7 @@ async function verifyV51FixtureQueries(
     );
   }
 
-  const packageContext = await ask("What package does the Administrator resource deletion implementation depend on?");
+  const packageContext = await ask('What package does the "Administrator resource deletion" implementation depend on?');
   const packageTrace = causalTraceFor(packageContext, "package dependency");
   if (!tracePaths(packageTrace.dependencies).some((path) => pathHasNode(path, "Package", "zod"))) {
     throw new Error("production v5.1 context did not traverse the implementation to its direct zod package");
