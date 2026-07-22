@@ -3,6 +3,25 @@ import { spawn } from "node:child_process";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
+
+test("known-head reconciliation includes linked and untracked repair pull requests", () => {
+  const merged = {
+    number: 5,
+    merged_at: "2026-07-20T19:22:28Z",
+    merge_commit_sha: "a".repeat(40),
+    title: "Restore administrator delete access"
+  };
+  assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4." }, false), true);
+  assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "References #4." }, false), true);
+  assert.equal(
+    shouldReconcileRecentPullRequest({ ...merged, body: "Repairs the broken policy without a tracked issue." }, false),
+    true
+  );
+  assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Adds a new policy feature." }, false), false);
+  assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4." }, true), false);
+  assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4.", merged_at: null }, false), false);
+});
 
 test("worker reviews pull requests and incrementally ingests context graph source blobs", async (context) => {
   let claimCount = 0;
