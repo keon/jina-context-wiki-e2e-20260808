@@ -5,15 +5,18 @@ import {
   assertionsFromGeneratedContextGraph,
   createContextGraph,
   materializeRequiredCausalAssertions,
+  materializeRequiredIncidentDeploymentAssertions,
   materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
   requiredDerivedIssuePullRequestNumbers,
+  requiredIncidentDeploymentAnchors,
   requiredMoveAnchors,
   sourceBackedModelEntityIds,
   validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
+  validateRequiredIncidentDeploymentAssertions,
   validateRequiredMoveAssertions,
   validateSourceBackedModelEntities,
   type GeneratedContextGraph,
@@ -21,6 +24,7 @@ import {
   type ContextGraphExecutor,
   type ContextGraph,
   type RequiredCausalAnchor,
+  type RequiredIncidentDeploymentAnchor,
   type RequiredMoveAnchor
 } from "@jina/context-graph";
 
@@ -127,9 +131,16 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
         try {
           const parsedModelOutput = parseJsonResult(completion.text);
           const candidate = materializeRequiredMoveAssertions(
-            materializeRequiredCausalAssertions(
-              sanitizeGeneratedModelOutput(parseGeneratedContextGraph(parsedModelOutput), request.sourceEvidence ?? []),
-              input.causalAnchors
+            materializeRequiredIncidentDeploymentAssertions(
+              materializeRequiredCausalAssertions(
+                sanitizeGeneratedModelOutput(
+                  parseGeneratedContextGraph(parsedModelOutput),
+                  request.sourceEvidence ?? []
+                ),
+                input.causalAnchors
+              ),
+              input.incidentDeploymentAnchors,
+              input.sourceEntityIds
             ),
             input.moveAnchors
           );
@@ -156,6 +167,11 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
           }
           try {
             validateRequiredCausalAssertions(candidate, input.causalAnchors);
+          } catch (error) {
+            validationErrors.push(error instanceof Error ? error.message : String(error));
+          }
+          try {
+            validateRequiredIncidentDeploymentAssertions(candidate, input.incidentDeploymentAnchors);
           } catch (error) {
             validationErrors.push(error instanceof Error ? error.message : String(error));
           }
@@ -337,7 +353,9 @@ async function prepareModelInput(
   readonly prompt: string;
   readonly focusedRepairPrompt: string;
   readonly causalAnchors: readonly RequiredCausalAnchor[];
+  readonly incidentDeploymentAnchors: readonly RequiredIncidentDeploymentAnchor[];
   readonly moveAnchors: readonly RequiredMoveAnchor[];
+  readonly sourceEntityIds: ReadonlySet<string>;
 }> {
   const focusEvidence = await buildFocusEvidenceBundle(sandbox, request.focusPaths ?? []);
   const requiredDerivedIssues = requiredDerivedIssuePullRequestNumbers(
@@ -345,10 +363,19 @@ async function prepareModelInput(
     request.problemEvidencePullRequestNumbers ?? []
   );
   const causalAnchors = requiredCausalAnchors(focusEvidence.files, requiredDerivedIssues);
+  const incidentDeploymentAnchors = requiredIncidentDeploymentAnchors(focusEvidence.files);
   const moveAnchors = requiredMoveAnchors(focusEvidence.files);
-  const prompt = contextGraphPrompt(request, focusEvidence.text, requiredDerivedIssues, causalAnchors);
+  const sourceEntityIds = sourceBackedModelEntityIds(request.sourceEvidence ?? []);
+  const prompt = contextGraphPrompt(
+    request,
+    focusEvidence.text,
+    requiredDerivedIssues,
+    causalAnchors,
+    incidentDeploymentAnchors
+  );
   const requiredPaths = new Set([
     ...causalAnchors.map((anchor) => anchor.evidencePath),
+    ...incidentDeploymentAnchors.map((anchor) => anchor.evidencePath),
     ...moveAnchors.map((anchor) => anchor.evidencePath)
   ]);
   const repairFiles = focusEvidence.files.filter((file) => requiredPaths.has(file.path));
@@ -362,28 +389,35 @@ async function prepareModelInput(
   const repairSourceEvidence = (request.sourceEvidence ?? []).filter((evidence) => {
     const payload = evidence.payload;
     return (
-      typeof payload === "object" &&
-      payload !== null &&
-      !Array.isArray(payload) &&
-      (payload as { readonly kind?: unknown }).kind === "pull_request" &&
-      typeof (payload as { readonly number?: unknown }).number === "number" &&
-      requiredPullRequests.has((payload as { readonly number: number }).number)
+      (typeof payload === "object" &&
+        payload !== null &&
+        !Array.isArray(payload) &&
+        (payload as { readonly kind?: unknown }).kind === "pull_request" &&
+        typeof (payload as { readonly number?: unknown }).number === "number" &&
+        requiredPullRequests.has((payload as { readonly number: number }).number)) ||
+      (incidentDeploymentAnchors.length > 0 &&
+        typeof payload === "object" &&
+        payload !== null &&
+        !Array.isArray(payload) &&
+        ["deployment", "incident"].includes((payload as { readonly kind?: string }).kind ?? ""))
     );
   });
   const focusedRepairPrompt = contextGraphPrompt(
     { ...request, sourceEvidence: repairSourceEvidence },
     repairEvidence,
     requiredDerivedIssues,
-    causalAnchors
+    causalAnchors,
+    incidentDeploymentAnchors
   );
-  return { prompt, focusedRepairPrompt, causalAnchors, moveAnchors };
+  return { prompt, focusedRepairPrompt, causalAnchors, incidentDeploymentAnchors, moveAnchors, sourceEntityIds };
 }
 
 function contextGraphPrompt(
   request: ContextGraphBuildRequest,
   focusEvidence: string,
   requiredDerivedIssues: readonly number[],
-  causalAnchors: readonly RequiredCausalAnchor[]
+  causalAnchors: readonly RequiredCausalAnchor[],
+  incidentDeploymentAnchors: readonly RequiredIncidentDeploymentAnchor[]
 ): string {
   const focus = request.focusPaths?.length
     ? `\nIncremental scope: inspect only these prioritized content blobs unless a cited relationship cannot be resolved:\n${request.focusPaths.map((path) => `- ${path}`).join("\n")}`
@@ -402,16 +436,20 @@ function contextGraphPrompt(
     causalAnchors.length > 0
       ? `\nHost contract requirement: the following root-cause records explicitly state causality. Every listed edge is mandatory. Emit one Issue INTRODUCED_BY Commit edge for each anchor, with a nonempty why, and do not substitute an Incident edge. Each edge's evidence must cover the exact listed minimum span so it contains the issue identity, full SHA, and mechanism:\n${causalAnchors.map((anchor) => `- Issue ${anchor.issueId} INTRODUCED_BY commit ${anchor.commitSha}; evidence must cover ${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`).join("\n")}`
       : "";
+  const incidentDeploymentRequirements =
+    incidentDeploymentAnchors.length > 0
+      ? `\nHost contract requirement: these incident records explicitly identify deployment history. Emit every listed edge with evidence covering the exact minimum span:\n${incidentDeploymentAnchors.map((anchor) => `- Incident ${anchor.incidentLabel} ${anchor.predicate} Deployment ending in ${anchor.deploymentExternalId}; evidence must cover ${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`).join("\n")}`
+      : "";
   const sourceEntityIds = [...sourceBackedModelEntityIds(request.sourceEvidence ?? [])].sort();
   const sourceEntityRequirement =
     sourceEntityIds.length > 0
       ? `\nHost source-identity contract: Package, Service, Deployment, and Incident nodes may use only these deterministic IDs: ${sourceEntityIds.join(", ")}.`
       : "";
-  return `Repository: ${request.repository}\nRef: ${request.ref}\nTask: ${request.taskId}${focus}${sourceEvidence}${bundle}${requirements}${causalRequirements}${sourceEntityRequirement}`;
+  return `Repository: ${request.repository}\nRef: ${request.ref}\nTask: ${request.taskId}${focus}${sourceEvidence}${bundle}${requirements}${causalRequirements}${incidentDeploymentRequirements}${sourceEntityRequirement}`;
 }
 
 function repairPrompt(basePrompt: string, failure: string): string {
-  return `${basePrompt}\n\nThe previous output failed host validation: ${truncate(failure)}\nRegenerate the complete JSON once. Satisfy every host contract requirement above, including every mandatory Issue INTRODUCED_BY Commit edge and every required derived Issue. A derived repair anchor N must be Issue derived:pr:N RESOLVED_BY PullRequest N; never substitute the PR that introduced or caused the bug. For each INTRODUCED_BY edge, cite a range that explicitly names both endpoints and the causal mechanism; remove an optional causal edge if no such range exists. Correct all cited line ranges and preserve only claims that the checked-out repository explicitly supports.`;
+  return `${basePrompt}\n\nThe previous output failed host validation: ${truncate(failure)}\nRegenerate the complete JSON once. Satisfy every host contract requirement above, including every mandatory Issue INTRODUCED_BY Commit edge, Incident deployment edge, and required derived Issue. A derived repair anchor N must be Issue derived:pr:N RESOLVED_BY PullRequest N; never substitute the PR that introduced or caused the bug. For each INTRODUCED_BY edge, cite a range that explicitly names both endpoints and the causal mechanism; remove an optional causal edge if no such range exists. Correct all cited line ranges and preserve only claims that the checked-out repository explicitly supports.`;
 }
 
 export async function buildFocusEvidenceBundle(

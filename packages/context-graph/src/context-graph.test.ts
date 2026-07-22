@@ -4,14 +4,17 @@ import {
   createContextGraph,
   isProblemEvidencePath,
   materializeRequiredCausalAssertions,
+  materializeRequiredIncidentDeploymentAssertions,
   materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
+  requiredIncidentDeploymentAnchors,
   requiredMoveAnchors,
   sourceBackedModelEntityIds,
   validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
+  validateRequiredIncidentDeploymentAssertions,
   validateRequiredMoveAssertions,
   validateSourceBackedModelEntities
 } from "./model.js";
@@ -59,7 +62,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v16-materialized-move/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v17-materialized-incident-deployments/);
   assert.match(
     CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
     /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
@@ -3161,6 +3164,87 @@ test("materializes explicit causal contracts and drops malformed optional causal
     if (path === "README.md") return "demo";
     throw new Error(`unexpected evidence path: ${path}`);
   });
+});
+
+test("materializes explicit incident deployment history across repository renames", async () => {
+  const evidencePath = "docs/postmortems/INC-2026-42.md";
+  const content = [
+    "---",
+    "issue: #14",
+    "---",
+    "Incident INC-2026-42 was introduced by Deployment deployment:github:omxyz/jina-ontology-e2e:5535506368.",
+    "Incident INC-2026-42 was resolved by Deployment deployment:github:omxyz/jina-ontology-e2e:5535522601."
+  ].join("\n");
+  const anchors = requiredIncidentDeploymentAnchors([
+    { path: evidencePath, content },
+    {
+      path: "README.md",
+      content: "Incident INC-2026-42 was introduced by Deployment deployment:github:omxyz/jina-ontology-e2e:5535506368."
+    }
+  ]);
+  assert.deepEqual(anchors, [
+    {
+      incidentLabel: "INC-2026-42",
+      incidentIssueNumber: 14,
+      deploymentExternalId: "5535506368",
+      predicate: "INTRODUCED_BY",
+      evidencePath,
+      startLine: 4,
+      endLine: 4
+    },
+    {
+      incidentLabel: "INC-2026-42",
+      incidentIssueNumber: 14,
+      deploymentExternalId: "5535522601",
+      predicate: "RESOLVED_BY",
+      evidencePath,
+      startLine: 5,
+      endLine: 5
+    }
+  ]);
+
+  const generated = parseGeneratedContextGraph({
+    summary: "model omitted deployment history",
+    nodes: [
+      {
+        id: "repo",
+        kind: "Repository",
+        label: "demo",
+        description: "repository",
+        evidence: ["README.md:1"]
+      }
+    ],
+    edges: []
+  });
+  const sourceEntityIds = new Set([
+    "incident:github:omxyz/jina-context-graph-e2e#14",
+    "deployment:github:omxyz/jina-context-graph-e2e:5535506368",
+    "deployment:github:omxyz/jina-context-graph-e2e:5535522601"
+  ]);
+  const materialized = materializeRequiredIncidentDeploymentAssertions(generated, anchors, sourceEntityIds);
+
+  validateRequiredIncidentDeploymentAssertions(materialized, anchors);
+  assert.deepEqual(
+    materialized.edges.map((edge) => [edge.source, edge.predicate, edge.target]),
+    [
+      [
+        "incident:github:omxyz/jina-context-graph-e2e#14",
+        "INTRODUCED_BY",
+        "deployment:github:omxyz/jina-context-graph-e2e:5535506368"
+      ],
+      [
+        "incident:github:omxyz/jina-context-graph-e2e#14",
+        "RESOLVED_BY",
+        "deployment:github:omxyz/jina-context-graph-e2e:5535522601"
+      ]
+    ]
+  );
+  await validateContextGraphEvidence(materialized, async (path) => {
+    if (path === evidencePath) return content;
+    if (path === "README.md") return "demo";
+    throw new Error(`unexpected evidence path: ${path}`);
+  });
+  assert.equal(assertionsFromGeneratedContextGraph(materialized, "omxyz/jina-context-graph-e2e").length, 2);
 });
 
 test("materializes explicit file move continuity from repository evidence", async () => {
