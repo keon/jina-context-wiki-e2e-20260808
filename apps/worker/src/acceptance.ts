@@ -28,6 +28,8 @@ export interface ProductionAcceptanceSummary {
   readonly taskId: string;
   readonly repository: string;
   readonly commitSha: string;
+  /** Identity of the exact graph generation the run certified. */
+  readonly graphId: string;
   readonly nodeCount: number;
   readonly edgeCount: number;
   readonly citationCount: number;
@@ -39,38 +41,6 @@ export interface ProductionAcceptanceSummary {
  * identify the failed acceptance boundary without gaining access to private
  * repository logs.
  */
-/**
- * The tenant-global newest graph can belong to another repository once many
- * repositories build; acceptance must validate the graph published for its own
- * repository and ref. Prefers the API's latest when it already matches,
- * otherwise resolves the repository's newest summary and fetches that graph.
- */
-async function repositoryScopedGraph(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  contextGraph: Record<string, unknown>,
-  repository: string,
-  ref: string,
-  label: string
-): Promise<Record<string, unknown>> {
-  const latest = contextGraph.latest;
-  if (isRecord(latest) && latest.repository === repository && latest.ref === ref) return latest;
-  const graphs: readonly unknown[] = Array.isArray(contextGraph.graphs)
-    ? (contextGraph.graphs as readonly unknown[])
-    : [];
-  const summary = graphs.find(
-    (graph) => isRecord(graph) && graph.repository === repository && graph.ref === ref && typeof graph.id === "string"
-  );
-  if (!isRecord(summary)) {
-    throw new Error(`latest contextGraph graph is missing for ${repository}@${ref} (${label})`);
-  }
-  return requiredRecord(
-    await apiJson(fetchImpl, `${apiUrl}/context-graph/graphs/${encodeURIComponent(String(summary.id))}`, { headers }),
-    label
-  );
-}
-
 export function productionAcceptanceExitCode(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   if (/ended as|timed out|missing from the board|retains blocked contextGraph tasks/.test(message)) return 20;
@@ -161,16 +131,12 @@ export async function runProductionContextGraphAcceptance(
     );
   }
 
-  const contextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
-  let latest = await repositoryScopedGraph(
-    fetchImpl,
-    apiUrl,
-    headers,
-    contextGraph,
-    repository,
-    ref,
-    "contextGraph.latest"
-  );
+  // Certify the exact generation this build's project stage published — its
+  // graphId and commitSha are recorded in the completed stage's result —
+  // never a newest-in-scope lookup that a concurrent build could win.
+  const receipt = publishedProjectReceipt(completedBoardTasks ?? [], taskId);
+  let latest = await certifiedGraphForReceipt(fetchImpl, apiUrl, headers, receipt, repository, ref);
+  const certifiedCommitSha = requiredString(latest.commitSha, "contextGraph.latest.commitSha");
   let nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
   let edges = requiredArray(latest.edges, "contextGraph.latest.edges");
   if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
@@ -314,7 +280,7 @@ export async function runProductionContextGraphAcceptance(
       );
     }
 
-    await runFollowupContextGraphBuild(
+    const causal = await runFollowupContextGraphBuild(
       fetchImpl,
       apiUrl,
       headers,
@@ -325,18 +291,24 @@ export async function runProductionContextGraphAcceptance(
       pollIntervalMs,
       log
     );
-    const causalContextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
-    latest = await repositoryScopedGraph(
-      fetchImpl,
-      apiUrl,
-      headers,
-      causalContextGraph,
-      repository,
-      ref,
-      "causal contextGraph.latest"
-    );
+    // The causal pass certifies the follow-up build's own published
+    // generation, and it must project the same repository head the first pass
+    // certified — a concurrent build for another commit cannot substitute.
+    const causalReceipt = publishedProjectReceipt(causal.tasks, causal.taskId);
+    latest = await certifiedGraphForReceipt(fetchImpl, apiUrl, headers, causalReceipt, repository, ref);
+    if (latest.commitSha !== certifiedCommitSha) {
+      throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
+    }
     nodes = requiredArray(latest.nodes, "causal contextGraph.latest.nodes");
     edges = requiredArray(latest.edges, "causal contextGraph.latest.edges");
+    // The causal follow-up legitimately certifies a newer generation for the
+    // same commit (it materializes the just-reviewed causal assertions), so
+    // every certified generation gets the full structural checks — a
+    // substituted generation must pass everything, not just the edge check.
+    if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
+    if (![...nodes, ...edges].every(hasEvidence)) {
+      throw new Error("production contextGraph graph contains uncited items");
+    }
     const nodeById = new Map(
       nodes.flatMap((node) => (isRecord(node) && typeof node.id === "string" ? [[node.id, node] as const] : []))
     );
@@ -386,6 +358,7 @@ export async function runProductionContextGraphAcceptance(
   return {
     taskId,
     repository,
+    graphId: requiredString(latest.id, "contextGraph.latest.id"),
     commitSha: requiredString(latest.commitSha, "contextGraph.latest.commitSha"),
     nodeCount: nodes.length,
     edgeCount: edges.length,
@@ -708,7 +681,7 @@ async function runFollowupContextGraphBuild(
   deadline: number,
   pollIntervalMs: number,
   log: (message: string) => void
-): Promise<void> {
+): Promise<{ readonly taskId: string; readonly tasks: readonly unknown[] }> {
   const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
@@ -733,7 +706,7 @@ async function runFollowupContextGraphBuild(
         throw new Error(
           `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blocked.join(", ")}`
         );
-      return;
+      return { taskId, tasks };
     }
     if (TERMINAL_FAILURES.has(status)) {
       const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
@@ -744,8 +717,113 @@ async function runFollowupContextGraphBuild(
   throw new Error(`production causal projection task ${taskId} timed out`);
 }
 
+interface PublishedGraphReceipt {
+  readonly graphId: string;
+  readonly commitSha: string;
+}
+
+/**
+ * The graphId and commitSha a completed project stage published for
+ * `buildTaskId`, taken from the stage's recorded completion result. Binding
+ * certification to this receipt — instead of any newest-in-scope lookup —
+ * makes it impossible for a concurrent build's generation to be certified as
+ * this workflow's outcome. When both snapshot and history phases projected,
+ * the last completion wins; a malformed newest completion fails rather than
+ * falling back to an older stage.
+ */
+function publishedProjectReceipt(tasks: readonly unknown[], buildTaskId: string): PublishedGraphReceipt {
+  const completedAtOf = (task: Record<string, unknown>): string => {
+    const metadata = isRecord(task.metadata) ? task.metadata : {};
+    const timing = isRecord(metadata.timing) ? metadata.timing : {};
+    return typeof timing.completedAt === "string" ? timing.completedAt : "";
+  };
+  const newest = tasks
+    .filter(isRecord)
+    .filter(
+      (task) => task.parentTaskId === buildTaskId && task.type === "context_graph_project" && task.status === "done"
+    )
+    .sort((left, right) => completedAtOf(right).localeCompare(completedAtOf(left)))[0];
+  const metadata = newest && isRecord(newest.metadata) ? newest.metadata : {};
+  const result = isRecord(metadata.result) ? metadata.result : {};
+  const graphId = typeof result.graphId === "string" && result.graphId ? result.graphId : undefined;
+  const commitSha = typeof result.commitSha === "string" && result.commitSha ? result.commitSha : undefined;
+  if (!graphId || !commitSha) {
+    throw new Error(`latest contextGraph graph receipt is missing from the completed project stages of ${buildTaskId}`);
+  }
+  return { graphId, commitSha };
+}
+
+/**
+ * Certifies the receipt's exact generation when it is still readable. The
+ * store serves only current graph heads, so a later publication for the same
+ * repository/ref (e.g. an overlapping deploy's acceptance) can make the
+ * receipt's id return 404; certification then falls back to the current head
+ * — which must project the receipt's exact commit — instead of failing on
+ * timing. Every certified graph re-verifies its own identity.
+ */
+async function certifiedGraphForReceipt(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  receipt: PublishedGraphReceipt,
+  repository: string,
+  ref: string
+): Promise<Record<string, unknown>> {
+  const direct = await apiOptionalJson(
+    fetchImpl,
+    `${apiUrl}/context-graph/graphs/${encodeURIComponent(receipt.graphId)}`,
+    { headers }
+  );
+  if (direct) {
+    if (
+      direct.id !== receipt.graphId ||
+      direct.repository !== repository ||
+      direct.ref !== ref ||
+      direct.commitSha !== receipt.commitSha
+    ) {
+      throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
+    }
+    return direct;
+  }
+  const scope = `repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`;
+  const contextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph?${scope}`, { headers });
+  const head = requiredArray(contextGraph.graphs, "contextGraph.graphs").find(isRecord);
+  if (!head || typeof head.id !== "string") {
+    throw new Error(`latest contextGraph graph for ${repository}@${ref} is missing from the graph list`);
+  }
+  const graph = await apiJson(fetchImpl, `${apiUrl}/context-graph/graphs/${encodeURIComponent(head.id)}`, {
+    headers
+  });
+  if (
+    graph.id !== head.id ||
+    graph.repository !== repository ||
+    graph.ref !== ref ||
+    graph.commitSha !== receipt.commitSha
+  ) {
+    throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
+  }
+  return graph;
+}
+
 async function apiJson(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {
   return requiredRecord(await apiValue(fetchImpl, url, init), new URL(url).pathname);
+}
+
+/** Like apiJson, but a 404 means "gone" rather than a failure. */
+async function apiOptionalJson(
+  fetchImpl: typeof fetch,
+  url: string,
+  init: RequestInit
+): Promise<Record<string, unknown> | undefined> {
+  const response = await fetchImpl(url, init);
+  const body = await response.text();
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${body.slice(0, 500)}`);
+  try {
+    return requiredRecord(JSON.parse(body) as unknown, new URL(url).pathname);
+  } catch {
+    throw new Error(`${new URL(url).pathname} returned invalid JSON`);
+  }
 }
 
 async function apiArray(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown[]> {

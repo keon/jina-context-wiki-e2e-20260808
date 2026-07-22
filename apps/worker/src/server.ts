@@ -13,6 +13,7 @@ import {
   type ReviewRequest
 } from "@jina/ai";
 import { DaytonaCodexContextGraphExecutor } from "@jina/daytona";
+import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
   CONTEXT_GRAPH_PARSER_VERSION,
@@ -119,6 +120,8 @@ class LeaseLostError extends Error {
   }
 }
 
+const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-worker" });
+const metrics = new MetricsRegistry();
 const port = Number(process.env.PORT ?? 8080);
 const apiUrl = requiredEnv("JINA_API_URL").replace(/\/$/, "");
 const token = requiredEnv("INTERNAL_API_TOKEN");
@@ -162,7 +165,8 @@ const server = createServer((request, response) => {
         lastApiError,
         lastApiErrorAt,
         consecutiveApiFailures,
-        lastWork
+        lastWork,
+        metrics: metrics.snapshot()
       })
     );
     return;
@@ -172,7 +176,12 @@ const server = createServer((request, response) => {
 });
 
 server.listen(port, () => {
-  console.log(`worker listening on ${port} for ${topics.join(", ")}`);
+  logger.info(`worker listening on ${port} for ${topics.join(", ")}`, {
+    event: "worker.started",
+    workerId,
+    port,
+    topics
+  });
   void poll();
 });
 
@@ -192,7 +201,8 @@ async function poll(): Promise<void> {
       }
     } catch (error) {
       recordApiFailure(error);
-      console.error("worker poll failed", lastApiError);
+      metrics.count("worker.poll_failures");
+      logger.error("worker poll failed", { event: "worker.poll_failed", workerId, ...errorLogFields(error) });
     }
     if (!stopping) await delay(pollIntervalMs);
   }
@@ -209,7 +219,7 @@ async function claim(): Promise<ClaimedWork | undefined> {
     recordApiSuccess(!drainsContextGraphProjections);
     return undefined;
   }
-  if (!response.ok) throw new Error(`claim failed with ${response.status}: ${await response.text()}`);
+  if (!response.ok) throw new Error(`claim failed with ${response.status}: ${await boundedFailureDetail(response)}`);
   recordApiSuccess(!drainsContextGraphProjections);
   return parseClaimedWork(await response.json());
 }
@@ -224,11 +234,22 @@ async function execute(work: ClaimedWork): Promise<void> {
     void renew(work).catch((error) => {
       if (error instanceof LeaseLostError) {
         loseLease(lease, error);
-        console.error("worker lease renewal failed", lease.lostReason);
+        metrics.count("worker.lease_lost", { topic: work.message.topic });
+        logger.error("worker lease renewal failed", {
+          event: "worker.lease_lost",
+          workerId,
+          taskId: work.task.id,
+          reason: lease.lostReason
+        });
         return;
       }
       recordApiFailure(error);
-      console.error("worker lease renewal failed, retrying on next heartbeat", errorMessage(error));
+      logger.warn("worker lease renewal failed, retrying on next heartbeat", {
+        event: "worker.lease_renewal_retry",
+        workerId,
+        taskId: work.task.id,
+        ...errorLogFields(error)
+      });
     });
   }, heartbeatIntervalMs);
   heartbeat.unref();
@@ -272,10 +293,11 @@ async function execute(work: ClaimedWork): Promise<void> {
 }
 
 /**
- * One structured log line per finished task so stage durations are queryable
- * in Cloud Logging. Failure reasons reuse the already-redacted error message
- * (errorMessage + slice) rather than raw exceptions, matching this file's
- * failure-logging conventions.
+ * One structured log line plus one metrics sample per finished task so stage
+ * durations, outcomes, and failure categories are queryable in Cloud Logging
+ * and countable through log-based metrics. Failure reasons reuse the
+ * already-redacted error message (errorMessage + slice) rather than raw
+ * exceptions, matching this file's failure-logging conventions.
  */
 function logStageOutcome(
   work: ClaimedWork,
@@ -284,23 +306,41 @@ function logStageOutcome(
   failureReason: string | undefined
 ): void {
   const metadata = work.task.metadata as Record<string, unknown>;
+  const durationMs = Date.now() - startedAt;
   const base = {
+    workerId,
     topic: work.message.topic,
     taskId: work.task.id,
     ...(typeof metadata.repository === "string" ? { repository: metadata.repository } : {}),
     ...(typeof metadata.ref === "string" ? { ref: metadata.ref } : {}),
-    durationMs: Date.now() - startedAt
+    durationMs
   };
-  if (failureReason !== undefined || !result) {
-    console.log(JSON.stringify({ event: "stage.failed", ...base, reason: (failureReason ?? "unknown").slice(0, 500) }));
+  const stageLogger = logger.withTrace(generateTraceContext());
+  metrics.observe("worker.stage.duration_ms", durationMs, { topic: work.message.topic });
+  const reason =
+    failureReason !== undefined || !result
+      ? (failureReason ?? "unknown")
+      : result.outcome === "failed"
+        ? result.reason
+        : undefined;
+  if (reason !== undefined) {
+    const failureCategory = workerFailureCategory(reason);
+    metrics.count("worker.tasks", { topic: work.message.topic, outcome: "failed", category: failureCategory });
+    stageLogger.error(`${work.message.topic} failed for task ${work.task.id}`, {
+      event: "stage.failed",
+      ...base,
+      failureCategory,
+      reason: reason.slice(0, 500)
+    });
     return;
   }
-  if (result.outcome === "failed") {
-    console.log(JSON.stringify({ event: "stage.failed", ...base, reason: result.reason.slice(0, 500) }));
-    return;
-  }
-  const effect = result.result?.effect;
-  console.log(JSON.stringify({ event: "stage.completed", ...base, ...(typeof effect === "string" ? { effect } : {}) }));
+  metrics.count("worker.tasks", { topic: work.message.topic, outcome: "done" });
+  const effect = result?.outcome === "done" ? result.result?.effect : undefined;
+  stageLogger.info(`${work.message.topic} completed for task ${work.task.id}`, {
+    event: "stage.completed",
+    ...base,
+    ...(typeof effect === "string" ? { effect } : {})
+  });
 }
 
 async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
@@ -755,8 +795,9 @@ class GitIngestTransport {
     } catch (error) {
       this.failed = true;
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
-      console.warn(
-        `git ingest transport unavailable for ${this.repository}: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`
+      logger.warn(
+        `git ingest transport unavailable for ${this.repository}: ${error instanceof Error ? error.message.slice(0, 200) : "unknown"}`,
+        { event: "ingest.git_transport_unavailable", repository: this.repository }
       );
       return false;
     }
@@ -1293,7 +1334,7 @@ async function internalApiJson<T = Record<string, unknown>>(path: string, body: 
   // data calls to use the API service's longer processing window.
   const response = await apiRequest(path, body, contextGraphApiTimeoutMs);
   if (!response.ok)
-    throw new Error(`ContextGraph API ${path} failed with ${response.status}: ${await response.text()}`);
+    throw new Error(`ContextGraph API ${path} failed with ${response.status}: ${await boundedFailureDetail(response)}`);
   return (await response.json()) as T;
 }
 
@@ -1358,7 +1399,7 @@ async function renew(work: ClaimedWork): Promise<void> {
     contextGraphApiTimeoutMs
   );
   if (!response.ok) {
-    const message = `renewal failed with ${response.status}: ${await response.text()}`;
+    const message = `renewal failed with ${response.status}: ${await boundedFailureDetail(response)}`;
     if (response.status === 409) throw new LeaseLostError(message);
     throw new Error(message);
   }
@@ -1373,10 +1414,10 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
     ...result
   });
   if (response.status === 409) {
-    throw new LeaseLostError(`completion rejected after lease loss: ${await response.text()}`);
+    throw new LeaseLostError(`completion rejected after lease loss: ${await boundedFailureDetail(response)}`);
   }
   if (!response.ok) {
-    throw new Error(`completion failed with ${response.status}: ${await response.text()}`);
+    throw new Error(`completion failed with ${response.status}: ${await boundedFailureDetail(response)}`);
   }
   recordApiSuccess(!drainsContextGraphProjections);
 }
@@ -1409,7 +1450,7 @@ async function githubOptionalJson(path: string): Promise<Record<string, unknown>
     return await githubJson(path);
   } catch (error) {
     if (!isUnavailableOptionalGitHubSource(error)) throw error;
-    console.warn(`optional GitHub source unavailable: ${path}`);
+    logger.warn(`optional GitHub source unavailable: ${path}`, { event: "ingest.github_source_unavailable", path });
     return {};
   }
 }
@@ -1419,7 +1460,7 @@ async function githubOptionalJsonArray(path: string): Promise<Record<string, unk
     return await githubJsonArray(path);
   } catch (error) {
     if (!isUnavailableOptionalGitHubSource(error)) throw error;
-    console.warn(`optional GitHub source unavailable: ${path}`);
+    logger.warn(`optional GitHub source unavailable: ${path}`, { event: "ingest.github_source_unavailable", path });
     return [];
   }
 }
@@ -1743,6 +1784,15 @@ function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * Upstream failure bodies are untrusted and unbounded (a hostile or broken
+ * upstream can echo secrets or megabytes); error messages built from them are
+ * serialized into durable structured logs, so keep only a short prefix.
+ */
+async function boundedFailureDetail(response: Response): Promise<string> {
+  return (await response.text().catch(() => "unreadable body")).slice(0, 200);
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1764,7 +1814,7 @@ async function releaseContextGraphLeaseOnShutdown(work: ClaimedWork): Promise<vo
     signal: AbortSignal.timeout(8_000)
   });
   if (!response.ok && response.status !== 409) {
-    throw new Error(`lease release failed with ${response.status}: ${await response.text()}`);
+    throw new Error(`lease release failed with ${response.status}: ${await boundedFailureDetail(response)}`);
   }
 }
 
@@ -1775,7 +1825,12 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     if (activeLease) loseLease(activeLease, new LeaseLostError(`worker received ${signal}`));
     if (work) {
       void releaseContextGraphLeaseOnShutdown(work).catch((error) => {
-        console.error("worker lease release failed", errorMessage(error));
+        logger.error("worker lease release failed", {
+          event: "worker.lease_release_failed",
+          workerId,
+          taskId: work.task.id,
+          ...errorLogFields(error)
+        });
       });
     }
     server.close(() => undefined);

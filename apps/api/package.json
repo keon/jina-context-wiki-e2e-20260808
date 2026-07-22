@@ -12,9 +12,10 @@
   },
   "dependencies": {
     "@jina/board": "workspace:*",
+    "@jina/context-graph": "workspace:*",
     "@jina/db": "workspace:*",
     "@jina/github": "workspace:*",
-    "@jina/context-graph": "workspace:*",
+    "@jina/observability": "workspace:*",
     "@jina/publication": "workspace:*",
     "@jina/review": "workspace:*",
     "@jina/shared-kernel": "workspace:*",

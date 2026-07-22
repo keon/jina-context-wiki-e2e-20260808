@@ -17,7 +17,8 @@
       "@jina/github": ["./packages/github/src/index.ts"],
       "@jina/daytona": ["./packages/daytona/src/index.ts"],
       "@jina/ai": ["./packages/ai/src/index.ts"],
-      "@jina/shared-kernel": ["./packages/shared-kernel/src/index.ts"]
+      "@jina/shared-kernel": ["./packages/shared-kernel/src/index.ts"],
+      "@jina/observability": ["./packages/observability/src/index.ts"]
     }
   }
 }

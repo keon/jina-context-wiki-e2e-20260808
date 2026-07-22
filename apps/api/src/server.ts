@@ -49,6 +49,13 @@ import {
   type RepositorySnapshot,
   type RetrievalRequest
 } from "@jina/context-graph";
+import {
+  createLogger,
+  errorLogFields,
+  MetricsRegistry,
+  recordHttpRequest,
+  requestTraceContext
+} from "@jina/observability";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { DomainError, entityId, nowIso } from "@jina/shared-kernel";
@@ -113,6 +120,9 @@ export interface ApiStateStore {
 
 /** Creates the HTTP API without binding a port. */
 export function createApiServer(config: ApiServerConfig = {}): Server {
+  const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
+  const metrics = new MetricsRegistry();
+  const startedAtIso = nowIso();
   let intakeState: GitHubIntakeState = createGitHubIntakeState();
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
@@ -354,10 +364,63 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   const server = createServer((request, response) => {
+    const requestStartedAt = Date.now();
+    const trace = requestTraceContext(request.headers);
+    const requestLogger = logger.withTrace(trace);
+    const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
+    const routeLabel = metricsRoute(pathname);
+    // Never retain a path this server does not serve: unauthenticated probes
+    // control it, so logging it verbatim would persist attacker-chosen (and
+    // potentially secret-bearing) strings and mint one unique message per
+    // probe. Served routes keep the real path, which is bounded vocabulary.
+    const loggedPath = routeLabel === "(unknown)" ? "(unknown)" : pathname;
+    // "finish" never fires for client disconnects and incomplete uploads, so
+    // "close" is the terminal backstop; the settled flag keeps the normal path
+    // (finish then close) counted exactly once.
+    let requestSettled = false;
+    const settleRequest = (aborted: boolean) => {
+      if (requestSettled) return;
+      requestSettled = true;
+      recordHttpRequest({
+        logger: requestLogger,
+        metrics,
+        method: request.method ?? "GET",
+        path: loggedPath,
+        route: routeLabel,
+        // An abort before headers were sent has no real status; the default
+        // 200 on the unsent response must not masquerade as a success.
+        statusCode: aborted && !response.headersSent ? 0 : response.statusCode,
+        durationMs: Date.now() - requestStartedAt,
+        trace,
+        aborted,
+        quiet: !aborted && (routeLabel === "/health" || routeLabel === "/healthz") && response.statusCode < 400
+      });
+    };
+    response.once("finish", () => settleRequest(false));
+    response.once("close", () => settleRequest(true));
     void route(request, response).catch((error: unknown) => {
-      const message = error instanceof Error ? error.message : String(error);
+      // A fully consumed request stream auto-destroys, so request.destroyed
+      // does not mean the client left — only a dead response/socket does.
+      if (response.destroyed || !response.socket || response.socket.destroyed) {
+        // The client is gone: the handler's failure is a consequence of the
+        // abort, not a server fault, and the dead response cannot be written.
+        // The close-settled http.request record already accounts for it.
+        requestLogger.warn("request aborted by client during handling", {
+          event: "http.request.client_abort",
+          method: request.method,
+          path: loggedPath,
+          ...errorLogFields(error)
+        });
+        return;
+      }
       const apiError = httpError(error);
-      console.error("API request failed", message);
+      requestLogger.error("API request failed", {
+        event: "http.request.error",
+        method: request.method,
+        path: loggedPath,
+        code: apiError.code,
+        ...errorLogFields(error)
+      });
       json(response, apiError.statusCode, {
         accepted: false,
         error: apiError.expose ? apiError.message : "internal server error",
@@ -377,6 +440,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // the full snapshot reload; completeWork synchronizes its JSON-board
     // branch itself before validating against the snapshot.
     if (
+      url.pathname !== "/internal/observability" &&
       !isDirectContextGraphRead(request.method, url.pathname) &&
       !isSnapshotExemptInternalRoute(request.method, url.pathname)
     )
@@ -522,7 +586,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (request.method === "GET" && url.pathname.startsWith("/v1/graphs/")) {
-      const graphId = decodeURIComponent(url.pathname.slice("/v1/graphs/".length));
+      const graphId = graphRouteId(url.pathname, "/v1/graphs/");
+      if (graphId === undefined) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
       const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
       if (!graph || !allowedRepositories.includes(graph.repository)) {
@@ -569,11 +637,26 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "GET" && url.pathname === "/context-graph") {
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      const [latest, graphValues] = await Promise.all([
-        contextGraphStore.latest(tenantId),
-        contextGraphStore.listSummaries(tenantId)
-      ]);
+      // Optional repository/ref scope narrows the summary listing in the
+      // store, before its row limit, so a scoped caller's graphs cannot be
+      // pushed out of the page by other repositories' fresher heads.
+      const repositoryFilter = url.searchParams.get("repository");
+      const refFilter = url.searchParams.get("ref");
+      const scoped = repositoryFilter !== null || refFilter !== null;
+      const graphValues = await contextGraphStore.listSummaries(tenantId, {
+        ...(repositoryFilter ? { repository: repositoryFilter } : {}),
+        ...(refFilter ? { ref: refFilter } : {})
+      });
       const graphs = graphValues.filter((graph) => allowedRepositories.includes(graph.repository));
+      // A scoped response must be internally consistent: its latest is the
+      // newest graph within the scope (summaries are ordered newest-first),
+      // never the unscoped tenant-wide head, which can belong to another
+      // repository entirely.
+      const latest = scoped
+        ? graphs[0]
+          ? await contextGraphStore.get(graphs[0].id, tenantId)
+          : undefined
+        : await contextGraphStore.latest(tenantId);
       json(response, 200, {
         latest: latest && allowedRepositories.includes(latest.repository) ? latest : null,
         graphs
@@ -581,7 +664,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname.startsWith("/context-graph/graphs/")) {
-      const graphId = decodeURIComponent(url.pathname.slice("/context-graph/graphs/".length));
+      const graphId = graphRouteId(url.pathname, "/context-graph/graphs/");
+      if (graphId === undefined) {
+        json(response, 404, { error: "contextGraph graph not found" });
+        return;
+      }
       const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const permitted = graph && allowedRepositories.includes(graph.repository) ? graph : undefined;
@@ -749,6 +836,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, await contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso()));
       return;
     }
+    if (request.method === "GET" && url.pathname === "/internal/observability") {
+      json(response, 200, {
+        service: process.env.K_SERVICE ?? "jina-api",
+        startedAt: startedAtIso,
+        metrics: metrics.snapshot()
+      });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
       await claimWork(request, response, tenantId);
       return;
@@ -823,10 +918,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await mutate(async () => {
         if (!config.stateStore) await persist(result.deliveryId);
       }, result.deliveryId);
+      const outcome = duplicateHead ? "duplicate" : "created";
+      logger.info(`github webhook ${result.deliveryId}: ${outcome}`, {
+        event: "github.webhook",
+        deliveryId: result.deliveryId,
+        repository: result.webhook.repository,
+        outcome,
+        createdTaskCount: createdTaskIds.length
+      });
+      metrics.count("github.webhooks", { outcome });
       json(response, result.statusCode, {
         accepted: true,
         deliveryId: result.deliveryId,
-        outcome: duplicateHead ? "duplicate" : "created",
+        outcome,
         createdTaskIds
       });
       return;
@@ -849,8 +953,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       };
     }, result.deliveryId);
     if (!committed) {
+      metrics.count("github.webhooks", { outcome: "duplicate" });
       json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
       return;
+    }
+    if (result.webhook) {
+      const payload = committed.payload as { outcome?: string; createdTaskIds?: readonly string[] };
+      const outcome = payload.outcome ?? "accepted";
+      logger.info(`github webhook ${result.deliveryId}: ${outcome}`, {
+        event: "github.webhook",
+        deliveryId: result.deliveryId,
+        repository: result.webhook.repository,
+        outcome,
+        createdTaskCount: payload.createdTaskIds?.length ?? 0
+      });
+      metrics.count("github.webhooks", { outcome });
     }
     json(response, committed.statusCode, committed.payload);
   }
@@ -1411,7 +1528,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   if (config.simulateRuns) {
     const timer = setInterval(
-      () => void mutate(drainOneSimulatedRun).catch((error) => console.error("simulated run failed", error)),
+      () =>
+        void mutate(drainOneSimulatedRun).catch((error) => logger.error("simulated run failed", errorLogFields(error))),
       1500
     );
     timer.unref();
@@ -1461,6 +1579,73 @@ function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig
   return Boolean(
     config.graphApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.graphApiToken}`
   );
+}
+
+/**
+ * Routes this server actually serves, used to label request metrics. Requests
+ * outside this set (including unauthorized probes, which are rejected before
+ * route matching and so can carry arbitrary raw paths) collapse into one
+ * "(unknown)" series so probing cannot exhaust the metric registry's bounded
+ * label cardinality.
+ */
+const METRICS_ROUTES = new Set([
+  "/health",
+  "/healthz",
+  "/task-types",
+  "/webhooks/github",
+  "/dev/webhooks/github",
+  "/mcp",
+  "/board",
+  "/events",
+  "/v1/graphs",
+  "/v1/graph/query",
+  "/context-graph",
+  "/context-graph/ask",
+  "/context-graph/assertions",
+  "/context-graph/build",
+  "/context-graph/commands",
+  "/context-graph/metrics",
+  "/context-graph/retrieve",
+  "/internal/graph/access/sync",
+  "/internal/observability",
+  "/internal/context-graph/assertions/cached",
+  "/internal/context-graph/assertions/evidence",
+  "/internal/context-graph/assertions/save",
+  "/internal/context-graph/ingest/blobs",
+  "/internal/context-graph/ingest/github",
+  "/internal/context-graph/ingest/known",
+  "/internal/context-graph/ingest/plan",
+  "/internal/context-graph/outbox/drain",
+  "/internal/context-graph/project/run",
+  "/internal/worker/claim",
+  "/internal/worker/complete",
+  "/internal/worker/release",
+  "/internal/worker/renew"
+]);
+
+function metricsRoute(pathname: string): string {
+  if (graphRouteId(pathname, "/v1/graphs/") !== undefined) return "/v1/graphs/:id";
+  if (graphRouteId(pathname, "/context-graph/graphs/") !== undefined) return "/context-graph/graphs/:id";
+  return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
+}
+
+/**
+ * The decoded graph id when `pathname` matches the route grammar exactly —
+ * one non-empty, validly percent-encoded segment after `prefix` — else
+ * undefined. Prefix matching alone would let malformed or extra-segment
+ * paths masquerade as served parameterized routes (retaining raw
+ * attacker-controlled paths in logs) and let invalid escapes throw URIError
+ * out of the dispatcher as a 500.
+ */
+function graphRouteId(pathname: string, prefix: string): string | undefined {
+  if (!pathname.startsWith(prefix)) return undefined;
+  const segment = pathname.slice(prefix.length);
+  if (!segment || segment.includes("/")) return undefined;
+  try {
+    return decodeURIComponent(segment);
+  } catch {
+    return undefined;
+  }
 }
 
 function isPublicGraphRoute(pathname: string): boolean {

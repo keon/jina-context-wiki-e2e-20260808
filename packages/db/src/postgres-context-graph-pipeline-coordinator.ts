@@ -641,7 +641,13 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
                   and attname in ('started_at','completed_at','duration_ms') and not attisdropped) = 3
            and exists (select 1 from pg_constraint
                        where conrelid=to_regclass('jina_board.tasks') and contype='c'
-                         and pg_get_constraintdef(oid) like '%duration_ms%') as ready`
+                         and pg_get_constraintdef(oid) like '%duration_ms%')
+           -- A pre-rename database passes every check above but still
+           -- constrains topic to the run-ontology-* vocabulary; it must take
+           -- the DDL path so the topic migration runs.
+           and not exists (select 1 from pg_constraint
+                           where conrelid=to_regclass('jina_board.tasks') and contype='c'
+                             and pg_get_constraintdef(oid) like '%run-ontology-%') as ready`
       );
       if (!probe.rows[0]?.ready) await client.query(PIPELINE_SCHEMA_SQL);
       await client.query("commit");
@@ -820,6 +826,34 @@ const PIPELINE_SCHEMA_SQL = `
   alter table jina_board.tasks add column if not exists started_at timestamptz;
   alter table jina_board.tasks add column if not exists completed_at timestamptz;
   alter table jina_board.tasks add column if not exists duration_ms bigint;
+  -- The context-graph rename changed the worker topic vocabulary, but "create
+  -- table if not exists" never touches an existing table: a database created
+  -- before the rename still constrains topic to the run-ontology-* values and
+  -- rejects every new task. Rewrite legacy rows first, then swap the check.
+  do $$
+  declare
+    legacy_check record;
+    had_legacy boolean := false;
+  begin
+    -- Drop every legacy-vocabulary check, whatever its name: rewriting rows
+    -- while any one of them remains active would violate it and roll the
+    -- whole migration back.
+    for legacy_check in
+      select conname from pg_constraint
+      where conrelid='jina_board.tasks'::regclass and contype='c'
+        and pg_get_constraintdef(oid) like '%run-ontology-%'
+    loop
+      had_legacy := true;
+      execute format('alter table jina_board.tasks drop constraint %I', legacy_check.conname);
+    end loop;
+    if had_legacy then
+      update jina_board.tasks
+        set topic = replace(topic, 'run-ontology-', 'run-context-graph-')
+        where topic like 'run-ontology-%';
+      alter table jina_board.tasks add constraint tasks_topic_check
+        check (topic in ('run-context-graph-ingest','run-context-graph-assert','run-context-graph-project'));
+    end if;
+  end $$;
   do $$
   begin
     if not exists (

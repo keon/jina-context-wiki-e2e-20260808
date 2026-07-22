@@ -44,7 +44,8 @@ import {
   type RetrievalCitation,
   type RetrievalRequest,
   type RetrievalResult,
-  type StoredAssertion
+  type StoredAssertion,
+  type ContextGraphSummaryFilter
 } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { DomainError } from "@jina/shared-kernel";
@@ -298,18 +299,31 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     return this.loadGraphs(tenantId, 50);
   }
 
-  async listSummaries(tenantId: string) {
+  async listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter) {
     await this.initialize();
+    // Scope in SQL before the row limit: an unscoped tenant-wide page can hold
+    // more heads than the limit, which would silently omit a scoped caller's
+    // repository from a post-hoc filter.
+    const conditions = ["head.tenant_id=$1"];
+    const parameters: string[] = [tenantId];
+    if (filter?.repository !== undefined) {
+      parameters.push(filter.repository);
+      conditions.push(`head.repository=$${parameters.length}`);
+    }
+    if (filter?.ref !== undefined) {
+      parameters.push(filter.ref);
+      conditions.push(`head.ref_name=$${parameters.length}`);
+    }
     const result = await this.pool.query<GraphSummaryRow>(
       `select g.*,
          (select count(*) from jina_context_graph.nodes n where n.graph_id = g.id) as node_count,
          (select count(*) from jina_context_graph.edges e where e.graph_id = g.id) as edge_count
        from jina_context_graph.graph_heads head
        join jina_context_graph.graphs g on g.id=head.graph_id and g.tenant_id=head.tenant_id
-       where head.tenant_id=$1
+       where ${conditions.join(" and ")}
        order by g.generated_at desc,head.repository,head.ref_name
        limit 5000`,
-      [tenantId]
+      parameters
     );
     return result.rows.map((row) => ({
       ...graphMetadata(row),

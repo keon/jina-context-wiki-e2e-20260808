@@ -90,7 +90,8 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
             id: "context-graph-project",
             parentTaskId: "context-graph-root",
             type: "context_graph_project",
-            status: boardReads === 1 ? "triage" : "done"
+            status: boardReads === 1 ? "triage" : "done",
+            ...(boardReads === 1 ? {} : { metadata: { result: { graphId: "graph-e2e", commitSha: "a".repeat(40) } } })
           }
         ]
       });
@@ -128,15 +129,44 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
       });
     }
     if (url.endsWith("/context-graph/metrics")) return json({ outboxDepth: {}, unparsedBlobCount: 0 });
-    if (url.endsWith("/context-graph")) {
+    if (url.endsWith("/context-graph/graphs/graph-e2e")) {
       return json({
-        latest: {
-          repository: "omxyz/jina-context-graph-e2e",
-          ref: "main",
-          commitSha: "a".repeat(40),
-          nodes: [{ evidence: ["src/index.ts:1"] }],
-          edges: [{ evidence: ["src/index.ts:1"] }]
-        }
+        id: "graph-e2e",
+        repository: "omxyz/jina-context-graph-e2e",
+        ref: "main",
+        commitSha: "a".repeat(40),
+        nodes: [{ evidence: ["src/index.ts:1"] }],
+        edges: [{ evidence: ["src/index.ts:1"] }]
+      });
+    }
+    if (new URL(url).pathname === "/context-graph") {
+      // Another repository's fresher build owns the tenant-wide latest head;
+      // acceptance must still resolve its own repository's newest graph.
+      return json({
+        latest: { repository: "omxyz/other-production-repo", ref: "main" },
+        graphs: [
+          {
+            id: "graph-other",
+            repository: "omxyz/other-production-repo",
+            ref: "main",
+            commitSha: "d".repeat(40),
+            generatedAt: "2026-07-21T12:00:00.000Z"
+          },
+          {
+            id: "graph-e2e",
+            repository: "omxyz/jina-context-graph-e2e",
+            ref: "main",
+            commitSha: "a".repeat(40),
+            generatedAt: "2026-07-20T12:00:00.000Z"
+          },
+          {
+            id: "graph-e2e-stale",
+            repository: "omxyz/jina-context-graph-e2e",
+            ref: "main",
+            commitSha: "e".repeat(40),
+            generatedAt: "2026-07-19T12:00:00.000Z"
+          }
+        ]
       });
     }
     return json({ error: "not found" }, 404);
@@ -158,6 +188,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   assert.deepEqual(result, {
     taskId: "context-graph-root",
     repository: "omxyz/jina-context-graph-e2e",
+    graphId: "graph-e2e",
     commitSha: "a".repeat(40),
     nodeCount: 1,
     edgeCount: 1,
@@ -167,7 +198,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     "POST /context-graph/build",
     "GET /board",
     "GET /board",
-    "GET /context-graph",
+    "GET /context-graph/graphs/graph-e2e",
     "POST /context-graph/ask",
     "POST /context-graph/ask",
     "GET /context-graph/metrics"
@@ -176,6 +207,263 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     "Production contextGraph task context-graph-root: root=in_progress, context_graph_ingest=done, context_graph_assert=in_progress, context_graph_project=triage",
     "Production contextGraph task context-graph-root: root=done, context_graph_ingest=done, context_graph_assert=done, context_graph_project=done"
   ]);
+});
+
+test("production acceptance certifies the current same-commit head when the receipt graph was replaced", async () => {
+  let askReads = 0;
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/context-graph/build") return json({ task: { id: "context-graph-root" } }, 202);
+    if (url.pathname === "/board") {
+      return json({
+        tasks: [
+          { id: "context-graph-root", type: "context_graph_build", status: "done" },
+          {
+            id: "context-graph-project",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_project",
+            status: "done",
+            metadata: { result: { graphId: "graph-receipt", commitSha: "a".repeat(40) } }
+          }
+        ]
+      });
+    }
+    // A later publication replaced the receipt graph as the durable head.
+    if (url.pathname === "/context-graph/graphs/graph-receipt") return json({ error: "not found" }, 404);
+    if (url.pathname === "/context-graph/graphs/graph-successor") {
+      return json({
+        id: "graph-successor",
+        repository: "omxyz/jina-context-graph-e2e",
+        ref: "main",
+        commitSha: "a".repeat(40),
+        nodes: [{ evidence: ["src/index.ts:1"] }],
+        edges: [{ evidence: ["src/index.ts:1"] }]
+      });
+    }
+    if (url.pathname === "/context-graph") {
+      return json({
+        latest: null,
+        graphs: [
+          {
+            id: "graph-successor",
+            repository: "omxyz/jina-context-graph-e2e",
+            ref: "main",
+            commitSha: "a".repeat(40),
+            generatedAt: "2026-07-22T03:00:00.000Z"
+          }
+        ]
+      });
+    }
+    if (url.pathname === "/context-graph/ask") {
+      askReads += 1;
+      if (askReads === 2)
+        return json({
+          calls: [
+            {
+              template: "issue_trace",
+              items: [
+                {
+                  data: {
+                    issue: { number: 1, title: "Document guest access denial semantics" },
+                    resolutions: [{ pullRequestNumber: 2, commits: [{ sha: "b".repeat(40) }] }]
+                  },
+                  citations: [{ kind: "assertion", id: "resolves" }]
+                }
+              ]
+            }
+          ],
+          citations: [{ kind: "assertion", id: "resolves" }]
+        });
+      return json({
+        calls: ["change", "intent", "ownership"].map((template) => ({
+          template,
+          items: [{ citations: [{ kind: "assertion", id: template }] }]
+        })),
+        citations: [{ kind: "assertion", id: "change" }]
+      });
+    }
+    if (url.pathname === "/context-graph/metrics") return json({ outboxDepth: {}, unparsedBlobCount: 0 });
+    return json({ error: "not found" }, 404);
+  };
+
+  const result = await runProductionContextGraphAcceptance(
+    {
+      apiUrl: "https://api.example.test",
+      token: "secret",
+      requestKey: "deploy-replaced-head",
+      repository: "omxyz/jina-context-graph-e2e",
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+      log: () => undefined
+    },
+    fetchImpl
+  );
+  assert.equal(result.graphId, "graph-successor");
+  assert.equal(result.commitSha, "a".repeat(40));
+});
+
+test("production acceptance rejects a direct receipt graph projecting a different commit", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/context-graph/build") return json({ task: { id: "context-graph-root" } }, 202);
+    if (url.pathname === "/board") {
+      return json({
+        tasks: [
+          { id: "context-graph-root", type: "context_graph_build", status: "done" },
+          {
+            id: "context-graph-project",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_project",
+            status: "done",
+            metadata: { result: { graphId: "graph-e2e", commitSha: "a".repeat(40) } }
+          }
+        ]
+      });
+    }
+    if (url.pathname.startsWith("/context-graph/graphs/")) {
+      // Same id, repository, and ref — but the served graph projects another
+      // commit than the receipt recorded.
+      return json({
+        id: "graph-e2e",
+        repository: "omxyz/jina-context-graph-e2e",
+        ref: "main",
+        commitSha: "b".repeat(40),
+        nodes: [{ evidence: ["src/index.ts:1"] }],
+        edges: [{ evidence: ["src/index.ts:1"] }]
+      });
+    }
+    return json({ error: "not found" }, 404);
+  };
+
+  await assert.rejects(
+    runProductionContextGraphAcceptance(
+      {
+        apiUrl: "https://api.example.test",
+        token: "secret",
+        requestKey: "deploy-commit-mismatch",
+        repository: "omxyz/jina-context-graph-e2e",
+        pollIntervalMs: 1,
+        timeoutMs: 100,
+        log: () => undefined
+      },
+      fetchImpl
+    ),
+    /latest contextGraph graph does not match the acceptance repository and ref/
+  );
+});
+
+test("production acceptance rejects a fetched graph whose own identity does not match", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/context-graph/build") return json({ task: { id: "context-graph-root" } }, 202);
+    if (url.pathname === "/board") {
+      return json({
+        tasks: [
+          { id: "context-graph-root", type: "context_graph_build", status: "done" },
+          {
+            id: "context-graph-project",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_project",
+            status: "done",
+            metadata: { result: { graphId: "graph-e2e", commitSha: "a".repeat(40) } }
+          }
+        ]
+      });
+    }
+    if (url.pathname.startsWith("/context-graph/graphs/")) {
+      // The summary advertised the acceptance repository, but the direct
+      // response carries another repository's graph.
+      return json({
+        id: "graph-e2e",
+        repository: "omxyz/other-production-repo",
+        ref: "main",
+        commitSha: "d".repeat(40),
+        nodes: [{ evidence: ["src/index.ts:1"] }],
+        edges: [{ evidence: ["src/index.ts:1"] }]
+      });
+    }
+    if (url.pathname === "/context-graph") {
+      return json({
+        latest: null,
+        graphs: [
+          {
+            id: "graph-e2e",
+            repository: "omxyz/jina-context-graph-e2e",
+            ref: "main",
+            commitSha: "a".repeat(40),
+            generatedAt: "2026-07-21T12:00:00.000Z"
+          }
+        ]
+      });
+    }
+    return json({ error: "not found" }, 404);
+  };
+
+  await assert.rejects(
+    runProductionContextGraphAcceptance(
+      {
+        apiUrl: "https://api.example.test",
+        token: "secret",
+        requestKey: "deploy-mismatch",
+        repository: "omxyz/jina-context-graph-e2e",
+        pollIntervalMs: 1,
+        timeoutMs: 100,
+        log: () => undefined
+      },
+      fetchImpl
+    ),
+    /latest contextGraph graph does not match the acceptance repository and ref/
+  );
+});
+
+test("production acceptance rejects a newest project stage without a published graphId", async () => {
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/context-graph/build") return json({ task: { id: "context-graph-root" } }, 202);
+    if (url.pathname === "/board") {
+      // The newest completion is malformed; an older stage still advertises a
+      // graphId. Acceptance must fail rather than certify the older graph.
+      return json({
+        tasks: [
+          { id: "context-graph-root", type: "context_graph_build", status: "done" },
+          {
+            id: "project-old",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_project",
+            status: "done",
+            metadata: {
+              result: { graphId: "graph-old", commitSha: "a".repeat(40) },
+              timing: { completedAt: "2026-07-22T01:00:00.000Z" }
+            }
+          },
+          {
+            id: "project-new",
+            parentTaskId: "context-graph-root",
+            type: "context_graph_project",
+            status: "done",
+            metadata: { result: {}, timing: { completedAt: "2026-07-22T02:00:00.000Z" } }
+          }
+        ]
+      });
+    }
+    return json({ error: "not found" }, 404);
+  };
+
+  await assert.rejects(
+    runProductionContextGraphAcceptance(
+      {
+        apiUrl: "https://api.example.test",
+        token: "secret",
+        requestKey: "deploy-malformed",
+        repository: "omxyz/jina-context-graph-e2e",
+        pollIntervalMs: 1,
+        timeoutMs: 100,
+        log: () => undefined
+      },
+      fetchImpl
+    ),
+    /latest contextGraph graph receipt is missing/
+  );
 });
 
 test("production acceptance reviews causality, queries it in both directions, and verifies the graph edge", async () => {
@@ -198,55 +486,69 @@ test("production acceptance reviews causality, queries it in both directions, an
             id: `${taskId}-project`,
             parentTaskId: taskId,
             type: "context_graph_project",
-            status: "done"
+            status: "done",
+            metadata: { result: { graphId: "graph-e2e", commitSha: "a".repeat(40) } }
           }
         ]
       });
     }
-    if (url.pathname === "/context-graph") {
+    if (url.pathname.startsWith("/context-graph/graphs/")) {
       contextGraphReads += 1;
       return json({
-        latest: {
-          repository: "omxyz/jina-context-graph-e2e",
-          ref: "main",
-          commitSha: "a".repeat(40),
-          nodes:
-            contextGraphReads === 1
-              ? [{ id: "repo", kind: "Repository", evidence: ["README.md:1"] }]
-              : [
-                  {
-                    id: "issue",
-                    kind: "Issue",
-                    description: "github:issue:omxyz/jina-context-graph-e2e#7",
-                    evidence: ["ROOT_CAUSE.md:2"]
-                  },
-                  {
-                    id: "commit",
-                    kind: "Commit",
-                    description: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
-                    evidence: ["ROOT_CAUSE.md:2"]
-                  }
-                ],
-          edges:
-            contextGraphReads === 1
-              ? [
-                  {
-                    source: "repo",
-                    target: "repo",
-                    predicate: "CONTAINS",
-                    evidence: ["README.md:1"]
-                  }
-                ]
-              : [
-                  {
-                    source: "issue",
-                    target: "commit",
-                    predicate: "INTRODUCED_BY",
-                    why: "The guard was bypassed.",
-                    evidence: ["ROOT_CAUSE.md:2"]
-                  }
-                ]
-        }
+        id: "graph-e2e",
+        repository: "omxyz/jina-context-graph-e2e",
+        ref: "main",
+        commitSha: "a".repeat(40),
+        nodes:
+          contextGraphReads === 1
+            ? [{ id: "repo", kind: "Repository", evidence: ["README.md:1"] }]
+            : [
+                {
+                  id: "issue",
+                  kind: "Issue",
+                  description: "github:issue:omxyz/jina-context-graph-e2e#7",
+                  evidence: ["ROOT_CAUSE.md:2"]
+                },
+                {
+                  id: "commit",
+                  kind: "Commit",
+                  description: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
+                  evidence: ["ROOT_CAUSE.md:2"]
+                }
+              ],
+        edges:
+          contextGraphReads === 1
+            ? [
+                {
+                  source: "repo",
+                  target: "repo",
+                  predicate: "CONTAINS",
+                  evidence: ["README.md:1"]
+                }
+              ]
+            : [
+                {
+                  source: "issue",
+                  target: "commit",
+                  predicate: "INTRODUCED_BY",
+                  why: "The guard was bypassed.",
+                  evidence: ["ROOT_CAUSE.md:2"]
+                }
+              ]
+      });
+    }
+    if (url.pathname === "/context-graph") {
+      return json({
+        latest: null,
+        graphs: [
+          {
+            id: "graph-e2e",
+            repository: "omxyz/jina-context-graph-e2e",
+            ref: "main",
+            commitSha: "a".repeat(40),
+            generatedAt: "2026-07-21T12:00:00.000Z"
+          }
+        ]
       });
     }
     if (url.pathname === "/context-graph/assertions")

@@ -90,3 +90,4 @@ Smaller packages contain review planning, context policy, publication, billing p
 - [Deployment](docs/DEPLOYMENT.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
 - [Billing](docs/BILLING.md)
+- [Observability](docs/OBSERVABILITY.md)

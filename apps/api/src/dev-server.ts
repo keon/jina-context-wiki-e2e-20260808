@@ -10,6 +10,7 @@ import {
   type ContextGraphStore,
   type ContextGraphPipelineCoordinator
 } from "@jina/context-graph";
+import { createLogger, errorLogFields } from "@jina/observability";
 import { createApiServer } from "./server.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
@@ -41,23 +42,33 @@ const server = createApiServer({
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")
 });
 
+// This file is also the production container entrypoint, so lifecycle events
+// must be single-line JSON for Cloud Logging; the human-readable endpoint
+// listing stays dev-only.
+const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
+
 server.listen(port, () => {
-  console.log(`jina api server: http://localhost:${port}`);
-  console.log(`  storage: ${stateStore ? "postgres" : "memory"}`);
-  console.log("  GET  /board  /events  /context-graph  /health");
-  console.log("  POST /mcp  (query_graph MCP tool)");
-  console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
+  logger.info(`jina api server listening on ${port}`, {
+    event: "api.started",
+    port,
+    storage: stateStore ? "postgres" : "memory",
+    devEndpoints: enableDevEndpoints
+  });
   if (enableDevEndpoints) {
+    console.log(`jina api server: http://localhost:${port}`);
+    console.log("  GET  /board  /events  /context-graph  /health");
+    console.log("  POST /mcp  (query_graph MCP tool)");
+    console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
   }
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    console.log(`received ${signal}; shutting down`);
+    logger.info(`received ${signal}; shutting down`, { event: "api.shutdown", signal });
     server.close((error) => {
       if (error) {
-        console.error("API shutdown failed", error);
+        logger.error("API shutdown failed", { event: "api.shutdown_failed", ...errorLogFields(error) });
         process.exitCode = 1;
       }
     });

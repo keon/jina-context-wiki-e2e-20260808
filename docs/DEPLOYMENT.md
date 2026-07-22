@@ -90,3 +90,7 @@ The migration revokes `PUBLIC` access, installs matching default privileges, use
 gcloud run services list --project=jina-v2 --region=us-central1
 gcloud run services describe jina-dashboard --project=jina-v2 --region=us-central1 --format=json
 ```
+
+Structured logging, trace correlation, metrics, and the recommended Cloud
+Monitoring dashboards and alerts are documented in
+[OBSERVABILITY.md](OBSERVABILITY.md).

@@ -55,6 +55,17 @@ import {
 } from "./pipeline.js";
 import { DomainError } from "@jina/shared-kernel";
 
+/**
+ * Optional repository/ref scope for graph-summary listings. Stores apply it
+ * before any result limit, so a scoped caller (e.g. deploy acceptance) sees
+ * its repository's graphs even when the tenant holds more heads than one
+ * unscoped page returns.
+ */
+export interface ContextGraphSummaryFilter {
+  readonly repository?: string;
+  readonly ref?: string;
+}
+
 export interface ContextGraphStore extends ContextGraphPipelineStore, RepositoryContextOperations {
   save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void>;
   latest(tenantId: string): Promise<ContextGraph | undefined>;
@@ -65,7 +76,7 @@ export interface ContextGraphStore extends ContextGraphPipelineStore, Repository
   ): Promise<{ readonly graphId: string; readonly commitSha: string } | undefined>;
   get(graphId: string, tenantId: string): Promise<ContextGraph | undefined>;
   list(tenantId: string): Promise<readonly ContextGraph[]>;
-  listSummaries(tenantId: string): Promise<readonly ContextGraphSummary[]>;
+  listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter): Promise<readonly ContextGraphSummary[]>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
   close(): Promise<void>;
@@ -121,8 +132,14 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
   }
 
-  async listSummaries(tenantId: string): Promise<readonly ContextGraphSummary[]> {
-    return (await this.list(tenantId)).map(summarizeContextGraph);
+  async listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter): Promise<readonly ContextGraphSummary[]> {
+    return (await this.list(tenantId))
+      .filter(
+        (graph) =>
+          (filter?.repository === undefined || graph.repository === filter.repository) &&
+          (filter?.ref === undefined || graph.ref === filter.ref)
+      )
+      .map(summarizeContextGraph);
   }
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void> {

@@ -11,8 +11,9 @@
   },
   "dependencies": {
     "@jina/ai": "workspace:*",
+    "@jina/context-graph": "workspace:*",
     "@jina/daytona": "workspace:*",
-    "@jina/context-graph": "workspace:*"
+    "@jina/observability": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

@@ -12,6 +12,7 @@
     { "path": "../../packages/board" },
     { "path": "../../packages/db" },
     { "path": "../../packages/github" },
+    { "path": "../../packages/observability" },
     { "path": "../../packages/publication" },
     { "path": "../../packages/context-graph" },
     { "path": "../../packages/review" },

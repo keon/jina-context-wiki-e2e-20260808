@@ -3380,3 +3380,39 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
     "changed cited blobs invalidate old assertions"
   );
 });
+
+test("summary listings scope by repository and ref before any result limit", async () => {
+  const store = new MemoryContextGraphStore();
+  const generated = parseGeneratedContextGraph({
+    summary: "repo",
+    nodes: [
+      { id: "repo", kind: "Repository", label: "demo", description: "repo", evidence: ["README.md:1"] },
+      { id: "readme", kind: "File", label: "README", description: "docs", path: "README.md", evidence: ["README.md:1"] }
+    ],
+    edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
+  });
+  const build = (repository: string, ref: string, generatedAt: string) =>
+    createContextGraph({
+      request: { tenantId: "tenant", repository, ref, taskId: `task-${repository}-${ref}` },
+      commitSha: "abc",
+      generatedAt,
+      executor: "fixture",
+      model: "fixture",
+      generated
+    });
+  await store.save(build("omxyz/e2e", "main", "2026-01-01T00:00:00.000Z"));
+  await store.save(build("omxyz/other", "main", "2026-01-02T00:00:00.000Z"));
+  await store.save(build("omxyz/e2e", "dev", "2026-01-03T00:00:00.000Z"));
+
+  const scoped = await store.listSummaries("tenant", { repository: "omxyz/e2e", ref: "main" });
+  assert.deepEqual(
+    scoped.map((summary) => [summary.repository, summary.ref]),
+    [["omxyz/e2e", "main"]]
+  );
+  const repositoryOnly = await store.listSummaries("tenant", { repository: "omxyz/e2e" });
+  assert.deepEqual(
+    repositoryOnly.map((summary) => summary.ref),
+    ["dev", "main"]
+  );
+  assert.equal((await store.listSummaries("tenant")).length, 3);
+});
