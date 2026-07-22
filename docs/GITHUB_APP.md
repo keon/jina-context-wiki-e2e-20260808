@@ -44,7 +44,7 @@ Create a private GitHub App under the account or organization that owns the repo
 - Repository permission: **Pull requests — Read-only**
 - Repository permission: **Issues — Read-only**
 - Repository permission: **Contents — Read-only**
-- Optional repository permission: **Deployments — Read-only**
+- Repository permission for deployment-aware context graphs: **Deployments — Read-only**
 - Optional repository permission: **Actions — Read-only**
 - Subscribe to events: **Push**, **Pull request**, and **Issues**
 
@@ -52,7 +52,7 @@ Install the App on the repositories Jina should watch. In production shared mode
 
 The resolved original tenant UUID scopes every task created by the delivery. Task metadata also retains the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types, making those names available on the board and in context graph provenance.
 
-The webhook slice does not use an App ID or private key. The current review worker uses `GITHUB_CLONE_TOKEN` to read PR metadata and diffs. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
+The webhook slice does not use an App ID or private key. Workers use `GITHUB_CLONE_TOKEN` for repository cloning and prefer `GITHUB_API_TOKEN` for REST metadata. The production API token needs read access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions; the deployment acceptance fixture depends on Deployments access. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
 
 GitHub documents the registration flow in [Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app) and the event setup in [Using webhooks with GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/using-webhooks-with-github-apps).
 

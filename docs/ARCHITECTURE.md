@@ -10,7 +10,7 @@ The deployed backend runs as three Cloud Run services backed by the shared Postg
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
 - `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
 
-The dashboard and admin are Next.js applications deployed separately. An existing Cloud Run dashboard remains during the Vercel authentication cutover; see [DEPLOYMENT.md](DEPLOYMENT.md).
+The dashboard and admin are Next.js applications deployed automatically from `main` by the Om Labs Vercel projects `jina-dashboard` and `jina-admin`. They call the Cloud Run API only from server routes, forwarding the internal bearer credential and shared tenant identity after app-level authentication. A legacy Cloud Run dashboard remains during traffic cutover but is not updated by the active pipeline; see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ```text
 GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
@@ -75,7 +75,7 @@ Source writes, model observations, and projections are independently idempotent.
 
 Production shared mode is scoped by an original tenant UUID on each authenticated request; fixed mode uses the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential. In shared mode, a forwarded `tenant:<uuid>` principal must match the `x-jina-tenant-id` header.
 
-The web application must authenticate users before forwarding a verified principal and service credential. The existing Cloud Run dashboard uses IAP; its replacement needs an equivalent identity boundary. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
+The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal; the admin app uses the service principal. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
 MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
 

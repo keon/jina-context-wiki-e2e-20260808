@@ -96,3 +96,5 @@ Smaller packages contain review planning, context policy, publication, billing p
 - [GitHub App setup](docs/GITHUB_APP.md)
 - [Billing](docs/BILLING.md)
 - [Observability](docs/OBSERVABILITY.md)
+
+Deployment, credential, trigger, service, or hosting changes must update [Deployment](docs/DEPLOYMENT.md) in the same pull request so the checked-in operating guide stays authoritative.
