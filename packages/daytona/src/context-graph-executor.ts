@@ -5,19 +5,23 @@ import {
   assertionsFromGeneratedContextGraph,
   createContextGraph,
   materializeRequiredCausalAssertions,
+  materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
   requiredDerivedIssuePullRequestNumbers,
+  requiredMoveAnchors,
   sourceBackedModelEntityIds,
   validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
+  validateRequiredMoveAssertions,
   validateSourceBackedModelEntities,
   type GeneratedContextGraph,
   type ContextGraphBuildRequest,
   type ContextGraphExecutor,
   type ContextGraph,
-  type RequiredCausalAnchor
+  type RequiredCausalAnchor,
+  type RequiredMoveAnchor
 } from "@jina/context-graph";
 
 const DEFAULT_IMAGE = "node:22-bookworm";
@@ -122,9 +126,12 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
         request.signal?.throwIfAborted();
         try {
           const parsedModelOutput = parseJsonResult(completion.text);
-          const candidate = materializeRequiredCausalAssertions(
-            sanitizeGeneratedModelOutput(parseGeneratedContextGraph(parsedModelOutput), request.sourceEvidence ?? []),
-            input.causalAnchors
+          const candidate = materializeRequiredMoveAssertions(
+            materializeRequiredCausalAssertions(
+              sanitizeGeneratedModelOutput(parseGeneratedContextGraph(parsedModelOutput), request.sourceEvidence ?? []),
+              input.causalAnchors
+            ),
+            input.moveAnchors
           );
           const validationErrors: string[] = [];
           try {
@@ -149,6 +156,11 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
           }
           try {
             validateRequiredCausalAssertions(candidate, input.causalAnchors);
+          } catch (error) {
+            validationErrors.push(error instanceof Error ? error.message : String(error));
+          }
+          try {
+            validateRequiredMoveAssertions(candidate, input.moveAnchors);
           } catch (error) {
             validationErrors.push(error instanceof Error ? error.message : String(error));
           }
@@ -325,6 +337,7 @@ async function prepareModelInput(
   readonly prompt: string;
   readonly focusedRepairPrompt: string;
   readonly causalAnchors: readonly RequiredCausalAnchor[];
+  readonly moveAnchors: readonly RequiredMoveAnchor[];
 }> {
   const focusEvidence = await buildFocusEvidenceBundle(sandbox, request.focusPaths ?? []);
   const requiredDerivedIssues = requiredDerivedIssuePullRequestNumbers(
@@ -332,8 +345,12 @@ async function prepareModelInput(
     request.problemEvidencePullRequestNumbers ?? []
   );
   const causalAnchors = requiredCausalAnchors(focusEvidence.files, requiredDerivedIssues);
+  const moveAnchors = requiredMoveAnchors(focusEvidence.files);
   const prompt = contextGraphPrompt(request, focusEvidence.text, requiredDerivedIssues, causalAnchors);
-  const requiredPaths = new Set(causalAnchors.map((anchor) => anchor.evidencePath));
+  const requiredPaths = new Set([
+    ...causalAnchors.map((anchor) => anchor.evidencePath),
+    ...moveAnchors.map((anchor) => anchor.evidencePath)
+  ]);
   const repairFiles = focusEvidence.files.filter((file) => requiredPaths.has(file.path));
   const repairEvidence = repairFiles
     .map(
@@ -359,7 +376,7 @@ async function prepareModelInput(
     requiredDerivedIssues,
     causalAnchors
   );
-  return { prompt, focusedRepairPrompt, causalAnchors };
+  return { prompt, focusedRepairPrompt, causalAnchors, moveAnchors };
 }
 
 function contextGraphPrompt(
