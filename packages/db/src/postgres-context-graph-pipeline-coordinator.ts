@@ -221,6 +221,25 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     readonly leaseExpiresAt: string;
   }): Promise<ContextGraphStageClaim | undefined> {
     await this.initialize();
+    // Claim transactions lock jina_board.tasks then jina_board.workflows and can
+    // deadlock against concurrent createBuild supersede sweeps; retry 40P01.
+    for (let attempt = 1; ; attempt += 1) {
+      try {
+        return await this.claimOnce(input);
+      } catch (error) {
+        if (attempt >= 3 || (error as { code?: string }).code !== "40P01") throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
+      }
+    }
+  }
+
+  private async claimOnce(input: {
+    readonly tenantId: string;
+    readonly workerId: string;
+    readonly topics: readonly ContextGraphWorkerTopic[];
+    readonly now: string;
+    readonly leaseExpiresAt: string;
+  }): Promise<ContextGraphStageClaim | undefined> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");

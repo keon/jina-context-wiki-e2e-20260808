@@ -8,15 +8,122 @@ import {
   createContextGraph,
   derivedIssueNaturalKey,
   featureNaturalKey,
+  predicateRegistry,
   stableId
 } from "@jina/context-graph";
 import { PostgresJsonStateStore } from "./postgres-json-state-store.js";
-import { PostgresContextGraphStore } from "./postgres-context-graph-store.js";
+import { CONTEXT_GRAPH_SCHEMA_SQL, PostgresContextGraphStore } from "./postgres-context-graph-store.js";
 import { CONTEXT_GRAPH_ROLES_SQL } from "./context-graph-roles.js";
 import { PostgresContextGraphPipelineCoordinator } from "./postgres-context-graph-pipeline-coordinator.js";
 import { Pool } from "pg";
 
 const connectionString = process.env.TEST_DATABASE_URL;
+
+test("Postgres schema backstops every cardinality-one predicate from the registry", () => {
+  const expected = Object.values(predicateRegistry)
+    .filter((definition) => definition.cardinality === "one")
+    .map((definition) => definition.name)
+    .sort();
+  assert.ok(expected.length >= 5);
+  const index =
+    /create unique index if not exists context_graph_assertions_one_active_\w+[\s\S]+?where status='active' and predicate in \(([^)]+)\)/.exec(
+      CONTEXT_GRAPH_SCHEMA_SQL
+    );
+  assert.ok(index, "cardinality-one backstop index is missing");
+  assert.deepEqual(
+    index[1]!.split(",").map((name) => name.trim().replace(/^'|'$/g, "")),
+    expected
+  );
+});
+
+test(
+  "Postgres schema reconciles legacy cardinality-one duplicates before widening the backstop index",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const pool = new Pool({ connectionString });
+    const suffix = Date.now().toString(36);
+    const tenantId = `legacy-${suffix}`;
+    const repository = `omxyz/legacy-${suffix}`;
+    try {
+      await pool.query(CONTEXT_GRAPH_SCHEMA_SQL);
+      // Simulate the pre-widening state: no backstop index, and two active
+      // DEPLOYS rows for one subject — legal under the old three-predicate index.
+      await pool.query(`
+        do $$ declare stale record; begin
+          for stale in select indexname from pg_indexes
+            where schemaname='jina_context_graph' and indexname like 'context_graph_assertions_one_active%'
+          loop execute format('drop index jina_context_graph.%I', stale.indexname); end loop;
+        end $$`);
+      const entity = (kind: string, key: string) => stableId("entity", `${tenantId}:${kind}:${key}`);
+      const deployment = entity("Deployment", "deployment:test:legacy");
+      const commitA = entity("Commit", "sha:a");
+      const commitB = entity("Commit", "sha:b");
+      await pool.query(
+        `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name,created_at)
+         values ($1,$2,'Deployment','deployment:test:legacy','legacy deploy',now()),
+                ($3,$2,'Commit','sha:a','commit a',now()),
+                ($4,$2,'Commit','sha:b','commit b',now())`,
+        [deployment, tenantId, commitA, commitB]
+      );
+      const assertionRow = (id: string, objectId: string, recordedAt: string) =>
+        pool.query(
+          `insert into jina_context_graph.assertions
+            (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
+             predicate,object_id,object_kind,object_natural_key,object_label,status,evidence,explanation,
+             asserted_by,generator_version,registry_version,recorded_at,last_confirmed_at)
+           values ($1,$2,$3,'command',$4,'Deployment','deployment:test:legacy','legacy deploy',
+                   'DEPLOYS',$5,'Commit','sha','sha','active','[]'::jsonb,'legacy duplicate for migration test',
+                   'test:legacy','test','test',$6,$6)`,
+          [id, tenantId, repository, deployment, objectId, recordedAt]
+        );
+      await assertionRow("assertion_legacy_older", commitA, "2026-01-01T00:00:00Z");
+      await assertionRow("assertion_legacy_newer", commitB, "2026-02-01T00:00:00Z");
+
+      // Re-applying the schema must reconcile the duplicates, then create the
+      // widened index — instead of failing every boot with 23505.
+      await pool.query(CONTEXT_GRAPH_SCHEMA_SQL);
+      const rows = await pool.query<{
+        id: string;
+        status: string;
+        superseded_by: string | null;
+        audit_id: string | null;
+      }>(
+        `select id,status,superseded_by,audit_id from jina_context_graph.assertions
+         where tenant_id=$1 order by id`,
+        [tenantId]
+      );
+      assert.deepEqual(
+        rows.rows.map((row) => [row.id, row.status, row.superseded_by]),
+        [
+          ["assertion_legacy_newer", "active", null],
+          ["assertion_legacy_older", "superseded", "assertion_legacy_newer"]
+        ]
+      );
+      const audit = await pool.query<{ actor_id: string }>(
+        `select actor_id from jina_context_graph.audit_log where tenant_id=$1 and id=$2`,
+        [tenantId, rows.rows[1]!.audit_id]
+      );
+      assert.equal(audit.rows[0]?.actor_id, "svc:schema-migration");
+      const indexes = await pool.query(
+        `select indexname from pg_indexes
+         where schemaname='jina_context_graph' and indexname like 'context_graph_assertions_one_active%'`
+      );
+      assert.equal(indexes.rows.length, 1);
+      // Idempotent: a further apply changes nothing.
+      await pool.query(CONTEXT_GRAPH_SCHEMA_SQL);
+      const unchanged = await pool.query<{ active: number }>(
+        `select count(*)::int as active from jina_context_graph.assertions where tenant_id=$1 and status='active'`,
+        [tenantId]
+      );
+      assert.equal(unchanged.rows[0]?.active, 1);
+    } finally {
+      await pool.end();
+    }
+  }
+);
 
 test(
   "Postgres context graph pipeline claims once and fences superseded leases",

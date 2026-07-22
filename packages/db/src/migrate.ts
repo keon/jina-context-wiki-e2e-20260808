@@ -1,4 +1,5 @@
 import { Pool, type PoolConfig } from "pg";
+import { applySchema } from "./apply-schema.js";
 import { CONTEXT_GRAPH_ROLES_SQL } from "./context-graph-roles.js";
 import { CONTEXT_GRAPH_SCHEMA_SQL } from "./postgres-context-graph-store.js";
 
@@ -16,7 +17,7 @@ const config: PoolConfig = connectionString
 
 const pool = new Pool({ ...config, application_name: "jina-context-graph-migrate", max: 1 });
 try {
-  await pool.query(CONTEXT_GRAPH_SCHEMA_SQL);
+  await applySchema(pool, "jina_context_graph.schema", CONTEXT_GRAPH_SCHEMA_SQL);
   if (process.argv.includes("--install-roles")) await pool.query(CONTEXT_GRAPH_ROLES_SQL);
 } finally {
   await pool.end();

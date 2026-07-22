@@ -44,7 +44,13 @@ import {
   parsePackageManifest,
   parseServiceDefinitions
 } from "./normalizers.js";
-import { buildCausalTrace, evaluateCounterfactual } from "./causal.js";
+import {
+  buildCausalTrace,
+  causalTraceItemsFromGraph,
+  evaluateCounterfactual,
+  type CausalTraceNode,
+  type CausalTraceProjection
+} from "./causal.js";
 import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js";
 
 test("snapshot-first contextGraph builds publish and ingest history without waiting for assertions", async () => {
@@ -1487,6 +1493,182 @@ test("counterfactuals use reviewed issue roles instead of generic change rows", 
   });
   assert.equal(unsupported.citedClaims.length, 0);
   assert.match(unsupported.coverageGaps[0]?.message ?? "", /citation|evidence/i);
+});
+
+test("counterfactual commit interventions match truncated and short shas by prefix", () => {
+  const sha = "4980ac3a3c9f27e314da47380078c19108e4edb4";
+  const root: CausalTraceNode = { id: "issue", kind: "Issue", label: "Issue #123", description: "Issue #123" };
+  const trace = (commit: CausalTraceNode): CausalTraceProjection => ({
+    root,
+    causes: [
+      {
+        kind: "cause",
+        nodes: [root, commit],
+        edgeIds: ["cause"],
+        predicates: ["INTRODUCED_BY"],
+        citations: [{ kind: "assertion", id: "cause", repository: "org/repo" }]
+      }
+    ],
+    resolutions: [],
+    implementations: [],
+    affectedEntities: [],
+    dependencies: [],
+    deployments: [],
+    documentation: [],
+    ownership: [],
+    movedFrom: [],
+    structuralPaths: [],
+    citations: [{ kind: "assertion", id: "cause", repository: "org/repo" }]
+  });
+
+  // Node text carries only a 12-char truncated sha; the question uses the full 40-char sha.
+  // The node side is prefix-resolved, so the answer must carry the sha caveat.
+  const truncated = evaluateCounterfactual(
+    trace({ id: "cause-commit", kind: "Commit", label: sha.slice(0, 12), description: "introduced the regression" }),
+    `If commit ${sha} were removed, would issue #123 disappear?`
+  );
+  assert.equal(truncated.intervention?.id, "cause-commit");
+  assert.equal(truncated.removedPaths.length, 1);
+  assert.equal(truncated.remainingPaths.length, 0);
+  assert.deepEqual(truncated.coverageGaps, []);
+  assert.match(truncated.unresolvedAmbiguities[0] ?? "", /sha prefix/);
+
+  // Inverse: node carries the full sha (in its id), question uses a 7-char short sha.
+  // A short question sha can collide outside the trace, so the caveat stays.
+  const short = evaluateCounterfactual(
+    trace({ id: `commit:${sha}`, kind: "Commit", label: "bad change", description: "free text" }),
+    `If commit ${sha.slice(0, 7)} were removed, would issue #123 disappear?`
+  );
+  assert.equal(short.intervention?.id, `commit:${sha}`);
+  assert.equal(short.removedPaths.length, 1);
+  assert.equal(short.remainingPaths.length, 0);
+  assert.match(short.unresolvedAmbiguities[0] ?? "", /sha prefix/);
+
+  // Full 40-char sha on both sides pins the commit exactly: no caveat.
+  const exact = evaluateCounterfactual(
+    trace({ id: "cause-commit", kind: "Commit", label: sha.slice(0, 12), description: `repo:org/repo:sha:${sha}` }),
+    `If commit ${sha} were removed, would issue #123 disappear?`
+  );
+  assert.equal(exact.intervention?.id, "cause-commit");
+  assert.deepEqual(exact.unresolvedAmbiguities, []);
+
+  // A different commit must not match, even with the prefix-tolerant rule.
+  const mismatch = evaluateCounterfactual(
+    trace({ id: "cause-commit", kind: "Commit", label: "deadbeefcafe", description: "other change" }),
+    `If commit ${sha} were removed, would issue #123 disappear?`
+  );
+  assert.equal(mismatch.intervention, undefined);
+  assert.equal(mismatch.removedPaths.length, 0);
+});
+
+test("memory projection materializes accepted human causal assertions for counterfactuals", async () => {
+  const store = new MemoryContextGraphStore();
+  const tenantId = "t";
+  const repository = "org/repo";
+  const headSha = "9".repeat(40);
+  const causeSha = "4980ac3a3c9f27e314da47380078c19108e4edb4";
+  const now = "2026-07-21T00:00:00.000Z";
+  await store.planIngestion({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha: headSha,
+    treeSha: "c".repeat(40),
+    parents: [],
+    isDefaultRef: true,
+    recordedAt: now,
+    taskId: "ingest",
+    files: [{ path: "README.md", blobSha: "b".repeat(40), size: 10 }]
+  });
+  await store.applyGitHubObservations([
+    {
+      tenantId,
+      repository,
+      kind: "issue",
+      number: 123,
+      title: "Worker failed",
+      state: "open",
+      url: `https://github.com/${repository}/issues/123`,
+      recordedAt: now
+    },
+    {
+      tenantId,
+      repository,
+      kind: "pull_request",
+      number: 99,
+      title: "Replace transport",
+      state: "merged",
+      url: `https://github.com/${repository}/pull/99`,
+      recordedAt: now,
+      commitShas: [causeSha],
+      mergeCommitSha: causeSha,
+      mergedAt: now
+    }
+  ]);
+  const assigned = await store.executeCommand(
+    tenantId,
+    "user:verifier",
+    {
+      type: "assign_relationship",
+      repository,
+      subject: { kind: "Issue", key: `github:issue:${repository}#123`, displayName: "Worker failed" },
+      predicate: "INTRODUCED_BY",
+      object: { kind: "Commit", key: `repo:${repository}:sha:${causeSha}`, displayName: causeSha },
+      qualifiers: { reason: "the transport change dropped the runtime" },
+      reason: "curated root cause"
+    },
+    now,
+    true
+  );
+  // While the command assertion is only proposed it must not project as fact.
+  const unreviewed = await store.project({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha: headSha,
+    taskId: "project-unreviewed",
+    generatedAt: now
+  });
+  assert.equal(unreviewed.edges.filter((edge) => edge.predicate === "INTRODUCED_BY").length, 0);
+  await store.executeCommand(
+    tenantId,
+    "user:verifier",
+    {
+      type: "review_assertion",
+      assertionId: assigned.affectedIds[0]!,
+      decision: "accept",
+      reason: "verified"
+    },
+    now,
+    true
+  );
+  const graph = await store.project({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha: headSha,
+    taskId: "project",
+    generatedAt: now
+  });
+  assert.equal(graph.edges.filter((edge) => edge.predicate === "INTRODUCED_BY").length, 1);
+  const items = causalTraceItemsFromGraph(graph, {
+    tenantId,
+    allowedRepositories: [repository],
+    repository,
+    template: "counterfactual",
+    issueNumber: 123,
+    commitSha: causeSha,
+    query: `if commit ${causeSha} were removed, would issue #123 disappear?`
+  });
+  assert.equal(items.length, 1);
+  const evaluation = evaluateCounterfactual(
+    items[0]!.data as unknown as CausalTraceProjection,
+    `If commit ${causeSha} were removed, would issue #123 disappear?`
+  );
+  // The projected Commit node label is the source normalizer's 12-char short sha.
+  assert.equal(evaluation.intervention?.label, causeSha.slice(0, 12));
+  assert.ok(evaluation.removedPaths.length >= 1);
+  assert.equal(evaluation.remainingPaths.length, 0);
 });
 
 test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNERS facts", () => {

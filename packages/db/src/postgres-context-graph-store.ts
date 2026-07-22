@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   CONTEXT_GRAPH_PARSER_VERSION,
   CONTEXT_GRAPH_REGISTRY_VERSION,
@@ -16,6 +16,7 @@ import {
   sourceObservationId,
   stableId,
   predicateDefinition,
+  predicateRegistry,
   validatePredicateEndpoints,
   validateQualifiers,
   type BlobAnalysis,
@@ -49,6 +50,7 @@ import {
 } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { DomainError } from "@jina/shared-kernel";
+import { applySchema } from "./apply-schema.js";
 
 interface GraphRow {
   id: string;
@@ -3490,7 +3492,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
   }
 
   private async createSchema(): Promise<void> {
-    await this.pool.query(CONTEXT_GRAPH_SCHEMA_SQL);
+    await applySchema(this.pool, "jina_context_graph.schema", CONTEXT_GRAPH_SCHEMA_SQL);
   }
 }
 
@@ -5604,6 +5606,17 @@ function cosine(left: readonly number[], right: readonly number[]): number {
   return product / ((Math.sqrt(leftNorm) || 1) * (Math.sqrt(rightNorm) || 1));
 }
 
+const cardinalityOnePredicates = Object.values(predicateRegistry)
+  .filter((definition) => definition.cardinality === "one")
+  .map((definition) => definition.name)
+  .sort();
+// The index name encodes the predicate list so schema reruns rebuild the
+// backstop only when the registry's cardinality-one set changes.
+const oneActiveIndexName = `context_graph_assertions_one_active_${createHash("sha256")
+  .update(cardinalityOnePredicates.join(","))
+  .digest("hex")
+  .slice(0, 8)}`;
+
 export const CONTEXT_GRAPH_SCHEMA_SQL = `
       -- Production data predating the context-graph rename lives in the
       -- legacy jina_ontology schema. Renaming that schema in place keeps
@@ -6118,9 +6131,51 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
       create unique index if not exists context_graph_assertions_tenant_identity
         on jina_context_graph.assertions (tenant_id,id);
       drop index if exists jina_context_graph.context_graph_assertions_one_active;
-      create unique index if not exists context_graph_assertions_one_active_repository
+      -- Legacy data can hold duplicate active rows for predicates the old
+      -- hardcoded index did not cover; creating the widened index over them
+      -- would raise 23505 on every boot. Reconcile first with the same winner
+      -- rule the reconciliation worker uses, as an audited migration action.
+      do $$
+      declare grp record; winner_id text; loser_ids text[]; migration_audit_id text;
+      begin
+        for grp in
+          select tenant_id,repository,subject_id,predicate,qualifiers_hash
+          from jina_context_graph.assertions
+          where status='active' and predicate in (${cardinalityOnePredicates.map((name) => `'${name}'`).join(",")})
+          group by tenant_id,repository,subject_id,predicate,qualifiers_hash
+          having count(*) > 1
+        loop
+          select id into winner_id from jina_context_graph.assertions
+          where tenant_id=grp.tenant_id and repository=grp.repository and subject_id=grp.subject_id
+            and predicate=grp.predicate and qualifiers_hash=grp.qualifiers_hash and status='active'
+          order by coalesce(valid_from,recorded_at) desc, recorded_at desc, id desc limit 1;
+          select array_agg(id) into loser_ids from jina_context_graph.assertions
+          where tenant_id=grp.tenant_id and repository=grp.repository and subject_id=grp.subject_id
+            and predicate=grp.predicate and qualifiers_hash=grp.qualifiers_hash and status='active'
+            and id <> winner_id;
+          migration_audit_id := 'audit_migration_' || md5(grp.tenant_id||':'||grp.repository||':'||grp.subject_id||':'||grp.predicate||':'||grp.qualifiers_hash);
+          insert into jina_context_graph.audit_log (id,tenant_id,actor_id,action,input,result,created_at)
+          values (migration_audit_id, grp.tenant_id, 'svc:schema-migration', 'reconcile_cardinality_backstop',
+                  jsonb_build_object('winnerId',winner_id,'supersededIds',to_jsonb(loser_ids),'predicate',grp.predicate),
+                  'accepted', now())
+          on conflict (id) do nothing;
+          update jina_context_graph.assertions
+            set status='superseded', valid_to=now(), superseded_by=winner_id, audit_id=migration_audit_id
+          where id = any(loser_ids);
+        end loop;
+      end $$;
+      do $$ declare stale record; begin
+        for stale in
+          select indexname from pg_indexes
+          where schemaname='jina_context_graph' and indexname like 'context_graph_assertions_one_active%'
+            and indexname <> '${oneActiveIndexName}'
+        loop
+          execute format('drop index jina_context_graph.%I', stale.indexname);
+        end loop;
+      end $$;
+      create unique index if not exists ${oneActiveIndexName}
         on jina_context_graph.assertions (tenant_id,repository,subject_id,predicate,qualifiers_hash)
-        where status='active' and predicate in ('OWNED_BY','MERGED_AS','MOVED_FROM');
+        where status='active' and predicate in (${cardinalityOnePredicates.map((name) => `'${name}'`).join(",")});
       drop index if exists jina_context_graph.context_graph_assertions_one_live_candidate;
       create unique index if not exists context_graph_assertions_one_live_candidate_repository
         on jina_context_graph.assertions (tenant_id,repository,subject_id,predicate,object_id,qualifiers_hash)

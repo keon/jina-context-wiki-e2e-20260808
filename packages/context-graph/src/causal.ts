@@ -332,7 +332,7 @@ export function evaluateCounterfactual(trace: CausalTraceProjection, question: s
     removedPaths,
     remainingPaths,
     citedClaims,
-    unresolvedAmbiguities: [],
+    unresolvedAmbiguities: commitPrefixAmbiguity(intervention, question),
     coverageGaps:
       relevant.length === 0
         ? ["No reviewed causal, impact, implementation, dependency, or deployment path is available."]
@@ -425,8 +425,7 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
         traceEdges.some((edge) => {
           const other = nodeById.get(edge.source === node.id ? edge.target : edge.source);
           return (
-            other?.kind === "Commit" &&
-            `${other.label} ${other.description} ${other.id}`.toLowerCase().includes(commitSha)
+            other?.kind === "Commit" && matchesCommitSha(`${other.label} ${other.description} ${other.id}`, commitSha)
           );
         })
       )
@@ -448,9 +447,7 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
               )
             )
               return true;
-            return Boolean(
-              commitSha && `${cause.label} ${cause.description} ${cause.id}`.toLowerCase().includes(commitSha)
-            );
+            return Boolean(commitSha && matchesCommitSha(`${cause.label} ${cause.description} ${cause.id}`, commitSha));
           });
         })
       )
@@ -519,13 +516,43 @@ function selectInterventionNodes(nodes: readonly CausalTraceNode[], question: st
       return (
         node.kind === "PullRequest" && (haystack.includes(`#${pullRequest}`) || haystack.endsWith(`:${pullRequest}`))
       );
-    if (commit) return node.kind === "Commit" && haystack.includes(commit);
+    if (commit) return node.kind === "Commit" && matchesCommitSha(`${node.id} ${haystack}`, commit);
     if (packageName) return node.kind === "Package" && haystack.includes(packageName);
     if (deploymentName) return node.kind === "Deployment" && haystack.includes(deploymentName);
     if (implementationName)
       return (node.kind === "File" || node.kind === "Symbol") && haystack.includes(implementationName);
     return false;
   });
+}
+
+// A commit reference matches when one sha-like token is a prefix of the
+// other with at least 7 hex chars of overlap. Node text may hold truncated shas while
+// the question holds the full sha, or vice versa, so exact `includes` is insufficient.
+function matchesCommitSha(text: string, sha: string): boolean {
+  return text
+    .toLowerCase()
+    .split(/[^a-f0-9]+/)
+    .some((token) => token.length >= 7 && token.length <= 40 && (token.startsWith(sha) || sha.startsWith(token)));
+}
+
+// Prefix matching only sees commits inside the selected trace, so a short sha
+// that is unique here could still collide elsewhere in the repository. Flag any
+// commit intervention that was not pinned by a full 40-char sha on both sides.
+function commitPrefixAmbiguity(intervention: CausalTraceNode, question: string): readonly string[] {
+  if (intervention.kind !== "Commit") return [];
+  const sha = /\b(?:commit|sha)\s*[:#]?\s*([a-f0-9]{7,40})\b/i.exec(question)?.[1]?.toLowerCase();
+  if (!sha) return [];
+  const exact =
+    sha.length === 40 &&
+    `${intervention.id} ${intervention.label} ${intervention.description}`
+      .toLowerCase()
+      .split(/[^a-f0-9]+/)
+      .includes(sha);
+  return exact
+    ? []
+    : [
+        `The intervention commit was resolved by sha prefix ${sha}; confirm the full 40-character sha before acting on this answer.`
+      ];
 }
 
 function path(

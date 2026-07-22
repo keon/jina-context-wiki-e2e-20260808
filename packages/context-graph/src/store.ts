@@ -338,6 +338,12 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         .filter((assertion) => assertion.status === "active" || assertion.status === "proposed")
         .filter((assertion) => {
           if (assertion.commitSha === "source") return true;
+          // Audited human commands carry no code evidence to go stale; the
+          // Postgres projection includes them, so the memory store must too.
+          // Only accepted ones: projected edges carry no status, so a proposed
+          // command assertion would read as reviewed fact in causal traces.
+          if (assertion.commitSha === "command")
+            return assertion.status === "active" && assertion.evidence.length === 0 && Boolean(assertion.assertedBy);
           const source = this.snapshots.get(snapshotKey(assertion.tenantId, assertion.repository, assertion.commitSha));
           return source ? assertionEvidenceIsCurrent(assertion, source, snapshot) : false;
         })
