@@ -102,10 +102,22 @@ export const prReviewTaskTypeTriggers = [
 
 export interface PrReviewInput {
   readonly tenantId: string;
+  /** Human-readable organization or personal workspace label. */
+  readonly workspaceLabel?: string;
+  /** Stable GitHub account id as a decimal string (the source column is bigint). */
+  readonly githubAccountId?: string;
   readonly repository: string;
+  readonly githubRepositoryId?: number;
+  readonly githubInstallationId?: number;
   readonly pullRequestNumber: number;
   readonly headSha: string;
   readonly epoch: number;
+  readonly authorGithubUserId?: number;
+  readonly authorLogin?: string;
+  readonly authorAccountType?: string;
+  readonly senderGithubUserId?: number;
+  readonly senderLogin?: string;
+  readonly senderAccountType?: string;
   readonly needsExternalContext?: boolean;
 }
 
@@ -123,6 +135,20 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
   const rootTaskId = entityId<"task">(`task_${subjectKey}:root`);
   const reviewTaskId = entityId<"task">(`task_${subjectKey}:review:general`);
   const publishTaskId = entityId<"task">(`task_${subjectKey}:publish`);
+  const identityMetadata = {
+    tenantId: input.tenantId,
+    ...(input.workspaceLabel ? { workspaceLabel: input.workspaceLabel } : {}),
+    ...(input.githubAccountId !== undefined ? { githubAccountId: input.githubAccountId } : {}),
+    repository: input.repository,
+    ...(input.githubRepositoryId !== undefined ? { githubRepositoryId: input.githubRepositoryId } : {}),
+    ...(input.githubInstallationId !== undefined ? { githubInstallationId: input.githubInstallationId } : {}),
+    ...(input.authorGithubUserId !== undefined ? { authorGithubUserId: input.authorGithubUserId } : {}),
+    ...(input.authorLogin ? { authorLogin: input.authorLogin } : {}),
+    ...(input.authorAccountType ? { authorAccountType: input.authorAccountType } : {}),
+    ...(input.senderGithubUserId !== undefined ? { senderGithubUserId: input.senderGithubUserId } : {}),
+    ...(input.senderLogin ? { senderLogin: input.senderLogin } : {}),
+    ...(input.senderAccountType ? { senderAccountType: input.senderAccountType } : {})
+  };
 
   return {
     pipeline: { slug: "pr_review", version: "2026-07-08" },
@@ -138,8 +164,7 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
         dedupeKey: `${subjectKey}:root`,
         required: true,
         metadata: {
-          tenantId: input.tenantId,
-          repository: input.repository,
+          ...identityMetadata,
           pullRequestNumber: input.pullRequestNumber,
           headSha: input.headSha
         }
@@ -154,8 +179,7 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
         dispatchTopic: "run-review",
         parentTaskId: rootTaskId,
         metadata: {
-          tenantId: input.tenantId,
-          repository: input.repository,
+          ...identityMetadata,
           pullRequestNumber: input.pullRequestNumber,
           headSha: input.headSha,
           needsExternalContext: input.needsExternalContext ?? true
@@ -171,8 +195,7 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
         dispatchTopic: "run-publish",
         parentTaskId: rootTaskId,
         metadata: {
-          tenantId: input.tenantId,
-          repository: input.repository,
+          ...identityMetadata,
           pullRequestNumber: input.pullRequestNumber,
           headSha: input.headSha
         }

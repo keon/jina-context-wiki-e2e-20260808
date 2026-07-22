@@ -10,6 +10,47 @@ image_tag="${IMAGE_TAG:-${CLOUD_BUILD_ID}}"
 api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
 runtime_service_account="jina-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
+tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
+db_name="${JINA_DB_NAME:-jina}"
+db_user="${JINA_DB_USER:-jina_app}"
+db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
+fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
+
+validate_cloud_sql_instance() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[a-z][a-z0-9.-]*:[a-z0-9-]+:[a-zA-Z0-9_-]+$ ]]; then
+    echo "${name} must be a Cloud SQL connection name in project:region:instance form" >&2
+    exit 2
+  fi
+}
+
+validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
+if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
+  echo "JINA_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
+  exit 2
+fi
+
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false"
+api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest"
+
+case "${tenancy_mode}" in
+  fixed)
+    : "${fixed_tenant_id:?JINA_FIXED_TENANT_ID is required in fixed mode}"
+    api_env_vars+="~JINA_TENANT_ID=${fixed_tenant_id}~JINA_TENANT_ADMIN_PRINCIPALS=user:keon@omlabs.xyz~JINA_TENANT_ALIASES=github:unscoped,e2e-production,e2e"
+    acceptance_tenant_id="${fixed_tenant_id}"
+    acceptance_principal_id="user:keon@omlabs.xyz"
+    ;;
+  shared-db)
+    acceptance_tenant_id="eff0efc9-b103-494a-b7a3-1ae7f95c2d26"
+    acceptance_principal_id="tenant:${acceptance_tenant_id}"
+    ;;
+  *)
+    echo "JINA_TENANCY_MODE must be fixed or shared-db" >&2
+    exit 2
+    ;;
+esac
 
 retry_health() {
   local url="$1"
@@ -80,13 +121,13 @@ gcloud run deploy jina-api \
   --image="${api_image}" \
   --allow-unauthenticated \
   --service-account="${runtime_service_account}" \
-  --add-cloudsql-instances="${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres" \
+  --set-cloudsql-instances="${cloud_sql_instance}" \
   --concurrency=20 \
   --timeout=900 \
   --min-instances=0 \
   --max-instances=1 \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANT_ID=omlabs~JINA_TENANT_ADMIN_PRINCIPALS=user:keon@omlabs.xyz~JINA_TENANT_ALIASES=github:unscoped,e2e-production,e2e~INSTANCE_UNIX_SOCKET=/cloudsql/${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres~DB_NAME=jina~DB_USER=jina_app" \
-  --set-secrets="DB_PASS=jina-db-password:latest,GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest" \
+  --set-env-vars="${api_env_vars}" \
+  --set-secrets="${api_secrets}" \
   --quiet
 
 api_url="$(gcloud run services describe jina-api \
@@ -155,7 +196,7 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${runtime_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_TIMEOUT_MS=3000000~ACCEPTANCE_ISSUE_NUMBER=4~ACCEPTANCE_RESOLUTION_PR_NUMBER=5~ACCEPTANCE_CAUSING_PR_NUMBER=3~ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2~ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin~ACCEPTANCE_V51_FIXTURE=true" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_TIMEOUT_MS=3000000~ACCEPTANCE_ISSUE_NUMBER=4~ACCEPTANCE_RESOLUTION_PR_NUMBER=5~ACCEPTANCE_CAUSING_PR_NUMBER=3~ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2~ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin~ACCEPTANCE_V51_FIXTURE=true" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \
@@ -201,4 +242,6 @@ API: ${api_url}
 ContextGraph worker: ${context_graph_worker_url}
 Task worker: ${task_worker_url}
 Image tag: ${image_tag}
+Cloud SQL: ${cloud_sql_instance}
+Tenancy mode: ${tenancy_mode}
 SUMMARY

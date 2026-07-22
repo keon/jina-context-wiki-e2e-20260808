@@ -66,6 +66,24 @@ test("filterBoardTasks combines query and facet filters", () => {
   );
 });
 
+test("filterBoardTasks searches original workspace and PR author names", () => {
+  const tasks = [
+    task({
+      id: "identity",
+      title: "Review PR",
+      metadata: { repository: "omxyz/jina", workspaceLabel: "omxyz", authorLogin: "octocat" }
+    })
+  ];
+  assert.deepEqual(
+    filterBoardTasks(tasks, { ...EMPTY_BOARD_FILTERS, query: "octocat" }).map((item) => item.id),
+    ["identity"]
+  );
+  assert.deepEqual(
+    filterBoardTasks(tasks, { ...EMPTY_BOARD_FILTERS, query: "omxyz" }).map((item) => item.id),
+    ["identity"]
+  );
+});
+
 test("uniqueValues sorts and deduplicates", () => {
   assert.deepEqual(uniqueValues(["b", "a", "b", undefined, ""]), ["a", "b"]);
 });

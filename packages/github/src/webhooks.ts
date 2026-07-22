@@ -14,7 +14,9 @@ export type GitHubWebhookEvent =
       readonly headSha: string;
       readonly title?: string;
       readonly url?: string;
+      readonly authorId?: number;
       readonly authorLogin?: string;
+      readonly authorAccountType?: string;
       readonly draft?: boolean;
     }
   | {
@@ -23,7 +25,9 @@ export type GitHubWebhookEvent =
       readonly headSha: string;
       readonly title?: string;
       readonly url?: string;
+      readonly authorId?: number;
       readonly authorLogin?: string;
+      readonly authorAccountType?: string;
       readonly draft?: boolean;
     }
   | {
@@ -31,8 +35,16 @@ export type GitHubWebhookEvent =
       readonly issueNumber: number;
       readonly title: string;
       readonly url?: string;
+      readonly authorId?: number;
       readonly authorLogin?: string;
+      readonly authorAccountType?: string;
     };
+
+export interface GitHubWebhookAccount {
+  readonly id?: number;
+  readonly login?: string;
+  readonly accountType?: string;
+}
 
 export type GitHubReviewTriggerEvent = Extract<
   GitHubWebhookEvent,
@@ -47,6 +59,8 @@ export interface ParsedGitHubWebhook {
   readonly repository: string;
   readonly repositoryId?: number;
   readonly installationId?: number;
+  readonly repositoryOwner?: GitHubWebhookAccount;
+  readonly sender?: GitHubWebhookAccount;
 }
 
 export class InvalidGitHubWebhookPayloadError extends Error {
@@ -106,7 +120,9 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
   const common = {
     repository: repositoryFullName,
     ...optionalNumberProperty("repositoryId", repository.id),
-    ...optionalNestedNumberProperty("installationId", root.installation, "id")
+    ...optionalNestedNumberProperty("installationId", root.installation, "id"),
+    ...optionalAccountProperty("repositoryOwner", repository.owner),
+    ...optionalAccountProperty("sender", root.sender)
   };
 
   if (eventName === "push") {
@@ -140,7 +156,9 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
       headSha: requiredString(head.sha, "pull_request.head.sha"),
       ...optionalStringProperty("title", pullRequest.title),
       ...optionalStringProperty("url", pullRequest.html_url),
+      ...optionalNestedNumberProperty("authorId", pullRequest.user, "id"),
       ...optionalNestedStringProperty("authorLogin", pullRequest.user, "login"),
+      ...optionalNestedStringProperty("authorAccountType", pullRequest.user, "type"),
       ...(typeof pullRequest.draft === "boolean" ? { draft: pullRequest.draft } : {})
     };
 
@@ -165,7 +183,9 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
       issueNumber: requiredPositiveInteger(issue.number, "issue.number"),
       title: requiredString(issue.title, "issue.title"),
       ...optionalStringProperty("url", issue.html_url),
-      ...optionalNestedStringProperty("authorLogin", issue.user, "login")
+      ...optionalNestedNumberProperty("authorId", issue.user, "id"),
+      ...optionalNestedStringProperty("authorLogin", issue.user, "login"),
+      ...optionalNestedStringProperty("authorAccountType", issue.user, "type")
     }
   };
 }
@@ -223,4 +243,22 @@ function optionalNestedNumberProperty<Key extends string>(
     return {} as Partial<Record<Key, number>>;
   }
   return optionalNumberProperty(key, (container as Record<string, unknown>)[field]);
+}
+
+function optionalAccountProperty<Key extends string>(
+  key: Key,
+  value: unknown
+): Readonly<Partial<Record<Key, GitHubWebhookAccount>>> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return {} as Partial<Record<Key, GitHubWebhookAccount>>;
+  }
+  const record = value as Record<string, unknown>;
+  const account = {
+    ...optionalNumberProperty("id", record.id),
+    ...optionalStringProperty("login", record.login),
+    ...optionalStringProperty("accountType", record.type)
+  };
+  return Object.keys(account).length > 0
+    ? ({ [key]: account } as Record<Key, GitHubWebhookAccount>)
+    : ({} as Partial<Record<Key, GitHubWebhookAccount>>);
 }

@@ -92,12 +92,35 @@ export interface ApiServerConfig {
   readonly stateStore?: ApiStateStore;
   readonly contextGraphStore?: ContextGraphStore;
   readonly contextGraphCoordinator?: ContextGraphPipelineCoordinator;
+  /** Read-only resolver backed by the original Jina public identity tables. */
+  readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   /** Browser origins allowed to call the MCP endpoint. Non-browser clients normally omit Origin. */
   readonly mcpAllowedOrigins?: readonly string[];
+}
+
+export interface ResolvedRepositoryIdentity {
+  readonly tenantId: string;
+  readonly githubAccountId: string;
+  readonly githubAccountLogin: string;
+  readonly githubAccountType: string;
+  readonly githubRepositoryId?: string;
+  readonly repository: string;
+  readonly defaultBranch?: string;
+}
+
+export interface SharedIdentityResolver {
+  resolveRepository(input: {
+    readonly githubRepositoryId?: number;
+    readonly githubInstallationId?: number;
+    readonly repository: string;
+  }): Promise<ResolvedRepositoryIdentity | undefined>;
+  listTenantIds(): Promise<readonly string[]>;
+  ping(): Promise<void>;
+  close(): Promise<void>;
 }
 
 export interface ApiSnapshot {
@@ -336,11 +359,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return config.stateStore ? config.stateStore.hasDelivery(deliveryId) : deliveries.has(deliveryId);
   }
 
-  function acceptWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
+  function acceptWebhook(webhook: ParsedGitHubWebhook, deliveryId: string, identity?: ResolvedRepositoryIdentity) {
     const result = ingestGitHubWebhook(intakeState, webhook, {
       deliveryId,
       now: nowIso(),
-      ...(config.tenantId ? { tenantId: config.tenantId } : {})
+      ...(identity
+        ? {
+            tenantId: identity.tenantId,
+            workspaceLabel: identity.githubAccountLogin,
+            githubAccountId: identity.githubAccountId
+          }
+        : config.tenantId
+          ? { tenantId: config.tenantId }
+          : {})
     });
     intakeState = result.state;
     return result;
@@ -474,7 +505,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await Promise.all([config.stateStore?.ping(), contextGraphCoordinator.ping()]);
+      await Promise.all([
+        config.stateStore?.ping(),
+        contextGraphCoordinator.ping(),
+        config.sharedIdentityResolver?.ping()
+      ]);
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
@@ -518,11 +553,40 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
+    // Shared-mode workers claim and drain across all active original-Jina tenants.
+    // Every request after a claim carries the concrete tenant header instead.
+    if (
+      config.sharedIdentityResolver &&
+      !firstHeader(request.headers["x-jina-tenant-id"]) &&
+      hasInternalApiCredential(request, config)
+    ) {
+      if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
+        await claimWork(request, response, await sharedTenantIdsForClaim());
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
+        await readRawBody(request);
+        const results = await Promise.all(
+          (await config.sharedIdentityResolver.listTenantIds()).map((tenantId) =>
+            contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso())
+          )
+        );
+        json(response, 200, {
+          processedEventCount: results.reduce((sum, result) => sum + result.processedEventCount, 0),
+          rebuiltRepositories: [...new Set(results.flatMap((result) => result.rebuiltRepositories))].sort()
+        });
+        return;
+      }
+    }
+
     if (request.method === "POST" && url.pathname === "/internal/graph/access/sync") {
+      const syncTenantId = config.sharedIdentityResolver
+        ? normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]))
+        : config.tenantId;
       if (
         !config.graphApiToken ||
         firstHeader(request.headers.authorization) !== `Bearer ${config.graphApiToken}` ||
-        !config.tenantId
+        !syncTenantId
       ) {
         json(response, 401, { error: "unauthorized" });
         return;
@@ -532,6 +596,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       try {
         const body = parseJsonObject(await readRawBody(request));
         principalId = requiredTenantPrincipal(body.principalId);
+        if (config.sharedIdentityResolver && principalId !== `tenant:${syncTenantId}`) {
+          throw new Error("principalId must match x-jina-tenant-id");
+        }
         if (!Array.isArray(body.repositories) || body.repositories.length > 5_000) {
           throw new Error("repositories must be an array with at most 5000 entries");
         }
@@ -542,7 +609,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 400, { error: error instanceof Error ? error.message : "invalid graph access sync" });
         return;
       }
-      await contextGraphStore.replaceRepositoryAccess(config.tenantId, principalId, repositories);
+      await contextGraphStore.replaceRepositoryAccess(syncTenantId, principalId, repositories);
       json(response, 200, { principalId, repositoryCount: repositories.length });
       return;
     }
@@ -884,7 +951,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
-      await claimWork(request, response, tenantId);
+      await claimWork(request, response, [tenantId]);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/renew") {
@@ -920,10 +987,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
       return;
     }
+    const identity = result.webhook ? await resolveWebhookIdentity(result.webhook) : undefined;
     if (result.webhook && isContextGraphTrigger(result.webhook.event)) {
       const event = result.webhook.event;
       const ref = event.ref.slice("refs/heads/".length);
-      const builds = await contextGraphCoordinator.list(config.tenantId ?? "default", {
+      const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
+      const builds = await contextGraphCoordinator.list(tenantId, {
         repositories: [result.webhook.repository]
       });
       const latest = builds
@@ -933,7 +1002,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       let createdTaskIds: readonly string[] = [];
       if (!duplicateHead) {
         const build = await contextGraphCoordinator.createBuild({
-          tenantId: config.tenantId ?? "default",
+          tenantId,
           repository: result.webhook.repository,
           ref,
           requestKey: `push:${event.headSha}:delivery:${result.deliveryId}`,
@@ -943,6 +1012,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           metadata: {
             githubDeliveryId: result.deliveryId,
             githubHeadSha: event.headSha,
+            ...(identity
+              ? {
+                  workspaceLabel: identity.githubAccountLogin,
+                  githubAccountId: identity.githubAccountId,
+                  githubAccountType: identity.githubAccountType
+                }
+              : {}),
             ...(result.webhook.repositoryId !== undefined ? { githubRepositoryId: result.webhook.repositoryId } : {}),
             ...(result.webhook.installationId !== undefined
               ? { githubInstallationId: result.webhook.installationId }
@@ -985,7 +1061,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         await persist(result.deliveryId);
         return { statusCode: result.statusCode, payload: result };
       }
-      const intake = acceptWebhook(result.webhook, result.deliveryId!);
+      const intake = acceptWebhook(result.webhook, result.deliveryId!, identity);
       await persist(result.deliveryId);
       return {
         statusCode: result.statusCode,
@@ -1015,6 +1091,26 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       metrics.count("github.webhooks", { outcome });
     }
     json(response, committed.statusCode, committed.payload);
+  }
+
+  async function resolveWebhookIdentity(webhook: ParsedGitHubWebhook): Promise<ResolvedRepositoryIdentity | undefined> {
+    if (!config.sharedIdentityResolver) return undefined;
+    const identity = await config.sharedIdentityResolver.resolveRepository({
+      repository: webhook.repository,
+      ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
+      ...(webhook.installationId !== undefined ? { githubInstallationId: webhook.installationId } : {})
+    });
+    if (!identity) {
+      throw new ApiError(
+        409,
+        "repository_tenant_not_found",
+        `repository ${webhook.repository} is not enabled for an original Jina tenant`
+      );
+    }
+    if (identity.repository.toLowerCase() !== webhook.repository.toLowerCase()) {
+      throw new ApiError(409, "repository_identity_mismatch", "resolved repository identity does not match webhook");
+    }
+    return identity;
   }
 
   async function createContextGraphTask(
@@ -1240,7 +1336,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return { ...stage, id: stage.stageId };
   }
 
-  async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
+  async function sharedTenantIdsForClaim(): Promise<readonly string[]> {
+    return [...new Set(await config.sharedIdentityResolver!.listTenantIds())].sort();
+  }
+
+  async function claimWork(
+    request: IncomingMessage,
+    response: ServerResponse,
+    tenantIds: readonly string[]
+  ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerId = requiredString(body.workerId, "workerId");
     if (!Array.isArray(body.topics) || body.topics.length === 0)
@@ -1253,24 +1357,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
     const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
     const contextGraphTopics = requestedTopics.filter(isContextGraphWorkerTopic);
-    if (contextGraphTopics.length > 0) {
+    if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
       const now = nowIso();
       const claimed = await contextGraphCoordinator.claim({
-        tenantId,
+        tenantId: tenantIds[0]!,
+        ...(tenantIds.length > 1 ? { tenantIds } : {}),
         workerId,
         topics: contextGraphTopics,
         now,
         leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
       });
-      if (claimed || contextGraphTopics.length === requestedTopics.length) {
-        json(response, claimed ? 200 : 204, claimed ?? {});
+      if (claimed) {
+        json(response, 200, claimed);
         return;
       }
     }
+    if (contextGraphTopics.length === requestedTopics.length) {
+      json(response, 204, {});
+      return;
+    }
+    const tenantIdSet = new Set(tenantIds);
     const claimed = await mutate(async () => {
       const taskIds = intakeState.board.tasks
         .filter(
-          (task) => task.metadata.tenantId === tenantId && (task.status === "queued" || task.status === "in_progress")
+          (task) =>
+            typeof task.metadata.tenantId === "string" &&
+            tenantIdSet.has(task.metadata.tenantId) &&
+            (task.status === "queued" || task.status === "in_progress")
         )
         .map((task) => task.id);
       const now = nowIso();
@@ -1555,9 +1668,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return graph;
   }
 
-  function isTenantAdmin(principal: { readonly principalId: string }): boolean {
+  function isTenantAdmin(principal: { readonly tenantId?: string; readonly principalId: string }): boolean {
     return (
-      principal.principalId.startsWith("svc:") || (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
+      principal.principalId.startsWith("svc:") ||
+      (principal.tenantId !== undefined && principal.principalId === `tenant:${principal.tenantId}`) ||
+      (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
     );
   }
 
@@ -1602,6 +1717,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     server.once("close", () => clearInterval(timer));
   }
   if (config.stateStore) server.once("close", () => void config.stateStore?.close());
+  if (config.sharedIdentityResolver) server.once("close", () => void config.sharedIdentityResolver?.close());
   server.once("close", () => void contextGraphCoordinator.close());
   server.once("close", () => void contextGraphStore.close());
   return server;
@@ -1627,9 +1743,22 @@ function authenticatedPrincipal(
     (isPublicGraphRoute(pathname) || pathname === "/context-graph/build")
   );
   if (!hasInternalAccess && !hasGraphAccess) return undefined;
-  if (!config.tenantId) return undefined;
+  const tenantId = config.sharedIdentityResolver
+    ? normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]))
+    : config.tenantId;
+  if (!tenantId) return undefined;
   const forwarded = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]));
-  return { tenantId: config.tenantId, principalId: forwarded ?? "svc:api", forwarded: forwarded !== undefined };
+  if (config.sharedIdentityResolver && forwarded?.startsWith("tenant:") && forwarded !== `tenant:${tenantId}`) {
+    return undefined;
+  }
+  return { tenantId, principalId: forwarded ?? "svc:api", forwarded: forwarded !== undefined };
+}
+
+function normalizedTenantId(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
+    ? value.toLowerCase()
+    : undefined;
 }
 
 function normalizedForwardedPrincipal(value: string | undefined): string | undefined {
@@ -1644,6 +1773,12 @@ function normalizedForwardedPrincipal(value: string | undefined): string | undef
 function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
   return Boolean(
     config.graphApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.graphApiToken}`
+  );
+}
+
+function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
+  return Boolean(
+    config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
   );
 }
 
@@ -2223,8 +2358,15 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
     ...(typeof value.body === "string" ? { body: value.body } : {}),
     state: requiredString(value.state, "observation.state"),
     url: requiredString(value.url, "observation.url"),
+    ...(typeof value.authorId === "number"
+      ? { authorId: requiredPositiveInteger(value.authorId, "observation.authorId") }
+      : {}),
     ...(typeof value.authorLogin === "string" && value.authorLogin.trim()
       ? { authorLogin: value.authorLogin.trim() }
+      : {}),
+    ...(typeof value.authorName === "string" && value.authorName.trim() ? { authorName: value.authorName.trim() } : {}),
+    ...(typeof value.authorAccountType === "string" && value.authorAccountType.trim()
+      ? { authorAccountType: value.authorAccountType.trim() }
       : {}),
     ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
     ...(typeof value.mergedAt === "string" && value.mergedAt ? { mergedAt: value.mergedAt } : {}),

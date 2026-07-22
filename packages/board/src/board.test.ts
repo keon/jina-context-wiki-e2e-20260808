@@ -50,6 +50,7 @@ test("workers can pass small durable metadata to a dependent task", () => {
   ).state;
 
   assert.equal(findTask(updated, taskId)?.metadata.commitSha, "a".repeat(40));
+  assert.deepEqual(created.events[0]?.payload, { type: "context_graph_assert", actor: "test", actorType: "user" });
   assert.equal(updated.events.at(-1)?.type, "task.updated");
 });
 

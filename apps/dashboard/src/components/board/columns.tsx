@@ -5,6 +5,8 @@ import { humanize } from "../../lib/format.ts";
 import type { BoardTask } from "../../lib/types.ts";
 
 function TaskCard({ task, onOpen }: { readonly task: BoardTask; readonly onOpen: (taskId: string) => void }) {
+  const workspace = typeof task.metadata?.workspaceLabel === "string" ? task.metadata.workspaceLabel : undefined;
+  const author = typeof task.metadata?.authorLogin === "string" ? task.metadata.authorLogin : undefined;
   return (
     <button
       type="button"
@@ -18,6 +20,8 @@ function TaskCard({ task, onOpen }: { readonly task: BoardTask; readonly onOpen:
         <span className="chip">{humanize(task.type)}</span>
         <span className="chip">epoch {task.epoch ?? "–"}</span>
         <span className="chip">attempt {task.attempt}</span>
+        {workspace ? <span className="chip">{workspace}</span> : null}
+        {author ? <span className="chip">@{author}</span> : null}
       </span>
     </button>
   );

@@ -281,7 +281,7 @@ The test suite proves:
 - repository ACL denial, redaction, and personal erasure;
 - board/API/worker lease behavior and dashboard rendering.
 
-Run the database contract with PostgreSQL 17:
+Run the database contract with PostgreSQL 16, matching production:
 
 ```sh
 TEST_DATABASE_URL=postgresql://... pnpm --filter @jina/db test

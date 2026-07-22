@@ -340,6 +340,30 @@ test("expired contextGraph lease sweeps stay tenant-scoped", async () => {
   assert.notEqual(second.message.leaseId, first.message.leaseId);
 });
 
+test("shared workers claim queued context graph stages across an explicit tenant set", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId: "tenant-b",
+    repository: "omxyz/jina",
+    ref: "main",
+    requestKey: "shared-claim",
+    snapshotFirst: true,
+    createdAt: "2026-07-21T00:00:00.000Z"
+  });
+
+  const claimed = await coordinator.claim({
+    tenantId: "tenant-a",
+    tenantIds: ["tenant-a", "tenant-b"],
+    workerId: "shared-worker",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-21T00:01:00.000Z",
+    leaseExpiresAt: "2026-07-21T00:06:00.000Z"
+  });
+
+  assert.ok(claimed);
+  assert.equal(claimed.task.metadata.tenantId, "tenant-b");
+});
+
 test("pure structural parsing produces versioned symbols and imports", () => {
   const analysis = analyzeSourceBlob(
     "a".repeat(40),
@@ -1702,6 +1726,10 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
     body: "Fixes #12",
     state: "closed",
     url: "https://github.com/org/repo/pull/4",
+    authorId: 12345,
+    authorLogin: "octocat",
+    authorName: "The Octocat",
+    authorAccountType: "User",
     recordedAt: "2026-01-02T00:00:00Z",
     mergedAt: "2026-01-02T00:00:00Z",
     mergeCommitSha: mergeSha,
@@ -1710,8 +1738,12 @@ test("GitHub normalizers derive explicit work links and pattern-scoped CODEOWNER
   });
   assert.deepEqual(
     workItem.assertions.map((assertion) => assertion.predicate),
-    ["INCLUDES", "MERGED_AS", "RESOLVES"]
+    ["AUTHORED_BY", "INCLUDES", "MERGED_AS", "RESOLVES"]
   );
+  assert.deepEqual(workItem.githubIdentity, {
+    externalId: "12345",
+    entity: { kind: "Engineer", key: "github:user:12345", displayName: "The Octocat" }
+  });
   assert.equal(
     workItem.assertions.every((assertion) => assertion.explanation.length > 0),
     true

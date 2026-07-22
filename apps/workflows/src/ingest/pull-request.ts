@@ -9,9 +9,19 @@ const GITHUB_ACTOR: CommandActor = { type: "github", id: "github-webhook" };
 
 export interface PullRequestReviewInput {
   readonly tenantId: string;
+  readonly workspaceLabel?: string;
+  readonly githubAccountId?: string;
   readonly repository: string;
+  readonly githubRepositoryId?: number;
+  readonly githubInstallationId?: number;
   readonly pullRequestNumber: number;
   readonly headSha: string;
+  readonly authorGithubUserId?: number;
+  readonly authorLogin?: string;
+  readonly authorAccountType?: string;
+  readonly senderGithubUserId?: number;
+  readonly senderLogin?: string;
+  readonly senderAccountType?: string;
   readonly needsExternalContext?: boolean;
   readonly budgetLimits?: BudgetLimits;
   readonly sourcePolicy?: SourcePolicy;
@@ -45,6 +55,16 @@ export function ingestPullRequestReview(
     pullRequestNumber: input.pullRequestNumber,
     headSha: input.headSha,
     epoch,
+    ...(input.workspaceLabel ? { workspaceLabel: input.workspaceLabel } : {}),
+    ...(input.githubAccountId !== undefined ? { githubAccountId: input.githubAccountId } : {}),
+    ...(input.githubRepositoryId !== undefined ? { githubRepositoryId: input.githubRepositoryId } : {}),
+    ...(input.githubInstallationId !== undefined ? { githubInstallationId: input.githubInstallationId } : {}),
+    ...(input.authorGithubUserId !== undefined ? { authorGithubUserId: input.authorGithubUserId } : {}),
+    ...(input.authorLogin ? { authorLogin: input.authorLogin } : {}),
+    ...(input.authorAccountType ? { authorAccountType: input.authorAccountType } : {}),
+    ...(input.senderGithubUserId !== undefined ? { senderGithubUserId: input.senderGithubUserId } : {}),
+    ...(input.senderLogin ? { senderLogin: input.senderLogin } : {}),
+    ...(input.senderAccountType ? { senderAccountType: input.senderAccountType } : {}),
     ...(input.needsExternalContext !== undefined ? { needsExternalContext: input.needsExternalContext } : {})
   });
 
@@ -61,9 +81,27 @@ export function ingestPullRequestReview(
   };
 
   next = upsertPullRequest(next, {
-    ...(existing ?? newPullRequest(input.repository, input.pullRequestNumber, input.headSha, epoch)),
+    ...(existing ??
+      newPullRequest(input.repository, input.pullRequestNumber, input.headSha, epoch, {
+        tenantId: input.tenantId,
+        ...(input.workspaceLabel ? { workspaceLabel: input.workspaceLabel } : {}),
+        ...(input.githubAccountId !== undefined ? { githubAccountId: input.githubAccountId } : {}),
+        ...(input.githubRepositoryId !== undefined ? { githubRepositoryId: input.githubRepositoryId } : {}),
+        ...(input.githubInstallationId !== undefined ? { githubInstallationId: input.githubInstallationId } : {}),
+        ...(input.authorGithubUserId !== undefined ? { authorGithubUserId: input.authorGithubUserId } : {}),
+        ...(input.authorLogin ? { authorLogin: input.authorLogin } : {}),
+        ...(input.authorAccountType ? { authorAccountType: input.authorAccountType } : {})
+      })),
     headSha: input.headSha,
-    currentEpoch: epoch
+    currentEpoch: epoch,
+    tenantId: input.tenantId,
+    ...(input.workspaceLabel ? { workspaceLabel: input.workspaceLabel } : {}),
+    ...(input.githubAccountId !== undefined ? { githubAccountId: input.githubAccountId } : {}),
+    ...(input.githubRepositoryId !== undefined ? { githubRepositoryId: input.githubRepositoryId } : {}),
+    ...(input.githubInstallationId !== undefined ? { githubInstallationId: input.githubInstallationId } : {}),
+    ...(input.authorGithubUserId !== undefined ? { authorGithubUserId: input.authorGithubUserId } : {}),
+    ...(input.authorLogin ? { authorLogin: input.authorLogin } : {}),
+    ...(input.authorAccountType ? { authorAccountType: input.authorAccountType } : {})
   });
 
   return next;

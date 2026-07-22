@@ -58,12 +58,16 @@ function SummaryItem({
 }
 
 function Summary({ task }: { readonly task: BoardTask }) {
+  const workspace = typeof task.metadata?.workspaceLabel === "string" ? task.metadata.workspaceLabel : "–";
+  const author = typeof task.metadata?.authorLogin === "string" ? `@${task.metadata.authorLogin}` : "–";
   return (
     <section className="summary-grid">
       <SummaryItem label="Status" value={humanize(task.status)} valueClass={`status status-${task.status}`} />
       <SummaryItem label="Assignee" value={humanize(task.assigneeRole)} />
       <SummaryItem label="Attempt" value={String(task.attempt)} />
       <SummaryItem label="Epoch" value={String(task.epoch ?? "–")} />
+      <SummaryItem label="Workspace" value={workspace} />
+      <SummaryItem label="PR author" value={author} />
       <SummaryItem label="Created" value={formatTime(task.createdAt)} />
       <SummaryItem label="Updated" value={formatTime(task.updatedAt)} />
     </section>

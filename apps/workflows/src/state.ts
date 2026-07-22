@@ -5,10 +5,18 @@ import type { PublicationRecord } from "@jina/publication";
 import type { FindingThread, PrReviewPlan } from "@jina/review";
 
 export interface TrackedPullRequest {
+  readonly tenantId?: string;
+  readonly workspaceLabel?: string;
+  readonly githubAccountId?: string;
   readonly repository: string;
+  readonly githubRepositoryId?: number;
+  readonly githubInstallationId?: number;
   readonly number: number;
   readonly headSha: string;
   readonly currentEpoch: number;
+  readonly authorGithubUserId?: number;
+  readonly authorLogin?: string;
+  readonly authorAccountType?: string;
   readonly spend: BudgetSpend;
 }
 
@@ -84,6 +92,12 @@ export function recordPullRequestSpend(
   return upsertPullRequest(state, { ...pr, spend: recordSpend(pr.spend, epoch, amount) });
 }
 
-export function newPullRequest(repository: string, number: number, headSha: string, epoch: number): TrackedPullRequest {
-  return { repository, number, headSha, currentEpoch: epoch, spend: emptyBudgetSpend };
+export function newPullRequest(
+  repository: string,
+  number: number,
+  headSha: string,
+  epoch: number,
+  identity: Omit<TrackedPullRequest, "repository" | "number" | "headSha" | "currentEpoch" | "spend"> = {}
+): TrackedPullRequest {
+  return { ...identity, repository, number, headSha, currentEpoch: epoch, spend: emptyBudgetSpend };
 }

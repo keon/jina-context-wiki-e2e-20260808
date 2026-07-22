@@ -4,7 +4,7 @@ This document describes the runtime in this repository. Domain-specific ContextG
 
 ## Topology
 
-The deployed backend runs as three Cloud Run services backed by PostgreSQL 17:
+The deployed backend runs as three Cloud Run services backed by the shared PostgreSQL 16 database:
 
 - `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.

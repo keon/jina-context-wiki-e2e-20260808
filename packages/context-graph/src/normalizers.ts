@@ -24,7 +24,11 @@ export interface GitHubWorkItemObservation {
   readonly body?: string;
   readonly state: string;
   readonly url: string;
+  /** Stable GitHub account id; preferred over login for identity keys. */
+  readonly authorId?: number;
   readonly authorLogin?: string;
+  readonly authorName?: string;
+  readonly authorAccountType?: string;
   readonly occurredAt?: string;
   readonly recordedAt: string;
   readonly commitShas?: readonly string[];
@@ -369,20 +373,22 @@ function normalizeGitHubWorkItem(observation: GitHubWorkItemObservation): Normal
   const entities: SourceEntityIntent[] = [subject];
   const assertions: SourceAssertionIntent[] = [];
   let githubIdentity: NormalizedGitHubObservation["githubIdentity"];
-  if (observation.authorLogin) {
+  if (observation.authorId !== undefined || observation.authorLogin) {
+    const externalId = observation.authorId === undefined ? observation.authorLogin! : String(observation.authorId);
+    const displayName = observation.authorName ?? observation.authorLogin ?? externalId;
     const engineer: SourceEntityIntent = {
       kind: "Engineer",
-      key: `github:user:${observation.authorLogin}`,
-      displayName: observation.authorLogin
+      key: `github:user:${externalId}`,
+      displayName
     };
     entities.push(engineer);
     assertions.push({
       subject,
       predicate: "AUTHORED_BY",
       object: engineer,
-      explanation: `The GitHub ${observation.kind === "pull_request" ? "pull request" : "issue"} snapshot identifies ${observation.authorLogin} as the author.`
+      explanation: `The GitHub ${observation.kind === "pull_request" ? "pull request" : "issue"} snapshot identifies ${displayName} as the author.`
     });
-    githubIdentity = { externalId: observation.authorLogin, entity: engineer };
+    githubIdentity = { externalId, entity: engineer };
   }
   if (observation.kind === "pull_request") {
     for (const sha of new Set(observation.commitShas ?? [])) {

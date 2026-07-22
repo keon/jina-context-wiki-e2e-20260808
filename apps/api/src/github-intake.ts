@@ -11,12 +11,19 @@ import { isIssueTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina
 import { applyPrReviewPlan, planPrReview } from "@jina/review";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 
-interface TrackedPullRequest {
+export interface TrackedPullRequest {
   readonly tenantId: string;
+  readonly workspaceLabel?: string;
+  readonly githubAccountId?: string;
   readonly repository: string;
+  readonly githubRepositoryId?: number;
+  readonly githubInstallationId?: number;
   readonly number: number;
   readonly headSha: string;
   readonly epoch: number;
+  readonly authorGithubUserId?: number;
+  readonly authorLogin?: string;
+  readonly authorAccountType?: string;
 }
 
 export interface GitHubIntakeState {
@@ -24,10 +31,12 @@ export interface GitHubIntakeState {
   readonly pullRequests: readonly TrackedPullRequest[];
 }
 
-interface GitHubIntakeOptions {
+export interface GitHubIntakeOptions {
   readonly deliveryId: string;
   readonly now: IsoTimestamp;
   readonly tenantId?: string;
+  readonly workspaceLabel?: string;
+  readonly githubAccountId?: string;
 }
 
 interface GitHubIntakeResult {
@@ -76,6 +85,10 @@ function ingestPullRequest(
   }
 
   const event = webhook.event;
+  const workspaceLabel = options.workspaceLabel ?? webhook.repositoryOwner?.login;
+  const githubAccountId =
+    options.githubAccountId ??
+    (webhook.repositoryOwner?.id === undefined ? undefined : String(webhook.repositoryOwner.id));
   const existing = state.pullRequests.find(
     (pullRequest) =>
       pullRequest.tenantId === tenantId &&
@@ -104,20 +117,37 @@ function ingestPullRequest(
     pullRequestNumber: event.pullRequestNumber,
     headSha: event.headSha,
     epoch,
+    ...(workspaceLabel ? { workspaceLabel } : {}),
+    ...(githubAccountId !== undefined ? { githubAccountId } : {}),
+    ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
+    ...(webhook.installationId !== undefined ? { githubInstallationId: webhook.installationId } : {}),
+    ...(event.authorId !== undefined ? { authorGithubUserId: event.authorId } : {}),
+    ...(event.authorLogin ? { authorLogin: event.authorLogin } : {}),
+    ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {}),
+    ...(webhook.sender?.id !== undefined ? { senderGithubUserId: webhook.sender.id } : {}),
+    ...(webhook.sender?.login ? { senderLogin: webhook.sender.login } : {}),
+    ...(webhook.sender?.accountType ? { senderAccountType: webhook.sender.accountType } : {}),
     needsExternalContext: false
   });
   board = applyPrReviewPlan(board, plan, {
-    actor: { type: "github", id: `github-delivery:${options.deliveryId}` },
+    actor: githubActor(webhook, options.deliveryId),
     now: options.now,
     taskMetadata: { githubDeliveryId: options.deliveryId }
   });
 
   const tracked: TrackedPullRequest = {
     tenantId,
+    ...(workspaceLabel ? { workspaceLabel } : {}),
+    ...(githubAccountId !== undefined ? { githubAccountId } : {}),
     repository: webhook.repository,
+    ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
+    ...(webhook.installationId !== undefined ? { githubInstallationId: webhook.installationId } : {}),
     number: event.pullRequestNumber,
     headSha: event.headSha,
-    epoch
+    epoch,
+    ...(event.authorId !== undefined ? { authorGithubUserId: event.authorId } : {}),
+    ...(event.authorLogin ? { authorLogin: event.authorLogin } : {}),
+    ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {})
   };
 
   return {
@@ -139,12 +169,16 @@ function ingestIssue(
   }
 
   const event = webhook.event;
+  const workspaceLabel = options.workspaceLabel ?? webhook.repositoryOwner?.login;
+  const githubAccountId =
+    options.githubAccountId ??
+    (webhook.repositoryOwner?.id === undefined ? undefined : String(webhook.repositoryOwner.id));
   const subjectKey = `${tenantId}:${webhook.repository}:issue-${event.issueNumber}`;
   const taskId = entityId<"task">(`task_${subjectKey}:triage`);
   if (state.board.tasks.some((task) => task.dedupeKey === `${subjectKey}:triage`)) {
     return state;
   }
-  const actor: CommandActor = { type: "github", id: `github-delivery:${options.deliveryId}` };
+  const actor = githubActor(webhook, options.deliveryId);
   const created = applyCommand(
     state.board,
     {
@@ -158,12 +192,19 @@ function ingestIssue(
         required: true,
         metadata: {
           tenantId,
+          ...(workspaceLabel ? { workspaceLabel } : {}),
+          ...(githubAccountId !== undefined ? { githubAccountId } : {}),
           repository: webhook.repository,
           issueNumber: event.issueNumber,
           githubTitle: event.title,
           githubDeliveryId: options.deliveryId,
           ...(event.url ? { githubUrl: event.url } : {}),
+          ...(event.authorId !== undefined ? { authorGithubUserId: event.authorId } : {}),
           ...(event.authorLogin ? { authorLogin: event.authorLogin } : {}),
+          ...(event.authorAccountType ? { authorAccountType: event.authorAccountType } : {}),
+          ...(webhook.sender?.id !== undefined ? { senderGithubUserId: webhook.sender.id } : {}),
+          ...(webhook.sender?.login ? { senderLogin: webhook.sender.login } : {}),
+          ...(webhook.sender?.accountType ? { senderAccountType: webhook.sender.accountType } : {}),
           ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
           ...(webhook.installationId !== undefined ? { githubInstallationId: webhook.installationId } : {})
         }
@@ -193,4 +234,10 @@ function ingestIssue(
 
 function tenantIdFor(webhook: ParsedGitHubWebhook): string {
   return webhook.installationId === undefined ? "github:unscoped" : `github:installation:${webhook.installationId}`;
+}
+
+function githubActor(webhook: ParsedGitHubWebhook, deliveryId: string): CommandActor {
+  if (webhook.sender?.id !== undefined) return { type: "github", id: `github-user:${webhook.sender.id}` };
+  if (webhook.sender?.login) return { type: "github", id: `github-login:${webhook.sender.login}` };
+  return { type: "github", id: `github-delivery:${deliveryId}` };
 }

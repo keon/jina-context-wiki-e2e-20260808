@@ -60,7 +60,14 @@ export const EMPTY_BOARD_FILTERS: BoardFilters = { query: "", repository: "", ow
 export function filterBoardTasks(tasks: readonly BoardTask[], filters: BoardFilters): readonly BoardTask[] {
   const query = filters.query.trim().toLowerCase();
   return tasks.filter((task) => {
-    const haystack = [task.title, task.type, task.assigneeRole, task.metadata?.repository]
+    const haystack = [
+      task.title,
+      task.type,
+      task.assigneeRole,
+      task.metadata?.repository,
+      task.metadata?.workspaceLabel,
+      task.metadata?.authorLogin
+    ]
       .filter(Boolean)
       .join(" ")
       .toLowerCase();

@@ -18,6 +18,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   const mock = createServer(async (request, response) => {
     const body = await readJson(request);
     if (request.url === "/internal/worker/claim") {
+      assert.equal(request.headers["x-jina-tenant-id"], undefined);
       const topics = (body as { topics?: unknown }).topics;
       assert.deepEqual(topics, ["run-review", "run-context-graph-ingest"]);
       claimCount += 1;
@@ -55,17 +56,20 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       return;
     }
     if (request.url === "/internal/worker/renew") {
+      assert.equal(request.headers["x-jina-tenant-id"], "omlabs");
       renewals += 1;
       json(response, 200, { accepted: true });
       return;
     }
     if (request.url === "/internal/worker/complete") {
+      assert.equal(request.headers["x-jina-tenant-id"], "omlabs");
       completions.push(body as Record<string, unknown>);
       if (completions.length === 2) resolveCompletion();
       json(response, 200, { accepted: true });
       return;
     }
     if (request.url === "/internal/context-graph/ingest/plan") {
+      assert.equal(request.headers["x-jina-tenant-id"], "omlabs");
       const snapshot = (body as { snapshot: { commitSha: string; files: unknown[] } }).snapshot;
       assert.equal(snapshot.commitSha, "a".repeat(40));
       assert.equal(snapshot.files.length, 1);
@@ -86,6 +90,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       return;
     }
     if (request.url === "/internal/context-graph/outbox/drain") {
+      assert.equal(request.headers["x-jina-tenant-id"], undefined);
       projectionDrains += 1;
       json(response, 200, { processedEventCount: 0, rebuiltRepositories: [] });
       return;
@@ -290,7 +295,7 @@ test("worker rejects malformed topic metadata before dispatch", async (context) 
               leaseId: "lease",
               leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
             },
-            task: { id: "task", metadata: { repository: "omlabs/example" } }
+            task: { id: "task", metadata: { tenantId: "omlabs", repository: "omlabs/example" } }
           })
         : json(response, 204, {});
     }

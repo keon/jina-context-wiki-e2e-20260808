@@ -2,6 +2,7 @@ import {
   PostgresJsonStateStore,
   PostgresContextGraphStore,
   PostgresContextGraphPipelineCoordinator,
+  PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
 import {
@@ -22,11 +23,19 @@ if (enableDevEndpoints && process.env.K_SERVICE) {
 const stateStore = createStateStore();
 const contextGraphStore = createContextGraphStore();
 const contextGraphCoordinator = createContextGraphCoordinator();
-if (
-  !enableDevEndpoints &&
-  (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_TENANT_ID)
-) {
-  throw new Error("INTERNAL_API_TOKEN, GRAPH_API_TOKEN, and JINA_TENANT_ID are required in production");
+const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
+if (tenancyMode !== "fixed" && tenancyMode !== "shared-db") {
+  throw new Error("JINA_TENANCY_MODE must be fixed or shared-db");
+}
+const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver() : undefined;
+if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN)) {
+  throw new Error("INTERNAL_API_TOKEN and GRAPH_API_TOKEN are required in production");
+}
+if (!enableDevEndpoints && tenancyMode === "fixed" && !process.env.JINA_TENANT_ID) {
+  throw new Error("JINA_TENANT_ID is required in fixed tenancy mode");
+}
+if (tenancyMode === "shared-db" && process.env.JINA_TENANT_ID) {
+  throw new Error("JINA_TENANT_ID must be unset in shared-db tenancy mode");
 }
 
 const server = createApiServer({
@@ -39,6 +48,7 @@ const server = createApiServer({
   ...(stateStore ? { stateStore } : {}),
   contextGraphStore,
   contextGraphCoordinator,
+  ...(sharedIdentityResolver ? { sharedIdentityResolver } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
   ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
@@ -83,7 +93,10 @@ function createStateStore(): ApiStateStore | undefined {
   if (!config) {
     return undefined;
   }
-  return new PostgresJsonStateStore<ApiSnapshot>(config);
+  return new PostgresJsonStateStore<ApiSnapshot>({
+    ...config,
+    manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
+  });
 }
 
 function createContextGraphStore(): ContextGraphStore {
@@ -104,6 +117,12 @@ function createContextGraphCoordinator(): ContextGraphPipelineCoordinator {
         manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
       })
     : new MemoryContextGraphPipelineCoordinator();
+}
+
+function createSharedIdentityResolver(): PostgresSharedIdentityStore {
+  const config = databaseConfig();
+  if (!config) throw new Error("Postgres storage is required in shared-db tenancy mode");
+  return new PostgresSharedIdentityStore({ ...config, applicationName: "jina-api-shared-identity" });
 }
 
 function databaseConfig(): PostgresJsonStateStoreConfig | undefined {

@@ -9,7 +9,7 @@ steps:
           --env POSTGRES_DB=jina_test \
           --env POSTGRES_USER=postgres \
           --env POSTGRES_PASSWORD=postgres \
-          postgres:17-alpine
+          postgres:16-alpine
         until docker exec jina-ci-postgres pg_isready -U postgres -d jina_test; do
           sleep 1
         done

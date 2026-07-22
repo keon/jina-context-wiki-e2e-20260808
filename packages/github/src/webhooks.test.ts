@@ -24,24 +24,28 @@ test("parses an opened pull request delivery", () => {
         title: "Make it work",
         html_url: "https://github.com/omlabs/example/pull/42",
         draft: false,
-        user: { login: "octocat" },
+        user: { id: 1, login: "octocat", type: "User" },
         head: { sha: "abc123" }
       },
-      repository: { id: 10, full_name: "omlabs/example" },
+      repository: { id: 10, full_name: "omlabs/example", owner: { id: 20, login: "omlabs", type: "Organization" } },
       installation: { id: 99 },
-      sender: { login: "octocat" }
+      sender: { id: 2, login: "maintainer", type: "User" }
     })
   );
 
   assert.equal(parsed?.repository, "omlabs/example");
   assert.equal(parsed?.installationId, 99);
+  assert.deepEqual(parsed?.repositoryOwner, { id: 20, login: "omlabs", accountType: "Organization" });
+  assert.deepEqual(parsed?.sender, { id: 2, login: "maintainer", accountType: "User" });
   assert.deepEqual(parsed?.event, {
     type: "pull_request.opened",
     pullRequestNumber: 42,
     headSha: "abc123",
     title: "Make it work",
     url: "https://github.com/omlabs/example/pull/42",
+    authorId: 1,
     authorLogin: "octocat",
+    authorAccountType: "User",
     draft: false
   });
 });
@@ -53,11 +57,11 @@ test("parses a newly opened issue and ignores non-open actions", () => {
       number: 7,
       title: "Investigate flaky test",
       html_url: "https://github.com/omlabs/example/issues/7",
-      user: { login: "hubot" }
+      user: { id: 3, login: "hubot", type: "Bot" }
     },
     repository: { id: 10, full_name: "omlabs/example" },
     installation: { id: 99 },
-    sender: { login: "hubot" }
+    sender: { id: 3, login: "hubot", type: "Bot" }
   };
 
   const parsed = parseGitHubWebhook("issues", jsonBytes(payload));
@@ -66,8 +70,11 @@ test("parses a newly opened issue and ignores non-open actions", () => {
     issueNumber: 7,
     title: "Investigate flaky test",
     url: "https://github.com/omlabs/example/issues/7",
-    authorLogin: "hubot"
+    authorId: 3,
+    authorLogin: "hubot",
+    authorAccountType: "Bot"
   });
+  assert.deepEqual(parsed?.sender, { id: 3, login: "hubot", accountType: "Bot" });
   assert.equal(parseGitHubWebhook("issues", jsonBytes({ ...payload, action: "labeled" })), undefined);
   assert.equal(parseGitHubWebhook("ping", jsonBytes({ zen: "Keep it logically awesome." })), undefined);
 });

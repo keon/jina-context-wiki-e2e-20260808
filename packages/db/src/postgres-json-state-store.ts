@@ -2,6 +2,7 @@ import { Pool, type PoolConfig } from "pg";
 
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
+  readonly manageSchema?: boolean;
 }
 
 export interface StateUpdate<T, R> {
@@ -27,11 +28,14 @@ export interface VersionedState<T> {
  */
 export class PostgresJsonStateStore<T> {
   private readonly pool: Pool;
+  private readonly manageSchema: boolean;
   private initialized?: Promise<void>;
 
   constructor(config: PostgresJsonStateStoreConfig) {
+    const { manageSchema = true, ...poolConfig } = config;
+    this.manageSchema = manageSchema;
     this.pool = new Pool({
-      ...config,
+      ...poolConfig,
       application_name: config.applicationName ?? "jina-api",
       max: config.max ?? 5,
       idleTimeoutMillis: config.idleTimeoutMillis ?? 30_000,
@@ -179,7 +183,7 @@ export class PostgresJsonStateStore<T> {
   }
 
   private initialize(): Promise<void> {
-    this.initialized ??= this.createSchema();
+    this.initialized ??= this.manageSchema ? this.createSchema() : Promise.resolve();
     return this.initialized;
   }
 
