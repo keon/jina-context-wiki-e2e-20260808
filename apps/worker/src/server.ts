@@ -587,7 +587,7 @@ async function runContextGraphIngestWithTransport(
       recordedAt: new Date().toISOString()
     });
   if (discovery.knownCommitShas.has(commitSha)) {
-    await hydrateRecentMergedPullRequestScope(repository, commitSha, workItems);
+    await hydrateRecentMergedPullRequestScope(repository, commitSha, discovery.knownCommitShas, workItems);
   }
   const problemEvidencePullRequestNumbers = await hydratePullRequestScope(repository, workItems, headPaths);
   const observations: RepositorySourceObservation[] = [
@@ -998,13 +998,18 @@ async function githubWorkItemObservations(
 async function hydrateRecentMergedPullRequestScope(
   repository: string,
   headCommitSha: string,
+  knownCommitShas: ReadonlySet<string>,
   pullRequests: Map<number, { item: Record<string, unknown>; commitShas: Set<string> }>
 ): Promise<void> {
   const recent = await githubJsonArray(
     `/repos/${repository}/pulls?state=closed&sort=updated&direction=desc&per_page=100`
   );
   const candidates = recent.filter((item) =>
-    shouldReconcileRecentPullRequest(item, typeof item.number === "number" && pullRequests.has(item.number))
+    shouldReconcileRecentPullRequest(
+      item,
+      typeof item.number === "number" && pullRequests.has(item.number),
+      knownCommitShas
+    )
   );
   const reachable = await mapWithConcurrency(
     candidates,
