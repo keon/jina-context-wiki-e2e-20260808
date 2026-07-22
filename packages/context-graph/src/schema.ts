@@ -76,6 +76,7 @@ Rules:
 - Every edge must use plane knowledge and include a calibrated confidence from 0 to 1.
 - Every node and edge needs repository-relative file:line evidence.
 - Prefer explicit README/design documentation, configuration, ownership files, and tests over guesses.
+- When repository evidence explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol while retaining the same feature, emit current MOVED_FROM previous with that evidence. Do not omit this continuity merely because the previous path is absent from the current tree.
 - A deterministic move_candidate observation is only a similarity candidate. Emit MOVED_FROM only when repository evidence supports continuity, and keep it proposed for review.
 - Map suggestive repository configuration to Service or Feature only as a proposed model assertion. Never repeat deterministic Package, DEPLOYS, TARGETS, or DEPENDS_ON facts.
 - Never invent people, teams, external issue numbers, or ownership. A derived Issue is permitted only by the derived Issue rule above.
