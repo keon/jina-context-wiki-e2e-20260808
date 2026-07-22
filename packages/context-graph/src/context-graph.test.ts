@@ -2653,6 +2653,16 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   const commitSha = "f".repeat(40);
   const store = new MemoryContextGraphStore();
   assert.equal(extractFeatureText("What implements the administrator deletion feature?"), "administrator deletion");
+  assert.equal(
+    extractFeatureText("What package does the Administrator resource deletion implementation depend on?"),
+    "Administrator resource deletion"
+  );
+  assert.equal(
+    extractFeatureText(
+      "If package zod were excluded, which Administrator resource deletion implementation paths disappear?"
+    ),
+    "Administrator resource deletion"
+  );
   assert.deepEqual(classifyTemplates('Which files implement "administrator deletion"?'), ["feature_trace"]);
   await store.planIngestion({
     tenantId,
@@ -2849,7 +2859,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     allowedRepositories: [repository],
     repository,
     ref: "main",
-    question: 'What package does the "administrator deletion" implementation depend on?'
+    question: "What package does the administrator deletion implementation depend on?"
   });
   assert.equal(dependency.calls[0]?.template, "causal_trace");
   assert.match(dependency.answer, /pg/);
@@ -2858,7 +2868,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     allowedRepositories: [repository],
     repository,
     ref: "main",
-    question: "If package pg were excluded, which implementation paths disappear?"
+    question: "If package pg were excluded, which administrator deletion implementation paths disappear?"
   });
   assert.equal(excludedPackage.calls[0]?.template, "counterfactual");
   assert.equal(excludedPackage.counterfactual?.removedPaths.length, 1);

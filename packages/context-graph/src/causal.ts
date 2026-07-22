@@ -455,6 +455,11 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
       const implementationEdges = graph.edges.filter(
         (edge) => edge.predicate === "IMPLEMENTS" && edge.target === node.id
       );
+      // Model-derived feature ids can evolve while retaining the same
+      // human label. Prefer the matching root with the richest reviewed
+      // implementation coverage so equivalent labels do not become an
+      // arbitrary tie (or hide a dependency path present on one version).
+      if (text && node.kind === "Feature" && haystack.includes(text)) score += Math.min(implementationEdges.length, 9);
       if (
         packageName &&
         implementationEdges.some((implementation) => {

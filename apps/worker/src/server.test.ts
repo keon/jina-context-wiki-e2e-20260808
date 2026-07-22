@@ -63,7 +63,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
           },
           task: {
             id: "task-2",
-            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main", pipelinePhase: "snapshot" }
+            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main", pipelinePhase: "history" }
           }
         });
         return;
@@ -180,11 +180,25 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
           updated_at: "2026-07-21T00:00:00Z",
           merge_commit_sha: "d".repeat(40),
           user: { login: "reviewer" }
+        },
+        {
+          number: 12,
+          title: "Restore administrator access",
+          body: "Fixes #4.",
+          state: "closed",
+          html_url: "https://github.com/omlabs/example/pull/12",
+          merged_at: "2026-07-21T00:01:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+          merge_commit_sha: "e".repeat(40),
+          user: { login: "reviewer" }
         }
       ]);
       return;
     }
-    if (request.url === `/github/repos/omlabs/example/compare/${"d".repeat(40)}...${"a".repeat(40)}`) {
+    if (
+      request.url === `/github/repos/omlabs/example/compare/${"d".repeat(40)}...${"a".repeat(40)}` ||
+      request.url === `/github/repos/omlabs/example/compare/${"e".repeat(40)}...${"a".repeat(40)}`
+    ) {
       json(response, 200, { status: "ahead" });
       return;
     }
@@ -194,6 +208,26 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
     }
     if (request.url === "/github/repos/omlabs/example/pulls/11/files?per_page=100&page=1") {
       json(response, 200, [{ filename: "src/index.test.ts" }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/12/commits?per_page=100&page=1") {
+      json(response, 200, [{ sha: "e".repeat(40) }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/12/files?per_page=100&page=1") {
+      json(response, 200, [{ filename: "src/index.test.ts" }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/issues/4") {
+      json(response, 200, {
+        number: 4,
+        title: "Administrators cannot delete",
+        body: "Administrator requests are denied.",
+        state: "closed",
+        html_url: "https://github.com/omlabs/example/issues/4",
+        updated_at: "2026-07-21T00:01:00Z",
+        user: { login: "reporter" }
+      });
       return;
     }
     if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
@@ -300,14 +334,15 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   const ingestionResult = completions[1]?.result as Record<string, unknown>;
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
   assert.equal(ingestionResult.effect, "changed");
-  assert.equal(ingestionResult.ingestedCommitCount, 1);
-  assert.equal(ingestionResult.newCommitCount, 1);
-  assert.equal(ingestionResult.confirmedCommitCount, 0);
+  assert.equal(ingestionResult.ingestedCommitCount, 0);
+  assert.equal(ingestionResult.newCommitCount, 0);
+  assert.equal(ingestionResult.confirmedCommitCount, 1);
   assert.equal(ingestionResult.parsedBlobCount, 1);
   assert.equal(ingestionResult.reusedBlobCount, 0);
-  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, []);
-  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, []);
-  assert.deepEqual(ingestedPullRequestNumbers, []);
+  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, [11, 12]);
+  assert.deepEqual(ingestionResult.resolvedPullRequestNumbers, [12]);
+  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [11, 12]);
+  assert.deepEqual(ingestedPullRequestNumbers, [11, 12]);
   assert.equal(projectionDrains > 0, true);
 });
 
