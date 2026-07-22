@@ -3575,7 +3575,6 @@ test(
   }
 );
 
-
 test(
   "Postgres context graph store adopts a legacy pre-rename schema in place",
   {

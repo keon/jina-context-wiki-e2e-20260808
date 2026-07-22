@@ -8,7 +8,13 @@ onlyBuiltDependencies:
 allowBuilds:
   esbuild: true
   protobufjs: true
+  # sharp is an optional next/image optimizer; the Next.js apps serve no
+  # optimized images, so its native postinstall is intentionally skipped.
   sharp: false
 
 overrides:
   "@opentelemetry/propagator-jaeger": ">=2.9.0"
+  # next pulls sharp <0.35 (optional image optimizer) which carries a high-sev
+  # libvips advisory; the admin app uses no next/image, so force the patched
+  # line to keep `pnpm audit --prod --audit-level=high` clean.
+  "sharp": ">=0.35.0"
