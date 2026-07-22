@@ -2,6 +2,7 @@
 
 import type { ContextGraph } from "../../lib/types.ts";
 import { countGraphTypes } from "../../lib/context-graph.ts";
+import { isAdvancedGraphNodeKind } from "@jina/graph-renderer/node-filters";
 
 /** Toolbar controls: node/edge filter popover, layout reset, fit and zoom. */
 
@@ -15,6 +16,8 @@ export interface GraphControlsProps {
   readonly onToggleFilter: (group: "node" | "edge", type: string) => void;
   readonly onShowAll: () => void;
   readonly onRemoveAll: () => void;
+  readonly onShowAllNodes: () => void;
+  readonly onHideAllNodes: () => void;
   readonly onResetLayout: () => void;
   readonly onFit: () => void;
   readonly onZoomBy: (factor: number) => void;
@@ -30,11 +33,15 @@ export function GraphControls({
   onToggleFilter,
   onShowAll,
   onRemoveAll,
+  onShowAllNodes,
+  onHideAllNodes,
   onResetLayout,
   onFit,
   onZoomBy
 }: GraphControlsProps) {
   const nodeKinds = countGraphTypes(graph.nodes, "kind");
+  const primaryNodeKinds = nodeKinds.filter(([type]) => !isAdvancedGraphNodeKind(type));
+  const advancedNodeKinds = nodeKinds.filter(([type]) => isAdvancedGraphNodeKind(type));
   const edgePredicates = countGraphTypes(graph.edges, "predicate");
   const showAllDisabled = hiddenNodeKinds.size === 0 && hiddenEdgePredicates.size === 0;
   const removeAllDisabled =
@@ -50,13 +57,29 @@ export function GraphControls({
         <summary className="graph-control-button">Filters</summary>
         <div className="graph-filter-popover">
           <div className="graph-filter-columns">
-            <GraphFilterRow
-              label="Node types"
-              group="node"
-              types={nodeKinds}
-              hiddenTypes={hiddenNodeKinds}
-              onToggleFilter={onToggleFilter}
-            />
+            <div className="graph-node-filter-column">
+              <GraphFilterRow
+                label="Node types"
+                group="node"
+                types={primaryNodeKinds}
+                hiddenTypes={hiddenNodeKinds}
+                onToggleFilter={onToggleFilter}
+                onShowAll={onShowAllNodes}
+                onHideAll={onHideAllNodes}
+              />
+              {advancedNodeKinds.length ? (
+                <details className="graph-filter-advanced">
+                  <summary>Advanced node types · {advancedNodeKinds.length}</summary>
+                  <GraphFilterRow
+                    label=""
+                    group="node"
+                    types={advancedNodeKinds}
+                    hiddenTypes={hiddenNodeKinds}
+                    onToggleFilter={onToggleFilter}
+                  />
+                </details>
+              ) : null}
+            </div>
             <GraphFilterRow
               label="Relationship types"
               group="edge"
@@ -104,17 +127,35 @@ function GraphFilterRow({
   group,
   types,
   hiddenTypes,
-  onToggleFilter
+  onToggleFilter,
+  onShowAll,
+  onHideAll
 }: {
   readonly label: string;
   readonly group: "node" | "edge";
   readonly types: readonly (readonly [string, number])[];
   readonly hiddenTypes: ReadonlySet<string>;
   readonly onToggleFilter: (group: "node" | "edge", type: string) => void;
+  readonly onShowAll?: () => void;
+  readonly onHideAll?: () => void;
 }) {
   return (
     <div className="graph-filter-row">
-      <span className="graph-filter-label">{label}</span>
+      {label ? (
+        <div className="graph-filter-label-row">
+          <span className="graph-filter-label">{label}</span>
+          {onShowAll && onHideAll ? (
+            <span className="graph-filter-kind-actions">
+              <button type="button" onClick={onShowAll} aria-label="Show all node types">
+                All
+              </button>
+              <button type="button" onClick={onHideAll} aria-label="Hide all node types">
+                None
+              </button>
+            </span>
+          ) : null}
+        </div>
+      ) : null}
       <div className="graph-filter-list">
         {types.map(([type, count]) => (
           <button

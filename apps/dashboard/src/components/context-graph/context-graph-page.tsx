@@ -16,6 +16,7 @@ import {
 } from "../../lib/context-graph.ts";
 import type { ContextAskState, GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
 import type { PublicRenderer } from "../../lib/context-graph-renderer.ts";
+import { ADVANCED_GRAPH_NODE_KINDS, defaultHiddenGraphNodeKinds } from "@jina/graph-renderer/node-filters";
 import { usePoll } from "../../lib/poll.ts";
 import type { ContextGraphResponse } from "../../lib/types.ts";
 
@@ -32,7 +33,7 @@ export function ContextGraphPage() {
   const graphKey = graph ? contextGraphIdentity(graph) : null;
 
   const [selected, setSelected] = useState<GraphSelection | null>(null);
-  const [hiddenNodeKinds, setHiddenNodeKinds] = useState<ReadonlySet<string>>(() => new Set());
+  const [hiddenNodeKinds, setHiddenNodeKinds] = useState<ReadonlySet<string>>(() => new Set(ADVANCED_GRAPH_NODE_KINDS));
   const [hiddenEdgePredicates, setHiddenEdgePredicates] = useState<ReadonlySet<string>>(() => new Set());
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [zoomPercent, setZoomPercent] = useState(100);
@@ -65,6 +66,8 @@ export function ContextGraphPage() {
     lastGraphKey.current = graphKey;
     invalidateContextRequest();
     setSelected(null);
+    setHiddenNodeKinds(defaultHiddenGraphNodeKinds(graphRef.current?.nodes.map((node) => node.kind) ?? []));
+    setHiddenEdgePredicates(new Set());
     setFilterMenuOpen(false);
     setContextState(null);
     setSearchOpen(false);
@@ -105,6 +108,16 @@ export function ContextGraphPage() {
     if (!currentGraph) return;
     setHiddenNodeKinds(new Set(currentGraph.nodes.map((node) => node.kind)));
     setHiddenEdgePredicates(new Set(currentGraph.edges.map((edge) => edge.predicate)));
+  }, []);
+
+  const onShowAllNodes = useCallback(() => {
+    setHiddenNodeKinds(new Set());
+  }, []);
+
+  const onHideAllNodes = useCallback(() => {
+    const currentGraph = graphRef.current;
+    if (!currentGraph) return;
+    setHiddenNodeKinds(new Set(currentGraph.nodes.map((node) => node.kind)));
   }, []);
 
   const reviewAssertion = useCallback(
@@ -238,6 +251,8 @@ export function ContextGraphPage() {
                   onToggleFilter={onToggleFilter}
                   onShowAll={onShowAll}
                   onRemoveAll={onRemoveAll}
+                  onShowAllNodes={onShowAllNodes}
+                  onHideAllNodes={onHideAllNodes}
                   onResetLayout={() => rendererRef.current?.reset()}
                   onFit={() => rendererRef.current?.fit()}
                   onZoomBy={(factor) => rendererRef.current?.zoomBy(factor)}

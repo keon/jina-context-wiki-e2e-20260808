@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import type { PublicRenderer, RendererSelection } from "@jina/graph-renderer";
+import { defaultEnabledGraphNodeKinds, partitionGraphNodeKinds } from "@jina/graph-renderer/node-filters";
 import { graphCitationLabel, graphQueryMatches, type AdminGraphQueryResult } from "../lib/graph-query";
 import type { AdminGraphEdge, AdminGraphNode } from "../lib/jina-api";
 
@@ -42,6 +43,9 @@ export function GraphView({
   const [rendererReady, setRendererReady] = useState(false);
   const [rendererUnavailable, setRendererUnavailable] = useState(false);
   const [selection, setSelection] = useState<RendererSelection>(null);
+  const [enabledKinds, setEnabledKinds] = useState<ReadonlySet<string>>(() =>
+    defaultEnabledGraphNodeKinds(nodes.map((node) => node.kind))
+  );
   const [zoomPercent, setZoomPercent] = useState(100);
   const [question, setQuestion] = useState("");
   const [queryResult, setQueryResult] = useState<AdminGraphQueryResult | null>(null);
@@ -54,14 +58,32 @@ export function GraphView({
   const byId = useMemo(() => new Map(nodes.map((node) => [node.id, node])), [nodes]);
   const byEdgeId = useMemo(() => new Map(edges.map((edge) => [edge.id, edge])), [edges]);
   const labels = useMemo(() => Object.fromEntries(nodes.map((node) => [node.id, node.label])), [nodes]);
-  const dataKey = useMemo(
+  const sourceDataKey = useMemo(
     () => `${nodes.map((node) => node.id).join("|")}::${edges.map((edge) => edge.id).join("|")}`,
     [edges, nodes]
   );
   const kindsInGraph = useMemo(() => [...new Set(nodes.map((node) => node.kind))].sort(), [nodes]);
+  const kindGroups = useMemo(() => partitionGraphNodeKinds(kindsInGraph), [kindsInGraph]);
+  const visibleNodes = useMemo(() => nodes.filter((node) => enabledKinds.has(node.kind)), [enabledKinds, nodes]);
+  const visibleNodeIds = useMemo(() => new Set(visibleNodes.map((node) => node.id)), [visibleNodes]);
+  const visibleEdges = useMemo(
+    () => edges.filter((edge) => visibleNodeIds.has(edge.source) && visibleNodeIds.has(edge.target)),
+    [edges, visibleNodeIds]
+  );
+  const visibleEdgeIds = useMemo(() => new Set(visibleEdges.map((edge) => edge.id)), [visibleEdges]);
+  const dataKey = useMemo(
+    () => `${sourceDataKey}::kinds:${[...enabledKinds].sort().join("|")}`,
+    [enabledKinds, sourceDataKey]
+  );
   const selectedNode = selection?.kind === "node" ? byId.get(selection.id) : undefined;
   const selectedEdge = selection?.kind === "edge" ? byEdgeId.get(selection.id) : undefined;
-  const queryMatches = useMemo(() => graphQueryMatches(queryResult, { nodes, edges }), [edges, nodes, queryResult]);
+  const queryMatches = useMemo(
+    () =>
+      graphQueryMatches(queryResult, { nodes, edges }).filter((match) =>
+        match.kind === "node" ? visibleNodeIds.has(match.id) : visibleEdgeIds.has(match.id)
+      ),
+    [edges, nodes, queryResult, visibleEdgeIds, visibleNodeIds]
+  );
 
   useEffect(() => {
     if (!nodes.length || rendererRef.current || rendererUnavailable) return;
@@ -108,17 +130,32 @@ export function GraphView({
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
-    renderer.setData({ key: dataKey, nodes, edges, labels });
+    renderer.setData({ key: dataKey, nodes: visibleNodes, edges: visibleEdges, labels });
     renderer.setSelection(selection);
     renderer.setSearchMatches(queryMatches.map((match) => ({ ...match })));
-  }, [dataKey, edges, labels, nodes, queryMatches, rendererReady, selection]);
+  }, [dataKey, labels, queryMatches, rendererReady, selection, visibleEdges, visibleNodes]);
 
   useEffect(() => {
     setSelection(null);
+    setEnabledKinds(defaultEnabledGraphNodeKinds(kindsInGraph));
     setQuestion("");
     setQueryResult(null);
     setQueryError(null);
-  }, [dataKey]);
+  }, [kindsInGraph, sourceDataKey]);
+
+  useEffect(() => {
+    if (selection?.kind === "node" && !visibleNodeIds.has(selection.id)) setSelection(null);
+    if (selection?.kind === "edge" && !visibleEdgeIds.has(selection.id)) setSelection(null);
+  }, [selection, visibleEdgeIds, visibleNodeIds]);
+
+  const toggleKind = (kind: string) => {
+    setEnabledKinds((current) => {
+      const next = new Set(current);
+      if (next.has(kind)) next.delete(kind);
+      else next.add(kind);
+      return next;
+    });
+  };
 
   const submitQuery = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -193,13 +230,42 @@ export function GraphView({
 
       <div className="graph-panel admin-graph-panel">
         <div className="admin-graph-toolbar">
-          <div className="graph-legend" aria-label="Graph legend">
-            {kindsInGraph.map((kind) => (
-              <span key={kind}>
-                <span className="swatch" style={{ background: KIND_COLORS[kind] ?? FALLBACK_COLOR }} />
-                {kind}
-              </span>
-            ))}
+          <div className="admin-graph-visibility">
+            <div className="graph-legend" aria-label="Visible graph node types">
+              {kindsInGraph
+                .filter((kind) => enabledKinds.has(kind))
+                .map((kind) => (
+                  <span key={kind}>
+                    <span className="swatch" style={{ background: KIND_COLORS[kind] ?? FALLBACK_COLOR }} />
+                    {kind}
+                  </span>
+                ))}
+              {!enabledKinds.size ? <span>No node types visible</span> : null}
+            </div>
+            <details className="admin-graph-filters">
+              <summary>Node types</summary>
+              <div className="admin-graph-filter-popover">
+                <div className="admin-graph-filter-actions">
+                  <button
+                    type="button"
+                    aria-label="Show all node types"
+                    onClick={() => setEnabledKinds(new Set(kindsInGraph))}
+                  >
+                    All
+                  </button>
+                  <button type="button" aria-label="Hide all node types" onClick={() => setEnabledKinds(new Set())}>
+                    None
+                  </button>
+                </div>
+                <NodeKindButtons kinds={kindGroups.primary} enabledKinds={enabledKinds} onToggle={toggleKind} />
+                {kindGroups.advanced.length ? (
+                  <details className="admin-graph-filter-advanced">
+                    <summary>Advanced · {kindGroups.advanced.length}</summary>
+                    <NodeKindButtons kinds={kindGroups.advanced} enabledKinds={enabledKinds} onToggle={toggleKind} />
+                  </details>
+                ) : null}
+              </div>
+            </details>
           </div>
           <div className="graph-controls" aria-label="Graph view controls">
             <button type="button" disabled={!rendererReady} onClick={() => rendererRef.current?.reset()}>
@@ -233,10 +299,13 @@ export function GraphView({
           <div
             className="admin-graph-canvas"
             role="application"
-            aria-label={`Context graph visualization with ${nodes.length} nodes and ${edges.length} relationships`}
+            aria-label={`Context graph visualization with ${visibleNodes.length} nodes and ${visibleEdges.length} relationships`}
             ref={containerRef}
           >
             <div className="context-graph-label-layer" ref={labelLayerRef} />
+          </div>
+          <div className="graph-empty-state" hidden={Boolean(visibleNodes.length) || rendererUnavailable}>
+            All node types are hidden. Choose one from Node types to build a focused view.
           </div>
           <div className="graph-empty-state" hidden={!rendererUnavailable}>
             The interactive graph could not start. Reload the page to try again.
@@ -254,6 +323,27 @@ export function GraphView({
 
       <SelectionPanel node={selectedNode} edge={selectedEdge} edges={edges} byId={byId} />
     </>
+  );
+}
+
+function NodeKindButtons({
+  kinds,
+  enabledKinds,
+  onToggle
+}: {
+  readonly kinds: readonly string[];
+  readonly enabledKinds: ReadonlySet<string>;
+  readonly onToggle: (kind: string) => void;
+}) {
+  return (
+    <div className="admin-graph-filter-list">
+      {kinds.map((kind) => (
+        <button type="button" key={kind} aria-pressed={enabledKinds.has(kind)} onClick={() => onToggle(kind)}>
+          <span className="swatch" style={{ background: KIND_COLORS[kind] ?? FALLBACK_COLOR }} />
+          {kind}
+        </button>
+      ))}
+    </div>
   );
 }
 
