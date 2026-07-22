@@ -77,6 +77,11 @@ steps:
       - JINA_DB_USER=${_JINA_DB_USER}
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
+      - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
+      - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
+      - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
+      - JINA_API_CPU=${_JINA_API_CPU}
+      - JINA_API_MEMORY=${_JINA_API_MEMORY}
     timeout: 4200s
 
 substitutions:
@@ -88,6 +93,14 @@ substitutions:
   _JINA_DB_USER: jina_v2_app
   _JINA_DB_PASS_SECRET: jina-shared-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
+  # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
+  # start. Raise max instances only after checking the resulting DB connection
+  # budget; each instance owns independent PostgreSQL pools.
+  _JINA_API_MIN_INSTANCES: "1"
+  _JINA_API_MAX_INSTANCES: "1"
+  _JINA_API_CONCURRENCY: "20"
+  _JINA_API_CPU: "1"
+  _JINA_API_MEMORY: 512Mi
 
 timeout: 7200s
 serviceAccount: projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com

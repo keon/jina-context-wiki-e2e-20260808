@@ -1267,6 +1267,38 @@ dialog::backdrop {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.review-mcp-section > h3 + h3,
+.review-mcp-section > .review-mcp-chips + h3,
+.review-mcp-section > .empty-detail + h3 {
+  margin-top: 20px;
+}
+
+.review-mcp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-mcp-chip {
+  border: 1px solid #30384b;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #171c27;
+  color: #e1e5ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.review-mcp-events {
+  margin-top: 8px;
+}
+
+.review-mcp-detail {
+  margin: 6px 0 0;
+  color: #9aa4b7;
+  font-size: 13px;
+}
 .empty-detail {
   color: #68758c;
   font-size: 0.72rem;

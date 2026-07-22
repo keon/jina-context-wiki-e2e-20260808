@@ -66,9 +66,21 @@ export interface ContextGraphSummaryFilter {
   readonly ref?: string;
 }
 
+export interface ContextGraphReadRevisionOptions extends ContextGraphSummaryFilter {
+  readonly repositories?: readonly string[];
+  readonly assertionRepository?: string;
+  readonly assertionStatus?: StoredAssertion["status"];
+  readonly includeAssertions?: boolean;
+}
+
 export interface ContextGraphStore extends ContextGraphPipelineStore, RepositoryContextOperations {
   save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void>;
-  latest(tenantId: string): Promise<ContextGraph | undefined>;
+  latest(
+    tenantId: string,
+    repositories?: readonly string[],
+    filter?: ContextGraphSummaryFilter
+  ): Promise<ContextGraph | undefined>;
+  readRevision(tenantId: string, options?: ContextGraphReadRevisionOptions): Promise<string>;
   currentGraphHead(
     tenantId: string,
     repository: string,
@@ -108,8 +120,39 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
   }
 
-  async latest(tenantId: string): Promise<ContextGraph | undefined> {
-    return (await this.list(tenantId))[0];
+  async latest(tenantId: string, repositories?: readonly string[], filter: ContextGraphSummaryFilter = {}) {
+    return (await this.list(tenantId)).find(
+      (graph) =>
+        (!repositories || repositories.includes(graph.repository)) &&
+        (!filter.repository || graph.repository === filter.repository) &&
+        (!filter.ref || graph.ref === filter.ref)
+    );
+  }
+
+  async readRevision(tenantId: string, options: ContextGraphReadRevisionOptions = {}): Promise<string> {
+    const repositories = options.repositories ? new Set(options.repositories) : undefined;
+    const graphs = (await this.list(tenantId)).filter(
+      (graph) =>
+        (!repositories || repositories.has(graph.repository)) &&
+        (!options.repository || graph.repository === options.repository) &&
+        (!options.ref || graph.ref === options.ref)
+    );
+    const assertions = options.includeAssertions
+      ? this.allAssertions().filter(
+          (assertion) =>
+            assertion.tenantId === tenantId &&
+            (!repositories || repositories.has(assertion.repository)) &&
+            (!options.assertionRepository || assertion.repository === options.assertionRepository) &&
+            (!options.assertionStatus || assertion.status === options.assertionStatus)
+        )
+      : [];
+    return stableId(
+      "context-graph-read",
+      canonicalJson({
+        graphs: graphs.map((graph) => graph.id),
+        assertions: assertions.map((assertion) => [assertion.id, assertion.status, assertion.subject, assertion.object])
+      })
+    );
   }
 
   async currentGraphHead(
@@ -652,6 +695,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       readonly status?: StoredAssertion["status"];
       readonly predicate?: string;
       readonly entityKind?: ContextGraphNode["kind"];
+      readonly limit?: number;
     } = {}
   ): Promise<readonly ContextGraphAssertionSummary[]> {
     return this.allAssertions()
@@ -664,6 +708,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
           assertion.subject.kind === filter.entityKind ||
           assertion.object.kind === filter.entityKind
       )
+      .slice(0, Math.max(1, Math.min(filter.limit ?? 500, 500)))
       .map((assertion) => ({
         id: assertion.id,
         repository: assertion.repository,

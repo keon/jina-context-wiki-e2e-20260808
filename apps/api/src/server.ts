@@ -755,30 +755,61 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repositoryFilter = url.searchParams.get("repository");
       const refFilter = url.searchParams.get("ref");
       const scoped = repositoryFilter !== null || refFilter !== null;
-      const graphValues = await contextGraphStore.listSummaries(tenantId, {
+      const dashboardView = url.searchParams.get("view") === "dashboard";
+      const includeAssertions = url.searchParams.get("include") === "assertions";
+      const assertionStatusValue = url.searchParams.get("assertionStatus");
+      const assertionStatus = assertionStatusValue ? requiredAssertionStatus(assertionStatusValue) : undefined;
+      const assertionLimitValue = url.searchParams.get("assertionLimit");
+      const assertionLimit = assertionLimitValue
+        ? requiredPositiveInteger(Number(assertionLimitValue), "assertionLimit")
+        : undefined;
+      if (assertionLimit && assertionLimit > 500) throw invalidRequest("assertionLimit must not exceed 500");
+
+      // The validator is derived from graph heads and mutation clocks only. Check it
+      // before loading node/edge rows, summary pages, entities, or assertions.
+      const revision = await contextGraphStore.readRevision(tenantId, {
+        repositories: allowedRepositories,
         ...(repositoryFilter ? { repository: repositoryFilter } : {}),
-        ...(refFilter ? { ref: refFilter } : {})
+        ...(refFilter ? { ref: refFilter } : {}),
+        includeAssertions,
+        ...(includeAssertions && repositoryFilter ? { assertionRepository: repositoryFilter } : {}),
+        ...(assertionStatus ? { assertionStatus } : {})
       });
+      if (respondNotModified(request, response, revision)) return;
+
+      const graphValues = dashboardView
+        ? []
+        : await contextGraphStore.listSummaries(tenantId, {
+            ...(repositoryFilter ? { repository: repositoryFilter } : {}),
+            ...(refFilter ? { ref: refFilter } : {})
+          });
       const graphs = graphValues.filter((graph) => allowedRepositories.includes(graph.repository));
       // A scoped response must be internally consistent: its latest is the
       // newest graph within the scope (summaries are ordered newest-first),
       // never the unscoped tenant-wide head, which can belong to another
       // repository entirely.
-      const latest = scoped
-        ? graphs[0]
-          ? await contextGraphStore.get(graphs[0].id, tenantId)
-          : undefined
-        : await contextGraphStore.latest(tenantId);
+      const latest = dashboardView
+        ? await contextGraphStore.latest(tenantId, allowedRepositories, {
+            ...(repositoryFilter ? { repository: repositoryFilter } : {}),
+            ...(refFilter ? { ref: refFilter } : {})
+          })
+        : scoped
+          ? graphs[0]
+            ? await contextGraphStore.get(graphs[0].id, tenantId)
+            : undefined
+          : await contextGraphStore.latest(tenantId, allowedRepositories);
       const permittedLatest = latest && allowedRepositories.includes(latest.repository) ? latest : null;
       // ?include=assertions folds the assertion-review fetch into this
       // response so the client does not need a dependent second round trip.
-      const assertions =
-        url.searchParams.get("include") === "assertions"
-          ? permittedLatest
-            ? await contextGraphStore.listAssertions(tenantId, permittedLatest.repository, {})
-            : []
-          : undefined;
-      jsonCacheable(request, response, {
+      const assertions = includeAssertions
+        ? permittedLatest
+          ? await contextGraphStore.listAssertions(tenantId, permittedLatest.repository, {
+              ...(assertionStatus ? { status: assertionStatus } : {}),
+              ...(assertionLimit ? { limit: assertionLimit } : {})
+            })
+          : []
+        : undefined;
+      jsonCacheableWithRevision(request, response, revision, {
         latest: permittedLatest,
         graphs,
         ...(assertions ? { assertions } : {})
@@ -859,11 +890,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ? (entityKindValue as (typeof contextGraphNodeKinds)[number])
           : undefined;
       if (entityKindValue && !entityKind) throw invalidRequest("unsupported contextGraph entity kind");
+      const limitValue = url.searchParams.get("limit");
+      const limit = limitValue ? requiredPositiveInteger(Number(limitValue), "limit") : undefined;
+      if (limit && limit > 500) throw invalidRequest("limit must not exceed 500");
       jsonCacheable(request, response, {
         assertions: await contextGraphStore.listAssertions(tenantId, repository, {
           ...(status ? { status } : {}),
           ...(predicate ? { predicate } : {}),
-          ...(entityKind ? { entityKind } : {})
+          ...(entityKind ? { entityKind } : {}),
+          ...(limit ? { limit } : {})
         })
       });
       return;
@@ -2863,6 +2898,37 @@ function jsonCacheable(request: IncomingMessage, response: ServerResponse, paylo
   if (response.headersSent || response.destroyed) return;
   const body = JSON.stringify(payload);
   const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
+  const headers = { ...JSON_RESPONSE_HEADERS, etag, "cache-control": "no-cache" };
+  if (request.headers["if-none-match"] === etag) {
+    response.writeHead(304, headers);
+    response.end();
+    return;
+  }
+  response.writeHead(200, headers);
+  response.end(body);
+}
+
+function revisionEtag(revision: string): string {
+  return `"${revision}"`;
+}
+
+function respondNotModified(request: IncomingMessage, response: ServerResponse, revision: string): boolean {
+  const etag = revisionEtag(revision);
+  if (request.headers["if-none-match"] !== etag) return false;
+  response.writeHead(304, { ...JSON_RESPONSE_HEADERS, etag, "cache-control": "no-cache" });
+  response.end();
+  return true;
+}
+
+function jsonCacheableWithRevision(
+  request: IncomingMessage,
+  response: ServerResponse,
+  revision: string,
+  payload: unknown
+): void {
+  if (response.headersSent || response.destroyed) return;
+  const body = JSON.stringify(payload);
+  const etag = revisionEtag(revision);
   const headers = { ...JSON_RESPONSE_HEADERS, etag, "cache-control": "no-cache" };
   if (request.headers["if-none-match"] === etag) {
     response.writeHead(304, headers);

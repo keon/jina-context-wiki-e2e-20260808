@@ -33,6 +33,38 @@ The API requires PostgreSQL plus `INTERNAL_API_TOKEN` and `GRAPH_API_TOKEN`. Fix
 
 Backend services remain in `jina-v2/us-central1`. Production attaches the single original Jina database in `jina-463721/us-east1`; the original identity tables and v2-owned schemas have separate ownership and grants.
 
+This cross-region layout is supported but adds network latency to every database
+round trip. Do not migrate the shared production database as part of an
+application release. A region change needs a separate, rehearsed database
+cutover with backups, connection/grant verification, a write-freeze or
+replication plan, acceptance testing, and an explicit rollback. For lowest
+dashboard read latency, the eventual target is for the API and its primary
+Cloud SQL instance to share a region.
+
+### Dashboard read runtime sizing
+
+The release keeps one API instance warm by default. This removes scale-to-zero
+cold starts from dashboard graph reads. The following Cloud Build substitutions
+make the API envelope explicit and allow operators to tune it without editing
+the deployment script:
+
+| Substitution              | Default | Guidance                                                                          |
+| ------------------------- | ------: | --------------------------------------------------------------------------------- |
+| `_JINA_API_MIN_INSTANCES` |     `1` | Keep at least one warm for interactive reads.                                     |
+| `_JINA_API_MAX_INSTANCES` |     `1` | Increase only after calculating the aggregate PostgreSQL connection budget.       |
+| `_JINA_API_CONCURRENCY`   |    `20` | Lowering this can reduce per-instance contention, but may require more instances. |
+| `_JINA_API_CPU`           |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
+| `_JINA_API_MEMORY`        | `512Mi` | Increase if graph hydration/cache memory approaches the container limit.          |
+
+Each Cloud Run instance creates its own database pools, so raising maximum
+instances multiplies possible connections. Before changing it, inventory every
+pool used by one API process, reserve capacity for workers, migrations and
+operations, and keep the result below Cloud SQL's connection limit with safety
+headroom. Change one dimension at a time and compare warm p50/p95/p99 graph
+latency, instance count, CPU, memory and database connections before and after.
+Min instances improves cold-start latency; it does not fix slow SQL or
+cross-region round trips.
+
 See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants, cutover checks, and rollback.
 
 The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health and task-type definitions remain public; the disabled webhook route only acknowledges and discards deliveries. Tenant data does not become public.
@@ -67,7 +99,7 @@ CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3
 
 The assertion worker calls OpenRouter's non-streaming chat-completions API directly with a strict JSON schema. Daytona provides only the pinned repository checkout and citation reads; no coding-agent runtime or localhost proxy participates in generation. Transient provider timeout, rate-limit, 5xx, and network failures retry once within the same checkout. Host validation can trigger up to two complete schema-constrained repair generations with the default three-attempt setting.
 
-Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Services keep one minimum instance with CPU allocated, poll continuously, and renew five-minute leases. The durable lease, not process identity, is the source of truth.
+Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew five-minute leases. The API keeps one minimum instance by default; unlike workers it uses request-time CPU allocation. The durable lease, not process identity, is the source of truth.
 
 ## Context graph retry and cache behavior
 

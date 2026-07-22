@@ -1633,6 +1633,66 @@ test("context graph responses can inline the assertion review queue", async () =
   }
 });
 
+test("dashboard context graph revalidation skips graph hydration and assertion reads", async () => {
+  class CountingStore extends MemoryContextGraphStore {
+    readonly calls = { latest: 0, summaries: 0, assertions: 0, get: 0 };
+
+    override async latest(
+      tenantId: string,
+      repositories?: readonly string[],
+      filter?: { repository?: string; ref?: string }
+    ) {
+      this.calls.latest += 1;
+      return super.latest(tenantId, repositories, filter);
+    }
+
+    override async listSummaries(tenantId: string, filter?: { repository?: string; ref?: string }) {
+      this.calls.summaries += 1;
+      return super.listSummaries(tenantId, filter);
+    }
+
+    override async listAssertions(
+      tenantId: string,
+      repository: string,
+      filter?: Parameters<MemoryContextGraphStore["listAssertions"]>[2]
+    ) {
+      this.calls.assertions += 1;
+      return super.listAssertions(tenantId, repository, filter);
+    }
+
+    override async get(graphId: string, tenantId: string) {
+      this.calls.get += 1;
+      return super.get(graphId, tenantId);
+    }
+  }
+
+  const store = new CountingStore();
+  await store.save(fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "main", taskId: "task-a" }));
+  const server = createApiServer({ contextGraphStore: store, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
+  const baseUrl = await listen(server);
+  const route = `${baseUrl}/context-graph?view=dashboard&include=assertions&assertionStatus=proposed&assertionLimit=25`;
+  try {
+    const initial = await authenticatedFetch(route);
+    assert.equal(initial.status, 200);
+    assert.ok(initial.headers.get("etag"));
+    assert.equal(store.calls.summaries, 0, "dashboard view must not load the summary page");
+    assert.equal(store.calls.latest, 1);
+    assert.equal(store.calls.assertions, 1);
+
+    store.calls.latest = 0;
+    store.calls.summaries = 0;
+    store.calls.assertions = 0;
+    store.calls.get = 0;
+    const revalidated = await fetch(route, {
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "if-none-match": initial.headers.get("etag")! }
+    });
+    assert.equal(revalidated.status, 304);
+    assert.deepEqual(store.calls, { latest: 0, summaries: 0, assertions: 0, get: 0 });
+  } finally {
+    await close(server);
+  }
+});
+
 async function listen(server: ReturnType<typeof createApiServer>): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;

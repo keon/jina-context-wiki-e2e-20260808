@@ -16,6 +16,29 @@ db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
+api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
+api_max_instances="${JINA_API_MAX_INSTANCES:-1}"
+api_concurrency="${JINA_API_CONCURRENCY:-20}"
+api_cpu="${JINA_API_CPU:-1}"
+api_memory="${JINA_API_MEMORY:-512Mi}"
+
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${name} must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+validate_nonnegative_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "${name} must be a non-negative integer" >&2
+    exit 2
+  fi
+}
 
 validate_cloud_sql_instance() {
   local name="$1"
@@ -27,6 +50,13 @@ validate_cloud_sql_instance() {
 }
 
 validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
+validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
+validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
+validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
+if (( api_min_instances > api_max_instances )); then
+  echo "JINA_API_MIN_INSTANCES must not exceed JINA_API_MAX_INSTANCES" >&2
+  exit 2
+fi
 if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
   echo "JINA_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
   exit 2
@@ -122,10 +152,12 @@ gcloud run deploy jina-api \
   --allow-unauthenticated \
   --service-account="${runtime_service_account}" \
   --set-cloudsql-instances="${cloud_sql_instance}" \
-  --concurrency=20 \
+  --concurrency="${api_concurrency}" \
+  --cpu="${api_cpu}" \
+  --memory="${api_memory}" \
   --timeout=900 \
-  --min-instances=0 \
-  --max-instances=1 \
+  --min-instances="${api_min_instances}" \
+  --max-instances="${api_max_instances}" \
   --set-env-vars="${api_env_vars}" \
   --set-secrets="${api_secrets}" \
   --quiet
@@ -244,4 +276,7 @@ Task worker: ${task_worker_url}
 Image tag: ${image_tag}
 Cloud SQL: ${cloud_sql_instance}
 Tenancy mode: ${tenancy_mode}
+API instances: ${api_min_instances}-${api_max_instances}
+API concurrency: ${api_concurrency}
+API size: ${api_cpu} CPU / ${api_memory}
 SUMMARY
