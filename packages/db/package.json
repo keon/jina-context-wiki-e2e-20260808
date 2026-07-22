@@ -13,7 +13,7 @@
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
     "migrate": "pnpm build && node dist/migrate.js",
-    "test": "pnpm build && node --test dist/postgres.integration.test.js"
+    "test": "pnpm build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@jina/context-graph": "workspace:*",

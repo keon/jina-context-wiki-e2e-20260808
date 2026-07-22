@@ -2,6 +2,7 @@ import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel"
 import type { TaskDependencyDraft, TaskId } from "./dependencies.js";
 import { isTerminalFailure, isTerminalTaskStatus, type TaskStatus } from "./task-status.js";
 import type { BoardTask } from "./tasks.js";
+import type { CommandActor } from "./commands.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
@@ -76,13 +77,14 @@ export function appendEvent(
   };
 }
 
-export function addTask(state: BoardState, task: BoardTask): BoardState {
+export function addTask(state: BoardState, task: BoardTask, actor?: CommandActor): BoardState {
   if (state.tasks.some((existing) => existing.dedupeKey === task.dedupeKey)) {
     return state;
   }
 
   return appendEvent({ ...state, tasks: [...state.tasks, task] }, "task.created", task.updatedAt, task.id, {
-    type: task.type
+    type: task.type,
+    ...(actor ? { actor: actor.id, actorType: actor.type } : {})
   });
 }
 

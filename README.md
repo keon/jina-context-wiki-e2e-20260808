@@ -90,6 +90,7 @@ Smaller packages contain review planning, context policy, publication, billing p
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)
+- [Shared original Jina database](docs/SHARED_TENANCY.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
 - [Billing](docs/BILLING.md)
 - [Observability](docs/OBSERVABILITY.md)

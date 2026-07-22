@@ -9,7 +9,8 @@ The Next.js dashboard and admin apps deploy through the Om Labs Vercel projects 
 - Artifact Registry repository: `jina`
 - Cloud Run: `jina-api`, `jina-task-worker`, `jina-context-graph-worker`
 - Cloud Run Job: `jina-acceptance`
-- Cloud SQL: PostgreSQL 17 instance `jina-postgres`, database `jina`
+- Production Cloud SQL: PostgreSQL 16 instance `jina-463721:us-east1:jina-db`, database `jina`
+- Rollback Cloud SQL: PostgreSQL 17 instance `jina-v2:us-central1:jina-postgres`, database `jina`
 - Cloud Build deployer: `jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com`
 - Cloud Build pull-request validator: `jina-cloud-build-ci@jina-v2.iam.gserviceaccount.com`
 
@@ -17,7 +18,11 @@ Cloud Build runs entirely with user-specified Google service accounts. No Google
 
 ## Runtime configuration
 
-The API requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`. Signed intake additionally requires `GITHUB_WEBHOOK_SECRET` from Secret Manager. `JINA_TENANT_ALIASES` migrates configured legacy tenant IDs at startup.
+The API requires PostgreSQL plus `INTERNAL_API_TOKEN` and `GRAPH_API_TOKEN`. Fixed mode requires `JINA_TENANT_ID`; shared mode requires it to be unset and resolves original tenant UUIDs from the database. Signed intake additionally requires `GITHUB_WEBHOOK_SECRET`.
+
+Backend services remain in `jina-v2/us-central1`. Production attaches the single original Jina database in `jina-463721/us-east1`; the original identity tables and v2-owned schemas have separate ownership and grants.
+
+See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants, cutover checks, and rollback.
 
 The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health, task-type definitions, and signed webhooks remain public; tenant data does not.
 
@@ -52,7 +57,7 @@ Manifest, search, reconciliation, and graph consumers own separate canonical out
 
 ## CI and verification
 
-Pull-request Cloud Build runs `cloudbuild.ci.yaml` with the validation-only service account. It starts an ephemeral PostgreSQL 17 container and runs:
+Pull-request Cloud Build runs `cloudbuild.ci.yaml` with the validation-only service account. It starts an ephemeral PostgreSQL 16 container, matching the production major version, and runs:
 
 ```sh
 pnpm lint

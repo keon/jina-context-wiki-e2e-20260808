@@ -9,6 +9,7 @@ export interface ProductionAcceptanceConfig {
   readonly requestKey: string;
   readonly repository?: string;
   readonly ref?: string;
+  readonly tenantId?: string;
   readonly principalId?: string;
   readonly pollIntervalMs?: number;
   readonly timeoutMs?: number;
@@ -74,7 +75,8 @@ export async function runProductionContextGraphAcceptance(
   const log = config.log ?? console.log;
   const headers = {
     authorization: `Bearer ${config.token}`,
-    "x-jina-principal-id": principalId
+    "x-jina-principal-id": principalId,
+    ...(config.tenantId ? { "x-jina-tenant-id": config.tenantId } : {})
   };
 
   const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
@@ -961,6 +963,10 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       apiUrl: requiredEnv("JINA_API_URL"),
       token: requiredEnv("INTERNAL_API_TOKEN"),
       requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
+      ...(process.env.ACCEPTANCE_TENANT_ID?.trim() ? { tenantId: process.env.ACCEPTANCE_TENANT_ID.trim() } : {}),
+      ...(process.env.ACCEPTANCE_PRINCIPAL_ID?.trim()
+        ? { principalId: process.env.ACCEPTANCE_PRINCIPAL_ID.trim() }
+        : {}),
       ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout }),
       ...(expectedIssueNumber === undefined ? {} : { expectedIssueNumber }),
       ...(expectedResolutionPullRequestNumber === undefined ? {} : { expectedResolutionPullRequestNumber }),

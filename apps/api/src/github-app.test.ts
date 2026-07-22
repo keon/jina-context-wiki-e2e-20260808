@@ -21,6 +21,7 @@ const SECRET = "test-webhook-secret";
 const INTERNAL_TOKEN = "test-internal-token";
 const GRAPH_TOKEN = "test-graph-token";
 const TENANT = "github:installation:99";
+const SHARED_TENANT = "5f4d1548-7e14-4f9e-a6e2-e7d38b61b1c2";
 
 test("signed GitHub App deliveries create idempotent PR and issue tasks", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
@@ -69,7 +70,23 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 
   assert.equal(board.tasks.filter((task) => task.type === "issue_triage").length, 1);
   assert.equal(board.tasks.find((task) => task.type === "issue_triage")?.status, "triage");
+  assert.equal(board.tasks.find((task) => task.type === "issue_triage")?.metadata.authorGithubUserId, 101);
   assert.equal(board.tasks.filter((task) => task.type === "pr_review").length, 3);
+  assert.equal(
+    board.tasks.find((task) => task.type === "pr_review" && task.metadata.pullRequestNumber === 43)?.metadata
+      .authorGithubUserId,
+    101
+  );
+  assert.equal(
+    board.tasks.find((task) => task.type === "pr_review" && task.metadata.pullRequestNumber === 43)?.metadata
+      .senderGithubUserId,
+    101
+  );
+  assert.equal(
+    board.tasks.find((task) => task.type === "pr_review" && task.metadata.pullRequestNumber === 43)?.metadata
+      .githubAccountId,
+    "202"
+  );
   assert.equal(
     board.tasks.filter((task) => task.metadata.pullRequestNumber === 43).some((task) => task.status === "superseded"),
     false,
@@ -171,6 +188,92 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
       ?.requiredBy.map((dependency) => dependency.taskType),
     ["pr_review", "publish"]
   );
+});
+
+test("shared tenancy resolves original Jina organizations and scopes workers and board reads", async (context) => {
+  const resolutions: unknown[] = [];
+  const sharedIdentityResolver = {
+    async resolveRepository(input: unknown) {
+      resolutions.push(input);
+      const repository = (input as { repository: string }).repository;
+      if (repository !== "omlabs/example") return undefined;
+      return {
+        tenantId: SHARED_TENANT,
+        githubAccountId: "202",
+        githubAccountLogin: "omlabs",
+        githubAccountType: "Organization",
+        githubRepositoryId: "10",
+        repository,
+        defaultBranch: "main"
+      };
+    },
+    async listTenantIds() {
+      return [SHARED_TENANT];
+    },
+    async ping() {},
+    async close() {}
+  };
+  const server = createApiServer({
+    githubWebhookSecret: SECRET,
+    internalApiToken: INTERNAL_TOKEN,
+    graphApiToken: GRAPH_TOKEN,
+    sharedIdentityResolver
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  const delivered = await deliver(baseUrl, "pull_request", "shared-pr-1", pullRequestPayload(42, "abc123"));
+  assert.equal(delivered.status, 202);
+  assert.deepEqual(resolutions, [{ repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 }]);
+
+  assert.equal((await authenticatedFetch(`${baseUrl}/board`)).status, 401);
+  const boardResponse = await fetch(`${baseUrl}/board`, {
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "x-jina-tenant-id": SHARED_TENANT
+    }
+  });
+  assert.equal(boardResponse.status, 200);
+  const board = (await boardResponse.json()) as { tasks: { metadata: Record<string, unknown> }[] };
+  assert.equal(board.tasks.length, 3);
+  assert.equal(
+    board.tasks.every((task) => task.metadata.tenantId === SHARED_TENANT),
+    true
+  );
+  assert.equal(
+    board.tasks.every((task) => task.metadata.workspaceLabel === "omlabs"),
+    true
+  );
+  assert.equal(
+    board.tasks.every((task) => task.metadata.githubAccountId === "202"),
+    true
+  );
+  assert.equal(
+    board.tasks.every((task) => task.metadata.authorGithubUserId === 101),
+    true
+  );
+
+  const claim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "shared-worker", topics: ["run-review"] })
+  });
+  assert.equal(claim.status, 200);
+  const claimed = (await claim.json()) as { task: { metadata: Record<string, unknown> } };
+  assert.equal(claimed.task.metadata.tenantId, SHARED_TENANT);
+
+  const unknownPayload = pullRequestPayload(43, "def456") as Record<string, unknown>;
+  unknownPayload.repository = {
+    id: 11,
+    full_name: "elsewhere/unknown",
+    owner: { id: 303, login: "elsewhere", type: "Organization" }
+  };
+  const unknown = await deliver(baseUrl, "pull_request", "shared-pr-unknown", unknownPayload);
+  assert.equal(unknown.status, 409);
+  assert.equal(((await unknown.json()) as { code: string }).code, "repository_tenant_not_found");
 });
 
 test("branch pushes create and supersede the existing context graph workflow", async (context) => {
@@ -1684,11 +1787,11 @@ function issueOpenedPayload(): unknown {
       number: 7,
       title: "Investigate flaky test",
       html_url: "https://github.com/omlabs/example/issues/7",
-      user: { login: "octocat" }
+      user: { id: 101, login: "octocat", type: "User" }
     },
-    repository: { id: 10, full_name: "omlabs/example" },
+    repository: { id: 10, full_name: "omlabs/example", owner: { id: 202, login: "omlabs", type: "Organization" } },
     installation: { id: 99 },
-    sender: { login: "octocat" }
+    sender: { id: 101, login: "octocat", type: "User" }
   };
 }
 
@@ -1701,12 +1804,12 @@ function pullRequestPayload(number: number, headSha: string, action = "opened"):
       title: "Make it work",
       html_url: `https://github.com/omlabs/example/pull/${number}`,
       draft: false,
-      user: { login: "octocat" },
+      user: { id: 101, login: "octocat", type: "User" },
       head: { sha: headSha }
     },
-    repository: { id: 10, full_name: "omlabs/example" },
+    repository: { id: 10, full_name: "omlabs/example", owner: { id: 202, login: "omlabs", type: "Organization" } },
     installation: { id: 99 },
-    sender: { login: "octocat" }
+    sender: { id: 101, login: "octocat", type: "User" }
   };
 }
 

@@ -137,7 +137,7 @@ function applyCreateTask(state: BoardState, command: CreateTaskCommand, options:
     }
   }
 
-  let next = addTask(state, createBoardTask({ ...command.task, now: options.now }));
+  let next = addTask(state, createBoardTask({ ...command.task, now: options.now }), options.actor);
 
   for (const dependency of command.dependencies ?? []) {
     next = addDependency(next, dependency, options.now);

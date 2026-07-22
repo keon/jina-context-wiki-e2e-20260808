@@ -56,10 +56,18 @@ const SUPPORTED_TOPICS = [
 type WorkerTopic = (typeof SUPPORTED_TOPICS)[number];
 
 interface WorkMetadataByTopic {
-  readonly "run-review": { readonly repository: string; readonly pullRequestNumber: number };
-  readonly "run-research": { readonly question?: string; readonly sourceUrls?: readonly string[] };
-  readonly "run-publish": Record<string, unknown>;
-  readonly "run-cleanup": Record<string, unknown>;
+  readonly "run-review": {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly pullRequestNumber: number;
+  };
+  readonly "run-research": {
+    readonly tenantId: string;
+    readonly question?: string;
+    readonly sourceUrls?: readonly string[];
+  };
+  readonly "run-publish": Record<string, unknown> & { readonly tenantId: string };
+  readonly "run-cleanup": Record<string, unknown> & { readonly tenantId: string };
   readonly "run-context-graph-ingest": {
     readonly tenantId: string;
     readonly repository: string;
@@ -954,7 +962,7 @@ async function githubWorkItemObservations(
       body,
       state: requiredString(item.state, "GitHub pull request state"),
       url: requiredString(item.html_url, "GitHub pull request URL"),
-      ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
+      ...githubWorkItemAuthor(user),
       ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
       ...(typeof item.merged_at === "string" && item.merged_at ? { mergedAt: item.merged_at } : {}),
       ...(typeof item.merged_at === "string" && item.merged_at && typeof item.merge_commit_sha === "string"
@@ -978,7 +986,7 @@ async function githubWorkItemObservations(
       ...(typeof item.body === "string" ? { body: item.body } : {}),
       state: requiredString(item.state, "GitHub issue state"),
       url: requiredString(item.html_url, "GitHub issue URL"),
-      ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
+      ...githubWorkItemAuthor(user),
       ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
       recordedAt
     });
@@ -1127,7 +1135,7 @@ async function githubIncidentObservations(
       ...(typeof item.body === "string" ? { body: item.body } : {}),
       state: typeof item.state === "string" ? item.state : "open",
       url: typeof item.html_url === "string" ? item.html_url : `https://github.com/${repository}/issues/${item.number}`,
-      ...(typeof user.login === "string" ? { authorLogin: user.login } : {}),
+      ...githubWorkItemAuthor(user),
       ...(typeof item.updated_at === "string" ? { occurredAt: item.updated_at } : {}),
       recordedAt
     };
@@ -1147,6 +1155,20 @@ async function githubIncidentObservations(
       }
     ];
   });
+}
+
+function githubWorkItemAuthor(user: Record<string, unknown>): {
+  readonly authorId?: number;
+  readonly authorLogin?: string;
+  readonly authorName?: string;
+  readonly authorAccountType?: string;
+} {
+  return {
+    ...(typeof user.id === "number" && Number.isSafeInteger(user.id) && user.id > 0 ? { authorId: user.id } : {}),
+    ...(typeof user.login === "string" && user.login.trim() ? { authorLogin: user.login.trim() } : {}),
+    ...(typeof user.name === "string" && user.name.trim() ? { authorName: user.name.trim() } : {}),
+    ...(typeof user.type === "string" && user.type.trim() ? { authorAccountType: user.type.trim() } : {})
+  };
 }
 
 function isDeterministicSourcePath(path: string): boolean {
@@ -1427,9 +1449,14 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
 
 function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Response> {
   assertLeaseOwned();
+  const tenantId = activeWork?.task.metadata.tenantId;
   return fetch(`${apiUrl}${path}`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      ...(tenantId ? { "x-jina-tenant-id": tenantId } : {})
+    },
     body: JSON.stringify(body),
     signal: requestSignal(timeoutMs)
   });
@@ -1603,6 +1630,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
         task: {
           id: taskId,
           metadata: {
+            tenantId: requiredString(metadata.tenantId, "task tenantId"),
             repository: requiredString(metadata.repository, "task repository"),
             pullRequestNumber: requiredPositiveInteger(metadata.pullRequestNumber, "task pullRequestNumber")
           }
@@ -1615,6 +1643,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
         task: {
           id: taskId,
           metadata: {
+            tenantId: requiredString(metadata.tenantId, "task tenantId"),
             ...(metadata.question === undefined
               ? {}
               : { question: requiredString(metadata.question, "task question") }),
@@ -1677,9 +1706,23 @@ function parseClaimedWork(value: unknown): ClaimedWork {
         }
       };
     case "run-publish":
-      return { topic, message: { ...message, topic }, task: { id: taskId, metadata } };
+      return {
+        topic,
+        message: { ...message, topic },
+        task: {
+          id: taskId,
+          metadata: { ...metadata, tenantId: requiredString(metadata.tenantId, "task tenantId") }
+        }
+      };
     case "run-cleanup":
-      return { topic, message: { ...message, topic }, task: { id: taskId, metadata } };
+      return {
+        topic,
+        message: { ...message, topic },
+        task: {
+          id: taskId,
+          metadata: { ...metadata, tenantId: requiredString(metadata.tenantId, "task tenantId") }
+        }
+      };
   }
 }
 
@@ -1812,7 +1855,11 @@ async function releaseContextGraphLeaseOnShutdown(work: ClaimedWork): Promise<vo
   if (!work.message.id.startsWith("context-graph-stage_")) return;
   const response = await fetch(`${apiUrl}/internal/worker/release`, {
     method: "POST",
-    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    headers: {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": work.task.metadata.tenantId
+    },
     body: JSON.stringify({
       messageId: work.message.id,
       leaseId: work.message.leaseId,

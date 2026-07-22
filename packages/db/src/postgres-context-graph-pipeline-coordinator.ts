@@ -215,6 +215,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
 
   async claim(input: {
     readonly tenantId: string;
+    readonly tenantIds?: readonly string[];
     readonly workerId: string;
     readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
@@ -235,11 +236,13 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
 
   private async claimOnce(input: {
     readonly tenantId: string;
+    readonly tenantIds?: readonly string[];
     readonly workerId: string;
     readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
     readonly leaseExpiresAt: string;
   }): Promise<ContextGraphStageClaim | undefined> {
+    const tenantIds = [...new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId])];
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -249,24 +252,25 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
       // update itself clears.
       const expired = await client.query<{
         id: string;
+        tenant_id: string;
         attempt: number;
         worker_id: string | null;
         started_at: Date | null;
       }>(
         `with expired as (
-           select id,attempt,worker_id,started_at from jina_board.tasks
-           where tenant_id=$2 and status='in_progress' and lease_expires_at <= $1
+           select id,tenant_id,attempt,worker_id,started_at from jina_board.tasks
+           where tenant_id=any($2::text[]) and status='in_progress' and lease_expires_at <= $1
            for update
          )
          update jina_board.tasks stage
          set status='queued',lease_id=null,worker_id=null,lease_expires_at=null,started_at=null,completed_at=null,duration_ms=null,updated_at=$1
          from expired where stage.id=expired.id
-         returning expired.id,expired.attempt,expired.worker_id,expired.started_at`,
-        [input.now, input.tenantId]
+         returning expired.id,expired.tenant_id,expired.attempt,expired.worker_id,expired.started_at`,
+        [input.now, tenantIds]
       );
       for (const stage of expired.rows) {
         if (!stage.started_at) continue;
-        await insertBoardEvent(client, input.tenantId, stage.id, "task.lease_expired", input.now, {
+        await insertBoardEvent(client, stage.tenant_id, stage.id, "task.lease_expired", input.now, {
           fromStatus: "in_progress",
           toStatus: "queued",
           attempt: stage.attempt,
@@ -319,11 +323,11 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
       const selected = await client.query<StageRow>(
         `select stage.* from jina_board.tasks stage
          join jina_board.workflows build on build.id=stage.build_id
-         where stage.tenant_id=$1 and stage.status='queued' and stage.topic=any($2::text[])
+         where stage.tenant_id=any($1::text[]) and stage.status='queued' and stage.topic=any($2::text[])
            and build.status in ('queued','in_progress','enriching')
          order by stage.priority desc,stage.created_at,stage.id
          for update of stage skip locked limit 1`,
-        [input.tenantId, input.topics]
+        [tenantIds, input.topics]
       );
       const stage = selected.rows[0];
       if (!stage) {
