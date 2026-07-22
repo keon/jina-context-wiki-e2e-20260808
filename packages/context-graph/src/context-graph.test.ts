@@ -53,6 +53,16 @@ import {
   type CausalTraceProjection
 } from "./causal.js";
 import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js";
+import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
+
+test("assertion generation requires evidence-backed move continuity", () => {
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v15-move-continuity/);
+  assert.match(
+    CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
+    /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
+  );
+  assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /emit current MOVED_FROM previous/);
+});
 
 test("snapshot-first contextGraph builds publish and ingest history without waiting for assertions", async () => {
   const coordinator = new MemoryContextGraphPipelineCoordinator();
