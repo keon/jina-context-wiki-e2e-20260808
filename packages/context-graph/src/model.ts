@@ -392,6 +392,16 @@ export interface RequiredMoveAnchor {
   readonly endLine: number;
 }
 
+export interface RequiredIncidentDeploymentAnchor {
+  readonly incidentLabel: string;
+  readonly incidentIssueNumber?: number;
+  readonly deploymentExternalId: string;
+  readonly predicate: "INTRODUCED_BY" | "RESOLVED_BY";
+  readonly evidencePath: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
 /** Detect only explicit root-cause records; proximity or PR membership never qualifies. */
 export function requiredCausalAnchors(
   files: readonly CausalEvidenceFile[],
@@ -460,6 +470,49 @@ export function requiredMoveAnchors(files: readonly CausalEvidenceFile[]): reado
   );
 }
 
+/** Detect only explicit incident-to-deployment statements in repository-authored incident records. */
+export function requiredIncidentDeploymentAnchors(
+  files: readonly CausalEvidenceFile[]
+): readonly RequiredIncidentDeploymentAnchor[] {
+  const anchors: RequiredIncidentDeploymentAnchor[] = [];
+  for (const file of files) {
+    if (!/(?:^|\/)(?:incident|postmortem|root[-_]?cause)|root[-_]?cause/i.test(file.path)) continue;
+    const issueText = /^\s*issue:\s*#?([1-9]\d*)\s*$/im.exec(file.content)?.[1];
+    const incidentIssueNumber = issueText ? Number.parseInt(issueText, 10) : undefined;
+    for (const [index, line] of file.content.split(/\r?\n/).entries()) {
+      const match =
+        /\bIncident\s+([A-Za-z][A-Za-z0-9_-]*-\d+)\s+was\s+(introduced|resolved)\s+by\s+Deployment\s+(deployment:[A-Za-z0-9_./#:-]+)/i.exec(
+          line
+        );
+      const incidentLabel = match?.[1];
+      const action = match?.[2]?.toLowerCase();
+      const deploymentExternalId = match?.[3]
+        ?.split(":")
+        .at(-1)
+        ?.replace(/[.,;]+$/, "");
+      if (!incidentLabel || !deploymentExternalId || !/^[A-Za-z0-9._-]+$/.test(deploymentExternalId)) continue;
+      anchors.push({
+        incidentLabel,
+        ...(incidentIssueNumber ? { incidentIssueNumber } : {}),
+        deploymentExternalId,
+        predicate: action === "introduced" ? "INTRODUCED_BY" : "RESOLVED_BY",
+        evidencePath: file.path,
+        startLine: index + 1,
+        endLine: index + 1
+      });
+    }
+  }
+  return anchors.filter(
+    (anchor, index) =>
+      anchors.findIndex(
+        (candidate) =>
+          candidate.incidentLabel.toLowerCase() === anchor.incidentLabel.toLowerCase() &&
+          candidate.deploymentExternalId === anchor.deploymentExternalId &&
+          candidate.predicate === anchor.predicate
+      ) === index
+  );
+}
+
 /** Materialize explicit move contracts without treating similarity candidates as facts. */
 export function materializeRequiredMoveAssertions(
   generated: GeneratedContextGraph,
@@ -513,6 +566,125 @@ export function materializeRequiredMoveAssertions(
     else edges[existing] = requiredEdge;
   }
   return { ...generated, nodes, edges };
+}
+
+/** Materialize explicit incident deployment history using only source-backed entity identities. */
+export function materializeRequiredIncidentDeploymentAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredIncidentDeploymentAnchor[],
+  sourceEntityIds: ReadonlySet<string>
+): GeneratedContextGraph {
+  const nodes = [...generated.nodes];
+  const edges = [...generated.edges];
+  const sourceIds = [...sourceEntityIds];
+
+  for (const anchor of anchors) {
+    const evidence = `${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`;
+    const allowedIncidentIds = sourceIds.filter((id) => id.startsWith("incident:"));
+    const matchingGeneratedIncidents = nodes.filter(
+      (node) =>
+        node.kind === "Incident" &&
+        sourceEntityIds.has(node.id) &&
+        `${node.id}\n${node.label}\n${node.description}`.toLowerCase().includes(anchor.incidentLabel.toLowerCase())
+    );
+    const issueIncidentIds = anchor.incidentIssueNumber
+      ? allowedIncidentIds.filter((id) => id.endsWith(`#${anchor.incidentIssueNumber}`))
+      : [];
+    const incidentId =
+      matchingGeneratedIncidents.length === 1
+        ? matchingGeneratedIncidents[0]?.id
+        : issueIncidentIds.length === 1
+          ? issueIncidentIds[0]
+          : allowedIncidentIds.length === 1
+            ? allowedIncidentIds[0]
+            : undefined;
+    const deploymentIds = sourceIds.filter(
+      (id) => id.startsWith("deployment:") && id.endsWith(`:${anchor.deploymentExternalId}`)
+    );
+    const deploymentId = deploymentIds.length === 1 ? deploymentIds[0] : undefined;
+    if (!incidentId || !deploymentId) continue;
+
+    const incidentIndex = nodes.findIndex((node) => node.kind === "Incident" && node.id === incidentId);
+    if (incidentIndex === -1) {
+      nodes.push({
+        id: incidentId,
+        kind: "Incident",
+        label: anchor.incidentLabel,
+        description: `Incident ${anchor.incidentLabel} identified by explicit repository postmortem evidence.`,
+        evidence: [evidence]
+      });
+    } else {
+      const incident = nodes[incidentIndex]!;
+      nodes[incidentIndex] = { ...incident, label: anchor.incidentLabel };
+    }
+    if (!nodes.some((node) => node.kind === "Deployment" && node.id === deploymentId)) {
+      nodes.push({
+        id: deploymentId,
+        kind: "Deployment",
+        label: anchor.deploymentExternalId,
+        description: `Deployment ${anchor.deploymentExternalId} identified by explicit repository postmortem evidence.`,
+        evidence: [evidence]
+      });
+    }
+
+    const existing = edges.findIndex(
+      (edge) => edge.predicate === anchor.predicate && edge.source === incidentId && edge.target === deploymentId
+    );
+    const requiredEdge: Omit<ContextGraphEdge, "id"> = {
+      source: incidentId,
+      target: deploymentId,
+      predicate: anchor.predicate,
+      plane: "knowledge",
+      confidence: 1,
+      why:
+        anchor.predicate === "INTRODUCED_BY"
+          ? `The cited incident record explicitly identifies deployment ${anchor.deploymentExternalId} as introducing ${anchor.incidentLabel}.`
+          : `The cited incident record explicitly identifies deployment ${anchor.deploymentExternalId} as resolving ${anchor.incidentLabel}.`,
+      evidence: [evidence]
+    };
+    if (existing === -1) edges.push(requiredEdge);
+    else edges[existing] = requiredEdge;
+  }
+
+  return { ...generated, nodes, edges };
+}
+
+export function validateRequiredIncidentDeploymentAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredIncidentDeploymentAnchor[]
+): void {
+  for (const anchor of anchors) {
+    const incident = generated.nodes.find(
+      (node) =>
+        node.kind === "Incident" &&
+        `${node.id}\n${node.label}\n${node.description}`.toLowerCase().includes(anchor.incidentLabel.toLowerCase())
+    );
+    const deployment = generated.nodes.find(
+      (node) => node.kind === "Deployment" && node.id.endsWith(`:${anchor.deploymentExternalId}`)
+    );
+    const edge =
+      incident && deployment
+        ? generated.edges.find(
+            (candidate) =>
+              candidate.predicate === anchor.predicate &&
+              candidate.source === incident.id &&
+              candidate.target === deployment.id
+          )
+        : undefined;
+    const spansAnchor = edge?.evidence.some((value) => {
+      const citation = parseEvidenceCitation(value);
+      return (
+        citation.path === anchor.evidencePath &&
+        citation.startLine <= anchor.startLine &&
+        citation.endLine >= anchor.endLine
+      );
+    });
+    if (!edge || !spansAnchor) {
+      throw new Error(
+        `explicit incident evidence requires ${anchor.incidentLabel} ${anchor.predicate} deployment ${anchor.deploymentExternalId}`
+      );
+    }
+  }
 }
 
 export function validateRequiredMoveAssertions(
@@ -707,7 +879,8 @@ function validateCausalEvidenceContents(generated: GeneratedContextGraph, files:
       : Boolean(
           deploymentId &&
           (citedText.toLowerCase().includes(deploymentId.toLowerCase()) ||
-            citedText.toLowerCase().includes(cause.label.trim().toLowerCase()))
+            citedText.toLowerCase().includes(cause.label.trim().toLowerCase()) ||
+            citedText.toLowerCase().includes(deploymentId.split(":").at(-1)?.toLowerCase() ?? "\u0000"))
         );
     if (!namesRoot || !namesCause) {
       const rootReference = issueNumber
