@@ -1,7 +1,11 @@
 import { linkedIssueNumbers } from "@jina/context-graph";
 
-/** Selects merged PRs that must be rehydrated even when their commits are already known. */
-export function shouldReconcileRecentPullRequest(item: Record<string, unknown>, alreadyHydrated: boolean): boolean {
+/** Selects merged PRs that can repair incomplete work-item scope on an already-known repository head. */
+export function shouldReconcileRecentPullRequest(
+  item: Record<string, unknown>,
+  alreadyHydrated: boolean,
+  knownCommitShas: ReadonlySet<string> = new Set()
+): boolean {
   if (
     alreadyHydrated ||
     typeof item.number !== "number" ||
@@ -12,6 +16,7 @@ export function shouldReconcileRecentPullRequest(item: Record<string, unknown>, 
   )
     return false;
 
+  if (knownCommitShas.has(item.merge_commit_sha.toLowerCase())) return true;
   const text = `${typeof item.title === "string" ? item.title : ""}\n${typeof item.body === "string" ? item.body : ""}`;
   const links = linkedIssueNumbers(text);
   if (links.resolves.length > 0 || links.references.length > 0) return true;
