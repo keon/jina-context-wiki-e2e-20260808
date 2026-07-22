@@ -8,7 +8,6 @@ export const metadata: Metadata = {
 };
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {
-  const apiLabel = process.env.JINA_API_URL ?? "http://localhost:4000";
   return (
     <html lang="en">
       <body>
@@ -22,7 +21,7 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
                 <span className="brand-name">Jina</span>
               </div>
               <PageNav />
-              <ConnectionIndicator apiLabel={apiLabel} />
+              <ConnectionIndicator apiLabel="Jina API" />
             </div>
           </header>
           {children}
