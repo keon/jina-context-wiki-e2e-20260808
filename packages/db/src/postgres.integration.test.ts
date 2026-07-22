@@ -126,6 +126,57 @@ test(
 );
 
 test(
+  "Postgres ingestion reuses a canonical observation id after a tenant-id remap",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantId = `remapped-${suffix}`;
+    const repository = `omxyz/remapped-${suffix}`;
+    const commitSha = "a".repeat(40);
+    const legacyObservationId = `observation_legacy_${suffix}`;
+    const store = new PostgresContextGraphStore({ connectionString });
+    const pool = new Pool({ connectionString });
+    try {
+      await store.list(tenantId);
+      await pool.query(
+        `insert into jina_context_graph.observations
+          (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
+         values ($1,$2,'git','source_snapshot',$3,$4,'2026-07-21T00:00:00.000Z','{}'::jsonb,'legacy')`,
+        [legacyObservationId, tenantId, `${repository}:${commitSha}`, repository]
+      );
+
+      const plan = await store.planIngestion({
+        tenantId,
+        repository,
+        ref: "main",
+        commitSha,
+        treeSha: "b".repeat(40),
+        parents: [],
+        recordedAt: "2026-07-21T00:01:00.000Z",
+        taskId: `task-remapped-${suffix}`,
+        files: []
+      });
+
+      assert.equal(plan.observationId, legacyObservationId);
+      const observations = await pool.query<{ id: string }>(
+        `select id from jina_context_graph.observations
+         where tenant_id=$1 and source='git' and external_id=$2`,
+        [tenantId, `${repository}:${commitSha}`]
+      );
+      assert.deepEqual(
+        observations.rows.map((row) => row.id),
+        [legacyObservationId]
+      );
+    } finally {
+      await Promise.all([store.close(), pool.end()]);
+    }
+  }
+);
+
+test(
   "Postgres context graph pipeline claims once and fences superseded leases",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"

@@ -563,14 +563,16 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         }
         files = [...tree.values()];
       }
-      const observationId = sourceObservationId(snapshot);
-      await client.query(
+      const candidateObservationId = sourceObservationId(snapshot);
+      const storedObservation = await client.query<{ id: string }>(
         `insert into jina_context_graph.observations
           (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
          values ($1,$2,'git','source_snapshot',$3,$4,$5,$6::jsonb,$7)
-         on conflict (id) do nothing`,
+         on conflict (tenant_id,source,external_id) do update
+           set external_id=excluded.external_id
+         returning id`,
         [
-          observationId,
+          candidateObservationId,
           snapshot.tenantId,
           `${snapshot.repository}:${snapshot.commitSha}`,
           snapshot.repository,
@@ -579,6 +581,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           stableId("sha", JSON.stringify(filteredSnapshot))
         ]
       );
+      const observationId = storedObservation.rows[0]?.id;
+      if (!observationId) throw new Error("source observation insert did not resolve an id");
       if (files.length > 0) {
         await client.query(
           `insert into jina_context_graph.trees (tenant_id,tree_sha,paths,blob_shas)
@@ -992,6 +996,23 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           occurredAt: "occurredAt" in observation ? (observation.occurredAt ?? null) : null
         };
       });
+      if (prepared.length > 0) {
+        const existing = await client.query<{ ord: number; id: string }>(
+          `select item.ord::int as ord,observation.id
+           from unnest($1::text[],$2::text[],$3::text[]) with ordinality
+             as item(tenant_id,source,external_id,ord)
+           join jina_context_graph.observations observation
+             on observation.tenant_id=item.tenant_id
+            and observation.source=item.source
+            and observation.external_id=item.external_id`,
+          [
+            prepared.map((item) => item.observation.tenantId),
+            prepared.map((item) => item.source),
+            prepared.map((item) => item.externalId)
+          ]
+        );
+        for (const row of existing.rows) prepared[row.ord - 1]!.observationId = row.id;
+      }
       for (const item of prepared) observationIds.push(item.observationId);
       // Prior-version probes, batched. This runs BEFORE the batch insert so it sees
       // exactly the pre-transaction rows; sequential execution additionally saw earlier
@@ -1627,7 +1648,16 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const generated = await this.pool.query<{ observation_id: string; evidence_fingerprint: string }>(
       `select id as observation_id,payload->>'evidenceFingerprint' as evidence_fingerprint
        from jina_context_graph.observations
-       where id=$1 and tenant_id=$2 and repository=$3 and type='model_output'
+       where tenant_id=$2 and repository=$3 and type='model_output'
+         and (
+           id=$1
+           or (
+             payload->>'commitSha'=$4
+             and payload->>'generatorVersion'=$5
+             and payload->>'registryVersion'=$6
+             and payload->>'evidenceFingerprint'=$7
+           )
+         )
          and redacted_at is null and payload is not null`,
       [
         assertionObservationId({
@@ -1639,7 +1669,11 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           evidenceFingerprint
         }),
         tenantId,
-        repository
+        repository,
+        commitSha,
+        generatorVersion,
+        registryVersion,
+        evidenceFingerprint
       ]
     );
     const row = generated.rows[0];
@@ -1663,29 +1697,53 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     await this.initialize();
     const normalized = normalizeAssertionBatchLenient(batch);
     const assertions = normalized.assertions;
-    const observationId = assertionObservationId(batch);
+    const candidateObservationId = assertionObservationId(batch);
+    let observationId = candidateObservationId;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
       await assertPipelineWriteFence(client, batch.tenantId, batch.repository, "run-context-graph-assert", writeFence);
       await assertRepositoryWritable(client, batch.tenantId, batch.repository, ["knowledge"]);
-      const inserted = await client.query(
-        `insert into jina_context_graph.observations
-          (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
-         values ($1,$2,$3,'model_output',$4,$5,$6,$7::jsonb,$8)
-         on conflict do nothing returning id`,
-        [
-          observationId,
-          batch.tenantId,
-          `model:${batch.model}`,
-          `${batch.repository}:${batch.commitSha}:${batch.generatorVersion}:${batch.registryVersion}:${batch.evidenceFingerprint}`,
-          batch.repository,
-          batch.generatedAt,
-          JSON.stringify(batch),
-          stableId("sha", JSON.stringify(batch))
-        ]
+      const observationSource = `model:${batch.model}`;
+      const observationExternalId = `${batch.repository}:${batch.commitSha}:${batch.generatorVersion}:${batch.registryVersion}:${batch.evidenceFingerprint}`;
+      const existingObservation = await client.query<{ id: string }>(
+        `select id from jina_context_graph.observations
+         where tenant_id=$1 and source=$2 and external_id=$3`,
+        [batch.tenantId, observationSource, observationExternalId]
       );
-      if (inserted.rowCount === 1) {
+      let insertedObservation = false;
+      if (existingObservation.rows[0]) {
+        observationId = existingObservation.rows[0].id;
+      } else {
+        const inserted = await client.query<{ id: string }>(
+          `insert into jina_context_graph.observations
+            (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
+           values ($1,$2,$3,'model_output',$4,$5,$6,$7::jsonb,$8)
+           on conflict (tenant_id,source,external_id) do nothing returning id`,
+          [
+            candidateObservationId,
+            batch.tenantId,
+            observationSource,
+            observationExternalId,
+            batch.repository,
+            batch.generatedAt,
+            JSON.stringify(batch),
+            stableId("sha", JSON.stringify(batch))
+          ]
+        );
+        if (inserted.rows[0]) {
+          observationId = inserted.rows[0].id;
+          insertedObservation = true;
+        } else {
+          const raced = await client.query<{ id: string }>(
+            `select id from jina_context_graph.observations
+             where tenant_id=$1 and source=$2 and external_id=$3`,
+            [batch.tenantId, observationSource, observationExternalId]
+          );
+          observationId = raced.rows[0]?.id ?? candidateObservationId;
+        }
+      }
+      if (insertedObservation) {
         await insertOutbox(
           client,
           batch.tenantId,
@@ -1850,7 +1908,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         batch.registryVersion,
         batch.evidenceFingerprint,
         observationId,
-        inserted.rowCount !== 1
+        !insertedObservation
       );
       return { ...result, warnings: normalized.warnings };
     } catch (error) {
