@@ -5,7 +5,7 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
 
-test("known-head reconciliation includes linked and untracked repair pull requests", () => {
+test("known-head reconciliation includes linked, known-commit, and untracked repair pull requests", () => {
   const merged = {
     number: 5,
     merged_at: "2026-07-20T19:22:28Z",
@@ -15,11 +15,23 @@ test("known-head reconciliation includes linked and untracked repair pull reques
   assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4." }, false), true);
   assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "References #4." }, false), true);
   assert.equal(
+    shouldReconcileRecentPullRequest(
+      { ...merged, body: "Align administrator and member handling for destructive actions." },
+      false,
+      new Set(["a".repeat(40)])
+    ),
+    true
+  );
+  assert.equal(
     shouldReconcileRecentPullRequest({ ...merged, body: "Repairs the broken policy without a tracked issue." }, false),
     true
   );
   assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Adds a new policy feature." }, false), false);
   assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4." }, true), false);
+  assert.equal(
+    shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4." }, true, new Set(["a".repeat(40)])),
+    false
+  );
   assert.equal(shouldReconcileRecentPullRequest({ ...merged, body: "Fixes #4.", merged_at: null }, false), false);
 });
 
