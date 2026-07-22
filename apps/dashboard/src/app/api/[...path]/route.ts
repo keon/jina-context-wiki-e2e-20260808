@@ -1,14 +1,15 @@
 import type { NextRequest } from "next/server";
-import { isAllowedDashboardApiRequest } from "../../../server/proxy-policy.ts";
+import { isAllowedDashboardApiRequest, resolveDashboardPrincipal } from "../../../server/proxy-policy.ts";
 
 export const dynamic = "force-dynamic";
 
 /**
  * Same-origin proxy in front of the Jina API, preserving the deployment
  * contract of the previous dashboard server: an allowlisted route policy, and
- * the internal service token only ever attached to requests carrying a
- * validated IAP identity. Conditional-request headers pass through untouched
- * so browser ETag revalidation works end to end.
+ * the internal service token only ever attached to requests carrying an
+ * identity established by IAP or the Vercel app's HTTP authentication.
+ * Conditional-request headers pass through untouched so browser ETag
+ * revalidation works end to end.
  */
 
 const STRIPPED_REQUEST_HEADERS = new Set([
@@ -36,20 +37,21 @@ async function proxy(request: NextRequest): Promise<Response> {
   for (const [name, value] of request.headers) {
     if (!STRIPPED_REQUEST_HEADERS.has(name.toLowerCase())) headers.set(name, value);
   }
-  const iapEmail = request.headers
-    .get("x-goog-authenticated-user-email")
-    ?.replace(/^accounts\.google\.com:/i, "")
-    .trim()
-    .toLowerCase();
-  const validIapEmail = iapEmail && /^[^\s@]+@[^\s@]+$/.test(iapEmail) ? iapEmail : undefined;
-  if (internalApiToken && !validIapEmail) {
+  const principal = resolveDashboardPrincipal({
+    iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
+    authorizationHeader: request.headers.get("authorization"),
+    webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
+    webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD,
+    webPrincipal: process.env.JINA_WEB_PRINCIPAL_ID
+  });
+  if (internalApiToken && !principal) {
     // The internal token authorizes as a tenant-admin service principal; never
-    // attach it to a request that lacks a validated IAP identity.
+    // attach it to a request that lacks an authenticated deployment boundary.
     return Response.json({ error: "unauthenticated" }, { status: 401 });
   }
   if (internalApiToken) {
     headers.set("authorization", `Bearer ${internalApiToken}`);
-    headers.set("x-jina-principal-id", `user:${validIapEmail}`);
+    headers.set("x-jina-principal-id", principal!);
   }
 
   const upstreamUrl = new URL(`${pathname.slice("/api".length)}${search}`, apiUrl);

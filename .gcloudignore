@@ -1,0 +1,14 @@
+.gcloudignore
+.git
+.github
+.turbo
+**/.turbo
+**/.next
+**/dist
+**/node_modules
+node_modules
+*.tsbuildinfo
+**/*.tsbuildinfo
+.env
+.env.*
+!.env.example

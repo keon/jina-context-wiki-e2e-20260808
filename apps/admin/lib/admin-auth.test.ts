@@ -32,6 +32,32 @@ test("production without an IAP identity is rejected with 401", () => {
   assert.deepEqual(decision, { ok: false, status: 401, error: "authenticated identity required" });
 });
 
+test("production permits requests with valid app-level HTTP authentication", () => {
+  const authenticated = evaluateAdminAccess({
+    authRequired: true,
+    iapEmailHeader: null,
+    allowlistRaw: null,
+    authorizationHeader: `Basic ${Buffer.from("omlabs:correct horse").toString("base64")}`,
+    webAuthUsername: "omlabs",
+    webAuthPassword: "correct horse"
+  });
+  assert.deepEqual(authenticated, { ok: true });
+
+  const invalidPassword = evaluateAdminAccess({
+    authRequired: true,
+    iapEmailHeader: null,
+    allowlistRaw: null,
+    authorizationHeader: "Basic bm9wZTp3cm9uZw==",
+    webAuthUsername: "omlabs",
+    webAuthPassword: "correct horse"
+  });
+  assert.deepEqual(invalidPassword, {
+    ok: false,
+    status: 401,
+    error: "authenticated identity required"
+  });
+});
+
 test("production with a valid identity and no allowlist is permitted", () => {
   const decision = evaluateAdminAccess({
     authRequired: true,

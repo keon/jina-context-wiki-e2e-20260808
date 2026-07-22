@@ -58,11 +58,7 @@ export async function runProductionContextGraphAcceptance(
   fetchImpl: typeof fetch = fetch
 ): Promise<ProductionAcceptanceSummary> {
   const apiUrl = config.apiUrl.replace(/\/$/, "");
-  // The production e2e fixture still lives at its pre-rename GitHub location;
-  // renaming the omxyz/jina-ontology-e2e repository is a pending ops task, and
-  // pointing at the new name before that rename would break the post-deploy
-  // verify job. Update this default when the repository is renamed.
-  const repository = config.repository ?? "omxyz/jina-ontology-e2e";
+  const repository = config.repository ?? "omxyz/jina-context-graph-e2e";
   const ref = config.ref ?? "main";
   const principalId = config.principalId ?? "user:keon@omlabs.xyz";
   const pollIntervalMs = positiveInteger(config.pollIntervalMs ?? 10_000, "pollIntervalMs");

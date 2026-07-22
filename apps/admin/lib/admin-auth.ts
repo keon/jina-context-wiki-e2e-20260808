@@ -22,6 +22,9 @@ export interface AdminAccessInput {
   readonly iapEmailHeader: string | null | undefined;
   /** Raw comma-separated admin allowlist, if any. */
   readonly allowlistRaw: string | null | undefined;
+  readonly authorizationHeader?: string | null | undefined;
+  readonly webAuthUsername?: string | null | undefined;
+  readonly webAuthPassword?: string | null | undefined;
 }
 
 /** Normalizes an IAP email header (`accounts.google.com:you@x.com`) or returns undefined. */
@@ -44,12 +47,47 @@ export function parseAdminAllowlist(raw: string | null | undefined): ReadonlySet
   return emails.length > 0 ? new Set(emails) : undefined;
 }
 
+function constantTimeEqual(left: string, right: string): boolean {
+  const length = Math.max(left.length, right.length);
+  let difference = left.length ^ right.length;
+  for (let index = 0; index < length; index += 1) {
+    difference |= (left.charCodeAt(index) || 0) ^ (right.charCodeAt(index) || 0);
+  }
+  return difference === 0;
+}
+
+export function isValidBasicAuthorization(
+  header: string | null | undefined,
+  expectedUsername: string | null | undefined,
+  expectedPassword: string | null | undefined
+): boolean {
+  const username = expectedUsername?.trim();
+  const password = expectedPassword?.trim();
+  const encoded = header?.match(/^Basic\s+(.+)$/i)?.[1];
+  if (!username || !password || !encoded) return false;
+  try {
+    const decoded = globalThis.atob(encoded);
+    const separator = decoded.indexOf(":");
+    return (
+      separator >= 0 &&
+      constantTimeEqual(decoded.slice(0, separator), username) &&
+      constantTimeEqual(decoded.slice(separator + 1), password)
+    );
+  } catch {
+    return false;
+  }
+}
+
 /** Decides whether an inbound request may view tenant-wide graphs. */
 export function evaluateAdminAccess(input: AdminAccessInput): AdminAccessDecision {
   // Local and CI runs deploy without the internal token and are not internet
   // reachable; enforcing IAP there would break `pnpm dev`. This matches the
   // dashboard, which only demands an IAP identity once the token is present.
   if (!input.authRequired) return { ok: true };
+
+  if (isValidBasicAuthorization(input.authorizationHeader, input.webAuthUsername, input.webAuthPassword)) {
+    return { ok: true };
+  }
 
   const email = normalizeIapEmail(input.iapEmailHeader);
   if (!email) {

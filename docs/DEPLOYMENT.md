@@ -1,23 +1,29 @@
 # Deployment
 
-Only `main` deploys Jina to the `jina-v2` Google Cloud project in `us-central1`. Pull requests validate the repository but cannot change production. The protected `production` environment is the approval boundary.
+Cloud Build validates pull requests and deploys backend changes from `main` to the `jina-v2` Google Cloud project in `us-central1`. Pull-request builds use a validation-only service account and cannot change production. The main trigger requires approval before its build starts.
+
+The Next.js dashboard and admin apps deploy through the Om Labs Vercel projects `jina-dashboard` and `jina-admin`, not this Google Cloud pipeline. Both projects track `omxyz/jina`; pushes to `main` create production deployments from `apps/dashboard` and `apps/admin`. Cloud Build still compiles both production bundles. The existing `jina-dashboard` Cloud Run service remains available during traffic cutover, but Cloud Build does not update it.
 
 ## Resources
 
 - Artifact Registry repository: `jina`
-- Cloud Run: `jina-api`, `jina-dashboard`, `jina-task-worker`, `jina-context-graph-worker`
+- Cloud Run: `jina-api`, `jina-task-worker`, `jina-context-graph-worker`
 - Cloud Run Job: `jina-acceptance`
 - Cloud SQL: PostgreSQL 17 instance `jina-postgres`, database `jina`
-- GitHub deployer: `github-deployer@jina-v2.iam.gserviceaccount.com`
-- Workload identity provider: `github/omxyz-jina`
+- Cloud Build deployer: `jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com`
+- Cloud Build pull-request validator: `jina-cloud-build-ci@jina-v2.iam.gserviceaccount.com`
 
-GitHub Actions exchanges its OIDC token for short-lived Google credentials. No service-account key is stored in GitHub.
+Cloud Build runs entirely with user-specified Google service accounts. No Google service-account key is stored in GitHub or Vercel.
 
 ## Runtime configuration
 
 The API requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`. Signed intake additionally requires `GITHUB_WEBHOOK_SECRET` from Secret Manager. `JINA_TENANT_ALIASES` migrates configured legacy tenant IDs at startup.
 
-The dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health, task-type definitions, and signed webhooks remain public; tenant data does not.
+The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health, task-type definitions, and signed webhooks remain public; tenant data does not.
+
+The current Vercel plan does not provide production Vercel Authentication for new projects, so both web apps enforce app-level HTTP authentication using server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values. The dashboard forwards `JINA_WEB_PRINCIPAL_ID=user:keon@omlabs.xyz`; the admin app calls as `svc:api`. Both are tenant administrators, so possession of the web credentials controls access to tenant-wide data. Rotate the shared password through Secret Manager and both Vercel projects together.
+
+Both apps make server-side API calls with `JINA_API_URL` and `INTERNAL_API_TOKEN`. Those values belong only in Vercel Production environment variables and must never use a `NEXT_PUBLIC_` prefix. Preview builds intentionally receive no production API token.
 
 Streamable HTTP MCP at `POST /mcp` requires both the internal credential and a bound principal. Browser origins must be listed exactly in `JINA_MCP_ALLOWED_ORIGINS`.
 
@@ -46,21 +52,20 @@ Manifest, search, reconciliation, and graph consumers own separate canonical out
 
 ## CI and verification
 
-Pull-request CI runs:
+Pull-request Cloud Build runs `cloudbuild.ci.yaml` with the validation-only service account. It starts an ephemeral PostgreSQL 17 container and runs:
 
 ```sh
 pnpm lint
 pnpm typecheck
 pnpm test
 pnpm audit --prod --audit-level=high
-docker build -f apps/api/Dockerfile .
-docker build -f apps/worker/Dockerfile .
-docker build -f apps/dashboard/Dockerfile .
+pnpm --filter @jina/dashboard build
+pnpm --filter @jina/admin build
 ```
 
-After deployment, the workflow checks API health, worker connectivity, dashboard IAP, and the IAP policy. The `jina-acceptance` job receives the internal credential directly from Secret Manager and runs the private fixture repository through the three-stage context graph workflow.
+The approved main-branch build runs `cloudbuild.yaml`, repeats validation, builds and pushes the API and worker images, deploys the three backend Cloud Run services, and checks API and worker health. The `jina-acceptance` job receives the internal credential directly from Secret Manager and runs the private fixture repository through the three-stage context graph workflow.
 
-Acceptance requires terminal success, no lingering blocked work, a nonempty cited graph at the requested commit, fixed-template and causal retrieval, reviewed causal assertions in the projection, and empty canonical-outbox/parser backlogs. It also exercises the unchanged-head cache path and rejects stale attempts. The request key includes the GitHub run attempt so an operator can rerun a failed release without colliding with the prior task.
+Acceptance requires terminal success, no lingering blocked work, a nonempty cited graph at the requested commit, fixed-template and causal retrieval, reviewed causal assertions in the projection, and empty canonical-outbox/parser backlogs. It also exercises the unchanged-head cache path and rejects stale attempts. The request key includes the Cloud Build ID so an operator can rerun a failed release without colliding with the prior task.
 
 The acceptance poll window is 50 minutes, the Cloud Run task limit is 55 minutes, and production raises the model-command budget from 30 to 40 minutes. `CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_LIMIT`, `CONTEXT_GRAPH_FOCUS_BUNDLE_MAX_CHARS`, and `CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_CHARS` independently bound preloaded evidence.
 
@@ -84,21 +89,12 @@ Split services may receive `jina_context_graph_intake`, `jina_context_graph_code
 
 The migration revokes `PUBLIC` access, installs matching default privileges, uses composite foreign keys to prevent cross-tenant references, and serializes live/cardinality-one assertions with partial unique indexes.
 
-## Post-rename cutover runbook
-
-The `ontology` to `context graph` rename shipped with the repository, but some resources are configured outside this repository and must be cut over manually:
-
-1. **Database roles.** Run `pnpm --filter @jina/db migrate -- --install-roles` (with a `CREATEROLE` administrator) to create the `jina_context_graph_*` roles. Re-point any Secret Manager entries or service login credentials that still authenticate as the old `jina_ontology_*` role names to the new roles, verify the services reconnect, and then drop the old `jina_ontology_*` roles.
-2. **Acceptance fixture repository.** Rename the GitHub repository `omxyz/jina-ontology-e2e` to `omxyz/jina-context-graph-e2e`, then update the default repository in `apps/worker/src/acceptance.ts` (`runProductionContextGraphAcceptance`) to the new name. Until both steps happen together, the acceptance job must keep the pre-rename default.
-3. **Externally set environment variables.** Any `ONTOLOGY_*` variables configured outside this repository (Cloud Run overrides, local `.env` files, operator shells) must be recreated under their `CONTEXT_GRAPH_*` names. Known families: `CONTEXT_GRAPH_CODEX_*`, `CONTEXT_GRAPH_FOCUS_BUNDLE_*`, `CONTEXT_GRAPH_HISTORY_LIMIT`, `CONTEXT_GRAPH_ASSERTION_FOCUS_LIMIT`, and `CONTEXT_GRAPH_GITHUB_PR_CONCURRENCY`. The old `ONTOLOGY_*` names are no longer read.
-4. **CI log access.** Grant `roles/logging.viewer` to `github-deployer@jina-v2.iam.gserviceaccount.com` so the deploy workflow can read the acceptance job's logs; until then CI reports only the mapped acceptance exit-code category.
-5. **Old worker service.** No action needed: the deploy pipeline now deletes the retired `jina-ontology-worker` Cloud Run service automatically after the renamed worker passes its health check.
-
 ## Useful checks
 
 ```sh
 gcloud run services list --project=jina-v2 --region=us-central1
 gcloud run services describe jina-dashboard --project=jina-v2 --region=us-central1 --format=json
+gcloud builds list --project=jina-v2 --region=us-central1
 ```
 
 Structured logging, trace correlation, metrics, and the recommended Cloud

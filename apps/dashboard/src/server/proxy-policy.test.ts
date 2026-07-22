@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAllowedDashboardApiRequest } from "./proxy-policy.ts";
+import { isAllowedDashboardApiRequest, resolveDashboardPrincipal } from "./proxy-policy.ts";
 
 test("allows dashboard reads, blocks internal and unknown routes", () => {
   for (const pathname of [
@@ -23,4 +23,30 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
 test("demo webhook endpoint is local-only", () => {
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/dev/webhooks/github", false), true);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/dev/webhooks/github", true), false);
+});
+
+test("dashboard principal prefers a validated IAP email", () => {
+  assert.equal(
+    resolveDashboardPrincipal({
+      iapEmailHeader: "accounts.google.com:Person@Example.com",
+      authorizationHeader: null,
+      webAuthUsername: undefined,
+      webAuthPassword: undefined,
+      webPrincipal: undefined
+    }),
+    "user:person@example.com"
+  );
+});
+
+test("dashboard principal accepts the fixed identity only with valid HTTP authentication", () => {
+  const input = {
+    iapEmailHeader: null,
+    authorizationHeader: `Basic ${Buffer.from("omlabs:correct horse").toString("base64")}`,
+    webAuthUsername: "omlabs",
+    webAuthPassword: "correct horse",
+    webPrincipal: "user:keon@omlabs.xyz"
+  } as const;
+  assert.equal(resolveDashboardPrincipal(input), "user:keon@omlabs.xyz");
+  assert.equal(resolveDashboardPrincipal({ ...input, authorizationHeader: "Basic bm9wZTp3cm9uZw==" }), undefined);
+  assert.equal(resolveDashboardPrincipal({ ...input, webPrincipal: "not-a-principal" }), undefined);
 });

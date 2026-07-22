@@ -7,11 +7,22 @@ export function middleware(request: NextRequest): NextResponse {
   const decision = evaluateAdminAccess({
     authRequired: Boolean(process.env.INTERNAL_API_TOKEN?.trim()),
     iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
-    allowlistRaw: process.env.JINA_ADMIN_ALLOWED_EMAILS
+    allowlistRaw: process.env.JINA_ADMIN_ALLOWED_EMAILS,
+    authorizationHeader: request.headers.get("authorization"),
+    webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
+    webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD
   });
 
   if (!decision.ok) {
-    return NextResponse.json({ error: decision.error }, { status: decision.status });
+    return NextResponse.json(
+      { error: decision.error },
+      {
+        status: decision.status,
+        ...(decision.status === 401
+          ? { headers: { "www-authenticate": 'Basic realm="Jina Admin", charset="UTF-8"' } }
+          : {})
+      }
+    );
   }
   return NextResponse.next();
 }

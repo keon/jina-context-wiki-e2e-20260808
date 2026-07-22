@@ -8,9 +8,10 @@ The app calls the Jina API from the server only (`lib/jina-api.ts`) using `INTER
 
 ## Authentication boundary
 
-Because the app renders tenant-wide graph data as the tenant-admin service principal, **the app itself is the security boundary** — it must only be reached through the identity-aware proxy (Google IAP), exactly like the dashboard. `middleware.ts` enforces this on every route:
+Because the app renders tenant-wide graph data as the tenant-admin service principal, **the app itself is the security boundary**. `middleware.ts` accepts either of the two configured production boundaries:
 
-- When `INTERNAL_API_TOKEN` is set (production), a request must carry a valid IAP identity (`x-goog-authenticated-user-email`) or it receives `401`.
+- Google Cloud: a request must carry a valid IAP identity (`x-goog-authenticated-user-email`) or it receives `401`.
+- Vercel: a request must carry valid HTTP credentials matching the server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values.
 - If `JINA_ADMIN_ALLOWED_EMAILS` is set, the IAP identity must appear in that allowlist or it receives `403`.
 - When `INTERNAL_API_TOKEN` is unset (local `pnpm dev`, CI), the app is not internet-reachable and requests pass through, matching the dashboard.
 
@@ -32,3 +33,4 @@ Environment:
 - `JINA_API_URL` — base URL of the Jina API (default `http://localhost:4000`).
 - `INTERNAL_API_TOKEN` — required against a production API; optional locally when the API runs with dev endpoints enabled (`pnpm dev`), where every request is already treated as a dev service principal. Its presence also switches on the inbound IAP authentication boundary described above.
 - `JINA_ADMIN_ALLOWED_EMAILS` — optional comma-separated allowlist of IAP identities permitted to view graphs. When unset, any IAP-authenticated identity is allowed.
+- `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — app-level HTTP credentials for Vercel production.
