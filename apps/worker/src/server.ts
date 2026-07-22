@@ -1534,7 +1534,7 @@ const GITHUB_RETRY_BASE_MS = Math.max(1, Number(process.env.GITHUB_RETRY_BASE_MS
 const GITHUB_RETRY_MAX_WAIT_MS = 60_000;
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
-  const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim();
+  const githubToken = (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   for (let attempt = 0; ; attempt += 1) {
     assertLeaseOwned();

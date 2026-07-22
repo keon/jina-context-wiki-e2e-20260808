@@ -36,7 +36,7 @@ The simulation graph integration uses `GRAPH_API_TOKEN` for graph routes and exa
 
 The integration maps each simulation UUID to `tenant:<uuid>` and replaces that principal's complete repository ACL through `POST /internal/graph/access/sync`; repository removal or App uninstall is therefore revoked on the next sync.
 
-`GITHUB_CLONE_TOKEN` is the worker's temporary private-repository credential until installation tokens replace it. Use a fine-grained read-only token for Contents, Issues, Pull requests, and Metadata. Deployments and Actions access is optional enrichment; required source failures still fail closed.
+`GITHUB_CLONE_TOKEN` is the worker's temporary private-repository clone credential until installation tokens replace it. `GITHUB_API_TOKEN` may provide separate REST API access and falls back to the clone token when unset. Give the API token read-only access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions. Deployments and Actions access is optional enrichment; required source failures still fail closed.
 
 The production context graph uses the `jina-openrouter-api-key` secret with:
 

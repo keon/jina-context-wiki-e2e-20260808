@@ -148,7 +148,7 @@ gcloud run deploy jina-context-graph-worker \
   --max-instances=3 \
   --no-cpu-throttling \
   --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~CONTEXT_GRAPH_MODEL=google/gemini-3.5-flash-lite~CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS=12000~CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000~CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_API_TOKEN=jina-github-api-token:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
 context_graph_worker_url="$(gcloud run services describe jina-context-graph-worker \
@@ -180,7 +180,7 @@ gcloud run deploy jina-task-worker \
   --max-instances=1 \
   --no-cpu-throttling \
   --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-review|run-research|run-publish|run-cleanup~REVIEW_MODEL=gpt-5.6-sol" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_API_TOKEN=jina-github-api-token:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
 task_worker_url="$(gcloud run services describe jina-task-worker \
