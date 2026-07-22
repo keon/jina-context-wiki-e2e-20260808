@@ -56,9 +56,12 @@ async function repositoryScopedGraph(
 ): Promise<Record<string, unknown>> {
   const latest = contextGraph.latest;
   if (isRecord(latest) && latest.repository === repository && latest.ref === ref) return latest;
-  const graphs: readonly unknown[] = Array.isArray(contextGraph.graphs) ? (contextGraph.graphs as readonly unknown[]) : [];
-  const summary = graphs.find((graph) =>
-    isRecord(graph) && graph.repository === repository && graph.ref === ref && typeof graph.id === "string");
+  const graphs: readonly unknown[] = Array.isArray(contextGraph.graphs)
+    ? (contextGraph.graphs as readonly unknown[])
+    : [];
+  const summary = graphs.find(
+    (graph) => isRecord(graph) && graph.repository === repository && graph.ref === ref && typeof graph.id === "string"
+  );
   if (!isRecord(summary)) {
     throw new Error(`latest contextGraph graph is missing for ${repository}@${ref} (${label})`);
   }
@@ -159,7 +162,15 @@ export async function runProductionContextGraphAcceptance(
   }
 
   const contextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
-  let latest = await repositoryScopedGraph(fetchImpl, apiUrl, headers, contextGraph, repository, ref, "contextGraph.latest");
+  let latest = await repositoryScopedGraph(
+    fetchImpl,
+    apiUrl,
+    headers,
+    contextGraph,
+    repository,
+    ref,
+    "contextGraph.latest"
+  );
   let nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
   let edges = requiredArray(latest.edges, "contextGraph.latest.edges");
   if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
@@ -315,7 +326,15 @@ export async function runProductionContextGraphAcceptance(
       log
     );
     const causalContextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph`, { headers });
-    latest = await repositoryScopedGraph(fetchImpl, apiUrl, headers, causalContextGraph, repository, ref, "causal contextGraph.latest");
+    latest = await repositoryScopedGraph(
+      fetchImpl,
+      apiUrl,
+      headers,
+      causalContextGraph,
+      repository,
+      ref,
+      "causal contextGraph.latest"
+    );
     nodes = requiredArray(latest.nodes, "causal contextGraph.latest.nodes");
     edges = requiredArray(latest.edges, "causal contextGraph.latest.edges");
     const nodeById = new Map(
