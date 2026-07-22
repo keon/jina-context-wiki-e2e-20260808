@@ -150,6 +150,153 @@ async function findLiveAssertionByNaturalKey(
   return result.rows[0];
 }
 
+/**
+ * Batched equivalent of running findLiveAssertionByNaturalKey once per natural key.
+ * `distinct on` with the same `order by recorded_at,id` picks exactly the row the
+ * per-key `limit 1` query would have returned. Callers must already hold the advisory
+ * locks for every requested natural key so the snapshot cannot go stale before the
+ * per-key insert/confirm decision is applied.
+ */
+async function prefetchLiveAssertionsByNaturalKey(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  keys: readonly {
+    readonly subjectId: string;
+    readonly objectId: string;
+    readonly qualifiersHash: string;
+    readonly assertion: Pick<StoredAssertion, "predicate">;
+  }[]
+): Promise<ReadonlyMap<string, { readonly id: string; readonly status: "proposed" | "active" }>> {
+  const live = new Map<string, { id: string; status: "proposed" | "active" }>();
+  if (keys.length === 0) return live;
+  const result = await client.query<{
+    id: string;
+    status: "proposed" | "active";
+    subject_id: string;
+    predicate: string;
+    object_id: string;
+    qualifiers_hash: string;
+  }>(
+    `select distinct on (assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash)
+       assertion.id,assertion.status,assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash
+     from jina_context_graph.assertions assertion
+     join unnest($3::text[],$4::text[],$5::text[],$6::text[]) as source(subject_id,predicate,object_id,qualifiers_hash)
+       on assertion.subject_id=source.subject_id and assertion.predicate=source.predicate
+      and assertion.object_id=source.object_id and assertion.qualifiers_hash=source.qualifiers_hash
+     where assertion.tenant_id=$1 and assertion.repository=$2 and assertion.status in ('proposed','active')
+     order by assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash,
+       assertion.recorded_at,assertion.id`,
+    [
+      tenantId,
+      repository,
+      keys.map((key) => key.subjectId),
+      keys.map((key) => key.assertion.predicate),
+      keys.map((key) => key.objectId),
+      keys.map((key) => key.qualifiersHash)
+    ]
+  );
+  for (const row of result.rows) {
+    live.set(`${row.subject_id}:${row.predicate}:${row.object_id}:${row.qualifiers_hash}`, {
+      id: row.id,
+      status: row.status
+    });
+  }
+  return live;
+}
+
+/**
+ * Batched equivalent of calling ensureEntity(client, tenantId, endpoint, eventAt, false)
+ * for every assertion endpoint in batch order. It reproduces the assert-path semantics
+ * exactly: a new entity is created with the label of its first occurrence in the batch,
+ * an existing entity keeps its display name untouched (updateExisting=false), ids are
+ * resolved through the (tenant_id,kind,natural_key) unique key rather than assumed from
+ * stableId, and entity_changed outbox events are emitted only for created entities.
+ */
+async function ensureAssertionEntities(
+  client: PoolClient,
+  tenantId: string,
+  endpoints: readonly StoredAssertion["subject"][],
+  eventAt: string
+): Promise<ReadonlyMap<string, string>> {
+  const distinct = new Map<string, StoredAssertion["subject"]>();
+  for (const endpoint of endpoints) {
+    const key = `${endpoint.kind}:${endpoint.naturalKey}`;
+    if (!distinct.has(key)) distinct.set(key, endpoint);
+  }
+  const ordered = [...distinct.values()];
+  const created = await client.query<{ id: string }>(
+    `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name)
+     select source.id,$1,source.kind,source.natural_key,source.display_name
+     from unnest($2::text[],$3::text[],$4::text[],$5::text[]) as source(id,kind,natural_key,display_name)
+     on conflict do nothing
+     returning id`,
+    [
+      tenantId,
+      ordered.map((endpoint) => stableId("entity", `${tenantId}:${endpoint.kind}:${endpoint.naturalKey}`)),
+      ordered.map((endpoint) => endpoint.kind),
+      ordered.map((endpoint) => endpoint.naturalKey),
+      ordered.map((endpoint) => endpoint.label)
+    ]
+  );
+  const resolved = await client.query<{ id: string; kind: string; natural_key: string }>(
+    `select entity.id,entity.kind,entity.natural_key
+     from jina_context_graph.entities entity
+     join unnest($2::text[],$3::text[]) as source(kind,natural_key)
+       on entity.kind=source.kind and entity.natural_key=source.natural_key
+     where entity.tenant_id=$1`,
+    [tenantId, ordered.map((endpoint) => endpoint.kind), ordered.map((endpoint) => endpoint.naturalKey)]
+  );
+  const ids = new Map<string, string>();
+  for (const row of resolved.rows) ids.set(`${row.kind}:${row.natural_key}`, row.id);
+  for (const key of distinct.keys()) {
+    if (!ids.has(key)) throw new Error("entity id collision");
+  }
+  await insertOutboxEventBatch(
+    client,
+    tenantId,
+    "entity_changed",
+    created.rows.map((row) => ({ aggregateId: row.id, payload: { entityId: row.id } })),
+    eventAt
+  );
+  return ids;
+}
+
+/**
+ * Batched equivalent of calling backfillAssertionExplanation once per assertion:
+ * one update fills every null explanation, and the per-row audit entries are only
+ * written for rows the update actually touched (legacy rows recorded before the
+ * explanation migration), mirroring the sequential rowCount check.
+ */
+async function backfillAssertionExplanations(
+  client: PoolClient,
+  tenantId: string,
+  backfills: readonly { readonly id: string; readonly explanation: string }[],
+  now: string
+): Promise<void> {
+  if (backfills.length === 0) return;
+  const updated = await client.query<{ id: string }>(
+    `update jina_context_graph.assertions assertion
+     set explanation=source.explanation
+     from unnest($2::text[],$3::text[]) as source(id,explanation)
+     where assertion.tenant_id=$1 and assertion.id=source.id and assertion.explanation is null
+     returning assertion.id`,
+    [tenantId, backfills.map((backfill) => backfill.id), backfills.map((backfill) => backfill.explanation)]
+  );
+  for (const row of updated.rows) {
+    await insertAudit(client, {
+      id: stableId("audit", `${tenantId}:backfill_assertion_explanation:${row.id}`),
+      tenantId,
+      actorId: "svc:assertion-migration",
+      action: "backfill_assertion_explanation",
+      input: { assertionId: row.id },
+      result: "accepted",
+      reason: "Added an explanation from newly available source evidence.",
+      now
+    });
+  }
+}
+
 interface GraphSummaryRow extends GraphRow {
   node_count: string;
   edge_count: string;
@@ -217,7 +364,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     try {
       await client.query("begin");
       await assertPipelineWriteFence(client, graph.tenantId, graph.repository, "run-context-graph-project", writeFence);
-      await assertRepositoryWritable(client, graph.tenantId, graph.repository);
+      await assertRepositoryWritable(client, graph.tenantId, graph.repository, ["projection"]);
       await insertContextGraph(client, graph);
       if (graph.generator.executor === "projection") {
         await client.query(
@@ -357,7 +504,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         "run-context-graph-ingest",
         writeFence
       );
-      await assertRepositoryWritable(client, snapshot.tenantId, snapshot.repository);
+      // planIngestion writes git-shaped tables and also upserts entities/identities.
+      await assertRepositoryWritable(client, snapshot.tenantId, snapshot.repository, ["code", "knowledge"]);
       const filtered = await client.query<{ kind: string; value: string }>(
         `select kind,value from jina_context_graph.erasure_filters
          where tenant_id=$1 and ((kind='identity' and value=$2) or (kind='commit' and value=$3))`,
@@ -672,7 +820,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     try {
       await client.query("begin");
       await assertPipelineWriteFence(client, scope.tenantId, scope.repository, "run-context-graph-ingest", writeFence);
-      await assertRepositoryWritable(client, scope.tenantId, scope.repository);
+      await assertRepositoryWritable(client, scope.tenantId, scope.repository, ["code"]);
       if (analyses.length > 0) {
         const membership = await client.query<{ blob_sha: string }>(
           `select distinct blob_sha from jina_context_graph.commit_manifest($1,$2,$3)
@@ -812,110 +960,385 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       ].sort();
       for (const scope of scopes) {
         const [tenantId, repository] = scope.split("\0");
-        await assertRepositoryWritable(client, tenantId!, repository!);
+        await assertRepositoryWritable(client, tenantId!, repository!, ["knowledge"]);
       }
-      for (const observation of observations) {
-        const normalized = normalizeSourceObservation(observation);
+      // The mechanical per-observation layers below (prior-version probes, observation
+      // inserts, latest-snapshot checks, entity/identity ensures, and their outbox rows)
+      // are batched into a handful of statements. The per-assertion natural-key work and
+      // the retraction sweep intentionally stay sequential per observation, in batch
+      // order, because a later observation of the same work item must observe (and
+      // supersede or retract) the assertion rows written by an earlier batch member.
+      const prepared = observations.map((observation, index) => {
         const source = sourceObservationProvider(observation);
         const externalId = sourceObservationExternalId(observation);
-        const observationId = stableId("observation", `${observation.tenantId}:${source}:${externalId}`);
-        const scope = repositoryObservationScope(observation);
-        observationIds.push(observationId);
         const payload = JSON.stringify(observation);
-        const priorVersion = await client.query(
-          `select 1 from jina_context_graph.observations
-           where tenant_id=$1 and repository=$2 and source=$3 and payload->>'kind'=$4
-             and ($5::text is null or payload->>$5=$6) limit 1`,
-          [observation.tenantId, observation.repository, source, observation.kind, scope.field, scope.value]
-        );
-        const insertedObservation = await client.query(
-          `insert into jina_context_graph.observations
-            (id,tenant_id,source,type,external_id,repository,occurred_at,recorded_at,payload,payload_sha)
-           values ($1,$2,$9,'source_snapshot',$3,$4,$5,$6,$7::jsonb,$8)
-           on conflict (tenant_id,source,external_id) do nothing returning id`,
+        return {
+          index,
+          observation,
+          normalized: normalizeSourceObservation(observation),
+          source,
+          externalId,
+          observationId: stableId("observation", `${observation.tenantId}:${source}:${externalId}`),
+          scope: repositoryObservationScope(observation),
+          payload,
+          payloadSha: stableId("sha", payload),
+          occurredAt: "occurredAt" in observation ? (observation.occurredAt ?? null) : null
+        };
+      });
+      for (const item of prepared) observationIds.push(item.observationId);
+      // Prior-version probes, batched. This runs BEFORE the batch insert so it sees
+      // exactly the pre-transaction rows; sequential execution additionally saw earlier
+      // batch members that had just been inserted, which is reproduced in TypeScript
+      // below when the counts are classified.
+      const dbPriorVersion = new Set<number>();
+      if (prepared.length > 0) {
+        const priorRows = await client.query<{ ord: number }>(
+          `select item.ord::int as ord
+           from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[]) with ordinality
+             as item(tenant_id,repository,source,kind,field,value,ord)
+           where exists (
+             select 1 from jina_context_graph.observations o
+             where o.tenant_id=item.tenant_id and o.repository=item.repository and o.source=item.source
+               and o.payload->>'kind'=item.kind
+               and (item.field is null or o.payload->>item.field=item.value))`,
           [
-            observationId,
-            observation.tenantId,
-            externalId,
-            observation.repository,
-            "occurredAt" in observation ? (observation.occurredAt ?? null) : null,
-            observation.recordedAt,
-            payload,
-            stableId("sha", payload),
-            source
+            prepared.map((item) => item.observation.tenantId),
+            prepared.map((item) => item.observation.repository),
+            prepared.map((item) => item.source),
+            prepared.map((item) => item.observation.kind),
+            prepared.map((item) => item.scope.field),
+            prepared.map((item) => item.scope.value)
           ]
         );
-        if (insertedObservation.rowCount === 1) {
-          if (priorVersion.rowCount) updatedObservationCount += 1;
-          else newObservationCount += 1;
-          await insertOutbox(
-            client,
-            observation.tenantId,
-            "observation_recorded",
-            observationId,
-            {
-              observationId,
-              repoId: observation.repository
-            },
-            observation.recordedAt
+        for (const row of priorRows.rows) dbPriorVersion.add(Number(row.ord) - 1);
+      }
+      // Observation inserts, batched. The conflict key (tenant_id,source,external_id)
+      // fully determines the observation id, so only the first batch occurrence of each
+      // id is inserted; later occurrences would have conflicted sequentially and count
+      // as confirmed below.
+      const firstOccurrence = new Map<string, number>();
+      for (const item of prepared) {
+        if (!firstOccurrence.has(item.observationId)) firstOccurrence.set(item.observationId, item.index);
+      }
+      const insertRows = prepared.filter((item) => firstOccurrence.get(item.observationId) === item.index);
+      const insertedIds = new Set<string>();
+      if (insertRows.length > 0) {
+        const inserted = await client.query<{ id: string }>(
+          `insert into jina_context_graph.observations
+            (id,tenant_id,source,type,external_id,repository,occurred_at,recorded_at,payload,payload_sha)
+           select item.id,item.tenant_id,item.source,'source_snapshot',item.external_id,item.repository,
+                  item.occurred_at,item.recorded_at,item.payload::jsonb,item.payload_sha
+           from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::timestamptz[],$7::timestamptz[],$8::text[],$9::text[])
+             as item(id,tenant_id,source,external_id,repository,occurred_at,recorded_at,payload,payload_sha)
+           on conflict (tenant_id,source,external_id) do nothing returning id`,
+          [
+            insertRows.map((item) => item.observationId),
+            insertRows.map((item) => item.observation.tenantId),
+            insertRows.map((item) => item.source),
+            insertRows.map((item) => item.externalId),
+            insertRows.map((item) => item.observation.repository),
+            insertRows.map((item) => item.occurredAt),
+            insertRows.map((item) => item.observation.recordedAt),
+            insertRows.map((item) => item.payload),
+            insertRows.map((item) => item.payloadSha)
+          ]
+        );
+        for (const row of inserted.rows) insertedIds.add(row.id);
+      }
+      const insertedFlags = prepared.map(
+        (item) => firstOccurrence.get(item.observationId) === item.index && insertedIds.has(item.observationId)
+      );
+      // Classify new/updated/confirmed exactly as sequential execution did: the prior
+      // probe for observation i also matched any EARLIER batch member with the same
+      // tenant/repository/source/kind/scope-field-value that was itself inserted.
+      const payloadFieldText = (observation: RepositorySourceObservation, field: string): string | undefined => {
+        const raw: unknown = (observation as unknown as Record<string, unknown>)[field];
+        if (raw === undefined || raw === null) return undefined;
+        return typeof raw === "string" ? raw : JSON.stringify(raw);
+      };
+      const observationEvents: OutboxEventInput[] = [];
+      for (const item of prepared) {
+        if (!insertedFlags[item.index]) {
+          confirmedObservationCount += 1;
+          continue;
+        }
+        const priorVersion =
+          dbPriorVersion.has(item.index) ||
+          prepared.some(
+            (earlier) =>
+              earlier.index < item.index &&
+              insertedFlags[earlier.index] &&
+              earlier.observation.tenantId === item.observation.tenantId &&
+              earlier.observation.repository === item.observation.repository &&
+              earlier.source === item.source &&
+              earlier.observation.kind === item.observation.kind &&
+              (item.scope.field === null ||
+                payloadFieldText(earlier.observation, item.scope.field) === item.scope.value)
           );
-        } else confirmedObservationCount += 1;
-        const currentSourceSnapshot =
-          observation.kind === "pull_request" || observation.kind === "issue"
-            ? await isLatestGitHubWorkItemObservation(client, observation, observationId)
-            : insertedObservation.rowCount === 1;
-        const shouldReconcile = insertedObservation.rowCount === 1 && currentSourceSnapshot;
-        const entityIds = new Map<string, string>();
-        for (const entity of normalized.entities) {
-          const id = await ensureEntity(
-            client,
-            observation.tenantId,
-            {
+        if (priorVersion) updatedObservationCount += 1;
+        else newObservationCount += 1;
+        observationEvents.push({
+          tenantId: item.observation.tenantId,
+          eventType: "observation_recorded",
+          aggregateId: item.observationId,
+          payload: { observationId: item.observationId, repoId: item.observation.repository },
+          createdAt: item.observation.recordedAt
+        });
+      }
+      await insertOutboxBatch(client, observationEvents);
+      // Latest-work-item checks, batched (previously isLatestGitHubWorkItemObservation
+      // per row; the tuple comparison below is copied from it verbatim). Sequential
+      // execution ran the check for observation i after inserting batch members 0..i
+      // only, so rows this batch inserted at a LATER position are excluded per item;
+      // pre-existing rows (including those that made a batch member "confirmed") always
+      // participate.
+      const latestByIndex = new Map<number, boolean>();
+      const workItems = prepared.filter(
+        (item) => item.observation.kind === "pull_request" || item.observation.kind === "issue"
+      );
+      if (workItems.length > 0) {
+        const insertedBatch = prepared.filter((item) => insertedFlags[item.index]);
+        const latestRows = await client.query<{ pos: number; is_latest: boolean }>(
+          `with item as (
+             select * from unnest($1::int[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[],$8::timestamptz[])
+               as item(pos,tenant_id,repository,obs_id,kind,number,occurred_at,recorded_at)
+           ), batch_inserted as (
+             select * from unnest($9::int[],$10::text[]) as batch_inserted(pos,id)
+           )
+           select item.pos, not exists (
+             select 1 from jina_context_graph.observations o
+             where o.tenant_id=item.tenant_id and o.repository=item.repository and o.source='github' and o.id<>item.obs_id
+               and o.payload->>'kind'=item.kind and o.payload->>'number'=item.number
+               and (coalesce(o.occurred_at,o.recorded_at),o.recorded_at,o.id) >
+                   (coalesce(item.occurred_at,item.recorded_at),item.recorded_at,item.obs_id)
+               and not exists (select 1 from batch_inserted b where b.id=o.id and b.pos>item.pos)
+           ) as is_latest
+           from item`,
+          [
+            workItems.map((item) => item.index),
+            workItems.map((item) => item.observation.tenantId),
+            workItems.map((item) => item.observation.repository),
+            workItems.map((item) => item.observationId),
+            workItems.map((item) => item.observation.kind),
+            workItems.map((item) => String((item.observation as GitHubWorkItemObservation).number)),
+            workItems.map((item) => item.occurredAt),
+            workItems.map((item) => item.observation.recordedAt),
+            insertedBatch.map((item) => item.index),
+            insertedBatch.map((item) => item.observationId)
+          ]
+        );
+        for (const row of latestRows.rows) latestByIndex.set(Number(row.pos), row.is_latest === true);
+      }
+      const currentFlags = prepared.map((item) =>
+        item.observation.kind === "pull_request" || item.observation.kind === "issue"
+          ? latestByIndex.get(item.index) === true
+          : insertedFlags[item.index]
+      );
+      // Entity ensures, batched: one existence probe, one insert, one label update, and
+      // batched entity_changed rows. ensureEntity semantics reproduced per entity:
+      // - created entities take the label of their FIRST batch occurrence and emit one
+      //   entity_changed event at that occurrence's recordedAt;
+      // - pre-existing entities (and created entities on later occurrences) take the
+      //   label of the LAST occurrence whose observation is a current source snapshot,
+      //   matching sequential last-writer-wins label updates.
+      const entityStates = new Map<
+        string,
+        {
+          readonly tenantId: string;
+          readonly kind: string;
+          readonly naturalKey: string;
+          readonly firstIndex: number;
+          readonly firstLabel: string;
+          readonly occurrences: { readonly index: number; readonly label: string }[];
+          id?: string;
+          created?: boolean;
+        }
+      >();
+      const entityMapKey = (tenantId: string, kind: string, key: string) => `${tenantId}\0${kind}\0${key}`;
+      for (const item of prepared) {
+        for (const entity of item.normalized.entities) {
+          const mapKey = entityMapKey(item.observation.tenantId, entity.kind, entity.key);
+          let state = entityStates.get(mapKey);
+          if (!state) {
+            state = {
+              tenantId: item.observation.tenantId,
               kind: entity.kind,
               naturalKey: entity.key,
-              label: entity.displayName
-            },
-            observation.recordedAt,
-            currentSourceSnapshot
-          );
-          entityIds.set(`${entity.kind}:${entity.key}`, id);
+              firstIndex: item.index,
+              firstLabel: entity.displayName,
+              occurrences: []
+            };
+            entityStates.set(mapKey, state);
+          }
+          state.occurrences.push({ index: item.index, label: entity.displayName });
         }
-        if (normalized.githubIdentity) {
-          const entityId = entityIds.get(
-            `${normalized.githubIdentity.entity.kind}:${normalized.githubIdentity.entity.key}`
-          )!;
-          const identityId = stableId(
-            "identity",
-            `${observation.tenantId}:github:${normalized.githubIdentity.externalId}:${entityId}`
-          );
-          const inserted = await client.query(
-            `insert into jina_context_graph.identities
-              (id,tenant_id,source,external_id,entity_id,status,confidence,source_observation_id,created_at)
-             values ($1,$2,'github',$3,$4,'accepted',1,$5,$6)
-             on conflict (tenant_id,source,external_id,entity_id) do nothing returning id`,
+      }
+      const entityList = [...entityStates.values()];
+      if (entityList.length > 0) {
+        const existing = await client.query<{ ord: number; id: string }>(
+          `select item.ord::int as ord,e.id
+           from unnest($1::text[],$2::text[],$3::text[]) with ordinality as item(tenant_id,kind,natural_key,ord)
+           join jina_context_graph.entities e
+             on e.tenant_id=item.tenant_id and e.kind=item.kind and e.natural_key=item.natural_key`,
+          [
+            entityList.map((state) => state.tenantId),
+            entityList.map((state) => state.kind),
+            entityList.map((state) => state.naturalKey)
+          ]
+        );
+        for (const row of existing.rows) entityList[Number(row.ord) - 1]!.id = row.id;
+        const missing = entityList.filter((state) => state.id === undefined);
+        if (missing.length > 0) {
+          const created = await client.query<{ id: string }>(
+            `insert into jina_context_graph.entities (id,tenant_id,kind,natural_key,display_name)
+             select item.id,item.tenant_id,item.kind,item.natural_key,item.display_name
+             from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[])
+               as item(id,tenant_id,kind,natural_key,display_name)
+             on conflict do nothing returning id`,
             [
-              identityId,
-              observation.tenantId,
-              normalized.githubIdentity.externalId,
-              entityId,
-              observationId,
-              observation.recordedAt
+              missing.map((state) => stableId("entity", `${state.tenantId}:${state.kind}:${state.naturalKey}`)),
+              missing.map((state) => state.tenantId),
+              missing.map((state) => state.kind),
+              missing.map((state) => state.naturalKey),
+              missing.map((state) => state.firstLabel)
             ]
           );
-          if (inserted.rowCount === 1)
-            await insertOutbox(
-              client,
-              observation.tenantId,
-              "identity_changed",
-              identityId,
-              { identityId },
-              observation.recordedAt
+          const createdIds = new Set(created.rows.map((row) => row.id));
+          const unresolved: typeof missing = [];
+          for (const state of missing) {
+            const id = stableId("entity", `${state.tenantId}:${state.kind}:${state.naturalKey}`);
+            if (createdIds.has(id)) {
+              state.id = id;
+              state.created = true;
+            } else unresolved.push(state);
+          }
+          if (unresolved.length > 0) {
+            // The insert conflicted without a natural-key match from the existence
+            // probe: either a concurrent transaction created the entity (re-resolve it,
+            // as sequential ensureEntity did) or the deterministic id collided with a
+            // different natural key (surface the same error).
+            const reresolved = await client.query<{ ord: number; id: string }>(
+              `select item.ord::int as ord,e.id
+               from unnest($1::text[],$2::text[],$3::text[]) with ordinality as item(tenant_id,kind,natural_key,ord)
+               join jina_context_graph.entities e
+                 on e.tenant_id=item.tenant_id and e.kind=item.kind and e.natural_key=item.natural_key`,
+              [
+                unresolved.map((state) => state.tenantId),
+                unresolved.map((state) => state.kind),
+                unresolved.map((state) => state.naturalKey)
+              ]
             );
+            for (const row of reresolved.rows) unresolved[Number(row.ord) - 1]!.id = row.id;
+            if (unresolved.some((state) => state.id === undefined)) throw new Error("entity id collision");
+          }
         }
+        await insertOutboxBatch(
+          client,
+          entityList
+            .filter((state) => state.created)
+            .map((state) => ({
+              tenantId: state.tenantId,
+              eventType: "entity_changed",
+              aggregateId: state.id!,
+              payload: { entityId: state.id! },
+              createdAt: prepared[state.firstIndex]!.observation.recordedAt
+            }))
+        );
+        const labelUpdates: { readonly id: string; readonly label: string }[] = [];
+        for (const state of entityList) {
+          // The creating call set the label unconditionally; every LATER call whose
+          // observation is a current source snapshot overwrote it, so the last such
+          // occurrence wins. Pre-existing entities have no creating call in this batch.
+          const updates = (state.created ? state.occurrences.slice(1) : state.occurrences).filter(
+            (occurrence) => currentFlags[occurrence.index]
+          );
+          const last = updates.at(-1);
+          if (last) labelUpdates.push({ id: state.id!, label: last.label });
+        }
+        if (labelUpdates.length > 0) {
+          await client.query(
+            `update jina_context_graph.entities e set display_name=item.display_name
+             from unnest($1::text[],$2::text[]) as item(id,display_name)
+             where e.id=item.id`,
+            [labelUpdates.map((update) => update.id), labelUpdates.map((update) => update.label)]
+          );
+        }
+      }
+      const entityIdFor = (tenantId: string, kind: string, key: string): string =>
+        entityStates.get(entityMapKey(tenantId, kind, key))!.id!;
+      // Identity inserts, batched. The conflict key (tenant_id,source,external_id,
+      // entity_id) fully determines the identity id, so only the first batch occurrence
+      // is inserted; sequential later occurrences conflicted and emitted no event.
+      const identityRows: {
+        readonly identityId: string;
+        readonly tenantId: string;
+        readonly externalId: string;
+        readonly entityId: string;
+        readonly observationId: string;
+        readonly recordedAt: string;
+      }[] = [];
+      const seenIdentityIds = new Set<string>();
+      for (const item of prepared) {
+        const githubIdentity = item.normalized.githubIdentity;
+        if (!githubIdentity) continue;
+        const entityId = entityIdFor(item.observation.tenantId, githubIdentity.entity.kind, githubIdentity.entity.key);
+        const identityId = stableId(
+          "identity",
+          `${item.observation.tenantId}:github:${githubIdentity.externalId}:${entityId}`
+        );
+        if (seenIdentityIds.has(identityId)) continue;
+        seenIdentityIds.add(identityId);
+        identityRows.push({
+          identityId,
+          tenantId: item.observation.tenantId,
+          externalId: githubIdentity.externalId,
+          entityId,
+          observationId: item.observationId,
+          recordedAt: item.observation.recordedAt
+        });
+      }
+      if (identityRows.length > 0) {
+        const insertedIdentities = await client.query<{ id: string }>(
+          `insert into jina_context_graph.identities
+            (id,tenant_id,source,external_id,entity_id,status,confidence,source_observation_id,created_at)
+           select item.id,item.tenant_id,'github',item.external_id,item.entity_id,'accepted',1,item.source_observation_id,item.created_at
+           from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::timestamptz[])
+             as item(id,tenant_id,external_id,entity_id,source_observation_id,created_at)
+           on conflict (tenant_id,source,external_id,entity_id) do nothing returning id`,
+          [
+            identityRows.map((row) => row.identityId),
+            identityRows.map((row) => row.tenantId),
+            identityRows.map((row) => row.externalId),
+            identityRows.map((row) => row.entityId),
+            identityRows.map((row) => row.observationId),
+            identityRows.map((row) => row.recordedAt)
+          ]
+        );
+        const insertedIdentityIds = new Set(insertedIdentities.rows.map((row) => row.id));
+        await insertOutboxBatch(
+          client,
+          identityRows
+            .filter((row) => insertedIdentityIds.has(row.identityId))
+            .map((row) => ({
+              tenantId: row.tenantId,
+              eventType: "identity_changed",
+              aggregateId: row.identityId,
+              payload: { identityId: row.identityId },
+              createdAt: row.recordedAt
+            }))
+        );
+      }
+      // Per-assertion natural-key work and retractions stay sequential in batch order:
+      // assertion visibility between batch members (a later observation confirming,
+      // superseding, or retracting an earlier member's freshly written assertions)
+      // depends on this ordering.
+      for (const item of prepared) {
+        const { observation, normalized, source, observationId, scope } = item;
+        const shouldReconcile = insertedFlags[item.index] === true && currentFlags[item.index] === true;
         const desiredAssertionIds: string[] = [];
         for (const intent of normalized.assertions) {
-          const subjectId = entityIds.get(`${intent.subject.kind}:${intent.subject.key}`)!;
-          const objectId = entityIds.get(`${intent.object.kind}:${intent.object.key}`)!;
+          const subjectId = entityIdFor(observation.tenantId, intent.subject.kind, intent.subject.key);
+          const objectId = entityIdFor(observation.tenantId, intent.object.kind, intent.object.key);
           const qualifiers = intent.qualifiers ?? {};
           const qualifiersHash = stableId("q", canonicalJson(qualifiers));
           const assertionId = stableId(
@@ -1238,7 +1661,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     try {
       await client.query("begin");
       await assertPipelineWriteFence(client, batch.tenantId, batch.repository, "run-context-graph-assert", writeFence);
-      await assertRepositoryWritable(client, batch.tenantId, batch.repository);
+      await assertRepositoryWritable(client, batch.tenantId, batch.repository, ["knowledge"]);
       const inserted = await client.query(
         `insert into jina_context_graph.observations
           (id,tenant_id,source,type,external_id,repository,recorded_at,payload,payload_sha)
@@ -1267,107 +1690,147 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           },
           batch.generatedAt
         );
-        for (const assertion of assertions) {
+        // The per-assertion work below used to run sequentially: two ensureEntity calls,
+        // one advisory lock, one live lookup, one insert-or-confirm, and one outbox
+        // insert per assertion (~6-8 round trips each). Everything except the advisory
+        // locks is now batched into a fixed number of statements while reproducing the
+        // sequential loop's semantics row for row.
+        if (assertions.length > 0) {
           // Model observations may introduce entities, but they must not rename
-          // identities already established by deterministic source intake.
-          const subjectId = await ensureEntity(client, batch.tenantId, assertion.subject, batch.generatedAt, false);
-          const objectId = await ensureEntity(client, batch.tenantId, assertion.object, batch.generatedAt, false);
-          const qualifiersHash = stableId("q", canonicalJson(assertion.qualifiers ?? {}));
-          await lockAssertionNaturalKey(
+          // identities already established by deterministic source intake — the batched
+          // helper reproduces ensureEntity's assert-path call (updateExisting=false).
+          const entityIds = await ensureAssertionEntities(
+            client,
+            batch.tenantId,
+            assertions.flatMap((assertion) => [assertion.subject, assertion.object]),
+            batch.generatedAt
+          );
+          const resolved = assertions.map((assertion) => ({
+            assertion,
+            subjectId: entityIds.get(`${assertion.subject.kind}:${assertion.subject.naturalKey}`)!,
+            objectId: entityIds.get(`${assertion.object.kind}:${assertion.object.naturalKey}`)!,
+            qualifiersHash: stableId("q", canonicalJson(assertion.qualifiers ?? {}))
+          }));
+          // Advisory locks stay one query per assertion and are taken in batch order —
+          // exactly the order the sequential loop used — so concurrent writers acquire
+          // them in the same relative order as before. They are deliberately NOT folded
+          // into a single unnest() statement: PostgreSQL does not guarantee that a
+          // volatile target-list function is evaluated in ORDER BY order, and lock
+          // acquisition order is what keeps this path deadlock-free.
+          for (const item of resolved) {
+            await lockAssertionNaturalKey(
+              client,
+              batch.tenantId,
+              batch.repository,
+              item.subjectId,
+              item.assertion.predicate,
+              item.objectId,
+              item.qualifiersHash,
+              predicateDefinition(item.assertion.predicate).cardinality
+            );
+          }
+          // One prefetch replaces the per-assertion findLiveAssertionByNaturalKey calls.
+          // It cannot be stale within this transaction: findLiveAssertionByNaturalKey
+          // filters on status in ('proposed','active'), and any concurrent writer that
+          // could change which row is live for one of these natural keys must first hold
+          // the same pg_advisory_xact_lock — it either committed before we acquired the
+          // lock above (visible to this read-committed query) or is blocked until we
+          // commit. Intra-batch inserts cannot invalidate it either, because
+          // normalizeAssertionBatchLenient drops duplicate natural keys, so no key in
+          // this batch can be inserted by an earlier iteration of the same batch.
+          const liveByKey = await prefetchLiveAssertionsByNaturalKey(
             client,
             batch.tenantId,
             batch.repository,
-            subjectId,
-            assertion.predicate,
-            objectId,
-            qualifiersHash,
-            predicateDefinition(assertion.predicate).cardinality
+            resolved
           );
-          const existingLive = await findLiveAssertionByNaturalKey(
-            client,
-            batch.tenantId,
-            batch.repository,
-            subjectId,
-            assertion.predicate,
-            objectId,
-            qualifiersHash
-          );
-          if (existingLive) {
-            if (assertion.explanation) {
-              await backfillAssertionExplanation(
-                client,
-                batch.tenantId,
-                existingLive.id,
-                assertion.explanation,
-                batch.generatedAt
-              );
+          const confirmations: { readonly id: string; readonly explanation: string | undefined }[] = [];
+          const freshInserts: (typeof resolved)[number][] = [];
+          const assertionEvents: OutboxBatchEvent[] = [];
+          for (const item of resolved) {
+            const existingLive = liveByKey.get(
+              `${item.subjectId}:${item.assertion.predicate}:${item.objectId}:${item.qualifiersHash}`
+            );
+            if (existingLive) {
+              confirmations.push({ id: existingLive.id, explanation: item.assertion.explanation });
+              assertionEvents.push({
+                aggregateId: existingLive.id,
+                payload: { assertionId: existingLive.id, repoId: batch.repository }
+              });
+              continue;
             }
+            freshInserts.push(item);
+            assertionEvents.push({
+              aggregateId: item.assertion.id,
+              payload: { assertionId: item.assertion.id, repoId: batch.repository, status: item.assertion.status }
+            });
+          }
+          await backfillAssertionExplanations(
+            client,
+            batch.tenantId,
+            confirmations.flatMap((confirmation) =>
+              confirmation.explanation ? [{ id: confirmation.id, explanation: confirmation.explanation }] : []
+            ),
+            batch.generatedAt
+          );
+          if (confirmations.length > 0) {
             await client.query(
               `update jina_context_graph.assertions
                set last_confirmed_at=greatest(last_confirmed_at,$3)
-               where tenant_id=$1 and id=$2`,
-              [batch.tenantId, existingLive.id, batch.generatedAt]
+               where tenant_id=$1 and id=any($2::text[])`,
+              [batch.tenantId, confirmations.map((confirmation) => confirmation.id), batch.generatedAt]
             );
-            await insertOutbox(
-              client,
-              batch.tenantId,
-              "assertion_changed",
-              existingLive.id,
-              {
-                assertionId: existingLive.id,
-                repoId: batch.repository
-              },
-              batch.generatedAt
-            );
-            continue;
           }
-          await client.query(
-            `insert into jina_context_graph.assertions
-              (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
-               predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,
-               source_observation_id,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,generator,last_confirmed_at)
-             values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17::jsonb,$18,$19,$20,$21,$22::jsonb,$23,$24,$21)
-             on conflict (id) do update set
-               last_confirmed_at=greatest(jina_context_graph.assertions.last_confirmed_at,excluded.last_confirmed_at)`,
-            [
-              assertion.id,
-              assertion.tenantId,
-              assertion.repository,
-              assertion.commitSha,
-              subjectId,
-              assertion.subject.kind,
-              assertion.subject.naturalKey,
-              assertion.subject.label,
-              assertion.predicate,
-              objectId,
-              assertion.object.kind,
-              assertion.object.naturalKey,
-              assertion.object.label,
-              assertion.status,
-              assertion.confidence,
-              assertion.explanation,
-              JSON.stringify(assertion.evidence),
-              assertion.sourceObservationId,
-              assertion.generatorVersion,
-              assertion.registryVersion,
-              assertion.recordedAt,
-              JSON.stringify(assertion.qualifiers ?? {}),
-              qualifiersHash,
-              `model:${assertion.generatorVersion}`
-            ]
-          );
-          await insertOutbox(
-            client,
-            batch.tenantId,
-            "assertion_changed",
-            assertion.id,
-            {
-              assertionId: assertion.id,
-              repoId: batch.repository,
-              status: assertion.status
-            },
-            batch.generatedAt
-          );
+          if (freshInserts.length > 0) {
+            await client.query(
+              `insert into jina_context_graph.assertions
+                (id,tenant_id,repository,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,
+                 predicate,object_id,object_kind,object_natural_key,object_label,status,confidence,explanation,evidence,
+                 source_observation_id,generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,generator,last_confirmed_at)
+               select source.id,$1,$2,source.commit_sha,source.subject_id,source.subject_kind,source.subject_natural_key,
+                 source.subject_label,source.predicate,source.object_id,source.object_kind,source.object_natural_key,
+                 source.object_label,source.status,source.confidence,source.explanation,source.evidence::jsonb,
+                 source.source_observation_id,source.generator_version,source.registry_version,
+                 source.recorded_at::timestamptz,source.qualifiers::jsonb,source.qualifiers_hash,source.generator,
+                 source.recorded_at::timestamptz
+               from unnest(
+                 $3::text[],$4::text[],$5::text[],$6::text[],$7::text[],$8::text[],$9::text[],$10::text[],$11::text[],
+                 $12::text[],$13::text[],$14::float8[],$15::text[],$16::text[],$17::text[],$18::text[],$19::text[],
+                 $20::text[],$21::text[],$22::text[],$23::text[],$24::text[]
+               ) as source(id,commit_sha,subject_id,subject_kind,subject_natural_key,subject_label,predicate,object_id,
+                 object_kind,object_natural_key,object_label,confidence,explanation,evidence,source_observation_id,
+                 generator_version,registry_version,recorded_at,qualifiers,qualifiers_hash,status,generator)
+               on conflict (id) do update set
+                 last_confirmed_at=greatest(jina_context_graph.assertions.last_confirmed_at,excluded.last_confirmed_at)`,
+              [
+                batch.tenantId,
+                batch.repository,
+                freshInserts.map((item) => item.assertion.id),
+                freshInserts.map((item) => item.assertion.commitSha),
+                freshInserts.map((item) => item.subjectId),
+                freshInserts.map((item) => item.assertion.subject.kind),
+                freshInserts.map((item) => item.assertion.subject.naturalKey),
+                freshInserts.map((item) => item.assertion.subject.label),
+                freshInserts.map((item) => item.assertion.predicate),
+                freshInserts.map((item) => item.objectId),
+                freshInserts.map((item) => item.assertion.object.kind),
+                freshInserts.map((item) => item.assertion.object.naturalKey),
+                freshInserts.map((item) => item.assertion.object.label),
+                freshInserts.map((item) => item.assertion.confidence),
+                freshInserts.map((item) => item.assertion.explanation ?? null),
+                freshInserts.map((item) => JSON.stringify(item.assertion.evidence)),
+                freshInserts.map((item) => item.assertion.sourceObservationId ?? null),
+                freshInserts.map((item) => item.assertion.generatorVersion),
+                freshInserts.map((item) => item.assertion.registryVersion),
+                freshInserts.map((item) => item.assertion.recordedAt),
+                freshInserts.map((item) => JSON.stringify(item.assertion.qualifiers ?? {})),
+                freshInserts.map((item) => item.qualifiersHash),
+                freshInserts.map((item) => item.assertion.status),
+                freshInserts.map((item) => `model:${item.assertion.generatorVersion}`)
+              ]
+            );
+          }
+          await insertOutboxEventBatch(client, batch.tenantId, "assertion_changed", assertionEvents, batch.generatedAt);
         }
       }
       await reassertPipelineWriteFence(client, writeFence);
@@ -1396,7 +1859,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const guard = await this.pool.connect();
     try {
       await guard.query("begin");
-      await assertRepositoryWritable(guard, request.tenantId, request.repository);
+      // The guard transaction only rewrites entity display labels (knowledge plane).
+      await assertRepositoryWritable(guard, request.tenantId, request.repository, ["knowledge"]);
       await guard.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [request.tenantId, request.repository]);
       await guard.query("commit");
     } catch (error) {
@@ -1496,8 +1960,11 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         throw new Error("assertion rejection requires a reason and rejection code");
       }
       if ("repository" in command && command.repository) {
-        if (command.type === "tombstone_repository") await lockRepositoryWrite(client, tenantId, command.repository);
-        else await assertRepositoryWritable(client, tenantId, command.repository);
+        // Tombstoning deletes across every plane, so it needs full exclusion
+        // (and skips the tombstone check because it is creating the tombstone).
+        if (command.type === "tombstone_repository")
+          await lockRepositoryAllPlanes(client, tenantId, command.repository);
+        else await assertRepositoryWritable(client, tenantId, command.repository, ["knowledge"]);
       }
       await insertAudit(client, {
         id: auditId,
@@ -2086,7 +2553,15 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      await assertRepositoryWritable(client, tenantId, repository);
+      // A full rebuild also rewrites entity labels, purges observations, and
+      // garbage-collects the code plane, so it needs every plane; consumer-scoped
+      // rebuilds only replace derived projection artifacts.
+      await assertRepositoryWritable(
+        client,
+        tenantId,
+        repository,
+        consumers.length === 3 ? REPOSITORY_LOCK_PLANES : ["projection"]
+      );
       if (consumers.length === 3) await client.query(RESTORE_GITHUB_ENTITY_LABELS_SQL, [tenantId, repository]);
       const claimToken = `projection:${repository}:${randomUUID()}`;
       const claimed = await client.query<{ id: string }>(
@@ -2266,7 +2741,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      await assertRepositoryWritable(client, tenantId, repository);
+      await assertRepositoryWritable(client, tenantId, repository, ["projection"]);
       const documents = await client.query<{ id: string; title: string; body: string; source_kind: string }>(
         `select id,source || ':' || type as title,
                 case when type='source_snapshot' then '' else coalesce(payload::text,'') end as body,
@@ -2793,10 +3268,29 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const distinct = [...new Set(aliases.filter((alias) => alias && alias !== tenantId))];
     if (distinct.length === 0) return;
     await this.initialize();
-    await this.pool.query("update jina_context_graph.graphs set tenant_id = $1 where tenant_id = any($2::text[])", [
-      tenantId,
-      distinct
-    ]);
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      // Lifecycle migration: fully exclude every plane writer for each affected
+      // repository. Scopes are sorted so concurrent migrations acquire locks in
+      // the same global order (tenant, repository, then plane order).
+      const scopes = await client.query<{ tenant_id: string; repository: string }>(
+        `select distinct tenant_id,repository from jina_context_graph.graphs
+         where tenant_id=any($1::text[]) order by tenant_id,repository`,
+        [distinct]
+      );
+      for (const scope of scopes.rows) await lockRepositoryAllPlanes(client, scope.tenant_id, scope.repository);
+      await client.query("update jina_context_graph.graphs set tenant_id = $1 where tenant_id = any($2::text[])", [
+        tenantId,
+        distinct
+      ]);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
   async close(): Promise<void> {
@@ -3064,32 +3558,6 @@ function repositoryObservationScope(observation: RepositorySourceObservation): {
   return { field: null, value: "" };
 }
 
-async function isLatestGitHubWorkItemObservation(
-  client: PoolClient,
-  observation: GitHubWorkItemObservation,
-  observationId: string
-): Promise<boolean> {
-  const result = await client.query<{ is_latest: boolean }>(
-    `select not exists (
-       select 1 from jina_context_graph.observations o
-       where o.tenant_id=$1 and o.repository=$2 and o.source='github' and o.id<>$3
-         and o.payload->>'kind'=$4 and o.payload->>'number'=$5
-         and (coalesce(o.occurred_at,o.recorded_at),o.recorded_at,o.id) >
-             (coalesce($6::timestamptz,$7::timestamptz),$7::timestamptz,$3)
-     ) as is_latest`,
-    [
-      observation.tenantId,
-      observation.repository,
-      observationId,
-      observation.kind,
-      String(observation.number),
-      observation.occurredAt ?? null,
-      observation.recordedAt
-    ]
-  );
-  return result.rows[0]?.is_latest === true;
-}
-
 async function ensureEntity(
   client: PoolClient,
   tenantId: string,
@@ -3304,6 +3772,50 @@ function graphMetadata(row: GraphRow) {
   };
 }
 
+interface OutboxEventInput {
+  readonly tenantId: string;
+  readonly eventType: string;
+  readonly aggregateId: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+  readonly createdAt: string;
+}
+
+/** Batch variant of insertOutbox: identical ids, consumer fan-out, and conflict handling. */
+async function insertOutboxBatch(client: PoolClient, events: readonly OutboxEventInput[]): Promise<void> {
+  if (events.length === 0) return;
+  const rows = events.flatMap((event) => {
+    const serializedPayload = JSON.stringify(event.payload);
+    return outboxConsumers(event.eventType).map((consumer) => ({
+      id: stableId(
+        "outbox",
+        `${event.tenantId}:${event.eventType}:${event.aggregateId}:${event.createdAt}:${serializedPayload}:${consumer}`
+      ),
+      tenantId: event.tenantId,
+      eventType: event.eventType,
+      consumer,
+      aggregateId: event.aggregateId,
+      payload: serializedPayload,
+      createdAt: event.createdAt
+    }));
+  });
+  await client.query(
+    `insert into jina_context_graph.outbox (id,tenant_id,event_type,consumer,aggregate_id,payload,created_at,available_at)
+     select item.id,item.tenant_id,item.event_type,item.consumer,item.aggregate_id,item.payload::jsonb,item.created_at,item.created_at
+     from unnest($1::text[],$2::text[],$3::text[],$4::text[],$5::text[],$6::text[],$7::timestamptz[])
+       as item(id,tenant_id,event_type,consumer,aggregate_id,payload,created_at)
+     on conflict do nothing`,
+    [
+      rows.map((row) => row.id),
+      rows.map((row) => row.tenantId),
+      rows.map((row) => row.eventType),
+      rows.map((row) => row.consumer),
+      rows.map((row) => row.aggregateId),
+      rows.map((row) => row.payload),
+      rows.map((row) => row.createdAt)
+    ]
+  );
+}
+
 async function insertOutbox(
   client: PoolClient,
   tenantId: string,
@@ -3327,6 +3839,52 @@ async function insertOutbox(
   return ids[0]!;
 }
 
+interface OutboxBatchEvent {
+  readonly aggregateId: string;
+  readonly payload: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Batched equivalent of calling insertOutbox once per event with a shared event type
+ * and creation time: identical stable ids, per-consumer fan-out, and conflict handling,
+ * but one round trip for the whole batch.
+ */
+async function insertOutboxEventBatch(
+  client: PoolClient,
+  tenantId: string,
+  eventType: string,
+  events: readonly OutboxBatchEvent[],
+  createdAt: string
+): Promise<void> {
+  if (events.length === 0) return;
+  const consumers = outboxConsumers(eventType);
+  const ids: string[] = [];
+  const consumerRows: string[] = [];
+  const aggregateIds: string[] = [];
+  const payloads: string[] = [];
+  for (const event of events) {
+    const serializedPayload = JSON.stringify(event.payload);
+    for (const consumer of consumers) {
+      ids.push(
+        stableId(
+          "outbox",
+          `${tenantId}:${eventType}:${event.aggregateId}:${createdAt}:${serializedPayload}:${consumer}`
+        )
+      );
+      consumerRows.push(consumer);
+      aggregateIds.push(event.aggregateId);
+      payloads.push(serializedPayload);
+    }
+  }
+  await client.query(
+    `insert into jina_context_graph.outbox (id,tenant_id,event_type,consumer,aggregate_id,payload,created_at,available_at)
+     select source.id,$1,$2,source.consumer,source.aggregate_id,source.payload::jsonb,$3,$3
+     from unnest($4::text[],$5::text[],$6::text[],$7::text[]) as source(id,consumer,aggregate_id,payload)
+     on conflict do nothing`,
+    [tenantId, eventType, createdAt, ids, consumerRows, aggregateIds, payloads]
+  );
+}
+
 function outboxConsumers(eventType: string): readonly ("manifest" | "search" | "reconciliation" | "graph")[] {
   switch (eventType) {
     case "ref_moved":
@@ -3348,12 +3906,49 @@ function outboxConsumers(eventType: string): readonly ("manifest" | "search" | "
   }
 }
 
-async function lockRepositoryWrite(client: PoolClient, tenantId: string, repository: string): Promise<void> {
-  await client.query("select pg_advisory_xact_lock(hashtext($1),hashtext($2))", [tenantId, repository]);
+/**
+ * Canonical writes are serialized per repository, but on independent planes so
+ * that ingest, knowledge, and projection traffic no longer queue behind each
+ * other:
+ *   - "code": git-shaped tables (commits, trees, blobs, blob_* / symbol_* rows,
+ *     commit_changes, refs).
+ *   - "knowledge": observations, entities, identities, assertions and their
+ *     relations.
+ *   - "projection": derived artifacts (graphs, graph_heads, ref_manifest,
+ *     search_documents).
+ * A writer that touches tables from several planes must hold every affected
+ * plane lock; locks are always acquired in REPOSITORY_LOCK_PLANES order so
+ * multi-plane writers cannot deadlock each other.
+ */
+type RepositoryLockPlane = "code" | "knowledge" | "projection";
+const REPOSITORY_LOCK_PLANES: readonly RepositoryLockPlane[] = ["code", "knowledge", "projection"];
+
+async function lockRepositoryWrite(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  planes: readonly RepositoryLockPlane[]
+): Promise<void> {
+  // Iterate the canonical plane list (not the caller's array) so every
+  // transaction acquires plane locks in the same fixed order.
+  for (const plane of REPOSITORY_LOCK_PLANES) {
+    if (!planes.includes(plane)) continue;
+    await client.query("select pg_advisory_xact_lock(hashtext($1),hashtext($2))", [`${tenantId}:${plane}`, repository]);
+  }
 }
 
-async function assertRepositoryWritable(client: PoolClient, tenantId: string, repository: string): Promise<void> {
-  await lockRepositoryWrite(client, tenantId, repository);
+/** Full cross-plane exclusion for lifecycle operations (tombstone, tenant migration). */
+async function lockRepositoryAllPlanes(client: PoolClient, tenantId: string, repository: string): Promise<void> {
+  await lockRepositoryWrite(client, tenantId, repository, REPOSITORY_LOCK_PLANES);
+}
+
+async function assertRepositoryWritable(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  planes: readonly RepositoryLockPlane[]
+): Promise<void> {
+  await lockRepositoryWrite(client, tenantId, repository, planes);
   const tombstone = await client.query(
     `select 1 from jina_context_graph.erasure_filters
      where tenant_id=$1 and kind='repository' and value=$2`,

@@ -2869,6 +2869,680 @@ test(
 );
 
 test(
+  "Postgres applies two versions of one pull request in a single batch with sequential semantics",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const store = new PostgresContextGraphStore({ connectionString });
+    const pool = new Pool({ connectionString });
+    const suffix = Date.now().toString(36);
+    const repository = `omlabs/obs-batch-pair-${suffix}`;
+    const shaA = "a".repeat(40);
+    const shaB = "b".repeat(40);
+    const version = (
+      tenantId: string,
+      occurredAt: string,
+      title: string,
+      sha: string,
+      resolves: readonly number[]
+    ) => ({
+      tenantId,
+      repository,
+      kind: "pull_request" as const,
+      number: 3,
+      title,
+      body: resolves.length ? "Fixes #7" : "No longer fixes the issue",
+      state: "closed",
+      url: `https://github.com/${repository}/pull/3`,
+      authorLogin: "alice",
+      occurredAt,
+      recordedAt: occurredAt,
+      mergedAt: occurredAt,
+      mergeCommitSha: sha,
+      commitShas: [sha],
+      resolvesIssueNumbers: resolves,
+      referencesIssueNumbers: []
+    });
+    try {
+      // Forward order: the second batch member is a NEWER snapshot of the same work
+      // item. Sequentially the first member sees no prior version (new) and the second
+      // sees the row the first just inserted (updated); the second member's snapshot
+      // wins the entity label and supersedes/retracts the first member's facts.
+      const forwardTenant = `obs-batch-fwd-${suffix}`;
+      const v1 = version(forwardTenant, "2026-07-21T00:00:00.000Z", "Add guard", shaA, [7]);
+      const v2 = version(forwardTenant, "2026-07-21T01:00:00.000Z", "Add stronger guard", shaB, []);
+      const forward = await store.applyGitHubObservations([v1, v2]);
+      assert.equal(forward.newObservationCount, 1);
+      assert.equal(forward.updatedObservationCount, 1);
+      assert.equal(forward.confirmedObservationCount, 0);
+      assert.equal(forward.observationCount, 2);
+      assert.equal(forward.observationIds.length, 2);
+      const forwardLabel = await pool.query<{ display_name: string }>(
+        `select display_name from jina_context_graph.entities where tenant_id=$1 and kind='PullRequest' and natural_key=$2`,
+        [forwardTenant, `github:pr:${repository}#3`]
+      );
+      assert.equal(
+        forwardLabel.rows[0]?.display_name,
+        "#3 Add stronger guard",
+        "the latest snapshot titles the entity"
+      );
+      const byFact = async (tenantId: string) => {
+        const rows = await pool.query<{
+          predicate: string;
+          object_natural_key: string;
+          status: string;
+          superseded_by: string | null;
+        }>(
+          `select predicate,object_natural_key,status,superseded_by from jina_context_graph.assertions
+           where tenant_id=$1 and repository=$2 order by predicate,object_natural_key,recorded_at`,
+          [tenantId, repository]
+        );
+        return rows.rows;
+      };
+      const forwardFacts = await byFact(forwardTenant);
+      const fact = (facts: typeof forwardFacts, predicate: string, objectKey: string) =>
+        facts.filter((row) => row.predicate === predicate && row.object_natural_key === objectKey);
+      // The confirmed author fact stays live under the first observation's assertion.
+      assert.deepEqual(
+        fact(forwardFacts, "AUTHORED_BY", "github:user:alice").map((row) => row.status),
+        ["active"]
+      );
+      // The newer snapshot's commit is active; the older snapshot's commit is retracted.
+      assert.deepEqual(
+        fact(forwardFacts, "INCLUDES", `repo:${repository}:sha:${shaB}`).map((row) => row.status),
+        ["active"]
+      );
+      assert.deepEqual(
+        fact(forwardFacts, "INCLUDES", `repo:${repository}:sha:${shaA}`).map((row) => row.status),
+        ["retracted"]
+      );
+      // MERGED_AS has cardinality one: the newer merge commit supersedes the older.
+      assert.deepEqual(
+        fact(forwardFacts, "MERGED_AS", `repo:${repository}:sha:${shaB}`).map((row) => row.status),
+        ["active"]
+      );
+      const supersededMerge = fact(forwardFacts, "MERGED_AS", `repo:${repository}:sha:${shaA}`);
+      assert.deepEqual(
+        supersededMerge.map((row) => row.status),
+        ["superseded"]
+      );
+      assert.equal(typeof supersededMerge[0]?.superseded_by, "string");
+      // The dropped issue linkage is retracted by the newer snapshot's sweep.
+      assert.deepEqual(
+        fact(forwardFacts, "RESOLVES", `github:issue:${repository}#7`).map((row) => row.status),
+        ["retracted"]
+      );
+
+      // Reverse order: the OLDER snapshot arrives second in the same batch. It still
+      // counts as updated (the newer member inserted first), but it is not the latest
+      // snapshot, so it cannot touch the entity label and its unshared facts land
+      // retracted, exactly as a delayed sequential call would.
+      const reverseTenant = `obs-batch-rev-${suffix}`;
+      const reverse = await store.applyGitHubObservations([
+        version(reverseTenant, "2026-07-21T01:00:00.000Z", "Add stronger guard", shaB, []),
+        version(reverseTenant, "2026-07-21T00:00:00.000Z", "Add guard", shaA, [7])
+      ]);
+      assert.equal(reverse.newObservationCount, 1);
+      assert.equal(reverse.updatedObservationCount, 1);
+      assert.equal(reverse.confirmedObservationCount, 0);
+      const reverseLabel = await pool.query<{ display_name: string }>(
+        `select display_name from jina_context_graph.entities where tenant_id=$1 and kind='PullRequest' and natural_key=$2`,
+        [reverseTenant, `github:pr:${repository}#3`]
+      );
+      assert.equal(reverseLabel.rows[0]?.display_name, "#3 Add stronger guard", "a stale batch member cannot relabel");
+      const reverseFacts = await byFact(reverseTenant);
+      assert.deepEqual(
+        fact(reverseFacts, "AUTHORED_BY", "github:user:alice").map((row) => row.status),
+        ["active"]
+      );
+      assert.deepEqual(
+        fact(reverseFacts, "INCLUDES", `repo:${repository}:sha:${shaB}`).map((row) => row.status),
+        ["active"]
+      );
+      assert.deepEqual(
+        fact(reverseFacts, "INCLUDES", `repo:${repository}:sha:${shaA}`).map((row) => row.status),
+        ["retracted"]
+      );
+      assert.deepEqual(
+        fact(reverseFacts, "MERGED_AS", `repo:${repository}:sha:${shaB}`).map((row) => row.status),
+        ["active"]
+      );
+      assert.deepEqual(
+        fact(reverseFacts, "MERGED_AS", `repo:${repository}:sha:${shaA}`).map((row) => row.status),
+        ["retracted"]
+      );
+      assert.deepEqual(
+        fact(reverseFacts, "RESOLVES", `github:issue:${repository}#7`).map((row) => row.status),
+        ["retracted"]
+      );
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres batched GitHub observation ingestion equals sequential single-observation calls",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const batchStore = new PostgresContextGraphStore({ connectionString });
+    const sequentialStore = new PostgresContextGraphStore({ connectionString });
+    const pool = new Pool({ connectionString });
+    const suffix = Date.now().toString(36);
+    const repository = `omlabs/obs-batch-eq-${suffix}`;
+    const batchTenant = `obs-eq-batch-${suffix}`;
+    const sequentialTenant = `obs-eq-seq-${suffix}`;
+    const shaA = "a".repeat(40);
+    const shaB = "b".repeat(40);
+    const observationsFor = (tenantId: string) => {
+      const pullRequest = (occurredAt: string, title: string, sha: string, resolves: readonly number[]) => ({
+        tenantId,
+        repository,
+        kind: "pull_request" as const,
+        number: 3,
+        title,
+        body: "Fixes #7",
+        state: "closed",
+        url: `https://github.com/${repository}/pull/3`,
+        authorLogin: "alice",
+        occurredAt,
+        recordedAt: occurredAt,
+        mergedAt: occurredAt,
+        mergeCommitSha: sha,
+        commitShas: [sha],
+        resolvesIssueNumbers: resolves,
+        referencesIssueNumbers: []
+      });
+      const issue = {
+        tenantId,
+        repository,
+        kind: "issue" as const,
+        number: 7,
+        title: "Guard broken",
+        body: "The guard rejects valid requests.",
+        state: "open",
+        url: `https://github.com/${repository}/issues/7`,
+        authorLogin: "bob",
+        occurredAt: "2026-07-21T00:10:00.000Z",
+        recordedAt: "2026-07-21T00:10:00.000Z"
+      };
+      return [
+        pullRequest("2026-07-21T00:00:00.000Z", "Add guard", shaA, [7]),
+        issue,
+        {
+          tenantId,
+          repository,
+          kind: "codeowners" as const,
+          commitSha: shaA,
+          path: ".github/CODEOWNERS",
+          entries: [{ pattern: "/src/**", owners: ["@omlabs/owners", "@alice"] }],
+          recordedAt: "2026-07-21T00:20:00.000Z"
+        },
+        {
+          tenantId,
+          repository,
+          kind: "package_manifest" as const,
+          commitSha: shaA,
+          path: "package.json",
+          ecosystem: "npm",
+          dependencies: [{ name: "pg", version: "8" }, { name: "express" }],
+          recordedAt: "2026-07-21T00:30:00.000Z"
+        },
+        // A newer snapshot of the same pull request: drops the issue linkage and swaps
+        // the commit set, exercising confirmation, supersession, and retraction against
+        // facts written earlier in the same batch.
+        pullRequest("2026-07-21T01:00:00.000Z", "Add stronger guard", shaB, []),
+        // An exact duplicate of the issue snapshot: must count as confirmed.
+        issue
+      ];
+    };
+    try {
+      const batchResult = await batchStore.applyGitHubObservations(observationsFor(batchTenant));
+      const sequentialResults: Awaited<ReturnType<typeof sequentialStore.applyGitHubObservations>>[] = [];
+      for (const observation of observationsFor(sequentialTenant)) {
+        sequentialResults.push(await sequentialStore.applyGitHubObservations([observation]));
+      }
+      const summed = (
+        key: "newObservationCount" | "updatedObservationCount" | "confirmedObservationCount" | "assertionCount"
+      ) => sequentialResults.reduce((sum, result) => sum + result[key], 0);
+      assert.equal(batchResult.newObservationCount, summed("newObservationCount"));
+      assert.equal(batchResult.updatedObservationCount, summed("updatedObservationCount"));
+      assert.equal(batchResult.confirmedObservationCount, summed("confirmedObservationCount"));
+      assert.equal(batchResult.assertionCount, summed("assertionCount"));
+      assert.deepEqual(batchResult.newObservationCount, 4);
+      assert.deepEqual(batchResult.updatedObservationCount, 1);
+      assert.deepEqual(batchResult.confirmedObservationCount, 1);
+
+      const assertionRows = (tenantId: string) =>
+        pool.query<Record<string, unknown>>(
+          `select subject_kind,subject_natural_key,subject_label,predicate,object_kind,object_natural_key,object_label,
+                  qualifiers::text as qualifiers,status,generator,explanation,commit_sha,
+                  recorded_at,last_confirmed_at,valid_to,(superseded_by is not null) as is_superseded
+           from jina_context_graph.assertions where tenant_id=$1 and repository=$2
+           order by subject_natural_key,predicate,object_natural_key,qualifiers::text,recorded_at,status`,
+          [tenantId, repository]
+        );
+      const [batchAssertions, sequentialAssertions] = await Promise.all([
+        assertionRows(batchTenant),
+        assertionRows(sequentialTenant)
+      ]);
+      assert.deepEqual(batchAssertions.rows, sequentialAssertions.rows, "assertion sets and statuses match");
+
+      const entityRows = (tenantId: string) =>
+        pool.query<Record<string, unknown>>(
+          `select kind,natural_key,display_name from jina_context_graph.entities
+           where tenant_id=$1 order by kind,natural_key`,
+          [tenantId]
+        );
+      const [batchEntities, sequentialEntities] = await Promise.all([
+        entityRows(batchTenant),
+        entityRows(sequentialTenant)
+      ]);
+      assert.deepEqual(batchEntities.rows, sequentialEntities.rows, "entity labels match");
+
+      const identityRows = (tenantId: string) =>
+        pool.query<Record<string, unknown>>(
+          `select i.source,i.external_id,e.natural_key,i.status,i.confidence,i.created_at
+           from jina_context_graph.identities i
+           join jina_context_graph.entities e on e.id=i.entity_id
+           where i.tenant_id=$1 order by i.source,i.external_id,e.natural_key`,
+          [tenantId]
+        );
+      const [batchIdentities, sequentialIdentities] = await Promise.all([
+        identityRows(batchTenant),
+        identityRows(sequentialTenant)
+      ]);
+      assert.deepEqual(batchIdentities.rows, sequentialIdentities.rows, "identity sets match");
+
+      const outboxRows = (tenantId: string) =>
+        pool.query<Record<string, unknown>>(
+          `select event_type,consumer,count(*)::int as events from jina_context_graph.outbox
+           where tenant_id=$1 group by event_type,consumer order by event_type,consumer`,
+          [tenantId]
+        );
+      const [batchOutbox, sequentialOutbox] = await Promise.all([
+        outboxRows(batchTenant),
+        outboxRows(sequentialTenant)
+      ]);
+      assert.deepEqual(batchOutbox.rows, sequentialOutbox.rows, "outbox event volumes match per type and consumer");
+    } finally {
+      await pool.end();
+      await Promise.all([batchStore.close(), sequentialStore.close()]);
+    }
+  }
+);
+
+test(
+  "Postgres retracts a previously asserted fact dropped by a newer GitHub snapshot",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const store = new PostgresContextGraphStore({ connectionString });
+    const pool = new Pool({ connectionString });
+    const suffix = Date.now().toString(36);
+    const tenantId = `obs-retract-${suffix}`;
+    const repository = `omlabs/obs-retract-${suffix}`;
+    const sha = "c".repeat(40);
+    const snapshot = (occurredAt: string, resolves: readonly number[]) => ({
+      tenantId,
+      repository,
+      kind: "pull_request" as const,
+      number: 9,
+      title: "Fix pagination",
+      body: resolves.length ? "Fixes #11" : "Standalone fix",
+      state: "closed",
+      url: `https://github.com/${repository}/pull/9`,
+      authorLogin: "carol",
+      occurredAt,
+      recordedAt: occurredAt,
+      commitShas: [sha],
+      resolvesIssueNumbers: resolves,
+      referencesIssueNumbers: []
+    });
+    try {
+      const first = await store.applyGitHubObservations([snapshot("2026-07-21T00:00:00.000Z", [11])]);
+      assert.equal(first.newObservationCount, 1);
+      const before = await store.listAssertions(tenantId, repository, { predicate: "RESOLVES" });
+      assert.deepEqual(
+        before.map((assertion) => assertion.status),
+        ["active"]
+      );
+      const droppedAt = "2026-07-21T01:00:00.000Z";
+      const second = await store.applyGitHubObservations([snapshot(droppedAt, [])]);
+      assert.equal(second.updatedObservationCount, 1);
+      const resolves = await pool.query<{ status: string; valid_to: Date | null }>(
+        `select status,valid_to from jina_context_graph.assertions
+         where tenant_id=$1 and repository=$2 and predicate='RESOLVES'`,
+        [tenantId, repository]
+      );
+      assert.deepEqual(
+        resolves.rows.map((row) => row.status),
+        ["retracted"]
+      );
+      assert.equal(
+        resolves.rows[0]?.valid_to?.toISOString(),
+        droppedAt,
+        "the retraction is stamped at the new snapshot"
+      );
+      const survivors = await store.listAssertions(tenantId, repository, { status: "active" });
+      assert.deepEqual(
+        survivors.map((assertion) => assertion.predicate).sort(),
+        ["AUTHORED_BY", "INCLUDES"],
+        "facts the newer snapshot still contains stay active"
+      );
+      const retractedEvent = await pool.query<{ count: string }>(
+        `select count(distinct aggregate_id) as count from jina_context_graph.outbox
+         where tenant_id=$1 and event_type='assertion_changed' and payload->>'status'='retracted'`,
+        [tenantId]
+      );
+      assert.equal(Number(retractedEvent.rows[0]?.count), 1, "the retraction emits its outbox event");
+    } finally {
+      await pool.end();
+      await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres batches assertion writes while matching sequential per-assertion semantics",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const batchedTenantId = `assert-batched-${suffix}`;
+    const sequentialTenantId = `assert-sequential-${suffix}`;
+    const repository = `omxyz/assert-batch-${suffix}`;
+    const commitSha = "a".repeat(40);
+    const seededAt = "2026-07-22T01:00:00.000Z";
+    const mixedAt = "2026-07-22T02:00:00.000Z";
+    const rerunAt = "2026-07-22T03:00:00.000Z";
+    const store = new PostgresContextGraphStore({ connectionString });
+    const admin = new Pool({ connectionString });
+    // Subjects repeat every 25 assertions so a 50-assertion batch carries duplicate
+    // endpoints, and subject labels embed the assertion index so first-occurrence
+    // label semantics stay observable.
+    const assertionInput = (index: number, labelPrefix: string) => ({
+      subject: {
+        kind: "File" as const,
+        naturalKey: `repo:${repository}:path:src/file${index % 25}.ts`,
+        label: `${labelPrefix}${index}:file${index % 25}.ts`
+      },
+      predicate: "IMPLEMENTS",
+      object: {
+        kind: "Feature" as const,
+        naturalKey: `repo:${repository}:feature:feature-${index}`,
+        label: `Feature ${index}`
+      },
+      confidence: 0.9,
+      explanation: `src/file${index % 25}.ts implements feature ${index}.`,
+      evidence: [`src/file${index % 25}.ts:1`]
+    });
+    const batchInput = (
+      tenantId: string,
+      fingerprint: string,
+      generatedAt: string,
+      labelPrefix: string,
+      indexes: readonly number[]
+    ) => ({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha,
+      taskId: `assert-${fingerprint}`,
+      generatedAt,
+      generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+      registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
+      evidenceFingerprint: fingerprint,
+      evidenceObservationIds: [],
+      model: "fixture",
+      summary: "batched assertions",
+      rawOutput: { summary: "batched assertions", nodes: [], edges: [] },
+      assertions: indexes.map((index) => assertionInput(index, labelPrefix))
+    });
+    const tenantState = async (tenantId: string) => {
+      const assertions = await admin.query(
+        `select subject_natural_key,predicate,object_natural_key,subject_label,object_label,status,
+           count(*)::int as row_count,max(last_confirmed_at)::text as last_confirmed_at
+         from jina_context_graph.assertions where tenant_id=$1
+         group by 1,2,3,4,5,6 order by 1,2,3,4,5,6`,
+        [tenantId]
+      );
+      const entities = await admin.query(
+        `select kind,natural_key,display_name from jina_context_graph.entities
+         where tenant_id=$1 order by kind,natural_key`,
+        [tenantId]
+      );
+      return { assertions: assertions.rows, entities: entities.rows };
+    };
+    try {
+      const seedIndexes = Array.from({ length: 20 }, (_, index) => index);
+      const allIndexes = Array.from({ length: 50 }, (_, index) => index);
+      const seeded = await store.saveAssertionBatch(batchInput(batchedTenantId, "seed", seededAt, "v1-", seedIndexes));
+      assert.equal(seeded.proposedCount, 20);
+      // A 50-assertion batch where 20 assertions are already live and 30 are new.
+      const mixed = await store.saveAssertionBatch(batchInput(batchedTenantId, "mixed", mixedAt, "v2-", allIndexes));
+      assert.equal(mixed.cached, false);
+      assert.deepEqual(mixed.warnings, []);
+      assert.equal(mixed.assertionCount, 50);
+      assert.equal(mixed.proposedCount, 50);
+      assert.equal(mixed.activeCount, 0);
+      // The sequential comparison tenant runs the same workload one assertion per call.
+      for (const index of seedIndexes) {
+        await store.saveAssertionBatch(batchInput(sequentialTenantId, `seed-${index}`, seededAt, "v1-", [index]));
+      }
+      for (const index of allIndexes) {
+        const single = await store.saveAssertionBatch(
+          batchInput(sequentialTenantId, `mixed-${index}`, mixedAt, "v2-", [index])
+        );
+        assert.equal(single.proposedCount, 1);
+        assert.equal(single.activeCount, 0);
+      }
+      const batchedState = await tenantState(batchedTenantId);
+      const sequentialState = await tenantState(sequentialTenantId);
+      assert.equal(batchedState.assertions.length, 50);
+      assert.deepEqual(batchedState.assertions, sequentialState.assertions);
+      assert.deepEqual(batchedState.entities, sequentialState.entities);
+      // Duplicate endpoints resolve to one entity each: 25 files + 50 features.
+      assert.equal(batchedState.entities.length, 75);
+      const fileLabels = batchedState.entities
+        .filter((entity: { kind: string }) => entity.kind === "File")
+        .map((entity: { display_name: string }) => entity.display_name);
+      // Entities created by the seed batch keep their original labels; entities first
+      // seen in the mixed batch take the label of their first occurrence there.
+      assert.equal(fileLabels.includes("v1-0:file0.ts"), true);
+      assert.equal(fileLabels.includes("v2-20:file20.ts"), true);
+      assert.equal(
+        fileLabels.some((label: string) => label.startsWith("v2-45:")),
+        false
+      );
+      // Every live row carries the mixed batch's confirmation timestamp.
+      const confirmedAt = await admin.query<{ count: number }>(
+        `select count(*)::int as count from jina_context_graph.assertions
+         where tenant_id=$1 and last_confirmed_at=$2::timestamptz`,
+        [batchedTenantId, mixedAt]
+      );
+      assert.equal(confirmedAt.rows[0]?.count, 50);
+      const outbox = await admin.query<{ event_type: string; count: number }>(
+        `select event_type,count(distinct aggregate_id)::int as count from jina_context_graph.outbox
+         where tenant_id=$1 group by event_type order by event_type`,
+        [batchedTenantId]
+      );
+      const outboxCounts = new Map(outbox.rows.map((row) => [row.event_type, row.count]));
+      assert.equal(outboxCounts.get("entity_changed"), 75);
+      assert.equal(outboxCounts.get("assertion_changed"), 50);
+      // A re-run of the same logical batch confirms every assertion in place.
+      const rerun = await store.saveAssertionBatch(batchInput(batchedTenantId, "rerun", rerunAt, "v2-", allIndexes));
+      assert.equal(rerun.cached, false);
+      assert.equal(rerun.assertionCount, 50);
+      assert.equal(rerun.proposedCount, 50);
+      assert.equal(rerun.activeCount, 0);
+      const afterRerun = await admin.query<{ count: number; confirmed: number }>(
+        `select count(*)::int as count,
+           (count(*) filter (where last_confirmed_at=$2::timestamptz))::int as confirmed
+         from jina_context_graph.assertions where tenant_id=$1`,
+        [batchedTenantId, rerunAt]
+      );
+      assert.equal(afterRerun.rows[0]?.count, 50);
+      assert.equal(afterRerun.rows[0]?.confirmed, 50);
+      // Submitting the identical batch again takes the cached observation path.
+      const cachedRun = await store.saveAssertionBatch(
+        batchInput(batchedTenantId, "mixed", mixedAt, "v2-", allIndexes)
+      );
+      assert.equal(cachedRun.cached, true);
+      assert.equal(cachedRun.proposedCount, 50);
+    } finally {
+      await admin.end();
+      await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres plane locks let planes interleave while lifecycle operations exclude all planes",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantId = `planes-${suffix}`;
+    const repository = `omlabs/planes-${suffix}`;
+    const store = new PostgresContextGraphStore({ connectionString });
+    const secondStore = new PostgresContextGraphStore({ connectionString });
+    const raw = new Pool({ connectionString, max: 4 });
+    const planeKey = (plane: string) => `${tenantId}:${plane}`;
+    const waitUntil = async (probe: () => Promise<boolean>, label: string) => {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        if (await probe()) return;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.fail(`timed out waiting for ${label}`);
+    };
+    const advisoryWaiterExists = async (plane: string) => {
+      const waiting = await raw.query<{ count: string }>(
+        `select count(*) from pg_locks
+         where locktype='advisory' and granted=false
+           and classid=hashtext($1)::oid and objid=hashtext($2)::oid`,
+        [planeKey(plane), repository]
+      );
+      return Number(waiting.rows[0]?.count ?? 0) > 0;
+    };
+    const codeHolder = await raw.connect();
+    const knowledgeHolder = await raw.connect();
+    try {
+      await store.planIngestion({
+        tenantId,
+        repository,
+        ref: "main",
+        commitSha: "1".repeat(40),
+        treeSha: "2".repeat(40),
+        parents: [],
+        recordedAt: "2026-07-21T00:00:00.000Z",
+        taskId: `planes-${suffix}`,
+        files: [{ path: "README.md", blobSha: "a".repeat(40), size: 5 }]
+      });
+
+      // Structural: each plane hashes to its own advisory keyspace.
+      const keys = await raw.query<{ code: number; knowledge: number; projection: number }>(
+        "select hashtext($1) as code,hashtext($2) as knowledge,hashtext($3) as projection",
+        [planeKey("code"), planeKey("knowledge"), planeKey("projection")]
+      );
+      const { code, knowledge, projection } = keys.rows[0]!;
+      assert.equal(new Set([code, knowledge, projection]).size, 3, "plane lock keyspaces must be distinct");
+
+      // A code-plane transaction held open (an applyBlobAnalyses mid-flight)...
+      await codeHolder.query("begin");
+      await codeHolder.query("select pg_advisory_xact_lock(hashtext($1),hashtext($2))", [planeKey("code"), repository]);
+      // ...must not block a knowledge-plane write on the same repository.
+      const knowledgeWrite = secondStore.applyGitHubObservations([
+        {
+          tenantId,
+          repository,
+          kind: "issue",
+          number: 7,
+          title: "Interleaved issue",
+          body: "written while the code plane is locked",
+          state: "open",
+          url: `https://github.com/${repository}/issues/7`,
+          authorLogin: "alice",
+          occurredAt: "2026-07-21T00:01:00.000Z",
+          recordedAt: "2026-07-21T00:01:00.000Z"
+        }
+      ]);
+      const raced = await Promise.race([
+        knowledgeWrite.then(() => "completed" as const),
+        new Promise<"blocked">((resolve) => setTimeout(() => resolve("blocked"), 10_000))
+      ]);
+      assert.equal(raced, "completed", "knowledge-plane write must not queue behind a code-plane transaction");
+
+      // A lifecycle tombstone needs every plane: it queues behind the open
+      // code-plane transaction and a concurrent knowledge-plane transaction.
+      await knowledgeHolder.query("begin");
+      await knowledgeHolder.query("select pg_advisory_xact_lock(hashtext($1),hashtext($2))", [
+        planeKey("knowledge"),
+        repository
+      ]);
+      let tombstoneSettled = false;
+      const tombstone = store
+        .executeCommand(
+          tenantId,
+          "svc:test",
+          { type: "tombstone_repository", repository, reason: "plane lock test" },
+          "2026-07-21T00:02:00.000Z",
+          true
+        )
+        .finally(() => {
+          tombstoneSettled = true;
+        });
+      await waitUntil(() => advisoryWaiterExists("code"), "tombstone to queue on the code plane");
+      assert.equal(tombstoneSettled, false, "tombstone must wait for the code-plane transaction");
+      await codeHolder.query("commit");
+      await waitUntil(() => advisoryWaiterExists("knowledge"), "tombstone to queue on the knowledge plane");
+      assert.equal(tombstoneSettled, false, "tombstone must also wait for the knowledge-plane transaction");
+      await knowledgeHolder.query("commit");
+      await tombstone;
+      assert.equal(tombstoneSettled, true);
+      await assert.rejects(
+        secondStore.saveAssertionBatch({
+          tenantId,
+          repository,
+          ref: "main",
+          commitSha: "1".repeat(40),
+          taskId: `planes-batch-${suffix}`,
+          generatedAt: "2026-07-21T00:03:00.000Z",
+          generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+          registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
+          evidenceFingerprint: "planes",
+          evidenceObservationIds: [],
+          model: "fixture",
+          summary: "plane lock fixture",
+          rawOutput: { summary: "fixture", nodes: [], edges: [] },
+          assertions: []
+        }),
+        /tombstoned/,
+        "every plane variant keeps the tombstone check"
+      );
+    } finally {
+      codeHolder.release();
+      knowledgeHolder.release();
+      await raw.end();
+      await Promise.all([store.close(), secondStore.close()]);
+    }
+  }
+);
+
+
+test(
   "Postgres context graph store adopts a legacy pre-rename schema in place",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
