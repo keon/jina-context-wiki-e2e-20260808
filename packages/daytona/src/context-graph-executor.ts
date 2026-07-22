@@ -394,7 +394,7 @@ function contextGraphPrompt(
       : "";
   const causalRequirements =
     causalAnchors.length > 0
-      ? `\nHost contract requirement: the following root-cause records explicitly state causality. Emit one Issue INTRODUCED_BY Commit edge for each anchor, with a nonempty why. Its edge evidence must include the exact listed minimum span so it contains the issue identity, full SHA, and mechanism: ${causalAnchors.map((anchor) => `Issue ${anchor.issueId} -> commit ${anchor.commitSha}, cite ${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`).join("; ")}.`
+      ? `\nHost contract requirement: the following root-cause records explicitly state causality. Every listed edge is mandatory. Emit one Issue INTRODUCED_BY Commit edge for each anchor, with a nonempty why, and do not substitute an Incident edge. Each edge's evidence must cover the exact listed minimum span so it contains the issue identity, full SHA, and mechanism:\n${causalAnchors.map((anchor) => `- Issue ${anchor.issueId} INTRODUCED_BY commit ${anchor.commitSha}; evidence must cover ${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`).join("\n")}`
       : "";
   const sourceEntityIds = [...sourceBackedModelEntityIds(request.sourceEvidence ?? [])].sort();
   const sourceEntityRequirement =
@@ -405,7 +405,7 @@ function contextGraphPrompt(
 }
 
 function repairPrompt(basePrompt: string, failure: string): string {
-  return `${basePrompt}\n\nThe previous output failed host validation: ${truncate(failure)}\nRegenerate the complete JSON once. Correct the cited line ranges and any missing required derived Issue. Preserve only claims that the checked-out repository explicitly supports.`;
+  return `${basePrompt}\n\nThe previous output failed host validation: ${truncate(failure)}\nRegenerate the complete JSON once. Satisfy every host contract requirement above, including every mandatory Issue INTRODUCED_BY Commit edge and every required derived Issue. For each INTRODUCED_BY edge, cite a range that explicitly names both endpoints and the causal mechanism; remove an optional causal edge if no such range exists. Correct all cited line ranges and preserve only claims that the checked-out repository explicitly supports.`;
 }
 
 export async function buildFocusEvidenceBundle(
