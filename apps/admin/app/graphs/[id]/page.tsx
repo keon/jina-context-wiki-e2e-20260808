@@ -45,7 +45,7 @@ export default async function GraphDetailPage({ params }: { readonly params: Pro
         />
         <Meta label="Size" value={`${graph.nodes.length} nodes · ${graph.edges.length} edges`} />
       </div>
-      <GraphView nodes={graph.nodes} edges={graph.edges} />
+      <GraphView graphId={graph.id} nodes={graph.nodes} edges={graph.edges} />
     </main>
   );
 }

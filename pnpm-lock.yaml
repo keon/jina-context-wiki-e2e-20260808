@@ -39,6 +39,9 @@ importers:
 
   apps/admin:
     dependencies:
+      '@jina/graph-renderer':
+        specifier: workspace:*
+        version: link:../../packages/graph-renderer
       next:
         specifier: ^15.5.6
         version: 15.5.20(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -98,9 +101,9 @@ importers:
 
   apps/dashboard:
     dependencies:
-      '@cosmos.gl/graph':
-        specifier: ^3.3.0
-        version: 3.3.0
+      '@jina/graph-renderer':
+        specifier: workspace:*
+        version: link:../../packages/graph-renderer
       next:
         specifier: ^15.5.0
         version: 15.5.20(@opentelemetry/api@1.9.1)(@types/node@26.1.1)(react-dom@19.2.7(react@19.2.7))(react@19.2.7)
@@ -240,6 +243,16 @@ importers:
         version: 8.20.0
 
   packages/github:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
+
+  packages/graph-renderer:
+    dependencies:
+      '@cosmos.gl/graph':
+        specifier: ^3.3.0
+        version: 3.3.0
     devDependencies:
       '@types/node':
         specifier: ^26.1.1
