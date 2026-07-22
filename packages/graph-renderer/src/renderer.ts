@@ -1,4 +1,5 @@
 import { Graph } from "@cosmos.gl/graph";
+import { centerPositions, initializeGraphPositions, seedPosition, type GraphPosition } from "./layout-positions.js";
 import { canvasFallbackStatus, canvasGraphSlice, chooseRendererMode } from "./renderer-policy.js";
 
 /**
@@ -28,6 +29,7 @@ export type RendererSelection = { kind: "node" | "edge"; id: string } | null;
 
 export interface RendererData {
   readonly key: string;
+  readonly layoutKey: string;
   readonly nodes: readonly GraphNode[];
   readonly edges: readonly GraphEdge[];
   readonly labels: Readonly<Record<string, string>>;
@@ -73,13 +75,14 @@ const DEFAULT_NODE_COLOR: [number, number, number, number] = [0.58, 0.62, 0.69, 
 const CODE_LINK_COLOR: [number, number, number, number] = [0.36, 0.49, 0.73, 0.42];
 const KNOWLEDGE_LINK_COLOR: [number, number, number, number] = [0.58, 0.43, 0.73, 0.48];
 const GRAPH_SPACE_SIZE = 4096;
-const GRAPH_SPACE_CENTER = GRAPH_SPACE_SIZE / 2;
 
 class ContextGraphRenderer implements PublicRenderer {
   private readonly options: RendererOptions;
   private readonly graph: Graph;
-  private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
+  private data: RendererData = { key: "empty", layoutKey: "empty", nodes: [], edges: [], labels: {} };
   private dataKey = "";
+  private layoutKey = "";
+  private positionCache = new Map<string, GraphPosition>();
   private selection: RendererSelection = null;
   private searchMatches: Exclude<RendererSelection, null>[] = [];
   private nodeIndex = new Map<string, number>();
@@ -252,9 +255,11 @@ class ContextGraphRenderer implements PublicRenderer {
     this.settling = false;
     this.graph.stop();
     this.clearSettleTimer();
-    const previousPositions = this.positionsById();
+    this.capturePositions();
+    if (data.layoutKey !== this.layoutKey) this.positionCache.clear();
     this.data = data;
     this.dataKey = nextKey;
+    this.layoutKey = data.layoutKey;
     this.graph.setConfigPartial({
       simulationLinkDistance: topologyLinkDistance(data.nodes.length)
     });
@@ -278,22 +283,16 @@ class ContextGraphRenderer implements PublicRenderer {
       linkStyles[index] = edge.plane === "knowledge" ? 1 : 0;
     });
 
-    const positions = new Float32Array(data.nodes.length * 2);
+    const { positions } = initializeGraphPositions(data.nodes, data.edges, this.positionCache);
     const pointColors = new Float32Array(data.nodes.length * 4);
     const pointSizes = new Float32Array(data.nodes.length);
     const pointShapes = new Float32Array(data.nodes.length);
-    let reusedPositionCount = 0;
     data.nodes.forEach((node, index) => {
-      const previous = previousPositions.get(node.id);
-      if (previous) reusedPositionCount += 1;
-      const seeded = previous ?? seedPosition(node.id, index, data.nodes.length);
-      positions[index * 2] = seeded[0];
-      positions[index * 2 + 1] = seeded[1];
       pointColors.set(NODE_COLORS[node.kind] ?? DEFAULT_NODE_COLOR, index * 4);
       pointSizes[index] = Math.min(14, 4.4 + Math.sqrt(this.degree[index] ?? 0) * 1.8);
       pointShapes[index] = node.kind === "Repository" ? 5 : node.kind === "Issue" ? 3 : 0;
     });
-    if (reusedPositionCount === 0) centerPositions(positions);
+    this.cachePositions(data.nodes, positions);
 
     this.graph.setPointPositions(positions, true);
     this.graph.setPointColors(pointColors);
@@ -437,6 +436,8 @@ class ContextGraphRenderer implements PublicRenderer {
       positions[index * 2 + 1] = seeded[1];
     });
     centerPositions(positions);
+    this.positionCache.clear();
+    this.cachePositions(this.data.nodes, positions);
     this.graph.setPinnedPoints([]);
     this.graph.setPointPositions(positions, true);
     this.graph.render(0.65, 0);
@@ -458,20 +459,22 @@ class ContextGraphRenderer implements PublicRenderer {
     this.graph.destroy();
   }
 
-  private positionsById(): Map<string, [number, number]> {
+  private capturePositions(): void {
     // On the first data load Cosmos has not created its point-position GPU
     // texture yet. Calling getPointPositions() at that point makes luma.gl
     // attempt to read from an undefined WebGL device resource. There are no
     // positions to preserve until a previous node set has been installed.
-    if (!this.data.nodes.length) return new Map();
+    if (!this.data.nodes.length) return;
     const positions = this.graph.getPointPositions();
-    const result = new Map<string, [number, number]>();
-    this.data.nodes.forEach((node, index) => {
+    this.cachePositions(this.data.nodes, positions);
+  }
+
+  private cachePositions(nodes: readonly GraphNode[], positions: ArrayLike<number>): void {
+    nodes.forEach((node, index) => {
       const x = positions[index * 2];
       const y = positions[index * 2 + 1];
-      if (Number.isFinite(x) && Number.isFinite(y)) result.set(node.id, [x!, y!]);
+      if (Number.isFinite(x) && Number.isFinite(y)) this.positionCache.set(node.id, [x!, y!]);
     });
-    return result;
   }
 
   private queueLabels(): void {
@@ -756,7 +759,7 @@ class CanvasContextGraphRenderer implements PublicRenderer {
   private readonly options: RendererOptions;
   private readonly canvas: HTMLCanvasElement;
   private readonly resizeObserver: ResizeObserver;
-  private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
+  private data: RendererData = { key: "empty", layoutKey: "empty", nodes: [], edges: [], labels: {} };
   private sourceNodeCount = 0;
   private sourceEdgeCount = 0;
   private selection: RendererSelection = null;
@@ -985,7 +988,7 @@ class CanvasContextGraphRenderer implements PublicRenderer {
 
 class AdaptiveContextGraphRenderer implements PublicRenderer {
   private renderer: PublicRenderer;
-  private data: RendererData = { key: "empty", nodes: [], edges: [], labels: {} };
+  private data: RendererData = { key: "empty", layoutKey: "empty", nodes: [], edges: [], labels: {} };
   private selection: RendererSelection = null;
   private matches: Exclude<RendererSelection, null>[] = [];
   private usingCanvas = false;
@@ -1066,31 +1069,6 @@ function webglAvailable(): boolean {
 
 function rgba(color: readonly [number, number, number, number], alpha: number): string {
   return `rgba(${Math.round(color[0] * 255)}, ${Math.round(color[1] * 255)}, ${Math.round(color[2] * 255)}, ${alpha})`;
-}
-
-function seedPosition(id: string, index: number, total: number): [number, number] {
-  const hash = hashString(id);
-  const angle = index * 2.399963229728653 + ((hash % 360) * Math.PI) / 180;
-  const radius = 12 + Math.sqrt(index + 1) * Math.max(4.5, 120 / Math.sqrt(Math.max(1, total)));
-  const jitter = ((hash >>> 8) % 1000) / 1000;
-  return [Math.cos(angle) * radius * (0.85 + jitter * 0.3), Math.sin(angle) * radius * (0.85 + (1 - jitter) * 0.3)];
-}
-
-function centerPositions(positions: Float32Array): void {
-  const pointCount = positions.length / 2;
-  if (!pointCount) return;
-  let centerX = 0;
-  let centerY = 0;
-  for (let index = 0; index < pointCount; index += 1) {
-    centerX += positions[index * 2] ?? 0;
-    centerY += positions[index * 2 + 1] ?? 0;
-  }
-  centerX /= pointCount;
-  centerY /= pointCount;
-  for (let index = 0; index < pointCount; index += 1) {
-    positions[index * 2] = (positions[index * 2] ?? 0) - centerX + GRAPH_SPACE_CENTER;
-    positions[index * 2 + 1] = (positions[index * 2 + 1] ?? 0) - centerY + GRAPH_SPACE_CENTER;
-  }
 }
 
 function hashString(value: string): number {

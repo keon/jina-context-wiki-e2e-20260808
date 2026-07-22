@@ -583,6 +583,20 @@ test("API maps validation failures to typed client errors", async () => {
       error: "repository must be a non-empty string",
       code: "invalid_request"
     });
+    const excessiveHistory = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "omxyz/example",
+        metadata: { source: "jina-v1-dashboard", historyLimit: 10_001 }
+      })
+    });
+    assert.equal(excessiveHistory.status, 400);
+    assert.deepEqual(await excessiveHistory.json(), {
+      accepted: false,
+      error: "metadata.historyLimit must be an integer from 1 to 10000",
+      code: "invalid_request"
+    });
   } finally {
     await close(server);
   }
@@ -606,7 +620,8 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         metadata: {
           source: "jina-v1-review",
           pullRequestNumber: 42,
-          authorLogin: "alice"
+          authorLogin: "alice",
+          historyLimit: 2_500
         }
       })
     });
@@ -619,6 +634,7 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
     let ingestion = await claimTopic(baseUrl, "run-context-graph-ingest");
     assert.equal(ingestion.message.topic, "run-context-graph-ingest");
     assert.equal(ingestion.task.metadata?.pipelinePhase, "snapshot");
+    assert.equal(ingestion.task.metadata?.historyLimit, 2_500);
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",

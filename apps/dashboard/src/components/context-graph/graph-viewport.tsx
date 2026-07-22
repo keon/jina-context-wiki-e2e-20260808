@@ -111,7 +111,7 @@ export function GraphViewport({
     const renderer = rendererRef.current;
     if (!renderer) return;
     if (!graph || !graphKey) {
-      renderer.setData({ key: "empty", nodes: [], edges: [], labels: {} });
+      renderer.setData({ key: "empty", layoutKey: "empty", nodes: [], edges: [], labels: {} });
       renderer.setSearchMatches([]);
       return;
     }
@@ -120,6 +120,7 @@ export function GraphViewport({
       `|edges:${Array.from(hiddenEdgePredicates).sort().join(",")}`;
     renderer.setData({
       key: rendererKey,
+      layoutKey: graphKey,
       nodes: visibleGraph.nodes,
       edges: visibleGraph.edges,
       labels: rendererLabels

@@ -130,7 +130,7 @@ export function GraphView({
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
-    renderer.setData({ key: dataKey, nodes: visibleNodes, edges: visibleEdges, labels });
+    renderer.setData({ key: dataKey, layoutKey: graphId, nodes: visibleNodes, edges: visibleEdges, labels });
     renderer.setSelection(selection);
     renderer.setSearchMatches(queryMatches.map((match) => ({ ...match })));
   }, [dataKey, labels, queryMatches, rendererReady, selection, visibleEdges, visibleNodes]);

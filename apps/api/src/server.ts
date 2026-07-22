@@ -22,6 +22,7 @@ import {
   MemoryContextGraphPipelineCoordinator,
   MemoryContextGraphStore,
   CONTEXT_GRAPH_GENERATOR_VERSION,
+  CONTEXT_GRAPH_MAX_HISTORY_LIMIT,
   CONTEXT_GRAPH_PARSER_VERSION,
   CONTEXT_GRAPH_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
@@ -1790,13 +1791,20 @@ function parseContextGraphBuildMetadata(value: unknown): Readonly<Record<string,
     "authorAccountType",
     "senderGithubUserId",
     "senderLogin",
-    "senderAccountType"
+    "senderAccountType",
+    "historyLimit"
   ]);
   const metadata: Record<string, unknown> = {};
   for (const [key, item] of Object.entries(value)) {
     if (!allowed.has(key)) throw invalidRequest(`unsupported metadata field: ${key}`);
     if (typeof item !== "string" && typeof item !== "number") {
       throw invalidRequest(`metadata.${key} must be a string or number`);
+    }
+    if (
+      key === "historyLimit" &&
+      (typeof item !== "number" || !Number.isSafeInteger(item) || item <= 0 || item > CONTEXT_GRAPH_MAX_HISTORY_LIMIT)
+    ) {
+      throw invalidRequest(`metadata.historyLimit must be an integer from 1 to ${CONTEXT_GRAPH_MAX_HISTORY_LIMIT}`);
     }
     metadata[key] = typeof item === "string" ? item.slice(0, 500) : item;
   }

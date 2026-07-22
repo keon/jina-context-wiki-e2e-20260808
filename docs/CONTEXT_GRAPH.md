@@ -53,7 +53,7 @@ The board stores repository/ref inputs and checkpoint IDs. It does not store obs
 
 ### Intake and incrementality
 
-The contextGraph worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree it asks the canonical store which SHAs already exist. A repeated build therefore reads only the head tree; a new head ingests only the previously unseen subgraph until it reaches known parents. `CONTEXT_GRAPH_HISTORY_LIMIT` is a safety fence (default 10,000 commits); exceeding it fails rather than storing a partial history.
+The contextGraph worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree it asks the canonical store which SHAs already exist. A repeated build therefore reads only the head tree; a new head ingests only the previously unseen subgraph until it reaches known parents. Automated builds use a 500-commit partial-history boundary by default. Dashboard builds may override that boundary up to the `CONTEXT_GRAPH_HISTORY_LIMIT` physical safety ceiling (default and production value: 10,000 commits).
 
 Each commit stores parents, author external ID, commit time, message, its exact observed path/blob tree, and first-parent churn. The root churn is a set of adds; later `commit_changes` rows record add, modify, delete, and exact-content rename. `commit_manifest(tenant, repository, sha)` returns the exact recorded tree independently of parent order; ancestry replay exists only for legacy rows that predate exact-tree recording. `context_graph_project` materializes that state only for hot refs. A force-push moves a ref; it does not rewrite commit facts.
 

@@ -7,6 +7,9 @@ export type ContextGraphStageStatus =
   "triage" | "queued" | "in_progress" | "done" | "failed" | "canceled" | "superseded";
 export type ContextGraphBuildStatus = "queued" | "in_progress" | "enriching" | "done" | "failed" | "superseded";
 
+export const CONTEXT_GRAPH_DEFAULT_HISTORY_LIMIT = 500;
+export const CONTEXT_GRAPH_MAX_HISTORY_LIMIT = 10_000;
+
 export interface ContextGraphPipelineBuildRequest {
   readonly tenantId: string;
   readonly repository: string;

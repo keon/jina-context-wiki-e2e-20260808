@@ -16,7 +16,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/renderer-policy.test.js dist/node-filters.test.js"
+    "test": "pnpm build && node --test dist/renderer-policy.test.js dist/node-filters.test.js dist/layout-positions.test.js"
   },
   "dependencies": {
     "@cosmos.gl/graph": "^3.3.0"

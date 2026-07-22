@@ -44,6 +44,7 @@ import {
 } from "@jina/context-graph";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
+import { contextGraphHistoryPolicy, type ContextGraphHistoryPolicy } from "./history-limit.js";
 
 const SUPPORTED_TOPICS = [
   "run-review",
@@ -74,6 +75,7 @@ interface WorkMetadataByTopic {
     readonly repository: string;
     readonly ref: string;
     readonly pipelinePhase: "snapshot" | "history";
+    readonly historyLimit?: number;
   };
   readonly "run-context-graph-assert": {
     readonly tenantId: string;
@@ -412,11 +414,15 @@ async function runContextGraphIngestWithTransport(
     githubJson(`/repos/${repository}`)
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
-  const historyLimit = positiveInt(process.env.CONTEXT_GRAPH_HISTORY_LIMIT, 10_000);
+  const serviceHistoryLimit = positiveInt(process.env.CONTEXT_GRAPH_HISTORY_LIMIT, 10_000);
+  const historyPolicy =
+    work.task.metadata.pipelinePhase === "history"
+      ? contextGraphHistoryPolicy(work.task.metadata.historyLimit, serviceHistoryLimit)
+      : contextGraphHistoryPolicy(undefined, serviceHistoryLimit);
   const discovery =
     work.task.metadata.pipelinePhase === "snapshot"
-      ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
-      : await discoverNewCommits(work, repository, head, historyLimit);
+      ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>(), truncated: false }
+      : await discoverNewCommits(work, repository, head, historyPolicy);
   const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
   const defaultBranch =
     typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
@@ -634,6 +640,9 @@ async function runContextGraphIngestWithTransport(
     problemEvidencePullRequestNumbers
   });
   return {
+    ...(work.task.metadata.pipelinePhase === "history"
+      ? { historyCommitLimit: historyPolicy.limit, historyTruncated: discovery.truncated }
+      : {}),
     effect:
       newCommitCount > 0 ||
       parsedBlobCount > 0 ||
@@ -676,15 +685,25 @@ async function discoverNewCommits(
   work: ClaimedWork,
   repository: string,
   head: Record<string, unknown>,
-  limit: number
-): Promise<{ readonly commits: Map<string, Record<string, unknown>>; readonly knownCommitShas: Set<string> }> {
+  policy: ContextGraphHistoryPolicy
+): Promise<{
+  readonly commits: Map<string, Record<string, unknown>>;
+  readonly knownCommitShas: Set<string>;
+  readonly truncated: boolean;
+}> {
   const headSha = requiredGitSha(head.sha, "GitHub head SHA");
   const commits = new Map<string, Record<string, unknown>>([[headSha, head]]);
   const pending = [headSha];
   const expanded = new Set<string>();
   const knownCommitShas = new Set<string>();
+  let truncated = false;
   while (pending.length > 0) {
-    const batch = pending.splice(0, 25).filter((sha) => !expanded.has(sha));
+    if (commits.size >= policy.limit) {
+      truncated = true;
+      break;
+    }
+    const batchSize = Math.min(25, policy.limit - commits.size);
+    const batch = pending.splice(0, Math.max(1, batchSize)).filter((sha) => !expanded.has(sha));
     if (batch.length === 0) continue;
     const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>(
       "/internal/context-graph/ingest/known",
@@ -713,10 +732,8 @@ async function discoverNewCommits(
       }
       const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
       commits.set(sha, commit);
-      if (commits.size > limit)
-        throw new Error(
-          `reachable Git history exceeds CONTEXT_GRAPH_HISTORY_LIMIT=${limit}; refusing a partial backfill`
-        );
+      if (commits.size > policy.limit)
+        throw new Error(`reachable Git history discovery exceeded its configured limit of ${policy.limit} commits`);
       for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
         if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
         const parentSha = requiredGitSha(parent.sha, "GitHub parent SHA");
@@ -724,7 +741,7 @@ async function discoverNewCommits(
       }
     }
   }
-  return { commits, knownCommitShas };
+  return { commits, knownCommitShas, truncated };
 }
 
 function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Record<string, unknown>>): string[] {
