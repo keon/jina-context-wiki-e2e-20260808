@@ -84,14 +84,14 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
             id: "context-graph-assert",
             parentTaskId: "context-graph-root",
             type: "context_graph_assert",
-            status: boardReads === 1 ? "in_progress" : "done"
+            status: boardReads < 3 ? "in_progress" : "done"
           },
           {
             id: "context-graph-project",
             parentTaskId: "context-graph-root",
             type: "context_graph_project",
-            status: boardReads === 1 ? "triage" : "done",
-            ...(boardReads === 1 ? {} : { metadata: { result: { graphId: "graph-e2e", commitSha: "a".repeat(40) } } })
+            status: boardReads < 3 ? "triage" : "done",
+            ...(boardReads < 3 ? {} : { metadata: { result: { graphId: "graph-e2e", commitSha: "a".repeat(40) } } })
           }
         ]
       });
@@ -198,6 +198,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     "POST /context-graph/build",
     "GET /board",
     "GET /board",
+    "GET /board",
     "GET /context-graph/graphs/graph-e2e",
     "POST /context-graph/ask",
     "POST /context-graph/ask",
@@ -205,6 +206,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   ]);
   assert.deepEqual(logs, [
     "Production contextGraph task context-graph-root: root=in_progress, context_graph_ingest=done, context_graph_assert=in_progress, context_graph_project=triage",
+    "Production contextGraph task context-graph-root: root=done, context_graph_ingest=done, context_graph_assert=in_progress, context_graph_project=triage",
     "Production contextGraph task context-graph-root: root=done, context_graph_ingest=done, context_graph_assert=done, context_graph_project=done"
   ]);
 });

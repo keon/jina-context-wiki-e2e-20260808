@@ -87,10 +87,12 @@ export async function runProductionContextGraphAcceptance(
   let lastStatus = "";
   let lastTaskSummary = "";
   let completedBoardTasks: unknown[] | undefined;
+  let workflowCompleted = false;
 
   while (Date.now() < deadline) {
     const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
     const tasks = requiredArray(board.tasks, "board.tasks");
+    completedBoardTasks = tasks;
     const task = tasks.find((value) => isRecord(value) && value.id === taskId);
     if (!isRecord(task)) throw new Error(`acceptance task ${taskId} is missing from the board`);
     const status = requiredString(task.status, "task.status");
@@ -102,28 +104,39 @@ export async function runProductionContextGraphAcceptance(
     if (status !== lastStatus) {
       lastStatus = status;
     }
-    if (status === "done") {
-      completedBoardTasks = tasks;
+    const stageFailure = failedWorkflowStage(tasks, taskId);
+    if (TERMINAL_FAILURES.has(status) || stageFailure) {
+      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
+      const terminalStatus = TERMINAL_FAILURES.has(status)
+        ? status
+        : `${String(stageFailure?.type)} ${String(stageFailure?.status)}`;
+      throw new Error(
+        `production contextGraph task ${taskId} ended as ${terminalStatus} (${taskSummary}${failureSummary})`
+      );
+    }
+    // Snapshot-first builds report the aggregate root as done while the
+    // enrichment stages are still running. Certification needs the canonical
+    // assertions and final projection, so wait for every stage in this exact
+    // build to finish rather than treating the early snapshot as terminal.
+    if (status === "done" && workflowStagesAreDone(tasks, taskId)) {
+      workflowCompleted = true;
       break;
     }
-    if (TERMINAL_FAILURES.has(status)) {
-      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-      throw new Error(`production contextGraph task ${taskId} ended as ${status} (${taskSummary}${failureSummary})`);
-    }
     await delay(pollIntervalMs);
-  }
-  if (lastStatus !== "done") {
-    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
-    const tasks = requiredArray(board.tasks, "board.tasks");
-    const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-    throw new Error(
-      `production contextGraph task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`
-    );
   }
   const blockedTaskIds = blockedContextGraphTaskIds(completedBoardTasks ?? [], repository, ref);
   if (blockedTaskIds.length > 0) {
     throw new Error(
       `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`
+    );
+  }
+  if (!workflowCompleted) {
+    const latestTasks =
+      completedBoardTasks ??
+      requiredArray((await apiJson(fetchImpl, `${apiUrl}/board`, { headers })).tasks, "board.tasks");
+    const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, latestTasks, taskId);
+    throw new Error(
+      `production contextGraph task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`
     );
   }
 
@@ -696,17 +709,23 @@ async function runFollowupContextGraphBuild(
       log(`Production causal projection task ${taskId}: ${summary}`);
       lastSummary = summary;
     }
-    if (status === "done") {
+    const stageFailure = failedWorkflowStage(tasks, taskId);
+    if (TERMINAL_FAILURES.has(status) || stageFailure) {
+      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
+      const terminalStatus = TERMINAL_FAILURES.has(status)
+        ? status
+        : `${String(stageFailure?.type)} ${String(stageFailure?.status)}`;
+      throw new Error(
+        `production causal projection task ${taskId} ended as ${terminalStatus} (${summary}${failureSummary})`
+      );
+    }
+    if (status === "done" && workflowStagesAreDone(tasks, taskId)) {
       const blocked = blockedContextGraphTaskIds(tasks, repository, ref);
       if (blocked.length > 0)
         throw new Error(
           `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blocked.join(", ")}`
         );
       return { taskId, tasks };
-    }
-    if (TERMINAL_FAILURES.has(status)) {
-      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-      throw new Error(`production causal projection task ${taskId} ended as ${status} (${summary}${failureSummary})`);
     }
     await delay(pollIntervalMs);
   }
@@ -1001,6 +1020,27 @@ function summarizeWorkflowTasks(tasks: readonly unknown[], rootTaskId: string): 
       return `${label}=${status}`;
     })
     .join(", ");
+}
+
+function workflowStages(tasks: readonly unknown[], rootTaskId: string): Record<string, unknown>[] {
+  return tasks.filter(
+    (value): value is Record<string, unknown> =>
+      isRecord(value) &&
+      value.parentTaskId === rootTaskId &&
+      typeof value.type === "string" &&
+      value.type.startsWith("context_graph_")
+  );
+}
+
+function workflowStagesAreDone(tasks: readonly unknown[], rootTaskId: string): boolean {
+  const stages = workflowStages(tasks, rootTaskId);
+  return stages.length > 0 && stages.every((stage) => stage.status === "done");
+}
+
+function failedWorkflowStage(tasks: readonly unknown[], rootTaskId: string): Record<string, unknown> | undefined {
+  return workflowStages(tasks, rootTaskId).find(
+    (stage) => typeof stage.status === "string" && TERMINAL_FAILURES.has(stage.status)
+  );
 }
 
 function taskSortKey(task: Record<string, unknown>, rootTaskId: string): string {
