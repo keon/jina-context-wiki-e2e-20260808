@@ -41,11 +41,13 @@ The integration maps each simulation UUID to `tenant:<uuid>` and replaces that p
 The production context graph uses the `jina-openrouter-api-key` secret with:
 
 ```text
-CONTEXT_GRAPH_CODEX_PROVIDER=openrouter
-CONTEXT_GRAPH_CODEX_MODEL=openai/gpt-5.4-mini
+CONTEXT_GRAPH_MODEL=google/gemini-3.5-flash-lite
+CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS=12000
+CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000
+CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3
 ```
 
-The worker advertises a 16,000-token context and compacts at 12,000. Transient provider stream, timeout, rate-limit, 5xx, and Daytona transport failures retry once within the same checkout. Validation and schema errors are terminal.
+The assertion worker calls OpenRouter's non-streaming chat-completions API directly with a strict JSON schema. Daytona provides only the pinned repository checkout and citation reads; no coding-agent runtime or localhost proxy participates in generation. Transient provider timeout, rate-limit, 5xx, and network failures retry once within the same checkout. Host validation can trigger up to two complete schema-constrained repair generations with the default three-attempt setting.
 
 Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Services keep one minimum instance with CPU allocated, poll continuously, and renew five-minute leases. The durable lease, not process identity, is the source of truth.
 
