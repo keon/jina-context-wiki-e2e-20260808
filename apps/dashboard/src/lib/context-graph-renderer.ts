@@ -459,6 +459,11 @@ class ContextGraphRenderer implements PublicRenderer {
   }
 
   private positionsById(): Map<string, [number, number]> {
+    // On the first data load Cosmos has not created its point-position GPU
+    // texture yet. Calling getPointPositions() at that point makes luma.gl
+    // attempt to read from an undefined WebGL device resource. There are no
+    // positions to preserve until a previous node set has been installed.
+    if (!this.data.nodes.length) return new Map();
     const positions = this.graph.getPointPositions();
     const result = new Map<string, [number, number]>();
     this.data.nodes.forEach((node, index) => {
