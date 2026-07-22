@@ -1785,7 +1785,7 @@ function authenticatedPrincipal(
   const hasGraphAccess = Boolean(
     config.graphApiToken &&
     authorization === `Bearer ${config.graphApiToken}` &&
-    (isPublicGraphRoute(pathname) || pathname === "/context-graph/build")
+    (isPublicGraphRoute(pathname) || pathname === "/context-graph/build" || pathname === "/overview")
   );
   if (!hasInternalAccess && !hasGraphAccess) return undefined;
   const tenantId = config.sharedIdentityResolver

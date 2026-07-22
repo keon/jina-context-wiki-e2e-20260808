@@ -269,6 +269,14 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     board.tasks.every((task) => task.metadata.tenantId === SHARED_TENANT),
     true
   );
+  const graphOverviewResponse = await fetch(`${baseUrl}/overview`, {
+    headers: {
+      authorization: `Bearer ${GRAPH_TOKEN}`,
+      "x-jina-tenant-id": SHARED_TENANT,
+      "x-jina-principal-id": `tenant:${SHARED_TENANT}`
+    }
+  });
+  assert.equal(graphOverviewResponse.status, 200);
   assert.equal(
     board.tasks.every((task) => task.metadata.workspaceLabel === "omlabs"),
     true
