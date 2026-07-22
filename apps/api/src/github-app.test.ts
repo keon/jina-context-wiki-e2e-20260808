@@ -126,7 +126,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   assert.deepEqual(taskTypes.find((definition) => definition.type === "context_graph_ingest")?.triggeredBy, [
     {
       source: "POST /context-graph/build",
-      description: "Creates and queues the first executable ContextGraph task.",
+      description: "Creates and queues the first executable context graph task.",
       conditions: []
     },
     {
@@ -173,7 +173,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
 });
 
-test("branch pushes create and supersede the existing contextGraph workflow", async (context) => {
+test("branch pushes create and supersede the existing context graph workflow", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   context.after(
@@ -219,7 +219,7 @@ test("branch pushes create and supersede the existing contextGraph workflow", as
   );
 });
 
-test("contextGraph retrieval forwards generalized Issue identity and Feature text", async () => {
+test("context graph retrieval forwards generalized Issue identity and Feature text", async () => {
   class CapturingContextGraphStore extends MemoryContextGraphStore {
     request?: RetrievalRequest;
 
@@ -451,7 +451,7 @@ test("API maps validation failures to typed client errors", async () => {
   }
 });
 
-test("contextGraph pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
+test("context graph pipeline ingests, asserts, projects, and reuses content-addressed blobs", async () => {
   const server = createApiServer({
     enableDevEndpoints: true,
     tenantId: "default"
@@ -682,7 +682,7 @@ test("contextGraph pipeline ingests, asserts, projects, and reuses content-addre
   }
 });
 
-test("a new contextGraph attempt supersedes older active work for the same repository ref", async () => {
+test("a new context graph attempt supersedes older active work for the same repository ref", async () => {
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
   const baseUrl = await listen(server);
   try {
@@ -802,7 +802,7 @@ test("API validation rejects traversal, mixed worker topics, and stale leases wi
   }
 });
 
-test("contextGraph commands require a forwarded principal identity", async () => {
+test("context graph commands require a forwarded principal identity", async () => {
   const contextGraphStore = new MemoryContextGraphStore();
   const server = createApiServer({
     contextGraphStore,
@@ -823,7 +823,7 @@ test("contextGraph commands require a forwarded principal identity", async () =>
       headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
       body: command
     });
-    assert.equal(withoutIdentity.status, 401, "the svc:api fallback must not execute contextGraph commands");
+    assert.equal(withoutIdentity.status, 401, "the svc:api fallback must not execute context graph commands");
     const withIdentity = await fetch(`${baseUrl}/context-graph/commands`, {
       method: "POST",
       headers: {
@@ -839,7 +839,7 @@ test("contextGraph commands require a forwarded principal identity", async () =>
   }
 });
 
-test("contextGraph reads require authentication and cannot cross tenant boundaries", async () => {
+test("context graph reads require authentication and cannot cross tenant boundaries", async () => {
   const contextGraphStore = new MemoryContextGraphStore();
   const tenantAGraph = fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "main", taskId: "task-a" });
   const tenantBGraph = fixtureGraph({ tenantId: "tenant-b", repository: "omxyz/b", ref: "main", taskId: "task-b" });
@@ -1108,7 +1108,7 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
-test("contextGraph task-board state is independent of the legacy JSON board snapshot", async () => {
+test("context graph task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
   const first = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, contextGraphCoordinator });
@@ -1300,7 +1300,7 @@ test("repository builds supersede immediately without waiting for an ingestion d
   }
 });
 
-test("contextGraph completion does not depend on the legacy board snapshot", async () => {
+test("context graph completion does not depend on the legacy board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphStore = new MemoryContextGraphStore();
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default", stateStore, contextGraphStore });
@@ -1389,7 +1389,7 @@ test("contextGraph completion does not depend on the legacy board snapshot", asy
   }
 });
 
-test("configured aliases migrate existing tasks and contextGraph graphs to the canonical tenant", async () => {
+test("configured aliases migrate existing tasks and context graph graphs to the canonical tenant", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphStore = new MemoryContextGraphStore();
   const oldTenant = "github:unscoped";
@@ -1437,6 +1437,32 @@ test("configured aliases migrate existing tasks and contextGraph graphs to the c
     );
   } finally {
     await close(second);
+  }
+});
+
+test("retired ontology routes redirect permanently to their context-graph replacements", async () => {
+  const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
+  const baseUrl = await listen(server);
+  try {
+    const page = await fetch(`${baseUrl}/ontology`, { redirect: "manual" });
+    assert.equal(page.status, 308);
+    assert.equal(page.headers.get("location"), "/context-graph");
+
+    const assertions = await fetch(`${baseUrl}/ontology/assertions?repository=omxyz%2Fjina`, { redirect: "manual" });
+    assert.equal(assertions.status, 308);
+    assert.equal(assertions.headers.get("location"), "/context-graph/assertions?repository=omxyz%2Fjina");
+
+    const internal = await fetch(`${baseUrl}/internal/ontology/ingest/plan`, {
+      method: "POST",
+      redirect: "manual"
+    });
+    assert.equal(internal.status, 308);
+    assert.equal(internal.headers.get("location"), "/internal/context-graph/ingest/plan");
+
+    const followed = await fetch(`${baseUrl}/ontology`);
+    assert.equal(followed.status, 200);
+  } finally {
+    await close(server);
   }
 });
 

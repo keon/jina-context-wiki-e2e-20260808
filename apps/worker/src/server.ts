@@ -1329,7 +1329,7 @@ async function submitBlobAnalyses(
 }
 
 async function internalApiJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
-  // ContextGraph mutations can persist large content-addressed blob batches. Keep
+  // Context graph mutations can persist large content-addressed blob batches. Keep
   // claim and completion calls on the short default timeout, but allow these durable
   // data calls to use the API service's longer processing window.
   const response = await apiRequest(path, body, contextGraphApiTimeoutMs);

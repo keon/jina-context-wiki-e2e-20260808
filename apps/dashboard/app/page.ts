@@ -542,7 +542,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
   .inspector-actions, .context-graph-inspector-actions { position: sticky; bottom: 0; display: flex; gap: 8px; padding: 12px 15px; border-top: 1px solid var(--border); background: rgb(12 14 14 / 94%); backdrop-filter: blur(12px); }
   .inspector-actions button { flex: 1; }
 
-  /* ContextGraph graph explorer */
+  /* Context graph explorer */
   body[data-page="contextGraph"] .app-header { margin-bottom: 14px; }
   .context-graph-toolbar { display: grid; gap: 6px; margin-bottom: 10px; }
   .context-graph-toolbar-meta { display: flex; align-items: center; justify-content: space-between; min-height: 32px; }
@@ -726,7 +726,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
         <a href="/" data-page="board">Board</a>
         <a href="/history" data-page="history">History</a>
         <a href="/tasks" data-page="task-types">Task types</a>
-        <a href="/context-graph" data-page="contextGraph">ContextGraph</a>
+        <a href="/context-graph" data-page="contextGraph">Context graph</a>
       </nav>
       <div id="connection"><span class="pulse" id="connection-dot"></span><span id="connection-text">Connecting…</span></div>
     </div>
@@ -781,7 +781,7 @@ export function renderDashboardPage(apiUrl: string, apiLabel = apiUrl): string {
       <header class="context-graph-toolbar"><div class="context-graph-toolbar-meta"><button type="button" class="repository-button" id="context-graph-title">Repository graph</button><div class="graph-controls" id="graph-controls" aria-label="Graph visibility controls"></div></div><section class="context-graph-search-hero"><div class="context-search-shell" id="context-search-shell"><form class="context-search" id="context-query"><span class="context-search-icon" aria-hidden="true">⌕</span><label class="sr-only" for="context-question">Search this repository with citations</label><input id="context-question" name="question" placeholder="Ask anything about this repository…" aria-label="Search this repository with citations" aria-controls="context-search-results" aria-expanded="false" autocomplete="off" required><button type="button" class="context-search-clear" id="context-search-clear" aria-label="Clear cited search">×</button><button type="submit" class="context-search-submit" id="context-search-submit" aria-label="Search with citations" title="Search with citations">↵</button></form><div class="context-search-results" id="context-search-results" hidden><section class="context-results" id="context-results" aria-live="polite"></section></div></div></section></header>
       <section class="context-graph-workspace" id="context-graph-workspace">
         <section class="context-graph-card">
-          <div class="graph-wrap"><div id="context-graph" role="application" aria-label="Repository contextGraph graph"><div class="context-graph-label-layer" id="context-graph-label-layer"></div></div><div class="graph-empty-state" id="context-graph-empty" hidden></div><canvas class="context-graph-minimap" id="context-graph-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="context-graph-summary" id="context-graph-summary" hidden></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
+          <div class="graph-wrap"><div id="context-graph" role="application" aria-label="Repository context graph"><div class="context-graph-label-layer" id="context-graph-label-layer"></div></div><div class="graph-empty-state" id="context-graph-empty" hidden></div><canvas class="context-graph-minimap" id="context-graph-minimap" aria-label="Graph overview"></canvas><span class="graph-runtime-status" id="graph-runtime-status">Loading GPU renderer…</span><section class="context-graph-summary" id="context-graph-summary" hidden></section><div class="plane-key"><span>Code</span><span class="knowledge">Knowledge</span></div></div>
         </section>
         <aside class="context-graph-details side-inspector" id="context-graph-details" aria-live="polite"></aside>
       </section>
@@ -2614,7 +2614,7 @@ function eventLabel(event) {
     "task.created": "Task created", "task.queued": "Queued for execution", "task.transitioned": "Status changed",
     "task.dependency_added": "Dependency linked", "run.step": "Run comment", "review.completed": "Review completed",
     "publish.completed": "Publication comment", "github.issue_opened": "GitHub issue received"
-    ,"contextGraph.graph_created": "ContextGraph graph created", "contextGraph.failed": "ContextGraph build failed"
+    ,"contextGraph.graph_created": "Context graph created", "contextGraph.failed": "Context graph build failed"
   };
   return labels[event.type] || humanize(event.type);
 }

@@ -19,7 +19,7 @@ import { Pool } from "pg";
 const connectionString = process.env.TEST_DATABASE_URL;
 
 test(
-  "Postgres contextGraph pipeline claims once and fences superseded leases",
+  "Postgres context graph pipeline claims once and fences superseded leases",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -407,7 +407,7 @@ test(
 );
 
 test(
-  "Postgres contextGraph roles separate reads and runtime writes from schema ownership",
+  "Postgres context graph roles separate reads and runtime writes from schema ownership",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -430,8 +430,8 @@ test(
       }>(`select
       has_table_privilege('jina_context_graph_manifest','jina_context_graph.ref_manifest','INSERT') as manifest_writes_manifest,
       has_table_privilege('jina_context_graph_manifest','jina_context_graph.blobs','INSERT') as manifest_writes_blobs,
-      has_table_privilege('jina_context_graph','jina_context_graph.graphs','INSERT') as graph_writes_graphs,
-      has_table_privilege('jina_context_graph','jina_context_graph.assertions','INSERT') as graph_writes_assertions,
+      has_table_privilege('jina_context_graph_projection','jina_context_graph.graphs','INSERT') as graph_writes_graphs,
+      has_table_privilege('jina_context_graph_projection','jina_context_graph.assertions','INSERT') as graph_writes_assertions,
       has_table_privilege('jina_context_graph_query','jina_context_graph.retrieval_metrics','INSERT') as query_writes_metrics,
       has_table_privilege('jina_context_graph_query','jina_context_graph.assertions','INSERT') as query_writes_assertions,
       has_table_privilege('jina_context_graph_knowledge','jina_context_graph.assertion_relations','INSERT') as knowledge_writes_assertion_relations`);
@@ -2869,7 +2869,7 @@ test(
 );
 
 test(
-  "Postgres contextGraph store adopts a legacy pre-rename schema in place",
+  "Postgres context graph store adopts a legacy pre-rename schema in place",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -2904,6 +2904,362 @@ test(
       assert.equal(legacy.rows[0]?.present, false, "the legacy schema is renamed, not left behind");
     } finally {
       await admin.end();
+    }
+  }
+);
+
+// The task-board schema exactly as the pipeline coordinator created it before
+// the context-graph rename: topic is pinned to the run-ontology-* vocabulary,
+// while the timing columns, the named duration_ms constraint, and the
+// task_checkpoints table are all present — the shape production is in, where
+// the pre-fix readiness probe reported the schema current and skipped the DDL
+// (and with it any topic migration) entirely.
+const LEGACY_PIPELINE_SCHEMA_SQL = `
+  create schema if not exists jina_board;
+  create table if not exists jina_board.workflows (
+    id text primary key,
+    tenant_id text not null,
+    repository text not null,
+    ref_name text not null,
+    request_key text not null,
+    status text not null check (status in ('queued','in_progress','enriching','done','failed','superseded')),
+    snapshot_first boolean not null,
+    metadata jsonb not null default '{}'::jsonb,
+    created_at timestamptz not null,
+    updated_at timestamptz not null,
+    unique (tenant_id,repository,ref_name,request_key)
+  );
+  create index if not exists task_board_workflows_repository_idx
+    on jina_board.workflows (tenant_id,repository,ref_name,created_at desc);
+  create table if not exists jina_board.tasks (
+    id text primary key,
+    build_id text not null references jina_board.workflows(id) on delete cascade,
+    tenant_id text not null,
+    repository text not null,
+    ref_name text not null,
+    request_key text not null,
+    phase text not null check (phase in ('snapshot','history')),
+    stage text not null check (stage in ('ingest','assert','project')),
+    topic text not null check (topic in ('run-ontology-ingest','run-ontology-assert','run-ontology-project')),
+    status text not null check (status in ('triage','queued','in_progress','done','failed','canceled','superseded')),
+    priority integer not null,
+    ordinal integer not null,
+    metadata jsonb not null default '{}'::jsonb,
+    attempt integer not null default 0,
+    lease_id text,
+    worker_id text,
+    lease_expires_at timestamptz,
+    started_at timestamptz,
+    completed_at timestamptz,
+    duration_ms bigint check (duration_ms is null or duration_ms>=0),
+    created_at timestamptz not null,
+    updated_at timestamptz not null,
+    unique (build_id,phase,stage)
+  );
+  do $$
+  begin
+    if not exists (
+      select 1 from pg_constraint
+      where conrelid='jina_board.tasks'::regclass and contype='c'
+        and pg_get_constraintdef(oid) like '%duration_ms%'
+        and conname='task_board_tasks_duration_ms_check'
+    ) then
+      alter table jina_board.tasks
+        add constraint task_board_tasks_duration_ms_check check (duration_ms is null or duration_ms>=0);
+    end if;
+  end $$;
+  create index if not exists task_board_tasks_claim_idx
+    on jina_board.tasks (tenant_id,status,topic,priority desc,created_at);
+  create index if not exists task_board_tasks_lease_idx
+    on jina_board.tasks (tenant_id,id,lease_id,lease_expires_at) where status='in_progress';
+  create table if not exists jina_board.dependencies (
+    workflow_id text not null references jina_board.workflows(id) on delete cascade,
+    task_id text not null,
+    depends_on_task_id text not null,
+    relationship text not null,
+    required boolean not null,
+    blocks_parent_completion boolean not null,
+    created_at timestamptz not null,
+    primary key (workflow_id,task_id,depends_on_task_id,relationship)
+  );
+  create table if not exists jina_board.events (
+    id bigint generated always as identity primary key,
+    tenant_id text not null,
+    task_id text not null,
+    type text not null,
+    at timestamptz not null,
+    payload jsonb not null default '{}'::jsonb
+  );
+  create index if not exists task_board_events_task_idx
+    on jina_board.events (tenant_id,task_id,id);
+  create table if not exists jina_board.task_checkpoints (
+    stage_id text not null references jina_board.tasks(id) on delete cascade,
+    name text not null,
+    value jsonb not null,
+    updated_at timestamptz not null,
+    primary key (stage_id,name)
+  );
+`;
+
+test(
+  "Postgres contextGraph pipeline migrates a pre-rename task board topic constraint in place",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const admin = new Pool({ connectionString });
+    const suffix = Date.now().toString(36);
+    const tenantId = `board-migration-${suffix}`;
+    const repository = `omxyz/board-migration-${suffix}`;
+    const legacyBuildId = `legacy-build-${suffix}`;
+    const legacyTaskId = `legacy-task-${suffix}`;
+    const legacyLeasedId = `legacy-leased-${suffix}`;
+    const legacyDoneId = `legacy-done-${suffix}`;
+    const seededAt = "2026-07-20T00:00:00.000Z";
+    try {
+      await admin.query("drop schema if exists jina_board cascade");
+      await admin.query(LEGACY_PIPELINE_SCHEMA_SQL);
+      // Production still holds queued/leased/terminal rows carrying legacy
+      // topics; the migration must validate its replacement constraint
+      // against them and drain the non-terminal ones to the new vocabulary.
+      await admin.query(
+        `insert into jina_board.workflows (id,tenant_id,repository,ref_name,request_key,status,snapshot_first,metadata,created_at,updated_at)
+         values ($1,$2,$3,'main','pre-rename','queued',true,'{}'::jsonb,$4,$4)`,
+        [legacyBuildId, tenantId, repository, seededAt]
+      );
+      await admin.query(
+        `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,created_at,updated_at)
+         values ($1,$2,$3,$4,'main','pre-rename','snapshot','ingest','run-ontology-ingest','queued',100,0,'{}'::jsonb,$5,$5)`,
+        [legacyTaskId, legacyBuildId, tenantId, repository, seededAt]
+      );
+      await admin.query(
+        `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,attempt,lease_id,worker_id,lease_expires_at,started_at,created_at,updated_at)
+         values ($1,$2,$3,$4,'main','pre-rename','snapshot','assert','run-ontology-assert','in_progress',100,1,'{}'::jsonb,1,'legacy-lease','legacy-worker','2026-07-22T00:00:00.000Z',$5,$5,$5)`,
+        [legacyLeasedId, legacyBuildId, tenantId, repository, seededAt]
+      );
+      await admin.query(
+        `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,attempt,started_at,completed_at,duration_ms,created_at,updated_at)
+         values ($1,$2,$3,$4,'main','pre-rename','snapshot','project','run-ontology-project','done',100,2,'{}'::jsonb,1,$5,$5,0,$5,$5)`,
+        [legacyDoneId, legacyBuildId, tenantId, repository, seededAt]
+      );
+
+      const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      try {
+        // Bootstrap alone must swap the constraint and drain the stranded
+        // rows: non-terminal rows move to the new vocabulary (keeping any
+        // lease so the retired worker's renew/complete still key on task id +
+        // lease id), while terminal rows keep their historical topics.
+        await coordinator.ping();
+        const drained = await admin.query<{ id: string; topic: string; status: string; lease_id: string | null }>(
+          "select id,topic,status,lease_id from jina_board.tasks where build_id=$1 order by ordinal",
+          [legacyBuildId]
+        );
+        assert.deepEqual(drained.rows, [
+          { id: legacyTaskId, topic: "run-context-graph-ingest", status: "queued", lease_id: null },
+          { id: legacyLeasedId, topic: "run-context-graph-assert", status: "in_progress", lease_id: "legacy-lease" },
+          { id: legacyDoneId, topic: "run-ontology-project", status: "done", lease_id: null }
+        ]);
+
+        // The drained queued row is immediately claimable on the new topics.
+        const drainedClaim = await coordinator.claim({
+          tenantId,
+          workerId: "worker-drained",
+          topics: ["run-context-graph-ingest"],
+          now: "2026-07-20T01:00:00.000Z",
+          leaseExpiresAt: "2026-07-20T02:00:00.000Z"
+        });
+        assert.equal(drainedClaim?.task.id, legacyTaskId, "a migrated legacy row is claimable on the new topics");
+
+        // Superseding the legacy build rewrites the status of its legacy-era
+        // tasks, and Postgres re-evaluates the topic check on that update; the
+        // subsequent stage inserts carry the new vocabulary. Both only pass
+        // once the migration has replaced the legacy-only constraint.
+        const build = await coordinator.createBuild({
+          tenantId,
+          repository,
+          ref: "main",
+          requestKey: "post-rename",
+          snapshotFirst: true,
+          createdAt: "2026-07-21T00:00:00.000Z"
+        });
+        assert.equal(build.status, "queued");
+        const claim = await coordinator.claim({
+          tenantId,
+          workerId: "worker-migration",
+          topics: ["run-context-graph-ingest"],
+          now: "2026-07-21T00:01:00.000Z",
+          leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+        });
+        assert.ok(claim, "a build submitted after the rename is claimable on the new topics");
+        assert.equal(claim.message.topic, "run-context-graph-ingest");
+        assert.notEqual(claim.task.id, legacyTaskId);
+
+        const legacyTask = await admin.query<{ status: string; topic: string }>(
+          "select status,topic from jina_board.tasks where id=$1",
+          [legacyTaskId]
+        );
+        assert.equal(legacyTask.rows[0]?.status, "superseded", "the migrated row accepts status updates");
+        assert.equal(legacyTask.rows[0]?.topic, "run-context-graph-ingest");
+        const doneTask = await admin.query<{ topic: string }>("select topic from jina_board.tasks where id=$1", [
+          legacyDoneId
+        ]);
+        assert.equal(doneTask.rows[0]?.topic, "run-ontology-project", "terminal rows keep their historical topics");
+
+        // Legacy-topic rows must stay both insertable and updatable: the
+        // replacement constraint allows both vocabularies.
+        await admin.query(
+          `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,created_at,updated_at)
+           values ($1,$2,$3,$4,'main','pre-rename','history','assert','run-ontology-assert','queued',10,4,'{}'::jsonb,$5,$5)`,
+          [`legacy-extra-${suffix}`, legacyBuildId, tenantId, repository, seededAt]
+        );
+        await admin.query("update jina_board.tasks set status='canceled',updated_at=now() where id=$1", [
+          `legacy-extra-${suffix}`
+        ]);
+
+        const checks = await admin.query<{ conname: string; definition: string }>(
+          `select conname,pg_get_constraintdef(oid) as definition from pg_constraint
+           where conrelid='jina_board.tasks'::regclass and contype='c'
+             and pg_get_constraintdef(oid) like '%topic%'`
+        );
+        assert.deepEqual(
+          checks.rows.map((row) => row.conname),
+          ["task_board_tasks_topic_check"],
+          "exactly one named topic constraint remains"
+        );
+        assert.ok(checks.rows[0]?.definition.includes("run-context-graph-ingest"));
+        assert.ok(checks.rows[0]?.definition.includes("run-ontology-ingest"));
+      } finally {
+        await coordinator.close();
+      }
+
+      // A database that raced past the constraint fix (both-vocabulary check
+      // already in place, rows not yet drained) must still migrate: the
+      // readiness probe's lock-free row read detects the stranded row and
+      // sends the next coordinator down the DDL path, and re-running the
+      // whole apply on the migrated schema is idempotent.
+      await admin.query(
+        `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,created_at,updated_at)
+         values ($1,$2,$3,$4,'main','pre-rename','history','ingest','run-ontology-ingest','queued',10,3,'{}'::jsonb,$5,$5)`,
+        [`legacy-straggler-${suffix}`, legacyBuildId, tenantId, repository, seededAt]
+      );
+      const second = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      try {
+        await second.ping();
+        const straggler = await admin.query<{ topic: string }>("select topic from jina_board.tasks where id=$1", [
+          `legacy-straggler-${suffix}`
+        ]);
+        assert.equal(straggler.rows[0]?.topic, "run-context-graph-ingest", "a repeat apply drains stragglers");
+        const repeatChecks = await admin.query<{ conname: string }>(
+          `select conname from pg_constraint
+           where conrelid='jina_board.tasks'::regclass and contype='c'
+             and pg_get_constraintdef(oid) like '%topic%'`
+        );
+        assert.deepEqual(
+          repeatChecks.rows.map((row) => row.conname),
+          ["task_board_tasks_topic_check"],
+          "repeated applies leave the constraint set unchanged"
+        );
+      } finally {
+        await second.close();
+      }
+
+      // With nothing left to migrate, a later coordinator takes the lock-free
+      // fast path: the migrated schema counts as ready even though the
+      // replacement constraint's definition mentions the legacy vocabulary it
+      // still allows, and the terminal rows keep their legacy topics.
+      const third = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      try {
+        await third.ping();
+      } finally {
+        await third.close();
+      }
+    } finally {
+      await admin.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]).catch(() => undefined);
+      await admin.end();
+    }
+  }
+);
+
+test(
+  "Postgres contextGraph sweep records the interrupted attempt when a lease expires",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantId = `sweep-expiry-${suffix}`;
+    const repository = `omxyz/sweep-expiry-${suffix}`;
+    const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString });
+    const cleanup = new Pool({ connectionString });
+    try {
+      await coordinator.createBuild({
+        tenantId,
+        repository,
+        ref: "main",
+        requestKey: "expiry",
+        snapshotFirst: true,
+        createdAt: "2026-07-21T00:00:00.000Z"
+      });
+      const first = await coordinator.claim({
+        tenantId,
+        workerId: "worker-1",
+        topics: ["run-context-graph-ingest"],
+        now: "2026-07-21T00:01:00.000Z",
+        leaseExpiresAt: "2026-07-21T00:05:00.000Z"
+      });
+      assert.ok(first);
+      // A claim for an unrelated topic after the lease deadline sweeps the
+      // expired lease back to queued without immediately re-leasing the stage.
+      assert.equal(
+        await coordinator.claim({
+          tenantId,
+          workerId: "worker-2",
+          topics: ["run-context-graph-assert"],
+          now: "2026-07-21T00:06:00.000Z",
+          leaseExpiresAt: "2026-07-21T01:06:00.000Z"
+        }),
+        undefined
+      );
+      const requeued = (await coordinator.list(tenantId))[0]!.stages.find((stage) => stage.id === first.task.id);
+      assert.equal(requeued?.status, "queued");
+      assert.deepEqual(
+        { startedAt: requeued?.startedAt, completedAt: requeued?.completedAt, durationMs: requeued?.durationMs },
+        { startedAt: undefined, completedAt: undefined, durationMs: undefined },
+        "an expiry-requeued stage carries no stale timing while queued"
+      );
+      // The interrupted attempt's timing is not discarded: the sweep records
+      // it in a task.lease_expired board event before clearing the stage row.
+      const expiryEvents = (await coordinator.listEvents(tenantId, { taskIds: [first.task.id] })).filter(
+        (event) => event.type === "task.lease_expired"
+      );
+      assert.equal(expiryEvents.length, 1);
+      assert.equal(expiryEvents[0]?.at, "2026-07-21T00:06:00.000Z");
+      assert.deepEqual(expiryEvents[0]?.payload, {
+        fromStatus: "in_progress",
+        toStatus: "queued",
+        attempt: 1,
+        workerId: "worker-1",
+        startedAt: "2026-07-21T00:01:00.000Z",
+        endedAt: "2026-07-21T00:06:00.000Z",
+        durationMs: 300_000
+      });
+      const second = await coordinator.claim({
+        tenantId,
+        workerId: "worker-2",
+        topics: ["run-context-graph-ingest"],
+        now: "2026-07-21T00:07:00.000Z",
+        leaseExpiresAt: "2026-07-21T01:07:00.000Z"
+      });
+      assert.ok(second);
+      assert.equal(second.task.id, first.task.id);
+      assert.equal(second.task.metadata.pipelinePhase, "snapshot");
+    } finally {
+      await cleanup.query("delete from jina_board.events where tenant_id=$1", [tenantId]).catch(() => undefined);
+      await cleanup.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]).catch(() => undefined);
+      await cleanup.end();
+      await coordinator.close();
     }
   }
 );

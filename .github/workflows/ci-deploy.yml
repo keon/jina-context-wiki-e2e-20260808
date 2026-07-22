@@ -209,6 +209,14 @@ jobs:
         run: |
           curl --fail --retry 10 --retry-all-errors --retry-delay 3 "${{ steps.deploy-worker.outputs.url }}/health" | jq -e '.ok == true and .topics == ["run-context-graph-ingest", "run-context-graph-assert", "run-context-graph-project"] and ((keys - ["active", "consecutiveApiFailures", "lastApiError", "lastApiErrorAt", "lastApiSuccessAt", "lastWork", "metrics", "ok", "topics", "workerId"]) | length == 0) and (.lastWork == null or ((.lastWork | keys) - ["failureCategory", "finishedAt", "outcome", "topic"] | length == 0))'
 
+      - name: Remove retired jina-ontology-worker service
+        run: |
+          if gcloud run services describe jina-ontology-worker --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" >/dev/null 2>&1; then
+            gcloud run services delete jina-ontology-worker --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --quiet
+          else
+            echo "jina-ontology-worker is already gone; nothing to clean up"
+          fi
+
       - name: Deploy task worker
         id: deploy-task-worker
         uses: google-github-actions/deploy-cloudrun@v3
@@ -333,13 +341,32 @@ jobs:
               --execution="${execution_name}" \
               --limit=1 \
               --format='value(metadata.name)')"
+            task_yaml=""
             if [[ -n "${task_name}" ]]; then
-              gcloud run jobs executions tasks describe "${task_name}" \
+              task_yaml="$(gcloud run jobs executions tasks describe "${task_name}" \
                 --project="${GCP_PROJECT_ID}" \
                 --region="${GCP_REGION}" \
-                --format=yaml || true
+                --format=yaml || true)"
+              printf '%s\n' "${task_yaml}"
             fi
             if [[ "${acceptance_status}" -ne 0 ]]; then
+              # CI cannot read the job's private logs, but the acceptance binary
+              # encodes its failure boundary in the container exit code
+              # (apps/worker/src/acceptance.ts productionAcceptanceExitCode).
+              exit_code="$(printf '%s\n' "${task_yaml}" | awk '/lastAttemptResult:/{found=1} found && /exitCode:/{print $2; exit}')"
+              case "${exit_code}" in
+                20) category="board/timeout (workflow ended as failed/blocked, task missing from the board, or acceptance timed out)" ;;
+                21) category="latest-graph verification (contextGraph.latest missing or not the expected repository/commit)" ;;
+                22) category="empty graph (projected graph has no nodes or edges)" ;;
+                23) category="uncited assertions (graph content lacks checked evidence citations)" ;;
+                24) category="retrieval/causality (fixed-template retrieval, causal context, or v5.1 fixture checks failed)" ;;
+                25) category="backlog (canonical outbox or parser backlog did not converge)" ;;
+                26) category="uncategorized (unexpected or transport failure)" ;;
+                *) category="unknown (exit code not found in the task result yaml)" ;;
+              esac
+              echo "Acceptance failed with exit code ${exit_code:-unavailable}: ${category}"
+              echo "Exit code map: 20=board/timeout 21=latest-graph verification 22=empty graph 23=uncited assertions 24=retrieval/causality 25=backlog 26=uncategorized"
+              echo "Note: granting roles/logging.viewer to github-deployer@jina-v2.iam.gserviceaccount.com would surface the full acceptance logs below."
               echo "::group::Acceptance execution logs"
               gcloud logging read \
                 "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"jina-acceptance\" AND labels.\"run.googleapis.com/execution_name\"=\"${execution_name}\"" \

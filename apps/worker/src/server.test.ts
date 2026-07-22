@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
-test("worker reviews pull requests and incrementally ingests contextGraph source blobs", async (context) => {
+test("worker reviews pull requests and incrementally ingests context graph source blobs", async (context) => {
   let claimCount = 0;
   let renewals = 0;
   let projectionDrains = 0;
@@ -338,7 +338,7 @@ test("worker rejects malformed topic metadata before dispatch", async (context) 
   assert.equal(completions, 0);
 });
 
-test("contextGraph worker configuration preserves the explicit staged topics", async (context) => {
+test("context graph worker configuration preserves the explicit staged topics", async (context) => {
   let resolveClaim!: (topics: unknown) => void;
   const claimed = new Promise<unknown>((resolve) => {
     resolveClaim = resolve;
@@ -446,7 +446,7 @@ test("worker aborts active work and never completes after lease renewal is rejec
   assert.equal(completions, 0);
 });
 
-test("worker health remains degraded when contextGraph outbox draining fails", async (context) => {
+test("worker health remains degraded when context graph outbox draining fails", async (context) => {
   const mock = createServer(async (request, response) => {
     await readJson(request);
     if (request.url === "/internal/worker/claim") return json(response, 204, {});

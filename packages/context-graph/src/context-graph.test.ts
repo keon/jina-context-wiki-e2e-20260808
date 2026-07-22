@@ -199,6 +199,18 @@ test("workers can release contextGraph leases for immediate task-board recovery"
     { startedAt: undefined, completedAt: undefined, durationMs: undefined },
     "a released stage carries no stale timing while queued"
   );
+  const releaseEvent = (await coordinator.listEvents("tenant", { taskIds: [first.task.id] }))
+    .filter((event) => event.type === "task.transitioned" && event.payload.toStatus === "queued")
+    .at(-1);
+  assert.deepEqual(releaseEvent?.payload, {
+    fromStatus: "in_progress",
+    toStatus: "queued",
+    reason: "worker shutdown",
+    attempt: 1,
+    startedAt: "2026-07-21T00:01:00.000Z",
+    endedAt: "2026-07-21T00:02:00.000Z",
+    durationMs: 60_000
+  });
   const second = await coordinator.claim({
     tenantId: "tenant",
     workerId: "worker-2",
@@ -249,6 +261,22 @@ test("expired contextGraph leases requeue without stale stage timing", async () 
     { startedAt: undefined, completedAt: undefined, durationMs: undefined },
     "an expiry-requeued stage carries no stale timing while queued"
   );
+  // The interrupted attempt's timing is not discarded: the sweep records it
+  // in a task.lease_expired board event before clearing the stage row.
+  const expiryEvents = (await coordinator.listEvents("tenant", { taskIds: [first.task.id] })).filter(
+    (event) => event.type === "task.lease_expired"
+  );
+  assert.equal(expiryEvents.length, 1);
+  assert.equal(expiryEvents[0]?.at, "2026-07-21T00:06:00.000Z");
+  assert.deepEqual(expiryEvents[0]?.payload, {
+    fromStatus: "in_progress",
+    toStatus: "queued",
+    attempt: 1,
+    workerId: "worker-1",
+    startedAt: "2026-07-21T00:01:00.000Z",
+    endedAt: "2026-07-21T00:06:00.000Z",
+    durationMs: 300_000
+  });
   const second = await coordinator.claim({
     tenantId: "tenant",
     workerId: "worker-2",
@@ -258,6 +286,51 @@ test("expired contextGraph leases requeue without stale stage timing", async () 
   });
   assert.ok(second);
   assert.equal(second.task.id, first.task.id);
+});
+
+test("expired contextGraph lease sweeps stay tenant-scoped", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId: "tenant-a",
+    repository: "omxyz/jina",
+    ref: "main",
+    requestKey: "expiry-a",
+    snapshotFirst: true,
+    createdAt: "2026-07-21T00:00:00.000Z"
+  });
+  const first = await coordinator.claim({
+    tenantId: "tenant-a",
+    workerId: "worker-a",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-21T00:01:00.000Z",
+    leaseExpiresAt: "2026-07-21T00:05:00.000Z"
+  });
+  assert.ok(first);
+  // A claim by another tenant after the lease deadline must not sweep tenant
+  // A's expired lease back to queued, matching the Postgres coordinator.
+  assert.equal(
+    await coordinator.claim({
+      tenantId: "tenant-b",
+      workerId: "worker-b",
+      topics: ["run-context-graph-ingest"],
+      now: "2026-07-21T00:06:00.000Z",
+      leaseExpiresAt: "2026-07-21T01:06:00.000Z"
+    }),
+    undefined
+  );
+  const untouched = (await coordinator.list("tenant-a"))[0]!.stages.find((stage) => stage.id === first.task.id);
+  assert.equal(untouched?.status, "in_progress", "another tenant's claim leaves the expired lease untouched");
+  // A same-tenant claim sweeps the expired lease and re-leases the stage.
+  const second = await coordinator.claim({
+    tenantId: "tenant-a",
+    workerId: "worker-a2",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-21T00:07:00.000Z",
+    leaseExpiresAt: "2026-07-21T01:07:00.000Z"
+  });
+  assert.ok(second);
+  assert.equal(second.task.id, first.task.id);
+  assert.notEqual(second.message.leaseId, first.message.leaseId);
 });
 
 test("pure structural parsing produces versioned symbols and imports", () => {

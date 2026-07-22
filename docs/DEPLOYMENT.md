@@ -27,7 +27,7 @@ The integration maps each simulation UUID to `tenant:<uuid>` and replaces that p
 
 `GITHUB_CLONE_TOKEN` is the worker's temporary private-repository credential until installation tokens replace it. Use a fine-grained read-only token for Contents, Issues, Pull requests, and Metadata. Deployments and Actions access is optional enrichment; required source failures still fail closed.
 
-Production ContextGraph uses the `jina-openrouter-api-key` secret with:
+The production context graph uses the `jina-openrouter-api-key` secret with:
 
 ```text
 CONTEXT_GRAPH_CODEX_PROVIDER=openrouter
@@ -38,7 +38,7 @@ The worker advertises a 16,000-token context and compacts at 12,000. Transient p
 
 Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Services keep one minimum instance with CPU allocated, poll continuously, and renew five-minute leases. The durable lease, not process identity, is the source of truth.
 
-## ContextGraph retry and cache behavior
+## Context graph retry and cache behavior
 
 Canonical observations, exact commit trees, first-parent changes, blob analyses, source facts, and model-output proposals survive retries. The worker stops commit traversal at known parents. Unchanged heads reuse parsed blobs and exact-fingerprint assertion generations. A generator-contract change performs one bounded semantic refresh and then returns to cached execution.
 
@@ -58,7 +58,7 @@ docker build -f apps/worker/Dockerfile .
 docker build -f apps/dashboard/Dockerfile .
 ```
 
-After deployment, the workflow checks API health, worker connectivity, dashboard IAP, and the IAP policy. The `jina-acceptance` job receives the internal credential directly from Secret Manager and runs the private fixture repository through the three-stage ContextGraph workflow.
+After deployment, the workflow checks API health, worker connectivity, dashboard IAP, and the IAP policy. The `jina-acceptance` job receives the internal credential directly from Secret Manager and runs the private fixture repository through the three-stage context graph workflow.
 
 Acceptance requires terminal success, no lingering blocked work, a nonempty cited graph at the requested commit, fixed-template and causal retrieval, reviewed causal assertions in the projection, and empty canonical-outbox/parser backlogs. It also exercises the unchanged-head cache path and rejects stale attempts. The request key includes the GitHub run attempt so an operator can rerun a failed release without colliding with the prior task.
 
@@ -80,9 +80,19 @@ Install least-privilege roles with an administrator that has `CREATEROLE`:
 DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate -- --install-roles
 ```
 
-Split services may receive `jina_context_graph_intake`, `jina_context_graph_code`, `jina_context_graph_knowledge`, `jina_context_graph_manifest`, `jina_context_graph_search`, `jina_context_graph_reconciliation`, `jina_context_graph`, or `jina_context_graph_query`. The modular-monolith login may use aggregate `jina_context_graph_writer`; reporting logins use `jina_context_graph_reader`. Application logins must not own the schema.
+Split services may receive `jina_context_graph_intake`, `jina_context_graph_code`, `jina_context_graph_knowledge`, `jina_context_graph_manifest`, `jina_context_graph_search`, `jina_context_graph_reconciliation`, `jina_context_graph_projection`, or `jina_context_graph_query`. The modular-monolith login may use aggregate `jina_context_graph_writer`; reporting logins use `jina_context_graph_reader`. Application logins must not own the schema.
 
 The migration revokes `PUBLIC` access, installs matching default privileges, uses composite foreign keys to prevent cross-tenant references, and serializes live/cardinality-one assertions with partial unique indexes.
+
+## Post-rename cutover runbook
+
+The `ontology` to `context graph` rename shipped with the repository, but some resources are configured outside this repository and must be cut over manually:
+
+1. **Database roles.** Run `pnpm --filter @jina/db migrate -- --install-roles` (with a `CREATEROLE` administrator) to create the `jina_context_graph_*` roles. Re-point any Secret Manager entries or service login credentials that still authenticate as the old `jina_ontology_*` role names to the new roles, verify the services reconnect, and then drop the old `jina_ontology_*` roles.
+2. **Acceptance fixture repository.** Rename the GitHub repository `omxyz/jina-ontology-e2e` to `omxyz/jina-context-graph-e2e`, then update the default repository in `apps/worker/src/acceptance.ts` (`runProductionContextGraphAcceptance`) to the new name. Until both steps happen together, the acceptance job must keep the pre-rename default.
+3. **Externally set environment variables.** Any `ONTOLOGY_*` variables configured outside this repository (Cloud Run overrides, local `.env` files, operator shells) must be recreated under their `CONTEXT_GRAPH_*` names. Known families: `CONTEXT_GRAPH_CODEX_*`, `CONTEXT_GRAPH_FOCUS_BUNDLE_*`, `CONTEXT_GRAPH_HISTORY_LIMIT`, `CONTEXT_GRAPH_ASSERTION_FOCUS_LIMIT`, and `CONTEXT_GRAPH_GITHUB_PR_CONCURRENCY`. The old `ONTOLOGY_*` names are no longer read.
+4. **CI log access.** Grant `roles/logging.viewer` to `github-deployer@jina-v2.iam.gserviceaccount.com` so the deploy workflow can read the acceptance job's logs; until then CI reports only the mapped acceptance exit-code category.
+5. **Old worker service.** No action needed: the deploy pipeline now deletes the retired `jina-ontology-worker` Cloud Run service automatically after the renamed worker passes its health check.
 
 ## Useful checks
 

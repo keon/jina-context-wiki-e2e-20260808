@@ -5,7 +5,7 @@ const componentRoles = [
   "jina_context_graph_manifest",
   "jina_context_graph_search",
   "jina_context_graph_reconciliation",
-  "jina_context_graph",
+  "jina_context_graph_projection",
   "jina_context_graph_query"
 ] as const;
 
@@ -53,7 +53,7 @@ grant select on jina_context_graph.refs,jina_context_graph.commits,jina_context_
 grant select,insert,update,delete on jina_context_graph.ref_manifest to jina_context_graph_manifest;
 grant select,update on jina_context_graph.outbox to jina_context_graph_manifest;
 grant execute on function jina_context_graph.commit_manifest(text,text,text) to
-  jina_context_graph_reader,jina_context_graph_code,jina_context_graph_manifest,jina_context_graph,jina_context_graph_query;
+  jina_context_graph_reader,jina_context_graph_code,jina_context_graph_manifest,jina_context_graph_projection,jina_context_graph_query;
 
 grant select on jina_context_graph.observations,jina_context_graph.entities,jina_context_graph.assertions,jina_context_graph.entity_redirects,jina_context_graph.refs to jina_context_graph_search;
 grant select,insert,update,delete on jina_context_graph.search_documents to jina_context_graph_search;
@@ -64,9 +64,9 @@ grant select,update on jina_context_graph.assertions to jina_context_graph_recon
 grant select,insert on jina_context_graph.audit_log to jina_context_graph_reconciliation;
 grant select,insert,update on jina_context_graph.outbox to jina_context_graph_reconciliation;
 
-grant select on all tables in schema jina_context_graph to jina_context_graph;
-grant insert,update,delete on jina_context_graph.graphs,jina_context_graph.graph_heads,jina_context_graph.nodes,jina_context_graph.edges to jina_context_graph;
-grant update on jina_context_graph.outbox to jina_context_graph;
+grant select on all tables in schema jina_context_graph to jina_context_graph_projection;
+grant insert,update,delete on jina_context_graph.graphs,jina_context_graph.graph_heads,jina_context_graph.nodes,jina_context_graph.edges to jina_context_graph_projection;
+grant update on jina_context_graph.outbox to jina_context_graph_projection;
 
 grant select on all tables in schema jina_context_graph to jina_context_graph_query;
 grant insert,delete on jina_context_graph.retrieval_metrics to jina_context_graph_query;

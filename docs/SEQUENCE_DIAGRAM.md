@@ -69,7 +69,7 @@ sequenceDiagram
 
 If a worker crashes, the leased message becomes claimable after expiration. A completion with the wrong, expired, or replaced lease returns `409` and changes no state.
 
-## Incremental ContextGraph build
+## Incremental context graph build
 
 ```mermaid
 sequenceDiagram
@@ -197,7 +197,7 @@ sequenceDiagram
     Browser->>IAP: Open dashboard URL
     IAP->>IAP: Google sign-in and access policy
     IAP->>Dashboard: Authenticated request + verified email header
-    Dashboard-->>Browser: Board, task types, or ContextGraph page
+    Dashboard-->>Browser: Board, task types, or context graph page
     Browser->>Dashboard: GET /api/board, /events, /task-types, or /context-graph
     Dashboard->>API: Proxy allowlisted read + bearer + user principal
     API->>API: Resolve omlabs tenant + tenant-admin/repository relationship
@@ -206,8 +206,8 @@ sequenceDiagram
     Dashboard-->>Browser: JSON
 ```
 
-Each page polls only the endpoints it needs. The ContextGraph list request returns the latest full graph and lightweight summaries for older generations; historical node and edge collections are loaded only through graph detail.
+Each page polls only the endpoints it needs. The context graph list request returns the latest full graph and lightweight summaries for older generations; historical node and edge collections are loaded only through graph detail.
 
 ## Local development difference
 
-`pnpm dev` uses memory stores unless database variables are present. It enables the unsigned `/dev/webhooks/github` endpoint, can seed a demo PR, and may simulate non-ContextGraph task completion with an in-process timer. All three features are disabled in production; production work is handled only by the durable workers above.
+`pnpm dev` uses memory stores unless database variables are present. It enables the unsigned `/dev/webhooks/github` endpoint, can seed a demo PR, and may simulate non-context-graph task completion with an in-process timer. All three features are disabled in production; production work is handled only by the durable workers above.

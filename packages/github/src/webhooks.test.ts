@@ -72,7 +72,7 @@ test("parses a newly opened issue and ignores non-open actions", () => {
   assert.equal(parseGitHubWebhook("ping", jsonBytes({ zen: "Keep it logically awesome." })), undefined);
 });
 
-test("parses branch pushes for contextGraph intake", () => {
+test("parses branch pushes for context graph intake", () => {
   const parsed = parseGitHubWebhook(
     "push",
     jsonBytes({

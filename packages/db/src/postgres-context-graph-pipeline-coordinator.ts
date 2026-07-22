@@ -224,12 +224,39 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      await client.query(
-        `update jina_board.tasks
+      // Requeue expired leases. The row must not carry stale timing while
+      // queued, so the interrupted attempt's startedAt/duration survive only
+      // in a board event — the CTE captures the pre-update columns that the
+      // update itself clears.
+      const expired = await client.query<{
+        id: string;
+        attempt: number;
+        worker_id: string | null;
+        started_at: Date | null;
+      }>(
+        `with expired as (
+           select id,attempt,worker_id,started_at from jina_board.tasks
+           where tenant_id=$2 and status='in_progress' and lease_expires_at <= $1
+           for update
+         )
+         update jina_board.tasks stage
          set status='queued',lease_id=null,worker_id=null,lease_expires_at=null,started_at=null,completed_at=null,duration_ms=null,updated_at=$1
-         where tenant_id=$2 and status='in_progress' and lease_expires_at <= $1`,
+         from expired where stage.id=expired.id
+         returning expired.id,expired.attempt,expired.worker_id,expired.started_at`,
         [input.now, input.tenantId]
       );
+      for (const stage of expired.rows) {
+        if (!stage.started_at) continue;
+        await insertBoardEvent(client, input.tenantId, stage.id, "task.lease_expired", input.now, {
+          fromStatus: "in_progress",
+          toStatus: "queued",
+          attempt: stage.attempt,
+          ...(stage.worker_id ? { workerId: stage.worker_id } : {}),
+          startedAt: stage.started_at.toISOString(),
+          endedAt: input.now,
+          durationMs: Math.max(0, Date.parse(input.now) - stage.started_at.getTime())
+        });
+      }
       // Cheap probabilistic retention: roughly one in fifty claims prunes
       // month-old board events and terminal workflows. Deleting a workflow
       // cascades to tasks/dependencies/checkpoints via FKs; events carry no FK
@@ -361,13 +388,16 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         stage.phase === "history" ? "enriching" : "in_progress",
         input.now
       ]);
+      // The attempt-end timestamp is endedAt: the stage returns to queued, so
+      // nothing completed. Release events written before this rename carry the
+      // same value under completedAt; no in-repo consumer keys on either name.
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
         fromStatus: "in_progress",
         toStatus: "queued",
         reason: input.reason,
         attempt: stage.attempt,
         startedAt: stage.started_at?.toISOString() ?? input.now,
-        completedAt: input.now,
+        endedAt: input.now,
         durationMs: Math.max(0, Date.parse(input.now) - (stage.started_at?.getTime() ?? Date.parse(input.now)))
       });
       await client.query("update jina_board.tasks set started_at=null where id=$1", [stage.id]);
@@ -436,6 +466,8 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
          where id=$1`,
         [stage.id, input.outcome, JSON.stringify(metadata), input.now]
       );
+      // Here completedAt is accurate — the attempt end IS the stage
+      // completion — and matches the row's completed_at column.
       await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
         fromStatus: "in_progress",
         toStatus: input.outcome,
@@ -643,13 +675,35 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
                        where conrelid=to_regclass('jina_board.tasks') and contype='c'
                          and pg_get_constraintdef(oid) like '%duration_ms%')
            -- A pre-rename database passes every check above but still
-           -- constrains topic to the run-ontology-* vocabulary; it must take
-           -- the DDL path so the topic migration runs.
+           -- constrains topic to the run-ontology-* vocabulary only; it must
+           -- take the DDL path so the topic migration runs. The replacement
+           -- constraint deliberately allows both vocabularies, so its
+           -- definition also mentions run-ontology-: a check counts as legacy
+           -- only when it does NOT mention run-context-graph-.
            and not exists (select 1 from pg_constraint
                            where conrelid=to_regclass('jina_board.tasks') and contype='c'
-                             and pg_get_constraintdef(oid) like '%run-ontology-%') as ready`
+                             and pg_get_constraintdef(oid) like '%run-ontology-%'
+                             and pg_get_constraintdef(oid) not like '%run-context-graph-%') as ready`
       );
-      if (!probe.rows[0]?.ready) await client.query(PIPELINE_SCHEMA_SQL);
+      let ready = probe.rows[0]?.ready ?? false;
+      if (ready) {
+        // A database whose constraint was already migrated (or that raced past
+        // the constraint fix) can still hold pre-rename rows the renamed
+        // workers never claim; those must send it down the DDL path so the
+        // one-time topic row migration runs. This is a plain snapshot read
+        // (AccessShare only, no relation DDL locks), but it cannot live inside
+        // the catalog probe above: referencing jina_board.tasks directly would
+        // fail to parse on a fresh database, so it only runs once the catalog
+        // probe has confirmed the table exists.
+        const drained = await client.query<{ drained: boolean }>(
+          `select not exists (
+             select 1 from jina_board.tasks
+             where topic like 'run-ontology-%' and status in ('triage','queued','in_progress')
+           ) as drained`
+        );
+        ready = drained.rows[0]?.drained ?? false;
+      }
+      if (!ready) await client.query(PIPELINE_SCHEMA_SQL);
       await client.query("commit");
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
@@ -829,31 +883,51 @@ const PIPELINE_SCHEMA_SQL = `
   -- The context-graph rename changed the worker topic vocabulary, but "create
   -- table if not exists" never touches an existing table: a database created
   -- before the rename still constrains topic to the run-ontology-* values and
-  -- rejects every new task. Rewrite legacy rows first, then swap the check.
+  -- rejects every new task. Drop every check that pins the legacy-only
+  -- vocabulary (whatever name it carries) and install one named replacement
+  -- that allows BOTH vocabularies. Both sets are required: legacy queued and
+  -- leased rows still exist, Postgres re-evaluates check constraints on ANY
+  -- update to a row (superseding or canceling a legacy task would fail under
+  -- a new-only check), and adding a new-only constraint would not even
+  -- validate against those legacy rows. The legacy-only detection excludes
+  -- definitions that already mention run-context-graph- so the replacement
+  -- constraint itself never matches and the migration stays idempotent.
   do $$
   declare
     legacy_check record;
     had_legacy boolean := false;
   begin
-    -- Drop every legacy-vocabulary check, whatever its name: rewriting rows
-    -- while any one of them remains active would violate it and roll the
-    -- whole migration back.
     for legacy_check in
       select conname from pg_constraint
       where conrelid='jina_board.tasks'::regclass and contype='c'
         and pg_get_constraintdef(oid) like '%run-ontology-%'
+        and pg_get_constraintdef(oid) not like '%run-context-graph-%'
     loop
       had_legacy := true;
       execute format('alter table jina_board.tasks drop constraint %I', legacy_check.conname);
     end loop;
-    if had_legacy then
-      update jina_board.tasks
-        set topic = replace(topic, 'run-ontology-', 'run-context-graph-')
-        where topic like 'run-ontology-%';
-      alter table jina_board.tasks add constraint tasks_topic_check
-        check (topic in ('run-context-graph-ingest','run-context-graph-assert','run-context-graph-project'));
+    if had_legacy and not exists (
+      select 1 from pg_constraint
+      where conrelid='jina_board.tasks'::regclass and conname='task_board_tasks_topic_check'
+    ) then
+      alter table jina_board.tasks add constraint task_board_tasks_topic_check
+        check (topic in (
+          'run-ontology-ingest','run-ontology-assert','run-ontology-project',
+          'run-context-graph-ingest','run-context-graph-assert','run-context-graph-project'
+        ));
     end if;
   end $$;
+  -- Drain stranded pre-rename work: rows created before the context-graph
+  -- rename still carry run-ontology-* topics that the renamed workers never
+  -- poll, so non-terminal rows would sit unclaimed forever. Rewrite exactly
+  -- the non-terminal statuses to the new vocabulary; terminal rows keep their
+  -- historical topics. Idempotent: a second apply matches no rows. A lease on
+  -- a rewritten in_progress row belongs to a retired pre-rename worker whose
+  -- renew/release/complete key on task id + lease id, never topic; that lease
+  -- simply expires and the sweep requeues the row under its claimable topic.
+  update jina_board.tasks
+  set topic = replace(topic,'run-ontology-','run-context-graph-')
+  where topic like 'run-ontology-%' and status in ('triage','queued','in_progress');
   do $$
   begin
     if not exists (

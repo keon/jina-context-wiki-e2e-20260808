@@ -52,7 +52,7 @@ export const contextGraphTaskTypeTriggers = [
     workflow: "context_graph_build",
     taskType: "context_graph_ingest",
     source: "POST /context-graph/build",
-    description: "Creates and queues the first executable ContextGraph task."
+    description: "Creates and queues the first executable context graph task."
   },
   {
     workflow: "context_graph_build",

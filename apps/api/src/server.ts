@@ -67,7 +67,7 @@ import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publ
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
-// ContextGraph writes for large repositories can hold the durable mutation transaction
+// Context graph writes for large repositories can hold the durable mutation transaction
 // for several minutes. Keep the lease comfortably beyond that transaction so the
 // owning worker is not fenced while its write is still committing.
 const WORKER_LEASE_MS = 30 * 60 * 1000;
@@ -323,7 +323,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return result;
   }
 
-  /** Local demo runner only. ContextGraph work is always claimed by the durable worker. */
+  /** Local demo runner only. Context graph work is always claimed by the durable worker. */
   async function drainOneSimulatedRun(): Promise<void> {
     const message = intakeState.board.outbox.find(
       (candidate) => candidate.status === "pending" && !candidate.topic.startsWith("run-context-graph")
@@ -432,10 +432,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
-    // Published ContextGraph generations and repository ACLs live in their own
+    // Clients still calling the retired pre-rename route names get a permanent
+    // redirect that preserves the request method and body.
+    const renamedPathname = retiredContextGraphPath(url.pathname);
+    if (renamedPathname) {
+      response.writeHead(308, { location: `${renamedPathname}${url.search}` });
+      response.end();
+      return;
+    }
+    // Published context graph generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
-    // Internal contextGraph data-plane and worker-coordination routes likewise
+    // Internal context graph data-plane and worker-coordination routes likewise
     // never read the JSON api_state snapshot outside mutate(), so they skip
     // the full snapshot reload; completeWork synchronizes its JSON-board
     // branch itself before validating against the snapshot.
@@ -747,7 +755,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/commands") {
-      // The svc:api fallback is a tenant admin; state-changing contextGraph commands
+      // The svc:api fallback is a tenant admin; state-changing context graph commands
       // must carry an explicitly forwarded principal identity.
       if (!principal.forwarded) {
         json(response, 401, { accepted: false, error: "a bound principal is required" });
@@ -1648,6 +1656,17 @@ function graphRouteId(pathname: string, prefix: string): string | undefined {
   }
 }
 
+/** Maps a retired pre-rename "ontology" path to its context-graph replacement. */
+function retiredContextGraphPath(pathname: string): string | undefined {
+  if (pathname === "/ontology" || pathname.startsWith("/ontology/")) {
+    return `/context-graph${pathname.slice("/ontology".length)}`;
+  }
+  if (pathname.startsWith("/internal/ontology/")) {
+    return `/internal/context-graph/${pathname.slice("/internal/ontology/".length)}`;
+  }
+  return undefined;
+}
+
 function isPublicGraphRoute(pathname: string): boolean {
   return (
     pathname === "/mcp" ||
@@ -1659,7 +1678,7 @@ function isPublicGraphRoute(pathname: string): boolean {
 
 function isSnapshotExemptInternalRoute(method: string | undefined, pathname: string): boolean {
   if (method !== "POST") return false;
-  // Relational contextGraph data-plane routes never read the JSON board snapshot.
+  // Relational context graph data-plane routes never read the JSON board snapshot.
   if (pathname.startsWith("/internal/context-graph/")) return true;
   // Worker coordination: context-graph-stage_* leases bypass the JSON board
   // entirely, and the JSON-board claim/renew branches only read state inside
@@ -1803,7 +1822,7 @@ function pipelineBuildTask(build: ContextGraphBuildRecord): BoardTask {
   return {
     id: entityId<"task">(build.id),
     type: "context_graph_build",
-    title: `Build ContextGraph for ${build.repository}@${build.ref}`,
+    title: `Build context graph for ${build.repository}@${build.ref}`,
     status: pipelineBuildBoardStatus(build.status),
     assigneeRole: "system",
     dedupeKey: `contextGraph:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}:root`,

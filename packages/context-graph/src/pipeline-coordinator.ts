@@ -244,7 +244,25 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     readonly leaseExpiresAt: string;
   }): Promise<ContextGraphStageClaim | undefined> {
     for (const stage of this.stages.values()) {
-      if (stage.status === "in_progress" && stage.leaseExpiresAt && stage.leaseExpiresAt <= input.now) {
+      if (
+        stage.tenantId === input.tenantId &&
+        stage.status === "in_progress" &&
+        stage.leaseExpiresAt &&
+        stage.leaseExpiresAt <= input.now
+      ) {
+        // The requeued row must not carry stale timing, so the interrupted
+        // attempt's startedAt/duration survive only in this expiry event.
+        if (stage.startedAt) {
+          this.recordEvent(stage.id, "task.lease_expired", input.now, {
+            fromStatus: "in_progress",
+            toStatus: "queued",
+            attempt: stage.attempt,
+            ...(stage.workerId ? { workerId: stage.workerId } : {}),
+            startedAt: stage.startedAt,
+            endedAt: input.now,
+            durationMs: Math.max(0, Date.parse(input.now) - Date.parse(stage.startedAt))
+          });
+        }
         stage.status = "queued";
         clearLease(stage);
         delete stage.startedAt;
@@ -317,13 +335,16 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     stage!.updatedAt = input.now;
     clearLease(stage!);
     delete stage!.startedAt;
+    // The attempt-end timestamp is endedAt: the stage returns to queued, so
+    // nothing completed. Release events written before this rename carry the
+    // same value under completedAt; no in-repo consumer keys on either name.
     this.recordEvent(stage!.id, "task.transitioned", input.now, {
       fromStatus: "in_progress",
       toStatus: "queued",
       reason: input.reason,
       attempt: stage!.attempt,
       startedAt,
-      completedAt: input.now,
+      endedAt: input.now,
       durationMs
     });
     const build = this.builds.get(stage!.buildId)!;
@@ -366,6 +387,8 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     stage!.updatedAt = input.now;
     stage!.completedAt = input.now;
     stage!.durationMs = Math.max(0, Date.parse(input.now) - Date.parse(stage!.startedAt ?? input.now));
+    // Here completedAt is accurate — the attempt end IS the stage completion —
+    // and matches the stage record's completedAt field.
     this.recordEvent(stage!.id, "task.transitioned", input.now, {
       fromStatus: "in_progress",
       toStatus: input.outcome,
