@@ -6,7 +6,7 @@ This document describes the runtime in this repository. Domain-specific ContextG
 
 The deployed backend runs as three Cloud Run services backed by the shared PostgreSQL 16 database:
 
-- `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
+- `jina-api` accepts tenant-scoped work from trusted callers, applies commands, reduces readiness, and owns worker lease/completion transactions. Its direct GitHub parser is retained but disabled in production.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
 - `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
 
@@ -29,7 +29,7 @@ Production does not maintain a second user, organization, installation, or repos
 - `repositories` binds an enabled GitHub repository to that tenant;
 - `tenant_members` remains owned by the original application and supports its membership boundary.
 
-For signed intake, the API resolves the repository by GitHub repository ID first, with an installation/name fallback, and rejects a delivery that cannot resolve to one enabled original tenant. The original tenant UUID becomes the partition key for the board and every context graph row. The tenant GitHub login becomes `workspaceLabel`; pull-request/issue author and delivery sender IDs, logins, and account types come from the verified webhook payload and remain attached to the planned work and canonical observations.
+Production GitHub intake is owned by the original application. It resolves an enabled repository and active installation in the authoritative tables, starts the review, then submits an idempotent v2 graph build under the same original tenant UUID and PR head. The UUID becomes the partition key for the graph pipeline and every context graph row. Tenant, author, and sender identity from the verified delivery remains attached to the build, board tasks, and canonical observations. V2's signed webhook parser remains available for local development and rollback but is disabled in production.
 
 Workers do not connect to PostgreSQL. An unscoped worker claim asks the API to enumerate active original tenants; all later lease, completion, and graph requests carry the concrete original tenant UUID. The original application exposes its member-authenticated work overview by calling this API with the same UUID and `tenant:<uuid>` principal. Fixed mode remains available only for local development and rollback.
 
@@ -73,7 +73,7 @@ Source writes, model observations, and projections are independently idempotent.
 
 ## Authentication and security
 
-Production shared mode is scoped by an original tenant UUID on each authenticated request; fixed mode uses the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential. In shared mode, a forwarded `tenant:<uuid>` principal must match the `x-jina-tenant-id` header.
+Production shared mode is scoped by an original tenant UUID on each authenticated request; fixed mode uses the configured tenant. Health and task-type definitions are public; disabled webhook intake acknowledges without mutation. Board, worker, and context graph operations require the internal bearer credential. In shared mode, a forwarded `tenant:<uuid>` principal must match the `x-jina-tenant-id` header.
 
 The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal; the admin app uses the service principal. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 

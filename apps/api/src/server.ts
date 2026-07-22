@@ -84,6 +84,8 @@ const WORKER_TOPICS = [
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
+  /** Emergency/transition switch. Disabled intake acknowledges deliveries without creating work. */
+  readonly githubWebhookEnabled?: boolean;
   readonly tenantId?: string;
   readonly tenantAliases?: readonly string[];
   readonly enableDevEndpoints?: boolean;
@@ -512,7 +514,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ]);
       json(response, 200, {
         ok: true,
-        githubWebhookConfigured: Boolean(config.githubWebhookSecret),
+        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
         storage: config.stateStore ? "postgres" : "memory",
         durableWorker: true
       });
@@ -972,6 +974,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function handleWebhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readRawBody(request);
+    if (config.githubWebhookEnabled === false) {
+      json(response, 202, {
+        accepted: false,
+        reason: "GitHub webhook intake is disabled; original Jina owns review intake"
+      });
+      return;
+    }
     const result = handleGitHubWebhook({
       rawBody,
       secret: config.githubWebhookSecret,
@@ -1128,13 +1137,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const suppliedRequestKey =
       typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
     const requestKey = suppliedRequestKey ?? randomUUID();
+    const metadata = parseContextGraphBuildMetadata(body.metadata);
     const created = await contextGraphCoordinator.createBuild({
       tenantId,
       repository,
       ref,
       requestKey,
       snapshotFirst: body.snapshotFirst !== false,
-      createdAt: nowIso()
+      createdAt: nowIso(),
+      ...(metadata ? { metadata } : {})
     });
     json(response, 202, { accepted: true, task: pipelineBuildTask(created) });
   }
@@ -1723,6 +1734,40 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   return server;
 }
 
+function parseContextGraphBuildMetadata(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  if (value === undefined) return undefined;
+  if (!isRecord(value)) throw invalidRequest("metadata must be an object");
+  const allowed = new Set([
+    "source",
+    "githubDeliveryId",
+    "githubRepositoryId",
+    "githubInstallationId",
+    "pullRequestNumber",
+    "pullRequestUrl",
+    "reviewRunId",
+    "reviewSourceEvent",
+    "reviewTriggerRunId",
+    "workspaceLabel",
+    "githubAccountId",
+    "githubAccountType",
+    "authorGithubUserId",
+    "authorLogin",
+    "authorAccountType",
+    "senderGithubUserId",
+    "senderLogin",
+    "senderAccountType"
+  ]);
+  const metadata: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!allowed.has(key)) throw invalidRequest(`unsupported metadata field: ${key}`);
+    if (typeof item !== "string" && typeof item !== "number") {
+      throw invalidRequest(`metadata.${key} must be a string or number`);
+    }
+    metadata[key] = typeof item === "string" ? item.slice(0, 500) : item;
+  }
+  return metadata;
+}
+
 function authenticatedPrincipal(
   request: IncomingMessage,
   config: ApiServerConfig,
@@ -1740,7 +1785,7 @@ function authenticatedPrincipal(
   const hasGraphAccess = Boolean(
     config.graphApiToken &&
     authorization === `Bearer ${config.graphApiToken}` &&
-    (isPublicGraphRoute(pathname) || pathname === "/context-graph/build")
+    (isPublicGraphRoute(pathname) || pathname === "/context-graph/build" || pathname === "/overview")
   );
   if (!hasInternalAccess && !hasGraphAccess) return undefined;
   const tenantId = config.sharedIdentityResolver

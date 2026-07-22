@@ -29,13 +29,13 @@ Cloud Build runs entirely with user-specified Google service accounts. No Google
 
 ## Runtime configuration
 
-The API requires PostgreSQL plus `INTERNAL_API_TOKEN` and `GRAPH_API_TOKEN`. Fixed mode requires `JINA_TENANT_ID`; shared mode requires it to be unset and resolves original tenant UUIDs from the database. Signed intake additionally requires `GITHUB_WEBHOOK_SECRET`.
+The API requires PostgreSQL plus `INTERNAL_API_TOKEN` and `GRAPH_API_TOKEN`. Fixed mode requires `JINA_TENANT_ID`; shared mode requires it to be unset and resolves original tenant UUIDs from the database. Production sets `JINA_GITHUB_WEBHOOK_ENABLED=false` and omits `GITHUB_WEBHOOK_SECRET`; the original Jina service owns GitHub intake and submits tenant-scoped review graph builds. Local signed intake requires both the secret and an enabled switch.
 
 Backend services remain in `jina-v2/us-central1`. Production attaches the single original Jina database in `jina-463721/us-east1`; the original identity tables and v2-owned schemas have separate ownership and grants.
 
 See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants, cutover checks, and rollback.
 
-The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health, task-type definitions, and signed webhooks remain public; tenant data does not.
+The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health and task-type definitions remain public; the disabled webhook route only acknowledges and discards deliveries. Tenant data does not become public.
 
 The current Vercel plan does not provide production Vercel Authentication for new projects, so both web apps enforce app-level HTTP authentication using server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values. The configured username is `omlabs`; the password remains secret. Both apps forward the original tenant UUID through `JINA_TENANT_ID` when calling the shared-database API. The dashboard additionally forwards `JINA_WEB_PRINCIPAL_ID=user:keon@omlabs.xyz`; the admin app calls as `svc:api`. Both are tenant administrators, so possession of the web credentials controls access to tenant-wide data. Rotate the shared password through Secret Manager and both Vercel projects together.
 

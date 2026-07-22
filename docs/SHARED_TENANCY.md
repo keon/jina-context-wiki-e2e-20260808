@@ -12,15 +12,16 @@ Cross-region access adds query latency, network egress, and a dependency on both
 
 ## Identity resolution and propagation
 
-Signed webhook intake resolves an enabled repository to exactly one original tenant using the GitHub repository ID, installation ID, and `owner/repository` name. Resolution requires a non-suspended installation. If no valid binding exists, intake returns `409 repository_tenant_not_found`; it never falls back to a generated tenant.
+The original Jina webhook intake resolves an enabled repository to exactly one original tenant using the GitHub repository ID, installation ID, and `owner/repository` name. Resolution requires a non-suspended installation. After accepting an automatic or `@usejina` review, it submits an idempotent v2 build for the PR head with the original tenant UUID. V2 direct webhook intake is disabled in production and never becomes a second source of review work.
 
 The resolved values flow through the system as follows:
 
 ```text
 public.tenants/repositories/installations
   -> original tenant UUID + GitHub account identity
-  -> webhook planning
-  -> tasks, tracked PRs, events, outbox messages
+  -> original Jina review intake
+  -> tenant-scoped v2 graph build
+  -> graph tasks, events, and outbox messages
   -> context graph observations and projections
   -> dashboard and original-app work overview
 ```
@@ -129,7 +130,7 @@ Before deployment:
 5. In the plain SQL export, remove PostgreSQL 17's `SET transaction_timeout = 0` statement for PostgreSQL 16 compatibility. Remap only exact relational tenant values and JSON `tenantId` values from the legacy `omlabs` tenant to the original tenant UUID. Do not perform a broad text replacement, which would corrupt email addresses, task IDs, and dedupe keys.
 6. Drop and restore only the three v2 schemas, set their ownership to `jina_v2_app`, then run the current schema upgrader once with temporary database `CREATE` permission. Revoke that permission before starting the API; production runs with `JINA_DB_MANAGE_SCHEMA=false`.
 7. Compare every source/target v2 table count, verify that no legacy relational or JSON tenant remains, and sample board/graph reads.
-8. Deploy the already-built images with the checked-in shared-mode substitutions. Verify `/health`, one signed webhook, tenant-scoped `/board`, a worker claim/completion, and a graph query before resuming normal traffic.
+8. Deploy the already-built images with the checked-in shared-mode substitutions. Verify `/health`, a disabled v2 webhook acknowledgment with no created work, one original-app review graph request, tenant-scoped `/board`, a worker claim/completion, and a graph query before resuming normal traffic.
 
 Keep `jina-v2:us-central1:jina-postgres` intact and read-only during the rollback window.
 

@@ -40,6 +40,7 @@ if (tenancyMode === "shared-db" && process.env.JINA_TENANT_ID) {
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
+  githubWebhookEnabled: process.env.JINA_GITHUB_WEBHOOK_ENABLED !== "false",
   ...(process.env.JINA_TENANT_ID ? { tenantId: process.env.JINA_TENANT_ID } : {}),
   tenantAliases: commaSeparatedEnv("JINA_TENANT_ALIASES"),
   enableDevEndpoints,

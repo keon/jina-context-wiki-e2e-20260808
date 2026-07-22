@@ -1,8 +1,10 @@
 # GitHub App Webhook Setup
 
-Jina accepts real GitHub App webhook deliveries at `POST /webhooks/github`. The endpoint verifies the raw body with `X-Hub-Signature-256`, requires `X-GitHub-Delivery` for idempotency, and reads the event type from `X-GitHub-Event`.
+Jina can accept real GitHub App webhook deliveries at `POST /webhooks/github`. The endpoint verifies the raw body with `X-Hub-Signature-256`, requires `X-GitHub-Delivery` for idempotency, and reads the event type from `X-GitHub-Event`.
 
-## Current behavior
+Production currently sets `JINA_GITHUB_WEBHOOK_ENABLED=false` and does not mount `GITHUB_WEBHOOK_SECRET`. The original Jina application is the sole GitHub webhook consumer and calls `POST /context-graph/build` after accepting a review. Disabled v2 intake returns `202` without creating work, avoiding GitHub redelivery noise. Keep the signed route for local development and rollback only.
+
+## Behavior when enabled
 
 | GitHub event    | Action                  | Board result                                                                                                                                                                   |
 | --------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -50,7 +52,7 @@ Create a private GitHub App under the account or organization that owns the repo
 
 Install the App on the repositories Jina should watch. In production shared mode, the original Jina database must already contain the enabled repository, its tenant, and a non-suspended installation. The signed delivery is resolved against those records; an unknown, disabled, suspended, or mismatched repository is rejected instead of receiving a synthetic tenant. Local development and rollback can use fixed mode with `JINA_TENANT_ID`.
 
-The resolved original tenant UUID scopes every task created by the delivery. Task metadata also retains the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types, making those names available on the board and in context graph provenance.
+When intake is enabled, the resolved original tenant UUID scopes every task created by the delivery. In the current production path, the original application sends the same UUID and verified repository/review identity as server-side graph-build metadata. Both paths retain the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types.
 
 The webhook slice does not use an App ID or private key. Workers use `GITHUB_CLONE_TOKEN` for repository cloning and prefer `GITHUB_API_TOKEN` for REST metadata. The production API token needs read access to Contents, Issues, Pull requests, Metadata, Deployments, and Actions; the deployment acceptance fixture depends on Deployments access. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
 
