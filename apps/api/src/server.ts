@@ -135,6 +135,10 @@ interface SharedIdentityResolver {
     readonly githubInstallationId?: number;
     readonly repository: string;
   }): Promise<ResolvedRepositoryIdentity | undefined>;
+  resolveTenantRepositories(input: {
+    readonly tenantId: string;
+    readonly repositories: readonly string[];
+  }): Promise<readonly string[]>;
   listTenantIds(): Promise<readonly string[]>;
   listTenants(): Promise<readonly SharedTenantSummary[]>;
   ping(): Promise<void>;
@@ -703,6 +707,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 403, { error: "inactive_tenant" });
         return;
       }
+      if (config.sharedIdentityResolver) {
+        const connectedRepositories = await config.sharedIdentityResolver.resolveTenantRepositories({
+          tenantId: syncTenantId,
+          repositories
+        });
+        const requestedKeys = new Set(repositories.map((repository) => repository.toLowerCase()));
+        const connectedKeys = new Set(connectedRepositories.map((repository) => repository.toLowerCase()));
+        if (
+          connectedKeys.size !== requestedKeys.size ||
+          [...requestedKeys].some((repository) => !connectedKeys.has(repository))
+        ) {
+          json(response, 409, { error: "repository_not_connected" });
+          return;
+        }
+        repositories = [...connectedRepositories].sort();
+      }
       await contextGraphStore.replaceRepositoryAccess(syncTenantId, principalId, repositories);
       json(response, 200, { principalId, repositoryCount: repositories.length });
       return;
@@ -714,6 +734,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     const { tenantId } = principal;
+    if (config.sharedIdentityResolver && !(await config.sharedIdentityResolver.listTenantIds()).includes(tenantId)) {
+      json(response, 403, { error: "inactive_tenant" });
+      return;
+    }
 
     const usesGraphCredential = hasGraphApiCredential(request, config);
     const requiresBoundGraphPrincipal =

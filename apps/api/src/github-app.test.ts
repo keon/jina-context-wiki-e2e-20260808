@@ -300,6 +300,11 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
         defaultBranch: "main"
       };
     },
+    async resolveTenantRepositories(input: { tenantId: string; repositories: readonly string[] }) {
+      return input.tenantId === SHARED_TENANT
+        ? input.repositories.filter((repository) => repository.toLowerCase() === "omlabs/example")
+        : [];
+    },
     async listTenantIds() {
       return [SHARED_TENANT];
     },
@@ -401,6 +406,42 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   });
   assert.equal(inactiveSync.status, 403);
   assert.equal(contextGraphStore.syncCount, 0);
+
+  const inactivePaths = [
+    "/internal/worker/claim",
+    "/internal/worker/renew",
+    "/internal/worker/release",
+    "/internal/worker/complete",
+    "/internal/context-graph/outbox/drain"
+  ];
+  for (const path of inactivePaths) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": inactiveTenantId
+      },
+      body: "{}"
+    });
+    assert.equal(response.status, 403, `${path} must reject an inactive tenant before mutation`);
+  }
+
+  const activeSync = (repositories: readonly string[]) =>
+    fetch(`${baseUrl}/internal/graph/access/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${GRAPH_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": SHARED_TENANT
+      },
+      body: JSON.stringify({ principalId: `tenant:${SHARED_TENANT}`, repositories })
+    });
+  assert.equal((await activeSync(["elsewhere/foreign"])).status, 409);
+  assert.equal((await activeSync(["omlabs/example", "elsewhere/foreign"])).status, 409);
+  assert.equal(contextGraphStore.syncCount, 0);
+  assert.equal((await activeSync(["OMLABS/EXAMPLE"])).status, 200);
+  assert.equal(contextGraphStore.syncCount, 1);
 
   const mismatchedRepositoryId = pullRequestPayload(43, "def456") as Record<string, unknown>;
   mismatchedRepositoryId.repository = {
@@ -1356,6 +1397,11 @@ test("global admin graph listing requires its own credential and returns every t
         }
         return undefined;
       },
+      async resolveTenantRepositories(input) {
+        return input.tenantId === tenantA
+          ? input.repositories.filter((repository) => repository.toLowerCase() === "omxyz/a")
+          : [];
+      },
       async listTenantIds() {
         return [tenantA];
       },
@@ -1544,8 +1590,8 @@ test("global admin graph listing requires its own credential and returns every t
         githubInstallationId: 101
       })
     });
-    assert.equal(mismatchedBuild.status, 409);
-    assert.equal(((await mismatchedBuild.json()) as { code?: string }).code, "repository_installation_mismatch");
+    assert.equal(mismatchedBuild.status, 403);
+    assert.equal(((await mismatchedBuild.json()) as { error?: string }).error, "inactive_tenant");
 
     const tenantBList = await fetch(`${baseUrl}/context-graph`, {
       headers: {
@@ -1553,13 +1599,7 @@ test("global admin graph listing requires its own credential and returns every t
         "x-jina-tenant-id": tenantB
       }
     });
-    assert.equal(tenantBList.status, 200);
-    assert.deepEqual(
-      ((await tenantBList.json()) as { readonly graphs: readonly { readonly repository: string }[] }).graphs.map(
-        (graph) => graph.repository
-      ),
-      ["external/b"]
-    );
+    assert.equal(tenantBList.status, 403);
     assert.equal(
       (
         await fetch(`${baseUrl}/context-graph/graphs/${tenantBGraph.id}`, {
@@ -1569,7 +1609,7 @@ test("global admin graph listing requires its own credential and returns every t
           }
         })
       ).status,
-      200
+      403
     );
     assert.equal(
       (

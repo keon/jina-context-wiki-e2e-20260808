@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   buildSharedActiveTenantIdsQuery,
   buildSharedRepositoryIdentityQuery,
+  buildSharedTenantRepositoriesQuery,
   normalizeSharedRepositoryIdentityRow,
   normalizeSharedTenantSummaryRows
 } from "./postgres-shared-identity-store.js";
@@ -48,6 +49,20 @@ test("shared identity repository query permits installation/name and name-only f
     "omxyz",
     "jina"
   ]);
+});
+
+test("shared tenant repository query validates a bounded set against one active tenant", () => {
+  const query = buildSharedTenantRepositoriesQuery({
+    tenantId: "e752bea3-c5f1-49d9-9f6d-51953f5deeb4",
+    repositories: ["OmXYZ/Jina", "omxyz/jina", "External/Repo"]
+  });
+
+  assert.deepEqual(query.values, ["e752bea3-c5f1-49d9-9f6d-51953f5deeb4", ["external/repo", "omxyz/jina"]]);
+  assert.match(query.text, /r\.tenant_id = \$1::uuid/);
+  assert.match(query.text, /t\.merged_into_tenant_id is null/);
+  assert.match(query.text, /i\.suspended_at is null/);
+  assert.match(query.text, /i\.deleted_at is null/);
+  assert.match(query.text, /any\(\$2::text\[\]\)/);
 });
 
 test("shared identity repository input rejects ambiguous names and unsafe GitHub IDs", () => {

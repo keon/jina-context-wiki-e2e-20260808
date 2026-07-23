@@ -10,6 +10,11 @@ export interface ResolveSharedRepositoryInput {
   readonly repository: string;
 }
 
+export interface ResolveSharedTenantRepositoriesInput {
+  readonly tenantId: string;
+  readonly repositories: readonly string[];
+}
+
 export interface SharedRepositoryIdentity {
   readonly tenantId: string;
   readonly githubAccountId: string;
@@ -84,6 +89,11 @@ export interface SharedRepositoryIdentityQuery {
   readonly values: readonly (string | null)[];
 }
 
+export interface SharedTenantRepositoriesQuery {
+  readonly text: string;
+  readonly values: readonly [string, readonly string[]];
+}
+
 const RESOLVE_REPOSITORY_SQL = `
   select
     t.id::text as tenant_id,
@@ -131,6 +141,23 @@ const RESOLVE_TENANT_MEMBER_SQL = `
     and tm.github_user_id = $2::bigint
     and t.merged_into_tenant_id is null
   limit 1`;
+
+const RESOLVE_TENANT_REPOSITORIES_SQL = `
+  select
+    r.owner as repository_owner,
+    r.name as repository_name
+  from public.repositories r
+  join public.tenants t on t.id = r.tenant_id
+  join public.installations i
+    on i.id = r.installation_id
+   and i.tenant_id = r.tenant_id
+  where r.tenant_id = $1::uuid
+    and r.enabled = true
+    and t.merged_into_tenant_id is null
+    and i.suspended_at is null
+    and i.deleted_at is null
+    and lower(r.owner) || '/' || lower(r.name) = any($2::text[])
+  order by lower(r.owner), lower(r.name)`;
 
 const LIST_ACTIVE_TENANT_IDS_SQL = `
   select distinct t.id::text as tenant_id
@@ -222,6 +249,18 @@ export class PostgresSharedIdentityStore {
     };
   }
 
+  async resolveTenantRepositories(input: ResolveSharedTenantRepositoriesInput): Promise<readonly string[]> {
+    const query = buildSharedTenantRepositoriesQuery(input);
+    const result = await this.pool.query<{ readonly repository_owner: string; readonly repository_name: string }>(
+      query.text,
+      [...query.values]
+    );
+    return result.rows.map(
+      (row) =>
+        `${requiredText(row.repository_owner, "repository_owner")}/${requiredText(row.repository_name, "repository_name")}`
+    );
+  }
+
   async listTenantIds(): Promise<readonly string[]> {
     const result = await this.pool.query<{ readonly tenant_id: string }>(buildSharedActiveTenantIdsQuery());
     return result.rows.map((row) => requiredText(row.tenant_id, "tenant_id"));
@@ -249,6 +288,21 @@ export function buildSharedRepositoryIdentityQuery(input: ResolveSharedRepositor
     text: RESOLVE_REPOSITORY_SQL,
     values: [githubRepositoryId, githubInstallationId, owner, name]
   };
+}
+
+export function buildSharedTenantRepositoriesQuery(
+  input: ResolveSharedTenantRepositoriesInput
+): SharedTenantRepositoriesQuery {
+  const tenantId = requiredText(input.tenantId, "tenantId");
+  const repositories = [
+    ...new Set(
+      input.repositories.map((repository) => {
+        const [owner, name] = splitRepository(repository);
+        return `${owner.toLowerCase()}/${name.toLowerCase()}`;
+      })
+    )
+  ].sort();
+  return { text: RESOLVE_TENANT_REPOSITORIES_SQL, values: [tenantId, repositories] };
 }
 
 export function buildSharedActiveTenantIdsQuery(): string {
