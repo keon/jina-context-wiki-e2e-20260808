@@ -1,0 +1,27 @@
+{
+  "name": "@jina/graph-renderer",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node-filters": {
+      "types": "./dist/node-filters.d.ts",
+      "default": "./dist/node-filters.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "eslint . --max-warnings 0",
+    "test": "pnpm build && node --test dist/renderer-policy.test.js dist/node-filters.test.js dist/layout-positions.test.js"
+  },
+  "dependencies": {
+    "@cosmos.gl/graph": "^3.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  }
+}

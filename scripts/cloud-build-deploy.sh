@@ -11,11 +11,39 @@ api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
 runtime_service_account="jina-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
+graph_cloud_sql_instance="${GRAPH_CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
 tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
 db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
+graph_db_name="${JINA_GRAPH_DB_NAME:-jina}"
+graph_db_user="${JINA_GRAPH_DB_USER:-jina_app}"
+graph_db_pass_secret="${JINA_GRAPH_DB_PASS_SECRET:-jina-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
+acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-}"
+api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
+api_max_instances="${JINA_API_MAX_INSTANCES:-1}"
+api_concurrency="${JINA_API_CONCURRENCY:-20}"
+api_cpu="${JINA_API_CPU:-1}"
+api_memory="${JINA_API_MEMORY:-512Mi}"
+
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${name} must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+validate_nonnegative_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "${name} must be a non-negative integer" >&2
+    exit 2
+  fi
+}
 
 validate_cloud_sql_instance() {
   local name="$1"
@@ -27,13 +55,31 @@ validate_cloud_sql_instance() {
 }
 
 validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
+validate_cloud_sql_instance "GRAPH_CLOUD_SQL_INSTANCE" "${graph_cloud_sql_instance}"
+validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
+validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
+validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
+validate_positive_integer "JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID" "${acceptance_github_installation_id}"
+if (( api_min_instances > api_max_instances )); then
+  echo "JINA_API_MIN_INSTANCES must not exceed JINA_API_MAX_INSTANCES" >&2
+  exit 2
+fi
 if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
   echo "JINA_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
   exit 2
 fi
+if [[ "${graph_db_pass_secret}" == *","* || "${graph_db_pass_secret}" == *"~"* ]]; then
+  echo "JINA_GRAPH_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
+  exit 2
+fi
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false"
-api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest"
+cloud_sql_instances="${cloud_sql_instance}"
+if [[ "${graph_cloud_sql_instance}" != "${cloud_sql_instance}" ]]; then
+  cloud_sql_instances+=",${graph_cloud_sql_instance}"
+fi
+
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_GITHUB_WEBHOOK_ENABLED=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${graph_cloud_sql_instance}~GRAPH_DB_NAME=${graph_db_name}~GRAPH_DB_USER=${graph_db_user}~JINA_DB_MANAGE_SCHEMA=false"
+api_secrets="DB_PASS=${db_pass_secret},GRAPH_DB_PASS=${graph_db_pass_secret},INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest"
 
 case "${tenancy_mode}" in
   fixed)
@@ -121,11 +167,13 @@ gcloud run deploy jina-api \
   --image="${api_image}" \
   --allow-unauthenticated \
   --service-account="${runtime_service_account}" \
-  --set-cloudsql-instances="${cloud_sql_instance}" \
-  --concurrency=20 \
+  --set-cloudsql-instances="${cloud_sql_instances}" \
+  --concurrency="${api_concurrency}" \
+  --cpu="${api_cpu}" \
+  --memory="${api_memory}" \
   --timeout=900 \
-  --min-instances=0 \
-  --max-instances=1 \
+  --min-instances="${api_min_instances}" \
+  --max-instances="${api_max_instances}" \
   --set-env-vars="${api_env_vars}" \
   --set-secrets="${api_secrets}" \
   --quiet
@@ -147,8 +195,8 @@ gcloud run deploy jina-context-graph-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_GRAPH_CODEX_PROVIDER=openrouter~CONTEXT_GRAPH_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=16000~CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=12000" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~CONTEXT_GRAPH_MODEL=google/gemini-3.5-flash-lite~CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS=12000~CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000~CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest" \
   --quiet
 
 context_graph_worker_url="$(gcloud run services describe jina-context-graph-worker \
@@ -180,7 +228,7 @@ gcloud run deploy jina-task-worker \
   --max-instances=1 \
   --no-cpu-throttling \
   --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-review|run-research|run-publish|run-cleanup~REVIEW_MODEL=gpt-5.6-sol" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_API_TOKEN=jina-github-api-token:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
 task_worker_url="$(gcloud run services describe jina-task-worker \
@@ -196,7 +244,7 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${runtime_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_TIMEOUT_MS=3000000~ACCEPTANCE_ISSUE_NUMBER=4~ACCEPTANCE_RESOLUTION_PR_NUMBER=5~ACCEPTANCE_CAUSING_PR_NUMBER=3~ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2~ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin~ACCEPTANCE_V51_FIXTURE=true" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000~ACCEPTANCE_ISSUE_NUMBER=4~ACCEPTANCE_RESOLUTION_PR_NUMBER=5~ACCEPTANCE_CAUSING_PR_NUMBER=3~ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2~ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin~ACCEPTANCE_V51_FIXTURE=true" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \
@@ -244,4 +292,7 @@ Task worker: ${task_worker_url}
 Image tag: ${image_tag}
 Cloud SQL: ${cloud_sql_instance}
 Tenancy mode: ${tenancy_mode}
+API instances: ${api_min_instances}-${api_max_instances}
+API concurrency: ${api_concurrency}
+API size: ${api_cpu} CPU / ${api_memory}
 SUMMARY

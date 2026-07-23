@@ -4,12 +4,15 @@ import {
   createContextGraph,
   isProblemEvidencePath,
   materializeRequiredCausalAssertions,
+  materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
+  requiredMoveAnchors,
   sourceBackedModelEntityIds,
   validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
+  validateRequiredMoveAssertions,
   validateSourceBackedModelEntities
 } from "./model.js";
 import { MemoryContextGraphStore } from "./store.js";
@@ -30,6 +33,7 @@ import { predicateDefinition, validatePredicateEndpoints, validateQualifiers } f
 import {
   RepositoryContextOrchestrator,
   classifyTemplates,
+  extractCausalRootText,
   extractFeatureText,
   extractIssueText,
   extractRepositoryPath,
@@ -42,6 +46,7 @@ import {
   normalizeGitHubSourceObservation,
   normalizeSourceObservation,
   parseIncidentDocument,
+  parseIncidentDocumentObservations,
   parsePackageManifest,
   parseServiceDefinitions
 } from "./normalizers.js";
@@ -53,6 +58,16 @@ import {
   type CausalTraceProjection
 } from "./causal.js";
 import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js";
+import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
+
+test("assertion generation requires evidence-backed move continuity", () => {
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v20-source-owned-incident-relations/);
+  assert.match(
+    CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
+    /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
+  );
+  assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /emit current MOVED_FROM previous/);
+});
 
 test("snapshot-first contextGraph builds publish and ingest history without waiting for assertions", async () => {
   const coordinator = new MemoryContextGraphPipelineCoordinator();
@@ -111,7 +126,6 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
   const ready = (await coordinator.list("tenant"))[0]!.stages.filter((stage) => stage.status === "queued");
   assert.deepEqual(ready.map((stage) => `${stage.phase}:${stage.stage}`).sort(), [
     "history:ingest",
-    "snapshot:assert",
     "snapshot:project"
   ]);
   const projection = await claim("run-context-graph-project", "2026-07-21T00:03:00.000Z");
@@ -128,7 +142,19 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
   );
   const history = await claim("run-context-graph-ingest", "2026-07-21T00:05:00.000Z");
   assert.equal(history.task.metadata.pipelinePhase, "history");
-  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:05:00.000Z");
+  assert.equal(
+    await coordinator.complete({
+      tenantId: "tenant",
+      stageId: history.task.id,
+      leaseId: history.message.leaseId,
+      outcome: "done",
+      now: "2026-07-21T00:06:00.000Z",
+      nextMetadata: metadata
+    }),
+    true
+  );
+  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:07:00.000Z");
+  assert.equal(assertion.task.metadata.pipelinePhase, "history");
   assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
 });
 
@@ -458,6 +484,36 @@ test("deterministic intake extracts direct packages and stable services", () => 
   assert.deepEqual(normalizeSourceObservation({ ...manifest, dependencies: [], removed: true }).assertions, []);
   assert.deepEqual(normalizeSourceObservation({ ...services[0]!, removed: true }).assertions, []);
   assert.deepEqual(normalizeSourceObservation({ ...incident, removed: true }).assertions, []);
+  const incidentObservations = parseIncidentDocumentObservations({
+    tenantId: "t",
+    repository: "org/repo",
+    path: "docs/postmortems/INC-42.md",
+    content: [
+      "---",
+      "incident_id: INC-42",
+      "service: api",
+      "service_source: compose",
+      "service_external_id: org/repo:api",
+      "issue: #7",
+      "---",
+      "# Administrator deletion outage",
+      `Incident INC-42 was introduced by Deployment deployment:github:former/repo:101, which deployed commit ${"b".repeat(40)} to the api service.`,
+      `Incident INC-42 was resolved by Deployment deployment:github:former/repo:102. That recovery deployment shipped commit ${"c".repeat(40)} to api.`
+    ].join("\n"),
+    recordedAt: "2026-01-02T00:00:00Z"
+  });
+  assert.deepEqual(
+    incidentObservations.map((observation) =>
+      observation.kind === "deployment"
+        ? [observation.kind, observation.source, observation.externalId, observation.commitSha, observation.status]
+        : [observation.kind, observation.externalId]
+    ),
+    [
+      ["incident", "org/repo:inc-42"],
+      ["deployment", "github", "former/repo:101", "b".repeat(40), "incident_source"],
+      ["deployment", "github", "former/repo:102", "c".repeat(40), "incident_recovery"]
+    ]
+  );
   const pyproject = parsePackageManifest({
     tenantId: "t",
     repository: "org/repo",
@@ -2604,7 +2660,7 @@ test("ignores model duplicates of deterministic GitHub issue resolutions", () =>
   assert.equal(assertions[0]?.object.naturalKey, `repo:${repository}:sha:${sha}`);
 });
 
-test("keeps reviewed incident deployment resolution outside GitHub issue normalization", () => {
+test("drops model duplicates of source-owned incident deployment history", () => {
   const repository = "omxyz/demo";
   const assertions = assertionsFromGeneratedContextGraph(
     {
@@ -2639,12 +2695,7 @@ test("keeps reviewed incident deployment resolution outside GitHub issue normali
     },
     repository
   );
-  assert.deepEqual(
-    assertions.map((assertion) => assertion.predicate),
-    ["RESOLVED_BY"]
-  );
-  assert.equal(assertions[0]?.subject.kind, "Incident");
-  assert.equal(assertions[0]?.object.kind, "Deployment");
+  assert.deepEqual(assertions, []);
 });
 
 test("infers a reviewed Feature and answers from its projected relationships", async () => {
@@ -2653,6 +2704,16 @@ test("infers a reviewed Feature and answers from its projected relationships", a
   const commitSha = "f".repeat(40);
   const store = new MemoryContextGraphStore();
   assert.equal(extractFeatureText("What implements the administrator deletion feature?"), "administrator deletion");
+  assert.equal(
+    extractFeatureText("What package does the Administrator resource deletion implementation depend on?"),
+    "Administrator resource deletion"
+  );
+  assert.equal(
+    extractFeatureText(
+      "If package zod were excluded, which Administrator resource deletion implementation paths disappear?"
+    ),
+    "Administrator resource deletion"
+  );
   assert.deepEqual(classifyTemplates('Which files implement "administrator deletion"?'), ["feature_trace"]);
   await store.planIngestion({
     tenantId,
@@ -2849,7 +2910,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     allowedRepositories: [repository],
     repository,
     ref: "main",
-    question: 'What package does the "administrator deletion" implementation depend on?'
+    question: "What package does the administrator deletion implementation depend on?"
   });
   assert.equal(dependency.calls[0]?.template, "causal_trace");
   assert.match(dependency.answer, /pg/);
@@ -2858,7 +2919,7 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     allowedRepositories: [repository],
     repository,
     ref: "main",
-    question: "If package pg were excluded, which implementation paths disappear?"
+    question: "If package pg were excluded, which administrator deletion implementation paths disappear?"
   });
   assert.equal(excludedPackage.calls[0]?.template, "counterfactual");
   assert.equal(excludedPackage.counterfactual?.removedPaths.length, 1);
@@ -2909,6 +2970,119 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     0,
     "feature retrieval excludes assertions whose evidence is stale on the requested ref"
   );
+});
+
+test("causal root resolution prefers the named incident over requested result kinds", async () => {
+  const repository = "omxyz/incident-fixture";
+  const incidentId = "incident:github:omxyz/incident-fixture#14";
+  const serviceId = "service:compose:omxyz/incident-fixture:api";
+  const featureId = "repo:omxyz/incident-fixture:feature:administrator-deletion";
+  const question = "Which service and feature did incident INC-2026-42 impact?";
+  assert.equal(extractCausalRootText(question), "INC-2026-42");
+
+  const graph = createContextGraph({
+    request: {
+      tenantId: "tenant",
+      repository,
+      ref: "main",
+      taskId: "incident-projection"
+    },
+    commitSha: "a".repeat(40),
+    generatedAt: "2026-07-23T00:00:00.000Z",
+    executor: "projection",
+    model: "fixture",
+    generated: {
+      summary: "incident impact",
+      nodes: [
+        {
+          id: "repo",
+          kind: "Repository",
+          label: repository,
+          description: repository,
+          evidence: ["README.md:1"]
+        },
+        {
+          id: incidentId,
+          kind: "Incident",
+          label: "INC-2026-42 administrator deletion outage",
+          description: "incident 14",
+          evidence: ["docs/postmortems/INC-2026-42.md:1"]
+        },
+        {
+          id: serviceId,
+          kind: "Service",
+          label: "atlas-access-api",
+          description: "impacted service",
+          evidence: ["compose.yaml:1"]
+        },
+        {
+          id: featureId,
+          kind: "Feature",
+          label: "Administrator resource deletion",
+          description: "impacted feature",
+          evidence: ["src/admin-deletion.ts:1"]
+        }
+      ],
+      edges: [
+        {
+          source: incidentId,
+          target: serviceId,
+          predicate: "INCIDENT_IMPACTS",
+          plane: "knowledge",
+          confidence: 1,
+          why: "The postmortem names the affected service.",
+          evidence: ["docs/postmortems/INC-2026-42.md:2"]
+        },
+        {
+          source: incidentId,
+          target: featureId,
+          predicate: "INCIDENT_IMPACTS",
+          plane: "knowledge",
+          confidence: 1,
+          why: "The postmortem names the affected feature.",
+          evidence: ["docs/postmortems/INC-2026-42.md:3"]
+        }
+      ]
+    }
+  });
+  const items = causalTraceItemsFromGraph(graph, {
+    tenantId: "tenant",
+    allowedRepositories: [repository],
+    repository,
+    template: "causal_trace",
+    query: question,
+    rootText: "INC-2026-42",
+    featureText: "service and"
+  });
+  const trace = items[0]?.data as unknown as CausalTraceProjection;
+  assert.equal(trace.root.id, incidentId);
+  assert.deepEqual(trace.affectedEntities.map((path) => path.nodes[1]?.kind).sort(), ["Feature", "Service"]);
+
+  const answer = await new RepositoryContextOrchestrator({
+    async retrieve(request: RetrievalRequest) {
+      const selected = causalTraceItemsFromGraph(graph, request);
+      return {
+        template: request.template,
+        repository,
+        ref: "main",
+        items: selected,
+        truncated: false,
+        totalBeforeLimit: selected.length,
+        limit: request.limit ?? 50
+      };
+    }
+  }).answer({
+    tenantId: "tenant",
+    allowedRepositories: [repository],
+    repository,
+    question
+  });
+  const orchestratedTrace = answer.calls[0]?.items[0]?.data as unknown as CausalTraceProjection;
+  assert.equal(orchestratedTrace.root.id, incidentId);
+  assert.deepEqual(orchestratedTrace.affectedEntities.map((path) => path.nodes[1]?.kind).sort(), [
+    "Feature",
+    "Service"
+  ]);
 });
 
 function generatedDerivedIssue(repository: string, pullRequestNumber: number) {
@@ -3041,6 +3215,13 @@ test("requires explicit root-cause records to appear as causal assertions", () =
       endLine: 2
     }
   ]);
+  assert.deepEqual(
+    requiredMoveAnchors([
+      { path: "README.md", content: "`../../outside.ts` moved from `src/inside.ts`." },
+      { path: "README.md", content: "src/current.ts may resemble src/old.ts." }
+    ]),
+    []
+  );
   const generated = parseGeneratedContextGraph({
     summary: "explicit causes",
     nodes: [
@@ -3083,6 +3264,73 @@ test("requires explicit root-cause records to appear as causal assertions", () =
   );
 });
 
+test("validates an untracked causal issue through its explicit no-issue statement", async () => {
+  const sha = "08fdf81f84b9db0c0c35e2506dfc151d9236f7ac";
+  const evidencePath = "docs/cf-audit-export-root-cause.md";
+  const content = [
+    "# Audit exports are not chronological",
+    "",
+    `The audit export regression was introduced by PR #10, merged as commit ${sha}.`,
+    "",
+    "That change reversed the sequence comparator and returned row 3 before row 1.",
+    "",
+    "This change restores the ascending comparator and its regression test. No GitHub issue was opened for this repair."
+  ].join("\n");
+  const anchors = requiredCausalAnchors([{ path: evidencePath, content }], [11]);
+  assert.deepEqual(anchors, [
+    {
+      issueId: "derived:pr:11",
+      commitSha: sha,
+      evidencePath,
+      startLine: 3,
+      endLine: 7
+    }
+  ]);
+  const generated = parseGeneratedContextGraph({
+    summary: "untracked audit regression",
+    nodes: [
+      {
+        id: "repo",
+        kind: "Repository",
+        label: "demo",
+        description: "repository",
+        evidence: ["README.md:1"]
+      },
+      {
+        id: "derived:pr:11",
+        kind: "Issue",
+        label: "Chronological audit exports regression",
+        description: "Audit exports were returned newest-first.",
+        evidence: [`${evidencePath}:1-7`]
+      },
+      {
+        id: sha,
+        kind: "Commit",
+        label: sha.slice(0, 12),
+        description: "Reversed the sequence comparator.",
+        evidence: [`${evidencePath}:3-5`]
+      }
+    ],
+    edges: [
+      {
+        source: "derived:pr:11",
+        target: sha,
+        predicate: "INTRODUCED_BY",
+        plane: "knowledge",
+        confidence: 1,
+        why: "The cited change reversed the sequence comparator.",
+        evidence: [`${evidencePath}:3-7`]
+      }
+    ]
+  });
+  validateRequiredCausalAssertions(generated, anchors);
+  await validateContextGraphEvidence(generated, async (path) => {
+    if (path === evidencePath) return content;
+    if (path === "README.md") return "demo";
+    throw new Error(`unexpected evidence path: ${path}`);
+  });
+});
+
 test("materializes explicit causal contracts and drops malformed optional causal edges", async () => {
   const sha = "c".repeat(40);
   const evidencePath = "docs/audit-root-cause.md";
@@ -3120,15 +3368,149 @@ test("materializes explicit causal contracts and drops malformed optional causal
 
   const materialized = materializeRequiredCausalAssertions(generated, anchors);
 
-  assert.equal(materialized.edges.length, 1);
-  assert.equal(materialized.edges[0]?.source, "derived:pr:11");
-  assert.equal(materialized.edges[0]?.target, sha);
+  assert.equal(materialized.edges.length, 2);
+  assert.ok(
+    materialized.edges.some(
+      (edge) => edge.predicate === "INTRODUCED_BY" && edge.source === "derived:pr:11" && edge.target === sha
+    )
+  );
+  assert.ok(
+    materialized.edges.some(
+      (edge) => edge.predicate === "RESOLVED_BY" && edge.source === "derived:pr:11" && edge.target === "11"
+    )
+  );
   assert.equal(materialized.nodes.find((node) => node.id === "derived:pr:11")?.kind, "Issue");
   assert.equal(materialized.nodes.find((node) => node.id === sha)?.kind, "Commit");
+  assert.equal(materialized.nodes.find((node) => node.id === "11")?.kind, "PullRequest");
   validateRequiredCausalAssertions(materialized, anchors);
+  validateRequiredDerivedIssues(
+    materialized,
+    [
+      {
+        id: "pr-11",
+        source: "github",
+        type: "pull_request",
+        repository: "org/repo",
+        payloadSha: "payload",
+        payload: {
+          kind: "pull_request",
+          number: 11,
+          title: "Restore chronological audit exports",
+          body: "Restores the broken audit order without a tracked issue.",
+          mergedAt: "2026-07-21T01:28:05Z",
+          resolvesIssueNumbers: [],
+          referencesIssueNumbers: []
+        }
+      }
+    ],
+    [11]
+  );
   await validateContextGraphEvidence(materialized, async (path) => {
     if (path === evidencePath) return content;
     if (path === "README.md") return "demo";
+    throw new Error(`unexpected evidence path: ${path}`);
+  });
+});
+
+test("normalizes complete incident deployment history independently of model evidence budgets", () => {
+  const evidencePath = "docs/postmortems/INC-2026-42.md";
+  const content = [
+    "---",
+    "incident_id: INC-2026-42",
+    "issue: #14",
+    "---",
+    "# Administrator deletion outage",
+    `Incident INC-2026-42 was introduced by Deployment deployment:github:omxyz/jina-ontology-e2e:5535506368, which deployed commit ${"a".repeat(40)}.`,
+    `Incident INC-2026-99 was resolved by Deployment deployment:github:omxyz/jina-ontology-e2e:999, which shipped commit ${"c".repeat(40)}.`,
+    ...Array.from({ length: 80 }, (_, index) => `Detailed timeline entry ${index + 1}: investigation continued.`),
+    `Incident INC-2026-42 was resolved by Deployment deployment:github:omxyz/jina-ontology-e2e:5535522601, which shipped commit ${"b".repeat(40)}.`
+  ].join("\n");
+  assert.ok(content.indexOf("5535522601") > 500, "recovery evidence is beyond the generic prompt prefix budget");
+  const observations = parseIncidentDocumentObservations({
+    tenantId: "t",
+    repository: "omxyz/jina-context-graph-e2e",
+    path: evidencePath,
+    content,
+    recordedAt: "2026-07-22T00:00:00Z"
+  });
+  const incident = observations.find((observation) => observation.kind === "incident");
+  assert.ok(incident);
+  const normalized = normalizeSourceObservation(incident);
+  assert.deepEqual(
+    normalized.assertions
+      .filter((assertion) => assertion.object.kind === "Deployment")
+      .map((assertion) => [assertion.subject.key, assertion.predicate, assertion.object.key]),
+    [
+      [
+        "incident:github:omxyz/jina-context-graph-e2e#14",
+        "INTRODUCED_BY",
+        "deployment:github:omxyz/jina-ontology-e2e:5535506368"
+      ],
+      [
+        "incident:github:omxyz/jina-context-graph-e2e#14",
+        "RESOLVED_BY",
+        "deployment:github:omxyz/jina-ontology-e2e:5535522601"
+      ]
+    ]
+  );
+  assert.equal(
+    normalized.assertions.find((assertion) => assertion.predicate === "INTRODUCED_BY")?.qualifiers?.reason !==
+      undefined,
+    true
+  );
+});
+
+test("materializes explicit file move continuity from repository evidence", async () => {
+  const evidencePath = "README.md";
+  const content = "`src/admin-deletion.ts` moved from `src/legacy-admin-deletion.ts` while retaining the same feature.";
+  const anchors = requiredMoveAnchors([
+    { path: evidencePath, content },
+    {
+      path: "docs/migration.md",
+      content: "The implementation moved from `src/legacy-admin-deletion.ts` to `src/admin-deletion.ts`."
+    }
+  ]);
+  assert.deepEqual(anchors, [
+    {
+      currentPath: "src/admin-deletion.ts",
+      previousPath: "src/legacy-admin-deletion.ts",
+      evidencePath,
+      startLine: 1,
+      endLine: 1
+    }
+  ]);
+
+  const generated = parseGeneratedContextGraph({
+    summary: "model output omitted explicit move continuity",
+    nodes: [
+      {
+        id: "repo",
+        kind: "Repository",
+        label: "demo",
+        description: "repository",
+        evidence: ["README.md:1"]
+      }
+    ],
+    edges: []
+  });
+  const materialized = materializeRequiredMoveAssertions(generated, anchors);
+  validateRequiredMoveAssertions(materialized, anchors);
+  assert.equal(
+    materialized.edges.some(
+      (edge) =>
+        edge.predicate === "MOVED_FROM" &&
+        edge.source === "file:src/admin-deletion.ts" &&
+        edge.target === "file:src/legacy-admin-deletion.ts"
+    ),
+    true
+  );
+  const assertions = assertionsFromGeneratedContextGraph(materialized, "omxyz/demo");
+  assert.deepEqual(
+    assertions.map((assertion) => [assertion.subject.naturalKey, assertion.predicate, assertion.object.naturalKey]),
+    [["repo:omxyz/demo:path:src/admin-deletion.ts", "MOVED_FROM", "repo:omxyz/demo:path:src/legacy-admin-deletion.ts"]]
+  );
+  await validateContextGraphEvidence(materialized, async (path) => {
+    if (path === evidencePath) return content;
     throw new Error(`unexpected evidence path: ${path}`);
   });
 });

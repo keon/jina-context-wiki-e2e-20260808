@@ -16,12 +16,91 @@ import {
   type RetrievalResult
 } from "@jina/context-graph";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
+import { resolveDatabaseConfigs } from "./database-config.js";
 
 const SECRET = "test-webhook-secret";
 const INTERNAL_TOKEN = "test-internal-token";
 const GRAPH_TOKEN = "test-graph-token";
 const TENANT = "github:installation:99";
 const SHARED_TENANT = "5f4d1548-7e14-4f9e-a6e2-e7d38b61b1c2";
+
+test("database config keeps graph storage on the primary database when no graph override exists", () => {
+  const configs = resolveDatabaseConfigs({
+    DATABASE_URL: "postgresql://primary.example/jina"
+  });
+
+  assert.deepEqual(configs, {
+    primary: { connectionString: "postgresql://primary.example/jina" },
+    graph: { connectionString: "postgresql://primary.example/jina" },
+    graphIsDedicated: false
+  });
+});
+
+test("database config isolates graph storage when an explicit graph connection exists", () => {
+  const configs = resolveDatabaseConfigs({
+    INSTANCE_UNIX_SOCKET: "/cloudsql/original:us-east1:jina-db",
+    DB_USER: "jina_v2_app",
+    DB_PASS: "primary-password",
+    DB_NAME: "jina",
+    GRAPH_INSTANCE_UNIX_SOCKET: "/cloudsql/jina-v2:us-central1:jina-postgres",
+    GRAPH_DB_USER: "jina_app",
+    GRAPH_DB_PASS: "graph-password",
+    GRAPH_DB_NAME: "jina"
+  });
+
+  assert.deepEqual(configs, {
+    primary: {
+      host: "/cloudsql/original:us-east1:jina-db",
+      user: "jina_v2_app",
+      password: "primary-password",
+      database: "jina"
+    },
+    graph: {
+      host: "/cloudsql/jina-v2:us-central1:jina-postgres",
+      user: "jina_app",
+      password: "graph-password",
+      database: "jina"
+    },
+    graphIsDedicated: true
+  });
+});
+
+test("database config fails closed on a partial graph database override", () => {
+  assert.throws(
+    () =>
+      resolveDatabaseConfigs({
+        DATABASE_URL: "postgresql://primary.example/jina",
+        GRAPH_DB_NAME: "jina"
+      }),
+    /GRAPH_DATABASE_URL or GRAPH_INSTANCE_UNIX_SOCKET\/GRAPH_DB_HOST is required/
+  );
+});
+
+test("disabled GitHub intake acknowledges signed deliveries without creating work", async (context) => {
+  const server = createApiServer({
+    githubWebhookSecret: SECRET,
+    githubWebhookEnabled: false,
+    internalApiToken: INTERNAL_TOKEN,
+    tenantId: TENANT
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const address = server.address() as AddressInfo;
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+  const response = await deliver(baseUrl, "pull_request", "delivery-disabled", pullRequestPayload(42, "abc123"));
+  assert.equal(response.status, 202);
+  assert.deepEqual(await response.json(), {
+    accepted: false,
+    reason: "GitHub webhook intake is disabled; original Jina owns review intake"
+  });
+  const board = await authenticatedFetch(`${baseUrl}/board`).then(
+    (value) => value.json() as Promise<{ tasks: unknown[] }>
+  );
+  assert.deepEqual(board.tasks, []);
+});
 
 test("signed GitHub App deliveries create idempotent PR and issue tasks", async (context) => {
   const server = createApiServer({ githubWebhookSecret: SECRET, internalApiToken: INTERNAL_TOKEN, tenantId: TENANT });
@@ -243,6 +322,14 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     board.tasks.every((task) => task.metadata.tenantId === SHARED_TENANT),
     true
   );
+  const graphOverviewResponse = await fetch(`${baseUrl}/overview`, {
+    headers: {
+      authorization: `Bearer ${GRAPH_TOKEN}`,
+      "x-jina-tenant-id": SHARED_TENANT,
+      "x-jina-principal-id": `tenant:${SHARED_TENANT}`
+    }
+  });
+  assert.equal(graphOverviewResponse.status, 200);
   assert.equal(
     board.tasks.every((task) => task.metadata.workspaceLabel === "omlabs"),
     true
@@ -286,15 +373,15 @@ test("branch pushes create and supersede the existing context graph workflow", a
 
   const first = await deliver(baseUrl, "push", "push-1", pushPayload("a".repeat(40)));
   assert.equal(first.status, 202);
-  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 7);
+  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 6);
   const repeatedHead = await deliver(baseUrl, "push", "push-2", pushPayload("a".repeat(40)));
   assert.equal(((await repeatedHead.json()) as { outcome: string }).outcome, "duplicate");
   const second = await deliver(baseUrl, "push", "push-3", pushPayload("b".repeat(40)));
-  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 7);
+  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 6);
   const returned = await deliver(baseUrl, "push", "push-4", pushPayload("a".repeat(40)));
   assert.equal(
     ((await returned.json()) as { createdTaskIds: string[] }).createdTaskIds.length,
-    7,
+    6,
     "moving a branch back to an earlier SHA is a new ref transition, not a redelivery"
   );
 
@@ -308,7 +395,6 @@ test("branch pushes create and supersede the existing context graph workflow", a
   const old = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-3");
   assert.deepEqual(current.map((task) => task.type).sort(), [
     "context_graph_assert",
-    "context_graph_assert",
     "context_graph_build",
     "context_graph_ingest",
     "context_graph_ingest",
@@ -317,8 +403,30 @@ test("branch pushes create and supersede the existing context graph workflow", a
   ]);
   assert.equal(current.find((task) => task.type === "context_graph_ingest")?.status, "queued");
   assert.equal(
+    current.every((task) => task.metadata.githubInstallationId === 99),
+    true,
+    "the webhook installation id is durable across every graph stage"
+  );
+  assert.equal(
     old.every((task) => task.status === "superseded"),
     true
+  );
+
+  const directBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ repository: "omlabs/example", ref: "main", requestKey: "operator-retry" })
+  });
+  assert.equal(directBuild.status, 202);
+  const retriedBoard = await authenticatedFetch(`${baseUrl}/board`).then(
+    (response) => response.json() as Promise<{ tasks: { metadata: Record<string, unknown> }[] }>
+  );
+  const retried = retriedBoard.tasks.filter((task) => task.metadata.requestKey === "operator-retry");
+  assert.equal(retried.length, 6);
+  assert.equal(
+    retried.every((task) => task.metadata.githubInstallationId === 99),
+    true,
+    "operator retries inherit the last recorded installation id for the repository"
   );
 });
 
@@ -549,6 +657,20 @@ test("API maps validation failures to typed client errors", async () => {
       error: "repository must be a non-empty string",
       code: "invalid_request"
     });
+    const excessiveHistory = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "omxyz/example",
+        metadata: { source: "jina-v1-dashboard", historyLimit: 10_001 }
+      })
+    });
+    assert.equal(excessiveHistory.status, 400);
+    assert.deepEqual(await excessiveHistory.json(), {
+      accepted: false,
+      error: "metadata.historyLimit must be an integer from 1 to 10000",
+      code: "invalid_request"
+    });
   } finally {
     await close(server);
   }
@@ -568,7 +690,13 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         repository: "omxyz/context-graph-fixture",
         ref: "main",
         requestKey: "test",
-        snapshotFirst: true
+        snapshotFirst: true,
+        metadata: {
+          source: "jina-v1-review",
+          pullRequestNumber: 42,
+          authorLogin: "alice",
+          historyLimit: 2_500
+        }
       })
     });
     assert.equal(created.status, 202);
@@ -580,6 +708,7 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
     let ingestion = await claimTopic(baseUrl, "run-context-graph-ingest");
     assert.equal(ingestion.message.topic, "run-context-graph-ingest");
     assert.equal(ingestion.task.metadata?.pipelinePhase, "snapshot");
+    assert.equal(ingestion.task.metadata?.historyLimit, 2_500);
 
     const renewed = await fetch(`${baseUrl}/internal/worker/renew`, {
       method: "POST",
@@ -676,6 +805,23 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
       200
     );
 
+    const historyIngestion = await claimTopic(baseUrl, "run-context-graph-ingest");
+    assert.equal(historyIngestion.task.metadata?.pipelinePhase, "history");
+    assert.equal(
+      await completeClaim(baseUrl, historyIngestion, {
+        observationId: firstPlan.observationId,
+        commitSha,
+        fileCount: 2,
+        discoveredBlobCount: 2,
+        reusedBlobCount: 2,
+        parsedBlobCount: 0,
+        parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
+        codeCheckpoint: "code-checkpoint",
+        evidenceFingerprint: "evidence-fixture"
+      }),
+      200
+    );
+
     const assertion = await claimTopic(baseUrl, "run-context-graph-assert");
     assert.equal(assertion.message.topic, "run-context-graph-assert");
     const asserted = await fetch(`${baseUrl}/internal/worker/complete`, {
@@ -729,8 +875,12 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
     });
     assert.equal(asserted.status, 200);
 
-    const projection = await claimTopic(baseUrl, "run-context-graph-project");
-    assert.equal(await completeClaim(baseUrl, projection, { projected: true }), 200);
+    const snapshotProjection = await claimTopic(baseUrl, "run-context-graph-project");
+    assert.equal(snapshotProjection.task.metadata?.pipelinePhase, "snapshot");
+    assert.equal(await completeClaim(baseUrl, snapshotProjection, { projected: true }), 200);
+    const historyProjection = await claimTopic(baseUrl, "run-context-graph-project");
+    assert.equal(historyProjection.task.metadata?.pipelinePhase, "history");
+    assert.equal(await completeClaim(baseUrl, historyProjection, { projected: true }), 200);
 
     const contextGraph = await fetch(`${baseUrl}/context-graph`).then(
       (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
@@ -770,6 +920,9 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         }>
     );
     assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.source, "jina-v1-review");
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.pullRequestNumber, 42);
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.authorLogin, "alice");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_ingest")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_assert")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_project")?.status, "done");
@@ -805,12 +958,12 @@ test("a new context graph attempt supersedes older active work for the same repo
     );
     const first = board.tasks.filter((task) => task.metadata.requestKey === "first");
     const second = board.tasks.filter((task) => task.metadata.requestKey === "second");
-    assert.equal(first.length, 7);
+    assert.equal(first.length, 6);
     assert.equal(
       first.every((task) => task.status === "superseded"),
       true
     );
-    assert.equal(second.length, 7, "an idempotent request key does not duplicate the attempt");
+    assert.equal(second.length, 6, "an idempotent request key does not duplicate the attempt");
     assert.equal(second.find((task) => task.type === "context_graph_ingest")?.status, "queued");
     assert.equal(
       "timing" in (second.find((task) => task.type === "context_graph_ingest")?.metadata ?? {}),
@@ -1152,9 +1305,24 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
           "content-type": "application/json",
           ...(principalId ? { "x-jina-principal-id": principalId } : {})
         },
-        body: JSON.stringify({ repository, ref: "main", requestKey: `graph-client-${repository}` })
+        body: JSON.stringify({
+          repository,
+          ref: "main",
+          requestKey: `graph-client-${repository}`,
+          metadata: { githubInstallationId: 99 }
+        })
       });
     assert.equal((await build(undefined, "omxyz/a")).status, 401);
+    const missingInstallation = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${GRAPH_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-principal-id": principalA
+      },
+      body: JSON.stringify({ repository: "omxyz/a", ref: "main", requestKey: "missing-installation" })
+    });
+    assert.equal(missingInstallation.status, 400);
     assert.equal((await build(principalA, "omxyz/a")).status, 202);
     assert.equal((await build(principalA, "other/b")).status, 403);
 
@@ -1241,7 +1409,7 @@ test("context graph task-board state is independent of the legacy JSON board sna
           outbox: { id: string; status: string; topic: string }[];
         }>
     );
-    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 7);
+    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 6);
     assert.equal(
       board.outbox.some((message) => message.topic === "run-context-graph-ingest" && message.status === "pending"),
       true
@@ -1425,6 +1593,16 @@ test("context graph completion does not depend on the legacy board snapshot", as
       }),
       200
     );
+    const historyIngestion = await claimTopic(baseUrl, "run-context-graph-ingest");
+    assert.equal(historyIngestion.task.metadata?.pipelinePhase, "history");
+    assert.equal(
+      await completeClaim(baseUrl, historyIngestion, {
+        commitSha,
+        codeCheckpoint: "code-checkpoint",
+        evidenceFingerprint: "evidence-fingerprint"
+      }),
+      200
+    );
     const assertion = await claimTopic(baseUrl, "run-context-graph-assert");
     const firstCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
       method: "POST",
@@ -1586,6 +1764,66 @@ test("context graph responses can inline the assertion review queue", async () =
       `${baseUrl}/context-graph/assertions?repository=${encodeURIComponent(withAssertions.latest?.repository ?? "")}`
     ).then((response) => response.json())) as { assertions: unknown[] };
     assert.deepEqual(withAssertions.assertions, direct.assertions);
+  } finally {
+    await close(server);
+  }
+});
+
+test("dashboard context graph revalidation skips graph hydration and assertion reads", async () => {
+  class CountingStore extends MemoryContextGraphStore {
+    readonly calls = { latest: 0, summaries: 0, assertions: 0, get: 0 };
+
+    override async latest(
+      tenantId: string,
+      repositories?: readonly string[],
+      filter?: { repository?: string; ref?: string }
+    ) {
+      this.calls.latest += 1;
+      return super.latest(tenantId, repositories, filter);
+    }
+
+    override async listSummaries(tenantId: string, filter?: { repository?: string; ref?: string }) {
+      this.calls.summaries += 1;
+      return super.listSummaries(tenantId, filter);
+    }
+
+    override async listAssertions(
+      tenantId: string,
+      repository: string,
+      filter?: Parameters<MemoryContextGraphStore["listAssertions"]>[2]
+    ) {
+      this.calls.assertions += 1;
+      return super.listAssertions(tenantId, repository, filter);
+    }
+
+    override async get(graphId: string, tenantId: string) {
+      this.calls.get += 1;
+      return super.get(graphId, tenantId);
+    }
+  }
+
+  const store = new CountingStore();
+  await store.save(fixtureGraph({ tenantId: "tenant-a", repository: "omxyz/a", ref: "main", taskId: "task-a" }));
+  const server = createApiServer({ contextGraphStore: store, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
+  const baseUrl = await listen(server);
+  const route = `${baseUrl}/context-graph?view=dashboard&include=assertions&assertionStatus=proposed&assertionLimit=25`;
+  try {
+    const initial = await authenticatedFetch(route);
+    assert.equal(initial.status, 200);
+    assert.ok(initial.headers.get("etag"));
+    assert.equal(store.calls.summaries, 0, "dashboard view must not load the summary page");
+    assert.equal(store.calls.latest, 1);
+    assert.equal(store.calls.assertions, 1);
+
+    store.calls.latest = 0;
+    store.calls.summaries = 0;
+    store.calls.assertions = 0;
+    store.calls.get = 0;
+    const revalidated = await fetch(route, {
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "if-none-match": initial.headers.get("etag")! }
+    });
+    assert.equal(revalidated.status, 304);
+    assert.deepEqual(store.calls, { latest: 0, summaries: 0, assertions: 0, get: 0 });
   } finally {
     await close(server);
   }

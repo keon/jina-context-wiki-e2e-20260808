@@ -2,59 +2,88 @@ import { Daytona, type Resources, type Sandbox } from "@daytona/sdk";
 import {
   CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA,
   CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
+  assertionsFromGeneratedContextGraph,
   createContextGraph,
   materializeRequiredCausalAssertions,
+  materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
   requiredCausalAnchors,
   requiredDerivedIssuePullRequestNumbers,
+  requiredMoveAnchors,
   sourceBackedModelEntityIds,
   validateContextGraphEvidence,
   validateRequiredCausalAssertions,
   validateRequiredDerivedIssues,
+  validateRequiredMoveAssertions,
   validateSourceBackedModelEntities,
   type GeneratedContextGraph,
   type ContextGraphBuildRequest,
+  type ContextGraphExecutionCredentials,
   type ContextGraphExecutor,
   type ContextGraph,
-  type RequiredCausalAnchor
+  type RequiredCausalAnchor,
+  type RequiredMoveAnchor
 } from "@jina/context-graph";
 
 const DEFAULT_IMAGE = "node:22-bookworm";
-const DEFAULT_OPENAI_MODEL = "gpt-5.4-mini";
-const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.4-mini";
+const DEFAULT_OPENROUTER_MODEL = "google/gemini-3.5-flash-lite";
+const OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions";
 const WORK_DIR = "/home/daytona/context-graph";
 const REPO_DIR = `${WORK_DIR}/repo`;
-const CODEX_LOCAL_BIN = `${WORK_DIR}/node_modules/.bin/codex`;
-const SCHEMA_PATH = `${WORK_DIR}/context-graph-schema.json`;
-const EVIDENCE_PATH = `${WORK_DIR}/source-evidence.json`;
-const RESULT_PATH = `${WORK_DIR}/context-graph-result.json`;
-const PROMPT_PATH = `${WORK_DIR}/prompt.txt`;
-const PROXY_PATH = `${WORK_DIR}/openrouter-proxy.mjs`;
-const PROXY_PORT = 43123;
+const FULL_GIT_SHA = /^[a-f0-9]{40}$/i;
 
-export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
-  async buildAssertions(request: ContextGraphBuildRequest): Promise<ContextGraph> {
-    return this.execute(request, CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT);
+interface OpenRouterChatResponse {
+  readonly id?: string;
+  readonly model?: string;
+  readonly choices?: readonly {
+    readonly finish_reason?: string | null;
+    readonly message?: {
+      readonly content?: string | readonly { readonly type?: string; readonly text?: string }[];
+      readonly refusal?: string | null;
+    };
+  }[];
+  readonly usage?: {
+    readonly prompt_tokens?: number;
+    readonly completion_tokens?: number;
+    readonly total_tokens?: number;
+  };
+  readonly error?: { readonly code?: string | number; readonly message?: string };
+}
+
+export interface OpenRouterStructuredResult {
+  readonly id?: string;
+  readonly model: string;
+  readonly text: string;
+  readonly finishReason?: string;
+  readonly usage?: OpenRouterChatResponse["usage"];
+}
+
+export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
+  async buildAssertions(
+    request: ContextGraphBuildRequest,
+    credentials: ContextGraphExecutionCredentials
+  ): Promise<ContextGraph> {
+    return this.execute(
+      request,
+      credentials,
+      CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA,
+      CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT
+    );
   }
 
   private async execute(
     request: ContextGraphBuildRequest,
+    credentials: ContextGraphExecutionCredentials,
     outputSchema: object,
     systemPrompt: string
   ): Promise<ContextGraph> {
     request.signal?.throwIfAborted();
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
-    const openaiKey = process.env.OPENAI_API_KEY?.trim();
-    const openrouterKey = process.env.OPENROUTER_API_KEY?.trim();
-    const provider = selectProvider(openaiKey, openrouterKey);
-    const aiKey = provider === "openai" ? openaiKey : openrouterKey;
-    if (!aiKey)
-      throw new Error(
-        `${provider === "openai" ? "OPENAI_API_KEY" : "OPENROUTER_API_KEY"} is required for the Daytona ContextGraph worker`
-      );
-    const cloneToken = process.env.GITHUB_CLONE_TOKEN;
-    const model = selectedModel(provider);
-    const secrets = [daytonaApiKey, aiKey, cloneToken].filter((value): value is string => Boolean(value));
+    const openrouterKey = requiredEnv("OPENROUTER_API_KEY");
+    const cloneToken = credentials.githubToken.trim();
+    if (!cloneToken) throw new Error("GitHub installation token is required for Daytona repository access");
+    const model = selectedModel();
+    const secrets = [daytonaApiKey, openrouterKey, cloneToken].filter((value): value is string => Boolean(value));
 
     const daytona = new Daytona({ apiKey: daytonaApiKey });
     let sandbox: Sandbox | undefined;
@@ -83,93 +112,41 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
           );
 
       request.signal?.throwIfAborted();
+      const checkout = contextGraphCheckout(request.ref, request.commitSha);
       await cloneRepository(sandbox, request, cloneToken);
-      if (request.commitSha) await checkoutExpectedCommit(sandbox, request.commitSha);
-      const codexBinary = await prepareCodex(sandbox, Boolean(snapshot));
-      const input = await writeInputFiles(sandbox, request, outputSchema, systemPrompt);
+      if (checkout.expectedCommitSha) {
+        await checkoutExpectedCommit(sandbox, checkout.expectedCommitSha, cloneToken);
+      }
+      const input = await prepareModelInput(sandbox, request);
       request.signal?.throwIfAborted();
       const basePrompt = input.prompt;
-      if (provider === "openrouter") await startOutputLimitingProxy(sandbox);
-
-      const providerArguments =
-        provider === "openrouter"
-          ? [
-              "-c model_provider=openrouter",
-              "-c model_providers.openrouter.name=openrouter",
-              `-c model_providers.openrouter.base_url=http://127.0.0.1:${PROXY_PORT}/api/v1`,
-              "-c model_providers.openrouter.env_key=OPENROUTER_API_KEY"
-            ]
-          : [
-              "-c model_provider=openai_direct",
-              "-c model_providers.openai_direct.name=openai-direct",
-              "-c model_providers.openai_direct.base_url=https://api.openai.com/v1",
-              "-c model_providers.openai_direct.env_key=OPENAI_API_KEY",
-              "-c model_providers.openai_direct.wire_api=responses"
-            ];
-      const providerEnvironment = provider === "openrouter" ? { OPENROUTER_API_KEY: aiKey } : { OPENAI_API_KEY: aiKey };
 
       let generated: GeneratedContextGraph | undefined;
       let rawModelOutput: unknown;
+      let servedModel = model;
       let validationFailure = "";
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      const validationAttempts = positiveInt(process.env.CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS, 3);
+      for (let attempt = 0; attempt < validationAttempts; attempt += 1) {
         request.signal?.throwIfAborted();
-        if (attempt > 0) {
-          await sandbox.fs.uploadFile(Buffer.from(repairPrompt(basePrompt, validationFailure)), PROMPT_PATH, 120);
-        }
-        const codexCommand = [
-          shellQuote(codexBinary),
-          "exec",
-          "--json",
-          "--ephemeral",
-          "--sandbox workspace-write",
-          `-C ${shellQuote(REPO_DIR)}`,
-          `--output-schema ${shellQuote(SCHEMA_PATH)}`,
-          `--output-last-message ${shellQuote(RESULT_PATH)}`,
-          `-m ${shellQuote(model)}`,
-          ...providerArguments,
-          `-c model_context_window=${positiveInt(process.env.CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS, 16_000)}`,
-          `-c model_auto_compact_token_limit=${positiveInt(process.env.CONTEXT_GRAPH_CODEX_COMPACT_TOKENS, 12_000)}`,
-          `-c model_reasoning_effort=${shellQuote(process.env.CONTEXT_GRAPH_CODEX_EFFORT?.trim() || "low")}`,
-          "-c model_verbosity=low",
-          `"$(cat ${shellQuote(PROMPT_PATH)})"`
-        ].join(" ");
-        const executionAttempts = positiveInt(process.env.CONTEXT_GRAPH_CODEX_EXECUTION_ATTEMPTS, 2);
-        let run: Awaited<ReturnType<Sandbox["process"]["executeCommand"]>> | undefined;
-        for (let executionAttempt = 0; executionAttempt < executionAttempts; executionAttempt += 1) {
-          try {
-            run = await sandbox.process.executeCommand(
-              codexCommand,
-              REPO_DIR,
-              providerEnvironment,
-              positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
-            );
-            request.signal?.throwIfAborted();
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            if (executionAttempt + 1 >= executionAttempts || !isTransientCodexExecutionFailure(message)) throw error;
-            run = undefined;
-          }
-          if (run?.exitCode === 0) break;
-          if (run && !isTransientCodexExecutionFailure(run.result)) break;
-          if (executionAttempt + 1 >= executionAttempts) break;
-          const delaySeconds = positiveInt(process.env.CONTEXT_GRAPH_CODEX_RETRY_DELAY_SECONDS, 10);
-          await sandbox.process.executeCommand(`sleep ${delaySeconds}`, REPO_DIR, undefined, delaySeconds + 5);
-          request.signal?.throwIfAborted();
-        }
-        if (!run) throw new Error("Codex contextGraph build failed after a transient Daytona execution error");
-        if (run.exitCode !== 0) {
-          throw new Error(`Codex contextGraph build failed: ${redact(truncate(run.result), secrets)}`);
-        }
-        const resultBuffer = await sandbox.fs.downloadFile(
-          RESULT_PATH,
-          positiveInt(process.env.DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS, 120)
-        );
+        const prompt = attempt === 0 ? basePrompt : repairPrompt(input.focusedRepairPrompt, validationFailure);
+        const completion = await requestOpenRouterStructuredOutput({
+          apiKey: openrouterKey,
+          model,
+          systemPrompt,
+          prompt,
+          outputSchema,
+          ...(request.signal ? { signal: request.signal } : {})
+        });
+        servedModel = completion.model;
         request.signal?.throwIfAborted();
         try {
-          const parsedModelOutput = parseJsonResult(resultBuffer.toString("utf8"));
-          const candidate = materializeRequiredCausalAssertions(
-            parseGeneratedContextGraph(parsedModelOutput),
-            input.causalAnchors
+          const parsedModelOutput = parseJsonResult(completion.text);
+          const candidate = materializeRequiredMoveAssertions(
+            materializeRequiredCausalAssertions(
+              sanitizeGeneratedModelOutput(parseGeneratedContextGraph(parsedModelOutput), request.sourceEvidence ?? []),
+              input.causalAnchors
+            ),
+            input.moveAnchors
           );
           const validationErrors: string[] = [];
           try {
@@ -198,7 +175,23 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
             validationErrors.push(error instanceof Error ? error.message : String(error));
           }
           try {
+            validateRequiredMoveAssertions(candidate, input.moveAnchors);
+          } catch (error) {
+            validationErrors.push(error instanceof Error ? error.message : String(error));
+          }
+          try {
             validateSourceBackedModelEntities(candidate, request.sourceEvidence ?? []);
+          } catch (error) {
+            validationErrors.push(error instanceof Error ? error.message : String(error));
+          }
+          try {
+            // Run the same normalization contract used by the worker while a
+            // model repair is still possible. This catches invented derived PR
+            // anchors and explicit-resolution duplicates before returning.
+            assertionsFromGeneratedContextGraph(candidate, request.repository, {
+              sourcePullRequestNumbers: request.sourcePullRequestNumbers ?? [],
+              resolvedPullRequestNumbers: request.resolvedPullRequestNumbers ?? []
+            });
           } catch (error) {
             validationErrors.push(error instanceof Error ? error.message : String(error));
           }
@@ -208,11 +201,11 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
           break;
         } catch (error) {
           validationFailure = error instanceof Error ? error.message : String(error);
-          if (attempt === 1) throw error;
+          if (attempt + 1 >= validationAttempts) throw error;
         }
       }
 
-      if (!generated) throw new Error("Codex contextGraph build did not produce a validated result");
+      if (!generated) throw new Error("OpenRouter contextGraph generation did not produce a validated result");
       request.signal?.throwIfAborted();
       const shaResult = await sandbox.process.executeCommand("git rev-parse HEAD", REPO_DIR, undefined, 60);
       request.signal?.throwIfAborted();
@@ -220,8 +213,10 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
         throw new Error(`Unable to resolve repository commit: ${truncate(shaResult.result)}`);
       }
       const commitSha = shaResult.result.trim();
-      if (request.commitSha && commitSha !== request.commitSha) {
-        throw new Error(`Repository ref moved before checkout: expected ${request.commitSha}, got ${commitSha}`);
+      if (checkout.expectedCommitSha && commitSha !== checkout.expectedCommitSha) {
+        throw new Error(
+          `Repository ref moved before checkout: expected ${checkout.expectedCommitSha}, got ${commitSha}`
+        );
       }
 
       return {
@@ -230,7 +225,7 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
           commitSha,
           generatedAt: new Date().toISOString(),
           executor: "daytona",
-          model,
+          model: servedModel,
           sandboxId: sandbox.id,
           generated,
           allowEmptyEdges: true
@@ -249,36 +244,63 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
   }
 }
 
-export function isTransientCodexExecutionFailure(output: string): boolean {
-  return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:429|500|502|503|504)|rate limit|(?:daytona|sandbox).*(?:unavailable|failed|connection|timeout|timed out|gateway)|failed to .*sandbox)/i.test(
+/**
+ * Canonicalize recoverable model identity syntax and discard deterministic
+ * source entity aliases the model is not authoritative to create.
+ */
+export function sanitizeGeneratedModelOutput(
+  generated: GeneratedContextGraph,
+  sourceEvidence: NonNullable<ContextGraphBuildRequest["sourceEvidence"]> = []
+): GeneratedContextGraph {
+  const allowedSourceIds = sourceBackedModelEntityIds(sourceEvidence);
+  const sourceOwnedKinds = new Set(["Package", "Service", "Deployment", "Incident"]);
+  const ids = new Map<string, string>();
+  const nodes: GeneratedContextGraph["nodes"][number][] = [];
+  const retainedIds = new Set<string>();
+  for (const node of generated.nodes) {
+    const id = canonicalModelWorkItemId(node.kind, node.id);
+    if (sourceOwnedKinds.has(node.kind) && !allowedSourceIds.has(id)) continue;
+    ids.set(node.id, id);
+    if (retainedIds.has(id)) continue;
+    retainedIds.add(id);
+    nodes.push(id === node.id ? node : { ...node, id });
+  }
+  const edges = generated.edges.flatMap((edge) => {
+    const source = ids.get(edge.source);
+    const target = ids.get(edge.target);
+    return source && target ? [{ ...edge, source, target }] : [];
+  });
+  return { ...generated, nodes, edges };
+}
+
+function canonicalModelWorkItemId(kind: string, id: string): string {
+  if (kind !== "Issue" && kind !== "PullRequest") return id;
+  if (kind === "Issue" && /^derived:pr:\d+$/i.test(id)) return id;
+  if (/^[1-9]\d*$/.test(id)) return id;
+  const suffix = /#([1-9]\d*)$/.exec(id)?.[1] ?? /^(?:issue|pr):([1-9]\d*)$/i.exec(id)?.[1];
+  return suffix ?? id;
+}
+
+export function isTransientModelExecutionFailure(output: string): boolean {
+  return /(?:stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:408|409|429|500|502|503|504)|rate limit|fetch failed|network error)/i.test(
     output
   );
 }
 
-function selectProvider(openaiKey?: string, openrouterKey?: string): "openai" | "openrouter" {
-  const configured = process.env.CONTEXT_GRAPH_CODEX_PROVIDER?.trim().toLowerCase();
-  if (configured && configured !== "openai" && configured !== "openrouter") {
-    throw new Error("CONTEXT_GRAPH_CODEX_PROVIDER must be openai or openrouter");
-  }
-  if (configured === "openai" || configured === "openrouter") return configured;
-  if (openaiKey) return "openai";
-  if (openrouterKey) return "openrouter";
-  throw new Error("OPENAI_API_KEY or OPENROUTER_API_KEY is required for the Daytona ContextGraph worker");
-}
-
-function selectedModel(provider: "openai" | "openrouter"): string {
-  const configured = process.env.CONTEXT_GRAPH_CODEX_MODEL?.trim();
-  if (configured) return provider === "openai" ? configured.replace(/^openai\//, "") : configured;
-  return provider === "openai" ? DEFAULT_OPENAI_MODEL : DEFAULT_OPENROUTER_MODEL;
+function selectedModel(): string {
+  return (
+    process.env.CONTEXT_GRAPH_MODEL?.trim() || process.env.CONTEXT_GRAPH_CODEX_MODEL?.trim() || DEFAULT_OPENROUTER_MODEL
+  );
 }
 
 async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildRequest, token?: string): Promise<void> {
   const url = `https://github.com/${request.repository}.git`;
   const username = token ? "x-access-token" : undefined;
+  const { cloneRef } = contextGraphCheckout(request.ref, request.commitSha);
   try {
     // Shallow clone of the requested ref; the pinned commit is fetched shallowly
     // afterwards by checkoutExpectedCommit when the ref has moved past it.
-    await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, username, token, undefined, 1);
+    await sandbox.git.clone(url, REPO_DIR, cloneRef, undefined, username, token, undefined, 1);
     return;
   } catch {
     // Shallow clone is a fast path only: discard any partial checkout and retry
@@ -287,15 +309,17 @@ async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildReque
       .executeCommand(`rm -rf ${shellQuote(REPO_DIR)}`, undefined, undefined, 60)
       .catch(() => undefined);
   }
-  await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, username, token);
+  await sandbox.git.clone(url, REPO_DIR, cloneRef, undefined, username, token);
 }
 
-async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Promise<void> {
-  if (!/^[a-f0-9]{40}$/i.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
+async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string, token?: string): Promise<void> {
+  if (!FULL_GIT_SHA.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
+  const fetch = "git fetch";
+  const env = contextGraphGitAuthEnv(token);
   const ensureCommit = await sandbox.process.executeCommand(
-    `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || git fetch --depth=1 origin ${shellQuote(commitSha)}`,
+    `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || ${fetch} --depth=1 origin ${shellQuote(commitSha)}`,
     REPO_DIR,
-    undefined,
+    env,
     60
   );
   if (ensureCommit.exitCode !== 0) {
@@ -303,9 +327,9 @@ async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Prom
     // deepen on demand before giving up. --unshallow itself fails on a full clone,
     // where the commit was already proven unreachable above.
     const deepen = await sandbox.process.executeCommand(
-      `git fetch --unshallow origin && git cat-file -e ${shellQuote(`${commitSha}^{commit}`)}`,
+      `${fetch} --unshallow origin && git cat-file -e ${shellQuote(`${commitSha}^{commit}`)}`,
       REPO_DIR,
-      undefined,
+      env,
       positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 300)
     );
     if (deepen.exitCode !== 0) {
@@ -323,61 +347,78 @@ async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Prom
   }
 }
 
-async function prepareCodex(sandbox: Sandbox, preferExistingCodex: boolean): Promise<string> {
-  const mkdir = await sandbox.process.executeCommand(`mkdir -p ${shellQuote(WORK_DIR)}`, undefined, undefined, 60);
-  if (mkdir.exitCode !== 0) throw new Error(`Daytona workspace setup failed: ${truncate(mkdir.result)}`);
-  if (preferExistingCodex) {
-    const existing = await findExistingCodex(sandbox);
-    if (existing) return existing;
-  }
-  const install = await sandbox.process.executeCommand(
-    "npm init -y >/dev/null && npm install --silent @openai/codex@0.144.0 >/dev/null",
-    WORK_DIR,
-    undefined,
-    positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 600)
-  );
-  if (install.exitCode !== 0) throw new Error(`Codex installation failed: ${truncate(install.result)}`);
-  return CODEX_LOCAL_BIN;
+export function contextGraphCheckout(
+  ref: string,
+  commitSha?: string
+): { readonly cloneRef?: string; readonly expectedCommitSha?: string } {
+  const refIsCommit = FULL_GIT_SHA.test(ref);
+  return {
+    ...(refIsCommit ? {} : { cloneRef: ref }),
+    ...(commitSha ? { expectedCommitSha: commitSha } : refIsCommit ? { expectedCommitSha: ref } : {})
+  };
 }
 
-export async function findExistingCodex(sandbox: {
-  readonly process: Pick<Sandbox["process"], "executeCommand">;
-}): Promise<string | undefined> {
-  const probe = await sandbox.process.executeCommand(
-    `if ${shellQuote(CODEX_LOCAL_BIN)} --version >/dev/null 2>&1; then echo ${shellQuote(CODEX_LOCAL_BIN)}; elif command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1; then command -v codex; fi`,
-    WORK_DIR,
-    undefined,
-    60
-  );
-  if (probe.exitCode !== 0) return undefined;
-  const found = probe.result.trim().split("\n").pop()?.trim();
-  return found?.startsWith("/") ? found : undefined;
+export function contextGraphGitAuthEnv(token?: string): Record<string, string> | undefined {
+  if (!token) return undefined;
+  const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+  return {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`
+  };
 }
 
-async function writeInputFiles(
+async function prepareModelInput(
   sandbox: Sandbox,
-  request: ContextGraphBuildRequest,
-  outputSchema: object,
-  systemPrompt: string
-): Promise<{ readonly prompt: string; readonly causalAnchors: readonly RequiredCausalAnchor[] }> {
+  request: ContextGraphBuildRequest
+): Promise<{
+  readonly prompt: string;
+  readonly focusedRepairPrompt: string;
+  readonly causalAnchors: readonly RequiredCausalAnchor[];
+  readonly moveAnchors: readonly RequiredMoveAnchor[];
+}> {
   const focusEvidence = await buildFocusEvidenceBundle(sandbox, request.focusPaths ?? []);
   const requiredDerivedIssues = requiredDerivedIssuePullRequestNumbers(
     request.sourceEvidence ?? [],
     request.problemEvidencePullRequestNumbers ?? []
   );
   const causalAnchors = requiredCausalAnchors(focusEvidence.files, requiredDerivedIssues);
-  const prompt = contextGraphPrompt(systemPrompt, request, focusEvidence.text, requiredDerivedIssues, causalAnchors);
-  await Promise.all([
-    sandbox.fs.uploadFile(Buffer.from(JSON.stringify(outputSchema)), SCHEMA_PATH, 120),
-    sandbox.fs.uploadFile(Buffer.from(prompt), PROMPT_PATH, 120),
-    sandbox.fs.uploadFile(Buffer.from(JSON.stringify(request.sourceEvidence ?? [])), EVIDENCE_PATH, 120),
-    sandbox.fs.uploadFile(Buffer.from(openrouterProxySource()), PROXY_PATH, 120)
+  const moveAnchors = requiredMoveAnchors(focusEvidence.files);
+  const prompt = contextGraphPrompt(request, focusEvidence.text, requiredDerivedIssues, causalAnchors);
+  const requiredPaths = new Set([
+    ...causalAnchors.map((anchor) => anchor.evidencePath),
+    ...moveAnchors.map((anchor) => anchor.evidencePath)
   ]);
-  return { prompt, causalAnchors };
+  const repairFiles = focusEvidence.files.filter((file) => requiredPaths.has(file.path));
+  const repairEvidence = repairFiles
+    .map(
+      (file) =>
+        `--- ${file.path} ---\n${numberedExcerpt(file.content, file.content.length + file.content.split(/\r?\n/).length * 8)}`
+    )
+    .join("\n");
+  const requiredPullRequests = new Set(requiredDerivedIssues);
+  const repairSourceEvidence = (request.sourceEvidence ?? []).filter((evidence) => {
+    const payload = evidence.payload;
+    return (
+      typeof payload === "object" &&
+      payload !== null &&
+      !Array.isArray(payload) &&
+      (payload as { readonly kind?: unknown }).kind === "pull_request" &&
+      typeof (payload as { readonly number?: unknown }).number === "number" &&
+      requiredPullRequests.has((payload as { readonly number: number }).number)
+    );
+  });
+  const focusedRepairPrompt = contextGraphPrompt(
+    { ...request, sourceEvidence: repairSourceEvidence },
+    repairEvidence,
+    requiredDerivedIssues,
+    causalAnchors
+  );
+  return { prompt, focusedRepairPrompt, causalAnchors, moveAnchors };
 }
 
 function contextGraphPrompt(
-  systemPrompt: string,
   request: ContextGraphBuildRequest,
   focusEvidence: string,
   requiredDerivedIssues: readonly number[],
@@ -394,8 +435,8 @@ function contextGraphPrompt(
     : "";
   const requirements =
     requiredDerivedIssues.length > 0
-      ? `\nHost contract requirement: each listed PR explicitly repairs an untracked problem. The output must contain exactly one Issue node and one Issue RESOLVED_BY PullRequest edge for each anchor. The model must supply the problem title, description, why, confidence, and repository citations. Required anchors: ${requiredDerivedIssues.map((number) => `Issue derived:pr:${number} -> PR #${number}`).join(", ")}.`
-      : "";
+      ? `\nHost contract requirement: each listed PR explicitly repairs an untracked problem. The output must contain exactly one Issue node and one Issue RESOLVED_BY PullRequest edge for each anchor. For every required number N, use Issue id derived:pr:N and make that edge target the PullRequest node whose id is exactly N. A different PR named in repository evidence as introducing or causing the problem is never the derived anchor or the RESOLVED_BY target. The model must supply the problem title, description, why, confidence, and repository citations. Required anchors: ${requiredDerivedIssues.map((number) => `Issue id derived:pr:${number} RESOLVED_BY PullRequest id ${number}`).join(", ")}. Do not emit a derived:pr Issue for any other PR.`
+      : "\nHost contract requirement: do not emit any derived:pr Issue; no untracked repair anchor was supplied.";
   const causalRequirements =
     causalAnchors.length > 0
       ? `\nHost contract requirement: the following root-cause records explicitly state causality. Every listed edge is mandatory. Emit one Issue INTRODUCED_BY Commit edge for each anchor, with a nonempty why, and do not substitute an Incident edge. Each edge's evidence must cover the exact listed minimum span so it contains the issue identity, full SHA, and mechanism:\n${causalAnchors.map((anchor) => `- Issue ${anchor.issueId} INTRODUCED_BY commit ${anchor.commitSha}; evidence must cover ${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`).join("\n")}`
@@ -405,11 +446,11 @@ function contextGraphPrompt(
     sourceEntityIds.length > 0
       ? `\nHost source-identity contract: Package, Service, Deployment, and Incident nodes may use only these deterministic IDs: ${sourceEntityIds.join(", ")}.`
       : "";
-  return `${systemPrompt}\n\nRepository: ${request.repository}\nRef: ${request.ref}\nTask: ${request.taskId}${focus}${sourceEvidence}${bundle}${requirements}${causalRequirements}${sourceEntityRequirement}`;
+  return `Repository: ${request.repository}\nRef: ${request.ref}\nTask: ${request.taskId}${focus}${sourceEvidence}${bundle}${requirements}${causalRequirements}${sourceEntityRequirement}`;
 }
 
 function repairPrompt(basePrompt: string, failure: string): string {
-  return `${basePrompt}\n\nThe previous output failed host validation: ${truncate(failure)}\nRegenerate the complete JSON once. Satisfy every host contract requirement above, including every mandatory Issue INTRODUCED_BY Commit edge and every required derived Issue. For each INTRODUCED_BY edge, cite a range that explicitly names both endpoints and the causal mechanism; remove an optional causal edge if no such range exists. Correct all cited line ranges and preserve only claims that the checked-out repository explicitly supports.`;
+  return `${basePrompt}\n\nThe previous output failed host validation: ${truncate(failure)}\nRegenerate the complete JSON once. Satisfy every host contract requirement above, including every mandatory Issue INTRODUCED_BY Commit edge and required derived Issue. A derived repair anchor N must be Issue derived:pr:N RESOLVED_BY PullRequest N; never substitute the PR that introduced or caused the bug. For each INTRODUCED_BY edge, cite a range that explicitly names both endpoints and the causal mechanism; remove an optional causal edge if no such range exists. Correct all cited line ranges and preserve only claims that the checked-out repository explicitly supports.`;
 }
 
 export async function buildFocusEvidenceBundle(
@@ -519,66 +560,154 @@ async function assertSafeRepositoryFile(
   if (result.exitCode !== 0) throw new Error(`repository evidence path is not a regular in-repository file: ${path}`);
 }
 
-async function startOutputLimitingProxy(sandbox: Sandbox): Promise<void> {
-  const maxOutputTokens = positiveInt(process.env.CONTEXT_GRAPH_CODEX_MAX_OUTPUT_TOKENS, 4_000);
-  const started = await sandbox.process.executeCommand(
-    `nohup node ${shellQuote(PROXY_PATH)} > ${shellQuote(`${WORK_DIR}/proxy.log`)} 2>&1 &`,
-    WORK_DIR,
-    { CONTEXT_GRAPH_PROXY_PORT: String(PROXY_PORT), CONTEXT_GRAPH_MAX_OUTPUT_TOKENS: String(maxOutputTokens) },
-    30
+export async function requestOpenRouterStructuredOutput(
+  input: {
+    readonly apiKey: string;
+    readonly model: string;
+    readonly systemPrompt: string;
+    readonly prompt: string;
+    readonly outputSchema: object;
+    readonly signal?: AbortSignal;
+  },
+  fetchImpl: typeof fetch = fetch
+): Promise<OpenRouterStructuredResult> {
+  const maximumOutputTokens = positiveInt(
+    process.env.CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS ?? process.env.CONTEXT_GRAPH_CODEX_MAX_OUTPUT_TOKENS,
+    12_000
   );
-  if (started.exitCode !== 0) throw new Error(`OpenRouter proxy failed to start: ${truncate(started.result)}`);
-  const health = await sandbox.process.executeCommand(
-    `node -e "fetch('http://127.0.0.1:${PROXY_PORT}/health').then(r=>{if(!r.ok)process.exit(1)})"`,
-    WORK_DIR,
-    undefined,
-    30
+  const attempts = positiveInt(
+    process.env.CONTEXT_GRAPH_MODEL_EXECUTION_ATTEMPTS ?? process.env.CONTEXT_GRAPH_CODEX_EXECUTION_ATTEMPTS,
+    2
   );
-  if (health.exitCode !== 0) throw new Error("OpenRouter output-limiting proxy did not become healthy");
+  const timeoutMs = positiveInt(process.env.CONTEXT_GRAPH_MODEL_TIMEOUT_MS, 10 * 60_000);
+  const body = JSON.stringify({
+    model: input.model,
+    messages: [
+      { role: "system", content: input.systemPrompt },
+      { role: "user", content: input.prompt }
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: { name: "context_graph_assertions", strict: true, schema: input.outputSchema }
+    },
+    provider: { require_parameters: true },
+    max_tokens: maximumOutputTokens,
+    temperature: 0,
+    stream: false
+  });
+
+  let lastFailure = "OpenRouter request failed";
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    input.signal?.throwIfAborted();
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal = input.signal ? AbortSignal.any([input.signal, timeoutSignal]) : timeoutSignal;
+    let response: Response;
+    try {
+      response = await fetchImpl(OPENROUTER_CHAT_COMPLETIONS_URL, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${input.apiKey}`,
+          "content-type": "application/json",
+          "x-title": "Jina Context Graph"
+        },
+        body,
+        signal
+      });
+    } catch (error) {
+      input.signal?.throwIfAborted();
+      lastFailure = `OpenRouter request failed: ${error instanceof Error ? error.message : String(error)}`;
+      if (attempt + 1 >= attempts || !isTransientModelExecutionFailure(lastFailure)) {
+        throw new Error(lastFailure, { cause: error });
+      }
+      await retryDelay(undefined, input.signal);
+      continue;
+    }
+
+    const raw = await response.text();
+    const payload = parseOpenRouterResponse(raw);
+    const responseId = payload.id ?? response.headers.get("x-request-id") ?? undefined;
+    if (!response.ok || payload.error) {
+      const detail = payload.error?.message ?? response.statusText ?? "unknown error";
+      const suffix = responseId ? ` [request ${responseId}]` : "";
+      lastFailure = `OpenRouter request failed (HTTP ${response.status}): ${detail}${suffix}`;
+      const retryable = isTransientHttpStatus(response.status) || isTransientModelExecutionFailure(lastFailure);
+      if (attempt + 1 >= attempts || !retryable) throw new Error(lastFailure);
+      await retryDelay(response.headers.get("retry-after") ?? undefined, input.signal);
+      continue;
+    }
+
+    const choice = payload.choices?.[0];
+    const text = messageContentText(choice?.message?.content);
+    if (!text) {
+      const refusal = choice?.message?.refusal?.trim();
+      const suffix = responseId ? ` [request ${responseId}]` : "";
+      throw new Error(`OpenRouter response had no message content${refusal ? `: ${refusal}` : ""}${suffix}`);
+    }
+    return {
+      ...(responseId ? { id: responseId } : {}),
+      model: payload.model ?? input.model,
+      text,
+      ...(choice?.finish_reason ? { finishReason: choice.finish_reason } : {}),
+      ...(payload.usage ? { usage: payload.usage } : {})
+    };
+  }
+  throw new Error(lastFailure);
 }
 
-function openrouterProxySource(): string {
-  return `import http from "node:http";
-import https from "node:https";
-
-const port = Number(process.env.CONTEXT_GRAPH_PROXY_PORT || "${PROXY_PORT}");
-const maximum = Number(process.env.CONTEXT_GRAPH_MAX_OUTPUT_TOKENS || "4000");
-
-http.createServer((request, response) => {
-  if (request.url === "/health") {
-    response.writeHead(200, { "content-type": "application/json" });
-    response.end('{"ok":true}');
-    return;
+function parseOpenRouterResponse(raw: string): OpenRouterChatResponse {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    throw new Error(`OpenRouter returned a non-JSON response: ${truncate(raw)}`);
   }
-  const chunks = [];
-  request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-  request.on("end", () => {
-    let body = Buffer.concat(chunks);
-    if ((request.headers["content-type"] || "").includes("application/json") && body.length) {
-      const value = JSON.parse(body.toString("utf8"));
-      if (typeof value.max_output_tokens !== "number" || value.max_output_tokens > maximum) value.max_output_tokens = maximum;
-      if (typeof value.max_tokens === "number" && value.max_tokens > maximum) value.max_tokens = maximum;
-      body = Buffer.from(JSON.stringify(value));
-    }
-    const headers = { ...request.headers, host: "openrouter.ai", "content-length": String(body.length) };
-    delete headers.connection;
-    const upstream = https.request({
-      hostname: "openrouter.ai",
-      port: 443,
-      method: request.method,
-      path: request.url,
-      headers
-    }, (upstreamResponse) => {
-      response.writeHead(upstreamResponse.statusCode || 502, upstreamResponse.headers);
-      upstreamResponse.pipe(response);
-    });
-    upstream.on("error", (error) => {
-      if (!response.headersSent) response.writeHead(502, { "content-type": "application/json" });
-      response.end(JSON.stringify({ error: { message: error.message } }));
-    });
-    upstream.end(body);
+}
+
+function messageContentText(
+  content: string | readonly { readonly type?: string; readonly text?: string }[] | undefined
+): string | undefined {
+  if (typeof content === "string") return content.trim() || undefined;
+  if (!content) return undefined;
+  let joined = "";
+  for (const part of content) {
+    if (typeof part.text === "string") joined += part.text;
+  }
+  joined = joined.trim();
+  return joined || undefined;
+}
+
+function isTransientHttpStatus(status: number): boolean {
+  return status === 408 || status === 409 || status === 429 || status >= 500;
+}
+
+async function retryDelay(retryAfter: string | undefined, signal?: AbortSignal): Promise<void> {
+  const parsedSeconds = retryAfter ? Number(retryAfter) : Number.NaN;
+  const configured = positiveInt(
+    process.env.CONTEXT_GRAPH_MODEL_RETRY_DELAY_MS ??
+      (process.env.CONTEXT_GRAPH_CODEX_RETRY_DELAY_SECONDS
+        ? String(Number(process.env.CONTEXT_GRAPH_CODEX_RETRY_DELAY_SECONDS) * 1_000)
+        : undefined),
+    10_000
+  );
+  const milliseconds = Number.isFinite(parsedSeconds)
+    ? Math.min(Math.max(0, parsedSeconds * 1_000), 30_000)
+    : configured;
+  if (milliseconds === 0) return;
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => signal?.removeEventListener("abort", abort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, milliseconds);
+    const abort = (): void => {
+      clearTimeout(timer);
+      cleanup();
+      reject(signal?.reason instanceof Error ? signal.reason : new Error("ContextGraph model request aborted"));
+    };
+    if (signal?.aborted) abort();
+    else signal?.addEventListener("abort", abort, { once: true });
   });
-}).listen(port, "127.0.0.1");`;
+  signal?.throwIfAborted();
 }
 
 function sandboxResources(): Resources {

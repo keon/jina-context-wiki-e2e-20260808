@@ -1267,6 +1267,38 @@ dialog::backdrop {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.review-mcp-section > h3 + h3,
+.review-mcp-section > .review-mcp-chips + h3,
+.review-mcp-section > .empty-detail + h3 {
+  margin-top: 20px;
+}
+
+.review-mcp-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.review-mcp-chip {
+  border: 1px solid #30384b;
+  border-radius: 999px;
+  padding: 4px 9px;
+  background: #171c27;
+  color: #e1e5ed;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+.review-mcp-events {
+  margin-top: 8px;
+}
+
+.review-mcp-detail {
+  margin: 6px 0 0;
+  color: #9aa4b7;
+  font-size: 13px;
+}
 .empty-detail {
   color: #68758c;
   font-size: 0.72rem;
@@ -3132,6 +3164,46 @@ body[data-page="contextGraph"] .app-header {
   color: #898989;
   font-size: 9px;
   text-transform: none;
+}
+.graph-filter-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.graph-filter-label-row .graph-filter-label {
+  margin-bottom: 0;
+}
+.graph-filter-kind-actions {
+  display: inline-flex;
+  gap: 3px;
+}
+.graph-filter-kind-actions button {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: transparent;
+  padding: 2px 5px;
+  color: #898989;
+  font-size: 9px;
+  cursor: pointer;
+}
+.graph-filter-kind-actions button:hover {
+  border-color: #555;
+  color: #d0d0d0;
+}
+.graph-filter-advanced {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 7px;
+}
+.graph-filter-advanced > summary {
+  color: #777;
+  font-size: 9px;
+  cursor: pointer;
+}
+.graph-filter-advanced[open] > summary {
+  margin-bottom: 5px;
 }
 .graph-filter-list {
   display: grid;

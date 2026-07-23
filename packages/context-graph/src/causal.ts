@@ -387,7 +387,10 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
   const candidates = graph.nodes.filter((node) => causalRootKinds.includes(node.kind as CausalRootKind));
   if (request.rootEntityId) return candidates.filter((node) => node.id === request.rootEntityId);
   const issue = request.issueNumber ? `#${request.issueNumber}` : undefined;
-  const text = (request.issueText ?? request.featureText ?? request.rootText ?? "").trim().toLowerCase();
+  // Causal questions often name the requested result kinds before the actual
+  // subject ("Which service and feature did incident X impact?"). The
+  // explicitly resolved causal root must win over those answer-shape phrases.
+  const text = (request.rootText ?? request.issueText ?? request.featureText ?? "").trim().toLowerCase();
   const query = request.query?.toLowerCase() ?? "";
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   const pullRequestNumber = request.pullRequestNumber;
@@ -455,6 +458,11 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
       const implementationEdges = graph.edges.filter(
         (edge) => edge.predicate === "IMPLEMENTS" && edge.target === node.id
       );
+      // Model-derived feature ids can evolve while retaining the same
+      // human label. Prefer the matching root with the richest reviewed
+      // implementation coverage so equivalent labels do not become an
+      // arbitrary tie (or hide a dependency path present on one version).
+      if (text && node.kind === "Feature" && haystack.includes(text)) score += Math.min(implementationEdges.length, 9);
       if (
         packageName &&
         implementationEdges.some((implementation) => {

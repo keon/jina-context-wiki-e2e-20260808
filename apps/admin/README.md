@@ -20,7 +20,7 @@ The decision logic lives in `lib/admin-auth.ts` and is covered by `lib/admin-aut
 ## Pages
 
 - `/` — every graph (all repositories), with per-repository filtering and aggregate stats.
-- `/graphs/:id` — full graph detail: metadata, an interactive force-directed node/edge visualization, and per-node relationship inspection.
+- `/graphs/:id` — full graph detail: metadata, cited repository queries, an interactive force-directed node/edge visualization, and node/relationship inspection.
 
 ## Running
 

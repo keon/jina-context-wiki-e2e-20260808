@@ -12,6 +12,7 @@ import {
   type ContextGraphPipelineCoordinator
 } from "@jina/context-graph";
 import { createLogger, errorLogFields } from "@jina/observability";
+import { resolveDatabaseConfigs } from "./database-config.js";
 import { createApiServer } from "./server.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
@@ -20,18 +21,16 @@ const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 if (enableDevEndpoints && process.env.K_SERVICE) {
   throw new Error("JINA_ENABLE_DEV_ENDPOINTS must not be enabled on Cloud Run");
 }
-// Resolve the connection settings once. All PostgreSQL adapters share the same
-// connection target, and keeping that decision in one place avoids subtly
-// different fallback behavior between the board and graph stores.
-const database = databaseConfig();
-const stateStore = createStateStore(database);
-const contextGraphStore = createContextGraphStore(database);
-const contextGraphCoordinator = createContextGraphCoordinator(database);
+const databaseConfigs = resolveDatabaseConfigs(process.env);
+const stateStore = createStateStore(databaseConfigs.primary);
+const contextGraphStore = createContextGraphStore(databaseConfigs.graph);
+const contextGraphCoordinator = createContextGraphCoordinator(databaseConfigs.graph);
 const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
 if (tenancyMode !== "fixed" && tenancyMode !== "shared-db") {
   throw new Error("JINA_TENANCY_MODE must be fixed or shared-db");
 }
-const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver(database) : undefined;
+const sharedIdentityResolver =
+  tenancyMode === "shared-db" ? createSharedIdentityResolver(databaseConfigs.primary) : undefined;
 if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN)) {
   throw new Error("INTERNAL_API_TOKEN and GRAPH_API_TOKEN are required in production");
 }
@@ -44,6 +43,7 @@ if (tenancyMode === "shared-db" && process.env.JINA_TENANT_ID) {
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
+  githubWebhookEnabled: process.env.JINA_GITHUB_WEBHOOK_ENABLED !== "false",
   ...(process.env.JINA_TENANT_ID ? { tenantId: process.env.JINA_TENANT_ID } : {}),
   tenantAliases: commaSeparatedEnv("JINA_TENANT_ALIASES"),
   enableDevEndpoints,
@@ -69,6 +69,8 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
     event: "api.started",
     port,
     storage: stateStore ? "postgres" : "memory",
+    graphStorage: contextGraphStore instanceof PostgresContextGraphStore ? "postgres" : "memory",
+    graphDatabase: databaseConfigs.graphIsDedicated ? "dedicated" : "primary",
     devEndpoints: enableDevEndpoints
   });
   if (enableDevEndpoints) {
@@ -125,29 +127,6 @@ function createContextGraphCoordinator(
 function createSharedIdentityResolver(config: PostgresJsonStateStoreConfig | undefined): PostgresSharedIdentityStore {
   if (!config) throw new Error("Postgres storage is required in shared-db tenancy mode");
   return new PostgresSharedIdentityStore({ ...config, applicationName: "jina-api-shared-identity" });
-}
-
-function databaseConfig(): PostgresJsonStateStoreConfig | undefined {
-  const connectionString = process.env.DATABASE_URL;
-  const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
-  if (!connectionString && !host) return undefined;
-  if (connectionString) return { connectionString };
-  const port = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
-  return {
-    host,
-    user: requiredEnv("DB_USER"),
-    password: requiredEnv("DB_PASS"),
-    database: requiredEnv("DB_NAME"),
-    ...(port !== undefined ? { port } : {})
-  };
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required when Postgres storage is enabled`);
-  }
-  return value;
 }
 
 function commaSeparatedEnv(name: string): readonly string[] {

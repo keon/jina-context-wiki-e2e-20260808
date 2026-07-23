@@ -345,6 +345,8 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
         parent_audit_id text references jina_context_graph.audit_log(id),
         created_at timestamptz not null
       );
+      create index if not exists context_graph_audit_tenant_created
+        on jina_context_graph.audit_log (tenant_id,created_at desc);
       create table if not exists jina_context_graph.entity_redirects (
         id text primary key,
         tenant_id text not null,
@@ -355,6 +357,10 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
         created_at timestamptz not null,
         check (from_entity_id <> to_entity_id)
       );
+      create index if not exists context_graph_entity_redirects_tenant_created
+        on jina_context_graph.entity_redirects (tenant_id,created_at desc);
+      create index if not exists context_graph_entity_redirects_from_created
+        on jina_context_graph.entity_redirects (tenant_id,from_entity_id,created_at,id);
       create table if not exists jina_context_graph.assertions (
         id text primary key,
         tenant_id text not null,
@@ -379,6 +385,8 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
       );
       create index if not exists context_graph_assertions_current
         on jina_context_graph.assertions (tenant_id,repository,commit_sha,status);
+      create index if not exists context_graph_assertions_review_queue
+        on jina_context_graph.assertions (tenant_id,repository,status,recorded_at desc,id);
       alter table jina_context_graph.assertions alter column object_id drop not null;
       alter table jina_context_graph.assertions alter column source_observation_id drop not null;
       alter table jina_context_graph.assertions alter column object_kind drop not null;

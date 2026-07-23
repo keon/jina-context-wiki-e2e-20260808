@@ -11,6 +11,19 @@ The generic board currently uses two tables:
 
 The snapshot contains tasks, dependency edges, task events, and durable outbox messages. Task IDs and dedupe keys make planning idempotent. Outbox messages carry renewable lease IDs and expirations; completion requires the current lease. Every mutation is tenant-scoped and runs under a cross-instance transaction lock.
 
+## Shared identity boundary
+
+Production also reads four tables owned by the original Jina application in `public`: `tenants`, `tenant_members`, `installations`, and `repositories`. They are not v2 read models and are never migrated into a v2 schema. The `jina_v2_app` login has narrow `SELECT` grants on those tables, no original-application writes, and no access to session, OAuth, or integration-secret tables.
+
+The original tenant UUID is stored as `tenantId` throughout the board and as the tenant key throughout `jina_context_graph`. Work metadata retains the external identity needed by operators and downstream projections:
+
+- `workspaceLabel`, `githubAccountId`, and `githubAccountType` identify the original tenant's GitHub account;
+- `authorGithubUserId`, `authorLogin`, and `authorAccountType` identify the PR or issue author;
+- `senderGithubUserId`, `senderLogin`, and `senderAccountType` identify the webhook actor;
+- `githubRepositoryId` and `githubInstallationId` preserve the resolved GitHub binding.
+
+These values are provenance attached to tenant-scoped work; they do not create a parallel user or organization database. Dashboard search and task details use the workspace and author labels, while context graph observations normalize the same external identities into repository knowledge.
+
 ## Implemented context graph schema
 
 The context graph is normalized under `jina_context_graph`:

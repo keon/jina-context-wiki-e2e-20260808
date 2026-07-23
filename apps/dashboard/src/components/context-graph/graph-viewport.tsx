@@ -56,14 +56,15 @@ export function GraphViewport({
   onZoomChangeRef.current = onZoomChange;
   const hasGraph = Boolean(graph);
 
-  // Instantiate the renderer once, the first time a graph exists (matching
-  // the old ensureContextGraphRenderer, which was only invoked with a graph).
+  // Start downloading the renderer as soon as the page mounts, in parallel
+  // with the graph request. WebGL is still instantiated only when graph data
+  // exists, avoiding unnecessary GPU work for an empty repository.
   useEffect(() => {
-    if (!hasGraph || rendererRef.current || rendererUnavailable) return;
+    if (rendererRef.current || rendererUnavailable) return;
     let cancelled = false;
     void import("../../lib/context-graph-renderer.ts")
       .then((module) => {
-        if (cancelled || rendererRef.current) return;
+        if (cancelled || !hasGraph || rendererRef.current) return;
         const container = containerRef.current;
         const labels = labelLayerRef.current;
         const minimap = minimapRef.current;
@@ -110,7 +111,7 @@ export function GraphViewport({
     const renderer = rendererRef.current;
     if (!renderer) return;
     if (!graph || !graphKey) {
-      renderer.setData({ key: "empty", nodes: [], edges: [], labels: {} });
+      renderer.setData({ key: "empty", layoutKey: "empty", nodes: [], edges: [], labels: {} });
       renderer.setSearchMatches([]);
       return;
     }
@@ -119,6 +120,7 @@ export function GraphViewport({
       `|edges:${Array.from(hiddenEdgePredicates).sort().join(",")}`;
     renderer.setData({
       key: rendererKey,
+      layoutKey: graphKey,
       nodes: visibleGraph.nodes,
       edges: visibleGraph.edges,
       labels: rendererLabels

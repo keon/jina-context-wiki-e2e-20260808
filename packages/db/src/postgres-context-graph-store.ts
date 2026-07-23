@@ -45,7 +45,8 @@ import {
   type RetrievalRequest,
   type RetrievalResult,
   type StoredAssertion,
-  type ContextGraphSummaryFilter
+  type ContextGraphSummaryFilter,
+  type ContextGraphReadRevisionOptions
 } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { DomainError } from "@jina/shared-kernel";
@@ -429,9 +430,60 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     return row ? { graphId: row.graph_id, commitSha: row.commit_sha } : undefined;
   }
 
-  async latest(tenantId: string): Promise<ContextGraph | undefined> {
-    const graphs = await this.loadGraphs(tenantId, 1);
-    return graphs[0];
+  async latest(
+    tenantId: string,
+    repositories?: readonly string[],
+    filter: ContextGraphSummaryFilter = {}
+  ): Promise<ContextGraph | undefined> {
+    await this.initialize();
+    if (repositories?.length === 0) return undefined;
+    const result = await this.pool.query<GraphRow>(
+      `select graph.* from jina_context_graph.graph_heads head
+       join jina_context_graph.graphs graph on graph.id=head.graph_id and graph.tenant_id=head.tenant_id
+       where head.tenant_id=$1 and ($2::text[] is null or head.repository=any($2))
+         and ($3::text is null or head.repository=$3)
+         and ($4::text is null or head.ref_name=$4)
+       order by graph.generated_at desc,head.repository,head.ref_name limit 1`,
+      [tenantId, repositories ?? null, filter.repository ?? null, filter.ref ?? null]
+    );
+    return result.rows[0] ? this.hydrate(result.rows[0]) : undefined;
+  }
+
+  async readRevision(tenantId: string, options: ContextGraphReadRevisionOptions = {}): Promise<string> {
+    await this.initialize();
+    if (options.repositories?.length === 0) return stableId("context-graph-read", `${tenantId}:empty`);
+    const result = await this.pool.query<{ revision: string }>(
+      `select md5(concat_ws('|',
+         coalesce((select string_agg(concat_ws(':',head.repository,head.ref_name,head.graph_id,
+                                                extract(epoch from head.updated_at)),',' order by head.repository,head.ref_name)
+                   from jina_context_graph.graph_heads head
+                  where head.tenant_id=$1
+                    and ($2::text[] is null or head.repository=any($2))
+                    and ($3::text is null or head.repository=$3)
+                    and ($4::text is null or head.ref_name=$4)),''),
+         coalesce((select concat(count(*),':',max(extract(epoch from assertion.recorded_at)))
+                   from jina_context_graph.assertions assertion
+                  where assertion.tenant_id=$1 and $7::boolean
+                    and ($2::text[] is null or assertion.repository=any($2))
+                    and ($5::text is null or assertion.repository=$5)
+                    and ($6::text is null or assertion.status=$6)),''),
+         coalesce((select concat(count(*),':',max(extract(epoch from audit.created_at)))
+                   from jina_context_graph.audit_log audit
+                  where audit.tenant_id=$1 and $7::boolean),''),
+         coalesce((select concat(count(*),':',max(extract(epoch from redirect.created_at)))
+                   from jina_context_graph.entity_redirects redirect
+                  where redirect.tenant_id=$1 and $7::boolean),''))) as revision`,
+      [
+        tenantId,
+        options.repositories ?? null,
+        options.repository ?? null,
+        options.ref ?? null,
+        options.assertionRepository ?? null,
+        options.assertionStatus ?? null,
+        options.includeAssertions ?? false
+      ]
+    );
+    return result.rows[0]?.revision ?? stableId("context-graph-read", `${tenantId}:missing`);
   }
 
   async get(graphId: string, tenantId: string): Promise<ContextGraph | undefined> {
@@ -3170,6 +3222,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       readonly status?: StoredAssertion["status"];
       readonly predicate?: string;
       readonly entityKind?: ContextGraphNode["kind"];
+      readonly limit?: number;
     } = {}
   ): Promise<readonly ContextGraphAssertionSummary[]> {
     await this.initialize();
@@ -3203,39 +3256,54 @@ export class PostgresContextGraphStore implements ContextGraphStore {
          and ($3::text is null or status=$3)
          and ($4::text is null or predicate=$4)
          and ($5::text is null or subject_kind=$5 or object_kind=$5)
-       order by recorded_at desc,id limit 500`,
-      [tenantId, repository, filter.status ?? null, filter.predicate ?? null, filter.entityKind ?? null]
+       order by recorded_at desc,id limit $6`,
+      [
+        tenantId,
+        repository,
+        filter.status ?? null,
+        filter.predicate ?? null,
+        filter.entityKind ?? null,
+        Math.max(1, Math.min(filter.limit ?? 500, 500))
+      ]
     );
-    const [redirects, entities, relations] = await Promise.all([
+    if (result.rows.length === 0) return [];
+    const assertionEntityIds = [
+      ...new Set(result.rows.flatMap((row) => [row.subject_id, row.object_id]).filter(Boolean))
+    ];
+    const [redirects, relations] = await Promise.all([
       this.pool.query<{ from_entity_id: string; to_entity_id: string; kind: "merge" | "unmerge" }>(
-        `select from_entity_id,to_entity_id,kind from jina_context_graph.entity_redirects where tenant_id=$1 order by created_at,id`,
-        [tenantId]
+        `with recursive relevant as (
+           select redirect.* from jina_context_graph.entity_redirects redirect
+            where redirect.tenant_id=$1 and redirect.from_entity_id=any($2::text[])
+           union
+           select redirect.* from jina_context_graph.entity_redirects redirect
+           join relevant prior on redirect.from_entity_id=prior.to_entity_id
+            where redirect.tenant_id=$1
+         )
+         select from_entity_id,to_entity_id,kind from relevant order by created_at,id`,
+        [tenantId, assertionEntityIds]
       ),
       this.pool.query<{
-        id: string;
-        kind: ContextGraphAssertionSummary["subjectKind"];
-        natural_key: string;
-        display_name: string;
-      }>(`select id,kind,natural_key,display_name from jina_context_graph.entities where tenant_id=$1`, [tenantId]),
-      result.rows.length === 0
-        ? Promise.resolve({
-            rows: [] as {
-              source_assertion_id: string;
-              relation: "supports" | "contradicts";
-              target_assertion_id: string;
-            }[]
-          })
-        : this.pool.query<{
-            source_assertion_id: string;
-            relation: "supports" | "contradicts";
-            target_assertion_id: string;
-          }>(
-            `select source_assertion_id,relation,target_assertion_id from jina_context_graph.assertion_relations
+        source_assertion_id: string;
+        relation: "supports" | "contradicts";
+        target_assertion_id: string;
+      }>(
+        `select source_assertion_id,relation,target_assertion_id from jina_context_graph.assertion_relations
              where tenant_id=$1 and target_assertion_id=any($2::text[])`,
-            [tenantId, result.rows.map((row) => row.id)]
-          )
+        [tenantId, result.rows.map((row) => row.id)]
+      )
     ]);
     const mapping = redirectMap(redirects.rows);
+    const resolvedEntityIds = [...new Set(assertionEntityIds.flatMap((id) => [id, resolveRedirect(mapping, id)]))];
+    const entities = await this.pool.query<{
+      id: string;
+      kind: ContextGraphAssertionSummary["subjectKind"];
+      natural_key: string;
+      display_name: string;
+    }>(
+      `select id,kind,natural_key,display_name from jina_context_graph.entities where tenant_id=$1 and id=any($2::text[])`,
+      [tenantId, resolvedEntityIds]
+    );
     const byId = new Map(entities.rows.map((entity) => [entity.id, entity]));
     return result.rows.map((row) => {
       const subject = byId.get(resolveRedirect(mapping, row.subject_id));

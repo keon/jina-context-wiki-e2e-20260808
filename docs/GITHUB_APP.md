@@ -1,8 +1,10 @@
 # GitHub App Webhook Setup
 
-Jina accepts real GitHub App webhook deliveries at `POST /webhooks/github`. The endpoint verifies the raw body with `X-Hub-Signature-256`, requires `X-GitHub-Delivery` for idempotency, and reads the event type from `X-GitHub-Event`.
+Jina can accept real GitHub App webhook deliveries at `POST /webhooks/github`. The endpoint verifies the raw body with `X-Hub-Signature-256`, requires `X-GitHub-Delivery` for idempotency, and reads the event type from `X-GitHub-Event`.
 
-## Current behavior
+Production currently sets `JINA_GITHUB_WEBHOOK_ENABLED=false` and does not mount `GITHUB_WEBHOOK_SECRET`. The original Jina application is the sole GitHub webhook consumer and calls `POST /context-graph/build` after accepting a review. Disabled v2 intake returns `202` without creating work, avoiding GitHub redelivery noise. Keep the signed route for local development and rollback only.
+
+## Behavior when enabled
 
 | GitHub event    | Action                  | Board result                                                                                                                                                                   |
 | --------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -44,13 +46,18 @@ Create a private GitHub App under the account or organization that owns the repo
 - Repository permission: **Pull requests — Read-only**
 - Repository permission: **Issues — Read-only**
 - Repository permission: **Contents — Read-only**
-- Optional repository permission: **Deployments — Read-only**
+- Repository permission for deployment-aware context graphs: **Deployments — Read-only**
 - Optional repository permission: **Actions — Read-only**
 - Subscribe to events: **Push**, **Pull request**, and **Issues**
 
-Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Fixed-tenancy production sets a canonical `JINA_TENANT_ID`; configured aliases are migrated at API startup so historical tasks remain visible. Shared-database production leaves `JINA_TENANT_ID` unset and resolves the original tenant UUID from the repository and installation records.
+Install the App on the repositories Jina should watch. In production shared mode, `JINA_TENANT_ID` is unset and the original Jina database must already contain the enabled repository, its tenant, and a non-suspended installation. The signed delivery is resolved against those records; an unknown, disabled, suspended, or mismatched repository is rejected instead of receiving a synthetic tenant. Fixed mode uses canonical `JINA_TENANT_ID` and migrates configured aliases at API startup so historical tasks remain visible; local development can derive `github:installation:<id>` from the payload.
 
-The webhook slice does not use an App ID or private key. The current review worker uses `GITHUB_CLONE_TOKEN` to read PR metadata and diffs. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
+When intake is enabled, the resolved original tenant UUID scopes every task created by the delivery. In the current production path, the original application sends the same UUID and verified repository/review identity as server-side graph-build metadata. Both paths retain the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types.
+
+The API webhook slice needs only the webhook secret. Context graph workers also receive `GITHUB_APP_ID` and
+`GITHUB_APP_PRIVATE_KEY`; they exchange the installation ID persisted on each build for a short-lived token used by
+REST metadata, local git, and Daytona cloning. Legacy non-graph review tasks may still use `GITHUB_API_TOKEN` and
+`GITHUB_CLONE_TOKEN` until that workflow is migrated separately.
 
 GitHub documents the registration flow in [Registering a GitHub App](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app) and the event setup in [Using webhooks with GitHub Apps](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/using-webhooks-with-github-apps).
 
@@ -63,7 +70,7 @@ curl http://localhost:4000/board
 curl http://localhost:4000/events
 ```
 
-Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>`. Fixed-tenancy deployments use `JINA_TENANT_ID`; shared-database deployments resolve the tenant from PostgreSQL. Browsers should use the IAP-protected dashboard rather than calling the API credential directly.
+Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>`. Fixed mode uses `JINA_TENANT_ID`; shared-mode callers send `x-jina-tenant-id: <original-tenant-uuid>`, and a forwarded `tenant:<uuid>` principal must match it. The signed webhook endpoint resolves its own tenant and does not accept a caller-supplied tenant override. Browsers should use the authenticated dashboard rather than calling the API credential directly.
 
 GitHub's App settings also show every delivery, response status, and redelivery control.
 

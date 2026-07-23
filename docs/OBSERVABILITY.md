@@ -105,6 +105,36 @@ email or chat channel in **Monitoring → Alerting** to receive them:
 - _Jina API 5xx responses sustained 10m_ — `jina_api_errors` non-zero for
   10 minutes, grouped by `route`.
 
+## Validating dashboard read latency
+
+Use the API's `http.request` event rather than browser load time to separate
+backend latency from network transfer and graph rendering. Filter the relevant
+graph route in Logs Explorer, compare equivalent warm windows before and after
+a release, and report p50, p95, p99, request count and error rate. Exclude the
+first request only when explicitly measuring warm performance; retain it in the
+user-facing distribution.
+
+Correlate regressions with Cloud Run instance count, container CPU and memory,
+and Cloud SQL connection count. A latency spike while instance count rises from
+zero indicates a cold start; sustained latency with a warm instance is more
+likely query time, database contention, cross-region round trips, response
+serialization or payload size. The deployment now defaults the API to one
+minimum instance, so an unexpected zero active-instance floor should be treated
+as configuration drift.
+
+For a repeatable smoke measurement, send the same authenticated graph request
+at least 30 times with a short pause, retain status, time-to-first-byte, total
+time and response bytes, and run it from the dashboard's serving region. Do not
+log bearer tokens or response bodies. Compare a changed graph separately from
+an unchanged conditional request; combining them hides the effectiveness of
+revision checks and caching.
+
+After changing API maximum instances or concurrency, verify that the peak Cloud
+SQL connection count remains below the instance limit with operational
+headroom. Cloud Run scaling multiplies per-process pools; a lower request p95 is
+not a safe improvement if it exhausts database connections during worker or
+migration activity.
+
 ## Local development
 
 Logs stay readable as single-line JSON. Pipe through `jq` when needed:

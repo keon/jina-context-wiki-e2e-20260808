@@ -11,6 +11,7 @@
   "references": [
     { "path": "../../packages/ai" },
     { "path": "../../packages/daytona" },
+    { "path": "../../packages/github" },
     { "path": "../../packages/observability" },
     { "path": "../../packages/context-graph" }
   ]

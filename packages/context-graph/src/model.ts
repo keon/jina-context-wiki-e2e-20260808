@@ -80,6 +80,10 @@ export interface ContextGraphBuildRequest {
   readonly focusPaths?: readonly string[];
   /** PRs whose complete changed-file list contains durable regression/problem evidence. */
   readonly problemEvidencePullRequestNumbers?: readonly number[];
+  /** PRs present in the immutable source observations for this generation. */
+  readonly sourcePullRequestNumbers?: readonly number[];
+  /** Source PRs that already explicitly resolve a tracked issue. */
+  readonly resolvedPullRequestNumbers?: readonly number[];
   /** Immutable source observations included in this generation's evidence fingerprint. */
   readonly sourceEvidence?: readonly ContextGraphSourceEvidence[];
   readonly taskId: string;
@@ -110,7 +114,15 @@ export interface EvidenceCitation {
 }
 
 export interface ContextGraphExecutor {
-  buildAssertions(request: ContextGraphBuildRequest): Promise<ContextGraph>;
+  buildAssertions(
+    request: ContextGraphBuildRequest,
+    credentials: ContextGraphExecutionCredentials
+  ): Promise<ContextGraph>;
+}
+
+/** Ephemeral credentials supplied by the worker and never persisted in graph data or task metadata. */
+export interface ContextGraphExecutionCredentials {
+  readonly githubToken: string;
 }
 
 export function createContextGraph(input: {
@@ -189,7 +201,7 @@ export function parseGeneratedContextGraph(value: unknown): GeneratedContextGrap
     !Array.isArray(value.nodes) ||
     !Array.isArray(value.edges)
   ) {
-    throw new Error("Codex returned an invalid contextGraph document");
+    throw new Error("The model returned an invalid contextGraph document");
   }
 
   const nodes = value.nodes.map(parseNode);
@@ -380,6 +392,14 @@ export interface RequiredCausalAnchor {
   readonly endLine: number;
 }
 
+export interface RequiredMoveAnchor {
+  readonly currentPath: string;
+  readonly previousPath: string;
+  readonly evidencePath: string;
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
 /** Detect only explicit root-cause records; proximity or PR membership never qualifies. */
 export function requiredCausalAnchors(
   files: readonly CausalEvidenceFile[],
@@ -394,21 +414,25 @@ export function requiredCausalAnchors(
     const commitSha = shaMatch?.[1]?.toLowerCase();
     if (!commitSha) continue;
     const issuePattern = /\b(?:github\s+)?issue\s+#(\d+)\b/i;
+    const noIssuePattern = /\bno\s+github\s+issue\s+was\s+opened\b/i;
     const issueNumber = issuePattern.exec(file.content)?.[1];
     const issueId =
       issueNumber ??
-      (/\bno\s+github\s+issue\s+was\s+opened\b/i.test(file.content) && derivedIssuePullRequestNumbers.length === 1
+      (noIssuePattern.test(file.content) && derivedIssuePullRequestNumbers.length === 1
         ? `derived:pr:${derivedIssuePullRequestNumbers[0]}`
         : undefined);
     if (issueId) {
       const shaLine = Math.max(1, lines.findIndex((line) => line.toLowerCase().includes(commitSha)) + 1);
-      const issueLine = issueNumber ? Math.max(1, lines.findIndex((line) => issuePattern.test(line)) + 1) : 1;
+      const issueLine = Math.max(
+        1,
+        lines.findIndex((line) => (issueNumber ? issuePattern.test(line) : noIssuePattern.test(line))) + 1
+      );
       anchors.push({
         issueId,
         commitSha,
         evidencePath: file.path,
         startLine: Math.min(issueLine, shaLine),
-        endLine: Math.min(lines.length, shaLine + 2)
+        endLine: Math.min(lines.length, Math.max(issueLine, shaLine + 2))
       });
     }
   }
@@ -418,6 +442,125 @@ export function requiredCausalAnchors(
         (candidate) => candidate.issueId === anchor.issueId && candidate.commitSha === anchor.commitSha
       ) === index
   );
+}
+
+/** Detect only explicit, repository-authored file continuity statements. */
+export function requiredMoveAnchors(files: readonly CausalEvidenceFile[]): readonly RequiredMoveAnchor[] {
+  const anchors: RequiredMoveAnchor[] = [];
+  for (const file of files) {
+    const lines = file.content.split(/\r?\n/);
+    for (const [index, line] of lines.entries()) {
+      const currentFromPrevious = /`([^`\n]+)`\s+(?:was\s+)?moved\s+from\s+`([^`\n]+)`/i.exec(line);
+      const previousToCurrent = /\bmoved\s+from\s+`([^`\n]+)`\s+to\s+`([^`\n]+)`/i.exec(line);
+      const currentPath = normalizeExplicitMovePath(currentFromPrevious?.[1] ?? previousToCurrent?.[2]);
+      const previousPath = normalizeExplicitMovePath(currentFromPrevious?.[2] ?? previousToCurrent?.[1]);
+      if (!currentPath || !previousPath || currentPath === previousPath) continue;
+      anchors.push({
+        currentPath,
+        previousPath,
+        evidencePath: file.path,
+        startLine: index + 1,
+        endLine: index + 1
+      });
+    }
+  }
+  return anchors.filter(
+    (anchor, index) =>
+      anchors.findIndex(
+        (candidate) => candidate.currentPath === anchor.currentPath && candidate.previousPath === anchor.previousPath
+      ) === index
+  );
+}
+
+/** Materialize explicit move contracts without treating similarity candidates as facts. */
+export function materializeRequiredMoveAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredMoveAnchor[]
+): GeneratedContextGraph {
+  const nodes = [...generated.nodes];
+  const edges = [...generated.edges];
+  const fileNode = (path: string, evidence: string, historical: boolean): ContextGraphNode => {
+    const canonicalId = `file:${path}`;
+    const existingIndex = nodes.findIndex(
+      (node) => node.kind === "File" && (node.path === path || node.id === canonicalId)
+    );
+    const existing = nodes[existingIndex];
+    if (existing?.kind === "File") {
+      if (existing.path === path) return existing;
+      const anchored = { ...existing, path };
+      nodes[existingIndex] = anchored;
+      return anchored;
+    }
+    const node: ContextGraphNode = {
+      id: canonicalId,
+      kind: "File",
+      label: path.split("/").at(-1) ?? path,
+      description: historical
+        ? `Historical file named by explicit repository move-continuity evidence: ${path}`
+        : `Current file named by explicit repository move-continuity evidence: ${path}`,
+      path,
+      evidence: [evidence]
+    };
+    nodes.push(node);
+    return node;
+  };
+
+  for (const anchor of anchors) {
+    const evidence = `${anchor.evidencePath}:${anchor.startLine}-${anchor.endLine}`;
+    const current = fileNode(anchor.currentPath, evidence, false);
+    const previous = fileNode(anchor.previousPath, evidence, true);
+    const requiredEdge: Omit<ContextGraphEdge, "id"> = {
+      source: current.id,
+      target: previous.id,
+      predicate: "MOVED_FROM",
+      plane: "knowledge",
+      confidence: 1,
+      why: `Repository evidence explicitly states that ${anchor.currentPath} moved from ${anchor.previousPath}.`,
+      evidence: [evidence]
+    };
+    const existing = edges.findIndex(
+      (edge) => edge.predicate === "MOVED_FROM" && edge.source === current.id && edge.target === previous.id
+    );
+    if (existing === -1) edges.push(requiredEdge);
+    else edges[existing] = requiredEdge;
+  }
+  return { ...generated, nodes, edges };
+}
+
+export function validateRequiredMoveAssertions(
+  generated: GeneratedContextGraph,
+  anchors: readonly RequiredMoveAnchor[]
+): void {
+  for (const anchor of anchors) {
+    const current = generated.nodes.find((node) => node.kind === "File" && node.path === anchor.currentPath);
+    const previous = generated.nodes.find((node) => node.kind === "File" && node.path === anchor.previousPath);
+    const edge =
+      current && previous
+        ? generated.edges.find(
+            (candidate) =>
+              candidate.predicate === "MOVED_FROM" &&
+              candidate.source === current.id &&
+              candidate.target === previous.id
+          )
+        : undefined;
+    const spansAnchor = edge?.evidence.some((value) => {
+      const citation = parseEvidenceCitation(value);
+      return (
+        citation.path === anchor.evidencePath &&
+        citation.startLine <= anchor.startLine &&
+        citation.endLine >= anchor.endLine
+      );
+    });
+    if (!edge || !spansAnchor) {
+      throw new Error(`explicit move evidence requires ${anchor.currentPath} MOVED_FROM ${anchor.previousPath}`);
+    }
+  }
+}
+
+function normalizeExplicitMovePath(value: string | undefined): string | undefined {
+  const path = value?.trim().replace(/^\.\//, "");
+  if (!path || path.startsWith("/") || path.split("/").includes("..") || /[\s\\]/.test(path)) return undefined;
+  return path;
 }
 
 /**
@@ -469,6 +612,35 @@ export function materializeRequiredCausalAssertions(
       };
       nodes.push(commit);
       nodesById.set(commit.id, commit);
+    }
+    const derivedPullRequest = /^derived:pr:(\d+)$/i.exec(anchor.issueId)?.[1];
+    if (derivedPullRequest) {
+      if (!nodesById.has(derivedPullRequest)) {
+        const pullRequest: ContextGraphNode = {
+          id: derivedPullRequest,
+          kind: "PullRequest",
+          label: `PR #${derivedPullRequest}`,
+          description: "The merged pull request that repaired this explicitly documented untracked problem.",
+          evidence: [evidence]
+        };
+        nodes.push(pullRequest);
+        nodesById.set(pullRequest.id, pullRequest);
+      }
+      const existingResolution = edges.findIndex(
+        (edge) =>
+          edge.predicate === "RESOLVED_BY" && edge.source === anchor.issueId && edge.target === derivedPullRequest
+      );
+      const requiredResolution: Omit<ContextGraphEdge, "id"> = {
+        source: anchor.issueId,
+        target: derivedPullRequest,
+        predicate: "RESOLVED_BY",
+        plane: "knowledge",
+        confidence: 1,
+        why: `The merged pull request #${derivedPullRequest} repaired the untracked problem described by the cited root-cause record.`,
+        evidence: [evidence]
+      };
+      if (existingResolution === -1) edges.push(requiredResolution);
+      else edges[existingResolution] = requiredResolution;
     }
 
     const existing = edges.findIndex(
@@ -569,14 +741,16 @@ function validateCausalEvidenceContents(generated: GeneratedContextGraph, files:
       ? new RegExp(`(?:#${issueNumber}\\b|\\bissue\\s*#?\\s*${issueNumber}\\b|/issues/${issueNumber}\\b)`, "i").test(
           citedText
         )
-      : citedText.toLowerCase().includes(root.label.trim().toLowerCase()) ||
+      : (Boolean(derivedAnchor) && /\bno\s+github\s+issue\s+was\s+opened\b/i.test(citedText)) ||
+        citedText.toLowerCase().includes(root.label.trim().toLowerCase()) ||
         citedText.toLowerCase().includes(root.id.trim().toLowerCase());
     const namesCause = commitSha
       ? citedText.toLowerCase().includes(commitSha)
       : Boolean(
           deploymentId &&
           (citedText.toLowerCase().includes(deploymentId.toLowerCase()) ||
-            citedText.toLowerCase().includes(cause.label.trim().toLowerCase()))
+            citedText.toLowerCase().includes(cause.label.trim().toLowerCase()) ||
+            citedText.toLowerCase().includes(deploymentId.split(":").at(-1)?.toLowerCase() ?? "\u0000"))
         );
     if (!namesRoot || !namesCause) {
       const rootReference = issueNumber

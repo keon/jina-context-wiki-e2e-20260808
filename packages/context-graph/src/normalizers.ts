@@ -107,6 +107,14 @@ export interface IncidentSourceObservation {
   readonly url?: string;
   readonly issueNumber?: number;
   readonly impactedService?: { readonly source: string; readonly externalId: string; readonly name: string };
+  readonly deploymentRelations?: readonly {
+    readonly source: string;
+    readonly externalId: string;
+    readonly predicate: "INTRODUCED_BY" | "RESOLVED_BY";
+    readonly evidencePath: string;
+    readonly evidenceStartLine: number;
+    readonly evidenceEndLine: number;
+  }[];
   readonly occurredAt?: string;
   /** A current-ref tombstone retracts facts from a deleted postmortem. */
   readonly removed?: boolean;
@@ -153,7 +161,9 @@ export interface SourceAssertionIntent {
     | "DEPENDS_ON"
     | "DEPLOYS"
     | "TARGETS"
-    | "INCIDENT_IMPACTS";
+    | "INCIDENT_IMPACTS"
+    | "INTRODUCED_BY"
+    | "RESOLVED_BY";
   readonly object: SourceEntityIntent;
   readonly explanation: string;
   readonly qualifiers?: Readonly<Record<string, string | number | boolean>>;
@@ -348,6 +358,78 @@ export function parseIncidentDocument(input: {
     occurredAt: input.recordedAt,
     recordedAt: input.recordedAt
   };
+}
+
+/**
+ * Repository-authored postmortems are an authoritative source for deployment
+ * identities they explicitly name. Materialize those records alongside the
+ * incident so graph correctness does not depend on optional GitHub deployment
+ * API permissions or on the deployment belonging to the repository being
+ * analyzed.
+ */
+export function parseIncidentDocumentObservations(input: {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly path: string;
+  readonly content: string;
+  readonly recordedAt: string;
+}): readonly (IncidentSourceObservation | DeploymentSourceObservation)[] {
+  const incident = parseIncidentDocument(input);
+  if (!incident) return [];
+  const deployments: DeploymentSourceObservation[] = [];
+  const deploymentRelations: NonNullable<IncidentSourceObservation["deploymentRelations"]>[number][] = [];
+  const incidentDocumentId = incident.externalId.split(":").at(-1)?.toLowerCase().replaceAll("_", "-");
+  for (const [lineIndex, line] of input.content.split(/\r?\n/).entries()) {
+    const named =
+      /\bIncident\s+([A-Za-z][A-Za-z0-9_-]*-\d+)\s+was\s+(introduced|resolved)\s+by\s+Deployment\s+deployment:([A-Za-z0-9_.-]+):([A-Za-z0-9_/#:.-]+)/i.exec(
+        line
+      );
+    const commit = /\b(?:deployed|shipped)\s+commit\s+`?([a-f0-9]{40})`?/i.exec(line)?.[1]?.toLowerCase();
+    const mentionedIncidentId = named?.[1]?.toLowerCase().replaceAll("_", "-");
+    const source = named?.[3];
+    const externalId = named?.[4]?.replace(/[.,;]+$/, "");
+    if (mentionedIncidentId !== incidentDocumentId || !named?.[2] || !source || !externalId || !commit) continue;
+    const predicate = named[2].toLowerCase() === "introduced" ? "INTRODUCED_BY" : "RESOLVED_BY";
+    deployments.push({
+      tenantId: input.tenantId,
+      repository: input.repository,
+      kind: "deployment",
+      source: source.toLowerCase(),
+      externalId,
+      commitSha: commit,
+      environment: "postmortem",
+      status: predicate === "INTRODUCED_BY" ? "incident_source" : "incident_recovery",
+      ...(incident.impactedService ? { service: incident.impactedService } : {}),
+      occurredAt: input.recordedAt,
+      recordedAt: input.recordedAt
+    });
+    deploymentRelations.push({
+      source: source.toLowerCase(),
+      externalId,
+      predicate,
+      evidencePath: input.path,
+      evidenceStartLine: lineIndex + 1,
+      evidenceEndLine: lineIndex + 1
+    });
+  }
+  const uniqueRelations = deploymentRelations.filter(
+    (relation, index) =>
+      deploymentRelations.findIndex(
+        (candidate) =>
+          candidate.source === relation.source &&
+          candidate.externalId === relation.externalId &&
+          candidate.predicate === relation.predicate
+      ) === index
+  );
+  return [
+    uniqueRelations.length > 0 ? { ...incident, deploymentRelations: uniqueRelations } : incident,
+    ...deployments.filter(
+      (deployment, index) =>
+        deployments.findIndex(
+          (candidate) => candidate.source === deployment.source && candidate.externalId === deployment.externalId
+        ) === index
+    )
+  ];
 }
 
 export interface NormalizedGitHubObservation {
@@ -569,14 +651,20 @@ function normalizeDeployment(observation: DeploymentSourceObservation): Normaliz
   };
 }
 
-function normalizeIncident(observation: IncidentSourceObservation): NormalizedGitHubObservation {
-  const incident: SourceEntityIntent = {
+function incidentEntity(
+  observation: Pick<IncidentSourceObservation, "repository" | "source" | "externalId" | "title" | "issueNumber">
+): SourceEntityIntent {
+  return {
     kind: "Incident",
     key: observation.issueNumber
       ? `incident:github:${observation.repository}#${observation.issueNumber}`
       : `incident:${observation.source}:${observation.externalId}`,
     displayName: observation.title
   };
+}
+
+function normalizeIncident(observation: IncidentSourceObservation): NormalizedGitHubObservation {
+  const incident = incidentEntity(observation);
   const issue = observation.issueNumber
     ? {
         kind: "Issue" as const,
@@ -591,8 +679,19 @@ function normalizeIncident(observation: IncidentSourceObservation): NormalizedGi
         displayName: observation.impactedService.name
       }
     : undefined;
+  const deploymentRelations = observation.deploymentRelations ?? [];
+  const deployments = deploymentRelations.map((relation): SourceEntityIntent => ({
+    kind: "Deployment",
+    key: `deployment:${relation.source}:${relation.externalId}`,
+    displayName: `deployment ${relation.externalId}`
+  }));
   return {
-    entities: [incident, ...(issue ? [issue] : []), ...(service ? [service] : [])],
+    entities: [
+      incident,
+      ...(issue ? [issue] : []),
+      ...(service ? [service] : []),
+      ...dedupe(deployments, (deployment) => deployment.key)
+    ],
     assertions: observation.removed
       ? []
       : [
@@ -615,7 +714,25 @@ function normalizeIncident(observation: IncidentSourceObservation): NormalizedGi
                   explanation: `Incident ${observation.externalId} identifies ${service.displayName} as an impacted service.`
                 }
               ]
-            : [])
+            : []),
+          ...deploymentRelations.map((relation) => {
+            const deployment: SourceEntityIntent = {
+              kind: "Deployment",
+              key: `deployment:${relation.source}:${relation.externalId}`,
+              displayName: `deployment ${relation.externalId}`
+            };
+            const explanation =
+              relation.predicate === "INTRODUCED_BY"
+                ? `Postmortem ${relation.evidencePath}:${relation.evidenceStartLine} explicitly identifies deployment ${relation.externalId} as introducing incident ${observation.externalId}.`
+                : `Postmortem ${relation.evidencePath}:${relation.evidenceStartLine} explicitly identifies deployment ${relation.externalId} as resolving incident ${observation.externalId}.`;
+            return {
+              subject: incident,
+              predicate: relation.predicate,
+              object: deployment,
+              explanation,
+              ...(relation.predicate === "INTRODUCED_BY" ? { qualifiers: { reason: explanation } } : {})
+            };
+          })
         ]
   };
 }

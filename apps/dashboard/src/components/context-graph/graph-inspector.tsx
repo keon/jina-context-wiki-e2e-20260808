@@ -14,8 +14,10 @@ export interface GraphInspectorProps {
   readonly visibleGraph: VisibleGraph;
   readonly selection: GraphSelection | null;
   readonly proposedAssertions: readonly ContextGraphAssertion[];
+  readonly canLoadMoreProposedAssertions: boolean;
   readonly onSelect: (selection: GraphSelection | null) => void;
   readonly onReview: ReviewAssertionFn;
+  readonly onLoadMoreProposedAssertions: () => Promise<void>;
 }
 
 export function GraphInspector({
@@ -23,8 +25,10 @@ export function GraphInspector({
   visibleGraph,
   selection,
   proposedAssertions,
+  canLoadMoreProposedAssertions,
   onSelect,
-  onReview
+  onReview,
+  onLoadMoreProposedAssertions
 }: GraphInspectorProps) {
   return (
     <aside className="context-graph-details side-inspector" id="context-graph-details" aria-live="polite">
@@ -33,8 +37,10 @@ export function GraphInspector({
         visibleGraph={visibleGraph}
         selection={selection}
         proposedAssertions={proposedAssertions}
+        canLoadMoreProposedAssertions={canLoadMoreProposedAssertions}
         onSelect={onSelect}
         onReview={onReview}
+        onLoadMoreProposedAssertions={onLoadMoreProposedAssertions}
       />
     </aside>
   );
@@ -45,13 +51,22 @@ function InspectorBody({
   visibleGraph,
   selection,
   proposedAssertions,
+  canLoadMoreProposedAssertions,
   onSelect,
-  onReview
+  onReview,
+  onLoadMoreProposedAssertions
 }: GraphInspectorProps) {
   if (!graph) return <p className="empty-detail">Run an context_graph_build task to create the first graph.</p>;
   if (!selection) {
     if (proposedAssertions.length) {
-      return <AssertionReviewQueue assertions={proposedAssertions} onReview={onReview} />;
+      return (
+        <AssertionReviewQueue
+          assertions={proposedAssertions}
+          canLoadMore={canLoadMoreProposedAssertions}
+          onReview={onReview}
+          onLoadMore={onLoadMoreProposedAssertions}
+        />
+      );
     }
     return (
       <p className="empty-detail">

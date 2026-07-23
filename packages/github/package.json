@@ -12,7 +12,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/webhooks.test.js"
+    "test": "pnpm build && node --test dist/webhooks.test.js dist/github-app.test.js"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

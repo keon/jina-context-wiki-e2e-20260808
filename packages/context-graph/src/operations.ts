@@ -106,6 +106,7 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
       readonly status?: AssertionStatus;
       readonly predicate?: string;
       readonly entityKind?: ContextGraphNodeKind;
+      readonly limit?: number;
     }
   ): Promise<readonly ContextGraphAssertionSummary[]>;
 }

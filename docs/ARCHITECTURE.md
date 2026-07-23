@@ -4,13 +4,15 @@ This document describes the runtime in this repository. Domain-specific ContextG
 
 ## Topology
 
-The deployed backend runs as three Cloud Run services backed by the shared PostgreSQL 16 database:
+The deployed backend runs as three Cloud Run services backed by the original
+PostgreSQL 16 identity/control-plane database and the dedicated same-region
+PostgreSQL 17 ContextGraph database:
 
-- `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
+- `jina-api` accepts tenant-scoped work from trusted callers, applies commands, reduces readiness, and owns worker lease/completion transactions. Its direct GitHub parser is retained but disabled in production.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
 - `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
 
-The dashboard and admin are Next.js applications deployed separately. An existing Cloud Run dashboard remains during the Vercel authentication cutover; see [DEPLOYMENT.md](DEPLOYMENT.md).
+The dashboard and admin are Next.js applications deployed automatically from `main` by the Om Labs Vercel projects `jina-dashboard` and `jina-admin`. They call the Cloud Run API only from server routes, forwarding the internal bearer credential and shared tenant identity after app-level authentication. A legacy Cloud Run dashboard remains during traffic cutover but is not updated by the active pipeline; see [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ```text
 GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
@@ -19,6 +21,19 @@ Trusted graph caller -> graph API or MCP -> repository-scoped retrieval
 ```
 
 The API performs short state transitions. Workers perform external I/O outside the mutation lock, renew their leases, and complete through the API. Expired work is reclaimable; a stale completion changes no state.
+
+## Identity and tenancy
+
+Production does not maintain a second user, organization, installation, or repository directory. The original Jina tables in `public` are authoritative:
+
+- `tenants` supplies the tenant UUID and GitHub account identity;
+- `installations` proves that the tenant's GitHub App installation is active;
+- `repositories` binds an enabled GitHub repository to that tenant;
+- `tenant_members` remains owned by the original application and supports its membership boundary.
+
+Production GitHub intake is owned by the original application. It resolves an enabled repository and active installation in the authoritative tables, starts the review, then submits an idempotent v2 graph build under the same original tenant UUID and PR head. The UUID becomes the partition key for the graph pipeline and every context graph row. Tenant, author, and sender identity from the verified delivery remains attached to the build, board tasks, and canonical observations. V2's signed webhook parser remains available for local development and rollback but is disabled in production.
+
+Workers do not connect to PostgreSQL. An unscoped worker claim asks the API to enumerate active original tenants; all later lease, completion, and graph requests carry the concrete original tenant UUID. The original application exposes its member-authenticated work overview by calling this API with the same UUID and `tenant:<uuid>` principal. Fixed mode remains available only for local development and rollback.
 
 ## Board and execution
 
@@ -46,7 +61,7 @@ Only assertion generation uses a model. Assertions must carry checked repository
 
 ## Read interfaces
 
-The dashboard is a Next.js application that reads board, history, task-type, graph, assertion, and fixed-template retrieval endpoints through its authenticated proxy. Its poll uses `GET /overview`, which serves the board and its event history from one ACL lookup and one pipeline listing, and `GET /context-graph?include=assertions`, which inlines the review queue so no dependent request follows. Polled read responses carry ETags: an unchanged poll revalidates to an empty 304, and the API itself skips reloading the board snapshot when its stored version has not moved. Historical graph lists contain summaries with counts denormalized at write time; full nodes and edges load only when requested.
+The dashboard is a Next.js application that reads board, history, task-type, graph, assertion, and fixed-template retrieval endpoints through its authenticated proxy. Its board poll uses `GET /overview`, which serves the board and its event history from one ACL lookup and one pipeline listing. The graph page uses the dashboard view of `GET /context-graph`, which returns only the latest authorized graph and a bounded proposed-assertion queue; older proposals and assertion history load on demand. Polled read responses carry ETags. Context-graph revalidation derives its validator from graph heads and assertion mutation clocks before hydrating nodes, edges, summaries, or assertion entities, so an unchanged request exits with `304`. Historical graph lists remain available to other clients as summaries with counts denormalized at write time; full nodes and edges load only when requested.
 
 `POST /mcp` implements stateless Streamable HTTP MCP with one read-only `query_graph` tool. The server chooses bounded retrieval templates and returns cited results; callers do not choose SQL, graph generations, or internal tools.
 
@@ -56,13 +71,21 @@ The simulation-facing graph API uses a dedicated credential and maps each simula
 
 The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in `jina_runtime.github_deliveries`. ContextGraph uses normalized canonical, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables under `jina_context_graph`.
 
+Production treats those as separate persistence planes. Identity, repository
+authorization, and board/runtime state remain on the original Jina database.
+The ContextGraph store and pipeline coordinator connect to a dedicated
+same-region PostgreSQL instance through `GRAPH_DB_*`. This keeps ingestion
+writes, graph indexes, vacuum, and connection pressure from contending with the
+original dashboard database while preserving the original application as the
+tenant authority.
+
 Source writes, model observations, and projections are independently idempotent. A retry may repeat a stage, but canonical keys, consumer-owned outbox delivery, exact fingerprints, and immutable graph generations make the result converge. Graph identity includes tenant, repository, ref content, projection version, and canonical graph content.
 
 ## Authentication and security
 
-Fixed-tenancy production is scoped to `JINA_TENANT_ID`; shared-database production resolves the tenant from PostgreSQL. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential.
+Fixed mode uses `JINA_TENANT_ID`. Shared mode resolves the original tenant UUID from PostgreSQL for signed webhook intake and scopes authenticated requests by `x-jina-tenant-id`; a forwarded `tenant:<uuid>` principal must match that header. Health and task-type definitions are public; disabled webhook intake acknowledges without mutation. Board, worker, and context graph operations require the internal bearer credential.
 
-The web application must authenticate users before forwarding a verified principal and service credential. The existing Cloud Run dashboard uses IAP; its replacement needs an equivalent identity boundary. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
+The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal; the admin app uses the service principal. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
 MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
 

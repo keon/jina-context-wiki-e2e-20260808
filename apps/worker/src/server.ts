@@ -12,7 +12,8 @@ import {
   prepareDiff,
   type ReviewRequest
 } from "@jina/ai";
-import { DaytonaCodexContextGraphExecutor } from "@jina/daytona";
+import { DaytonaContextGraphExecutor } from "@jina/daytona";
+import { createGitHubInstallationAccessToken, type GitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
@@ -27,6 +28,7 @@ import {
   isProblemEvidencePath,
   movedFromSimilarityCandidates,
   parseIncidentDocument,
+  parseIncidentDocumentObservations,
   parsePackageManifest,
   parseServiceDefinitions,
   selectAssertionFocusPaths,
@@ -44,6 +46,7 @@ import {
 } from "@jina/context-graph";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
+import { contextGraphHistoryPolicy, type ContextGraphHistoryPolicy } from "./history-limit.js";
 
 const SUPPORTED_TOPICS = [
   "run-review",
@@ -73,12 +76,15 @@ interface WorkMetadataByTopic {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly githubInstallationId: number;
     readonly pipelinePhase: "snapshot" | "history";
+    readonly historyLimit?: number;
   };
   readonly "run-context-graph-assert": {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly githubInstallationId: number;
     readonly commitSha: string;
     readonly evidenceFingerprint: string;
     readonly analysisPaths?: readonly string[];
@@ -90,6 +96,7 @@ interface WorkMetadataByTopic {
     readonly tenantId: string;
     readonly repository: string;
     readonly ref: string;
+    readonly githubInstallationId: number;
   };
 }
 
@@ -119,6 +126,7 @@ type WorkResult =
 
 interface LeaseExecutionState {
   readonly controller: AbortController;
+  githubToken?: string;
   lostReason?: string;
 }
 
@@ -141,7 +149,7 @@ const contextGraphApiTimeoutMs = positiveInt(process.env.CONTEXT_GRAPH_API_TIMEO
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsContextGraphProjections = topics.some((topic) => topic.startsWith("run-context-graph"));
 const contextGraphExecutor = topics.includes("run-context-graph-assert")
-  ? new DaytonaCodexContextGraphExecutor()
+  ? new DaytonaContextGraphExecutor()
   : undefined;
 let stopping = false;
 let active = false;
@@ -386,11 +394,31 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
   }
 }
 
+async function activateGitHubInstallationAccess(
+  installationId: number,
+  repository: string
+): Promise<GitHubInstallationAccessToken> {
+  assertLeaseOwned();
+  const access = await createGitHubInstallationAccessToken(installationId);
+  assertLeaseOwned();
+  if (!activeLease) throw new Error("GitHub installation token was minted outside an active worker lease");
+  activeLease.githubToken = access.token;
+  logger.info(`GitHub installation access ready for ${repository}`, {
+    event: "github.installation_access_ready",
+    workerId,
+    repository,
+    installationId,
+    ...(access.expiresAt ? { expiresAt: access.expiresAt } : {})
+  });
+  return access;
+}
+
 async function runContextGraphIngest(work: ClaimedWork<"run-context-graph-ingest">): Promise<Record<string, unknown>> {
-  const { tenantId, repository, ref } = work.task.metadata;
+  const { tenantId, repository, ref, githubInstallationId } = work.task.metadata;
+  const access = await activateGitHubInstallationAccess(githubInstallationId, repository);
   const lease = { messageId: work.message.id, leaseId: work.message.leaseId };
   if ((process.env.CONTEXT_GRAPH_INGEST_TRANSPORT?.trim() || "rest") === "git") {
-    activeGitIngestTransport = new GitIngestTransport(repository, ref);
+    activeGitIngestTransport = new GitIngestTransport(repository, ref, access.token);
   }
   try {
     return await runContextGraphIngestWithTransport(work, tenantId, repository, ref, lease);
@@ -412,11 +440,15 @@ async function runContextGraphIngestWithTransport(
     githubJson(`/repos/${repository}`)
   ]);
   const commitSha = requiredGitSha(head.sha, "GitHub commit SHA");
-  const historyLimit = positiveInt(process.env.CONTEXT_GRAPH_HISTORY_LIMIT, 10_000);
+  const serviceHistoryLimit = positiveInt(process.env.CONTEXT_GRAPH_HISTORY_LIMIT, 10_000);
+  const historyPolicy =
+    work.task.metadata.pipelinePhase === "history"
+      ? contextGraphHistoryPolicy(work.task.metadata.historyLimit, serviceHistoryLimit)
+      : contextGraphHistoryPolicy(undefined, serviceHistoryLimit);
   const discovery =
     work.task.metadata.pipelinePhase === "snapshot"
-      ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>() }
-      : await discoverNewCommits(work, repository, head, historyLimit);
+      ? { commits: new Map([[commitSha, head]]), knownCommitShas: new Set<string>(), truncated: false }
+      : await discoverNewCommits(work, repository, head, historyPolicy);
   const orderedShas = topologicalCommitOrder(commitSha, discovery.commits);
   const defaultBranch =
     typeof repositoryMetadata.default_branch === "string" ? repositoryMetadata.default_branch : "main";
@@ -526,14 +558,15 @@ async function runContextGraphIngestWithTransport(
             recordedAt: snapshot.recordedAt
           })
         );
-        const incident = parseIncidentDocument({
-          tenantId,
-          repository,
-          path: file.path,
-          content: source,
-          recordedAt: snapshot.recordedAt
-        });
-        if (incident) deterministicObservations.push(incident);
+        deterministicObservations.push(
+          ...parseIncidentDocumentObservations({
+            tenantId,
+            repository,
+            path: file.path,
+            content: source,
+            recordedAt: snapshot.recordedAt
+          })
+        );
       }
       for (const removed of plan.changes.filter(
         (change) => change.change === "delete" && change.oldBlobSha && isDeterministicSourcePath(change.path)
@@ -634,6 +667,9 @@ async function runContextGraphIngestWithTransport(
     problemEvidencePullRequestNumbers
   });
   return {
+    ...(work.task.metadata.pipelinePhase === "history"
+      ? { historyCommitLimit: historyPolicy.limit, historyTruncated: discovery.truncated }
+      : {}),
     effect:
       newCommitCount > 0 ||
       parsedBlobCount > 0 ||
@@ -676,15 +712,25 @@ async function discoverNewCommits(
   work: ClaimedWork,
   repository: string,
   head: Record<string, unknown>,
-  limit: number
-): Promise<{ readonly commits: Map<string, Record<string, unknown>>; readonly knownCommitShas: Set<string> }> {
+  policy: ContextGraphHistoryPolicy
+): Promise<{
+  readonly commits: Map<string, Record<string, unknown>>;
+  readonly knownCommitShas: Set<string>;
+  readonly truncated: boolean;
+}> {
   const headSha = requiredGitSha(head.sha, "GitHub head SHA");
   const commits = new Map<string, Record<string, unknown>>([[headSha, head]]);
   const pending = [headSha];
   const expanded = new Set<string>();
   const knownCommitShas = new Set<string>();
+  let truncated = false;
   while (pending.length > 0) {
-    const batch = pending.splice(0, 25).filter((sha) => !expanded.has(sha));
+    if (commits.size >= policy.limit) {
+      truncated = true;
+      break;
+    }
+    const batchSize = Math.min(25, policy.limit - commits.size);
+    const batch = pending.splice(0, Math.max(1, batchSize)).filter((sha) => !expanded.has(sha));
     if (batch.length === 0) continue;
     const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>(
       "/internal/context-graph/ingest/known",
@@ -713,10 +759,8 @@ async function discoverNewCommits(
       }
       const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
       commits.set(sha, commit);
-      if (commits.size > limit)
-        throw new Error(
-          `reachable Git history exceeds CONTEXT_GRAPH_HISTORY_LIMIT=${limit}; refusing a partial backfill`
-        );
+      if (commits.size > policy.limit)
+        throw new Error(`reachable Git history discovery exceeded its configured limit of ${policy.limit} commits`);
       for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
         if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
         const parentSha = requiredGitSha(parent.sha, "GitHub parent SHA");
@@ -724,7 +768,7 @@ async function discoverNewCommits(
       }
     }
   }
-  return { commits, knownCommitShas };
+  return { commits, knownCommitShas, truncated };
 }
 
 function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Record<string, unknown>>): string[] {
@@ -757,13 +801,13 @@ class GitIngestTransport {
   private failed = false;
   constructor(
     private readonly repository: string,
-    private readonly ref: string
+    private readonly ref: string,
+    private readonly githubToken: string
   ) {}
 
   private async git(args: readonly string[], maxBuffer = 64 * 1024 * 1024): Promise<string> {
     assertLeaseOwned();
-    const token = process.env.GITHUB_CLONE_TOKEN?.trim();
-    const basic = Buffer.from(`x-access-token:${token ?? ""}`).toString("base64");
+    const basic = Buffer.from(`x-access-token:${this.githubToken}`).toString("base64");
     const { stdout } = await execFileAsync("git", [...args], {
       maxBuffer,
       timeout: 600_000,
@@ -1227,7 +1271,8 @@ async function hydratePullRequestScope(
 
 async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-assert">): Promise<WorkResult> {
   if (!contextGraphExecutor) throw new Error("contextGraph executor is not configured for this worker");
-  const { tenantId, repository, ref, commitSha, evidenceFingerprint } = work.task.metadata;
+  const { tenantId, repository, ref, githubInstallationId, commitSha, evidenceFingerprint } = work.task.metadata;
+  const access = await activateGitHubInstallationAccess(githubInstallationId, repository);
   const focusPaths = work.task.metadata.analysisPaths ?? [];
   const problemEvidencePullRequestNumbers = work.task.metadata.problemEvidencePullRequestNumbers ?? [];
   const sourcePullRequestNumbers = work.task.metadata.sourcePullRequestNumbers ?? [];
@@ -1250,17 +1295,22 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
   // A generator/schema version change intentionally performs one full semantic
   // scan for an unchanged head. The resulting generation is cached, so routine
   // retries and subsequent builds still avoid Daytona entirely.
-  const graph = await contextGraphExecutor.buildAssertions({
-    tenantId,
-    repository,
-    ref,
-    commitSha,
-    focusPaths,
-    problemEvidencePullRequestNumbers,
-    sourceEvidence: evidence.evidence,
-    taskId: work.task.id,
-    ...(activeLease ? { signal: activeLease.controller.signal } : {})
-  });
+  const graph = await contextGraphExecutor.buildAssertions(
+    {
+      tenantId,
+      repository,
+      ref,
+      commitSha,
+      focusPaths,
+      problemEvidencePullRequestNumbers,
+      sourcePullRequestNumbers,
+      resolvedPullRequestNumbers,
+      sourceEvidence: evidence.evidence,
+      taskId: work.task.id,
+      ...(activeLease ? { signal: activeLease.controller.signal } : {})
+    },
+    { githubToken: access.token }
+  );
   assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
   validateSourceBackedModelEntities(rawOutput, evidence.evidence);
@@ -1532,7 +1582,8 @@ const GITHUB_RETRY_BASE_MS = Math.max(1, Number(process.env.GITHUB_RETRY_BASE_MS
 const GITHUB_RETRY_MAX_WAIT_MS = 60_000;
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
-  const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim();
+  const githubToken =
+    activeLease?.githubToken ?? (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
   const githubApiUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   for (let attempt = 0; ; attempt += 1) {
     assertLeaseOwned();
@@ -1720,11 +1771,13 @@ function repositoryMetadata(metadata: Record<string, unknown>): {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
+  readonly githubInstallationId: number;
 } {
   return {
     tenantId: requiredString(metadata.tenantId, "task tenantId"),
     repository: requiredString(metadata.repository, "task repository"),
-    ref: requiredString(metadata.ref, "task ref")
+    ref: requiredString(metadata.ref, "task ref"),
+    githubInstallationId: requiredPositiveInteger(metadata.githubInstallationId, "task githubInstallationId")
   };
 }
 

@@ -16,23 +16,34 @@ import {
 } from "../../lib/context-graph.ts";
 import type { GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
 import type { PublicRenderer } from "../../lib/context-graph-renderer.ts";
+import { ADVANCED_GRAPH_NODE_KINDS, defaultHiddenGraphNodeKinds } from "@jina/graph-renderer/node-filters";
 import { usePoll } from "../../lib/poll.ts";
-import type { ContextGraphResponse } from "../../lib/types.ts";
+import type { ContextGraphAssertion, ContextGraphResponse } from "../../lib/types.ts";
 
 const EMPTY_GRAPH: VisibleGraph = { nodes: [], edges: [] };
+const CONTEXT_GRAPH_POLL_INTERVAL_MS = 15_000;
+const CONTEXT_GRAPH_READ_PATH =
+  "/api/context-graph?view=dashboard&include=assertions&assertionStatus=proposed&assertionLimit=50";
 
 export function ContextGraphPage() {
-  const { data, refresh } = usePoll<ContextGraphResponse>("/api/context-graph?include=assertions");
+  const { data, refresh } = usePoll<ContextGraphResponse>(CONTEXT_GRAPH_READ_PATH, CONTEXT_GRAPH_POLL_INTERVAL_MS);
   const graph = data?.latest ?? null;
   const allAssertions = useMemo(() => data?.assertions ?? [], [data]);
+  const [expandedProposedAssertions, setExpandedProposedAssertions] = useState<readonly ContextGraphAssertion[] | null>(
+    null
+  );
   const proposedAssertions = useMemo(
-    () => allAssertions.filter((assertion) => assertion.status === "proposed"),
-    [allAssertions]
+    () => (expandedProposedAssertions ?? allAssertions).filter((assertion) => assertion.status === "proposed"),
+    [allAssertions, expandedProposedAssertions]
   );
   const graphKey = graph ? contextGraphIdentity(graph) : null;
 
+  useEffect(() => {
+    setExpandedProposedAssertions(null);
+  }, [allAssertions]);
+
   const [selected, setSelected] = useState<GraphSelection | null>(null);
-  const [hiddenNodeKinds, setHiddenNodeKinds] = useState<ReadonlySet<string>>(() => new Set());
+  const [hiddenNodeKinds, setHiddenNodeKinds] = useState<ReadonlySet<string>>(() => new Set(ADVANCED_GRAPH_NODE_KINDS));
   const [hiddenEdgePredicates, setHiddenEdgePredicates] = useState<ReadonlySet<string>>(() => new Set());
   const [filterMenuOpen, setFilterMenuOpen] = useState(false);
   const [zoomPercent, setZoomPercent] = useState(100);
@@ -42,12 +53,26 @@ export function ContextGraphPage() {
   const graphRef = useRef(graph);
   graphRef.current = graph;
 
+  const loadAllProposedAssertions = useCallback(async () => {
+    const currentGraph = graphRef.current;
+    if (!currentGraph) return;
+    const response = await fetch(
+      `/api/context-graph/assertions?repository=${encodeURIComponent(currentGraph.repository)}&status=proposed&limit=500`,
+      { headers: { accept: "application/json" } }
+    );
+    if (!response.ok) throw new Error(`Assertion queue request failed with ${response.status}`);
+    const payload = (await response.json()) as { readonly assertions?: readonly ContextGraphAssertion[] };
+    setExpandedProposedAssertions(payload.assertions ?? []);
+  }, []);
   // View-state reset when the graph identity changes (resetContextGraphViewForGraph).
   const lastGraphKey = useRef<string | null>(null);
   useEffect(() => {
     if (lastGraphKey.current === graphKey) return;
     lastGraphKey.current = graphKey;
+    setExpandedProposedAssertions(null);
     setSelected(null);
+    setHiddenNodeKinds(defaultHiddenGraphNodeKinds(graphRef.current?.nodes.map((node) => node.kind) ?? []));
+    setHiddenEdgePredicates(new Set());
     setFilterMenuOpen(false);
   }, [graphKey]);
 
@@ -86,6 +111,16 @@ export function ContextGraphPage() {
     setHiddenEdgePredicates(new Set(currentGraph.edges.map((edge) => edge.predicate)));
   }, []);
 
+  const onShowAllNodes = useCallback(() => {
+    setHiddenNodeKinds(new Set());
+  }, []);
+
+  const onHideAllNodes = useCallback(() => {
+    const currentGraph = graphRef.current;
+    if (!currentGraph) return;
+    setHiddenNodeKinds(new Set(currentGraph.nodes.map((node) => node.kind)));
+  }, []);
+
   const reviewAssertion = useCallback(
     async (assertionId: string, decision: string, rejectionCode?: string, reason?: string) => {
       const body: Record<string, unknown> = { type: "review_assertion", assertionId, decision };
@@ -97,6 +132,7 @@ export function ContextGraphPage() {
         body: JSON.stringify(body)
       });
       if (!response.ok) throw new Error("Assertion review failed");
+      setExpandedProposedAssertions(null);
       await refresh();
     },
     [refresh]
@@ -124,6 +160,8 @@ export function ContextGraphPage() {
                   onToggleFilter={onToggleFilter}
                   onShowAll={onShowAll}
                   onRemoveAll={onRemoveAll}
+                  onShowAllNodes={onShowAllNodes}
+                  onHideAllNodes={onHideAllNodes}
                   onResetLayout={() => rendererRef.current?.reset()}
                   onFit={() => rendererRef.current?.fit()}
                   onZoomBy={(factor) => rendererRef.current?.zoomBy(factor)}
@@ -172,11 +210,17 @@ export function ContextGraphPage() {
             visibleGraph={visibleGraph}
             selection={selection}
             proposedAssertions={proposedAssertions}
+            canLoadMoreProposedAssertions={expandedProposedAssertions === null && proposedAssertions.length >= 50}
             onSelect={setSelected}
             onReview={reviewAssertion}
+            onLoadMoreProposedAssertions={loadAllProposedAssertions}
           />
         </section>
-        <AssertionReview assertions={allAssertions} onReview={reviewAssertion} />
+        <AssertionReview
+          key={graphKey ?? "no-graph"}
+          repository={graph?.repository ?? null}
+          onReview={reviewAssertion}
+        />
       </div>
     </section>
   );

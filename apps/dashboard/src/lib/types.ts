@@ -124,7 +124,7 @@ export interface ContextGraphAssertion {
   readonly [key: string]: unknown;
 }
 
-/** GET /api/context-graph?include=assertions — graph state plus review queue. */
+/** GET /api/context-graph — graph state plus an optional assertion queue. */
 export interface ContextGraphResponse {
   readonly latest: ContextGraph | null;
   readonly graphs: readonly Readonly<Record<string, unknown>>[];

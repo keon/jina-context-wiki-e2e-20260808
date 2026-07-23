@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { generateKeyPairSync } from "node:crypto";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
@@ -36,7 +37,10 @@ test("known-head reconciliation includes linked, known-commit, and untracked rep
 });
 
 test("worker reviews pull requests and incrementally ingests context graph source blobs", async (context) => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const githubAppPrivateKey = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
   let claimCount = 0;
+  let installationTokenRequests = 0;
   let renewals = 0;
   let projectionDrains = 0;
   let ingestedPullRequestNumbers: number[] = [];
@@ -63,7 +67,13 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
           },
           task: {
             id: "task-2",
-            metadata: { tenantId: "omlabs", repository: "omlabs/example", ref: "main", pipelinePhase: "snapshot" }
+            metadata: {
+              tenantId: "omlabs",
+              repository: "omlabs/example",
+              ref: "main",
+              githubInstallationId: 99,
+              pipelinePhase: "history"
+            }
           }
         });
         return;
@@ -148,7 +158,18 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       });
       return;
     }
+    if (request.url === "/github/app/installations/99/access_tokens") {
+      installationTokenRequests += 1;
+      assert.match(String(request.headers.authorization), /^Bearer [^.]+\.[^.]+\.[^.]+$/);
+      json(response, 201, {
+        token: "installation-token",
+        expires_at: "2026-07-22T23:00:00Z",
+        permissions: { contents: "read", pull_requests: "read", issues: "read" }
+      });
+      return;
+    }
     if (request.url === "/github/repos/omlabs/example/commits/main") {
+      assert.equal(request.headers.authorization, "Bearer installation-token");
       json(response, 200, {
         sha: "a".repeat(40),
         commit: { tree: { sha: "b".repeat(40) } },
@@ -180,11 +201,25 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
           updated_at: "2026-07-21T00:00:00Z",
           merge_commit_sha: "d".repeat(40),
           user: { login: "reviewer" }
+        },
+        {
+          number: 12,
+          title: "Restore administrator access",
+          body: "Fixes #4.",
+          state: "closed",
+          html_url: "https://github.com/omlabs/example/pull/12",
+          merged_at: "2026-07-21T00:01:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+          merge_commit_sha: "e".repeat(40),
+          user: { login: "reviewer" }
         }
       ]);
       return;
     }
-    if (request.url === `/github/repos/omlabs/example/compare/${"d".repeat(40)}...${"a".repeat(40)}`) {
+    if (
+      request.url === `/github/repos/omlabs/example/compare/${"d".repeat(40)}...${"a".repeat(40)}` ||
+      request.url === `/github/repos/omlabs/example/compare/${"e".repeat(40)}...${"a".repeat(40)}`
+    ) {
       json(response, 200, { status: "ahead" });
       return;
     }
@@ -194,6 +229,26 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
     }
     if (request.url === "/github/repos/omlabs/example/pulls/11/files?per_page=100&page=1") {
       json(response, 200, [{ filename: "src/index.test.ts" }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/12/commits?per_page=100&page=1") {
+      json(response, 200, [{ sha: "e".repeat(40) }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/12/files?per_page=100&page=1") {
+      json(response, 200, [{ filename: "src/index.test.ts" }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/issues/4") {
+      json(response, 200, {
+        number: 4,
+        title: "Administrators cannot delete",
+        body: "Administrator requests are denied.",
+        state: "closed",
+        html_url: "https://github.com/omlabs/example/issues/4",
+        updated_at: "2026-07-21T00:01:00Z",
+        user: { login: "reporter" }
+      });
       return;
     }
     if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
@@ -265,6 +320,8 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       GITHUB_API_URL: `${mockUrl}/github`,
       OPENAI_API_URL: `${mockUrl}/openai`,
       OPENAI_API_KEY: "test-openai-key",
+      GITHUB_APP_ID: "12345",
+      GITHUB_APP_PRIVATE_KEY: githubAppPrivateKey,
       GITHUB_CLONE_TOKEN: "test-github-token"
     },
     stdio: ["ignore", "pipe", "pipe"]
@@ -290,6 +347,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   }
 
   assert.ok(renewals > 0);
+  assert.equal(installationTokenRequests, 1);
   assert.equal(completions[0]?.outcome, "done");
   assert.equal(completions[0]?.leaseId, "lease-1");
   const reviewResult = completions[0]?.result as Record<string, unknown>;
@@ -300,14 +358,15 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   const ingestionResult = completions[1]?.result as Record<string, unknown>;
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
   assert.equal(ingestionResult.effect, "changed");
-  assert.equal(ingestionResult.ingestedCommitCount, 1);
-  assert.equal(ingestionResult.newCommitCount, 1);
-  assert.equal(ingestionResult.confirmedCommitCount, 0);
+  assert.equal(ingestionResult.ingestedCommitCount, 0);
+  assert.equal(ingestionResult.newCommitCount, 0);
+  assert.equal(ingestionResult.confirmedCommitCount, 1);
   assert.equal(ingestionResult.parsedBlobCount, 1);
   assert.equal(ingestionResult.reusedBlobCount, 0);
-  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, []);
-  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, []);
-  assert.deepEqual(ingestedPullRequestNumbers, []);
+  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, [11, 12]);
+  assert.deepEqual(ingestionResult.resolvedPullRequestNumbers, [12]);
+  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [11, 12]);
+  assert.deepEqual(ingestedPullRequestNumbers, [11, 12]);
   assert.equal(projectionDrains > 0, true);
 });
 

@@ -14,7 +14,7 @@ pnpm test
 pnpm dev
 ```
 
-`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `GRAPH_API_TOKEN`; fixed tenancy additionally requires `JINA_TENANT_ID`, while shared-database tenancy resolves tenants from PostgreSQL.
+`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `GRAPH_API_TOKEN`. Fixed mode also requires `JINA_TENANT_ID`; shared mode uses `JINA_TENANCY_MODE=shared-db` and resolves original Jina tenant UUIDs from the database.
 
 To exercise the separate local PR-review harness:
 
@@ -40,6 +40,8 @@ GitHub event
 
 The board is the orchestrator. PostgreSQL owns board state, delivery deduplication, leases, and context graph data. Every board mutation loads and writes the JSON snapshot while holding a cross-instance transaction lock, preventing horizontally scaled API instances from overwriting newer state.
 
+Production uses the original Jina database as the tenancy and identity source of truth. Signed webhooks resolve an enabled repository and active GitHub App installation to the original tenant UUID before planning work. The tenant's GitHub account login and the webhook author's/sender's GitHub identities are retained on tasks, events, tracked pull requests, dashboard views, and repository observations instead of being replaced by a v2-local user model. See [Shared original Jina database](docs/SHARED_TENANCY.md).
+
 Opened PRs create review and publication tasks. Opened issues create manual triage tasks. Signed branch pushes create the same four-task ContextGraph workflow as `POST /context-graph/build`; unchanged heads dedupe and moved refs supersede stale work.
 
 The current review pipeline is:
@@ -60,7 +62,9 @@ The context graph workflow runs as three board-visible stages:
 
 Reviewed assertions retain their evidence, explanation, review state, and provenance when later runs confirm them. Counterfactual queries remove selected paths from the reviewed graph in memory; they do not create facts or tasks.
 
-Local context graph execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
+Local context graph execution requires `DAYTONA_API_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and
+`OPENAI_API_KEY` or `OPENROUTER_API_KEY`. Every graph build must carry the repository's GitHub App installation ID;
+the worker mints a short-lived installation token for REST, git, and Daytona access.
 
 Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST /mcp`. Its single read-only tool, `query_graph`, accepts a repository, natural-language query, and optional ref. Production requires the internal service credential plus a bound application principal, and every request is repository-ACL scoped. The simulation integration uses a separate `GRAPH_API_TOKEN` for graph reads and exact ACL synchronization without granting board or worker access.
 
@@ -94,3 +98,5 @@ Smaller packages contain review planning, context policy, publication, billing p
 - [GitHub App setup](docs/GITHUB_APP.md)
 - [Billing](docs/BILLING.md)
 - [Observability](docs/OBSERVABILITY.md)
+
+Deployment, credential, trigger, service, or hosting changes must update [Deployment](docs/DEPLOYMENT.md) in the same pull request so the checked-in operating guide stays authoritative.
