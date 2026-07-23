@@ -234,7 +234,9 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   const commitSha = extractCommitSha(question);
   const causal = isCausalIssueQuestion(question);
   const resolution = /resolv|fix(?:ed|es|ing)?|clos(?:e|ed|es|ing)/.test(value);
-  if (/\b(?:incident|deployment|service|derived issue|unlinked fix|package)\b/.test(value)) return ["causal_trace"];
+  const derivedIssue =
+    /\bderived\s+issue\b|\bissue\b[^?.]{0,80}\bderived\b|\bunlinked\s+(?:fix|fixing|repair|repairing)\b/.test(value);
+  if (/\b(?:incident|deployment|service|package)\b/.test(value) || derivedIssue) return ["causal_trace"];
   if (/\b(?:renamed?|moved?|previously)\b/.test(value)) return ["causal_trace"];
   if ((issueNumber || issueText) && (causal || resolution)) return ["issue_trace"];
   if ((pullRequestNumber || commitSha) && causal) return ["issue_trace"];

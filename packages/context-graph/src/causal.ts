@@ -409,7 +409,11 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
       if (/\bincident\b/.test(query) && node.kind === "Incident") score += 20;
       if (/\bservice\b/.test(query) && node.kind === "Service") score += 20;
       if (/\bfeature\b|implement/.test(query) && node.kind === "Feature") score += 20;
-      if (/derived issue|unlinked/.test(query) && node.kind === "Issue" && node.id.includes("derived:issue:"))
+      if (
+        /derived issue|issue\b[^?.]{0,80}\bderived|unlinked/.test(query) &&
+        node.kind === "Issue" &&
+        `${node.id} ${node.description}`.includes("derived:issue:")
+      )
         score += 20;
       const traceEdges = graph.edges.filter((edge) => edge.source === node.id || edge.target === node.id);
       if (
