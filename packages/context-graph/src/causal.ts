@@ -387,7 +387,10 @@ function selectRoots(graph: ContextGraph, request: RetrievalRequest): ContextGra
   const candidates = graph.nodes.filter((node) => causalRootKinds.includes(node.kind as CausalRootKind));
   if (request.rootEntityId) return candidates.filter((node) => node.id === request.rootEntityId);
   const issue = request.issueNumber ? `#${request.issueNumber}` : undefined;
-  const text = (request.issueText ?? request.featureText ?? request.rootText ?? "").trim().toLowerCase();
+  // Causal questions often name the requested result kinds before the actual
+  // subject ("Which service and feature did incident X impact?"). The
+  // explicitly resolved causal root must win over those answer-shape phrases.
+  const text = (request.rootText ?? request.issueText ?? request.featureText ?? "").trim().toLowerCase();
   const query = request.query?.toLowerCase() ?? "";
   const nodeById = new Map(graph.nodes.map((node) => [node.id, node]));
   const pullRequestNumber = request.pullRequestNumber;

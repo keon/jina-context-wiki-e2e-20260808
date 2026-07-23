@@ -36,6 +36,7 @@ import { predicateDefinition, validatePredicateEndpoints, validateQualifiers } f
 import {
   RepositoryContextOrchestrator,
   classifyTemplates,
+  extractCausalRootText,
   extractFeatureText,
   extractIssueText,
   extractRepositoryPath,
@@ -2977,6 +2978,119 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     0,
     "feature retrieval excludes assertions whose evidence is stale on the requested ref"
   );
+});
+
+test("causal root resolution prefers the named incident over requested result kinds", async () => {
+  const repository = "omxyz/incident-fixture";
+  const incidentId = "incident:github:omxyz/incident-fixture#14";
+  const serviceId = "service:compose:omxyz/incident-fixture:api";
+  const featureId = "repo:omxyz/incident-fixture:feature:administrator-deletion";
+  const question = "Which service and feature did incident INC-2026-42 impact?";
+  assert.equal(extractCausalRootText(question), "INC-2026-42");
+
+  const graph = createContextGraph({
+    request: {
+      tenantId: "tenant",
+      repository,
+      ref: "main",
+      taskId: "incident-projection"
+    },
+    commitSha: "a".repeat(40),
+    generatedAt: "2026-07-23T00:00:00.000Z",
+    executor: "projection",
+    model: "fixture",
+    generated: {
+      summary: "incident impact",
+      nodes: [
+        {
+          id: "repo",
+          kind: "Repository",
+          label: repository,
+          description: repository,
+          evidence: ["README.md:1"]
+        },
+        {
+          id: incidentId,
+          kind: "Incident",
+          label: "INC-2026-42 administrator deletion outage",
+          description: "incident 14",
+          evidence: ["docs/postmortems/INC-2026-42.md:1"]
+        },
+        {
+          id: serviceId,
+          kind: "Service",
+          label: "atlas-access-api",
+          description: "impacted service",
+          evidence: ["compose.yaml:1"]
+        },
+        {
+          id: featureId,
+          kind: "Feature",
+          label: "Administrator resource deletion",
+          description: "impacted feature",
+          evidence: ["src/admin-deletion.ts:1"]
+        }
+      ],
+      edges: [
+        {
+          source: incidentId,
+          target: serviceId,
+          predicate: "INCIDENT_IMPACTS",
+          plane: "knowledge",
+          confidence: 1,
+          why: "The postmortem names the affected service.",
+          evidence: ["docs/postmortems/INC-2026-42.md:2"]
+        },
+        {
+          source: incidentId,
+          target: featureId,
+          predicate: "INCIDENT_IMPACTS",
+          plane: "knowledge",
+          confidence: 1,
+          why: "The postmortem names the affected feature.",
+          evidence: ["docs/postmortems/INC-2026-42.md:3"]
+        }
+      ]
+    }
+  });
+  const items = causalTraceItemsFromGraph(graph, {
+    tenantId: "tenant",
+    allowedRepositories: [repository],
+    repository,
+    template: "causal_trace",
+    query: question,
+    rootText: "INC-2026-42",
+    featureText: "service and"
+  });
+  const trace = items[0]?.data as unknown as CausalTraceProjection;
+  assert.equal(trace.root.id, incidentId);
+  assert.deepEqual(trace.affectedEntities.map((path) => path.nodes[1]?.kind).sort(), ["Feature", "Service"]);
+
+  const answer = await new RepositoryContextOrchestrator({
+    async retrieve(request: RetrievalRequest) {
+      const selected = causalTraceItemsFromGraph(graph, request);
+      return {
+        template: request.template,
+        repository,
+        ref: "main",
+        items: selected,
+        truncated: false,
+        totalBeforeLimit: selected.length,
+        limit: request.limit ?? 50
+      };
+    }
+  }).answer({
+    tenantId: "tenant",
+    allowedRepositories: [repository],
+    repository,
+    question
+  });
+  const orchestratedTrace = answer.calls[0]?.items[0]?.data as unknown as CausalTraceProjection;
+  assert.equal(orchestratedTrace.root.id, incidentId);
+  assert.deepEqual(orchestratedTrace.affectedEntities.map((path) => path.nodes[1]?.kind).sort(), [
+    "Feature",
+    "Service"
+  ]);
 });
 
 function generatedDerivedIssue(repository: string, pullRequestNumber: number) {
