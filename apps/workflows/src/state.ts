@@ -26,7 +26,7 @@ interface StoredContextItem {
   readonly item: ContextItemDraft;
 }
 
-export interface StoredFinding {
+interface StoredFinding {
   readonly taskId: string;
   readonly fingerprint: string;
   readonly title: string;

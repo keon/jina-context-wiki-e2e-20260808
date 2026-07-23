@@ -56,7 +56,7 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-export function isValidBasicAuthorization(
+function isValidBasicAuthorization(
   header: string | null | undefined,
   expectedUsername: string | null | undefined,
   expectedPassword: string | null | undefined

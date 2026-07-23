@@ -11,7 +11,7 @@ import { isIssueTrigger, isReviewTrigger, type ParsedGitHubWebhook } from "@jina
 import { applyPrReviewPlan, planPrReview } from "@jina/review";
 import { entityId, type IsoTimestamp } from "@jina/shared-kernel";
 
-export interface TrackedPullRequest {
+interface TrackedPullRequest {
   readonly tenantId: string;
   readonly workspaceLabel?: string;
   readonly githubAccountId?: string;

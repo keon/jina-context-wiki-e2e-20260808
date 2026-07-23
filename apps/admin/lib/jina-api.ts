@@ -5,7 +5,7 @@
 // generated graphs rather than an ACL-scoped subset. The token never reaches
 // the browser: only server components import this module.
 
-export interface AdminGraphGenerator {
+interface AdminGraphGenerator {
   readonly executor: "daytona" | "fixture" | "projection";
   readonly model: string;
   readonly sandboxId?: string;

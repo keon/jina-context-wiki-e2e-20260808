@@ -45,7 +45,7 @@ CONTEXT_GRAPH_CODEX_PROVIDER=openrouter
 CONTEXT_GRAPH_CODEX_MODEL=openai/gpt-5.4-mini
 ```
 
-The worker advertises a 16,000-token context and compacts at 12,000. Transient provider stream, timeout, rate-limit, 5xx, and Daytona transport failures retry once within the same checkout. Validation and schema errors are terminal.
+The worker advertises a 16,000-token context and compacts at 12,000. Transient provider stream, timeout, rate-limit, 5xx, and Daytona transport failures retry once within the same checkout. Validation and schema failures receive one repair attempt; a second failure is terminal.
 
 Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Services keep one minimum instance with CPU allocated, poll continuously, and renew 30-minute leases. The durable lease, not process identity, is the source of truth.
 

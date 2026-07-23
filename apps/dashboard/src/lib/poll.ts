@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { reportConnection } from "./connection.ts";
 
-export const POLL_INTERVAL_MS = 2500;
+const POLL_INTERVAL_MS = 2500;
 
 /**
  * Polls a same-origin JSON endpoint. The API tags these responses with ETags,
