@@ -1,20 +1,11 @@
-"use client";
-
-import { useRef } from "react";
-import type { ReactNode, RefObject } from "react";
+import type { ReactNode } from "react";
 import { ConfidenceSection, DetailGrid, EvidenceSection, ExplanationSection } from "../inspector.tsx";
 import { confidenceLabel, humanize } from "../../lib/format.ts";
 import { connectedConfidenceSummary, friendlyNodeExplanation, friendlyNodeLabel } from "../../lib/context-graph.ts";
-import { ASSERTION_REJECTION_CODES, assertionView } from "../../lib/assertions.ts";
 import type { GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
 import type { ContextGraph, ContextGraphAssertion, ContextGraphEdge, ContextGraphNode } from "../../lib/types.ts";
-
-export type ReviewAssertionFn = (
-  assertionId: string,
-  decision: string,
-  rejectionCode?: string,
-  reason?: string
-) => Promise<void>;
+import { AssertionReviewQueue } from "./assertion-review-queue.tsx";
+import type { ReviewAssertionFn } from "./assertion-review-controls.tsx";
 
 /** Selection-driven node/edge inspector, with the proposed-assertion queue as its empty state. */
 
@@ -268,113 +259,5 @@ function RelationshipSection({
         </div>
       )}
     </section>
-  );
-}
-
-/** Shared rejection-code select + reason input (uncontrolled, validated on reject). */
-export function AssertionRejectionFields({
-  codeRef,
-  reasonRef
-}: {
-  readonly codeRef: RefObject<HTMLSelectElement | null>;
-  readonly reasonRef: RefObject<HTMLInputElement | null>;
-}) {
-  return (
-    <div className="assertion-review-fields">
-      <select className="assertion-rejection-code" ref={codeRef} defaultValue="">
-        {ASSERTION_REJECTION_CODES.map(([value, label]) => (
-          <option key={value} value={value}>
-            {label}
-          </option>
-        ))}
-      </select>
-      <input className="assertion-rejection-reason" placeholder="Reason for rejection" ref={reasonRef} />
-    </div>
-  );
-}
-
-export function validateRejection(
-  codeRef: RefObject<HTMLSelectElement | null>,
-  reasonRef: RefObject<HTMLInputElement | null>
-): { readonly code: string; readonly reason: string } | null {
-  const code = codeRef.current;
-  const reason = reasonRef.current;
-  if (!code || !reason) return null;
-  if (!code.value || !reason.value.trim()) {
-    reason.setCustomValidity("Choose a category and provide a reason.");
-    reason.reportValidity();
-    return null;
-  }
-  reason.setCustomValidity("");
-  return { code: code.value, reason: reason.value.trim() };
-}
-
-function AssertionReviewQueue({
-  assertions,
-  onReview
-}: {
-  readonly assertions: readonly ContextGraphAssertion[];
-  readonly onReview: ReviewAssertionFn;
-}) {
-  return (
-    <>
-      <div className="context-graph-item-heading">
-        <div className="context-graph-heading-copy">
-          <strong>Assertion review</strong>
-          <span className="context-graph-item-type">{assertions.length} proposed</span>
-        </div>
-      </div>
-      <div className="assertion-review-list">
-        {assertions.map((assertion) => (
-          <AssertionQueueCard key={assertion.id} assertion={assertion} onReview={onReview} />
-        ))}
-      </div>
-    </>
-  );
-}
-
-function AssertionQueueCard({
-  assertion,
-  onReview
-}: {
-  readonly assertion: ContextGraphAssertion;
-  readonly onReview: ReviewAssertionFn;
-}) {
-  const codeRef = useRef<HTMLSelectElement | null>(null);
-  const reasonRef = useRef<HTMLInputElement | null>(null);
-  const view = assertionView(assertion);
-  return (
-    <article className="assertion-review-card">
-      <strong>
-        {view.subjectLabel} · {assertion.predicate} · {view.objectLabel}
-      </strong>
-      <p>
-        {assertion.explanation || "This legacy assertion has no explanation and should not be accepted without review."}
-      </p>
-      <p>Evidence: {(assertion.evidence || []).join(", ") || "none"}</p>
-      <AssertionRejectionFields codeRef={codeRef} reasonRef={reasonRef} />
-      <div className="assertion-review-actions">
-        <button
-          type="button"
-          className="secondary-button"
-          onClick={() => {
-            void onReview(assertion.id, "accept").catch(() => undefined);
-          }}
-        >
-          Accept
-        </button>
-        <button
-          type="button"
-          className="danger-button"
-          onClick={() => {
-            const rejection = validateRejection(codeRef, reasonRef);
-            if (!rejection) return;
-            void onReview(assertion.id, "reject", rejection.code, rejection.reason).catch(() => undefined);
-          }}
-        >
-          Reject
-        </button>
-      </div>
-    </article>
   );
 }

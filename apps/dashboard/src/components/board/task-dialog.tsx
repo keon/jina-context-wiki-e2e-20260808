@@ -1,44 +1,9 @@
 "use client";
 
 import { Fragment, useEffect, useRef } from "react";
+import { taskRelationships } from "../../lib/board.ts";
 import { eventLabel, formatTime, formatValue, humanize, shortId } from "../../lib/format.ts";
 import type { BoardEvent, BoardState, BoardTask } from "../../lib/types.ts";
-
-interface TaskRelationship {
-  readonly direction: string;
-  readonly taskId: string;
-  readonly relationship: string;
-  readonly required?: boolean | undefined;
-}
-
-function taskRelationships(task: BoardTask, board: BoardState): readonly TaskRelationship[] {
-  const relationships: TaskRelationship[] = [];
-  if (task.parentTaskId) {
-    relationships.push({ direction: "Parent", taskId: task.parentTaskId, relationship: "parent" });
-  }
-  for (const child of board.tasks.filter((item) => item.parentTaskId === task.id)) {
-    relationships.push({ direction: "Child", taskId: child.id, relationship: "child" });
-  }
-  for (const dependency of board.dependencies) {
-    if (dependency.taskId === task.id) {
-      relationships.push({
-        direction: "Depends on",
-        taskId: dependency.dependsOnTaskId,
-        relationship: dependency.relationship,
-        required: dependency.required
-      });
-    }
-    if (dependency.dependsOnTaskId === task.id) {
-      relationships.push({
-        direction: "Required by",
-        taskId: dependency.taskId,
-        relationship: dependency.relationship,
-        required: dependency.required
-      });
-    }
-  }
-  return relationships;
-}
 
 function SummaryItem({
   label,
