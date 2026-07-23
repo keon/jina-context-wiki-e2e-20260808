@@ -2963,8 +2963,19 @@ test(
         repository: otherRepository,
         ref: "main"
       });
+      const scopedMissingRefMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
+        repository,
+        ref: "missing"
+      });
       assert.equal(scopedRepositoryMetrics.unparsedBlobCount, 0);
       assert.equal(scopedOtherMetrics.unparsedBlobCount, 1);
+      assert.equal(scopedMissingRefMetrics.unparsedBlobCount, 0);
+      assert.equal(
+        Object.values(scopedRepositoryMetrics.outboxDepth).reduce((sum, count) => sum + count, 0) >
+          Object.values(scopedMissingRefMetrics.outboxDepth).reduce((sum, count) => sum + count, 0),
+        true,
+        "ref-scoped metrics include repository-wide events but exclude events explicitly tied to another ref"
+      );
       await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:08:40.000Z");
       const beforeDrain = await store.operationalMetrics(tenantId, "2026-07-20T00:08:45.000Z");
       assert.equal(beforeDrain.unparsedBlobCount, 1);
