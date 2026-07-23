@@ -328,6 +328,13 @@ export function extractFeatureText(question: string): string | undefined {
 export function extractCausalRootText(question: string): string | undefined {
   const quoted = /["“]([^"”\n]{2,500})["”]/.exec(question)?.[1];
   if (quoted) return quoted.trim();
+  const incidentIdentifier = /\bincident\s+([A-Za-z][A-Za-z0-9_-]*-\d+)\b/i.exec(question)?.[1];
+  if (incidentIdentifier) return incidentIdentifier;
+  const grammaticalSubject =
+    /\b(?:did|does|is|are|was|were|would|could)\s+(?:the\s+)?(?:incident|service|feature|issue)\s+(?:called\s+|named\s+)?(.+?)(?=\s+(?:affect(?:ed|s|ing)?|impact(?:ed|s|ing)?|introduc(?:e|ed|es|ing)|resolv(?:e|ed|es|ing)|implement(?:ed|s|ing)?|depend(?:ed|s|ing)?)\b|,|\?|$)/i.exec(
+      question
+    )?.[1];
+  if (grammaticalSubject) return grammaticalSubject.trim().replace(/\s+/g, " ");
   const named =
     /\b(?:incident|service|feature|issue)\s+(?:called\s+|named\s+)?([^,?]+?)(?:,|\?|\s+(?:did|does|was|were|would|could)\b|$)/i.exec(
       question
