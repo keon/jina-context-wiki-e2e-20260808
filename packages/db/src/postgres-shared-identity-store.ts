@@ -108,7 +108,8 @@ const RESOLVE_REPOSITORY_SQL = `
     and (
       ($1::bigint is not null and r.github_repo_id = $1::bigint)
       or (
-        lower(r.owner) = lower($3)
+        $1::bigint is null
+        and lower(r.owner) = lower($3)
         and lower(r.name) = lower($4)
       )
     )

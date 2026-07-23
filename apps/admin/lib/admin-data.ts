@@ -94,16 +94,19 @@ export function tenantSummaries(
         .sort()
         .at(-1);
       const githubConnections = operationsTenant?.githubConnections ?? legacyGithubConnections(workflows);
+      const repositoryCount = operationsTenant?.repositoryCount ?? repositories.size;
       return {
         tenantId,
         name: operationsTenant?.name?.trim() || tenantName(tenantId, tenantGraphs, workflows),
         ...(operationsTenant?.kind ? { kind: operationsTenant.kind } : {}),
         githubConnections,
-        repositoryCount: operationsTenant?.repositoryCount ?? repositories.size,
+        repositoryCount,
         graphCount: tenantGraphs.length,
         ...(lastActivity ? { lastActivity } : {}),
         status:
-          lastActivity && now.getTime() - new Date(lastActivity).getTime() <= 30 * 24 * 60 * 60 * 1_000
+          repositoryCount > 0 &&
+          lastActivity &&
+          now.getTime() - new Date(lastActivity).getTime() <= 30 * 24 * 60 * 60 * 1_000
             ? ("active" as const)
             : ("inactive" as const)
       };

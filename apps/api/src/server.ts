@@ -696,6 +696,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 400, { error: error instanceof Error ? error.message : "invalid graph access sync" });
         return;
       }
+      if (
+        config.sharedIdentityResolver &&
+        !(await config.sharedIdentityResolver.listTenantIds()).includes(syncTenantId)
+      ) {
+        json(response, 403, { error: "inactive_tenant" });
+        return;
+      }
       await contextGraphStore.replaceRepositoryAccess(syncTenantId, principalId, repositories);
       json(response, 200, { principalId, repositoryCount: repositories.length });
       return;
@@ -1251,6 +1258,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (identity.repository.toLowerCase() !== webhook.repository.toLowerCase()) {
       throw new ApiError(409, "repository_identity_mismatch", "resolved repository identity does not match webhook");
+    }
+    if (webhook.repositoryId !== undefined && identity.githubRepositoryId !== String(webhook.repositoryId)) {
+      throw new ApiError(409, "repository_identity_mismatch", "resolved GitHub repository ID does not match webhook");
     }
     return identity;
   }

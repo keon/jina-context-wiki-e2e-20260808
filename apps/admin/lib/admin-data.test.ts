@@ -68,6 +68,24 @@ test("tenant summaries prefer authoritative Jina identity and connected reposito
   assert.equal(summary?.status, "inactive");
 });
 
+test("tenant summaries keep zero-repository tenants inactive despite recent legacy activity", () => {
+  const recentBuild = build("done", "2026-07-23T11:00:00.000Z", {});
+  const base = operation([recentBuild]);
+  const operations: AdminOperations = {
+    ...base,
+    tenants: [{ ...base.tenants[0]!, repositoryCount: 0 }]
+  };
+
+  const summary = tenantSummaries(
+    [graph("tenant-a", "omxyz/jina", "main", "2026-07-23T11:30:00.000Z")],
+    operations,
+    NOW
+  )[0];
+
+  assert.equal(summary?.repositoryCount, 0);
+  assert.equal(summary?.status, "inactive");
+});
+
 test("build labels are stable and metrics use real workflow timestamps", () => {
   const first = build("done", "2026-07-23T10:00:00.000Z", { source: "github webhook" });
   const second = build("failed", "2026-07-23T11:00:00.000Z", {});

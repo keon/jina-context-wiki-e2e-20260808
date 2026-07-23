@@ -272,6 +272,19 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 
 test("shared tenancy resolves original Jina organizations and scopes workers and board reads", async (context) => {
   const resolutions: unknown[] = [];
+  class TrackingContextGraphStore extends MemoryContextGraphStore {
+    syncCount = 0;
+
+    override async replaceRepositoryAccess(
+      tenantId: string,
+      principalId: string,
+      repositories: readonly string[]
+    ): Promise<void> {
+      this.syncCount += 1;
+      await super.replaceRepositoryAccess(tenantId, principalId, repositories);
+    }
+  }
+  const contextGraphStore = new TrackingContextGraphStore();
   const sharedIdentityResolver = {
     async resolveRepository(input: unknown) {
       resolutions.push(input);
@@ -316,6 +329,7 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     githubWebhookSecret: SECRET,
     internalApiToken: INTERNAL_TOKEN,
     graphApiToken: GRAPH_TOKEN,
+    contextGraphStore,
     sharedIdentityResolver
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -371,6 +385,32 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   assert.equal(claim.status, 200);
   const claimed = (await claim.json()) as { task: { metadata: Record<string, unknown> } };
   assert.equal(claimed.task.metadata.tenantId, SHARED_TENANT);
+
+  const inactiveTenantId = "6f4d1548-7e14-4f9e-a6e2-e7d38b61b1c3";
+  const inactiveSync = await fetch(`${baseUrl}/internal/graph/access/sync`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${GRAPH_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": inactiveTenantId
+    },
+    body: JSON.stringify({
+      principalId: `tenant:${inactiveTenantId}`,
+      repositories: ["omlabs/example"]
+    })
+  });
+  assert.equal(inactiveSync.status, 403);
+  assert.equal(contextGraphStore.syncCount, 0);
+
+  const mismatchedRepositoryId = pullRequestPayload(43, "def456") as Record<string, unknown>;
+  mismatchedRepositoryId.repository = {
+    id: 11,
+    full_name: "omlabs/example",
+    owner: { id: 202, login: "omlabs", type: "Organization" }
+  };
+  const mismatched = await deliver(baseUrl, "pull_request", "shared-pr-mismatched-id", mismatchedRepositoryId);
+  assert.equal(mismatched.status, 409);
+  assert.equal(((await mismatched.json()) as { code: string }).code, "repository_identity_mismatch");
 
   const unknownPayload = pullRequestPayload(43, "def456") as Record<string, unknown>;
   unknownPayload.repository = {

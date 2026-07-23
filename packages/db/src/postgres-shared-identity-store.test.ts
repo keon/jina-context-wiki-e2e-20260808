@@ -22,6 +22,7 @@ test("shared identity repository query uses parameterized public-schema lookups"
   assert.match(query.text, /i\.github_account_login/);
   assert.match(query.text, /i\.github_installation_id = \$2::bigint/);
   assert.match(query.text, /t\.merged_into_tenant_id is null/);
+  assert.match(query.text, /\$1::bigint is null\s+and lower\(r\.owner\) = lower\(\$3\)/);
   assert.doesNotMatch(query.text, /t\.github_account_login/);
   assert.doesNotMatch(query.text, /OmXYZ|Jina/);
 });
