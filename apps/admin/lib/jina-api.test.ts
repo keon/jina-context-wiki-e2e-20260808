@@ -134,6 +134,22 @@ test("global operations consume every cursor when a complete range is requested"
       tenants: [
         {
           tenantId: "tenant-a",
+          ...(second
+            ? {}
+            : {
+                name: "Acme Workspace",
+                kind: "team",
+                githubAccountLogin: "acme",
+                repositoryCount: 3,
+                githubConnections: [
+                  {
+                    installationId: "101",
+                    login: "acme",
+                    type: "Organization",
+                    repositoryCount: 3
+                  }
+                ]
+              }),
           workflows: [],
           metrics: {}
         }
@@ -151,8 +167,31 @@ test("global operations consume every cursor when a complete range is requested"
   assert.match(urls[1] ?? "", /cursor=next-page/);
   assert.equal(operations.queueDepth, 4);
   assert.deepEqual(
-    operations.tenants.map((tenant) => tenant.tenantId),
-    ["tenant-a"]
+    operations.tenants.map((tenant) => ({
+      tenantId: tenant.tenantId,
+      name: tenant.name,
+      kind: tenant.kind,
+      githubAccountLogin: tenant.githubAccountLogin,
+      repositoryCount: tenant.repositoryCount,
+      githubConnections: tenant.githubConnections
+    })),
+    [
+      {
+        tenantId: "tenant-a",
+        name: "Acme Workspace",
+        kind: "team",
+        githubAccountLogin: "acme",
+        repositoryCount: 3,
+        githubConnections: [
+          {
+            installationId: "101",
+            login: "acme",
+            type: "Organization",
+            repositoryCount: 3
+          }
+        ]
+      }
+    ]
   );
 });
 

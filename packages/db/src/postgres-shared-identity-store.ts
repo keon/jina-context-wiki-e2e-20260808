@@ -101,6 +101,7 @@ const RESOLVE_REPOSITORY_SQL = `
    and i.tenant_id = r.tenant_id
   where
     r.enabled = true
+    and t.merged_into_tenant_id is null
     and i.suspended_at is null
     and i.deleted_at is null
     and ($2::bigint is null or i.github_installation_id = $2::bigint)
@@ -127,6 +128,7 @@ const RESOLVE_TENANT_MEMBER_SQL = `
   join public.tenants t on t.id = tm.tenant_id
   where tm.tenant_id = $1::uuid
     and tm.github_user_id = $2::bigint
+    and t.merged_into_tenant_id is null
   limit 1`;
 
 const LIST_ACTIVE_TENANT_IDS_SQL = `
@@ -140,6 +142,7 @@ const LIST_ACTIVE_TENANT_IDS_SQL = `
    and i.tenant_id = r.tenant_id
    and i.suspended_at is null
    and i.deleted_at is null
+  where t.merged_into_tenant_id is null
   order by tenant_id`;
 
 const LIST_TENANTS_SQL = `
@@ -219,7 +222,7 @@ export class PostgresSharedIdentityStore {
   }
 
   async listTenantIds(): Promise<readonly string[]> {
-    const result = await this.pool.query<{ readonly tenant_id: string }>(LIST_ACTIVE_TENANT_IDS_SQL);
+    const result = await this.pool.query<{ readonly tenant_id: string }>(buildSharedActiveTenantIdsQuery());
     return result.rows.map((row) => requiredText(row.tenant_id, "tenant_id"));
   }
 
@@ -247,6 +250,10 @@ export function buildSharedRepositoryIdentityQuery(input: ResolveSharedRepositor
   };
 }
 
+export function buildSharedActiveTenantIdsQuery(): string {
+  return LIST_ACTIVE_TENANT_IDS_SQL;
+}
+
 export function normalizeSharedRepositoryIdentityRow(row: SharedRepositoryIdentityRow): SharedRepositoryIdentity {
   const owner = requiredText(row.repository_owner, "repository_owner");
   const name = requiredText(row.repository_name, "repository_name");
@@ -264,13 +271,16 @@ export function normalizeSharedRepositoryIdentityRow(row: SharedRepositoryIdenti
 export function normalizeSharedTenantSummaryRows(
   rows: readonly SharedTenantSummaryRow[]
 ): readonly SharedTenantSummary[] {
-  const tenants = new Map<string, {
-    name: string;
-    kind: "personal" | "team";
-    githubAccountLogin?: string;
-    repositoryCount: number;
-    githubConnections: SharedTenantGithubConnection[];
-  }>();
+  const tenants = new Map<
+    string,
+    {
+      name: string;
+      kind: "personal" | "team";
+      githubAccountLogin?: string;
+      repositoryCount: number;
+      githubConnections: SharedTenantGithubConnection[];
+    }
+  >();
   for (const row of rows) {
     const tenantId = requiredText(row.tenant_id, "tenant_id");
     const kind = requiredText(row.tenant_kind, "tenant_kind");
@@ -292,9 +302,7 @@ export function normalizeSharedTenantSummaryRows(
         login: row.installation_login
           ? requiredText(row.installation_login, "installation_login")
           : `GitHub installation ${row.github_installation_id}`,
-        type: row.installation_type
-          ? requiredText(row.installation_type, "installation_type")
-          : "Organization",
+        type: row.installation_type ? requiredText(row.installation_type, "installation_type") : "Organization",
         repositoryCount
       });
     }

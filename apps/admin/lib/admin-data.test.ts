@@ -29,12 +29,14 @@ test("tenant summaries preserve real tenant IDs and legacy installation coverage
   );
   assert.equal(summaries[0]?.tenantId, "tenant-a");
   assert.equal(summaries[0]?.name, "omxyz");
-  assert.deepEqual(summaries[0]?.githubConnections, [{
-    installationId: "140435029",
-    login: "GitHub installation 140435029",
-    type: "Organization",
-    repositoryCount: 0
-  }]);
+  assert.deepEqual(summaries[0]?.githubConnections, [
+    {
+      installationId: "140435029",
+      login: "GitHub installation 140435029",
+      type: "Organization",
+      repositoryCount: 0
+    }
+  ]);
   assert.equal(summaries[0]?.status, "active");
 });
 
@@ -42,22 +44,27 @@ test("tenant summaries prefer authoritative Jina identity and connected reposito
   const base = operation([]);
   const operations: AdminOperations = {
     ...base,
-    tenants: [{
-      ...base.tenants[0]!,
-      name: "Acme Workspace",
-      kind: "team",
-      repositoryCount: 12,
-      githubConnections: [
-        { installationId: "101", login: "acme-inc", type: "Organization", repositoryCount: 7 },
-        { installationId: "202", login: "acme-labs", type: "Organization", repositoryCount: 5 }
-      ]
-    }]
+    tenants: [
+      {
+        ...base.tenants[0]!,
+        name: "Acme Workspace",
+        kind: "team",
+        repositoryCount: 12,
+        githubConnections: [
+          { installationId: "101", login: "acme-inc", type: "Organization", repositoryCount: 7 },
+          { installationId: "202", login: "acme-labs", type: "Organization", repositoryCount: 5 }
+        ]
+      }
+    ]
   };
   const summary = tenantSummaries([], operations, NOW)[0];
   assert.equal(summary?.name, "Acme Workspace");
   assert.equal(summary?.kind, "team");
   assert.equal(summary?.repositoryCount, 12);
-  assert.deepEqual(summary?.githubConnections.map((connection) => connection.login), ["acme-inc", "acme-labs"]);
+  assert.deepEqual(
+    summary?.githubConnections.map((connection) => connection.login),
+    ["acme-inc", "acme-labs"]
+  );
   assert.equal(summary?.status, "inactive");
 });
 

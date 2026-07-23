@@ -237,12 +237,14 @@ function legacyGithubConnections(workflows: readonly AdminGraphWorkflow[]): read
           ? value
           : undefined;
     if (installationId) {
-      return [{
-        installationId,
-        login: `GitHub installation ${installationId}`,
-        type: "Organization",
-        repositoryCount: 0
-      }];
+      return [
+        {
+          installationId,
+          login: `GitHub installation ${installationId}`,
+          type: "Organization",
+          repositoryCount: 0
+        }
+      ];
     }
   }
   return [];

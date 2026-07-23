@@ -291,19 +291,23 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
       return [SHARED_TENANT];
     },
     async listTenants() {
-      return [{
-        tenantId: SHARED_TENANT,
-        name: "omlabs",
-        kind: "team" as const,
-        githubAccountLogin: "omlabs",
-        repositoryCount: 1,
-        githubConnections: [{
-          installationId: "99",
-          login: "omlabs",
-          type: "Organization",
-          repositoryCount: 1
-        }]
-      }];
+      return [
+        {
+          tenantId: SHARED_TENANT,
+          name: "omlabs",
+          kind: "team" as const,
+          githubAccountLogin: "omlabs",
+          repositoryCount: 1,
+          githubConnections: [
+            {
+              installationId: "99",
+              login: "omlabs",
+              type: "Organization",
+              repositoryCount: 1
+            }
+          ]
+        }
+      ];
     },
     async ping() {},
     async close() {}
@@ -1316,18 +1320,36 @@ test("global admin graph listing requires its own credential and returns every t
         return [tenantA];
       },
       async listTenants() {
-        return [{
-          tenantId: tenantA,
-          name: "Jina Workspace",
-          kind: "team" as const,
-          repositoryCount: 1,
-          githubConnections: [{
-            installationId: "101",
-            login: "omxyz",
-            type: "Organization",
-            repositoryCount: 1
-          }]
-        }];
+        return [
+          {
+            tenantId: tenantA,
+            name: "Jina Workspace",
+            kind: "team" as const,
+            repositoryCount: 1,
+            githubConnections: [
+              {
+                installationId: "101",
+                login: "omxyz",
+                type: "Organization",
+                repositoryCount: 1
+              }
+            ]
+          },
+          {
+            tenantId: tenantB,
+            name: "External Workspace",
+            kind: "team" as const,
+            repositoryCount: 1,
+            githubConnections: [
+              {
+                installationId: "202",
+                login: "external",
+                type: "Organization",
+                repositoryCount: 1
+              }
+            ]
+          }
+        ];
       },
       async ping() {},
       async close() {}
@@ -1385,12 +1407,14 @@ test("global admin graph listing requires its own credential and returns every t
         name: "Jina Workspace",
         kind: "team",
         repositoryCount: 1,
-        githubConnections: [{
-          installationId: "101",
-          login: "omxyz",
-          type: "Organization",
-          repositoryCount: 1
-        }]
+        githubConnections: [
+          {
+            installationId: "101",
+            login: "omxyz",
+            type: "Organization",
+            repositoryCount: 1
+          }
+        ]
       }
     );
     assert.deepEqual(
@@ -1402,6 +1426,40 @@ test("global admin graph listing requires its own credential and returns every t
     );
     assert.equal(typeof operations.nextCursor, "string");
     assert.equal(operations.queueDepth, 2);
+
+    const filteredOperationsResponse = await fetch(`${operationsRoute}&tenantId=${tenantA}`, {
+      headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
+    });
+    assert.equal(filteredOperationsResponse.status, 200);
+    const filteredOperations = (await filteredOperationsResponse.json()) as {
+      readonly tenants: readonly {
+        readonly tenantId: string;
+        readonly name?: string;
+        readonly githubConnections?: readonly { readonly login: string }[];
+      }[];
+    };
+    assert.deepEqual(
+      filteredOperations.tenants.map((tenant) => ({
+        tenantId: tenant.tenantId,
+        name: tenant.name,
+        githubConnections: tenant.githubConnections
+      })),
+      [
+        {
+          tenantId: tenantA,
+          name: "Jina Workspace",
+          githubConnections: [
+            {
+              installationId: "101",
+              login: "omxyz",
+              type: "Organization",
+              repositoryCount: 1
+            }
+          ]
+        }
+      ]
+    );
+
     const olderOperations = (await fetch(`${operationsRoute}&cursor=${encodeURIComponent(operations.nextCursor!)}`, {
       headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
     }).then((response) => response.json())) as {

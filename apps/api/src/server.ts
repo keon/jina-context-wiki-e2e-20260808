@@ -595,18 +595,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const filter = adminGlobalWorkflowFilter(url);
       const page = await contextGraphCoordinator.listGlobal(filter);
       const graphTenantIds = (await contextGraphStore.listAllSummaries()).map((graph) => graph.tenantId);
-      const identityTenants = config.sharedIdentityResolver
-        ? await config.sharedIdentityResolver.listTenants()
-        : [];
+      const identityTenants = config.sharedIdentityResolver ? await config.sharedIdentityResolver.listTenants() : [];
       const identityTenantById = new Map(identityTenants.map((tenant) => [tenant.tenantId, tenant]));
-      const activeTenantIds = identityTenants.length > 0
-        ? identityTenants.map((tenant) => tenant.tenantId)
-        : config.tenantId
-          ? [config.tenantId]
-          : [];
-      const tenantIds = [
-        ...new Set([...activeTenantIds, ...graphTenantIds, ...page.workflows.map(({ build }) => build.tenantId)])
-      ].sort();
+      const activeTenantIds =
+        identityTenants.length > 0
+          ? identityTenants.map((tenant) => tenant.tenantId)
+          : config.tenantId
+            ? [config.tenantId]
+            : [];
+      const tenantIds = filter.tenantId
+        ? [filter.tenantId]
+        : [
+            ...new Set([...activeTenantIds, ...graphTenantIds, ...page.workflows.map(({ build }) => build.tenantId)])
+          ].sort();
       const observedAt = nowIso();
       const [tenants, queueDepth] = await Promise.all([
         Promise.all(
@@ -618,9 +619,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 ? {
                     name: identity.name,
                     kind: identity.kind,
-                    ...(identity.githubAccountLogin
-                      ? { githubAccountLogin: identity.githubAccountLogin }
-                      : {}),
+                    ...(identity.githubAccountLogin ? { githubAccountLogin: identity.githubAccountLogin } : {}),
                     repositoryCount: identity.repositoryCount,
                     githubConnections: identity.githubConnections
                   }

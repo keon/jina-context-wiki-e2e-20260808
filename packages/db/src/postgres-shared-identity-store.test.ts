@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  buildSharedActiveTenantIdsQuery,
   buildSharedRepositoryIdentityQuery,
   normalizeSharedRepositoryIdentityRow,
   normalizeSharedTenantSummaryRows
@@ -20,8 +21,17 @@ test("shared identity repository query uses parameterized public-schema lookups"
   assert.match(query.text, /i\.id = r\.installation_id/);
   assert.match(query.text, /i\.github_account_login/);
   assert.match(query.text, /i\.github_installation_id = \$2::bigint/);
+  assert.match(query.text, /t\.merged_into_tenant_id is null/);
   assert.doesNotMatch(query.text, /t\.github_account_login/);
   assert.doesNotMatch(query.text, /OmXYZ|Jina/);
+});
+
+test("active shared tenants exclude merged source tenants", () => {
+  const query = buildSharedActiveTenantIdsQuery();
+  assert.match(query, /i\.id = r\.installation_id/);
+  assert.match(query, /i\.suspended_at is null/);
+  assert.match(query, /i\.deleted_at is null/);
+  assert.match(query, /t\.merged_into_tenant_id is null/);
 });
 
 test("shared identity repository query permits installation/name and name-only fallback", () => {

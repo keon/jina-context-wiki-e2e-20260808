@@ -324,6 +324,8 @@ export async function listAllAdminOperations(
     for (const tenant of page.tenants) {
       const existing = tenants.get(tenant.tenantId);
       tenants.set(tenant.tenantId, {
+        ...tenant,
+        ...existing,
         tenantId: tenant.tenantId,
         workflows: [...(existing?.workflows ?? []), ...tenant.workflows],
         metrics: existing?.metrics ?? tenant.metrics
