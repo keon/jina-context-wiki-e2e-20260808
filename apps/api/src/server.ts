@@ -2422,6 +2422,38 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
           name: requiredString(value.impactedService.name, "observation.impactedService.name")
         }
       : undefined;
+    if (value.deploymentRelations !== undefined && !Array.isArray(value.deploymentRelations)) {
+      throw invalidRequest("incident deployment relations must be an array");
+    }
+    const deploymentRelations = Array.isArray(value.deploymentRelations)
+      ? value.deploymentRelations.map((relation) => {
+          if (!isRecord(relation)) throw invalidRequest("incident deployment relation must be an object");
+          const predicateValue = requiredString(relation.predicate, "observation.deploymentRelation.predicate");
+          if (predicateValue !== "INTRODUCED_BY" && predicateValue !== "RESOLVED_BY") {
+            throw invalidRequest("incident deployment relation predicate is unsupported");
+          }
+          const predicate: "INTRODUCED_BY" | "RESOLVED_BY" = predicateValue;
+          const evidenceStartLine = requiredPositiveInteger(
+            relation.evidenceStartLine,
+            "observation.deploymentRelation.evidenceStartLine"
+          );
+          const evidenceEndLine = requiredPositiveInteger(
+            relation.evidenceEndLine,
+            "observation.deploymentRelation.evidenceEndLine"
+          );
+          if (evidenceEndLine < evidenceStartLine) {
+            throw invalidRequest("incident deployment relation evidence range is invalid");
+          }
+          return {
+            source: requiredString(relation.source, "observation.deploymentRelation.source"),
+            externalId: requiredString(relation.externalId, "observation.deploymentRelation.externalId"),
+            predicate,
+            evidencePath: requiredRepositoryPath(relation.evidencePath, "observation.deploymentRelation.evidencePath"),
+            evidenceStartLine,
+            evidenceEndLine
+          };
+        })
+      : [];
     return {
       tenantId,
       repository: requiredString(value.repository, "observation.repository"),
@@ -2434,6 +2466,7 @@ function parseRepositorySourceObservation(value: unknown, tenantId: string): Rep
         ? { issueNumber: requiredPositiveInteger(value.issueNumber, "observation.issueNumber") }
         : {}),
       ...(impactedService ? { impactedService } : {}),
+      ...(deploymentRelations.length > 0 ? { deploymentRelations } : {}),
       ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
       ...(value.removed === true ? { removed: true } : {}),
       recordedAt: requiredString(value.recordedAt, "observation.recordedAt")

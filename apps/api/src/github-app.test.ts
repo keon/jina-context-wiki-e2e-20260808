@@ -784,6 +784,41 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         }
       ]
     });
+    const incidentRecordedAt = new Date().toISOString();
+    await postJson(baseUrl, "/internal/context-graph/ingest/github", {
+      taskId: ingestion.task.id,
+      ...lease,
+      observations: [
+        {
+          tenantId: "untrusted-worker-value",
+          repository: "omxyz/context-graph-fixture",
+          kind: "incident",
+          source: "postmortem",
+          externalId: "omxyz/context-graph-fixture:inc-2026-42",
+          title: "INC-2026-42 fixture outage",
+          deploymentRelations: [
+            {
+              source: "github",
+              externalId: "former/repo:5535506368",
+              predicate: "INTRODUCED_BY",
+              evidencePath: "docs/postmortems/INC-2026-42.md",
+              evidenceStartLine: 11,
+              evidenceEndLine: 11
+            },
+            {
+              source: "github",
+              externalId: "former/repo:5535522601",
+              predicate: "RESOLVED_BY",
+              evidencePath: "docs/postmortems/INC-2026-42.md",
+              evidenceStartLine: 15,
+              evidenceEndLine: 15
+            }
+          ],
+          occurredAt: incidentRecordedAt,
+          recordedAt: incidentRecordedAt
+        }
+      ]
+    });
     const secondPlan = (await postJson(baseUrl, "/internal/context-graph/ingest/plan", { ...lease, snapshot })) as {
       missingBlobs: unknown[];
       reusedBlobCount: number;
@@ -883,10 +918,32 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
     assert.equal(await completeClaim(baseUrl, historyProjection, { projected: true }), 200);
 
     const contextGraph = await fetch(`${baseUrl}/context-graph`).then(
-      (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
+      (response) =>
+        response.json() as Promise<{
+          latest: {
+            nodes: { id: string; kind: string; label: string }[];
+            edges: { source: string; target: string; predicate: string }[];
+          } | null;
+        }>
     );
     assert.equal((contextGraph.latest?.nodes.length ?? 0) >= 4, true);
     assert.equal((contextGraph.latest?.edges.length ?? 0) >= 3, true);
+    const recoveryDeployment = contextGraph.latest?.nodes.find(
+      (node) => node.kind === "Deployment" && node.label.includes("5535522601")
+    );
+    const incident = contextGraph.latest?.nodes.find(
+      (node) => node.kind === "Incident" && node.label.includes("INC-2026-42")
+    );
+    assert.ok(recoveryDeployment, "the recovery deployment crosses the API ingestion boundary");
+    assert.ok(incident, "the incident crosses the API ingestion boundary");
+    assert.equal(
+      contextGraph.latest?.edges.some(
+        (edge) =>
+          edge.source === incident.id && edge.predicate === "RESOLVED_BY" && edge.target === recoveryDeployment.id
+      ),
+      true,
+      "the API preserves the worker's deterministic incident resolution relation"
+    );
 
     const contextAnswer = await fetch(`${baseUrl}/context-graph/ask`, {
       method: "POST",
