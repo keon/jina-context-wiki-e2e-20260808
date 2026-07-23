@@ -333,8 +333,8 @@ async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildReque
 
 async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string, token?: string): Promise<void> {
   if (!FULL_GIT_SHA.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
-  const fetch = contextGraphFetchCommand(Boolean(token));
-  const env = token ? { GITHUB_TOKEN: token } : undefined;
+  const fetch = "git fetch";
+  const env = contextGraphGitAuthEnv(token);
   const ensureCommit = await sandbox.process.executeCommand(
     `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || ${fetch} --depth=1 origin ${shellQuote(commitSha)}`,
     REPO_DIR,
@@ -377,8 +377,15 @@ export function contextGraphCheckout(
   };
 }
 
-export function contextGraphFetchCommand(authenticated: boolean): string {
-  return authenticated ? 'git -c http.extraHeader="Authorization: Bearer ${GITHUB_TOKEN}" fetch' : "git fetch";
+export function contextGraphGitAuthEnv(token?: string): Record<string, string> | undefined {
+  if (!token) return undefined;
+  const basic = Buffer.from(`x-access-token:${token}`).toString("base64");
+  return {
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`
+  };
 }
 
 async function prepareModelInput(
