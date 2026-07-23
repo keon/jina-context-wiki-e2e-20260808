@@ -7,6 +7,7 @@ export interface ProductionAcceptanceConfig {
   readonly apiUrl: string;
   readonly token: string;
   readonly requestKey: string;
+  readonly githubInstallationId: number;
   readonly repository?: string;
   readonly ref?: string;
   readonly tenantId?: string;
@@ -61,6 +62,7 @@ export async function runProductionContextGraphAcceptance(
   const apiUrl = config.apiUrl.replace(/\/$/, "");
   const repository = config.repository ?? "omxyz/jina-context-graph-e2e";
   const ref = config.ref ?? "main";
+  const githubInstallationId = positiveInteger(config.githubInstallationId, "githubInstallationId");
   const principalId = config.principalId ?? "user:keon@omlabs.xyz";
   const pollIntervalMs = positiveInteger(config.pollIntervalMs ?? 10_000, "pollIntervalMs");
   // Daytona setup plus the Codex run may legitimately consume the worker's
@@ -82,7 +84,7 @@ export async function runProductionContextGraphAcceptance(
   const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, requestKey: config.requestKey })
+    body: JSON.stringify({ repository, ref, requestKey: config.requestKey, githubInstallationId })
   });
   const taskId = requiredNestedString(created, "task", "id");
   const deadline = Date.now() + timeoutMs;
@@ -985,6 +987,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
       apiUrl: requiredEnv("JINA_API_URL"),
       token: requiredEnv("INTERNAL_API_TOKEN"),
       requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
+      githubInstallationId: requiredPositiveIntegerEnv("ACCEPTANCE_GITHUB_INSTALLATION_ID"),
       ...(process.env.ACCEPTANCE_TENANT_ID?.trim() ? { tenantId: process.env.ACCEPTANCE_TENANT_ID.trim() } : {}),
       ...(process.env.ACCEPTANCE_PRINCIPAL_ID?.trim()
         ? { principalId: process.env.ACCEPTANCE_PRINCIPAL_ID.trim() }
@@ -1025,6 +1028,10 @@ function optionalPositiveIntegerEnv(name: string): number | undefined {
   if (!value) return undefined;
   const parsed = Number(value);
   return positiveInteger(parsed, name);
+}
+
+function requiredPositiveIntegerEnv(name: string): number {
+  return positiveInteger(Number(requiredEnv(name)), name);
 }
 
 async function writeTerminationMessage(message: string): Promise<void> {

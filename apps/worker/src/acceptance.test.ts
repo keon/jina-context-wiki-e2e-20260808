@@ -108,10 +108,14 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   const requests: string[] = [];
   const logs: string[] = [];
   let askReads = 0;
+  let buildBody: unknown;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     requests.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
-    if (url.endsWith("/context-graph/build")) return json({ task: { id: "context-graph-root" } }, 202);
+    if (url.endsWith("/context-graph/build")) {
+      buildBody = JSON.parse(String(init?.body));
+      return json({ task: { id: "context-graph-root" } }, 202);
+    }
     if (url.endsWith("/board")) {
       boardReads += 1;
       return json({
@@ -224,6 +228,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
       apiUrl: "https://api.example.test",
       token: "secret",
       requestKey: "deploy-1",
+      githubInstallationId: 99,
       repository: "omxyz/jina-context-graph-e2e",
       pollIntervalMs: 1,
       timeoutMs: 100,
@@ -240,6 +245,12 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     nodeCount: 1,
     edgeCount: 1,
     citationCount: 3
+  });
+  assert.deepEqual(buildBody, {
+    repository: "omxyz/jina-context-graph-e2e",
+    ref: "main",
+    requestKey: "deploy-1",
+    githubInstallationId: 99
   });
   assert.deepEqual(requests, [
     "POST /context-graph/build",
@@ -340,6 +351,7 @@ test("production acceptance certifies the current same-commit head when the rece
       apiUrl: "https://api.example.test",
       token: "secret",
       requestKey: "deploy-replaced-head",
+      githubInstallationId: 99,
       repository: "omxyz/jina-context-graph-e2e",
       pollIntervalMs: 1,
       timeoutMs: 100,
@@ -390,6 +402,7 @@ test("production acceptance rejects a direct receipt graph projecting a differen
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-commit-mismatch",
+        githubInstallationId: 99,
         repository: "omxyz/jina-context-graph-e2e",
         pollIntervalMs: 1,
         timeoutMs: 100,
@@ -454,6 +467,7 @@ test("production acceptance rejects a fetched graph whose own identity does not 
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-mismatch",
+        githubInstallationId: 99,
         repository: "omxyz/jina-context-graph-e2e",
         pollIntervalMs: 1,
         timeoutMs: 100,
@@ -504,6 +518,7 @@ test("production acceptance rejects a newest project stage without a published g
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-malformed",
+        githubInstallationId: 99,
         repository: "omxyz/jina-context-graph-e2e",
         pollIntervalMs: 1,
         timeoutMs: 100,
@@ -733,6 +748,7 @@ test("production acceptance reviews causality, queries it in both directions, an
       apiUrl: "https://api.example.test",
       token: "secret",
       requestKey: "deploy-causal",
+      githubInstallationId: 99,
       repository: "omxyz/jina-context-graph-e2e",
       expectedIssueNumber: 7,
       expectedResolutionPullRequestNumber: 8,
@@ -768,6 +784,7 @@ test("production acceptance fails on a terminal task failure", async () => {
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-2",
+        githubInstallationId: 99,
         pollIntervalMs: 1,
         timeoutMs: 100,
         log: () => undefined
@@ -806,6 +823,7 @@ test("production acceptance rejects lingering blocked tasks from an older attemp
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-stale",
+        githubInstallationId: 99,
         repository: "omxyz/jina-context-graph-e2e",
         pollIntervalMs: 1,
         timeoutMs: 100,
@@ -863,6 +881,7 @@ test("production acceptance treats a blocked aggregate as terminal and reports i
         apiUrl: "https://api.example.test",
         token: "secret",
         requestKey: "deploy-3",
+        githubInstallationId: 99,
         pollIntervalMs: 1,
         timeoutMs: 100,
         log: () => undefined

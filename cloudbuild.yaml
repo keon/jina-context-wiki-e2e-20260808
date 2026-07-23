@@ -81,6 +81,7 @@ steps:
       - JINA_GRAPH_DB_USER=${_JINA_GRAPH_DB_USER}
       - JINA_GRAPH_DB_PASS_SECRET=${_JINA_GRAPH_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
+      - JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
       - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
       - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
@@ -101,6 +102,7 @@ substitutions:
   _JINA_GRAPH_DB_USER: jina_app
   _JINA_GRAPH_DB_PASS_SECRET: jina-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
+  _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
   # start. Raise max instances only after checking the resulting DB connection
   # budget; each instance owns independent PostgreSQL pools.

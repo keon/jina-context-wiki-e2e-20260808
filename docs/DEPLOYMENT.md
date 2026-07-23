@@ -129,7 +129,7 @@ pnpm --filter @jina/dashboard build
 pnpm --filter @jina/admin build
 ```
 
-The approved main-branch build runs `cloudbuild.yaml`, repeats validation, builds and pushes the API and worker images, deploys the three backend Cloud Run services, and checks API and worker health. The `jina-acceptance` job receives the internal credential directly from Secret Manager and runs the private fixture repository through the three-stage context graph workflow.
+The approved main-branch build runs `cloudbuild.yaml`, repeats validation, builds and pushes the API and worker images, deploys the three backend Cloud Run services, and checks API and worker health. The `jina-acceptance` job receives the internal credential directly from Secret Manager and runs the private fixture repository through the three-stage context graph workflow. Its non-secret GitHub App installation ID is explicit in the `_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID` substitution and is included in every acceptance build request.
 
 Acceptance requires terminal success, no lingering blocked work, a nonempty cited graph at the requested commit, fixed-template and causal retrieval, reviewed causal assertions in the projection, and empty canonical-outbox/parser backlogs. Its deployment scenario requires the postmortem's cited introducing and recovery deployments to appear in the incident trace, including when the postmortem retains an older repository name. It also exercises the unchanged-head cache path and rejects stale attempts. The request key includes the Cloud Build ID so an operator can rerun a failed release without colliding with the prior task.
 
