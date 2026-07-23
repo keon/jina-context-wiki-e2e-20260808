@@ -2,6 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
 
 const TERMINAL_FAILURES = new Set(["blocked", "failed", "canceled", "superseded"]);
+const API_RATE_LIMIT_ATTEMPTS = 5;
 
 export interface ProductionAcceptanceConfig {
   readonly apiUrl: string;
@@ -876,14 +877,32 @@ async function apiArray(fetchImpl: typeof fetch, url: string, init: RequestInit)
 }
 
 async function apiValue(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown> {
-  const response = await fetchImpl(url, init);
-  const body = await response.text();
-  if (!response.ok) throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${body.slice(0, 500)}`);
-  try {
-    return JSON.parse(body) as unknown;
-  } catch {
-    throw new Error(`${new URL(url).pathname} returned invalid JSON`);
+  for (let attempt = 0; attempt < API_RATE_LIMIT_ATTEMPTS; attempt += 1) {
+    const response = await fetchImpl(url, init);
+    const body = await response.text();
+    if (response.status === 429 && attempt + 1 < API_RATE_LIMIT_ATTEMPTS) {
+      await delay(rateLimitRetryMs(response, attempt));
+      continue;
+    }
+    if (!response.ok) throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${body.slice(0, 500)}`);
+    try {
+      return JSON.parse(body) as unknown;
+    } catch {
+      throw new Error(`${new URL(url).pathname} returned invalid JSON`);
+    }
   }
+  throw new Error(`${new URL(url).pathname} exhausted rate-limit retries`);
+}
+
+function rateLimitRetryMs(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get("retry-after")?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, 10_000);
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) return Math.min(Math.max(0, retryAt - Date.now()), 10_000);
+  }
+  return Math.min(1_000 * 2 ** attempt, 10_000);
 }
 
 async function workflowFailureSummary(
