@@ -80,9 +80,7 @@ function ingestPullRequest(
   tenantId: string,
   options: GitHubIntakeOptions
 ): GitHubIntakeState {
-  if (!isReviewTrigger(webhook.event)) {
-    return state;
-  }
+  if (!isReviewTrigger(webhook.event)) return state;
 
   const event = webhook.event;
   const workspaceLabel = options.workspaceLabel ?? webhook.repositoryOwner?.login;
@@ -164,9 +162,7 @@ function ingestIssue(
   tenantId: string,
   options: GitHubIntakeOptions
 ): GitHubIntakeState {
-  if (!isIssueTrigger(webhook.event)) {
-    return state;
-  }
+  if (!isIssueTrigger(webhook.event)) return state;
 
   const event = webhook.event;
   const workspaceLabel = options.workspaceLabel ?? webhook.repositoryOwner?.login;

@@ -63,7 +63,7 @@ curl http://localhost:4000/board
 curl http://localhost:4000/events
 ```
 
-Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>` and always use the configured tenant. Browsers should use the IAP-protected dashboard rather than calling the API credential directly.
+Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>`. Fixed-tenancy deployments use `JINA_TENANT_ID`; shared-database deployments resolve the tenant from PostgreSQL. Browsers should use the IAP-protected dashboard rather than calling the API credential directly.
 
 GitHub's App settings also show every delivery, response status, and redelivery control.
 

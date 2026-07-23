@@ -14,6 +14,12 @@ allowBuilds:
 
 overrides:
   "@opentelemetry/propagator-jaeger": ">=2.9.0"
+  # Next 16 currently resolves an older PostCSS line. Force the patched release
+  # until its own dependency range catches up.
+  "postcss": ">=8.5.10"
+  # The MCP SDK accepts the current Hono peer API but still resolves a
+  # pre-2.x node adapter with a Windows traversal advisory.
+  "@hono/node-server": ">=2.0.5"
   # next pulls sharp <0.35 (optional image optimizer) which carries a high-sev
   # libvips advisory; the admin app uses no next/image, so force the patched
   # line to keep `pnpm audit --prod --audit-level=high` clean.

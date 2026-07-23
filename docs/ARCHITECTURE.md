@@ -60,7 +60,7 @@ Source writes, model observations, and projections are independently idempotent.
 
 ## Authentication and security
 
-Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential.
+Fixed-tenancy production is scoped to `JINA_TENANT_ID`; shared-database production resolves the tenant from PostgreSQL. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential.
 
 The web application must authenticate users before forwarding a verified principal and service credential. The existing Cloud Run dashboard uses IAP; its replacement needs an equivalent identity boundary. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
