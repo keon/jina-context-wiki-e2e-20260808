@@ -5,7 +5,7 @@ import { evaluateAdminAccess } from "./lib/admin-auth";
 // evaluated at request time by the self-hosted Node server, not inlined.
 export function proxy(request: NextRequest): NextResponse {
   const decision = evaluateAdminAccess({
-    authRequired: Boolean(process.env.INTERNAL_API_TOKEN?.trim()),
+    authRequired: Boolean(process.env.INTERNAL_API_TOKEN?.trim() || process.env.JINA_GLOBAL_ADMIN_TOKEN?.trim()),
     iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
     allowlistRaw: process.env.JINA_ADMIN_ALLOWED_EMAILS,
     authorizationHeader: request.headers.get("authorization"),

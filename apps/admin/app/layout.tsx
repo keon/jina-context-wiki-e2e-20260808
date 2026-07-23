@@ -17,9 +17,9 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
             <h1>
               <Link href="/">Jina Admin</Link>
             </h1>
-            <span className="scope-badge">All graphs</span>
+            <span className="scope-badge">All tenants</span>
             <span className="spacer" />
-            <span className="muted">tenant-admin view</span>
+            <span className="muted">global-admin view</span>
           </header>
           {children}
         </div>

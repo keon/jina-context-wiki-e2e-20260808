@@ -1,11 +1,12 @@
-// Server-side client for the Jina API. Requests authenticate with
-// INTERNAL_API_TOKEN and deliberately omit an x-jina-principal-id header, so
-// the API treats them as the svc:api tenant-admin principal, which is granted
-// every repository in the tenant. That is what lets this app list ALL
-// generated graphs rather than an ACL-scoped subset. The token never reaches
-// the browser: only server components import this module.
+// Server-side client for the Jina API. Cross-tenant discovery uses the
+// read-only JINA_GLOBAL_ADMIN_TOKEN. Graph reads and queries keep using
+// INTERNAL_API_TOKEN with the discovered graph's tenant ID, so the existing
+// tenant authorization boundary remains intact. Neither token reaches the
+// browser: only server components and route handlers import this module.
 
 import type { AdminGraphQueryResult } from "./graph-query";
+
+const SAFE_TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
 
 interface AdminGraphGenerator {
   readonly executor: "daytona" | "fixture" | "projection";
@@ -52,11 +53,11 @@ export interface AdminGraph extends Omit<AdminGraphSummary, "nodeCount" | "edgeC
 }
 
 export class JinaApiError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number
-  ) {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
     super(message);
+    if (status !== undefined) this.status = status;
   }
 }
 
@@ -66,13 +67,27 @@ function apiBaseUrl(): string {
 
 async function apiRequest(
   pathname: string,
-  init?: { readonly method?: "GET" | "POST"; readonly body?: unknown }
+  init?: {
+    readonly method?: "GET" | "POST";
+    readonly body?: unknown;
+    readonly credential?: "global" | "internal";
+    readonly tenantId?: string | undefined;
+  }
 ): Promise<unknown> {
   const headers: Record<string, string> = { accept: "application/json" };
-  const token = process.env.INTERNAL_API_TOKEN?.trim();
+  const credential = init?.credential ?? "internal";
+  const internalToken = process.env.INTERNAL_API_TOKEN?.trim();
+  const globalAdminToken = process.env.JINA_GLOBAL_ADMIN_TOKEN?.trim();
+  if (internalToken && globalAdminToken && internalToken === globalAdminToken) {
+    throw new JinaApiError("JINA_GLOBAL_ADMIN_TOKEN must differ from INTERNAL_API_TOKEN");
+  }
+  const token = credential === "global" ? globalAdminToken : internalToken;
   if (token) headers.authorization = `Bearer ${token}`;
-  const tenantId = process.env.JINA_TENANT_ID?.trim();
-  if (tenantId) headers["x-jina-tenant-id"] = tenantId;
+  if (credential === "internal") {
+    const tenantId = init?.tenantId?.trim() || process.env.JINA_TENANT_ID?.trim();
+    if (tenantId && !SAFE_TENANT_ID.test(tenantId)) throw new JinaApiError("invalid tenant ID");
+    if (tenantId) headers["x-jina-tenant-id"] = tenantId;
+  }
   if (init?.body !== undefined) headers["content-type"] = "application/json";
   let response: Response;
   try {
@@ -93,19 +108,25 @@ async function apiRequest(
   return response.json();
 }
 
-function apiGet(pathname: string): Promise<unknown> {
-  return apiRequest(pathname);
+function apiGet(
+  pathname: string,
+  init?: { readonly credential?: "global" | "internal"; readonly tenantId?: string | undefined }
+): Promise<unknown> {
+  return apiRequest(pathname, init);
 }
 
 export async function listAllGraphs(): Promise<readonly AdminGraphSummary[]> {
-  const body = (await apiGet("/context-graph")) as { readonly graphs?: readonly AdminGraphSummary[] };
+  const useGlobalIndex = Boolean(process.env.JINA_GLOBAL_ADMIN_TOKEN?.trim());
+  const body = (await apiGet(useGlobalIndex ? "/internal/admin/context-graph" : "/context-graph", {
+    credential: useGlobalIndex ? "global" : "internal"
+  })) as { readonly graphs?: readonly AdminGraphSummary[] };
   const graphs = Array.isArray(body.graphs) ? (body.graphs as readonly AdminGraphSummary[]) : [];
   return [...graphs].sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
 }
 
-export async function getGraph(graphId: string): Promise<AdminGraph | undefined> {
+export async function getGraph(graphId: string, tenantId?: string): Promise<AdminGraph | undefined> {
   try {
-    return (await apiGet(`/context-graph/graphs/${encodeURIComponent(graphId)}`)) as AdminGraph;
+    return (await apiGet(`/context-graph/graphs/${encodeURIComponent(graphId)}`, { tenantId })) as AdminGraph;
   } catch (error) {
     if (error instanceof JinaApiError && error.status === 404) return undefined;
     throw error;
@@ -113,11 +134,12 @@ export async function getGraph(graphId: string): Promise<AdminGraph | undefined>
 }
 
 export async function askGraph(
-  graph: Pick<AdminGraph, "repository" | "ref" | "commitSha">,
+  graph: Pick<AdminGraph, "tenantId" | "repository" | "ref" | "commitSha">,
   question: string
 ): Promise<AdminGraphQueryResult> {
   return (await apiRequest("/context-graph/ask", {
     method: "POST",
+    tenantId: graph.tenantId,
     body: {
       repository: graph.repository,
       ref: graph.ref,

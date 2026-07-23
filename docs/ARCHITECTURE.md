@@ -83,9 +83,9 @@ Source writes, model observations, and projections are independently idempotent.
 
 ## Authentication and security
 
-Fixed mode uses `JINA_TENANT_ID`. Shared mode resolves the original tenant UUID from PostgreSQL for signed webhook intake and scopes authenticated requests by `x-jina-tenant-id`; a forwarded `tenant:<uuid>` principal must match that header. Health and task-type definitions are public; disabled webhook intake acknowledges without mutation. Board, worker, and context graph operations require the internal bearer credential.
+Fixed mode uses `JINA_TENANT_ID`. Shared mode resolves the original tenant UUID from PostgreSQL for signed webhook intake and scopes authenticated requests by `x-jina-tenant-id`; a forwarded `tenant:<uuid>` principal must match that header. Health and task-type definitions are public; disabled webhook intake acknowledges without mutation. Board, worker, and context graph operations require the internal bearer credential. The one cross-tenant exception is the read-only admin graph-head index, which accepts only the distinct `JINA_GLOBAL_ADMIN_TOKEN`.
 
-The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal; the admin app uses the service principal. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
+The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal and remains fixed to its configured tenant. The admin app uses the global-admin credential only to discover graph heads, then uses the service credential plus the selected graph's tenant ID for detail and retrieval calls. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 
 MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
 

@@ -88,6 +88,7 @@ export interface ContextGraphStore extends ContextGraphPipelineStore, Repository
   ): Promise<{ readonly graphId: string; readonly commitSha: string } | undefined>;
   get(graphId: string, tenantId: string): Promise<ContextGraph | undefined>;
   list(tenantId: string): Promise<readonly ContextGraph[]>;
+  listAllSummaries(): Promise<readonly ContextGraphSummary[]>;
   listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter): Promise<readonly ContextGraphSummary[]>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
@@ -173,6 +174,16 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     return [...this.graphs.values()]
       .filter((graph) => graph.tenantId === tenantId)
       .sort((a, b) => b.generatedAt.localeCompare(a.generatedAt));
+  }
+
+  async listAllSummaries(): Promise<readonly ContextGraphSummary[]> {
+    const heads = new Map<string, ContextGraph>();
+    for (const graph of this.graphs.values()) {
+      const key = canonicalJson([graph.tenantId, graph.repository, graph.ref]);
+      const current = heads.get(key);
+      if (!current || graph.generatedAt > current.generatedAt) heads.set(key, graph);
+    }
+    return [...heads.values()].sort((a, b) => b.generatedAt.localeCompare(a.generatedAt)).map(summarizeContextGraph);
   }
 
   async listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter): Promise<readonly ContextGraphSummary[]> {
