@@ -14,7 +14,7 @@ pnpm test
 pnpm dev
 ```
 
-`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL and `INTERNAL_API_TOKEN`. Fixed mode also requires `JINA_TENANT_ID`; shared mode uses `JINA_TENANCY_MODE=shared-db` and resolves original Jina tenant UUIDs from the database.
+`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `GRAPH_API_TOKEN`. Fixed mode also requires `JINA_TENANT_ID`; shared mode uses `JINA_TENANCY_MODE=shared-db` and resolves original Jina tenant UUIDs from the database.
 
 To exercise the separate local PR-review harness:
 

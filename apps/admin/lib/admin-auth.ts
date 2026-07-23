@@ -9,7 +9,7 @@
 // ACL-scoped subset), it additionally supports an explicit admin allowlist.
 //
 // These helpers are pure so the decision is unit-testable and identical
-// whether evaluated in middleware or a server component.
+// whether evaluated in the request proxy or a server component.
 
 export type AdminAccessDecision =
   | { readonly ok: true; readonly email?: string }
@@ -56,7 +56,7 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-export function isValidBasicAuthorization(
+function isValidBasicAuthorization(
   header: string | null | undefined,
   expectedUsername: string | null | undefined,
   expectedPassword: string | null | undefined

@@ -3,7 +3,7 @@ import { evaluateAdminAccess } from "./lib/admin-auth";
 
 // Runs before every rendered route. Env is read inside the handler so it is
 // evaluated at request time by the self-hosted Node server, not inlined.
-export function middleware(request: NextRequest): NextResponse {
+export function proxy(request: NextRequest): NextResponse {
   const decision = evaluateAdminAccess({
     authRequired: Boolean(process.env.INTERNAL_API_TOKEN?.trim()),
     iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),

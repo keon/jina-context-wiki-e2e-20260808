@@ -83,7 +83,7 @@ Source writes, model observations, and projections are independently idempotent.
 
 ## Authentication and security
 
-Production shared mode is scoped by an original tenant UUID on each authenticated request; fixed mode uses the configured tenant. Health and task-type definitions are public; disabled webhook intake acknowledges without mutation. Board, worker, and context graph operations require the internal bearer credential. In shared mode, a forwarded `tenant:<uuid>` principal must match the `x-jina-tenant-id` header.
+Fixed mode uses `JINA_TENANT_ID`. Shared mode resolves the original tenant UUID from PostgreSQL for signed webhook intake and scopes authenticated requests by `x-jina-tenant-id`; a forwarded `tenant:<uuid>` principal must match that header. Health and task-type definitions are public; disabled webhook intake acknowledges without mutation. Board, worker, and context graph operations require the internal bearer credential.
 
 The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal; the admin app uses the service principal. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
 

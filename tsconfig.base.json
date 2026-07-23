@@ -18,9 +18,7 @@
       "@jina/daytona": ["./packages/daytona/src/index.ts"],
       "@jina/ai": ["./packages/ai/src/index.ts"],
       "@jina/shared-kernel": ["./packages/shared-kernel/src/index.ts"],
-      "@jina/observability": ["./packages/observability/src/index.ts"],
-      "@jina/graph-renderer": ["./packages/graph-renderer/src/index.ts"],
-      "@jina/graph-renderer/node-filters": ["./packages/graph-renderer/src/node-filters.ts"]
+      "@jina/observability": ["./packages/observability/src/index.ts"]
     }
   }
 }

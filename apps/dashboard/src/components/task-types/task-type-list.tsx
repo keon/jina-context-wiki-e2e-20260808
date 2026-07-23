@@ -12,7 +12,7 @@ export interface TaskTypeMetrics {
   readonly steps: number;
 }
 
-export function taskTypeMetrics(definition: TaskTypeDefinition, tasks: readonly BoardTask[]): TaskTypeMetrics {
+function taskTypeMetrics(definition: TaskTypeDefinition, tasks: readonly BoardTask[]): TaskTypeMetrics {
   const runs = tasks
     .filter((task) => task.type === definition.type)
     .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt)));

@@ -50,7 +50,7 @@ Create a private GitHub App under the account or organization that owns the repo
 - Optional repository permission: **Actions — Read-only**
 - Subscribe to events: **Push**, **Pull request**, and **Issues**
 
-Install the App on the repositories Jina should watch. In production shared mode, the original Jina database must already contain the enabled repository, its tenant, and a non-suspended installation. The signed delivery is resolved against those records; an unknown, disabled, suspended, or mismatched repository is rejected instead of receiving a synthetic tenant. Local development and rollback can use fixed mode with `JINA_TENANT_ID`.
+Install the App on the repositories Jina should watch. In production shared mode, `JINA_TENANT_ID` is unset and the original Jina database must already contain the enabled repository, its tenant, and a non-suspended installation. The signed delivery is resolved against those records; an unknown, disabled, suspended, or mismatched repository is rejected instead of receiving a synthetic tenant. Fixed mode uses canonical `JINA_TENANT_ID` and migrates configured aliases at API startup so historical tasks remain visible; local development can derive `github:installation:<id>` from the payload.
 
 When intake is enabled, the resolved original tenant UUID scopes every task created by the delivery. In the current production path, the original application sends the same UUID and verified repository/review identity as server-side graph-build metadata. Both paths retain the original tenant's GitHub account login plus the webhook author's and sender's GitHub IDs, logins, and account types.
 
@@ -70,7 +70,7 @@ curl http://localhost:4000/board
 curl http://localhost:4000/events
 ```
 
-Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>`. Shared-mode callers also send `x-jina-tenant-id: <original-tenant-uuid>`; a forwarded `tenant:<uuid>` principal must match it. The signed webhook endpoint resolves its own tenant and does not accept a caller-supplied tenant override. Browsers should use the authenticated dashboard rather than calling the API credential directly.
+Production read endpoints require `Authorization: Bearer <INTERNAL_API_TOKEN>`. Fixed mode uses `JINA_TENANT_ID`; shared-mode callers send `x-jina-tenant-id: <original-tenant-uuid>`, and a forwarded `tenant:<uuid>` principal must match it. The signed webhook endpoint resolves its own tenant and does not accept a caller-supplied tenant override. Browsers should use the authenticated dashboard rather than calling the API credential directly.
 
 GitHub's App settings also show every delivery, response status, and redelivery control.
 

@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AssertionRejectionFields, validateRejection } from "./graph-inspector.tsx";
-import type { ReviewAssertionFn } from "./graph-inspector.tsx";
+import { AssertionRejectionFields, validateRejection } from "./assertion-review-controls.tsx";
+import type { ReviewAssertionFn } from "./assertion-review-controls.tsx";
 import { TraceEvidence } from "./trace.tsx";
 import { confidenceLabel, humanize } from "../../lib/format.ts";
 import { assertionView } from "../../lib/assertions.ts";

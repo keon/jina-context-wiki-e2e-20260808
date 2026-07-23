@@ -7,7 +7,7 @@
 
 import type { AdminGraphQueryResult } from "./graph-query";
 
-export interface AdminGraphGenerator {
+interface AdminGraphGenerator {
   readonly executor: "daytona" | "fixture" | "projection";
   readonly model: string;
   readonly sandboxId?: string;

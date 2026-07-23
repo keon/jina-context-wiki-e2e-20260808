@@ -106,9 +106,9 @@ CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000
 CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3
 ```
 
-The assertion worker calls OpenRouter's non-streaming chat-completions API directly with a strict JSON schema. Daytona provides only the pinned repository checkout and citation reads; no coding-agent runtime or localhost proxy participates in generation. Transient provider timeout, rate-limit, 5xx, and network failures retry once within the same checkout. Host validation can trigger up to two complete schema-constrained repair generations with the default three-attempt setting.
+The assertion worker calls OpenRouter's non-streaming chat-completions API directly with a strict JSON schema. Daytona provides only the pinned repository checkout and citation reads; no coding-agent runtime or localhost proxy participates in generation. The worker advertises a 16,000-token context and compacts at 12,000. Transient provider stream, timeout, rate-limit, 5xx, network, and Daytona transport failures retry once within the same checkout. Host validation can trigger up to two complete schema-constrained repair generations with the default three-attempt setting.
 
-Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew five-minute leases. The API keeps one minimum instance by default; unlike workers it uses request-time CPU allocation. The durable lease, not process identity, is the source of truth.
+Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew 30-minute leases. The API keeps one minimum instance by default; unlike workers it uses request-time CPU allocation. The durable lease, not process identity, is the source of truth.
 
 ## Context graph retry and cache behavior
 

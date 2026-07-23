@@ -7,21 +7,21 @@ export interface AdminGraphCitation {
   readonly commitSha?: string;
 }
 
-export interface AdminGraphCitedClaim {
+interface AdminGraphCitedClaim {
   readonly text?: string;
   readonly citations?: readonly AdminGraphCitation[];
 }
 
-export interface AdminGraphQueryCallItem {
+interface AdminGraphQueryCallItem {
   readonly data?: unknown;
   readonly citations?: readonly AdminGraphCitation[];
 }
 
-export interface AdminGraphQueryCall {
+interface AdminGraphQueryCall {
   readonly items?: readonly AdminGraphQueryCallItem[];
 }
 
-export interface AdminGraphCoverageGap {
+interface AdminGraphCoverageGap {
   readonly capability?: string;
   readonly message?: string;
 }

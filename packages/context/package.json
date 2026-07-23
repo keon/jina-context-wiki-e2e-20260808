@@ -15,6 +15,6 @@
     "test": "pnpm build && node --test dist/source-policy.test.js"
   },
   "devDependencies": {
-    "@types/node": "^26.1.0"
+    "@types/node": "^26.1.1"
   }
 }

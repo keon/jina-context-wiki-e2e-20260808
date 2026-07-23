@@ -281,9 +281,6 @@ function canonicalModelWorkItemId(kind: string, id: string): string {
   return suffix ?? id;
 }
 
-/** @deprecated Use DaytonaContextGraphExecutor. */
-export const DaytonaCodexContextGraphExecutor = DaytonaContextGraphExecutor;
-
 export function isTransientModelExecutionFailure(output: string): boolean {
   return /(?:stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:408|409|429|500|502|503|504)|rate limit|fetch failed|network error)/i.test(
     output

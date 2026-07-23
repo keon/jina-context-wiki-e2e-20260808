@@ -11,13 +11,13 @@
   },
   "dependencies": {
     "@jina/graph-renderer": "workspace:*",
-    "next": "^15.5.21",
-    "react": "^19.2.0",
-    "react-dom": "^19.2.0"
+    "next": "^16.2.11",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",
-    "@types/react": "^19.2.0",
-    "@types/react-dom": "^19.2.0"
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3"
   }
 }

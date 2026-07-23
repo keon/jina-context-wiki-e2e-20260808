@@ -1,12 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent } from "react";
 import { AssertionReview } from "./assertion-review.tsx";
 import { CitedSearch } from "./cited-search.tsx";
 import { GraphControls } from "./graph-controls.tsx";
 import { GraphInspector } from "./graph-inspector.tsx";
 import { GraphViewport } from "./graph-viewport.tsx";
+import { useContextSearch } from "./use-context-search.ts";
 import {
   contextGraphIdentity,
   contextGraphMatches,
@@ -14,7 +14,7 @@ import {
   friendlyNodeLabels,
   selectionIsVisible
 } from "../../lib/context-graph.ts";
-import type { ContextAskState, GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
+import type { GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
 import type { PublicRenderer } from "../../lib/context-graph-renderer.ts";
 import { ADVANCED_GRAPH_NODE_KINDS, defaultHiddenGraphNodeKinds } from "@jina/graph-renderer/node-filters";
 import { usePoll } from "../../lib/poll.ts";
@@ -22,7 +22,7 @@ import type { ContextGraphAssertion, ContextGraphResponse } from "../../lib/type
 
 const EMPTY_GRAPH: VisibleGraph = { nodes: [], edges: [] };
 const CONTEXT_GRAPH_POLL_INTERVAL_MS = 15_000;
-export const CONTEXT_GRAPH_READ_PATH =
+const CONTEXT_GRAPH_READ_PATH =
   "/api/context-graph?view=dashboard&include=assertions&assertionStatus=proposed&assertionLimit=50";
 
 export function ContextGraphPage() {
@@ -49,16 +49,7 @@ export function ContextGraphPage() {
   const [zoomPercent, setZoomPercent] = useState(100);
   const rendererRef = useRef<PublicRenderer | null>(null);
 
-  // Cited-search state.
-  const [question, setQuestion] = useState("");
-  const [contextState, setContextState] = useState<ContextAskState | null>(null);
-  const [searchOpen, setSearchOpen] = useState(false);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [evidenceExpanded, setEvidenceExpanded] = useState(false);
-  const requestSequence = useRef(0);
-  const abortRef = useRef<AbortController | null>(null);
-  const questionRef = useRef(question);
-  questionRef.current = question;
+  const search = useContextSearch(graph, graphKey);
   const graphRef = useRef(graph);
   graphRef.current = graph;
 
@@ -73,30 +64,17 @@ export function ContextGraphPage() {
     const payload = (await response.json()) as { readonly assertions?: readonly ContextGraphAssertion[] };
     setExpandedProposedAssertions(payload.assertions ?? []);
   }, []);
-
-  const invalidateContextRequest = useCallback(() => {
-    requestSequence.current += 1;
-    abortRef.current?.abort();
-    abortRef.current = null;
-    setSearchLoading(false);
-  }, []);
-
   // View-state reset when the graph identity changes (resetContextGraphViewForGraph).
   const lastGraphKey = useRef<string | null>(null);
   useEffect(() => {
     if (lastGraphKey.current === graphKey) return;
     lastGraphKey.current = graphKey;
-    invalidateContextRequest();
     setExpandedProposedAssertions(null);
     setSelected(null);
     setHiddenNodeKinds(defaultHiddenGraphNodeKinds(graphRef.current?.nodes.map((node) => node.kind) ?? []));
     setHiddenEdgePredicates(new Set());
     setFilterMenuOpen(false);
-    setContextState(null);
-    setSearchOpen(false);
-    setEvidenceExpanded(false);
-    setQuestion("");
-  }, [graphKey, invalidateContextRequest]);
+  }, [graphKey]);
 
   const rendererLabels = useMemo(() => (graph ? friendlyNodeLabels(graph) : {}), [graph]);
   const visibleGraph = useMemo(
@@ -105,10 +83,10 @@ export function ContextGraphPage() {
   );
   const selection = selected && selectionIsVisible(selected, visibleGraph) ? selected : null;
   const searchMatches = useMemo(
-    () => contextGraphMatches(contextState, graph ? visibleGraph : null),
-    [contextState, graph, visibleGraph]
+    () => contextGraphMatches(search.contextState, graph ? visibleGraph : null),
+    [search.contextState, graph, visibleGraph]
   );
-  const resultMatches = useMemo(() => contextGraphMatches(contextState, graph), [contextState, graph]);
+  const resultMatches = useMemo(() => contextGraphMatches(search.contextState, graph), [search.contextState, graph]);
 
   const onToggleFilter = useCallback((group: "node" | "edge", type: string) => {
     const update = (previous: ReadonlySet<string>): ReadonlySet<string> => {
@@ -160,99 +138,6 @@ export function ContextGraphPage() {
     [refresh]
   );
 
-  const onQuestionChange = useCallback(
-    (value: string) => {
-      setQuestion(value);
-      if (searchLoading) {
-        invalidateContextRequest();
-        setContextState(null);
-        setSearchOpen(false);
-        setEvidenceExpanded(false);
-      }
-      if (!value.trim()) {
-        setContextState(null);
-        setSearchOpen(false);
-      }
-    },
-    [searchLoading, invalidateContextRequest]
-  );
-
-  const onSearchFocus = useCallback(() => {
-    if (contextState || searchLoading) setSearchOpen(true);
-  }, [contextState, searchLoading]);
-
-  const onSearchEscape = useCallback(() => {
-    invalidateContextRequest();
-    setSearchOpen(false);
-    setEvidenceExpanded(false);
-  }, [invalidateContextRequest]);
-
-  const onSearchClear = useCallback(() => {
-    invalidateContextRequest();
-    setQuestion("");
-    setContextState(null);
-    setSearchOpen(false);
-    setEvidenceExpanded(false);
-  }, [invalidateContextRequest]);
-
-  const onSearchDismiss = useCallback(() => {
-    invalidateContextRequest();
-    setSearchOpen(false);
-  }, [invalidateContextRequest]);
-
-  const onSearchSubmit = useCallback(
-    async (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const currentGraph = graphRef.current;
-      if (!currentGraph) return;
-      const trimmed = questionRef.current.trim();
-      if (!trimmed || searchLoading) return;
-      invalidateContextRequest();
-      setEvidenceExpanded(false);
-      const sequence = requestSequence.current;
-      const key = contextGraphIdentity(currentGraph);
-      const abortController = new AbortController();
-      abortRef.current = abortController;
-      setSearchOpen(true);
-      setSearchLoading(true);
-      setContextState(null);
-      const finish = (next: ContextAskState) => {
-        if (sequence !== requestSequence.current) return;
-        abortRef.current = null;
-        setSearchLoading(false);
-        setSearchOpen(true);
-        setContextState(next);
-      };
-      try {
-        const response = await fetch("/api/context-graph/ask", {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          signal: abortController.signal,
-          body: JSON.stringify({ repository: currentGraph.repository, ref: currentGraph.ref, question: trimmed })
-        });
-        if (!response.ok) throw new Error(`Context query failed with ${response.status}`);
-        const nextContextState = (await response.json()) as ContextAskState;
-        // Discard stale responses: a newer request, an edited question, or a
-        // different (or missing) graph invalidate this answer.
-        const latestGraph = graphRef.current;
-        if (
-          sequence !== requestSequence.current ||
-          questionRef.current.trim() !== trimmed ||
-          !latestGraph ||
-          contextGraphIdentity(latestGraph) !== key
-        )
-          return;
-        finish(nextContextState);
-      } catch (error) {
-        const aborted =
-          typeof error === "object" && error !== null && (error as { name?: unknown }).name === "AbortError";
-        if (aborted) return;
-        finish({ error: error instanceof Error ? error.message : String(error) });
-      }
-    },
-    [searchLoading, invalidateContextRequest]
-  );
-
   const hasSelectionClass = Boolean(graph) && (Boolean(selection) || proposedAssertions.length > 0);
 
   return (
@@ -286,21 +171,21 @@ export function ContextGraphPage() {
           </div>
           <CitedSearch
             graph={graph}
-            question={question}
-            contextState={contextState}
-            searchOpen={searchOpen}
-            searchLoading={searchLoading}
-            evidenceExpanded={evidenceExpanded}
+            question={search.question}
+            contextState={search.contextState}
+            searchOpen={search.searchOpen}
+            searchLoading={search.searchLoading}
+            evidenceExpanded={search.evidenceExpanded}
             graphMatches={resultMatches}
-            onQuestionChange={onQuestionChange}
-            onFocus={onSearchFocus}
-            onEscape={onSearchEscape}
-            onClear={onSearchClear}
-            onDismiss={onSearchDismiss}
+            onQuestionChange={search.onQuestionChange}
+            onFocus={search.onSearchFocus}
+            onEscape={search.onSearchEscape}
+            onClear={search.onSearchClear}
+            onDismiss={search.onSearchDismiss}
             onSubmit={(event) => {
-              void onSearchSubmit(event);
+              void search.onSearchSubmit(event);
             }}
-            onEvidenceToggle={setEvidenceExpanded}
+            onEvidenceToggle={search.setEvidenceExpanded}
           />
         </header>
         <section

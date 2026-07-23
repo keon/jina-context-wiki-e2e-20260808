@@ -1,6 +1,6 @@
 import type { BoardEvent, BoardState, BoardTask } from "./types.ts";
 
-export interface ReviewMcpUsageEvent {
+interface ReviewMcpUsageEvent {
   readonly server: string;
   readonly tool: string;
   readonly at?: string;

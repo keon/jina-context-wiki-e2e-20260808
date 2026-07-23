@@ -21,7 +21,7 @@ export interface BoardTask {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-export interface BoardDependency {
+interface BoardDependency {
   readonly taskId: string;
   readonly dependsOnTaskId: string;
   readonly relationship: string;

@@ -43,7 +43,7 @@ export function contextGraphIdentity(graph: ContextGraph): string {
   );
 }
 
-export function mergePullRequestsForCommit(node: ContextGraphNode, graph: VisibleGraph): readonly ContextGraphNode[] {
+function mergePullRequestsForCommit(node: ContextGraphNode, graph: VisibleGraph): readonly ContextGraphNode[] {
   const pullRequests: ContextGraphNode[] = [];
   const seen = new Set<string>();
   for (const edge of graph.edges) {
@@ -177,18 +177,18 @@ export interface ContextCitation {
   readonly commitSha?: string;
 }
 
-export interface ContextCitedClaim {
+interface ContextCitedClaim {
   readonly text?: string;
   readonly citations?: readonly ContextCitation[];
 }
 
-export interface TracePullRequest {
+interface TracePullRequest {
   readonly number?: number | string;
   readonly title?: string;
   readonly url?: string;
 }
 
-export interface TraceChange {
+interface TraceChange {
   readonly path?: string;
 }
 
@@ -217,7 +217,7 @@ export interface TraceIssue {
   readonly url?: string;
 }
 
-export interface CausalPathNode {
+interface CausalPathNode {
   readonly kind?: string;
   readonly label?: string;
 }
@@ -228,7 +228,7 @@ export interface CausalPath {
   readonly citations?: readonly ContextCitation[];
 }
 
-export interface CausalTraceRoot {
+interface CausalTraceRoot {
   readonly kind?: string;
   readonly label?: string;
 }
@@ -256,18 +256,18 @@ export interface ContextCallItem {
   readonly citations?: readonly ContextCitation[];
 }
 
-export interface ContextCall {
+interface ContextCall {
   readonly template?: string;
   readonly truncated?: boolean;
   readonly items?: readonly ContextCallItem[];
 }
 
-export interface ContextCounterfactualEntity {
+interface ContextCounterfactualEntity {
   readonly kind?: string;
   readonly label?: string;
 }
 
-export interface ContextCounterfactual {
+interface ContextCounterfactual {
   readonly basis?: string;
   readonly intervention?: ContextCounterfactualEntity;
   readonly outcome?: ContextCounterfactualEntity;
@@ -275,7 +275,7 @@ export interface ContextCounterfactual {
   readonly remainingPaths?: readonly CausalPath[];
 }
 
-export interface ContextCoverageGap {
+interface ContextCoverageGap {
   readonly capability?: string;
   readonly message?: string;
 }

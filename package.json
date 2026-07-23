@@ -5,7 +5,8 @@
   "scripts": {
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
-    "lint": "turbo run lint && pnpm format:check",
+    "lint": "turbo run lint && pnpm lint:dead-code && pnpm format:check",
+    "lint:dead-code": "knip",
     "lint:fix": "turbo run lint -- --fix && pnpm format",
     "format": "prettier . --write",
     "format:check": "prettier . --check",
@@ -20,6 +21,7 @@
     "eslint": "^10.7.0",
     "eslint-config-prettier": "^10.1.8",
     "globals": "^17.7.0",
+    "knip": "^6.29.0",
     "prettier": "^3.9.6",
     "turbo": "^2.10.5",
     "typescript": "^6.0.3",

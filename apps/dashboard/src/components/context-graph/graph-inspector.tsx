@@ -1,20 +1,11 @@
-"use client";
-
-import { useRef, useState } from "react";
-import type { ReactNode, RefObject } from "react";
+import type { ReactNode } from "react";
 import { ConfidenceSection, DetailGrid, EvidenceSection, ExplanationSection } from "../inspector.tsx";
 import { confidenceLabel, humanize } from "../../lib/format.ts";
 import { connectedConfidenceSummary, friendlyNodeExplanation, friendlyNodeLabel } from "../../lib/context-graph.ts";
-import { ASSERTION_REJECTION_CODES, assertionView } from "../../lib/assertions.ts";
 import type { GraphSelection, VisibleGraph } from "../../lib/context-graph.ts";
 import type { ContextGraph, ContextGraphAssertion, ContextGraphEdge, ContextGraphNode } from "../../lib/types.ts";
-
-export type ReviewAssertionFn = (
-  assertionId: string,
-  decision: string,
-  rejectionCode?: string,
-  reason?: string
-) => Promise<void>;
+import { AssertionReviewQueue } from "./assertion-review-queue.tsx";
+import type { ReviewAssertionFn } from "./assertion-review-controls.tsx";
 
 /** Selection-driven node/edge inspector, with the proposed-assertion queue as its empty state. */
 
@@ -133,7 +124,6 @@ function NodeInspector({
       <EvidenceSection evidence={node.evidence} />
       <ExplanationSection value={explanation} />
       <RelationshipSection node={node} edges={relatedEdges} graph={graph} onSelect={onSelect} />
-      <InspectorActions labels={["⌖  Pin", "◎  Center", "↗  Open source"]} />
     </InspectorItem>
   );
 }
@@ -175,7 +165,6 @@ function EdgeInspector({
       <ExplanationSection
         value={edge.why || `This relationship states that ${sourceLabel} ${humanize(edge.predicate)} ${targetLabel}.`}
       />
-      <InspectorActions labels={["⇄  Reverse direction", "⌁  Reconnect", "◌  Hide type", "⌫  Delete"]} />
     </InspectorItem>
   );
 }
@@ -214,25 +203,6 @@ function Endpoint({ label, value, kind }: { readonly label: string; readonly val
       <strong>{value}</strong>
       <span className="context-graph-item-type">{humanize(kind)}</span>
     </section>
-  );
-}
-
-function InspectorActions({ labels }: { readonly labels: readonly string[] }) {
-  return (
-    <footer className="context-graph-inspector-actions">
-      {labels.map((label) => (
-        <button
-          key={label}
-          type="button"
-          className={label.includes("Delete") ? "danger-button" : "secondary-button"}
-          disabled
-          aria-disabled="true"
-          title="This action is not available in the read-only graph explorer."
-        >
-          {label}
-        </button>
-      ))}
-    </footer>
   );
 }
 
@@ -283,156 +253,5 @@ function RelationshipSection({
         </div>
       )}
     </section>
-  );
-}
-
-/** Shared rejection-code select + reason input (uncontrolled, validated on reject). */
-export function AssertionRejectionFields({
-  codeRef,
-  reasonRef
-}: {
-  readonly codeRef: RefObject<HTMLSelectElement | null>;
-  readonly reasonRef: RefObject<HTMLInputElement | null>;
-}) {
-  return (
-    <div className="assertion-review-fields">
-      <select className="assertion-rejection-code" ref={codeRef} defaultValue="">
-        {ASSERTION_REJECTION_CODES.map(([value, label]) => (
-          <option key={value} value={value}>
-            {label}
-          </option>
-        ))}
-      </select>
-      <input className="assertion-rejection-reason" placeholder="Reason for rejection" ref={reasonRef} />
-    </div>
-  );
-}
-
-export function validateRejection(
-  codeRef: RefObject<HTMLSelectElement | null>,
-  reasonRef: RefObject<HTMLInputElement | null>
-): { readonly code: string; readonly reason: string } | null {
-  const code = codeRef.current;
-  const reason = reasonRef.current;
-  if (!code || !reason) return null;
-  if (!code.value || !reason.value.trim()) {
-    reason.setCustomValidity("Choose a category and provide a reason.");
-    reason.reportValidity();
-    return null;
-  }
-  reason.setCustomValidity("");
-  return { code: code.value, reason: reason.value.trim() };
-}
-
-function AssertionReviewQueue({
-  assertions,
-  canLoadMore,
-  onReview,
-  onLoadMore
-}: {
-  readonly assertions: readonly ContextGraphAssertion[];
-  readonly canLoadMore: boolean;
-  readonly onReview: ReviewAssertionFn;
-  readonly onLoadMore: () => Promise<void>;
-}) {
-  const pageSize = 25;
-  const [visibleCount, setVisibleCount] = useState(pageSize);
-  const [loadingMore, setLoadingMore] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const visibleAssertions = assertions.slice(0, visibleCount);
-  const remaining = assertions.length - visibleAssertions.length;
-  return (
-    <>
-      <div className="context-graph-item-heading">
-        <div className="context-graph-heading-copy">
-          <strong>Assertion review</strong>
-          <span className="context-graph-item-type">
-            {assertions.length}
-            {canLoadMore ? "+" : ""} proposed
-          </span>
-        </div>
-      </div>
-      <div className="assertion-review-list">
-        {visibleAssertions.map((assertion) => (
-          <AssertionQueueCard key={assertion.id} assertion={assertion} onReview={onReview} />
-        ))}
-        {remaining > 0 || canLoadMore ? (
-          <button
-            type="button"
-            className="secondary-button"
-            aria-controls="context-graph-details"
-            disabled={loadingMore}
-            title={loadError ?? undefined}
-            onClick={() => {
-              if (remaining > 0) {
-                setVisibleCount((count) => count + pageSize);
-                return;
-              }
-              setLoadingMore(true);
-              setLoadError(null);
-              void onLoadMore()
-                .catch((error) => {
-                  setLoadError(error instanceof Error ? error.message : "Could not load older proposals");
-                })
-                .finally(() => setLoadingMore(false));
-            }}
-          >
-            {loadingMore
-              ? "Loading older proposals…"
-              : remaining > 0
-                ? `Load more (${remaining} remaining)`
-                : loadError
-                  ? "Retry loading older proposals"
-                  : "Load older proposals"}
-          </button>
-        ) : null}
-      </div>
-    </>
-  );
-}
-
-function AssertionQueueCard({
-  assertion,
-  onReview
-}: {
-  readonly assertion: ContextGraphAssertion;
-  readonly onReview: ReviewAssertionFn;
-}) {
-  const codeRef = useRef<HTMLSelectElement | null>(null);
-  const reasonRef = useRef<HTMLInputElement | null>(null);
-  const view = assertionView(assertion);
-  return (
-    <article className="assertion-review-card">
-      <strong>
-        {view.subjectLabel} · {assertion.predicate} · {view.objectLabel}
-      </strong>
-      <p>
-        {assertion.explanation || "This legacy assertion has no explanation and should not be accepted without review."}
-      </p>
-      <p>Evidence: {(assertion.evidence || []).join(", ") || "none"}</p>
-      <AssertionRejectionFields codeRef={codeRef} reasonRef={reasonRef} />
-      <div className="assertion-review-actions">
-        <button
-          type="button"
-          className="secondary-button"
-          onClick={() => {
-            void onReview(assertion.id, "accept").catch(() => undefined);
-          }}
-        >
-          Accept
-        </button>
-        <button
-          type="button"
-          className="danger-button"
-          onClick={() => {
-            const rejection = validateRejection(codeRef, reasonRef);
-            if (!rejection) return;
-            void onReview(assertion.id, "reject", rejection.code, rejection.reason).catch(() => undefined);
-          }}
-        >
-          Reject
-        </button>
-      </div>
-    </article>
   );
 }
