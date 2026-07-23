@@ -118,7 +118,9 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
       request.signal?.throwIfAborted();
       const checkout = contextGraphCheckout(request.ref, request.commitSha);
       await cloneRepository(sandbox, request, cloneToken);
-      if (checkout.expectedCommitSha) await checkoutExpectedCommit(sandbox, checkout.expectedCommitSha);
+      if (checkout.expectedCommitSha) {
+        await checkoutExpectedCommit(sandbox, checkout.expectedCommitSha, cloneToken);
+      }
       const input = await prepareModelInput(sandbox, request);
       request.signal?.throwIfAborted();
       const basePrompt = input.prompt;
@@ -329,12 +331,14 @@ async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildReque
   await sandbox.git.clone(url, REPO_DIR, cloneRef, undefined, username, token);
 }
 
-async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Promise<void> {
+async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string, token?: string): Promise<void> {
   if (!FULL_GIT_SHA.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
+  const fetch = contextGraphFetchCommand(Boolean(token));
+  const env = token ? { GITHUB_TOKEN: token } : undefined;
   const ensureCommit = await sandbox.process.executeCommand(
-    `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || git fetch --depth=1 origin ${shellQuote(commitSha)}`,
+    `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || ${fetch} --depth=1 origin ${shellQuote(commitSha)}`,
     REPO_DIR,
-    undefined,
+    env,
     60
   );
   if (ensureCommit.exitCode !== 0) {
@@ -342,9 +346,9 @@ async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Prom
     // deepen on demand before giving up. --unshallow itself fails on a full clone,
     // where the commit was already proven unreachable above.
     const deepen = await sandbox.process.executeCommand(
-      `git fetch --unshallow origin && git cat-file -e ${shellQuote(`${commitSha}^{commit}`)}`,
+      `${fetch} --unshallow origin && git cat-file -e ${shellQuote(`${commitSha}^{commit}`)}`,
       REPO_DIR,
-      undefined,
+      env,
       positiveInt(process.env.DAYTONA_SETUP_TIMEOUT_SECONDS, 300)
     );
     if (deepen.exitCode !== 0) {
@@ -371,6 +375,10 @@ export function contextGraphCheckout(
     ...(refIsCommit ? {} : { cloneRef: ref }),
     ...(commitSha ? { expectedCommitSha: commitSha } : refIsCommit ? { expectedCommitSha: ref } : {})
   };
+}
+
+export function contextGraphFetchCommand(authenticated: boolean): string {
+  return authenticated ? 'git -c http.extraHeader="Authorization: Bearer ${GITHUB_TOKEN}" fetch' : "git fetch";
 }
 
 async function prepareModelInput(

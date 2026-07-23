@@ -5,6 +5,7 @@ import type { Sandbox } from "@daytona/sdk";
 import {
   buildFocusEvidenceBundle,
   contextGraphCheckout,
+  contextGraphFetchCommand,
   isTransientModelExecutionFailure,
   requestOpenRouterStructuredOutput,
   sanitizeGeneratedModelOutput
@@ -18,6 +19,11 @@ test("clones commit refs from the default branch before checking out the pinned 
     cloneRef: "main",
     expectedCommitSha: sha
   });
+});
+
+test("keeps installation credentials out of fetch commands while forwarding them through the environment", () => {
+  assert.equal(contextGraphFetchCommand(true), 'git -c http.extraHeader="Authorization: Bearer ${GITHUB_TOKEN}" fetch');
+  assert.equal(contextGraphFetchCommand(false), "git fetch");
 });
 
 test("classifies retryable provider execution failures", () => {
