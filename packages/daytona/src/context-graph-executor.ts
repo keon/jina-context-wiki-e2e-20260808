@@ -25,7 +25,7 @@ import {
   type RequiredMoveAnchor
 } from "@jina/context-graph";
 
-const DEFAULT_OPENROUTER_MODEL = "google/gemini-3.6-flash";
+const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.6-luna";
 const DEFAULT_IMAGE = "node:22-bookworm";
 const WORK_DIR = "/home/daytona/context-graph";
 const REPO_DIR = `${WORK_DIR}/repo`;

@@ -44,11 +44,11 @@ test("classifies retryable provider execution failures", () => {
 });
 
 test("runs Codex through OpenRouter Responses with catalog-aware authentication", () => {
-  const command = codexCommand("/opt/codex", "google/gemini-3.6-flash");
+  const command = codexCommand("/opt/codex", "openai/gpt-5.6-luna");
   assert.match(command, /codex' exec --json --ephemeral/);
   assert.match(command, /--output-schema/);
   assert.match(command, /--output-last-message/);
-  assert.match(command, /google\/gemini-3\.6-flash/);
+  assert.match(command, /openai\/gpt-5\.6-luna/);
   assert.match(command, /model_provider=openrouter/);
   assert.match(command, /base_url=https:\/\/openrouter\.ai\/api\/v1/);
   assert.match(command, /wire_api=responses/);
