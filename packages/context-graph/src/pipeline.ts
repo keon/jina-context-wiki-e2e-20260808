@@ -17,7 +17,7 @@ import {
 
 export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
 export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
-export const CONTEXT_GRAPH_GENERATOR_VERSION = "direct-assertions-v20-source-owned-incident-relations";
+export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v21-source-owned-incidents-bounded-output";
 export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v3";
 
 export interface RepositoryTreeEntry {

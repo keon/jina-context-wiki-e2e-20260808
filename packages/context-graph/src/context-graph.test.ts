@@ -58,10 +58,13 @@ import {
   type CausalTraceProjection
 } from "./causal.js";
 import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js";
-import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
+import { CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v20-source-owned-incident-relations/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v21-source-owned-incidents-bounded-output/);
+  assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.nodes.maxItems, 128);
+  assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.maxItems, 256);
+  assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.items.properties.evidence.maxItems, 4);
   assert.match(
     CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
     /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/

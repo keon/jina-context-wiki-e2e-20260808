@@ -100,13 +100,18 @@ Other optional-source failures remain fail-closed only where the source is requi
 The production context graph uses the `jina-openrouter-api-key` secret with:
 
 ```text
-CONTEXT_GRAPH_MODEL=google/gemini-3.5-flash-lite
-CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS=12000
+CONTEXT_GRAPH_MODEL=google/gemini-3.6-flash
 CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000
 CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3
+CONTEXT_GRAPH_CODEX_EXECUTION_ATTEMPTS=2
+CONTEXT_GRAPH_CODEX_EFFORT=medium
+CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=256000
+CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=200000
 ```
 
-The assertion worker calls OpenRouter's non-streaming chat-completions API directly with a strict JSON schema. Daytona provides only the pinned repository checkout and citation reads; no coding-agent runtime or localhost proxy participates in generation. The worker advertises a 16,000-token context and compacts at 12,000. Transient provider stream, timeout, rate-limit, 5xx, network, and Daytona transport failures retry once within the same checkout. Host validation can trigger up to two complete schema-constrained repair generations with the default three-attempt setting.
+The worker creates or reuses the immutable Daytona snapshot `jina-context-graph-codex-0-145-0`, which installs the pinned Codex binary once while building the snapshot rather than during each assertion task. `DAYTONA_SNAPSHOT` can override that snapshot name. Every assertion sandbox verifies that Codex 0.145.0 is present at `/home/daytona/context-graph/node_modules/.bin/codex` or on `PATH` and fails fast on version drift.
+
+The assertion worker runs Codex 0.145.0 inside the Daytona checkout and routes the pinned `google/gemini-3.6-flash` model through OpenRouter's Responses API. Codex obtains the key through command-backed authentication so it can refresh OpenRouter model metadata, and `--output-schema` keeps graph assertions schema-constrained and bounded. Transient provider and sandbox failures retry once within the same checkout. Losing the durable task lease deletes the active Daytona sandbox, terminating the paid model run before another worker retries it. Host validation can trigger up to two complete repair generations with the default three-attempt setting.
 
 Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew 30-minute leases. The API keeps one minimum instance by default; unlike workers it uses request-time CPU allocation. The durable lease, not process identity, is the source of truth.
 

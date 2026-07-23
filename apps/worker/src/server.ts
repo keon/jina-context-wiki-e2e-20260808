@@ -12,7 +12,7 @@ import {
   prepareDiff,
   type ReviewRequest
 } from "@jina/ai";
-import { DaytonaContextGraphExecutor } from "@jina/daytona";
+import { DaytonaCodexContextGraphExecutor } from "@jina/daytona";
 import { createGitHubInstallationAccessToken, type GitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import {
@@ -149,7 +149,7 @@ const contextGraphApiTimeoutMs = positiveInt(process.env.CONTEXT_GRAPH_API_TIMEO
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsContextGraphProjections = topics.some((topic) => topic.startsWith("run-context-graph"));
 const contextGraphExecutor = topics.includes("run-context-graph-assert")
-  ? new DaytonaContextGraphExecutor()
+  ? new DaytonaCodexContextGraphExecutor()
   : undefined;
 let stopping = false;
 let active = false;
