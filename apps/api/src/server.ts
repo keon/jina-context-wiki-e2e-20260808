@@ -64,6 +64,13 @@ import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { handleGraphMcpRequest, publicGraphQueryResult } from "./mcp.js";
 import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publicGraphSummary } from "./graph-api.js";
+import {
+  graphRouteId,
+  isDirectContextGraphRead,
+  isPublicGraphRoute,
+  isSnapshotExemptInternalRoute,
+  metricsRoute
+} from "./route-policy.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
@@ -1780,118 +1787,6 @@ function hasInternalApiCredential(request: IncomingMessage, config: ApiServerCon
   return Boolean(
     config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
   );
-}
-
-/**
- * Routes this server actually serves, used to label request metrics. Requests
- * outside this set (including unauthorized probes, which are rejected before
- * route matching and so can carry arbitrary raw paths) collapse into one
- * "(unknown)" series so probing cannot exhaust the metric registry's bounded
- * label cardinality.
- */
-const METRICS_ROUTES = new Set([
-  "/health",
-  "/healthz",
-  "/task-types",
-  "/webhooks/github",
-  "/dev/webhooks/github",
-  "/mcp",
-  "/board",
-  "/events",
-  "/v1/graphs",
-  "/v1/graph/query",
-  "/context-graph",
-  "/context-graph/ask",
-  "/context-graph/assertions",
-  "/context-graph/build",
-  "/context-graph/commands",
-  "/context-graph/metrics",
-  "/context-graph/retrieve",
-  "/internal/graph/access/sync",
-  "/internal/observability",
-  "/internal/context-graph/assertions/cached",
-  "/internal/context-graph/assertions/evidence",
-  "/internal/context-graph/assertions/save",
-  "/internal/context-graph/ingest/blobs",
-  "/internal/context-graph/ingest/github",
-  "/internal/context-graph/ingest/known",
-  "/internal/context-graph/ingest/plan",
-  "/internal/context-graph/outbox/drain",
-  "/internal/context-graph/project/run",
-  "/internal/worker/claim",
-  "/internal/worker/complete",
-  "/internal/worker/release",
-  "/internal/worker/renew"
-]);
-
-function metricsRoute(pathname: string): string {
-  if (graphRouteId(pathname, "/v1/graphs/") !== undefined) return "/v1/graphs/:id";
-  if (graphRouteId(pathname, "/context-graph/graphs/") !== undefined) return "/context-graph/graphs/:id";
-  return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
-}
-
-/**
- * The decoded graph id when `pathname` matches the route grammar exactly —
- * one non-empty, validly percent-encoded segment after `prefix` — else
- * undefined. Prefix matching alone would let malformed or extra-segment
- * paths masquerade as served parameterized routes (retaining raw
- * attacker-controlled paths in logs) and let invalid escapes throw URIError
- * out of the dispatcher as a 500.
- */
-function graphRouteId(pathname: string, prefix: string): string | undefined {
-  if (!pathname.startsWith(prefix)) return undefined;
-  const segment = pathname.slice(prefix.length);
-  if (!segment || segment.includes("/")) return undefined;
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    return undefined;
-  }
-}
-
-function isPublicGraphRoute(pathname: string): boolean {
-  return (
-    pathname === "/mcp" ||
-    pathname === "/v1/graphs" ||
-    pathname.startsWith("/v1/graphs/") ||
-    pathname === "/v1/graph/query"
-  );
-}
-
-function isSnapshotExemptInternalRoute(method: string | undefined, pathname: string): boolean {
-  if (method !== "POST") return false;
-  // Relational context graph data-plane routes never read the JSON board snapshot.
-  if (pathname.startsWith("/internal/context-graph/")) return true;
-  // Worker coordination: context-graph-stage_* leases bypass the JSON board
-  // entirely, and the JSON-board claim/renew branches only read state inside
-  // mutate(), which restores the stored snapshot before operating. release is
-  // context-graph-only. complete re-synchronizes on its JSON-board path before it
-  // validates the task against the snapshot.
-  return (
-    pathname === "/internal/worker/claim" ||
-    pathname === "/internal/worker/renew" ||
-    pathname === "/internal/worker/release" ||
-    pathname === "/internal/worker/complete"
-  );
-}
-
-function isDirectContextGraphRead(method: string | undefined, pathname: string): boolean {
-  if (
-    method === "OPTIONS" ||
-    (method === "GET" && (pathname === "/health" || pathname === "/healthz" || pathname === "/task-types"))
-  ) {
-    return true;
-  }
-  if (isPublicGraphRoute(pathname)) return true;
-  if (
-    method === "GET" &&
-    (pathname === "/context-graph" ||
-      pathname === "/context-graph/metrics" ||
-      pathname === "/context-graph/assertions" ||
-      pathname.startsWith("/context-graph/graphs/"))
-  )
-    return true;
-  return method === "POST" && (pathname === "/context-graph/retrieve" || pathname === "/context-graph/ask");
 }
 
 function tenantTaskIds(
