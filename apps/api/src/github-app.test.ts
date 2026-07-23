@@ -290,6 +290,21 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     async listTenantIds() {
       return [SHARED_TENANT];
     },
+    async listTenants() {
+      return [{
+        tenantId: SHARED_TENANT,
+        name: "omlabs",
+        kind: "team" as const,
+        githubAccountLogin: "omlabs",
+        repositoryCount: 1,
+        githubConnections: [{
+          installationId: "99",
+          login: "omlabs",
+          type: "Organization",
+          repositoryCount: 1
+        }]
+      }];
+    },
     async ping() {},
     async close() {}
   };
@@ -1300,6 +1315,20 @@ test("global admin graph listing requires its own credential and returns every t
       async listTenantIds() {
         return [tenantA];
       },
+      async listTenants() {
+        return [{
+          tenantId: tenantA,
+          name: "Jina Workspace",
+          kind: "team" as const,
+          repositoryCount: 1,
+          githubConnections: [{
+            installationId: "101",
+            login: "omxyz",
+            type: "Organization",
+            repositoryCount: 1
+          }]
+        }];
+      },
       async ping() {},
       async close() {}
     }
@@ -1331,6 +1360,10 @@ test("global admin graph listing requires its own credential and returns every t
       readonly observedAt: string;
       readonly tenants: readonly {
         readonly tenantId: string;
+        readonly name?: string;
+        readonly kind?: string;
+        readonly repositoryCount?: number;
+        readonly githubConnections?: readonly { readonly installationId: string; readonly login: string }[];
         readonly workflows: readonly unknown[];
         readonly metrics: { readonly unparsedBlobCount: number };
       }[];
@@ -1338,6 +1371,28 @@ test("global admin graph listing requires its own credential and returns every t
       readonly queueDepth: number;
     };
     assert.equal(Number.isNaN(new Date(operations.observedAt).getTime()), false);
+    const authoritativeTenant = operations.tenants.find((tenant) => tenant.tenantId === tenantA);
+    assert.deepEqual(
+      authoritativeTenant && {
+        tenantId: authoritativeTenant.tenantId,
+        name: authoritativeTenant.name,
+        kind: authoritativeTenant.kind,
+        repositoryCount: authoritativeTenant.repositoryCount,
+        githubConnections: authoritativeTenant.githubConnections
+      },
+      {
+        tenantId: tenantA,
+        name: "Jina Workspace",
+        kind: "team",
+        repositoryCount: 1,
+        githubConnections: [{
+          installationId: "101",
+          login: "omxyz",
+          type: "Organization",
+          repositoryCount: 1
+        }]
+      }
+    );
     assert.deepEqual(
       operations.tenants.map((tenant) => [tenant.tenantId, tenant.workflows.length, tenant.metrics.unparsedBlobCount]),
       [

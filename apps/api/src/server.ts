@@ -64,6 +64,7 @@ import {
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { DomainError, entityId, nowIso } from "@jina/shared-kernel";
+import type { SharedTenantSummary } from "@jina/db";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
@@ -135,6 +136,7 @@ interface SharedIdentityResolver {
     readonly repository: string;
   }): Promise<ResolvedRepositoryIdentity | undefined>;
   listTenantIds(): Promise<readonly string[]>;
+  listTenants(): Promise<readonly SharedTenantSummary[]>;
   ping(): Promise<void>;
   close(): Promise<void>;
 }
@@ -593,8 +595,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const filter = adminGlobalWorkflowFilter(url);
       const page = await contextGraphCoordinator.listGlobal(filter);
       const graphTenantIds = (await contextGraphStore.listAllSummaries()).map((graph) => graph.tenantId);
-      const activeTenantIds = config.sharedIdentityResolver
-        ? await config.sharedIdentityResolver.listTenantIds()
+      const identityTenants = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.listTenants()
+        : [];
+      const identityTenantById = new Map(identityTenants.map((tenant) => [tenant.tenantId, tenant]));
+      const activeTenantIds = identityTenants.length > 0
+        ? identityTenants.map((tenant) => tenant.tenantId)
         : config.tenantId
           ? [config.tenantId]
           : [];
@@ -604,11 +610,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const observedAt = nowIso();
       const [tenants, queueDepth] = await Promise.all([
         Promise.all(
-          tenantIds.map(async (tenantId) => ({
-            tenantId,
-            workflows: page.workflows.filter(({ build }) => build.tenantId === tenantId),
-            metrics: await contextGraphStore.operationalMetrics(tenantId, observedAt)
-          }))
+          tenantIds.map(async (tenantId) => {
+            const identity = identityTenantById.get(tenantId);
+            return {
+              tenantId,
+              ...(identity
+                ? {
+                    name: identity.name,
+                    kind: identity.kind,
+                    ...(identity.githubAccountLogin
+                      ? { githubAccountLogin: identity.githubAccountLogin }
+                      : {}),
+                    repositoryCount: identity.repositoryCount,
+                    githubConnections: identity.githubConnections
+                  }
+                : {}),
+              workflows: page.workflows.filter(({ build }) => build.tenantId === tenantId),
+              metrics: await contextGraphStore.operationalMetrics(tenantId, observedAt)
+            };
+          })
         ),
         contextGraphCoordinator.countActive(filter.tenantId)
       ]);

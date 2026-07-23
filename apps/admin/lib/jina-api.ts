@@ -107,8 +107,20 @@ interface AdminOperationalMetrics {
   }[];
 }
 
+export interface AdminGithubConnection {
+  readonly installationId: string;
+  readonly login: string;
+  readonly type: string;
+  readonly repositoryCount: number;
+}
+
 export interface AdminOperationsTenant {
   readonly tenantId: string;
+  readonly name?: string;
+  readonly kind?: "personal" | "team";
+  readonly githubAccountLogin?: string;
+  readonly repositoryCount?: number;
+  readonly githubConnections?: readonly AdminGithubConnection[];
   readonly workflows: readonly AdminGraphWorkflow[];
   readonly metrics: AdminOperationalMetrics;
 }

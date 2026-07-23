@@ -33,7 +33,11 @@ export default async function TenantsPage({
   const visible = tenants.filter((tenant) => {
     if (
       query &&
-      ![tenant.name, tenant.tenantId, tenant.installationId ?? ""].some((value) => value.toLowerCase().includes(query))
+      ![
+        tenant.name,
+        tenant.tenantId,
+        ...tenant.githubConnections.flatMap((connection) => [connection.login, connection.installationId])
+      ].some((value) => value.toLowerCase().includes(query))
     )
       return false;
     return !filters.status || tenant.status === filters.status;
@@ -88,7 +92,7 @@ export default async function TenantsPage({
               <tr>
                 <th>Tenant</th>
                 <th>Tenant ID</th>
-                <th>GitHub installation</th>
+                <th>GitHub connections</th>
                 <th className="numeric">Repositories</th>
                 <th className="numeric">Graphs</th>
                 <th>Last activity</th>
@@ -104,7 +108,15 @@ export default async function TenantsPage({
                   <td title={tenant.tenantId}>
                     <code>{shortTenant(tenant.tenantId)}</code>
                   </td>
-                  <td>{tenant.installationId ?? "—"}</td>
+                  <td
+                    title={tenant.githubConnections
+                      .map((connection) => `${connection.login} (${connection.installationId})`)
+                      .join(", ")}
+                  >
+                    {tenant.githubConnections.length > 0
+                      ? tenant.githubConnections.map((connection) => connection.login).join(", ")
+                      : "—"}
+                  </td>
                   <td className="numeric">{tenant.repositoryCount.toLocaleString("en-US")}</td>
                   <td className="numeric">{tenant.graphCount.toLocaleString("en-US")}</td>
                   <td>{tenant.lastActivity ? formatRelativeTime(tenant.lastActivity) : "—"}</td>
