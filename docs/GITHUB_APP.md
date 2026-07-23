@@ -48,7 +48,7 @@ Create a private GitHub App under the account or organization that owns the repo
 - Optional repository permission: **Actions — Read-only**
 - Subscribe to events: **Push**, **Pull request**, and **Issues**
 
-Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Production sets the canonical `JINA_TENANT_ID=omlabs`; configured aliases are migrated at API startup so historical tasks remain visible.
+Install the App on the repositories Jina should watch. Local development can derive `github:installation:<id>` from the payload. Fixed-tenancy production sets a canonical `JINA_TENANT_ID`; configured aliases are migrated at API startup so historical tasks remain visible. Shared-database production leaves `JINA_TENANT_ID` unset and resolves the original tenant UUID from the repository and installation records.
 
 The webhook slice does not use an App ID or private key. The current review worker uses `GITHUB_CLONE_TOKEN` to read PR metadata and diffs. External review comments/checks are not published yet; a GitHub App installation-token flow is still required before that side effect ships.
 

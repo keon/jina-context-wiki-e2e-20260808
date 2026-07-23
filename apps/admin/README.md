@@ -8,7 +8,7 @@ The app calls the Jina API from the server only (`lib/jina-api.ts`) using `INTER
 
 ## Authentication boundary
 
-Because the app renders tenant-wide graph data as the tenant-admin service principal, **the app itself is the security boundary**. `middleware.ts` accepts either of the two configured production boundaries:
+Because the app renders tenant-wide graph data as the tenant-admin service principal, **the app itself is the security boundary**. `proxy.ts` accepts either of the two configured production boundaries:
 
 - Google Cloud: a request must carry a valid IAP identity (`x-goog-authenticated-user-email`) or it receives `401`.
 - Vercel: a request must carry valid HTTP credentials matching the server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values.

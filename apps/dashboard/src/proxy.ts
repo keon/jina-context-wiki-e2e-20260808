@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { isValidBasicAuthorization } from "./server/proxy-policy";
 
-export function middleware(request: NextRequest): NextResponse {
+export function proxy(request: NextRequest): NextResponse {
   if (!process.env.INTERNAL_API_TOKEN?.trim()) return NextResponse.next();
 
   // Existing Google Cloud deployments continue to rely on IAP. Vercel uses

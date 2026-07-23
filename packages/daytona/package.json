@@ -15,7 +15,7 @@
     "test": "pnpm run build && node --test dist/context-graph-executor.test.js"
   },
   "dependencies": {
-    "@daytona/sdk": "^0.199.0",
+    "@daytona/sdk": "^0.200.0",
     "@jina/context-graph": "workspace:*"
   },
   "devDependencies": {
