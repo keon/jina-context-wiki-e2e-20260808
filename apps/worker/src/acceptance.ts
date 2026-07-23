@@ -368,7 +368,11 @@ export async function runProductionContextGraphAcceptance(
     }
   }
 
-  const metrics = await apiJson(fetchImpl, `${apiUrl}/context-graph/metrics`, { headers });
+  const metrics = await apiJson(
+    fetchImpl,
+    `${apiUrl}/context-graph/metrics?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`,
+    { headers }
+  );
   const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");
   const pendingEvents = Object.values(outboxDepth).reduce<number>(
     (sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"),

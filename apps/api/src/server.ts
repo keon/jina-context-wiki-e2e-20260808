@@ -841,7 +841,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 403, { error: "tenant administrator access required" });
         return;
       }
-      json(response, 200, await contextGraphStore.operationalMetrics(tenantId, nowIso()));
+      const repository = url.searchParams.has("repository")
+        ? requiredString(url.searchParams.get("repository"), "repository")
+        : undefined;
+      const ref = url.searchParams.has("ref") ? requiredString(url.searchParams.get("ref"), "ref") : undefined;
+      if (ref && !repository) throw invalidRequest("repository is required when metrics are scoped by ref");
+      json(
+        response,
+        200,
+        await contextGraphStore.operationalMetrics(
+          tenantId,
+          nowIso(),
+          repository ? { repository, ...(ref ? { ref } : {}) } : undefined
+        )
+      );
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/retrieve") {

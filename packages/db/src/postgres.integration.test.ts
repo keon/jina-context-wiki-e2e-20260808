@@ -2940,6 +2940,7 @@ test(
       assert.equal(unmergedOwnership?.objectNaturalKey, "team:platform");
 
       const otherRepository = `${repository}-other`;
+      const unparsedOtherBlob = "1234567890".repeat(4);
       await store.planIngestion({
         tenantId,
         repository: otherRepository,
@@ -2952,10 +2953,21 @@ test(
         updateRef: true,
         recordedAt: "2026-07-20T00:08:30.000Z",
         taskId: `other-${suffix}`,
-        files: [{ path: "README.md", blobSha: readmeBlob, size: 20 }]
+        files: [{ path: "README.md", blobSha: unparsedOtherBlob, size: 20 }]
       });
+      const scopedRepositoryMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
+        repository,
+        ref: "main"
+      });
+      const scopedOtherMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
+        repository: otherRepository,
+        ref: "main"
+      });
+      assert.equal(scopedRepositoryMetrics.unparsedBlobCount, 0);
+      assert.equal(scopedOtherMetrics.unparsedBlobCount, 1);
       await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:08:40.000Z");
       const beforeDrain = await store.operationalMetrics(tenantId, "2026-07-20T00:08:45.000Z");
+      assert.equal(beforeDrain.unparsedBlobCount, 1);
       assert.equal(Object.values(beforeDrain.outboxDepth).reduce((sum, count) => sum + count, 0) > 0, true);
       assert.equal((beforeDrain.outboxDepthByConsumer.graph ?? 0) > 0, true);
       assert.equal(beforeDrain.parsedBlobCountLastHour > 0, true);
