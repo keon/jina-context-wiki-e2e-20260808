@@ -380,9 +380,23 @@ test("shared workers claim queued context graph stages across an explicit tenant
     createdAt: "2026-07-21T00:00:00.000Z"
   });
 
+  assert.equal(
+    await coordinator.claim({
+      tenantId: "tenant-a",
+      tenantIds: ["tenant-a", "tenant-b"],
+      repositoryScopes: [{ tenantId: "tenant-a", repository: "omxyz/jina" }],
+      workerId: "shared-worker",
+      topics: ["run-context-graph-ingest"],
+      now: "2026-07-21T00:00:30.000Z",
+      leaseExpiresAt: "2026-07-21T00:05:30.000Z"
+    }),
+    undefined
+  );
+
   const claimed = await coordinator.claim({
     tenantId: "tenant-a",
     tenantIds: ["tenant-a", "tenant-b"],
+    repositoryScopes: [{ tenantId: "tenant-b", repository: "omxyz/jina" }],
     workerId: "shared-worker",
     topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:01:00.000Z",

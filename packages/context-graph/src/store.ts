@@ -663,12 +663,22 @@ export class MemoryContextGraphStore implements ContextGraphStore {
   async operationalMetrics(
     tenantId: string,
     _now?: string,
-    scope?: { readonly repository: string; readonly ref?: string }
+    scope?: {
+      readonly repository?: string;
+      readonly repositories?: readonly string[];
+      readonly ref?: string;
+    }
   ): Promise<ContextGraphOperationalMetrics> {
+    const repositories = scope?.repositories
+      ? new Set(scope.repositories)
+      : scope?.repository
+        ? new Set([scope.repository])
+        : undefined;
     const scopedSnapshots = [...this.snapshots.values()].filter(
       (snapshot) =>
         snapshot.tenantId === tenantId &&
-        (!scope || (snapshot.repository === scope.repository && (!scope.ref || snapshot.ref === scope.ref)))
+        (!repositories || repositories.has(snapshot.repository)) &&
+        (!scope?.ref || snapshot.ref === scope.ref)
     );
     return {
       outboxDepth: {},
@@ -685,10 +695,16 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       manifestStalenessSeconds: 0,
       searchStalenessSeconds: 0,
       proposedAssertionCount: this.allAssertions().filter(
-        (assertion) => assertion.tenantId === tenantId && assertion.status === "proposed"
+        (assertion) =>
+          assertion.tenantId === tenantId &&
+          (!repositories || repositories.has(assertion.repository)) &&
+          assertion.status === "proposed"
       ).length,
       unexplainedAssertionCount: this.allAssertions().filter(
-        (assertion) => assertion.tenantId === tenantId && !assertion.explanation
+        (assertion) =>
+          assertion.tenantId === tenantId &&
+          (!repositories || repositories.has(assertion.repository)) &&
+          !assertion.explanation
       ).length,
       pendingErasureEventCount: 0,
       retrievalTemplates: [],

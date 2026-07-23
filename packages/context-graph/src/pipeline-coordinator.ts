@@ -126,6 +126,10 @@ export interface ContextGraphPipelineCoordinator {
   claim(input: {
     readonly tenantId: string;
     readonly tenantIds?: readonly string[];
+    readonly repositoryScopes?: readonly {
+      readonly tenantId: string;
+      readonly repository: string;
+    }[];
     readonly workerId: string;
     readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
@@ -273,12 +277,19 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
   async claim(input: {
     readonly tenantId: string;
     readonly tenantIds?: readonly string[];
+    readonly repositoryScopes?: readonly {
+      readonly tenantId: string;
+      readonly repository: string;
+    }[];
     readonly workerId: string;
     readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
     readonly leaseExpiresAt: string;
   }): Promise<ContextGraphStageClaim | undefined> {
     const tenantIds = new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId]);
+    const repositoryScopes = input.repositoryScopes
+      ? new Set(input.repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository}`))
+      : undefined;
     for (const stage of this.stages.values()) {
       if (
         tenantIds.has(stage.tenantId) &&
@@ -309,7 +320,10 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     const stage = [...this.stages.values()]
       .filter(
         (candidate) =>
-          tenantIds.has(candidate.tenantId) && candidate.status === "queued" && input.topics.includes(candidate.topic)
+          tenantIds.has(candidate.tenantId) &&
+          (!repositoryScopes || repositoryScopes.has(`${candidate.tenantId}:${candidate.repository}`)) &&
+          candidate.status === "queued" &&
+          input.topics.includes(candidate.topic)
       )
       .sort(
         (left, right) =>

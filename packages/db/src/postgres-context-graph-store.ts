@@ -3113,12 +3113,16 @@ export class PostgresContextGraphStore implements ContextGraphStore {
   async operationalMetrics(
     tenantId: string,
     now: string,
-    scope?: { readonly repository: string; readonly ref?: string }
+    scope?: {
+      readonly repository?: string;
+      readonly repositories?: readonly string[];
+      readonly ref?: string;
+    }
   ): Promise<ContextGraphOperationalMetrics> {
     await this.initialize();
-    const repository = scope?.repository ?? null;
+    const repositories = scope?.repositories ?? (scope?.repository ? [scope.repository] : null);
     const ref = scope?.ref ?? null;
-    const backlogQuery = repository
+    const backlogQuery = repositories
       ? this.pool.query<{ count: string }>(
           `select count(distinct manifest.blob_sha)
            from jina_context_graph.refs ref
@@ -3130,10 +3134,10 @@ export class PostgresContextGraphStore implements ContextGraphStore {
            left join jina_context_graph.blob_analyses analysis
              on analysis.tenant_id=blob.tenant_id and analysis.blob_sha=blob.blob_sha
             and analysis.parser_version=$2
-           where ref.tenant_id=$1 and ref.repository=$3
+           where ref.tenant_id=$1 and ref.repository=any($3::text[])
              and ($4::text is null or ref.ref_name=$4)
              and analysis.blob_sha is null`,
-          [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repository, ref]
+          [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repositories, ref]
         )
       : this.pool.query<{ count: string }>(
           `select count(distinct (b.blob_sha,b.tenant_id)) from jina_context_graph.blobs b
@@ -3146,33 +3150,71 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       this.pool.query<{ event_type: string; consumer: string; count: string; oldest: Date | null }>(
         `select event_type,consumer,count(*),min(created_at) as oldest from jina_context_graph.outbox
          where tenant_id=$1 and processed_at is null
-           and ($2::text is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=$2)
+           and ($2::text[] is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=any($2))
            and ($3::text is null or payload->>'refName' is null or payload->>'refName'=$3)
          group by event_type,consumer`,
-        [tenantId, repository, ref]
+        [tenantId, repositories, ref]
       ),
       backlogQuery,
+      repositories
+        ? this.pool.query<{ count: string }>(
+            `select count(distinct analysis.blob_sha)
+             from jina_context_graph.refs ref
+             cross join lateral jina_context_graph.commit_manifest(
+               ref.tenant_id,ref.repository,ref.commit_sha
+             ) manifest
+             join jina_context_graph.blob_analyses analysis
+               on analysis.tenant_id=ref.tenant_id and analysis.blob_sha=manifest.blob_sha
+              and analysis.parsed_at>=now()-interval '1 hour'
+             where ref.tenant_id=$1 and ref.repository=any($2::text[])
+               and ($3::text is null or ref.ref_name=$3)`,
+            [tenantId, repositories, ref]
+          )
+        : this.pool.query<{ count: string }>(
+            `select count(*) from jina_context_graph.blob_analyses
+             where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`,
+            [tenantId]
+          ),
       this.pool.query<{ count: string }>(
-        `select count(*) from jina_context_graph.blob_analyses where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`,
-        [tenantId]
+        `select count(*) from jina_context_graph.assertions assertion
+         where assertion.tenant_id=$1 and assertion.status='proposed'
+           and ($2::text[] is null or assertion.repository=any($2))
+           and ($3::text is null or exists (
+             select 1 from jina_context_graph.refs ref
+             where ref.tenant_id=assertion.tenant_id and ref.repository=assertion.repository
+               and ref.commit_sha=assertion.commit_sha and ref.ref_name=$3
+           ))`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ count: string }>(
-        `select count(*) from jina_context_graph.assertions where tenant_id=$1 and status='proposed'`,
-        [tenantId]
-      ),
-      this.pool.query<{ count: string }>(
-        `select count(*) from jina_context_graph.assertions where tenant_id=$1 and explanation is null`,
-        [tenantId]
+        `select count(*) from jina_context_graph.assertions assertion
+         where assertion.tenant_id=$1 and assertion.explanation is null
+           and ($2::text[] is null or assertion.repository=any($2))
+           and ($3::text is null or exists (
+             select 1 from jina_context_graph.refs ref
+             where ref.tenant_id=assertion.tenant_id and ref.repository=assertion.repository
+               and ref.commit_sha=assertion.commit_sha and ref.ref_name=$3
+           ))`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ count: string }>(
         `select count(distinct (event_type,aggregate_id)) from jina_context_graph.outbox
-         where tenant_id=$1 and processed_at is null and event_type in ('observation_redacted','tombstone')`,
-        [tenantId]
+         where tenant_id=$1 and processed_at is null and event_type in ('observation_redacted','tombstone')
+           and ($2::text[] is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=any($2))
+           and ($3::text is null or payload->>'refName' is null or payload->>'refName'=$3)`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ manifest: Date | null; search: Date | null }>(
-        `select (select max(projected_at) from jina_context_graph.ref_manifest where tenant_id=$1) as manifest,
-                (select max(projected_at) from jina_context_graph.search_documents where tenant_id=$1) as search`,
-        [tenantId]
+        `select (
+           select max(projected_at) from jina_context_graph.ref_manifest
+           where tenant_id=$1 and ($2::text[] is null or repository=any($2))
+             and ($3::text is null or ref_name=$3)
+         ) as manifest,
+         (
+           select max(projected_at) from jina_context_graph.search_documents
+           where tenant_id=$1 and ($2::text[] is null or repository=any($2))
+         ) as search`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ generator: string; predicate: string; accepted: string; rejected: string }>(
         `select a.generator,a.predicate,
@@ -3180,8 +3222,15 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           count(*) filter (where l.action='review_assertion' and l.input->>'decision' in ('reject','retract')) as rejected
          from jina_context_graph.audit_log l
          join jina_context_graph.assertions a on a.id=l.input->>'assertionId'
-         where l.tenant_id=$1 and a.generator is not null group by a.generator,a.predicate`,
-        [tenantId]
+         where l.tenant_id=$1 and a.generator is not null
+           and ($2::text[] is null or a.repository=any($2))
+           and ($3::text is null or exists (
+             select 1 from jina_context_graph.refs ref
+             where ref.tenant_id=a.tenant_id and ref.repository=a.repository
+               and ref.commit_sha=a.commit_sha and ref.ref_name=$3
+           ))
+         group by a.generator,a.predicate`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ template: string; requests: string; average: string; p95: string; truncated: string }>(
         `select template,count(*) as requests,avg(duration_ms) as average,
@@ -3189,8 +3238,9 @@ export class PostgresContextGraphStore implements ContextGraphStore {
                 avg(case when truncated then 1.0 else 0.0 end) as truncated
          from jina_context_graph.retrieval_metrics
          where tenant_id=$1 and recorded_at>=now()-interval '24 hours'
+           and ($2::text[] is null or repository=any($2))
          group by template order by template`,
-        [tenantId]
+        [tenantId, repositories]
       )
     ]);
     const nowMs = new Date(now).getTime();

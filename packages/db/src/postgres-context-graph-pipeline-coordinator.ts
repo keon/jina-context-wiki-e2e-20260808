@@ -219,6 +219,10 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
   async claim(input: {
     readonly tenantId: string;
     readonly tenantIds?: readonly string[];
+    readonly repositoryScopes?: readonly {
+      readonly tenantId: string;
+      readonly repository: string;
+    }[];
     readonly workerId: string;
     readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
@@ -240,12 +244,18 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
   private async claimOnce(input: {
     readonly tenantId: string;
     readonly tenantIds?: readonly string[];
+    readonly repositoryScopes?: readonly {
+      readonly tenantId: string;
+      readonly repository: string;
+    }[];
     readonly workerId: string;
     readonly topics: readonly ContextGraphWorkerTopic[];
     readonly now: string;
     readonly leaseExpiresAt: string;
   }): Promise<ContextGraphStageClaim | undefined> {
     const tenantIds = [...new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId])];
+    const repositoryScopeTenantIds = input.repositoryScopes?.map((scope) => scope.tenantId) ?? null;
+    const repositoryScopeRepositories = input.repositoryScopes?.map((scope) => scope.repository) ?? null;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -328,9 +338,17 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
          join jina_board.workflows build on build.id=stage.build_id
          where stage.tenant_id=any($1::text[]) and stage.status='queued' and stage.topic=any($2::text[])
            and build.status in ('queued','in_progress','enriching')
+           and (
+             $3::text[] is null
+             or exists (
+               select 1
+               from unnest($3::text[], $4::text[]) scope(tenant_id, repository)
+               where scope.tenant_id=stage.tenant_id and scope.repository=build.repository
+             )
+           )
          order by stage.priority desc,stage.created_at,stage.id
          for update of stage skip locked limit 1`,
-        [tenantIds, input.topics]
+        [tenantIds, input.topics, repositoryScopeTenantIds, repositoryScopeRepositories]
       );
       const stage = selected.rows[0];
       if (!stage) {

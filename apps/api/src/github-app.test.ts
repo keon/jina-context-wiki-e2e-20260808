@@ -474,6 +474,17 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     (await fetch(`${baseUrl}/v1/graphs/${encodeURIComponent(sharedGraph.id)}`, { headers: graphHeaders })).status,
     404
   );
+  assert.equal(
+    (
+      await fetch(`${baseUrl}/context-graph/metrics?repository=omlabs%2Fexample`, {
+        headers: {
+          authorization: `Bearer ${INTERNAL_TOKEN}`,
+          "x-jina-tenant-id": SHARED_TENANT
+        }
+      })
+    ).status,
+    404
+  );
   repositoryConnected = true;
 
   const explicitBuild = await fetch(`${baseUrl}/context-graph/build`, {
@@ -491,6 +502,56 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     })
   });
   assert.equal(explicitBuild.status, 202);
+  repositoryConnected = false;
+  const revokedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "revoked-worker", topics: ["run-context-graph-ingest"] })
+  });
+  assert.equal(revokedClaim.status, 204);
+  repositoryConnected = true;
+  const connectedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "connected-worker", topics: ["run-context-graph-ingest"] })
+  });
+  assert.equal(connectedClaim.status, 200);
+  const leased = (await connectedClaim.json()) as {
+    message: { id: string; leaseId: string };
+    task: { id: string };
+  };
+  repositoryConnected = false;
+  const workerHeaders = {
+    authorization: `Bearer ${INTERNAL_TOKEN}`,
+    "content-type": "application/json",
+    "x-jina-tenant-id": SHARED_TENANT
+  };
+  const revokedRenew = await fetch(`${baseUrl}/internal/worker/renew`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: JSON.stringify({ messageId: leased.message.id, leaseId: leased.message.leaseId })
+  });
+  assert.equal(revokedRenew.status, 409);
+  const revokedRelease = await fetch(`${baseUrl}/internal/worker/release`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: JSON.stringify({ messageId: leased.message.id, leaseId: leased.message.leaseId, reason: "revoked" })
+  });
+  assert.equal(revokedRelease.status, 409);
+  const revokedCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: JSON.stringify({
+      messageId: leased.message.id,
+      taskId: leased.task.id,
+      leaseId: leased.message.leaseId,
+      outcome: "failed",
+      reason: "revoked"
+    })
+  });
+  assert.equal(revokedCompletion.status, 409);
+  repositoryConnected = true;
+
   const staleHistoricalBuild = await fetch(`${baseUrl}/context-graph/build`, {
     method: "POST",
     headers: {

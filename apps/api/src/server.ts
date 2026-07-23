@@ -956,13 +956,28 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         : undefined;
       const ref = url.searchParams.has("ref") ? requiredString(url.searchParams.get("ref"), "ref") : undefined;
       if (ref && !repository) throw invalidRequest("repository is required when metrics are scoped by ref");
+      const connectedRepositories = config.sharedIdentityResolver
+        ? await repositoriesForPrincipal(principal)
+        : undefined;
+      if (
+        repository &&
+        connectedRepositories &&
+        !connectedRepositories.some((candidate) => candidate.toLowerCase() === repository.toLowerCase())
+      ) {
+        json(response, 404, { error: "repository not found" });
+        return;
+      }
       json(
         response,
         200,
         await contextGraphStore.operationalMetrics(
           tenantId,
           nowIso(),
-          repository ? { repository, ...(ref ? { ref } : {}) } : undefined
+          repository
+            ? { repository, ...(ref ? { ref } : {}) }
+            : connectedRepositories
+              ? { repositories: connectedRepositories }
+              : undefined
         )
       );
       return;
@@ -1575,6 +1590,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       now: nowIso()
     });
     if (!stage) throw new ApiError(409, "stale_lease", "stale contextGraph worker lease");
+    await requireConnectedRepository(stage.tenantId, stage.repository);
     return { ...stage, id: stage.stageId };
   }
 
@@ -1599,11 +1615,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
     const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
     const contextGraphTopics = requestedTopics.filter(isContextGraphWorkerTopic);
+    const repositoryScopes = config.sharedIdentityResolver
+      ? (
+          await Promise.all(
+            tenantIds.map(async (tenantId) =>
+              (await config.sharedIdentityResolver!.resolveTenantRepositories({ tenantId })).map((repository) => ({
+                tenantId,
+                repository
+              }))
+            )
+          )
+        ).flat()
+      : undefined;
     if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
       const now = nowIso();
       const claimed = await contextGraphCoordinator.claim({
         tenantId: tenantIds[0]!,
         ...(tenantIds.length > 1 ? { tenantIds } : {}),
+        ...(repositoryScopes ? { repositoryScopes } : {}),
         workerId,
         topics: contextGraphTopics,
         now,
@@ -1619,12 +1648,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     const tenantIdSet = new Set(tenantIds);
+    const repositoryScopeKeys = repositoryScopes
+      ? new Set(repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository}`))
+      : undefined;
     const claimed = await mutate(async () => {
       const taskIds = intakeState.board.tasks
         .filter(
           (task) =>
             typeof task.metadata.tenantId === "string" &&
             tenantIdSet.has(task.metadata.tenantId) &&
+            (!repositoryScopeKeys ||
+              (typeof task.metadata.repository === "string" &&
+                repositoryScopeKeys.has(`${task.metadata.tenantId}:${task.metadata.repository}`))) &&
             (task.status === "queued" || task.status === "in_progress")
         )
         .map((task) => task.id);
@@ -1664,6 +1699,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const leaseId = requiredString(body.leaseId, "leaseId");
     if (rawMessageId.startsWith("context-graph-stage_")) {
       const now = nowIso();
+      await requireConnectedLease(tenantId, rawMessageId, leaseId, now);
       const renewed = await contextGraphCoordinator.renew({
         tenantId,
         stageId: rawMessageId,
@@ -1705,11 +1741,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!messageId.startsWith("context-graph-stage_")) {
       throw invalidRequest("only contextGraph task-board leases can be released");
     }
+    const now = nowIso();
+    await requireConnectedLease(tenantId, messageId, leaseId, now);
     const released = await contextGraphCoordinator.release({
       tenantId,
       stageId: messageId,
       leaseId,
-      now: nowIso(),
+      now,
       reason
     });
     if (!released) throw staleLease();
@@ -1810,6 +1848,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const now = nowIso();
     const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
     if (!stage) throw staleLease();
+    await requireConnectedRepository(tenantId, stage.repository);
     if (outcome === "failed") {
       const completed = await contextGraphCoordinator.complete({
         tenantId,
@@ -1955,6 +1994,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       tenantId: principal.tenantId,
       repositories: persistedRepositories
     });
+  }
+
+  async function requireConnectedLease(tenantId: string, stageId: string, leaseId: string, now: string): Promise<void> {
+    if (!config.sharedIdentityResolver) return;
+    const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
+    if (!stage) throw staleLease();
+    await requireConnectedRepository(tenantId, stage.repository);
+  }
+
+  async function requireConnectedRepository(tenantId: string, repository: string): Promise<void> {
+    if (!config.sharedIdentityResolver) return;
+    const connected = await config.sharedIdentityResolver.resolveTenantRepositories({
+      tenantId,
+      repositories: [repository]
+    });
+    if (!connected.some((candidate) => candidate.toLowerCase() === repository.toLowerCase())) {
+      throw new ApiError(409, "repository_disconnected", "repository is no longer connected to this tenant");
+    }
   }
 
   if (config.simulateRuns) {
