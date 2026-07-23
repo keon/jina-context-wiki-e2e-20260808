@@ -261,12 +261,3 @@ code {
   padding-left: 18px;
   color: var(--text-muted);
 }
-
-section.listing {
-  margin-top: 26px;
-}
-
-section.listing h3 {
-  font-size: 15px;
-  margin-bottom: 10px;
-}

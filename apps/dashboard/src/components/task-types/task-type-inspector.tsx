@@ -6,8 +6,6 @@ import type { TaskTypeDefinition } from "../../lib/types.ts";
 
 /** Read-only side inspector describing a task type's trigger, steps, and configuration. */
 
-const READ_ONLY_TITLE = "This dashboard currently exposes task type configuration as read-only.";
-
 export function TaskTypeInspector({ definition }: { readonly definition: TaskTypeDefinition | null }) {
   if (!definition) {
     return (
@@ -20,9 +18,7 @@ export function TaskTypeInspector({ definition }: { readonly definition: TaskTyp
   const configuration: readonly (readonly [string, string])[] = [
     ["Execution", definition.dispatchTopic || "Coordinator managed"],
     ["Assignee", humanize(definition.defaultAssigneeRole)],
-    ["Task kind", humanize(definition.kind)],
-    ["Retry policy", "2 retries"],
-    ["Evidence", "Required"]
+    ["Task kind", humanize(definition.kind)]
   ];
   return (
     <aside className="side-inspector task-type-inspector" id="task-type-details" aria-live="polite">
@@ -65,14 +61,6 @@ export function TaskTypeInspector({ definition }: { readonly definition: TaskTyp
           </div>
         ))}
       </section>
-      <footer className="inspector-actions">
-        <button type="button" className="secondary-button" disabled aria-disabled="true" title={READ_ONLY_TITLE}>
-          {"✎  Edit"}
-        </button>
-        <button type="button" className="primary-button" disabled aria-disabled="true" title={READ_ONLY_TITLE}>
-          {"▷  Run now"}
-        </button>
-      </footer>
     </aside>
   );
 }

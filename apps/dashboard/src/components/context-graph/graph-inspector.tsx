@@ -109,7 +109,6 @@ function NodeInspector({
       <EvidenceSection evidence={node.evidence} />
       <ExplanationSection value={explanation} />
       <RelationshipSection node={node} edges={relatedEdges} graph={graph} onSelect={onSelect} />
-      <InspectorActions labels={["⌖  Pin", "◎  Center", "↗  Open source"]} />
     </InspectorItem>
   );
 }
@@ -151,7 +150,6 @@ function EdgeInspector({
       <ExplanationSection
         value={edge.why || `This relationship states that ${sourceLabel} ${humanize(edge.predicate)} ${targetLabel}.`}
       />
-      <InspectorActions labels={["⇄  Reverse direction", "⌁  Reconnect", "◌  Hide type", "⌫  Delete"]} />
     </InspectorItem>
   );
 }
@@ -190,25 +188,6 @@ function Endpoint({ label, value, kind }: { readonly label: string; readonly val
       <strong>{value}</strong>
       <span className="context-graph-item-type">{humanize(kind)}</span>
     </section>
-  );
-}
-
-function InspectorActions({ labels }: { readonly labels: readonly string[] }) {
-  return (
-    <footer className="context-graph-inspector-actions">
-      {labels.map((label) => (
-        <button
-          key={label}
-          type="button"
-          className={label.includes("Delete") ? "danger-button" : "secondary-button"}
-          disabled
-          aria-disabled="true"
-          title="This action is not available in the read-only graph explorer."
-        >
-          {label}
-        </button>
-      ))}
-    </footer>
   );
 }
 

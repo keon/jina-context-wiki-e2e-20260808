@@ -2757,21 +2757,6 @@ dialog::backdrop {
   text-align: right;
   overflow-wrap: anywhere;
 }
-.inspector-actions,
-.context-graph-inspector-actions {
-  position: sticky;
-  bottom: 0;
-  display: flex;
-  gap: 8px;
-  padding: 12px 15px;
-  border-top: 1px solid var(--border);
-  background: rgb(12 14 14 / 94%);
-  backdrop-filter: blur(12px);
-}
-.inspector-actions button {
-  flex: 1;
-}
-
 /* ContextGraph graph explorer */
 body[data-page="contextGraph"] .app-header {
   margin-bottom: 14px;
@@ -3564,13 +3549,6 @@ body[data-page="contextGraph"] .app-header {
   position: absolute;
   right: 12px;
   bottom: 12px;
-}
-.context-graph-inspector-actions {
-  flex-wrap: wrap;
-}
-.context-graph-inspector-actions button {
-  flex: 1 1 auto;
-  min-height: 30px;
 }
 .context-search-results .context-results {
   margin: 0;
