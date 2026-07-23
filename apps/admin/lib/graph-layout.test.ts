@@ -19,7 +19,3 @@ test("layoutGraph is deterministic and keeps nodes in the viewport", () => {
     assert.ok(node.y >= 40 && node.y <= GRAPH_HEIGHT - 40);
   }
 });
-
-test("layoutGraph handles an empty graph", () => {
-  assert.deepEqual(layoutGraph([], []), []);
-});

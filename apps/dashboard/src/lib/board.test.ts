@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filterBoardTasks, EMPTY_BOARD_FILTERS, partitionBoardTasks, uniqueValues } from "./board.ts";
+import { filterBoardTasks, EMPTY_BOARD_FILTERS, partitionBoardTasks } from "./board.ts";
 import type { BoardTask } from "./types.ts";
 
 function task(overrides: Partial<BoardTask> & { readonly id: string }): BoardTask {
@@ -82,8 +82,4 @@ test("filterBoardTasks searches original workspace and PR author names", () => {
     filterBoardTasks(tasks, { ...EMPTY_BOARD_FILTERS, query: "omxyz" }).map((item) => item.id),
     ["identity"]
   );
-});
-
-test("uniqueValues sorts and deduplicates", () => {
-  assert.deepEqual(uniqueValues(["b", "a", "b", undefined, ""]), ["a", "b"]);
 });

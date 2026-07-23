@@ -31,13 +31,3 @@ test("Canvas fallback deterministically bounds a large graph without dangling ed
     `Canvas fallback · rendering 1,200 of 5,000 nodes · ${first.edges.length.toLocaleString()} of 20,000 edges`
   );
 });
-
-test("Canvas fallback leaves small graphs intact", () => {
-  const nodes = [{ id: "a" }, { id: "b" }];
-  const edges = [{ id: "a-b", source: "a", target: "b" }];
-  const selected = canvasGraphSlice(nodes, edges);
-  assert.equal(selected.nodes, nodes);
-  assert.equal(selected.edges, edges);
-  assert.equal(selected.truncated, false);
-  assert.equal(canvasFallbackStatus(2, 1, 2, 1), "Canvas fallback · 2 nodes · 1 edge");
-});

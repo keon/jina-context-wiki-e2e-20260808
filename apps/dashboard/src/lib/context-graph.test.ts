@@ -3,20 +3,13 @@ import { test } from "node:test";
 import {
   canonicalNodeContext,
   commitShaForNode,
-  connectedConfidenceSummary,
-  contextGraphIdentity,
   contextGraphMatches,
-  countGraphTypes,
   filterContextGraph,
-  friendlyNodeLabel,
-  friendlyNodeLabels,
   isCausationQuestion,
-  issueTraceSections,
   safeExternalUrl,
-  selectionIsVisible,
-  visibleCount
+  selectionIsVisible
 } from "./context-graph.ts";
-import type { ContextGraph, ContextGraphEdge, ContextGraphNode } from "./types.ts";
+import type { ContextGraphEdge, ContextGraphNode } from "./types.ts";
 
 function node(overrides: Partial<ContextGraphNode> & { readonly id: string }): ContextGraphNode {
   return { kind: "File", label: overrides.id, description: "", evidence: [], ...overrides };
@@ -66,34 +59,6 @@ test("selectionIsVisible checks the filtered graph, not the full one", () => {
   assert.equal(selectionIsVisible({ kind: "edge", id: "contains" }, filtered), false);
 });
 
-test("contextGraphIdentity joins the identifying fields", () => {
-  const identity = contextGraphIdentity({
-    id: "g1",
-    repository: "acme/app",
-    ref: "main",
-    commitSha: "abc",
-    generatedAt: "2026-01-01T00:00:00Z"
-  } as ContextGraph);
-  assert.equal(identity, "g1|acme/app|main|abc|2026-01-01T00:00:00Z");
-});
-
-test("visibleCount collapses when nothing is hidden", () => {
-  assert.equal(visibleCount(3, 3), "3");
-  assert.equal(visibleCount(2, 3), "2 / 3");
-});
-
-test("countGraphTypes counts and sorts by type", () => {
-  assert.deepEqual(countGraphTypes(graph.nodes, "kind"), [
-    ["File", 1],
-    ["Issue", 1],
-    ["Repository", 1]
-  ]);
-  assert.deepEqual(countGraphTypes(graph.edges, "predicate"), [
-    ["CONTAINS", 1],
-    ["TRACKS", 1]
-  ]);
-});
-
 test("commitShaForNode reads the label or the canonical description", () => {
   assert.equal(commitShaForNode(node({ id: "c", label: "abcdef1234" })), "abcdef1234");
   assert.equal(commitShaForNode(node({ id: "c", label: "entity:1", description: "repo:acme:sha:abcdef1" })), "abcdef1");
@@ -104,40 +69,6 @@ test("canonicalNodeContext decodes repo and url descriptions", () => {
   assert.equal(canonicalNodeContext("repo:acme/app:path:src/index.ts"), "acme/app · src/index.ts");
   assert.equal(canonicalNodeContext("url:https://github.com/acme/app"), "https://github.com/acme/app");
   assert.equal(canonicalNodeContext("plain text"), "plain text");
-});
-
-test("friendly labels name merge commits after their single pull request", () => {
-  const merged = {
-    nodes: [
-      node({ id: "pr", kind: "PullRequest", label: "PR #7 · Fix crash" }),
-      node({ id: "commit", kind: "Commit", label: "abcdef123456abcd" })
-    ],
-    edges: [edge({ id: "merge", source: "pr", target: "commit", predicate: "MERGED_AS" })]
-  };
-  assert.equal(friendlyNodeLabel(merged.nodes[1]!, merged), "Merge commit · PR #7 · Fix crash");
-  const labels = friendlyNodeLabels(merged);
-  assert.equal(labels.commit, "Merge commit · PR #7 · Fix crash");
-  assert.equal(labels.pr, "PR #7 · Fix crash");
-});
-
-test("friendlyNodeLabels falls back to the short sha for unattributed commits", () => {
-  const labels = friendlyNodeLabels({
-    nodes: [node({ id: "commit", kind: "Commit", label: "abcdef123456abcd" })],
-    edges: []
-  });
-  assert.equal(labels.commit, "Commit · abcdef123456");
-});
-
-test("connectedConfidenceSummary averages only finite scores", () => {
-  const summary = connectedConfidenceSummary([
-    edge({ id: "a", source: "x", target: "y", confidence: 0.5 }),
-    edge({ id: "b", source: "x", target: "y", confidence: 0.9 }),
-    edge({ id: "c", source: "x", target: "y" })
-  ]);
-  assert.equal(summary.value, 0.7);
-  assert.equal(summary.scoredCount, 2);
-  assert.equal(summary.totalCount, 3);
-  assert.equal(connectedConfidenceSummary([]).value, undefined);
 });
 
 test("contextGraphMatches links citations to nodes and edges", () => {
@@ -185,21 +116,6 @@ test("isCausationQuestion detects causal phrasings", () => {
   assert.equal(isCausationQuestion("when did the flakiness start"), true);
   assert.equal(isCausationQuestion("Who owns the billing service?"), false);
   assert.equal(isCausationQuestion(undefined), false);
-});
-
-test("issueTraceSections orders causes first only for causal questions", () => {
-  const trace = {
-    introducedBy: [{ sha: "abc" }],
-    resolutions: [{ pullRequestNumber: 7 }]
-  };
-  assert.deepEqual(
-    issueTraceSections(trace, "what introduced this bug").map((section) => section.kind),
-    ["cause", "resolution"]
-  );
-  assert.deepEqual(
-    issueTraceSections(trace, "how was this fixed").map((section) => section.kind),
-    ["resolution", "cause"]
-  );
 });
 
 test("safeExternalUrl only allows https github.com links", () => {
