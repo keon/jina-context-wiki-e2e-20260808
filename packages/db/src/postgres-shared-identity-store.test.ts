@@ -21,6 +21,7 @@ test("shared identity repository query uses parameterized public-schema lookups"
   assert.match(query.text, /public\.installations/);
   assert.match(query.text, /i\.id = r\.installation_id/);
   assert.match(query.text, /i\.github_account_login/);
+  assert.match(query.text, /\$2::bigint is not null/);
   assert.match(query.text, /i\.github_installation_id = \$2::bigint/);
   assert.match(query.text, /t\.merged_into_tenant_id is null/);
   assert.match(query.text, /\$1::bigint is null\s+and lower\(r\.owner\) = lower\(\$3\)/);
@@ -36,19 +37,21 @@ test("active shared tenants exclude merged source tenants", () => {
   assert.match(query, /t\.merged_into_tenant_id is null/);
 });
 
-test("shared identity repository query permits installation/name and name-only fallback", () => {
+test("shared identity repository query requires installation provenance for name fallback", () => {
   assert.deepEqual(buildSharedRepositoryIdentityQuery({ githubInstallationId: 123, repository: "omxyz/jina" }).values, [
     null,
     "123",
     "omxyz",
     "jina"
   ]);
+  const missingInstallation = buildSharedRepositoryIdentityQuery({ repository: "omxyz/jina" });
   assert.deepEqual(buildSharedRepositoryIdentityQuery({ repository: "omxyz/jina" }).values, [
     null,
     null,
     "omxyz",
     "jina"
   ]);
+  assert.match(missingInstallation.text, /\$2::bigint is not null/);
 });
 
 test("shared tenant repository query validates a bounded set against one active tenant", () => {
@@ -63,6 +66,10 @@ test("shared tenant repository query validates a bounded set against one active 
   assert.match(query.text, /i\.suspended_at is null/);
   assert.match(query.text, /i\.deleted_at is null/);
   assert.match(query.text, /any\(\$2::text\[\]\)/);
+  assert.deepEqual(buildSharedTenantRepositoriesQuery({ tenantId: "e752bea3-c5f1-49d9-9f6d-51953f5deeb4" }).values, [
+    "e752bea3-c5f1-49d9-9f6d-51953f5deeb4",
+    null
+  ]);
 });
 
 test("shared identity repository input rejects ambiguous names and unsafe GitHub IDs", () => {

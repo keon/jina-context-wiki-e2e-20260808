@@ -272,6 +272,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 
 test("shared tenancy resolves original Jina organizations and scopes workers and board reads", async (context) => {
   const resolutions: unknown[] = [];
+  let repositoryConnected = true;
   class TrackingContextGraphStore extends MemoryContextGraphStore {
     syncCount = 0;
 
@@ -289,7 +290,7 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     async resolveRepository(input: unknown) {
       resolutions.push(input);
       const repository = (input as { repository: string }).repository;
-      if (repository !== "omlabs/example") return undefined;
+      if (!repositoryConnected || repository !== "omlabs/example") return undefined;
       return {
         tenantId: SHARED_TENANT,
         githubAccountId: "202",
@@ -300,9 +301,11 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
         defaultBranch: "main"
       };
     },
-    async resolveTenantRepositories(input: { tenantId: string; repositories: readonly string[] }) {
-      return input.tenantId === SHARED_TENANT
-        ? input.repositories.filter((repository) => repository.toLowerCase() === "omlabs/example")
+    async resolveTenantRepositories(input: { tenantId: string; repositories?: readonly string[] }) {
+      return repositoryConnected && input.tenantId === SHARED_TENANT
+        ? (input.repositories ?? ["omlabs/example"]).filter(
+            (repository) => repository.toLowerCase() === "omlabs/example"
+          )
         : [];
     },
     async listTenantIds() {
@@ -330,6 +333,13 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     async ping() {},
     async close() {}
   };
+  const sharedGraph = fixtureGraph({
+    tenantId: SHARED_TENANT,
+    repository: "omlabs/example",
+    ref: "main",
+    taskId: "shared-graph"
+  });
+  await contextGraphStore.save(sharedGraph);
   const server = createApiServer({
     githubWebhookSecret: SECRET,
     internalApiToken: INTERNAL_TOKEN,
@@ -442,6 +452,70 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   assert.equal(contextGraphStore.syncCount, 0);
   assert.equal((await activeSync(["OMLABS/EXAMPLE"])).status, 200);
   assert.equal(contextGraphStore.syncCount, 1);
+
+  const graphHeaders = {
+    authorization: `Bearer ${GRAPH_TOKEN}`,
+    "x-jina-tenant-id": SHARED_TENANT,
+    "x-jina-principal-id": `tenant:${SHARED_TENANT}`
+  };
+  const connectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
+    (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
+  );
+  assert.deepEqual(
+    connectedGraphs.graphs.map((graph) => graph.repository),
+    ["omlabs/example"]
+  );
+  repositoryConnected = false;
+  const disconnectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
+    (response) => response.json() as Promise<{ graphs: unknown[] }>
+  );
+  assert.deepEqual(disconnectedGraphs.graphs, []);
+  assert.equal(
+    (await fetch(`${baseUrl}/v1/graphs/${encodeURIComponent(sharedGraph.id)}`, { headers: graphHeaders })).status,
+    404
+  );
+  repositoryConnected = true;
+
+  const explicitBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      repository: "omlabs/example",
+      ref: "main",
+      requestKey: "shared-explicit-installation",
+      githubInstallationId: 99
+    })
+  });
+  assert.equal(explicitBuild.status, 202);
+  const staleHistoricalBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      repository: "omlabs/example",
+      ref: "main",
+      requestKey: "shared-stale-historical-installation"
+    })
+  });
+  assert.equal(staleHistoricalBuild.status, 400);
+
+  const missingInstallationPayload = pullRequestPayload(44, "fed456") as Record<string, unknown>;
+  delete missingInstallationPayload.installation;
+  const missingInstallation = await deliver(
+    baseUrl,
+    "pull_request",
+    "shared-pr-missing-installation",
+    missingInstallationPayload
+  );
+  assert.equal(missingInstallation.status, 409);
+  assert.equal(((await missingInstallation.json()) as { code: string }).code, "repository_installation_missing");
 
   const mismatchedRepositoryId = pullRequestPayload(43, "def456") as Record<string, unknown>;
   mismatchedRepositoryId.repository = {
@@ -1399,7 +1473,7 @@ test("global admin graph listing requires its own credential and returns every t
       },
       async resolveTenantRepositories(input) {
         return input.tenantId === tenantA
-          ? input.repositories.filter((repository) => repository.toLowerCase() === "omxyz/a")
+          ? (input.repositories ?? ["omxyz/a"]).filter((repository) => repository.toLowerCase() === "omxyz/a")
           : [];
       },
       async listTenantIds() {

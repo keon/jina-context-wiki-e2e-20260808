@@ -12,7 +12,7 @@ export interface ResolveSharedRepositoryInput {
 
 export interface ResolveSharedTenantRepositoriesInput {
   readonly tenantId: string;
-  readonly repositories: readonly string[];
+  readonly repositories?: readonly string[];
 }
 
 export interface SharedRepositoryIdentity {
@@ -91,7 +91,7 @@ export interface SharedRepositoryIdentityQuery {
 
 export interface SharedTenantRepositoriesQuery {
   readonly text: string;
-  readonly values: readonly [string, readonly string[]];
+  readonly values: readonly [string, readonly string[] | null];
 }
 
 const RESOLVE_REPOSITORY_SQL = `
@@ -114,7 +114,8 @@ const RESOLVE_REPOSITORY_SQL = `
     and t.merged_into_tenant_id is null
     and i.suspended_at is null
     and i.deleted_at is null
-    and ($2::bigint is null or i.github_installation_id = $2::bigint)
+    and $2::bigint is not null
+    and i.github_installation_id = $2::bigint
     and (
       ($1::bigint is not null and r.github_repo_id = $1::bigint)
       or (
@@ -156,7 +157,10 @@ const RESOLVE_TENANT_REPOSITORIES_SQL = `
     and t.merged_into_tenant_id is null
     and i.suspended_at is null
     and i.deleted_at is null
-    and lower(r.owner) || '/' || lower(r.name) = any($2::text[])
+    and (
+      $2::text[] is null
+      or lower(r.owner) || '/' || lower(r.name) = any($2::text[])
+    )
   order by lower(r.owner), lower(r.name)`;
 
 const LIST_ACTIVE_TENANT_IDS_SQL = `
@@ -294,14 +298,16 @@ export function buildSharedTenantRepositoriesQuery(
   input: ResolveSharedTenantRepositoriesInput
 ): SharedTenantRepositoriesQuery {
   const tenantId = requiredText(input.tenantId, "tenantId");
-  const repositories = [
-    ...new Set(
-      input.repositories.map((repository) => {
-        const [owner, name] = splitRepository(repository);
-        return `${owner.toLowerCase()}/${name.toLowerCase()}`;
-      })
-    )
-  ].sort();
+  const repositories = input.repositories
+    ? [
+        ...new Set(
+          input.repositories.map((repository) => {
+            const [owner, name] = splitRepository(repository);
+            return `${owner.toLowerCase()}/${name.toLowerCase()}`;
+          })
+        )
+      ].sort()
+    : null;
   return { text: RESOLVE_TENANT_REPOSITORIES_SQL, values: [tenantId, repositories] };
 }
 

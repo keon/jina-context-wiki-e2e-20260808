@@ -137,7 +137,7 @@ interface SharedIdentityResolver {
   }): Promise<ResolvedRepositoryIdentity | undefined>;
   resolveTenantRepositories(input: {
     readonly tenantId: string;
-    readonly repositories: readonly string[];
+    readonly repositories?: readonly string[];
   }): Promise<readonly string[]>;
   listTenantIds(): Promise<readonly string[]>;
   listTenants(): Promise<readonly SharedTenantSummary[]>;
@@ -832,9 +832,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (request.method === "GET" && url.pathname === "/board") {
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
+      const allowedRepositories =
+        !config.sharedIdentityResolver && isTenantAdmin(principal)
+          ? undefined
+          : new Set(await repositoriesForPrincipal(principal));
       const board = tenantBoardView(intakeState, publications, tenantId, allowedRepositories);
       const pipeline = await contextGraphCoordinator.list(
         tenantId,
@@ -847,9 +848,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       // Single round trip for the dashboard poll: the board and its event
       // history share one ACL lookup and one pipeline listing instead of the
       // separate /board + /events requests duplicating both.
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
+      const allowedRepositories =
+        !config.sharedIdentityResolver && isTenantAdmin(principal)
+          ? undefined
+          : new Set(await repositoriesForPrincipal(principal));
       const pipeline = await contextGraphCoordinator.list(
         tenantId,
         allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
@@ -1054,9 +1056,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/events") {
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
+      const allowedRepositories =
+        !config.sharedIdentityResolver && isTenantAdmin(principal)
+          ? undefined
+          : new Set(await repositoriesForPrincipal(principal));
       const workflows = await contextGraphCoordinator.list(
         tenantId,
         allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
@@ -1268,6 +1271,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function resolveWebhookIdentity(webhook: ParsedGitHubWebhook): Promise<ResolvedRepositoryIdentity | undefined> {
     if (!config.sharedIdentityResolver) return undefined;
+    if (webhook.installationId === undefined) {
+      throw new ApiError(
+        409,
+        "repository_installation_missing",
+        "GitHub installation provenance is required for shared tenant routing"
+      );
+    }
     const identity = await config.sharedIdentityResolver.resolveRepository({
       repository: webhook.repository,
       ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
@@ -1352,6 +1362,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         }
       }
       return githubInstallationId;
+    }
+
+    if (config.sharedIdentityResolver) {
+      throw invalidRequest("githubInstallationId is required for shared tenant context graph builds");
     }
 
     const latest = (await contextGraphCoordinator.list(tenantId, { repositories: [repository] }))
@@ -1929,10 +1943,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     readonly tenantId: string;
     readonly principalId: string;
   }): Promise<readonly string[]> {
-    return contextGraphStore.repositoriesForPrincipal(
+    if (config.sharedIdentityResolver && isTenantAdmin(principal)) {
+      return config.sharedIdentityResolver.resolveTenantRepositories({ tenantId: principal.tenantId });
+    }
+    const persistedRepositories = await contextGraphStore.repositoriesForPrincipal(
       principal.tenantId,
       isTenantAdmin(principal) ? "svc:tenant-admin" : principal.principalId
     );
+    if (!config.sharedIdentityResolver) return persistedRepositories;
+    return config.sharedIdentityResolver.resolveTenantRepositories({
+      tenantId: principal.tenantId,
+      repositories: persistedRepositories
+    });
   }
 
   if (config.simulateRuns) {
