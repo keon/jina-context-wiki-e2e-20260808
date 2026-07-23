@@ -195,7 +195,7 @@ gcloud run deploy jina-context-graph-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~CONTEXT_GRAPH_MODEL=google/gemini-3.5-flash-lite~CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS=12000~CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000~CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~CONTEXT_GRAPH_MODEL=google/gemini-3.6-flash~CONTEXT_GRAPH_MODEL_TIMEOUT_MS=600000~CONTEXT_GRAPH_MODEL_VALIDATION_ATTEMPTS=3~CONTEXT_GRAPH_CODEX_EXECUTION_ATTEMPTS=2~CONTEXT_GRAPH_CODEX_EFFORT=medium~CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=256000~CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=200000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest" \
   --quiet
 

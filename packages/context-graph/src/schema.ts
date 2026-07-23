@@ -1,12 +1,12 @@
 import { contextGraphNodeKinds } from "./model.js";
 
 const contextGraphNodeProperties = {
-  id: { type: "string" },
+  id: { type: "string", maxLength: 512 },
   kind: { type: "string", enum: contextGraphNodeKinds },
-  label: { type: "string" },
-  description: { type: "string" },
-  path: { type: ["string", "null"] },
-  evidence: { type: "array", minItems: 1, items: { type: "string" } }
+  label: { type: "string", maxLength: 300 },
+  description: { type: "string", maxLength: 1_000 },
+  path: { type: ["string", "null"], maxLength: 1_024 },
+  evidence: { type: "array", minItems: 1, maxItems: 4, items: { type: "string", maxLength: 512 } }
 } as const;
 
 export const CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA = {
@@ -14,10 +14,11 @@ export const CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA = {
   additionalProperties: false,
   required: ["summary", "nodes", "edges"],
   properties: {
-    summary: { type: "string" },
+    summary: { type: "string", maxLength: 4_000 },
     nodes: {
       type: "array",
       minItems: 1,
+      maxItems: 128,
       items: {
         type: "object",
         additionalProperties: false,
@@ -28,13 +29,14 @@ export const CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA = {
     edges: {
       type: "array",
       minItems: 0,
+      maxItems: 256,
       items: {
         type: "object",
         additionalProperties: false,
         required: ["source", "target", "predicate", "plane", "confidence", "why", "evidence"],
         properties: {
-          source: { type: "string" },
-          target: { type: "string" },
+          source: { type: "string", maxLength: 512 },
+          target: { type: "string", maxLength: 512 },
           predicate: {
             type: "string",
             enum: [
@@ -51,8 +53,8 @@ export const CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA = {
           },
           plane: { type: "string", enum: ["knowledge"] },
           confidence: { type: "number", minimum: 0, maximum: 1 },
-          why: { type: "string", minLength: 1 },
-          evidence: { type: "array", minItems: 1, items: { type: "string" } }
+          why: { type: "string", minLength: 1, maxLength: 1_000 },
+          evidence: { type: "array", minItems: 1, maxItems: 4, items: { type: "string", maxLength: 512 } }
         }
       }
     }

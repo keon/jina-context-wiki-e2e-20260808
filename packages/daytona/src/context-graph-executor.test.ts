@@ -4,10 +4,13 @@ import { test } from "node:test";
 import type { Sandbox } from "@daytona/sdk";
 import {
   buildFocusEvidenceBundle,
+  codexCommand,
   contextGraphCheckout,
   contextGraphGitAuthEnv,
+  executeAbortableSandboxCommand,
+  findExistingCodex,
   isTransientModelExecutionFailure,
-  requestOpenRouterStructuredOutput,
+  resolveCodexSnapshot,
   sanitizeGeneratedModelOutput
 } from "./context-graph-executor.js";
 
@@ -40,91 +43,78 @@ test("classifies retryable provider execution failures", () => {
   assert.equal(isTransientModelExecutionFailure("model not found"), false);
 });
 
-test("calls OpenRouter directly with strict structured output", async () => {
-  const previousMaximum = process.env.CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS;
-  process.env.CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS = "12000";
-  let requestedUrl = "";
-  let requestedAuthorization = "";
-  let requestedBody: Record<string, unknown> = {};
-  try {
-    const result = await requestOpenRouterStructuredOutput(
-      {
-        apiKey: "secret",
-        model: "google/gemini-3.5-flash-lite",
-        systemPrompt: "system",
-        prompt: "evidence",
-        outputSchema: { type: "object", additionalProperties: false }
-      },
-      async (url, init) => {
-        requestedUrl = String(url);
-        requestedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
-        requestedBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        return new Response(
-          JSON.stringify({
-            id: "generation-1",
-            model: "google/gemini-3.5-flash-lite",
-            choices: [{ finish_reason: "stop", message: { content: '{"summary":"ok"}' } }],
-            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
-          }),
-          { status: 200, headers: { "content-type": "application/json" } }
-        );
-      }
-    );
+test("runs Codex through OpenRouter Responses with catalog-aware authentication", () => {
+  const command = codexCommand("/opt/codex", "google/gemini-3.6-flash");
+  assert.match(command, /codex' exec --json --ephemeral/);
+  assert.match(command, /--output-schema/);
+  assert.match(command, /--output-last-message/);
+  assert.match(command, /google\/gemini-3\.6-flash/);
+  assert.match(command, /model_provider=openrouter/);
+  assert.match(command, /base_url=https:\/\/openrouter\.ai\/api\/v1/);
+  assert.match(command, /wire_api=responses/);
+  assert.match(command, /auth\.command=printenv/);
+  assert.match(command, /OPENROUTER_API_KEY/);
+  assert.match(command, /model_reasoning_effort='medium'/);
+  assert.doesNotMatch(command, /chat\/completions/);
+});
 
-    assert.equal(requestedUrl, "https://openrouter.ai/api/v1/chat/completions");
-    assert.equal(requestedAuthorization, "Bearer secret");
-    assert.equal(requestedBody.model, "google/gemini-3.5-flash-lite");
-    assert.equal(requestedBody.max_tokens, 12000);
-    assert.deepEqual(requestedBody.provider, { require_parameters: true });
-    assert.deepEqual(requestedBody.response_format, {
-      type: "json_schema",
-      json_schema: {
-        name: "context_graph_assertions",
-        strict: true,
-        schema: { type: "object", additionalProperties: false }
+test("uses a prebaked Codex binary when the sandbox image provides one", async () => {
+  const commands: string[] = [];
+  const sandbox = {
+    process: {
+      executeCommand: async (command: string) => {
+        commands.push(command);
+        return { exitCode: 0, result: "/home/daytona/context-graph/node_modules/.bin/codex\n" };
+      }
+    }
+  };
+  assert.equal(await findExistingCodex(sandbox), "/home/daytona/context-graph/node_modules/.bin/codex");
+  assert.match(commands[0] ?? "", /command -v codex/);
+});
+
+test("reuses the versioned Codex snapshot instead of rebuilding it per task", async () => {
+  const previous = process.env.DAYTONA_SNAPSHOT;
+  delete process.env.DAYTONA_SNAPSHOT;
+  let creates = 0;
+  try {
+    const snapshot = await resolveCodexSnapshot({
+      snapshot: {
+        get: async () => ({ name: "jina-context-graph-codex-0-145-0" }),
+        create: async () => {
+          creates += 1;
+          return { name: "unexpected" };
+        }
       }
     });
-    assert.equal(result.id, "generation-1");
-    assert.equal(result.text, '{"summary":"ok"}');
+    assert.equal(snapshot, "jina-context-graph-codex-0-145-0");
+    assert.equal(creates, 0);
   } finally {
-    if (previousMaximum === undefined) delete process.env.CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS;
-    else process.env.CONTEXT_GRAPH_MODEL_MAX_OUTPUT_TOKENS = previousMaximum;
+    if (previous === undefined) delete process.env.DAYTONA_SNAPSHOT;
+    else process.env.DAYTONA_SNAPSHOT = previous;
   }
 });
 
-test("retries transient OpenRouter failures without involving a sandbox command", async () => {
-  const previousAttempts = process.env.CONTEXT_GRAPH_MODEL_EXECUTION_ATTEMPTS;
-  const previousDelay = process.env.CONTEXT_GRAPH_MODEL_RETRY_DELAY_MS;
-  process.env.CONTEXT_GRAPH_MODEL_EXECUTION_ATTEMPTS = "2";
-  process.env.CONTEXT_GRAPH_MODEL_RETRY_DELAY_MS = "1";
-  let requests = 0;
-  try {
-    const result = await requestOpenRouterStructuredOutput(
-      {
-        apiKey: "secret",
-        model: "google/gemini-3.5-flash-lite",
-        systemPrompt: "system",
-        prompt: "evidence",
-        outputSchema: { type: "object" }
-      },
-      async () => {
-        requests += 1;
-        if (requests === 1) {
-          return new Response(JSON.stringify({ error: { message: "upstream unavailable" } }), { status: 503 });
-        }
-        return new Response(JSON.stringify({ choices: [{ message: { content: '{"summary":"recovered"}' } }] }), {
-          status: 200
-        });
+test("aborts an in-flight Codex command when its task lease is lost", async () => {
+  const controller = new AbortController();
+  let deleted = false;
+  const command = executeAbortableSandboxCommand(
+    {
+      process: {
+        executeCommand: async () => new Promise<never>(() => undefined)
       }
-    );
-    assert.equal(requests, 2);
-    assert.equal(result.text, '{"summary":"recovered"}');
-  } finally {
-    if (previousAttempts === undefined) delete process.env.CONTEXT_GRAPH_MODEL_EXECUTION_ATTEMPTS;
-    else process.env.CONTEXT_GRAPH_MODEL_EXECUTION_ATTEMPTS = previousAttempts;
-    if (previousDelay === undefined) delete process.env.CONTEXT_GRAPH_MODEL_RETRY_DELAY_MS;
-    else process.env.CONTEXT_GRAPH_MODEL_RETRY_DELAY_MS = previousDelay;
-  }
+    },
+    "codex exec",
+    "/repo",
+    { OPENROUTER_API_KEY: "secret" },
+    600,
+    controller.signal,
+    () => {
+      deleted = true;
+    }
+  );
+  controller.abort(new Error("lease lost"));
+  await assert.rejects(command, /lease lost/);
+  assert.equal(deleted, true);
 });
 
 test("canonicalizes GitHub work items and drops unanchored deterministic source aliases", () => {
