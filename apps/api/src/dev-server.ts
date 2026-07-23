@@ -12,6 +12,7 @@ import {
   type ContextGraphPipelineCoordinator
 } from "@jina/context-graph";
 import { createLogger, errorLogFields } from "@jina/observability";
+import { resolveDatabaseConfigs } from "./database-config.js";
 import { createApiServer } from "./server.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
@@ -20,14 +21,16 @@ const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 if (enableDevEndpoints && process.env.K_SERVICE) {
   throw new Error("JINA_ENABLE_DEV_ENDPOINTS must not be enabled on Cloud Run");
 }
-const stateStore = createStateStore();
-const contextGraphStore = createContextGraphStore();
-const contextGraphCoordinator = createContextGraphCoordinator();
+const databaseConfigs = resolveDatabaseConfigs(process.env);
+const stateStore = createStateStore(databaseConfigs.primary);
+const contextGraphStore = createContextGraphStore(databaseConfigs.graph);
+const contextGraphCoordinator = createContextGraphCoordinator(databaseConfigs.graph);
 const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
 if (tenancyMode !== "fixed" && tenancyMode !== "shared-db") {
   throw new Error("JINA_TENANCY_MODE must be fixed or shared-db");
 }
-const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver() : undefined;
+const sharedIdentityResolver =
+  tenancyMode === "shared-db" ? createSharedIdentityResolver(databaseConfigs.primary) : undefined;
 if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN)) {
   throw new Error("INTERNAL_API_TOKEN and GRAPH_API_TOKEN are required in production");
 }
@@ -66,6 +69,8 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
     event: "api.started",
     port,
     storage: stateStore ? "postgres" : "memory",
+    graphStorage: contextGraphStore instanceof PostgresContextGraphStore ? "postgres" : "memory",
+    graphDatabase: databaseConfigs.graphIsDedicated ? "dedicated" : "primary",
     devEndpoints: enableDevEndpoints
   });
   if (enableDevEndpoints) {
@@ -89,8 +94,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
-function createStateStore(): ApiStateStore | undefined {
-  const config = databaseConfig();
+function createStateStore(config: PostgresJsonStateStoreConfig | undefined): ApiStateStore | undefined {
   if (!config) {
     return undefined;
   }
@@ -100,8 +104,7 @@ function createStateStore(): ApiStateStore | undefined {
   });
 }
 
-function createContextGraphStore(): ContextGraphStore {
-  const config = databaseConfig();
+function createContextGraphStore(config: PostgresJsonStateStoreConfig | undefined): ContextGraphStore {
   return config
     ? new PostgresContextGraphStore({
         ...config,
@@ -110,8 +113,9 @@ function createContextGraphStore(): ContextGraphStore {
     : new MemoryContextGraphStore();
 }
 
-function createContextGraphCoordinator(): ContextGraphPipelineCoordinator {
-  const config = databaseConfig();
+function createContextGraphCoordinator(
+  config: PostgresJsonStateStoreConfig | undefined
+): ContextGraphPipelineCoordinator {
   return config
     ? new PostgresContextGraphPipelineCoordinator({
         ...config,
@@ -120,33 +124,9 @@ function createContextGraphCoordinator(): ContextGraphPipelineCoordinator {
     : new MemoryContextGraphPipelineCoordinator();
 }
 
-function createSharedIdentityResolver(): PostgresSharedIdentityStore {
-  const config = databaseConfig();
+function createSharedIdentityResolver(config: PostgresJsonStateStoreConfig | undefined): PostgresSharedIdentityStore {
   if (!config) throw new Error("Postgres storage is required in shared-db tenancy mode");
   return new PostgresSharedIdentityStore({ ...config, applicationName: "jina-api-shared-identity" });
-}
-
-function databaseConfig(): PostgresJsonStateStoreConfig | undefined {
-  const connectionString = process.env.DATABASE_URL;
-  const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
-  if (!connectionString && !host) return undefined;
-  if (connectionString) return { connectionString };
-  const port = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
-  return {
-    host,
-    user: requiredEnv("DB_USER"),
-    password: requiredEnv("DB_PASS"),
-    database: requiredEnv("DB_NAME"),
-    ...(port !== undefined ? { port } : {})
-  };
-}
-
-function requiredEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required when Postgres storage is enabled`);
-  }
-  return value;
 }
 
 function commaSeparatedEnv(name: string): readonly string[] {

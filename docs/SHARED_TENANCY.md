@@ -1,14 +1,23 @@
-# Shared original Jina database
+# Shared identity with an isolated ContextGraph database
 
-Jina v2 remains deployed in `jina-v2/us-central1` and connects directly to the original PostgreSQL database at `jina-463721:us-east1:jina-db`. This is a single-database layout:
+Jina v2 remains deployed in `jina-v2/us-central1` and uses a two-database
+layout:
 
-- Original identity and GitHub App data remain owned by the original service in `public`.
-- Jina v2 owns only `jina_runtime`, `jina_board`, and `jina_context_graph`.
+- Original identity and GitHub App data remain owned by the original service in
+  `public` on `jina-463721:us-east1:jina-db`.
+- Jina v2's lightweight runtime and board state remain in `jina_runtime` and
+  `jina_board` on that original database.
+- The graph store and graph pipeline coordinator own `jina_context_graph` on
+  `jina-v2:us-central1:jina-postgres`.
 - Webhooks resolve their tenant from `public.repositories`, `public.installations`, and `public.tenants` before creating work.
 - Workers receive the resolved original tenant UUID with each task and send it on subsequent API calls.
 - No Cloud Run service moves regions. Workers never receive a database credential.
 
-Cross-region access adds query latency, network egress, and a dependency on both regions. Monitor it, but do not add a second identity cache or replicated database until measurements justify that complexity.
+The original application remains the single identity authority; there is no
+second identity cache. The physical graph boundary isolates high-volume
+ingestion, indexes, vacuum, and connection pressure from dashboard persistence.
+Cross-region access remains only for identity and lightweight control-plane
+state.
 
 ## Identity resolution and propagation
 
@@ -50,9 +59,15 @@ JINA_TENANCY_MODE=shared-db
 JINA_DB_NAME=jina
 JINA_DB_USER=jina_v2_app
 JINA_DB_PASS_SECRET=jina-shared-db-password:latest
+GRAPH_CLOUD_SQL_INSTANCE=jina-v2:us-central1:jina-postgres
+JINA_GRAPH_DB_NAME=jina
+JINA_GRAPH_DB_USER=jina_app
+JINA_GRAPH_DB_PASS_SECRET=jina-db-password:latest
 ```
 
-`JINA_TENANT_ID` must be unset in shared mode. The API attaches exactly one Cloud SQL instance. Local and rollback deployments can use `JINA_TENANCY_MODE=fixed` with the existing `jina-v2:us-central1:jina-postgres` database.
+`JINA_TENANT_ID` must be unset in shared mode. The API attaches both Cloud SQL
+instances and creates separate connection pools. Local environments may omit
+all `GRAPH_*` variables to retain a single-database setup.
 
 ## One-time IAM
 
@@ -74,7 +89,11 @@ gcloud projects add-iam-policy-binding jina-463721 \
 
 ## Database role and schema boundary
 
-Create `jina_v2_app` as a separate login. It may read the original identity tables and own only the v2 schemas; it must not read session/OAuth secret tables or mutate original application tables.
+Create `jina_v2_app` as a separate login on the original database. It may read
+the original identity tables and own only `jina_runtime` and `jina_board`; it
+must not read session/OAuth secret tables, mutate original application tables,
+or own ContextGraph data. The dedicated graph database uses `jina_app` (or the
+least-privilege ContextGraph roles) and a separate secret.
 
 Prefer creating this PostgreSQL role with SQL. Cloud SQL's `gcloud sql users create` grants `cloudsqlsuperuser` membership to PostgreSQL users; if that command is used, revoke that membership before using the role:
 
@@ -90,7 +109,6 @@ grant connect on database jina to jina_v2_app;
 
 create schema if not exists jina_runtime authorization jina_v2_app;
 create schema if not exists jina_board authorization jina_v2_app;
-create schema if not exists jina_context_graph authorization jina_v2_app;
 
 grant usage on schema public to jina_v2_app;
 grant select on table
@@ -117,22 +135,31 @@ gcloud secrets add-iam-policy-binding jina-shared-db-password \
   --role='roles/secretmanager.secretAccessor'
 ```
 
-## Cutover
+## ContextGraph database cutover
 
-Production has completed this cutover. Keep the procedure below as the replay and disaster-recovery runbook.
+Treat the graph move as a data migration, not an application redeploy side
+effect.
 
 Before deployment:
 
-1. Apply the v2 schemas to PostgreSQL 16 and run the full database test suite against a disposable PostgreSQL 16 instance.
-2. Build and push the release images before pausing production writes.
-3. Pause v2 webhook intake and workers. Wait until the three v2 schemas stop changing before taking the final export.
-4. Use a PostgreSQL 17 `pg_dump` client to export the complete schema and data for only `jina_runtime`, `jina_board`, and `jina_context_graph`. A data-only copy is insufficient because historical rows can precede current column additions. Do not export or overwrite `public`.
-5. In the plain SQL export, remove PostgreSQL 17's `SET transaction_timeout = 0` statement for PostgreSQL 16 compatibility. Remap only exact relational tenant values and JSON `tenantId` values from the legacy `omlabs` tenant to the original tenant UUID. Do not perform a broad text replacement, which would corrupt email addresses, task IDs, and dedupe keys.
-6. Drop and restore only the three v2 schemas, set their ownership to `jina_v2_app`, then run the current schema upgrader once with temporary database `CREATE` permission. Revoke that permission before starting the API; production runs with `JINA_DB_MANAGE_SCHEMA=false`.
-7. Compare every source/target v2 table count, verify that no legacy relational or JSON tenant remains, and sample board/graph reads.
-8. Deploy the already-built images with the checked-in shared-mode substitutions. Verify `/health`, a disabled v2 webhook acknowledgment with no created work, one original-app review graph request, tenant-scoped `/board`, a worker claim/completion, and a graph query before resuming normal traffic.
-
-Keep `jina-v2:us-central1:jina-postgres` intact and read-only during the rollback window.
+1. Run the full database test suite against disposable PostgreSQL 16 and 17
+   instances.
+2. Build and push the release images before pausing graph writes.
+3. Pause graph build intake and all ContextGraph workers, then wait for
+   `jina_context_graph` to stop changing. Original login, dashboard, and review
+   traffic can remain online.
+4. Export the complete `jina_context_graph` schema and data from the original
+   database. Do not export `public`, `jina_runtime`, or `jina_board`.
+5. Replace only `jina_context_graph` on the dedicated database, set its ownership
+   to the graph migration owner, and run the current `@jina/db` migration.
+6. Compare every source/target graph table count and sample tenant, repository,
+   build, graph-head, ACL, and outbox rows.
+7. Deploy the already-built images with both checked-in database substitutions.
+   Verify `/health`, one original-app graph build, a worker claim/completion,
+   tenant-scoped graph reads, and a graph query before resuming graph intake.
+8. Keep the source graph schema intact but read-only during the rollback window.
+   After the window, revoke `jina_v2_app` access to it so configuration drift
+   cannot silently move graph traffic back to the dashboard database.
 
 ## Verification
 
@@ -147,18 +174,24 @@ curl --fail https://jina-api-m56inn6iva-uc.a.run.app/health
 curl --fail https://api.usejina.com/v1/healthz
 ```
 
-For an authenticated tenant read, send the internal credential server-side and use the original UUID for both tenant scope and tenant principal. Confirm that a known PR task contains the expected `workspaceLabel`, `authorLogin`, `senderLogin`, GitHub account ID, and author GitHub user ID. The original work-overview endpoint must return `401` without an original-app session.
+Confirm that the Cloud Run annotation contains both connection names. For an
+authenticated tenant read, send the internal credential server-side and use the
+original UUID for both tenant scope and tenant principal. Confirm that a known
+PR task contains the expected `workspaceLabel`, `authorLogin`, `senderLogin`,
+GitHub account ID, and author GitHub user ID. The original work-overview
+endpoint must return `401` without an original-app session.
 
 ## Rollback
 
-Redeploy the same image in fixed mode against the untouched v2 database:
+Redeploy the same image with the graph connection pointed back at the retained
+source schema:
 
 ```sh
 gcloud builds submit \
   --project=jina-v2 \
   --region=us-central1 \
   --config=cloudbuild.deploy.yaml \
-  --substitutions=_IMAGE_TAG=KNOWN_GOOD_TAG,_CLOUD_SQL_INSTANCE=jina-v2:us-central1:jina-postgres,_JINA_TENANCY_MODE=fixed,_JINA_DB_NAME=jina,_JINA_DB_USER=jina_app,_JINA_DB_PASS_SECRET=jina-db-password:latest,_JINA_FIXED_TENANT_ID=omlabs
+  --substitutions=_IMAGE_TAG=KNOWN_GOOD_TAG,_GRAPH_CLOUD_SQL_INSTANCE=jina-463721:us-east1:jina-db,_JINA_GRAPH_DB_NAME=jina,_JINA_GRAPH_DB_USER=jina_v2_app,_JINA_GRAPH_DB_PASS_SECRET=jina-shared-db-password:latest
 ```
 
 Do not delete either database or run down-migrations as part of rollback. Reconcile any writes accepted after cutover before attempting another migration.

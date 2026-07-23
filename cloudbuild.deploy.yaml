@@ -9,10 +9,14 @@ steps:
       - CLOUD_BUILD_ID=$BUILD_ID
       - IMAGE_TAG=${_IMAGE_TAG}
       - CLOUD_SQL_INSTANCE=${_CLOUD_SQL_INSTANCE}
+      - GRAPH_CLOUD_SQL_INSTANCE=${_GRAPH_CLOUD_SQL_INSTANCE}
       - JINA_TENANCY_MODE=${_JINA_TENANCY_MODE}
       - JINA_DB_NAME=${_JINA_DB_NAME}
       - JINA_DB_USER=${_JINA_DB_USER}
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
+      - JINA_GRAPH_DB_NAME=${_JINA_GRAPH_DB_NAME}
+      - JINA_GRAPH_DB_USER=${_JINA_GRAPH_DB_USER}
+      - JINA_GRAPH_DB_PASS_SECRET=${_JINA_GRAPH_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
       - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
@@ -23,13 +27,17 @@ steps:
 
 substitutions:
   _IMAGE_TAG: latest
-  # Cloud Run stays in jina-v2/us-central1 while its single database remains
-  # the original Jina database in jina-463721/us-east1.
+  # Keep identity/control-plane reads on the original database while graph
+  # ingestion and projections use the dedicated same-region database.
   _CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db
+  _GRAPH_CLOUD_SQL_INSTANCE: jina-v2:us-central1:jina-postgres
   _JINA_TENANCY_MODE: shared-db
   _JINA_DB_NAME: jina
   _JINA_DB_USER: jina_v2_app
   _JINA_DB_PASS_SECRET: jina-shared-db-password:latest
+  _JINA_GRAPH_DB_NAME: jina
+  _JINA_GRAPH_DB_USER: jina_app
+  _JINA_GRAPH_DB_PASS_SECRET: jina-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
   _JINA_API_MIN_INSTANCES: "1"
   _JINA_API_MAX_INSTANCES: "1"
