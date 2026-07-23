@@ -2299,6 +2299,7 @@ test(
   async () => {
     assert.ok(connectionString);
     const store = new PostgresContextGraphStore({ connectionString });
+    const metricsPool = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `v51-${suffix}`;
     const repository = `omlabs/v51-${suffix}`;
@@ -2955,6 +2956,18 @@ test(
         taskId: `other-${suffix}`,
         files: [{ path: "README.md", blobSha: unparsedOtherBlob, size: 20 }]
       });
+      await metricsPool.query(
+        `insert into jina_context_graph.outbox
+          (id,tenant_id,event_type,consumer,aggregate_id,payload,created_at,available_at)
+         values ($1,$2,'ref_moved','manifest',$3,$4::jsonb,$5,$5)`,
+        [
+          stableId("outbox", `${tenantId}:${repository}:main:metrics-scope`),
+          tenantId,
+          `${repository}:main`,
+          JSON.stringify({ repoId: repository, refName: "main" }),
+          "2026-07-20T00:08:34.000Z"
+        ]
+      );
       const scopedRepositoryMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
         repository,
         ref: "main"
@@ -3172,6 +3185,7 @@ test(
         "person erasure retracts assertions sourced from every destroyed personal observation"
       );
     } finally {
+      await metricsPool.end();
       await store.close();
     }
   }
