@@ -525,40 +525,55 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
 }
 
 function plannedStages(build: MutableBuild): MutableStage[] {
-  const phases: { readonly phase: "snapshot" | "history"; readonly priority: number }[] = build.snapshotFirst
-    ? [
-        { phase: "snapshot", priority: 100 },
-        { phase: "history", priority: 10 }
-      ]
-    : [{ phase: "history", priority: 50 }];
-  return phases.flatMap(({ phase, priority }, phaseIndex) =>
-    (["ingest", "assert", "project"] as const).map((stage, stageIndex) => {
-      const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
-      return {
-        id,
-        buildId: build.id,
+  return contextGraphPlannedStageSpecs(build.snapshotFirst).map(({ phase, priority, stage, ordinal }) => {
+    const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
+    return {
+      id,
+      buildId: build.id,
+      tenantId: build.tenantId,
+      repository: build.repository,
+      ref: build.ref,
+      requestKey: build.requestKey,
+      phase,
+      stage,
+      topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
+      status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
+      priority,
+      metadata: {
+        ...structuredClone(build.metadata),
         tenantId: build.tenantId,
         repository: build.repository,
         ref: build.ref,
         requestKey: build.requestKey,
-        phase,
-        stage,
-        topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
-        status: phaseIndex === 0 && stageIndex === 0 ? ("queued" as const) : ("triage" as const),
-        priority,
-        metadata: {
-          ...structuredClone(build.metadata),
-          tenantId: build.tenantId,
-          repository: build.repository,
-          ref: build.ref,
-          requestKey: build.requestKey,
-          pipelinePhase: phase
-        },
-        attempt: 0,
-        createdAt: build.createdAt,
-        updatedAt: build.createdAt
-      };
-    })
+        pipelinePhase: phase
+      },
+      attempt: 0,
+      createdAt: build.createdAt,
+      updatedAt: build.createdAt
+    };
+  });
+}
+
+/**
+ * Snapshot-first builds publish a fast structural projection while history is
+ * still loading. Semantic assertions belong to the history phase because they
+ * require the complete work-item and causal evidence scope.
+ */
+export function contextGraphPlannedStageSpecs(snapshotFirst: boolean): readonly {
+  readonly phase: "snapshot" | "history";
+  readonly stage: "ingest" | "assert" | "project";
+  readonly priority: number;
+  readonly ordinal: number;
+}[] {
+  const phases = snapshotFirst
+    ? [
+        { phase: "snapshot" as const, priority: 100, stages: ["ingest", "project"] as const },
+        { phase: "history" as const, priority: 10, stages: ["ingest", "assert", "project"] as const }
+      ]
+    : [{ phase: "history" as const, priority: 50, stages: ["ingest", "assert", "project"] as const }];
+  let ordinal = 0;
+  return phases.flatMap(({ phase, priority, stages }) =>
+    stages.map((stage) => ({ phase, stage, priority, ordinal: ordinal++ }))
   );
 }
 

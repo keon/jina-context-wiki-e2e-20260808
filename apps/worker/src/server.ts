@@ -28,6 +28,7 @@ import {
   isProblemEvidencePath,
   movedFromSimilarityCandidates,
   parseIncidentDocument,
+  parseIncidentDocumentObservations,
   parsePackageManifest,
   parseServiceDefinitions,
   selectAssertionFocusPaths,
@@ -557,14 +558,15 @@ async function runContextGraphIngestWithTransport(
             recordedAt: snapshot.recordedAt
           })
         );
-        const incident = parseIncidentDocument({
-          tenantId,
-          repository,
-          path: file.path,
-          content: source,
-          recordedAt: snapshot.recordedAt
-        });
-        if (incident) deterministicObservations.push(incident);
+        deterministicObservations.push(
+          ...parseIncidentDocumentObservations({
+            tenantId,
+            repository,
+            path: file.path,
+            content: source,
+            recordedAt: snapshot.recordedAt
+          })
+        );
       }
       for (const removed of plan.changes.filter(
         (change) => change.change === "delete" && change.oldBlobSha && isDeterministicSourcePath(change.path)

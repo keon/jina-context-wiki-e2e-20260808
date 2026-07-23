@@ -373,15 +373,15 @@ test("branch pushes create and supersede the existing context graph workflow", a
 
   const first = await deliver(baseUrl, "push", "push-1", pushPayload("a".repeat(40)));
   assert.equal(first.status, 202);
-  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 7);
+  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 6);
   const repeatedHead = await deliver(baseUrl, "push", "push-2", pushPayload("a".repeat(40)));
   assert.equal(((await repeatedHead.json()) as { outcome: string }).outcome, "duplicate");
   const second = await deliver(baseUrl, "push", "push-3", pushPayload("b".repeat(40)));
-  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 7);
+  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 6);
   const returned = await deliver(baseUrl, "push", "push-4", pushPayload("a".repeat(40)));
   assert.equal(
     ((await returned.json()) as { createdTaskIds: string[] }).createdTaskIds.length,
-    7,
+    6,
     "moving a branch back to an earlier SHA is a new ref transition, not a redelivery"
   );
 
@@ -394,7 +394,6 @@ test("branch pushes create and supersede the existing context graph workflow", a
   const current = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-4");
   const old = board.tasks.filter((task) => task.metadata.githubDeliveryId === "push-3");
   assert.deepEqual(current.map((task) => task.type).sort(), [
-    "context_graph_assert",
     "context_graph_assert",
     "context_graph_build",
     "context_graph_ingest",
@@ -423,7 +422,7 @@ test("branch pushes create and supersede the existing context graph workflow", a
     (response) => response.json() as Promise<{ tasks: { metadata: Record<string, unknown> }[] }>
   );
   const retried = retriedBoard.tasks.filter((task) => task.metadata.requestKey === "operator-retry");
-  assert.equal(retried.length, 7);
+  assert.equal(retried.length, 6);
   assert.equal(
     retried.every((task) => task.metadata.githubInstallationId === 99),
     true,
@@ -806,6 +805,23 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
       200
     );
 
+    const historyIngestion = await claimTopic(baseUrl, "run-context-graph-ingest");
+    assert.equal(historyIngestion.task.metadata?.pipelinePhase, "history");
+    assert.equal(
+      await completeClaim(baseUrl, historyIngestion, {
+        observationId: firstPlan.observationId,
+        commitSha,
+        fileCount: 2,
+        discoveredBlobCount: 2,
+        reusedBlobCount: 2,
+        parsedBlobCount: 0,
+        parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
+        codeCheckpoint: "code-checkpoint",
+        evidenceFingerprint: "evidence-fixture"
+      }),
+      200
+    );
+
     const assertion = await claimTopic(baseUrl, "run-context-graph-assert");
     assert.equal(assertion.message.topic, "run-context-graph-assert");
     const asserted = await fetch(`${baseUrl}/internal/worker/complete`, {
@@ -859,8 +875,12 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
     });
     assert.equal(asserted.status, 200);
 
-    const projection = await claimTopic(baseUrl, "run-context-graph-project");
-    assert.equal(await completeClaim(baseUrl, projection, { projected: true }), 200);
+    const snapshotProjection = await claimTopic(baseUrl, "run-context-graph-project");
+    assert.equal(snapshotProjection.task.metadata?.pipelinePhase, "snapshot");
+    assert.equal(await completeClaim(baseUrl, snapshotProjection, { projected: true }), 200);
+    const historyProjection = await claimTopic(baseUrl, "run-context-graph-project");
+    assert.equal(historyProjection.task.metadata?.pipelinePhase, "history");
+    assert.equal(await completeClaim(baseUrl, historyProjection, { projected: true }), 200);
 
     const contextGraph = await fetch(`${baseUrl}/context-graph`).then(
       (response) => response.json() as Promise<{ latest: { nodes: unknown[]; edges: unknown[] } | null }>
@@ -938,12 +958,12 @@ test("a new context graph attempt supersedes older active work for the same repo
     );
     const first = board.tasks.filter((task) => task.metadata.requestKey === "first");
     const second = board.tasks.filter((task) => task.metadata.requestKey === "second");
-    assert.equal(first.length, 7);
+    assert.equal(first.length, 6);
     assert.equal(
       first.every((task) => task.status === "superseded"),
       true
     );
-    assert.equal(second.length, 7, "an idempotent request key does not duplicate the attempt");
+    assert.equal(second.length, 6, "an idempotent request key does not duplicate the attempt");
     assert.equal(second.find((task) => task.type === "context_graph_ingest")?.status, "queued");
     assert.equal(
       "timing" in (second.find((task) => task.type === "context_graph_ingest")?.metadata ?? {}),
@@ -1389,7 +1409,7 @@ test("context graph task-board state is independent of the legacy JSON board sna
           outbox: { id: string; status: string; topic: string }[];
         }>
     );
-    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 7);
+    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 6);
     assert.equal(
       board.outbox.some((message) => message.topic === "run-context-graph-ingest" && message.status === "pending"),
       true
@@ -1567,6 +1587,16 @@ test("context graph completion does not depend on the legacy board snapshot", as
     const ingestion = await claimTopic(baseUrl, "run-context-graph-ingest");
     assert.equal(
       await completeClaim(baseUrl, ingestion, {
+        commitSha,
+        codeCheckpoint: "code-checkpoint",
+        evidenceFingerprint: "evidence-fingerprint"
+      }),
+      200
+    );
+    const historyIngestion = await claimTopic(baseUrl, "run-context-graph-ingest");
+    assert.equal(historyIngestion.task.metadata?.pipelinePhase, "history");
+    assert.equal(
+      await completeClaim(baseUrl, historyIngestion, {
         commitSha,
         codeCheckpoint: "code-checkpoint",
         evidenceFingerprint: "evidence-fingerprint"

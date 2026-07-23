@@ -785,6 +785,35 @@ export function materializeRequiredCausalAssertions(
       nodes.push(commit);
       nodesById.set(commit.id, commit);
     }
+    const derivedPullRequest = /^derived:pr:(\d+)$/i.exec(anchor.issueId)?.[1];
+    if (derivedPullRequest) {
+      if (!nodesById.has(derivedPullRequest)) {
+        const pullRequest: ContextGraphNode = {
+          id: derivedPullRequest,
+          kind: "PullRequest",
+          label: `PR #${derivedPullRequest}`,
+          description: "The merged pull request that repaired this explicitly documented untracked problem.",
+          evidence: [evidence]
+        };
+        nodes.push(pullRequest);
+        nodesById.set(pullRequest.id, pullRequest);
+      }
+      const existingResolution = edges.findIndex(
+        (edge) =>
+          edge.predicate === "RESOLVED_BY" && edge.source === anchor.issueId && edge.target === derivedPullRequest
+      );
+      const requiredResolution: Omit<ContextGraphEdge, "id"> = {
+        source: anchor.issueId,
+        target: derivedPullRequest,
+        predicate: "RESOLVED_BY",
+        plane: "knowledge",
+        confidence: 1,
+        why: `The merged pull request #${derivedPullRequest} repaired the untracked problem described by the cited root-cause record.`,
+        evidence: [evidence]
+      };
+      if (existingResolution === -1) edges.push(requiredResolution);
+      else edges[existingResolution] = requiredResolution;
+    }
 
     const existing = edges.findIndex(
       (edge) => edge.predicate === "INTRODUCED_BY" && edge.source === anchor.issueId && edge.target === anchor.commitSha
