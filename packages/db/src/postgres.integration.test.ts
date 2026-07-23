@@ -2299,6 +2299,7 @@ test(
   async () => {
     assert.ok(connectionString);
     const store = new PostgresContextGraphStore({ connectionString });
+    const metricsPool = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
     const tenantId = `v51-${suffix}`;
     const repository = `omlabs/v51-${suffix}`;
@@ -2940,6 +2941,7 @@ test(
       assert.equal(unmergedOwnership?.objectNaturalKey, "team:platform");
 
       const otherRepository = `${repository}-other`;
+      const unparsedOtherBlob = "1234567890".repeat(4);
       await store.planIngestion({
         tenantId,
         repository: otherRepository,
@@ -2952,10 +2954,44 @@ test(
         updateRef: true,
         recordedAt: "2026-07-20T00:08:30.000Z",
         taskId: `other-${suffix}`,
-        files: [{ path: "README.md", blobSha: readmeBlob, size: 20 }]
+        files: [{ path: "README.md", blobSha: unparsedOtherBlob, size: 20 }]
       });
+      await metricsPool.query(
+        `insert into jina_context_graph.outbox
+          (id,tenant_id,event_type,consumer,aggregate_id,payload,created_at,available_at)
+         values ($1,$2,'ref_moved','manifest',$3,$4::jsonb,$5,$5)`,
+        [
+          stableId("outbox", `${tenantId}:${repository}:main:metrics-scope`),
+          tenantId,
+          `${repository}:main`,
+          JSON.stringify({ repoId: repository, refName: "main" }),
+          "2026-07-20T00:08:34.000Z"
+        ]
+      );
+      const scopedRepositoryMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
+        repository,
+        ref: "main"
+      });
+      const scopedOtherMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
+        repository: otherRepository,
+        ref: "main"
+      });
+      const scopedMissingRefMetrics = await store.operationalMetrics(tenantId, "2026-07-20T00:08:35.000Z", {
+        repository,
+        ref: "missing"
+      });
+      assert.equal(scopedRepositoryMetrics.unparsedBlobCount, 0);
+      assert.equal(scopedOtherMetrics.unparsedBlobCount, 1);
+      assert.equal(scopedMissingRefMetrics.unparsedBlobCount, 0);
+      assert.equal(
+        Object.values(scopedRepositoryMetrics.outboxDepth).reduce((sum, count) => sum + count, 0) >
+          Object.values(scopedMissingRefMetrics.outboxDepth).reduce((sum, count) => sum + count, 0),
+        true,
+        "ref-scoped metrics include repository-wide events but exclude events explicitly tied to another ref"
+      );
       await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:08:40.000Z");
       const beforeDrain = await store.operationalMetrics(tenantId, "2026-07-20T00:08:45.000Z");
+      assert.equal(beforeDrain.unparsedBlobCount, 1);
       assert.equal(Object.values(beforeDrain.outboxDepth).reduce((sum, count) => sum + count, 0) > 0, true);
       assert.equal((beforeDrain.outboxDepthByConsumer.graph ?? 0) > 0, true);
       assert.equal(beforeDrain.parsedBlobCountLastHour > 0, true);
@@ -3149,6 +3185,7 @@ test(
         "person erasure retracts assertions sourced from every destroyed personal observation"
       );
     } finally {
+      await metricsPool.end();
       await store.close();
     }
   }

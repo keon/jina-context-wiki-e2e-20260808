@@ -97,7 +97,12 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
     tenantId: string,
     now: string
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }>;
-  operationalMetrics(tenantId: string, now: string): Promise<ContextGraphOperationalMetrics>;
+  /** Omit scope for tenant-wide administration; release checks should name the repository and ref they certify. */
+  operationalMetrics(
+    tenantId: string,
+    now: string,
+    scope?: { readonly repository: string; readonly ref?: string }
+  ): Promise<ContextGraphOperationalMetrics>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<readonly string[]>;
   listAssertions(
     tenantId: string,

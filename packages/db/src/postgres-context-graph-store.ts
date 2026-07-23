@@ -3093,20 +3093,48 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     return { processedEventCount, rebuiltRepositories: [...rebuiltRepositories].sort() };
   }
 
-  async operationalMetrics(tenantId: string, now: string): Promise<ContextGraphOperationalMetrics> {
+  async operationalMetrics(
+    tenantId: string,
+    now: string,
+    scope?: { readonly repository: string; readonly ref?: string }
+  ): Promise<ContextGraphOperationalMetrics> {
     await this.initialize();
+    const repository = scope?.repository ?? null;
+    const ref = scope?.ref ?? null;
+    const backlogQuery = repository
+      ? this.pool.query<{ count: string }>(
+          `select count(distinct manifest.blob_sha)
+           from jina_context_graph.refs ref
+           cross join lateral jina_context_graph.commit_manifest(
+             ref.tenant_id,ref.repository,ref.commit_sha
+           ) manifest
+           join jina_context_graph.blobs blob
+             on blob.tenant_id=ref.tenant_id and blob.blob_sha=manifest.blob_sha
+           left join jina_context_graph.blob_analyses analysis
+             on analysis.tenant_id=blob.tenant_id and analysis.blob_sha=blob.blob_sha
+            and analysis.parser_version=$2
+           where ref.tenant_id=$1 and ref.repository=$3
+             and ($4::text is null or ref.ref_name=$4)
+             and analysis.blob_sha is null`,
+          [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repository, ref]
+        )
+      : this.pool.query<{ count: string }>(
+          `select count(distinct (b.blob_sha,b.tenant_id)) from jina_context_graph.blobs b
+           left join jina_context_graph.blob_analyses a
+             on a.tenant_id=b.tenant_id and a.blob_sha=b.blob_sha and a.parser_version=$2
+           where b.tenant_id=$1 and a.blob_sha is null`,
+          [tenantId, CONTEXT_GRAPH_PARSER_VERSION]
+        );
     const [outbox, backlog, parsed, proposed, unexplained, erasure, freshness, labels, retrieval] = await Promise.all([
       this.pool.query<{ event_type: string; consumer: string; count: string; oldest: Date | null }>(
         `select event_type,consumer,count(*),min(created_at) as oldest from jina_context_graph.outbox
-         where tenant_id=$1 and processed_at is null group by event_type,consumer`,
-        [tenantId]
+         where tenant_id=$1 and processed_at is null
+           and ($2::text is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=$2)
+           and ($3::text is null or payload->>'refName' is null or payload->>'refName'=$3)
+         group by event_type,consumer`,
+        [tenantId, repository, ref]
       ),
-      this.pool.query<{ count: string }>(
-        `select count(distinct (b.blob_sha,b.tenant_id)) from jina_context_graph.blobs b
-         left join jina_context_graph.blob_analyses a on a.tenant_id=b.tenant_id and a.blob_sha=b.blob_sha and a.parser_version=$2
-         where b.tenant_id=$1 and a.blob_sha is null`,
-        [tenantId, CONTEXT_GRAPH_PARSER_VERSION]
-      ),
+      backlogQuery,
       this.pool.query<{ count: string }>(
         `select count(*) from jina_context_graph.blob_analyses where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`,
         [tenantId]

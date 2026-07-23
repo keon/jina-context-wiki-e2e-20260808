@@ -109,6 +109,7 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
   const logs: string[] = [];
   let askReads = 0;
   let buildBody: unknown;
+  let metricsRequest: URL | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = String(input);
     requests.push(`${init?.method ?? "GET"} ${new URL(url).pathname}`);
@@ -179,7 +180,10 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
         ]
       });
     }
-    if (url.endsWith("/context-graph/metrics")) return json({ outboxDepth: {}, unparsedBlobCount: 0 });
+    if (new URL(url).pathname === "/context-graph/metrics") {
+      metricsRequest = new URL(url);
+      return json({ outboxDepth: {}, unparsedBlobCount: 0 });
+    }
     if (url.endsWith("/context-graph/graphs/graph-e2e")) {
       return json({
         id: "graph-e2e",
@@ -252,6 +256,8 @@ test("production acceptance waits for all chunks and verifies cited canonical ou
     requestKey: "deploy-1",
     githubInstallationId: 99
   });
+  assert.equal(metricsRequest?.searchParams.get("repository"), "omxyz/jina-context-graph-e2e");
+  assert.equal(metricsRequest?.searchParams.get("ref"), "main");
   assert.deepEqual(requests, [
     "POST /context-graph/build",
     "GET /board",

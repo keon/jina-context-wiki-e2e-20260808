@@ -649,16 +649,27 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     return { processedEventCount: 0, rebuiltRepositories: [] };
   }
 
-  async operationalMetrics(tenantId: string): Promise<ContextGraphOperationalMetrics> {
+  async operationalMetrics(
+    tenantId: string,
+    _now?: string,
+    scope?: { readonly repository: string; readonly ref?: string }
+  ): Promise<ContextGraphOperationalMetrics> {
+    const scopedSnapshots = [...this.snapshots.values()].filter(
+      (snapshot) =>
+        snapshot.tenantId === tenantId &&
+        (!scope || (snapshot.repository === scope.repository && (!scope.ref || snapshot.ref === scope.ref)))
+    );
     return {
       outboxDepth: {},
       outboxDepthByConsumer: {},
       oldestOutboxAgeSeconds: 0,
       reconciliationLagSeconds: 0,
-      unparsedBlobCount: [...this.snapshots.values()]
-        .filter((snapshot) => snapshot.tenantId === tenantId)
-        .flatMap((snapshot) => snapshot.files)
-        .filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION))).length,
+      unparsedBlobCount: new Set(
+        scopedSnapshots
+          .flatMap((snapshot) => snapshot.files)
+          .filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION)))
+          .map((file) => file.blobSha)
+      ).size,
       parsedBlobCountLastHour: 0,
       manifestStalenessSeconds: 0,
       searchStalenessSeconds: 0,

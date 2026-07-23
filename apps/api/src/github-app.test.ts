@@ -1205,6 +1205,19 @@ test("context graph reads require authentication and cannot cross tenant boundar
     );
     assert.equal((await authenticatedFetch(`${baseUrl}/context-graph/metrics`, "user:reader@example.com")).status, 403);
     assert.equal((await authenticatedFetch(`${baseUrl}/context-graph/metrics`, "user:admin@example.com")).status, 200);
+    assert.equal(
+      (
+        await authenticatedFetch(
+          `${baseUrl}/context-graph/metrics?repository=omxyz%2Fa&ref=main`,
+          "user:admin@example.com"
+        )
+      ).status,
+      200
+    );
+    assert.equal(
+      (await authenticatedFetch(`${baseUrl}/context-graph/metrics?ref=main`, "user:admin@example.com")).status,
+      400
+    );
     const forbiddenCommand = await fetch(`${baseUrl}/context-graph/commands`, {
       method: "POST",
       headers: {
