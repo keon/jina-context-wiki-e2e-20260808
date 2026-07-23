@@ -800,6 +800,62 @@ test("generic causal traces preserve alternative causes and evaluate interventio
   assert.equal(result.basis, "graph-derived");
 });
 
+test("resolves projected derived issues as causal roots through their canonical description", () => {
+  const repository = "org/repo";
+  const graph = {
+    id: "graph",
+    tenantId: "t",
+    repository,
+    ref: "main",
+    commitSha: "f".repeat(40),
+    generatedAt: "2026-01-01T00:00:00Z",
+    generator: { executor: "projection" as const, model: "test" },
+    summary: "derived issue fixture",
+    nodes: [
+      {
+        id: "entity:node-derived",
+        kind: "Issue" as const,
+        label: "Audit exports are not chronological",
+        description: "derived:issue:org/repo:candidate_11",
+        evidence: ["assertion:issue"]
+      },
+      {
+        id: "entity:node-pr",
+        kind: "PullRequest" as const,
+        label: "PR #11",
+        description: "github:pr:org/repo#11",
+        evidence: ["observation:pr11"]
+      }
+    ],
+    edges: [
+      {
+        id: "resolution",
+        source: "entity:node-derived",
+        target: "entity:node-pr",
+        predicate: "RESOLVED_BY",
+        plane: "knowledge" as const,
+        why: "PR #11 repairs the documented untracked regression.",
+        evidence: ["assertion:resolution"]
+      }
+    ]
+  };
+  const items = causalTraceItemsFromGraph(graph, {
+    tenantId: "t",
+    allowedRepositories: [repository],
+    repository,
+    template: "causal_trace",
+    query: "Show the derived issue for the unlinked fix"
+  });
+  assert.equal(items[0]?.title, "Issue: Audit exports are not chronological");
+  assert.equal(items[0]?.citations.length, 2);
+  assert.equal(
+    (items[0]?.data.resolutions as { nodes: { kind: string; label: string }[] }[])[0]?.nodes.some(
+      (node) => node.kind === "PullRequest" && node.label === "PR #11"
+    ),
+    true
+  );
+});
+
 test("selects bounded assertion focus across newly ingested commits", () => {
   const current = new Set(["src/latest.ts", "docs/root-cause.md", "src/older.ts", "tests/regression.test.ts"]);
   assert.deepEqual(
@@ -1065,6 +1121,7 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(classifyTemplates(`Which issue did commit ${"a".repeat(40)} cause, and why?`), ["issue_trace"]);
   assert.deepEqual(classifyTemplates("Which issue did PR #42 introduce?"), ["issue_trace"]);
   assert.deepEqual(classifyTemplates("Which issue did PR #11 resolve?"), ["issue_trace"]);
+  assert.deepEqual(classifyTemplates("What issue was derived for the unlinked fixing PR #11?"), ["causal_trace"]);
   assert.deepEqual(classifyTemplates('Which PR or commit caused "Administrators cannot delete resources"?'), [
     "issue_trace"
   ]);
