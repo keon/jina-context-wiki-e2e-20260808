@@ -39,11 +39,15 @@ import {
   type ContextGraphCommand,
   type ContextGraphAssertionBatch,
   type ContextGraphBuildRecord,
+  type ContextGraphBuildStatus,
+  type ContextGraphBuildTrigger,
+  type ContextGraphGlobalWorkflowFilter,
   type ContextGraph,
   type ContextGraphStore,
   type ContextGraphPipelineCoordinator,
   type ContextGraphStageLease,
   type ContextGraphStageRecord,
+  type ContextGraphWorkflowCursor,
   type ContextGraphWorkerTopic,
   type ContextGraphNodeKind,
   type RepositoryContextOperation,
@@ -105,7 +109,7 @@ export interface ApiServerConfig {
   /** Read-only resolver backed by the original Jina public identity tables. */
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
-  /** Read-only credential accepted only by the cross-tenant admin graph listing. */
+  /** Read-only credential accepted only by cross-tenant admin graph and operations routes. */
   readonly globalAdminToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
@@ -577,6 +581,42 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         graphs: [...(await contextGraphStore.listAllSummaries())].sort((left, right) =>
           right.generatedAt.localeCompare(left.generatedAt)
         )
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/admin/context-graph/operations") {
+      if (!hasGlobalAdminCredential(request, config)) {
+        json(response, 401, { error: "unauthorized" });
+        return;
+      }
+      const filter = adminGlobalWorkflowFilter(url);
+      const page = await contextGraphCoordinator.listGlobal(filter);
+      const graphTenantIds = (await contextGraphStore.listAllSummaries()).map((graph) => graph.tenantId);
+      const activeTenantIds = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.listTenantIds()
+        : config.tenantId
+          ? [config.tenantId]
+          : [];
+      const tenantIds = [
+        ...new Set([...activeTenantIds, ...graphTenantIds, ...page.workflows.map(({ build }) => build.tenantId)])
+      ].sort();
+      const observedAt = nowIso();
+      const [tenants, queueDepth] = await Promise.all([
+        Promise.all(
+          tenantIds.map(async (tenantId) => ({
+            tenantId,
+            workflows: page.workflows.filter(({ build }) => build.tenantId === tenantId),
+            metrics: await contextGraphStore.operationalMetrics(tenantId, observedAt)
+          }))
+        ),
+        contextGraphCoordinator.countActive(filter.tenantId)
+      ]);
+      jsonCacheable(request, response, {
+        observedAt,
+        tenants,
+        queueDepth,
+        ...(page.nextCursor ? { nextCursor: encodeAdminWorkflowCursor(page.nextCursor) } : {})
       });
       return;
     }
@@ -1240,7 +1280,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (supplied.length > 0) {
       const installationIds = supplied.map((value) => requiredPositiveInteger(value, "githubInstallationId"));
       if (new Set(installationIds).size !== 1) throw invalidRequest("GitHub installation id fields must agree");
-      return installationIds[0]!;
+      const githubInstallationId = installationIds[0]!;
+      if (config.sharedIdentityResolver) {
+        const identity = await config.sharedIdentityResolver.resolveRepository({
+          repository,
+          githubInstallationId
+        });
+        if (
+          !identity ||
+          identity.tenantId !== tenantId ||
+          identity.repository.toLowerCase() !== repository.toLowerCase()
+        ) {
+          throw new ApiError(
+            409,
+            "repository_installation_mismatch",
+            "repository, tenant, and GitHub installation do not identify one active installation"
+          );
+        }
+      }
+      return githubInstallationId;
     }
 
     const latest = (await contextGraphCoordinator.list(tenantId, { repositories: [repository] }))
@@ -1879,6 +1937,79 @@ function parseContextGraphBuildMetadata(value: unknown): Readonly<Record<string,
     metadata[key] = typeof item === "string" ? item.slice(0, 500) : item;
   }
   return metadata;
+}
+
+function adminGlobalWorkflowFilter(url: URL): ContextGraphGlobalWorkflowFilter {
+  const limitValue = url.searchParams.get("limit");
+  const limit = limitValue ? requiredPositiveInteger(Number(limitValue), "limit") : 100;
+  if (limit > 500) throw invalidRequest("limit must not exceed 500");
+  const tenantId = url.searchParams.get("tenantId")?.trim();
+  if (tenantId && !/^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/.test(tenantId)) {
+    throw invalidRequest("invalid tenant ID");
+  }
+  const repositoryValue = url.searchParams.get("repository")?.trim();
+  const query = url.searchParams.get("query")?.trim();
+  if (query && query.length > 200) throw invalidRequest("query must not exceed 200 characters");
+  const statusesValue = url.searchParams.get("statuses")?.trim();
+  const statuses = statusesValue
+    ? statusesValue.split(",").map((status) => requiredContextGraphBuildStatus(status))
+    : undefined;
+  const triggerValue = url.searchParams.get("trigger")?.trim();
+  const trigger = triggerValue ? requiredContextGraphBuildTrigger(triggerValue) : undefined;
+  const createdAfterValue = url.searchParams.get("createdAfter")?.trim();
+  const activityAfterValue = url.searchParams.get("activityAfter")?.trim();
+  return {
+    limit,
+    ...(url.searchParams.get("cursor") ? { cursor: decodeAdminWorkflowCursor(url.searchParams.get("cursor")!) } : {}),
+    ...(tenantId ? { tenantId } : {}),
+    ...(repositoryValue ? { repository: requiredRepositoryName(repositoryValue, "repository") } : {}),
+    ...(statuses ? { statuses } : {}),
+    ...(trigger ? { trigger } : {}),
+    ...(query ? { query } : {}),
+    ...(createdAfterValue ? { createdAfter: requiredIsoInstant(createdAfterValue, "createdAfter") } : {}),
+    ...(activityAfterValue ? { activityAfter: requiredIsoInstant(activityAfterValue, "activityAfter") } : {})
+  };
+}
+
+function requiredContextGraphBuildStatus(value: string): ContextGraphBuildStatus {
+  if (["queued", "in_progress", "enriching", "done", "failed", "superseded"].includes(value)) {
+    return value as ContextGraphBuildStatus;
+  }
+  throw invalidRequest("unsupported context graph build status");
+}
+
+function requiredContextGraphBuildTrigger(value: string): ContextGraphBuildTrigger {
+  if (["webhook", "manual", "scheduled", "api"].includes(value)) {
+    return value as ContextGraphBuildTrigger;
+  }
+  throw invalidRequest("unsupported context graph build trigger");
+}
+
+function requiredIsoInstant(value: string, field: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw invalidRequest(`${field} must be an ISO timestamp`);
+  return date.toISOString();
+}
+
+function encodeAdminWorkflowCursor(cursor: ContextGraphWorkflowCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeAdminWorkflowCursor(value: string): ContextGraphWorkflowCursor {
+  if (value.length > 1_000) throw invalidRequest("invalid operations cursor");
+  try {
+    const cursor = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as unknown;
+    if (!isRecord(cursor) || typeof cursor.id !== "string" || typeof cursor.createdAt !== "string") {
+      throw new Error("invalid cursor shape");
+    }
+    return {
+      id: requiredString(cursor.id, "cursor.id"),
+      createdAt: requiredIsoInstant(cursor.createdAt, "cursor.createdAt")
+    };
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw invalidRequest("invalid operations cursor");
+  }
 }
 
 function authenticatedPrincipal(

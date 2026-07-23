@@ -6,6 +6,7 @@ export type ContextGraphWorkerTopic =
 export type ContextGraphStageStatus =
   "triage" | "queued" | "in_progress" | "done" | "failed" | "canceled" | "superseded";
 export type ContextGraphBuildStatus = "queued" | "in_progress" | "enriching" | "done" | "failed" | "superseded";
+export type ContextGraphBuildTrigger = "webhook" | "manual" | "scheduled" | "api";
 
 export const CONTEXT_GRAPH_DEFAULT_HISTORY_LIMIT = 500;
 export const CONTEXT_GRAPH_MAX_HISTORY_LIMIT = 10_000;
@@ -92,6 +93,34 @@ export interface ContextGraphTaskBoardEvent {
   readonly payload: Readonly<Record<string, unknown>>;
 }
 
+export interface ContextGraphWorkflow {
+  readonly build: ContextGraphBuildRecord;
+  readonly stages: readonly ContextGraphStageRecord[];
+}
+
+export interface ContextGraphWorkflowCursor {
+  readonly createdAt: string;
+  readonly id: string;
+}
+
+export interface ContextGraphWorkflowPage {
+  readonly workflows: readonly ContextGraphWorkflow[];
+  readonly nextCursor?: ContextGraphWorkflowCursor;
+}
+
+export interface ContextGraphGlobalWorkflowFilter {
+  readonly limit: number;
+  readonly cursor?: ContextGraphWorkflowCursor;
+  readonly tenantId?: string;
+  readonly repository?: string;
+  readonly statuses?: readonly ContextGraphBuildStatus[];
+  readonly trigger?: ContextGraphBuildTrigger;
+  readonly query?: string;
+  readonly createdAfter?: string;
+  /** Include builds created or updated at or after this instant. */
+  readonly activityAfter?: string;
+}
+
 export interface ContextGraphPipelineCoordinator {
   createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord>;
   claim(input: {
@@ -144,9 +173,10 @@ export interface ContextGraphPipelineCoordinator {
   list(
     tenantId: string,
     filter?: { readonly repositories?: readonly string[] }
-  ): Promise<
-    readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[]
-  >;
+  ): Promise<readonly ContextGraphWorkflow[]>;
+  /** Cross-tenant operational history, ordered newest-first with stable cursor pagination. */
+  listGlobal(filter: ContextGraphGlobalWorkflowFilter): Promise<ContextGraphWorkflowPage>;
+  countActive(tenantId?: string): Promise<number>;
   listEvents(
     tenantId: string,
     filter?: { readonly taskIds?: readonly string[] }
@@ -439,9 +469,7 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
   async list(
     tenantId: string,
     filter?: { readonly repositories?: readonly string[] }
-  ): Promise<
-    readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[]
-  > {
+  ): Promise<readonly ContextGraphWorkflow[]> {
     const repositories = filter?.repositories ? new Set(filter.repositories) : undefined;
     return [...this.builds.values()]
       .filter((build) => build.tenantId === tenantId && (!repositories || repositories.has(build.repository)))
@@ -452,6 +480,33 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
           .sort((a, b) => stageOrder(a) - stageOrder(b))
           .map((stage) => structuredClone(stage))
       }));
+  }
+
+  async listGlobal(filter: ContextGraphGlobalWorkflowFilter): Promise<ContextGraphWorkflowPage> {
+    const limit = normalizedGlobalLimit(filter.limit);
+    const workflows = [...this.builds.values()]
+      .filter((build) => globalWorkflowMatches(build, filter))
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+      .slice(0, limit + 1);
+    const page = workflows.slice(0, limit);
+    const last = page.at(-1);
+    return {
+      workflows: page.map((build) => ({
+        build: structuredClone(build),
+        stages: [...this.stages.values()]
+          .filter((stage) => stage.buildId === build.id)
+          .sort((left, right) => stageOrder(left) - stageOrder(right))
+          .map((stage) => structuredClone(stage))
+      })),
+      ...(workflows.length > limit && last ? { nextCursor: { createdAt: last.createdAt, id: last.id } } : {})
+    };
+  }
+
+  async countActive(tenantId?: string): Promise<number> {
+    return [...this.builds.values()].filter(
+      (build) =>
+        (!tenantId || build.tenantId === tenantId) && ["queued", "in_progress", "enriching"].includes(build.status)
+    ).length;
   }
 
   async listEvents(
@@ -522,6 +577,54 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     }
     return "in_progress";
   }
+}
+
+function normalizedGlobalLimit(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
+    throw new Error("global workflow limit must be an integer from 1 to 500");
+  }
+  return limit;
+}
+
+function globalWorkflowMatches(build: ContextGraphBuildRecord, filter: ContextGraphGlobalWorkflowFilter): boolean {
+  if (
+    filter.cursor &&
+    (build.createdAt > filter.cursor.createdAt ||
+      (build.createdAt === filter.cursor.createdAt && build.id >= filter.cursor.id))
+  )
+    return false;
+  if (filter.tenantId && build.tenantId !== filter.tenantId) return false;
+  if (filter.repository && build.repository !== filter.repository) return false;
+  if (filter.statuses && !filter.statuses.includes(build.status)) return false;
+  if (filter.trigger && contextGraphBuildTrigger(build) !== filter.trigger) return false;
+  if (filter.query) {
+    const query = filter.query.toLowerCase();
+    if (
+      ![build.repository, build.tenantId, build.ref, build.id, build.requestKey].some((value) =>
+        value.toLowerCase().includes(query)
+      )
+    )
+      return false;
+  }
+  if (filter.createdAfter && build.createdAt < filter.createdAfter) return false;
+  if (filter.activityAfter && build.createdAt < filter.activityAfter && build.updatedAt < filter.activityAfter)
+    return false;
+  return true;
+}
+
+function contextGraphBuildTrigger(build: ContextGraphBuildRecord): ContextGraphBuildTrigger {
+  const source = [
+    build.metadata.githubEventName,
+    build.metadata.eventName,
+    build.metadata.trigger,
+    build.metadata.source
+  ]
+    .find((value): value is string => typeof value === "string")
+    ?.toLowerCase();
+  if (source?.includes("schedule")) return "scheduled";
+  if (source?.includes("webhook") || source?.includes("push") || source?.includes("github")) return "webhook";
+  if (source?.includes("manual") || build.requestKey.startsWith("admin-")) return "manual";
+  return "api";
 }
 
 function plannedStages(build: MutableBuild): MutableStage[] {

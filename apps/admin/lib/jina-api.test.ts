@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
-import { askGraph, getGraph, listAllGraphs } from "./jina-api.ts";
+import {
+  askGraph,
+  getGraph,
+  listAdminOperations,
+  listAllAdminOperations,
+  listAllGraphs,
+  startGraphBuild
+} from "./jina-api.ts";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 const ORIGINAL_ENV = {
@@ -81,6 +88,100 @@ test("graph reads and queries use the internal credential with the graph tenant"
   }
   assert.equal(requests[0]?.url, "https://api.example.test/context-graph/graphs/graph%2Fb");
   assert.equal(requests[1]?.url, "https://api.example.test/context-graph/ask");
+});
+
+test("global operations use the read-only cross-tenant credential", { concurrency: false }, async () => {
+  process.env.JINA_API_URL = "https://api.example.test";
+  process.env.INTERNAL_API_TOKEN = "internal-secret";
+  process.env.JINA_GLOBAL_ADMIN_TOKEN = "global-secret";
+
+  let receivedUrl = "";
+  let receivedHeaders: Headers | undefined;
+  globalThis.fetch = async (input, init) => {
+    receivedUrl = String(input);
+    receivedHeaders = new Headers(init?.headers);
+    return Response.json({ observedAt: "2026-07-23T00:00:00.000Z", tenants: [], queueDepth: 0 });
+  };
+
+  const operations = await listAdminOperations({
+    limit: 100,
+    tenantId: "tenant-a",
+    statuses: ["done", "failed"],
+    trigger: "manual"
+  });
+
+  assert.equal(
+    receivedUrl,
+    "https://api.example.test/internal/admin/context-graph/operations?limit=100&tenantId=tenant-a&statuses=done%2Cfailed&trigger=manual"
+  );
+  assert.equal(receivedHeaders?.get("authorization"), "Bearer global-secret");
+  assert.deepEqual(operations.tenants, []);
+});
+
+test("global operations consume every cursor when a complete range is requested", { concurrency: false }, async () => {
+  process.env.JINA_API_URL = "https://api.example.test";
+  process.env.INTERNAL_API_TOKEN = "internal-secret";
+  process.env.JINA_GLOBAL_ADMIN_TOKEN = "global-secret";
+
+  const urls: string[] = [];
+  globalThis.fetch = async (input) => {
+    const url = String(input);
+    urls.push(url);
+    const second = url.includes("cursor=next-page");
+    return Response.json({
+      observedAt: "2026-07-23T00:00:00.000Z",
+      queueDepth: 4,
+      tenants: [
+        {
+          tenantId: "tenant-a",
+          workflows: [],
+          metrics: {}
+        }
+      ],
+      ...(second ? {} : { nextCursor: "next-page" })
+    });
+  };
+
+  const operations = await listAllAdminOperations({
+    activityAfter: "2026-07-22T00:00:00.000Z"
+  });
+
+  assert.equal(urls.length, 2);
+  assert.match(urls[0] ?? "", /limit=500/);
+  assert.match(urls[1] ?? "", /cursor=next-page/);
+  assert.equal(operations.queueDepth, 4);
+  assert.deepEqual(
+    operations.tenants.map((tenant) => tenant.tenantId),
+    ["tenant-a"]
+  );
+});
+
+test("graph builds use the internal credential and explicit tenant installation", { concurrency: false }, async () => {
+  process.env.JINA_API_URL = "https://api.example.test";
+  process.env.INTERNAL_API_TOKEN = "internal-secret";
+  process.env.JINA_GLOBAL_ADMIN_TOKEN = "global-secret";
+
+  let receivedHeaders: Headers | undefined;
+  let receivedBody = "";
+  globalThis.fetch = async (_input, init) => {
+    receivedHeaders = new Headers(init?.headers);
+    receivedBody = String(init?.body);
+    return Response.json({ task: { id: "build-1" } }, { status: 202 });
+  };
+
+  const result = await startGraphBuild({
+    tenantId: "tenant-a",
+    repository: "omxyz/jina",
+    ref: "main",
+    githubInstallationId: 140435029
+  });
+
+  assert.equal(result.task.id, "build-1");
+  assert.equal(receivedHeaders?.get("authorization"), "Bearer internal-secret");
+  assert.equal(receivedHeaders?.get("x-jina-tenant-id"), "tenant-a");
+  const body = JSON.parse(receivedBody) as Record<string, unknown>;
+  assert.equal(body.githubInstallationId, 140435029);
+  assert.match(String(body.requestKey), /^admin-/);
 });
 
 test(

@@ -22,6 +22,7 @@ const METRICS_ROUTES = new Set([
   "/context-graph/metrics",
   "/context-graph/retrieve",
   "/internal/admin/context-graph",
+  "/internal/admin/context-graph/operations",
   "/internal/graph/access/sync",
   "/internal/observability",
   "/internal/context-graph/assertions/cached",
@@ -81,7 +82,11 @@ export function isSnapshotExemptInternalRoute(method: string | undefined, pathna
 export function isDirectContextGraphRead(method: string | undefined, pathname: string): boolean {
   if (method === "OPTIONS" || (method === "GET" && ["/health", "/healthz", "/task-types"].includes(pathname)))
     return true;
-  if (method === "GET" && pathname === "/internal/admin/context-graph") return true;
+  if (
+    method === "GET" &&
+    ["/internal/admin/context-graph", "/internal/admin/context-graph/operations"].includes(pathname)
+  )
+    return true;
   if (isPublicGraphRoute(pathname)) return true;
   if (method === "GET" && ["/context-graph", "/context-graph/metrics", "/context-graph/assertions"].includes(pathname))
     return true;

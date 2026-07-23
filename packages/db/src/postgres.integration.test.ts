@@ -4182,6 +4182,67 @@ test(
 );
 
 test(
+  "Postgres contextGraph global history paginates across dormant tenant boundaries",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantA = `global-a-${suffix}`;
+    const tenantB = `global-b-${suffix}`;
+    const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString });
+    const cleanup = new Pool({ connectionString });
+    try {
+      await coordinator.createBuild({
+        tenantId: tenantA,
+        repository: `omxyz/global-a-${suffix}`,
+        ref: "main",
+        requestKey: "admin-first",
+        snapshotFirst: true,
+        createdAt: "2026-07-23T00:00:00.000Z",
+        metadata: { source: "manual" }
+      });
+      await coordinator.createBuild({
+        tenantId: tenantB,
+        repository: `external/global-b-${suffix}`,
+        ref: "main",
+        requestKey: "push-second",
+        snapshotFirst: true,
+        createdAt: "2026-07-23T01:00:00.000Z",
+        metadata: { source: "github push" }
+      });
+
+      const first = await coordinator.listGlobal({ limit: 1, query: suffix });
+      assert.deepEqual(
+        first.workflows.map(({ build }) => build.tenantId),
+        [tenantB]
+      );
+      assert.ok(first.nextCursor);
+      const second = await coordinator.listGlobal({ limit: 1, cursor: first.nextCursor, query: suffix });
+      assert.deepEqual(
+        second.workflows.map(({ build }) => build.tenantId),
+        [tenantA]
+      );
+      assert.deepEqual(
+        (await coordinator.listGlobal({ limit: 10, trigger: "manual", tenantId: tenantA })).workflows.map(
+          ({ build }) => build.requestKey
+        ),
+        ["admin-first"]
+      );
+      assert.equal(await coordinator.countActive(tenantA), 1);
+      assert.equal(await coordinator.countActive(tenantB), 1);
+    } finally {
+      await coordinator.close();
+      await cleanup
+        .query("delete from jina_board.workflows where tenant_id=any($1::text[])", [[tenantA, tenantB]])
+        .catch(() => undefined);
+      await cleanup.end();
+    }
+  }
+);
+
+test(
   "Postgres contextGraph sweep records the interrupted attempt when a lease expires",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"

@@ -1260,16 +1260,45 @@ test("global admin graph listing requires its own credential and returns every t
   });
   await contextGraphStore.save(tenantAGraph);
   await contextGraphStore.save(tenantBGraph);
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  await contextGraphCoordinator.createBuild({
+    tenantId: tenantA,
+    repository: "omxyz/a",
+    ref: "main",
+    requestKey: "admin-a",
+    snapshotFirst: true,
+    createdAt: "2026-07-23T00:00:00.000Z",
+    metadata: { githubInstallationId: 101 }
+  });
+  await contextGraphCoordinator.createBuild({
+    tenantId: tenantB,
+    repository: "external/b",
+    ref: "main",
+    requestKey: "admin-b",
+    snapshotFirst: true,
+    createdAt: "2026-07-23T01:00:00.000Z",
+    metadata: { githubInstallationId: 202 }
+  });
   const server = createApiServer({
     contextGraphStore,
+    contextGraphCoordinator,
     internalApiToken: INTERNAL_TOKEN,
     globalAdminToken: GLOBAL_ADMIN_TOKEN,
     sharedIdentityResolver: {
-      async resolveRepository() {
+      async resolveRepository(input) {
+        if (input.repository.toLowerCase() === "omxyz/a" && input.githubInstallationId === 101) {
+          return {
+            tenantId: tenantA,
+            githubAccountId: "1",
+            githubAccountLogin: "omxyz",
+            githubAccountType: "Organization",
+            repository: "omxyz/a"
+          };
+        }
         return undefined;
       },
       async listTenantIds() {
-        return [tenantA, tenantB];
+        return [tenantA];
       },
       async ping() {},
       async close() {}
@@ -1291,6 +1320,79 @@ test("global admin graph listing requires its own credential and returns every t
       [tenantA, "omxyz/a"],
       [tenantB, "external/b"]
     ]);
+
+    const operationsRoute = `${baseUrl}/internal/admin/context-graph/operations?limit=1`;
+    assert.equal((await fetch(operationsRoute)).status, 401);
+    const operationsResponse = await fetch(operationsRoute, {
+      headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
+    });
+    assert.equal(operationsResponse.status, 200);
+    const operations = (await operationsResponse.json()) as {
+      readonly observedAt: string;
+      readonly tenants: readonly {
+        readonly tenantId: string;
+        readonly workflows: readonly unknown[];
+        readonly metrics: { readonly unparsedBlobCount: number };
+      }[];
+      readonly nextCursor?: string;
+      readonly queueDepth: number;
+    };
+    assert.equal(Number.isNaN(new Date(operations.observedAt).getTime()), false);
+    assert.deepEqual(
+      operations.tenants.map((tenant) => [tenant.tenantId, tenant.workflows.length, tenant.metrics.unparsedBlobCount]),
+      [
+        [tenantA, 0, 0],
+        [tenantB, 1, 0]
+      ]
+    );
+    assert.equal(typeof operations.nextCursor, "string");
+    assert.equal(operations.queueDepth, 2);
+    const olderOperations = (await fetch(`${operationsRoute}&cursor=${encodeURIComponent(operations.nextCursor!)}`, {
+      headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
+    }).then((response) => response.json())) as {
+      readonly tenants: readonly { readonly tenantId: string; readonly workflows: readonly unknown[] }[];
+      readonly nextCursor?: string;
+    };
+    assert.deepEqual(
+      olderOperations.tenants.map((tenant) => [tenant.tenantId, tenant.workflows.length]),
+      [
+        [tenantA, 1],
+        [tenantB, 0]
+      ]
+    );
+    assert.equal(olderOperations.nextCursor, undefined);
+
+    const validBuild = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": tenantA
+      },
+      body: JSON.stringify({
+        repository: "omxyz/a",
+        ref: "main",
+        requestKey: "validated-admin",
+        githubInstallationId: 101
+      })
+    });
+    assert.equal(validBuild.status, 202);
+    const mismatchedBuild = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": tenantB
+      },
+      body: JSON.stringify({
+        repository: "omxyz/a",
+        ref: "main",
+        requestKey: "mismatched-admin",
+        githubInstallationId: 101
+      })
+    });
+    assert.equal(mismatchedBuild.status, 409);
+    assert.equal(((await mismatchedBuild.json()) as { code?: string }).code, "repository_installation_mismatch");
 
     const tenantBList = await fetch(`${baseUrl}/context-graph`, {
       headers: {

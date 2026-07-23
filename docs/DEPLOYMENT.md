@@ -82,7 +82,7 @@ Both apps make server-side API calls with `JINA_API_URL` and `INTERNAL_API_TOKEN
 
 `JINA_API_URL` is `https://jina-api-m56inn6iva-uc.a.run.app`, and the dashboard's `JINA_TENANT_ID` is the original shared-database tenant UUID. The dashboard's `/api/overview` route forwards the bearer credential, tenant ID, and bound principal to the API. The admin does not require a fixed tenant ID when its global credential is configured. A browser request without the web session is expected to return `401`; an authenticated request must return the requested application data and must not use a localhost fallback.
 
-Provision `jina-global-admin-token` directly in Secret Manager with a high-entropy value distinct from `jina-internal-api-token`. Grant the API runtime service account secret access; the deployment mounts it as `JINA_GLOBAL_ADMIN_TOKEN`. Configure the same value as a server-only `JINA_GLOBAL_ADMIN_TOKEN` in the admin Vercel project for Production and Preview. The credential is accepted only by `GET /internal/admin/context-graph`.
+Provision `jina-global-admin-token` directly in Secret Manager with a high-entropy value distinct from `jina-internal-api-token`. Grant the API runtime service account secret access; the deployment mounts it as `JINA_GLOBAL_ADMIN_TOKEN`. Configure the same value as a server-only `JINA_GLOBAL_ADMIN_TOKEN` in the admin Vercel project for Production and Preview. The credential is accepted only by `GET /internal/admin/context-graph` and `GET /internal/admin/context-graph/operations`.
 
 Streamable HTTP MCP at `POST /mcp` requires both the internal credential and a bound principal. Browser origins must be listed exactly in `JINA_MCP_ALLOWED_ORIGINS`.
 

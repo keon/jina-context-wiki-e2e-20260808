@@ -4,12 +4,14 @@ import {
   contextGraphStagePrerequisites,
   contextGraphStageRequired,
   type ContextGraphBuildRecord,
+  type ContextGraphGlobalWorkflowFilter,
   type ContextGraphPipelineBuildRequest,
   type ContextGraphPipelineCoordinator,
   type ContextGraphStageClaim,
   type ContextGraphStageLease,
   type ContextGraphStageRecord,
   type ContextGraphTaskBoardEvent,
+  type ContextGraphWorkflowPage,
   type ContextGraphWorkerTopic
 } from "@jina/context-graph";
 import { randomUUID } from "node:crypto";
@@ -634,6 +636,49 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     }));
   }
 
+  async listGlobal(filter: ContextGraphGlobalWorkflowFilter): Promise<ContextGraphWorkflowPage> {
+    await this.initialize();
+    const { where, values } = globalWorkflowWhere(filter);
+    const limit = normalizedGlobalLimit(filter.limit);
+    values.push(limit + 1);
+    const builds = await this.pool.query<BuildRow>(
+      `select * from jina_board.workflows
+       ${where}
+       order by created_at desc,id desc
+       limit $${values.length}`,
+      values
+    );
+    const pageRows = builds.rows.slice(0, limit);
+    const stages =
+      pageRows.length === 0
+        ? { rows: [] as StageRow[] }
+        : await this.pool.query<StageRow>(
+            "select * from jina_board.tasks where build_id=any($1::text[]) order by build_id,ordinal",
+            [pageRows.map((build) => build.id)]
+          );
+    const last = pageRows.at(-1);
+    return {
+      workflows: pageRows.map((build) => ({
+        build: buildRecord(build),
+        stages: stages.rows.filter((stage) => stage.build_id === build.id).map(stageRecord)
+      })),
+      ...(builds.rows.length > limit && last
+        ? { nextCursor: { createdAt: last.created_at.toISOString(), id: last.id } }
+        : {})
+    };
+  }
+
+  async countActive(tenantId?: string): Promise<number> {
+    await this.initialize();
+    const result = await this.pool.query<{ count: string }>(
+      `select count(*) from jina_board.workflows
+       where status in ('queued','in_progress','enriching')
+         and ($1::text is null or tenant_id=$1::text)`,
+      [tenantId ?? null]
+    );
+    return Number(result.rows[0]?.count ?? 0);
+  }
+
   async listEvents(
     tenantId: string,
     filter?: { readonly taskIds?: readonly string[] }
@@ -736,6 +781,61 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
       client.release();
     }
   }
+}
+
+function normalizedGlobalLimit(limit: number): number {
+  if (!Number.isSafeInteger(limit) || limit <= 0 || limit > 500) {
+    throw new Error("global workflow limit must be an integer from 1 to 500");
+  }
+  return limit;
+}
+
+function globalWorkflowWhere(filter: ContextGraphGlobalWorkflowFilter): {
+  readonly where: string;
+  readonly values: unknown[];
+} {
+  const clauses: string[] = [];
+  const values: unknown[] = [];
+  const parameter = (value: unknown, cast = ""): string => {
+    values.push(value);
+    return `$${values.length}${cast}`;
+  };
+  if (filter.cursor) {
+    const createdAt = parameter(filter.cursor.createdAt, "::timestamptz");
+    const id = parameter(filter.cursor.id, "::text");
+    clauses.push(`(created_at,id)<(${createdAt},${id})`);
+  }
+  if (filter.tenantId) clauses.push(`tenant_id=${parameter(filter.tenantId, "::text")}`);
+  if (filter.repository) clauses.push(`repository=${parameter(filter.repository, "::text")}`);
+  if (filter.statuses) clauses.push(`status=any(${parameter([...filter.statuses], "::text[]")})`);
+  if (filter.trigger) {
+    const source =
+      "lower(coalesce(metadata->>'githubEventName',metadata->>'eventName',metadata->>'trigger',metadata->>'source',''))";
+    clauses.push(
+      `(case
+        when ${source} like '%schedule%' then 'scheduled'
+        when ${source} like '%webhook%' or ${source} like '%push%' or ${source} like '%github%' then 'webhook'
+        when ${source} like '%manual%' or request_key like 'admin-%' then 'manual'
+        else 'api'
+      end)=${parameter(filter.trigger, "::text")}`
+    );
+  }
+  if (filter.query) {
+    const query = parameter(`%${filter.query}%`, "::text");
+    clauses.push(
+      `(repository ilike ${query} or tenant_id::text ilike ${query} or ref_name ilike ${query}
+        or id ilike ${query} or request_key ilike ${query})`
+    );
+  }
+  if (filter.createdAfter) clauses.push(`created_at>=${parameter(filter.createdAfter, "::timestamptz")}`);
+  if (filter.activityAfter) {
+    const after = parameter(filter.activityAfter, "::timestamptz");
+    clauses.push(`(created_at>=${after} or updated_at>=${after})`);
+  }
+  return {
+    where: clauses.length > 0 ? `where ${clauses.join(" and ")}` : "",
+    values
+  };
 }
 
 function plannedStages(

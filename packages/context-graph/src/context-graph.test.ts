@@ -4202,3 +4202,55 @@ test("summary listings scope by repository and ref before any result limit", asy
     ["external-tenant", "tenant", "tenant", "tenant"]
   );
 });
+
+test("global workflow history paginates across tenants and preserves operational filters", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
+  for (const build of [
+    {
+      tenantId: "tenant-a",
+      repository: "omxyz/a",
+      requestKey: "admin-a",
+      createdAt: "2026-07-23T00:00:00.000Z",
+      metadata: { source: "manual" }
+    },
+    {
+      tenantId: "tenant-b",
+      repository: "external/b",
+      requestKey: "push-b",
+      createdAt: "2026-07-23T01:00:00.000Z",
+      metadata: { source: "github push" }
+    },
+    {
+      tenantId: "tenant-c",
+      repository: "external/c",
+      requestKey: "schedule-c",
+      createdAt: "2026-07-23T02:00:00.000Z",
+      metadata: { source: "scheduled" }
+    }
+  ]) {
+    await coordinator.createBuild({
+      ...build,
+      ref: "main",
+      snapshotFirst: true
+    });
+  }
+
+  const first = await coordinator.listGlobal({ limit: 2 });
+  assert.deepEqual(
+    first.workflows.map(({ build }) => build.tenantId),
+    ["tenant-c", "tenant-b"]
+  );
+  assert.ok(first.nextCursor);
+  const second = await coordinator.listGlobal({ limit: 2, cursor: first.nextCursor });
+  assert.deepEqual(
+    second.workflows.map(({ build }) => build.tenantId),
+    ["tenant-a"]
+  );
+  assert.equal(second.nextCursor, undefined);
+  assert.deepEqual(
+    (await coordinator.listGlobal({ limit: 10, trigger: "webhook" })).workflows.map(({ build }) => build.repository),
+    ["external/b"]
+  );
+  assert.equal(await coordinator.countActive(), 3);
+  assert.equal(await coordinator.countActive("tenant-b"), 1);
+});
