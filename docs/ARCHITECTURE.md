@@ -69,6 +69,14 @@ The simulation-facing graph API uses a dedicated credential and maps each simula
 
 The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in `jina_runtime.github_deliveries`. ContextGraph uses normalized canonical, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables under `jina_context_graph`.
 
+Production treats those as separate persistence planes. Identity, repository
+authorization, and board/runtime state remain on the original Jina database.
+The ContextGraph store and pipeline coordinator connect to a dedicated
+same-region PostgreSQL instance through `GRAPH_DB_*`. This keeps ingestion
+writes, graph indexes, vacuum, and connection pressure from contending with the
+original dashboard database while preserving the original application as the
+tenant authority.
+
 Source writes, model observations, and projections are independently idempotent. A retry may repeat a stage, but canonical keys, consumer-owned outbox delivery, exact fingerprints, and immutable graph generations make the result converge. Graph identity includes tenant, repository, ref content, projection version, and canonical graph content.
 
 ## Authentication and security

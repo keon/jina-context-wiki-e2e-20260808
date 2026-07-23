@@ -16,12 +16,65 @@ import {
   type RetrievalResult
 } from "@jina/context-graph";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
+import { resolveDatabaseConfigs } from "./database-config.js";
 
 const SECRET = "test-webhook-secret";
 const INTERNAL_TOKEN = "test-internal-token";
 const GRAPH_TOKEN = "test-graph-token";
 const TENANT = "github:installation:99";
 const SHARED_TENANT = "5f4d1548-7e14-4f9e-a6e2-e7d38b61b1c2";
+
+test("database config keeps graph storage on the primary database when no graph override exists", () => {
+  const configs = resolveDatabaseConfigs({
+    DATABASE_URL: "postgresql://primary.example/jina"
+  });
+
+  assert.deepEqual(configs, {
+    primary: { connectionString: "postgresql://primary.example/jina" },
+    graph: { connectionString: "postgresql://primary.example/jina" },
+    graphIsDedicated: false
+  });
+});
+
+test("database config isolates graph storage when an explicit graph connection exists", () => {
+  const configs = resolveDatabaseConfigs({
+    INSTANCE_UNIX_SOCKET: "/cloudsql/original:us-east1:jina-db",
+    DB_USER: "jina_v2_app",
+    DB_PASS: "primary-password",
+    DB_NAME: "jina",
+    GRAPH_INSTANCE_UNIX_SOCKET: "/cloudsql/jina-v2:us-central1:jina-postgres",
+    GRAPH_DB_USER: "jina_app",
+    GRAPH_DB_PASS: "graph-password",
+    GRAPH_DB_NAME: "jina"
+  });
+
+  assert.deepEqual(configs, {
+    primary: {
+      host: "/cloudsql/original:us-east1:jina-db",
+      user: "jina_v2_app",
+      password: "primary-password",
+      database: "jina"
+    },
+    graph: {
+      host: "/cloudsql/jina-v2:us-central1:jina-postgres",
+      user: "jina_app",
+      password: "graph-password",
+      database: "jina"
+    },
+    graphIsDedicated: true
+  });
+});
+
+test("database config fails closed on a partial graph database override", () => {
+  assert.throws(
+    () =>
+      resolveDatabaseConfigs({
+        DATABASE_URL: "postgresql://primary.example/jina",
+        GRAPH_DB_NAME: "jina"
+      }),
+    /GRAPH_DATABASE_URL or GRAPH_INSTANCE_UNIX_SOCKET\/GRAPH_DB_HOST is required/
+  );
+});
 
 test("disabled GitHub intake acknowledges signed deliveries without creating work", async (context) => {
   const server = createApiServer({

@@ -11,10 +11,14 @@ api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
 runtime_service_account="jina-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
+graph_cloud_sql_instance="${GRAPH_CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
 tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
 db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
+graph_db_name="${JINA_GRAPH_DB_NAME:-jina}"
+graph_db_user="${JINA_GRAPH_DB_USER:-jina_app}"
+graph_db_pass_secret="${JINA_GRAPH_DB_PASS_SECRET:-jina-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
 api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
 api_max_instances="${JINA_API_MAX_INSTANCES:-1}"
@@ -50,6 +54,7 @@ validate_cloud_sql_instance() {
 }
 
 validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
+validate_cloud_sql_instance "GRAPH_CLOUD_SQL_INSTANCE" "${graph_cloud_sql_instance}"
 validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
 validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
 validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
@@ -61,9 +66,18 @@ if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
   echo "JINA_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
   exit 2
 fi
+if [[ "${graph_db_pass_secret}" == *","* || "${graph_db_pass_secret}" == *"~"* ]]; then
+  echo "JINA_GRAPH_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
+  exit 2
+fi
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_GITHUB_WEBHOOK_ENABLED=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false"
-api_secrets="DB_PASS=${db_pass_secret},INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest"
+cloud_sql_instances="${cloud_sql_instance}"
+if [[ "${graph_cloud_sql_instance}" != "${cloud_sql_instance}" ]]; then
+  cloud_sql_instances+=",${graph_cloud_sql_instance}"
+fi
+
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_GITHUB_WEBHOOK_ENABLED=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${graph_cloud_sql_instance}~GRAPH_DB_NAME=${graph_db_name}~GRAPH_DB_USER=${graph_db_user}~JINA_DB_MANAGE_SCHEMA=false"
+api_secrets="DB_PASS=${db_pass_secret},GRAPH_DB_PASS=${graph_db_pass_secret},INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest"
 
 case "${tenancy_mode}" in
   fixed)
@@ -151,7 +165,7 @@ gcloud run deploy jina-api \
   --image="${api_image}" \
   --allow-unauthenticated \
   --service-account="${runtime_service_account}" \
-  --set-cloudsql-instances="${cloud_sql_instance}" \
+  --set-cloudsql-instances="${cloud_sql_instances}" \
   --concurrency="${api_concurrency}" \
   --cpu="${api_cpu}" \
   --memory="${api_memory}" \

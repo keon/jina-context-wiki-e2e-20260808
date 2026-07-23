@@ -20,8 +20,8 @@ The Cloud Build GitHub repository connection is `jina-github` in `us-central1`. 
 - Artifact Registry repository: `jina`
 - Cloud Run: `jina-api`, `jina-task-worker`, `jina-context-graph-worker`
 - Cloud Run Job: `jina-acceptance`
-- Production Cloud SQL: PostgreSQL 16 instance `jina-463721:us-east1:jina-db`, database `jina`
-- Rollback Cloud SQL: PostgreSQL 17 instance `jina-v2:us-central1:jina-postgres`, database `jina`
+- Identity/control-plane Cloud SQL: PostgreSQL 16 instance `jina-463721:us-east1:jina-db`, database `jina`
+- ContextGraph Cloud SQL: PostgreSQL 17 instance `jina-v2:us-central1:jina-postgres`, database `jina`
 - Cloud Build deployer: `jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com`
 - Cloud Build pull-request validator: `jina-cloud-build-ci@jina-v2.iam.gserviceaccount.com`
 
@@ -31,15 +31,17 @@ Cloud Build runs entirely with user-specified Google service accounts. No Google
 
 The API requires PostgreSQL plus `INTERNAL_API_TOKEN` and `GRAPH_API_TOKEN`. Fixed mode requires `JINA_TENANT_ID`; shared mode requires it to be unset and resolves original tenant UUIDs from the database. Production sets `JINA_GITHUB_WEBHOOK_ENABLED=false` and omits `GITHUB_WEBHOOK_SECRET`; the original Jina service owns GitHub intake and submits tenant-scoped review graph builds. Local signed intake requires both the secret and an enabled switch.
 
-Backend services remain in `jina-v2/us-central1`. Production attaches the single original Jina database in `jina-463721/us-east1`; the original identity tables and v2-owned schemas have separate ownership and grants.
+Backend services remain in `jina-v2/us-central1`. The API attaches both Cloud
+SQL instances. Original identity tables and the lightweight v2 runtime/board
+schemas remain in `jina-463721/us-east1`; `jina_context_graph` lives in the
+same-region `jina-v2/us-central1` graph database with separate credentials,
+ownership, connection pools, and migration lifecycle.
 
-This cross-region layout is supported but adds network latency to every database
-round trip. Do not migrate the shared production database as part of an
-application release. A region change needs a separate, rehearsed database
-cutover with backups, connection/grant verification, a write-freeze or
-replication plan, acceptance testing, and an explicit rollback. For lowest
-dashboard read latency, the eventual target is for the API and its primary
-Cloud SQL instance to share a region.
+Cross-region identity/control-plane reads remain, but graph ingestion and query
+traffic stay in-region. Do not migrate either production database as an
+application-release side effect. A database cutover needs backups,
+connection/grant verification, a scoped write freeze or replication plan,
+acceptance testing, and an explicit rollback.
 
 ### Dashboard read runtime sizing
 
@@ -56,14 +58,14 @@ the deployment script:
 | `_JINA_API_CPU`           |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
 | `_JINA_API_MEMORY`        | `512Mi` | Increase if graph hydration/cache memory approaches the container limit.          |
 
-Each Cloud Run instance creates its own database pools, so raising maximum
-instances multiplies possible connections. Before changing it, inventory every
-pool used by one API process, reserve capacity for workers, migrations and
-operations, and keep the result below Cloud SQL's connection limit with safety
-headroom. Change one dimension at a time and compare warm p50/p95/p99 graph
-latency, instance count, CPU, memory and database connections before and after.
-Min instances improves cold-start latency; it does not fix slow SQL or
-cross-region round trips.
+Each Cloud Run instance creates independent primary, shared-identity, graph
+store, and graph-coordinator pools. Raising maximum instances multiplies
+connections on both databases. Inventory every pool, reserve capacity for
+migrations and operations, and keep each instance below its own Cloud SQL
+connection limit with safety headroom. Change one dimension at a time and
+compare warm p50/p95/p99 latency, CPU, memory, instance count, and per-database
+connections. Min instances improves cold-start latency; it does not fix slow
+SQL or cross-region round trips.
 
 See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants, cutover checks, and rollback.
 
@@ -139,7 +141,8 @@ A blocked aggregate is terminal for acceptance. The job reports the failed chunk
 
 ## Migrations and roles
 
-Run schema migrations with a schema-owning login before setting `JINA_DB_MANAGE_SCHEMA=false` on the API:
+Run ContextGraph schema migrations against the dedicated graph database with a
+schema-owning login before setting `JINA_DB_MANAGE_SCHEMA=false` on the API:
 
 ```sh
 DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate

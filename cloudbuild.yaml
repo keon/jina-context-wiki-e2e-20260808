@@ -72,10 +72,14 @@ steps:
       - GCP_REGION=us-central1
       - CLOUD_BUILD_ID=$BUILD_ID
       - CLOUD_SQL_INSTANCE=${_CLOUD_SQL_INSTANCE}
+      - GRAPH_CLOUD_SQL_INSTANCE=${_GRAPH_CLOUD_SQL_INSTANCE}
       - JINA_TENANCY_MODE=${_JINA_TENANCY_MODE}
       - JINA_DB_NAME=${_JINA_DB_NAME}
       - JINA_DB_USER=${_JINA_DB_USER}
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
+      - JINA_GRAPH_DB_NAME=${_JINA_GRAPH_DB_NAME}
+      - JINA_GRAPH_DB_USER=${_JINA_GRAPH_DB_USER}
+      - JINA_GRAPH_DB_PASS_SECRET=${_JINA_GRAPH_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
       - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
@@ -85,13 +89,17 @@ steps:
     timeout: 4200s
 
 substitutions:
-  # Cloud Run stays in jina-v2/us-central1 and connects cross-project/region to
-  # the one shared original Jina database.
+  # Identity/control-plane reads stay on the original Jina database. ContextGraph
+  # ingestion and projections use the dedicated same-region database.
   _CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db
+  _GRAPH_CLOUD_SQL_INSTANCE: jina-v2:us-central1:jina-postgres
   _JINA_TENANCY_MODE: shared-db
   _JINA_DB_NAME: jina
   _JINA_DB_USER: jina_v2_app
   _JINA_DB_PASS_SECRET: jina-shared-db-password:latest
+  _JINA_GRAPH_DB_NAME: jina
+  _JINA_GRAPH_DB_USER: jina_app
+  _JINA_GRAPH_DB_PASS_SECRET: jina-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
   # start. Raise max instances only after checking the resulting DB connection
