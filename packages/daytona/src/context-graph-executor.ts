@@ -34,6 +34,7 @@ const DEFAULT_OPENROUTER_MODEL = "google/gemini-3.5-flash-lite";
 const OPENROUTER_CHAT_COMPLETIONS_URL = "https://openrouter.ai/api/v1/chat/completions";
 const WORK_DIR = "/home/daytona/context-graph";
 const REPO_DIR = `${WORK_DIR}/repo`;
+const FULL_GIT_SHA = /^[a-f0-9]{40}$/i;
 
 interface OpenRouterChatResponse {
   readonly id?: string;
@@ -115,8 +116,9 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
           );
 
       request.signal?.throwIfAborted();
+      const checkout = contextGraphCheckout(request.ref, request.commitSha);
       await cloneRepository(sandbox, request, cloneToken);
-      if (request.commitSha) await checkoutExpectedCommit(sandbox, request.commitSha);
+      if (checkout.expectedCommitSha) await checkoutExpectedCommit(sandbox, checkout.expectedCommitSha);
       const input = await prepareModelInput(sandbox, request);
       request.signal?.throwIfAborted();
       const basePrompt = input.prompt;
@@ -225,8 +227,10 @@ export class DaytonaContextGraphExecutor implements ContextGraphExecutor {
         throw new Error(`Unable to resolve repository commit: ${truncate(shaResult.result)}`);
       }
       const commitSha = shaResult.result.trim();
-      if (request.commitSha && commitSha !== request.commitSha) {
-        throw new Error(`Repository ref moved before checkout: expected ${request.commitSha}, got ${commitSha}`);
+      if (checkout.expectedCommitSha && commitSha !== checkout.expectedCommitSha) {
+        throw new Error(
+          `Repository ref moved before checkout: expected ${checkout.expectedCommitSha}, got ${commitSha}`
+        );
       }
 
       return {
@@ -309,10 +313,11 @@ function selectedModel(): string {
 async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildRequest, token?: string): Promise<void> {
   const url = `https://github.com/${request.repository}.git`;
   const username = token ? "x-access-token" : undefined;
+  const { cloneRef } = contextGraphCheckout(request.ref, request.commitSha);
   try {
     // Shallow clone of the requested ref; the pinned commit is fetched shallowly
     // afterwards by checkoutExpectedCommit when the ref has moved past it.
-    await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, username, token, undefined, 1);
+    await sandbox.git.clone(url, REPO_DIR, cloneRef, undefined, username, token, undefined, 1);
     return;
   } catch {
     // Shallow clone is a fast path only: discard any partial checkout and retry
@@ -321,11 +326,11 @@ async function cloneRepository(sandbox: Sandbox, request: ContextGraphBuildReque
       .executeCommand(`rm -rf ${shellQuote(REPO_DIR)}`, undefined, undefined, 60)
       .catch(() => undefined);
   }
-  await sandbox.git.clone(url, REPO_DIR, request.ref, undefined, username, token);
+  await sandbox.git.clone(url, REPO_DIR, cloneRef, undefined, username, token);
 }
 
 async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Promise<void> {
-  if (!/^[a-f0-9]{40}$/i.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
+  if (!FULL_GIT_SHA.test(commitSha)) throw new Error("ContextGraph source commit must be a full Git SHA");
   const ensureCommit = await sandbox.process.executeCommand(
     `git cat-file -e ${shellQuote(`${commitSha}^{commit}`)} || git fetch --depth=1 origin ${shellQuote(commitSha)}`,
     REPO_DIR,
@@ -355,6 +360,17 @@ async function checkoutExpectedCommit(sandbox: Sandbox, commitSha: string): Prom
   if (checkout.exitCode !== 0) {
     throw new Error(`Unable to checkout prepared commit ${commitSha}: ${truncate(checkout.result)}`);
   }
+}
+
+export function contextGraphCheckout(
+  ref: string,
+  commitSha?: string
+): { readonly cloneRef?: string; readonly expectedCommitSha?: string } {
+  const refIsCommit = FULL_GIT_SHA.test(ref);
+  return {
+    ...(refIsCommit ? {} : { cloneRef: ref }),
+    ...(commitSha ? { expectedCommitSha: commitSha } : refIsCommit ? { expectedCommitSha: ref } : {})
+  };
 }
 
 async function prepareModelInput(

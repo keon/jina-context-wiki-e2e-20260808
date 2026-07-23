@@ -4,10 +4,21 @@ import { test } from "node:test";
 import type { Sandbox } from "@daytona/sdk";
 import {
   buildFocusEvidenceBundle,
+  contextGraphCheckout,
   isTransientModelExecutionFailure,
   requestOpenRouterStructuredOutput,
   sanitizeGeneratedModelOutput
 } from "./context-graph-executor.js";
+
+test("clones commit refs from the default branch before checking out the pinned SHA", () => {
+  const sha = "5b8a5176b3463d5ef024c8b8d22cdacc7ed04147";
+  assert.deepEqual(contextGraphCheckout(sha), { expectedCommitSha: sha });
+  assert.deepEqual(contextGraphCheckout("main"), { cloneRef: "main" });
+  assert.deepEqual(contextGraphCheckout("main", sha), {
+    cloneRef: "main",
+    expectedCommitSha: sha
+  });
+});
 
 test("classifies retryable provider execution failures", () => {
   assert.equal(isTransientModelExecutionFailure("stream disconnected before completion: Internal Server Error"), true);
