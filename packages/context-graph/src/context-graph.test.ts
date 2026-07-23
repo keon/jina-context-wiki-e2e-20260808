@@ -4171,9 +4171,9 @@ test("summary listings scope by repository and ref before any result limit", asy
     ],
     edges: [{ source: "repo", target: "readme", predicate: "contains", plane: "code", evidence: ["README.md:1"] }]
   });
-  const build = (repository: string, ref: string, generatedAt: string) =>
+  const build = (repository: string, ref: string, generatedAt: string, tenantId = "tenant") =>
     createContextGraph({
-      request: { tenantId: "tenant", repository, ref, taskId: `task-${repository}-${ref}` },
+      request: { tenantId, repository, ref, taskId: `task-${tenantId}-${repository}-${ref}` },
       commitSha: "abc",
       generatedAt,
       executor: "fixture",
@@ -4183,6 +4183,8 @@ test("summary listings scope by repository and ref before any result limit", asy
   await store.save(build("omxyz/e2e", "main", "2026-01-01T00:00:00.000Z"));
   await store.save(build("omxyz/other", "main", "2026-01-02T00:00:00.000Z"));
   await store.save(build("omxyz/e2e", "dev", "2026-01-03T00:00:00.000Z"));
+  await store.save(build("external/repo", "main", "2026-01-04T00:00:00.000Z", "external-tenant"));
+  await store.save(build("external/repo", "main", "2025-01-04T00:00:00.000Z", "external-tenant"));
 
   const scoped = await store.listSummaries("tenant", { repository: "omxyz/e2e", ref: "main" });
   assert.deepEqual(
@@ -4195,4 +4197,8 @@ test("summary listings scope by repository and ref before any result limit", asy
     ["dev", "main"]
   );
   assert.equal((await store.listSummaries("tenant")).length, 3);
+  assert.deepEqual(
+    (await store.listAllSummaries()).map((summary) => summary.tenantId),
+    ["external-tenant", "tenant", "tenant", "tenant"]
+  );
 });

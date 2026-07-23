@@ -21,6 +21,7 @@ import { resolveDatabaseConfigs } from "./database-config.js";
 const SECRET = "test-webhook-secret";
 const INTERNAL_TOKEN = "test-internal-token";
 const GRAPH_TOKEN = "test-graph-token";
+const GLOBAL_ADMIN_TOKEN = "test-global-admin-token";
 const TENANT = "github:installation:99";
 const SHARED_TENANT = "5f4d1548-7e14-4f9e-a6e2-e7d38b61b1c2";
 
@@ -1233,6 +1234,99 @@ test("context graph reads require authentication and cannot cross tenant boundar
       headers: { authorization: `Bearer ${INTERNAL_TOKEN}` }
     });
     assert.equal(drained.status, 200);
+  } finally {
+    await close(server);
+  }
+});
+
+test("global admin graph listing requires its own credential and returns every tenant head", async () => {
+  assert.throws(
+    () =>
+      createApiServer({
+        internalApiToken: INTERNAL_TOKEN,
+        globalAdminToken: INTERNAL_TOKEN
+      }),
+    /must differ/
+  );
+  const tenantA = "1401d9c9-774c-44e7-a6cf-72a61fb943e8";
+  const tenantB = "d3f94ff1-101b-435c-9665-7b305521614f";
+  const contextGraphStore = new MemoryContextGraphStore();
+  const tenantAGraph = fixtureGraph({ tenantId: tenantA, repository: "omxyz/a", ref: "main", taskId: "global-a" });
+  const tenantBGraph = fixtureGraph({
+    tenantId: tenantB,
+    repository: "external/b",
+    ref: "main",
+    taskId: "global-b"
+  });
+  await contextGraphStore.save(tenantAGraph);
+  await contextGraphStore.save(tenantBGraph);
+  const server = createApiServer({
+    contextGraphStore,
+    internalApiToken: INTERNAL_TOKEN,
+    globalAdminToken: GLOBAL_ADMIN_TOKEN,
+    sharedIdentityResolver: {
+      async resolveRepository() {
+        return undefined;
+      },
+      async listTenantIds() {
+        return [tenantA, tenantB];
+      },
+      async ping() {},
+      async close() {}
+    }
+  });
+  const baseUrl = await listen(server);
+  try {
+    const route = `${baseUrl}/internal/admin/context-graph`;
+    assert.equal((await fetch(route)).status, 401);
+    assert.equal((await fetch(route, { headers: { authorization: `Bearer ${INTERNAL_TOKEN}` } })).status, 401);
+    const globalResponse = await fetch(route, {
+      headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
+    });
+    assert.equal(globalResponse.status, 200);
+    const global = (await globalResponse.json()) as {
+      readonly graphs: readonly { readonly id: string; readonly tenantId: string; readonly repository: string }[];
+    };
+    assert.deepEqual(global.graphs.map((graph) => [graph.tenantId, graph.repository]).sort(), [
+      [tenantA, "omxyz/a"],
+      [tenantB, "external/b"]
+    ]);
+
+    const tenantBList = await fetch(`${baseUrl}/context-graph`, {
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "x-jina-tenant-id": tenantB
+      }
+    });
+    assert.equal(tenantBList.status, 200);
+    assert.deepEqual(
+      ((await tenantBList.json()) as { readonly graphs: readonly { readonly repository: string }[] }).graphs.map(
+        (graph) => graph.repository
+      ),
+      ["external/b"]
+    );
+    assert.equal(
+      (
+        await fetch(`${baseUrl}/context-graph/graphs/${tenantBGraph.id}`, {
+          headers: {
+            authorization: `Bearer ${INTERNAL_TOKEN}`,
+            "x-jina-tenant-id": tenantB
+          }
+        })
+      ).status,
+      200
+    );
+    assert.equal(
+      (
+        await fetch(`${baseUrl}/context-graph`, {
+          headers: {
+            authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}`,
+            "x-jina-tenant-id": tenantB
+          }
+        })
+      ).status,
+      401
+    );
   } finally {
     await close(server);
   }

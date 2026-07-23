@@ -443,6 +443,10 @@ test(
       await store.save(first);
       await store.save(second);
       await store.save(first);
+      assert.ok(
+        (await store.listAllSummaries()).some((summary) => summary.tenantId === tenantId),
+        "graph heads are globally discoverable"
+      );
       const current = await store.retrieve(request);
       const currentTrace = current.items[0]?.data as { causes?: readonly { nodes: readonly { label: string }[] }[] };
       assert.equal(

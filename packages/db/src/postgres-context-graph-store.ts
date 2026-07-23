@@ -502,6 +502,23 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     return this.loadGraphs(tenantId, 50);
   }
 
+  async listAllSummaries() {
+    await this.initialize();
+    const result = await this.pool.query<GraphSummaryRow>(
+      `select g.*,
+         coalesce(g.node_count, (select count(*) from jina_context_graph.nodes n where n.graph_id = g.id)) as node_count,
+         coalesce(g.edge_count, (select count(*) from jina_context_graph.edges e where e.graph_id = g.id)) as edge_count
+       from jina_context_graph.graph_heads head
+       join jina_context_graph.graphs g on g.id=head.graph_id and g.tenant_id=head.tenant_id
+       order by g.generated_at desc,head.tenant_id,head.repository,head.ref_name`
+    );
+    return result.rows.map((row) => ({
+      ...graphMetadata(row),
+      nodeCount: Number(row.node_count),
+      edgeCount: Number(row.edge_count)
+    }));
+  }
+
   async listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter) {
     await this.initialize();
     // Scope in SQL before the row limit: an unscoped tenant-wide page can hold

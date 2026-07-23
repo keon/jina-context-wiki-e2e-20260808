@@ -31,8 +31,18 @@ if (tenancyMode !== "fixed" && tenancyMode !== "shared-db") {
 }
 const sharedIdentityResolver =
   tenancyMode === "shared-db" ? createSharedIdentityResolver(databaseConfigs.primary) : undefined;
-if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN)) {
-  throw new Error("INTERNAL_API_TOKEN and GRAPH_API_TOKEN are required in production");
+if (
+  !enableDevEndpoints &&
+  (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN || !process.env.JINA_GLOBAL_ADMIN_TOKEN)
+) {
+  throw new Error("INTERNAL_API_TOKEN, GRAPH_API_TOKEN, and JINA_GLOBAL_ADMIN_TOKEN are required in production");
+}
+if (
+  process.env.JINA_GLOBAL_ADMIN_TOKEN &&
+  process.env.INTERNAL_API_TOKEN &&
+  process.env.JINA_GLOBAL_ADMIN_TOKEN === process.env.INTERNAL_API_TOKEN
+) {
+  throw new Error("JINA_GLOBAL_ADMIN_TOKEN must differ from INTERNAL_API_TOKEN");
 }
 if (!enableDevEndpoints && tenancyMode === "fixed" && !process.env.JINA_TENANT_ID) {
   throw new Error("JINA_TENANT_ID is required in fixed tenancy mode");
@@ -54,6 +64,7 @@ const server = createApiServer({
   contextGraphCoordinator,
   ...(sharedIdentityResolver ? { sharedIdentityResolver } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
+  ...(process.env.JINA_GLOBAL_ADMIN_TOKEN ? { globalAdminToken: process.env.JINA_GLOBAL_ADMIN_TOKEN } : {}),
   ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")

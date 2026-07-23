@@ -5,11 +5,18 @@ import { GraphView } from "../../../components/graph-view";
 
 export const dynamic = "force-dynamic";
 
-export default async function GraphDetailPage({ params }: { readonly params: Promise<{ readonly id: string }> }) {
+export default async function GraphDetailPage({
+  params,
+  searchParams
+}: {
+  readonly params: Promise<{ readonly id: string }>;
+  readonly searchParams: Promise<{ readonly tenantId?: string }>;
+}) {
   const { id } = await params;
+  const { tenantId } = await searchParams;
   let graph;
   try {
-    graph = await getGraph(decodeURIComponent(id));
+    graph = await getGraph(decodeURIComponent(id), tenantId);
   } catch (error) {
     return (
       <div className="error-state">
@@ -36,6 +43,7 @@ export default async function GraphDetailPage({ params }: { readonly params: Pro
       </div>
       <div className="meta-grid">
         <Meta label="Graph ID" value={graph.id} mono />
+        <Meta label="Tenant" value={graph.tenantId} mono />
         <Meta label="Ref" value={graph.ref} mono />
         <Meta label="Commit" value={graph.commitSha} mono />
         <Meta label="Generated" value={graph.generatedAt} />
@@ -45,7 +53,7 @@ export default async function GraphDetailPage({ params }: { readonly params: Pro
         />
         <Meta label="Size" value={`${graph.nodes.length} nodes · ${graph.edges.length} edges`} />
       </div>
-      <GraphView graphId={graph.id} nodes={graph.nodes} edges={graph.edges} />
+      <GraphView tenantId={graph.tenantId} graphId={graph.id} nodes={graph.nodes} edges={graph.edges} />
     </main>
   );
 }

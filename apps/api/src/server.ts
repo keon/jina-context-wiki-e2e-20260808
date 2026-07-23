@@ -105,6 +105,8 @@ export interface ApiServerConfig {
   /** Read-only resolver backed by the original Jina public identity tables. */
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
+  /** Read-only credential accepted only by the cross-tenant admin graph listing. */
+  readonly globalAdminToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
@@ -162,6 +164,9 @@ export interface ApiStateStore {
 
 /** Creates the HTTP API without binding a port. */
 export function createApiServer(config: ApiServerConfig = {}): Server {
+  if (config.globalAdminToken && config.globalAdminToken === config.internalApiToken) {
+    throw new Error("globalAdminToken must differ from internalApiToken");
+  }
   const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
   const metrics = new MetricsRegistry();
   const startedAtIso = nowIso();
@@ -559,6 +564,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         deliveryId: result.deliveryId,
         outcome: result.intake.outcome,
         createdTaskIds: result.intake.createdTaskIds
+      });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/internal/admin/context-graph") {
+      if (!hasGlobalAdminCredential(request, config)) {
+        json(response, 401, { error: "unauthorized" });
+        return;
+      }
+      jsonCacheable(request, response, {
+        graphs: [...(await contextGraphStore.listAllSummaries())].sort((left, right) =>
+          right.generatedAt.localeCompare(left.generatedAt)
+        )
       });
       return;
     }
@@ -1919,6 +1937,12 @@ function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig
 function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
   return Boolean(
     config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
+  );
+}
+
+function hasGlobalAdminCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
+  return Boolean(
+    config.globalAdminToken && firstHeader(request.headers.authorization) === `Bearer ${config.globalAdminToken}`
   );
 }
 

@@ -3,6 +3,8 @@ import { parseGraphQuestion } from "../../../../../lib/graph-query";
 
 export const dynamic = "force-dynamic";
 
+const SAFE_TENANT_ID = /^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/;
+
 export async function POST(
   request: Request,
   { params }: { readonly params: Promise<{ readonly id: string }> }
@@ -25,9 +27,14 @@ export async function POST(
     return Response.json({ error: error instanceof Error ? error.message : "invalid question" }, { status: 400 });
   }
 
+  const tenantId = new URL(request.url).searchParams.get("tenantId")?.trim();
+  if (tenantId && !SAFE_TENANT_ID.test(tenantId)) {
+    return Response.json({ error: "invalid tenant ID" }, { status: 400 });
+  }
+
   const { id } = await params;
   try {
-    const graph = await getGraph(decodeURIComponent(id));
+    const graph = await getGraph(decodeURIComponent(id), tenantId);
     if (!graph) return Response.json({ error: "graph not found" }, { status: 404 });
     return Response.json(await askGraph(graph, question));
   } catch (error) {

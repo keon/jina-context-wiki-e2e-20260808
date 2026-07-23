@@ -20,8 +20,8 @@ export default async function AllGraphsPage({
           <code>{error instanceof JinaApiError ? error.message : "unexpected error"}</code>
         </p>
         <p className="muted">
-          Check <code>JINA_API_URL</code> and <code>INTERNAL_API_TOKEN</code>, or start the local stack with{" "}
-          <code>pnpm dev</code>.
+          Check <code>JINA_API_URL</code>, <code>JINA_GLOBAL_ADMIN_TOKEN</code>, and <code>INTERNAL_API_TOKEN</code>, or
+          start the local stack with <code>pnpm dev</code>.
         </p>
       </div>
     );
@@ -29,6 +29,7 @@ export default async function AllGraphsPage({
 
   const repositories = [...new Set(graphs.map((graph) => graph.repository))].sort();
   const visible = repository ? graphs.filter((graph) => graph.repository === repository) : graphs;
+  const tenants = new Set(visible.map((graph) => graph.tenantId));
   const totalNodes = visible.reduce((sum, graph) => sum + graph.nodeCount, 0);
   const totalEdges = visible.reduce((sum, graph) => sum + graph.edgeCount, 0);
 
@@ -36,6 +37,7 @@ export default async function AllGraphsPage({
     <main>
       <div className="stat-row">
         <Stat label="Graphs" value={visible.length} />
+        <Stat label="Tenants" value={tenants.size} />
         <Stat label="Repositories" value={repository ? 1 : repositories.length} />
         <Stat label="Nodes" value={totalNodes} />
         <Stat label="Edges" value={totalEdges} />
@@ -70,6 +72,7 @@ export default async function AllGraphsPage({
           <thead>
             <tr>
               <th>Repository</th>
+              <th>Tenant</th>
               <th>Ref</th>
               <th>Commit</th>
               <th>Generated</th>
@@ -81,9 +84,14 @@ export default async function AllGraphsPage({
           </thead>
           <tbody>
             {visible.map((graph) => (
-              <tr key={graph.id}>
+              <tr key={`${graph.tenantId}:${graph.id}`}>
                 <td>
-                  <Link href={`/graphs/${encodeURIComponent(graph.id)}`}>{graph.repository}</Link>
+                  <Link href={`/graphs/${encodeURIComponent(graph.id)}?tenantId=${encodeURIComponent(graph.tenantId)}`}>
+                    {graph.repository}
+                  </Link>
+                </td>
+                <td>
+                  <code>{graph.tenantId}</code>
                 </td>
                 <td>
                   <code>{shortRef(graph.ref)}</code>

@@ -60,6 +60,7 @@ test("blocked contextGraph detection is scoped to the accepted repository and re
 test("v5.1 fixture review loads every repository predicate while excluding causal duplicates", async () => {
   const requestedUrls: URL[] = [];
   const reviewedIds: string[] = [];
+  let commandAttempts = 0;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     requestedUrls.push(url);
@@ -82,6 +83,8 @@ test("v5.1 fixture review loads every repository predicate while excluding causa
       });
     }
     if (url.pathname === "/context-graph/commands") {
+      commandAttempts += 1;
+      if (commandAttempts === 1) return json({ error: "Rate exceeded." }, 429, { "retry-after": "0" });
       const body = JSON.parse(String(init?.body ?? "{}")) as { assertionId?: string };
       if (body.assertionId) reviewedIds.push(body.assertionId);
       return json({ affectedIds: [body.assertionId] });
@@ -100,6 +103,7 @@ test("v5.1 fixture review loads every repository predicate while excluding causa
   const assertionRequest = requestedUrls.find((url) => url.pathname === "/context-graph/assertions");
   assert.equal(assertionRequest?.searchParams.get("repository"), "omxyz/jina-context-graph-e2e");
   assert.equal(assertionRequest?.searchParams.has("predicate"), false);
+  assert.equal(commandAttempts, 2);
   assert.deepEqual(reviewedIds, ["feature-implementation"]);
 });
 
@@ -899,9 +903,9 @@ test("production acceptance treats a blocked aggregate as terminal and reports i
   assert.deepEqual(requests, ["/context-graph/build", "/board", "/events"]);
 });
 
-function json(body: unknown, status = 200): Response {
+function json(body: unknown, status = 200, headers: Record<string, string> = {}): Response {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "content-type": "application/json" }
+    headers: { "content-type": "application/json", ...headers }
   });
 }

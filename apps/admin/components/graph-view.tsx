@@ -27,10 +27,12 @@ const KIND_COLORS: Readonly<Record<string, string>> = {
 const FALLBACK_COLOR = "#949eaf";
 
 export function GraphView({
+  tenantId,
   graphId,
   nodes,
   edges
 }: {
+  readonly tenantId: string;
   readonly graphId: string;
   readonly nodes: readonly AdminGraphNode[];
   readonly edges: readonly AdminGraphEdge[];
@@ -168,12 +170,15 @@ export function GraphView({
     setQueryError(null);
     setQueryResult(null);
     try {
-      const response = await fetch(`/api/graphs/${encodeURIComponent(graphId)}/query`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ question: nextQuestion }),
-        signal: controller.signal
-      });
+      const response = await fetch(
+        `/api/graphs/${encodeURIComponent(graphId)}/query?tenantId=${encodeURIComponent(tenantId)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ question: nextQuestion }),
+          signal: controller.signal
+        }
+      );
       const body = (await response.json()) as AdminGraphQueryResult;
       if (!response.ok) throw new Error(body.error || `Graph query returned ${response.status}`);
       if (!controller.signal.aborted) setQueryResult(body);
