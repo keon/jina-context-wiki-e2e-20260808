@@ -5,9 +5,11 @@ import {
   CONTEXT_GRAPH_PARSER_VERSION,
   CONTEXT_GRAPH_REGISTRY_VERSION,
   RepositoryContextOrchestrator,
+  type CausalTraceProjection,
   createContextGraph,
   derivedIssueNaturalKey,
   featureNaturalKey,
+  parseIncidentDocumentObservations,
   predicateRegistry,
   stableId
 } from "@jina/context-graph";
@@ -1252,6 +1254,98 @@ test(
         await store.listAssertions(tenantId, repository, { status: "active", predicate: "DEPENDS_ON" })
       ).filter((assertion) => assertion.objectKind === "Package");
       assert.equal(livePackages.length, 0, "a deleted manifest retracts its direct package facts");
+    } finally {
+      await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres projects complete postmortem deployment history as source-owned incident causality",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const store = new PostgresContextGraphStore({ connectionString });
+    const suffix = Date.now().toString(36);
+    const tenantId = `incident-history-${suffix}`;
+    const repository = `omlabs/incident-history-${suffix}`;
+    const commitSha = "a".repeat(40);
+    const now = "2026-07-22T00:00:00.000Z";
+    const postmortemPath = "docs/postmortems/INC-2026-42.md";
+    const observations = parseIncidentDocumentObservations({
+      tenantId,
+      repository,
+      path: postmortemPath,
+      content: [
+        "---",
+        "incident_id: INC-2026-42",
+        "issue: #14",
+        "---",
+        "# Administrator deletion outage",
+        `Incident INC-2026-42 was introduced by Deployment deployment:github:former/repo:5535506368, which deployed commit ${"b".repeat(40)}.`,
+        ...Array.from({ length: 80 }, (_, index) => `Timeline entry ${index + 1}: investigation continued.`),
+        `Incident INC-2026-42 was resolved by Deployment deployment:github:former/repo:5535522601, which shipped commit ${"c".repeat(40)}.`
+      ].join("\n"),
+      recordedAt: now
+    });
+    try {
+      await store.planIngestion({
+        tenantId,
+        repository,
+        ref: "main",
+        commitSha,
+        treeSha: "d".repeat(40),
+        parents: [],
+        committedAt: now,
+        recordedAt: now,
+        isDefaultRef: true,
+        updateRef: true,
+        taskId: `ingest-${suffix}`,
+        files: [{ path: postmortemPath, blobSha: "e".repeat(40), size: 4_000 }]
+      });
+      await store.applyGitHubObservations(observations);
+      const relations = (await store.listAssertions(tenantId, repository, { status: "active" })).filter(
+        (assertion) => assertion.subjectKind === "Incident" && assertion.objectKind === "Deployment"
+      );
+      assert.deepEqual(
+        relations
+          .map((assertion) => [assertion.predicate, assertion.objectNaturalKey])
+          .sort(([left], [right]) => left!.localeCompare(right!)),
+        [
+          ["INTRODUCED_BY", "deployment:github:former/repo:5535506368"],
+          ["RESOLVED_BY", "deployment:github:former/repo:5535522601"]
+        ]
+      );
+      const graph = await store.project({
+        tenantId,
+        repository,
+        ref: "main",
+        commitSha,
+        taskId: `project-${suffix}`,
+        generatedAt: "2026-07-22T00:01:00.000Z"
+      });
+      assert.equal(
+        graph.edges.some((edge) => edge.predicate === "RESOLVED_BY"),
+        true
+      );
+      const answer = await new RepositoryContextOrchestrator(store).answer({
+        tenantId,
+        allowedRepositories: [repository],
+        repository,
+        ref: "main",
+        question: "Which later deployment resolved incident INC-2026-42?"
+      });
+      const trace = answer.calls.find((call) => call.template === "causal_trace")?.items[0]
+        ?.data as unknown as CausalTraceProjection;
+      assert.equal(trace.root.kind, "Incident");
+      assert.equal(
+        trace.resolutions.some((path) =>
+          path.nodes.some((node) => node.kind === "Deployment" && node.label.includes("former/repo:5535522601"))
+        ),
+        true
+      );
     } finally {
       await store.close();
     }

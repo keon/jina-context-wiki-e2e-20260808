@@ -17,7 +17,7 @@ import {
 
 export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
 export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
-export const CONTEXT_GRAPH_GENERATOR_VERSION = "direct-assertions-v19-deterministic-contracts";
+export const CONTEXT_GRAPH_GENERATOR_VERSION = "direct-assertions-v20-source-owned-incident-relations";
 export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v3";
 
 export interface RepositoryTreeEntry {
@@ -532,10 +532,15 @@ export function assertionsFromGeneratedContextGraph(
       !isDerivedResolution &&
       ((edge.predicate === "RESOLVES" && subject.kind === "PullRequest" && object.kind === "Issue") ||
         (edge.predicate === "RESOLVED_BY" && subject.kind === "Issue" && object.kind === "PullRequest"));
-    // Explicit GitHub issue resolution is an authoritative intake fact. A model
-    // may repeat it after reading source evidence, but must not create a second
+    const duplicatesSourceOwnedIncidentDeployment =
+      subject.kind === "Incident" &&
+      object.kind === "Deployment" &&
+      (edge.predicate === "INTRODUCED_BY" || edge.predicate === "RESOLVED_BY");
+    // Explicit GitHub issue resolution and repository-authored incident
+    // deployment history are authoritative intake facts. A model may repeat
+    // them after reading source evidence, but must not create a second
     // knowledge assertion with independent provenance.
-    if (duplicatesExplicitGitHubResolution) return [];
+    if (duplicatesExplicitGitHubResolution || duplicatesSourceOwnedIncidentDeployment) return [];
     const assertion: GeneratedAssertion = {
       subject: {
         kind: subject.kind,
