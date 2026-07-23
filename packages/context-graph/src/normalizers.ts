@@ -350,6 +350,57 @@ export function parseIncidentDocument(input: {
   };
 }
 
+/**
+ * Repository-authored postmortems are an authoritative source for deployment
+ * identities they explicitly name. Materialize those records alongside the
+ * incident so graph correctness does not depend on optional GitHub deployment
+ * API permissions or on the deployment belonging to the repository being
+ * analyzed.
+ */
+export function parseIncidentDocumentObservations(input: {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly path: string;
+  readonly content: string;
+  readonly recordedAt: string;
+}): readonly (IncidentSourceObservation | DeploymentSourceObservation)[] {
+  const incident = parseIncidentDocument(input);
+  if (!incident) return [];
+  const deployments: DeploymentSourceObservation[] = [];
+  for (const line of input.content.split(/\r?\n/)) {
+    const named =
+      /\bIncident\s+[A-Za-z][A-Za-z0-9_-]*-\d+\s+was\s+(introduced|resolved)\s+by\s+Deployment\s+deployment:([A-Za-z0-9_.-]+):([A-Za-z0-9_/#:.-]+)/i.exec(
+        line
+      );
+    const commit = /\b(?:deployed|shipped)\s+commit\s+`?([a-f0-9]{40})`?/i.exec(line)?.[1]?.toLowerCase();
+    const source = named?.[2];
+    const externalId = named?.[3]?.replace(/[.,;]+$/, "");
+    if (!named?.[1] || !source || !externalId || !commit) continue;
+    deployments.push({
+      tenantId: input.tenantId,
+      repository: input.repository,
+      kind: "deployment",
+      source: source.toLowerCase(),
+      externalId,
+      commitSha: commit,
+      environment: "postmortem",
+      status: named[1].toLowerCase() === "introduced" ? "incident_source" : "incident_recovery",
+      ...(incident.impactedService ? { service: incident.impactedService } : {}),
+      occurredAt: input.recordedAt,
+      recordedAt: input.recordedAt
+    });
+  }
+  return [
+    incident,
+    ...deployments.filter(
+      (deployment, index) =>
+        deployments.findIndex(
+          (candidate) => candidate.source === deployment.source && candidate.externalId === deployment.externalId
+        ) === index
+    )
+  ];
+}
+
 export interface NormalizedGitHubObservation {
   readonly entities: readonly SourceEntityIntent[];
   readonly assertions: readonly SourceAssertionIntent[];

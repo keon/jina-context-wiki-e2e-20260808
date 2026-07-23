@@ -48,6 +48,7 @@ import {
   normalizeGitHubSourceObservation,
   normalizeSourceObservation,
   parseIncidentDocument,
+  parseIncidentDocumentObservations,
   parsePackageManifest,
   parseServiceDefinitions
 } from "./normalizers.js";
@@ -62,7 +63,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v18-untracked-causal-evidence/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /v19-deterministic-contracts/);
   assert.match(
     CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
     /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
@@ -127,7 +128,6 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
   const ready = (await coordinator.list("tenant"))[0]!.stages.filter((stage) => stage.status === "queued");
   assert.deepEqual(ready.map((stage) => `${stage.phase}:${stage.stage}`).sort(), [
     "history:ingest",
-    "snapshot:assert",
     "snapshot:project"
   ]);
   const projection = await claim("run-context-graph-project", "2026-07-21T00:03:00.000Z");
@@ -144,7 +144,19 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
   );
   const history = await claim("run-context-graph-ingest", "2026-07-21T00:05:00.000Z");
   assert.equal(history.task.metadata.pipelinePhase, "history");
-  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:05:00.000Z");
+  assert.equal(
+    await coordinator.complete({
+      tenantId: "tenant",
+      stageId: history.task.id,
+      leaseId: history.message.leaseId,
+      outcome: "done",
+      now: "2026-07-21T00:06:00.000Z",
+      nextMetadata: metadata
+    }),
+    true
+  );
+  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:07:00.000Z");
+  assert.equal(assertion.task.metadata.pipelinePhase, "history");
   assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
 });
 
@@ -474,6 +486,36 @@ test("deterministic intake extracts direct packages and stable services", () => 
   assert.deepEqual(normalizeSourceObservation({ ...manifest, dependencies: [], removed: true }).assertions, []);
   assert.deepEqual(normalizeSourceObservation({ ...services[0]!, removed: true }).assertions, []);
   assert.deepEqual(normalizeSourceObservation({ ...incident, removed: true }).assertions, []);
+  const incidentObservations = parseIncidentDocumentObservations({
+    tenantId: "t",
+    repository: "org/repo",
+    path: "docs/postmortems/INC-42.md",
+    content: [
+      "---",
+      "incident_id: INC-42",
+      "service: api",
+      "service_source: compose",
+      "service_external_id: org/repo:api",
+      "issue: #7",
+      "---",
+      "# Administrator deletion outage",
+      `Incident INC-42 was introduced by Deployment deployment:github:former/repo:101, which deployed commit ${"b".repeat(40)} to the api service.`,
+      `Incident INC-42 was resolved by Deployment deployment:github:former/repo:102. That recovery deployment shipped commit ${"c".repeat(40)} to api.`
+    ].join("\n"),
+    recordedAt: "2026-01-02T00:00:00Z"
+  });
+  assert.deepEqual(
+    incidentObservations.map((observation) =>
+      observation.kind === "deployment"
+        ? [observation.kind, observation.source, observation.externalId, observation.commitSha, observation.status]
+        : [observation.kind, observation.externalId]
+    ),
+    [
+      ["incident", "org/repo:inc-42"],
+      ["deployment", "github", "former/repo:101", "b".repeat(40), "incident_source"],
+      ["deployment", "github", "former/repo:102", "c".repeat(40), "incident_recovery"]
+    ]
+  );
   const pyproject = parsePackageManifest({
     tenantId: "t",
     repository: "org/repo",
@@ -3220,12 +3262,43 @@ test("materializes explicit causal contracts and drops malformed optional causal
 
   const materialized = materializeRequiredCausalAssertions(generated, anchors);
 
-  assert.equal(materialized.edges.length, 1);
-  assert.equal(materialized.edges[0]?.source, "derived:pr:11");
-  assert.equal(materialized.edges[0]?.target, sha);
+  assert.equal(materialized.edges.length, 2);
+  assert.ok(
+    materialized.edges.some(
+      (edge) => edge.predicate === "INTRODUCED_BY" && edge.source === "derived:pr:11" && edge.target === sha
+    )
+  );
+  assert.ok(
+    materialized.edges.some(
+      (edge) => edge.predicate === "RESOLVED_BY" && edge.source === "derived:pr:11" && edge.target === "11"
+    )
+  );
   assert.equal(materialized.nodes.find((node) => node.id === "derived:pr:11")?.kind, "Issue");
   assert.equal(materialized.nodes.find((node) => node.id === sha)?.kind, "Commit");
+  assert.equal(materialized.nodes.find((node) => node.id === "11")?.kind, "PullRequest");
   validateRequiredCausalAssertions(materialized, anchors);
+  validateRequiredDerivedIssues(
+    materialized,
+    [
+      {
+        id: "pr-11",
+        source: "github",
+        type: "pull_request",
+        repository: "org/repo",
+        payloadSha: "payload",
+        payload: {
+          kind: "pull_request",
+          number: 11,
+          title: "Restore chronological audit exports",
+          body: "Restores the broken audit order without a tracked issue.",
+          mergedAt: "2026-07-21T01:28:05Z",
+          resolvesIssueNumbers: [],
+          referencesIssueNumbers: []
+        }
+      }
+    ],
+    [11]
+  );
   await validateContextGraphEvidence(materialized, async (path) => {
     if (path === evidencePath) return content;
     if (path === "README.md") return "demo";

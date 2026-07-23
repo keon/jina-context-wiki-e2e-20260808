@@ -4,7 +4,9 @@ This document describes the runtime in this repository. Domain-specific ContextG
 
 ## Topology
 
-The deployed backend runs as three Cloud Run services backed by the shared PostgreSQL 16 database:
+The deployed backend runs as three Cloud Run services backed by the original
+PostgreSQL 16 identity/control-plane database and the dedicated same-region
+PostgreSQL 17 ContextGraph database:
 
 - `jina-api` accepts tenant-scoped work from trusted callers, applies commands, reduces readiness, and owns worker lease/completion transactions. Its direct GitHub parser is retained but disabled in production.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.

@@ -1,5 +1,6 @@
 import {
   stableId,
+  contextGraphPlannedStageSpecs,
   contextGraphStagePrerequisites,
   contextGraphStageRequired,
   type ContextGraphBuildRecord,
@@ -750,31 +751,23 @@ function plannedStages(
   readonly ordinal: number;
   readonly metadata: Readonly<Record<string, unknown>>;
 }[] {
-  const phases = request.snapshotFirst
-    ? [
-        { phase: "snapshot" as const, priority: 100 },
-        { phase: "history" as const, priority: 10 }
-      ]
-    : [{ phase: "history" as const, priority: 50 }];
-  return phases.flatMap(({ phase, priority }, phaseIndex) =>
-    (["ingest", "assert", "project"] as const).map((stage, stageIndex) => ({
-      id: stableId("context-graph-stage", `${buildId}:${phase}:${stage}`),
-      phase,
-      stage,
-      topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
-      status: phaseIndex === 0 && stageIndex === 0 ? ("queued" as const) : ("triage" as const),
-      priority,
-      ordinal: phaseIndex * 3 + stageIndex,
-      metadata: {
-        ...request.metadata,
-        tenantId: request.tenantId,
-        repository: request.repository,
-        ref: request.ref,
-        requestKey: request.requestKey,
-        pipelinePhase: phase
-      }
-    }))
-  );
+  return contextGraphPlannedStageSpecs(request.snapshotFirst).map(({ phase, priority, stage, ordinal }) => ({
+    id: stableId("context-graph-stage", `${buildId}:${phase}:${stage}`),
+    phase,
+    stage,
+    topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
+    status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
+    priority,
+    ordinal,
+    metadata: {
+      ...request.metadata,
+      tenantId: request.tenantId,
+      repository: request.repository,
+      ref: request.ref,
+      requestKey: request.requestKey,
+      pipelinePhase: phase
+    }
+  }));
 }
 
 function buildRecord(row: BuildRow): ContextGraphBuildRecord {
