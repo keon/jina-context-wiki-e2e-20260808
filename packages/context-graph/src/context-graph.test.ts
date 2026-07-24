@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createContextGraph,
+  discardUnresolvableContextGraphClaims,
   isProblemEvidencePath,
   materializeRequiredCausalAssertions,
   materializeRequiredMoveAssertions,
@@ -61,7 +62,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v23-semantic-revisions/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v24-evidence-scoped/);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.nodes.maxItems, 128);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.maxItems, 256);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.items.properties.evidence.maxItems, 4);
@@ -72,6 +73,90 @@ test("assertion generation requires evidence-backed move continuity", () => {
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /emit current MOVED_FROM previous/);
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /final synthesis pass/);
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /exactly one edge per semantic identity/);
+});
+
+test("final synthesis discards only claims whose checked-out evidence cannot resolve", async () => {
+  const reads = new Map([
+    ["src/current.ts", "one\ntwo\nthree"],
+    ["docs/causal.md", "cause\nresolution"]
+  ]);
+  const readCounts = new Map<string, number>();
+  const generated = {
+    summary: "Evidence-scoped assertions",
+    nodes: [
+      {
+        id: "current",
+        kind: "File" as const,
+        label: "current.ts",
+        description: "Current source",
+        path: "src/current.ts",
+        evidence: ["src/current.ts:1-2"]
+      },
+      {
+        id: "missing",
+        kind: "File" as const,
+        label: "missing.ts",
+        description: "Invented source",
+        path: "src/missing.ts",
+        evidence: ["src/missing.ts:1"]
+      },
+      {
+        id: "issue",
+        kind: "Issue" as const,
+        label: "Issue",
+        description: "Valid issue",
+        evidence: ["docs/causal.md:1"]
+      }
+    ],
+    edges: [
+      {
+        source: "issue",
+        target: "current",
+        predicate: "AFFECTS",
+        plane: "knowledge" as const,
+        confidence: 0.9,
+        why: "Supported",
+        evidence: ["docs/causal.md:1-2"]
+      },
+      {
+        source: "issue",
+        target: "current",
+        predicate: "REFERENCES",
+        plane: "knowledge" as const,
+        confidence: 0.7,
+        why: "Range is outside the file",
+        evidence: ["src/current.ts:8"]
+      },
+      {
+        source: "issue",
+        target: "missing",
+        predicate: "AFFECTS",
+        plane: "knowledge" as const,
+        confidence: 0.5,
+        why: "Target is unsupported",
+        evidence: ["docs/causal.md:1"]
+      }
+    ]
+  };
+  const filtered = await discardUnresolvableContextGraphClaims(generated, async (path) => {
+    readCounts.set(path, (readCounts.get(path) ?? 0) + 1);
+    const contents = reads.get(path);
+    if (contents === undefined) throw new Error("missing");
+    return contents;
+  });
+  assert.deepEqual(
+    filtered.nodes.map((node) => node.id),
+    ["current", "issue"]
+  );
+  assert.deepEqual(
+    filtered.edges.map((edge) => edge.predicate),
+    ["AFFECTS"]
+  );
+  assert.deepEqual([...readCounts.entries()].sort(), [
+    ["docs/causal.md", 1],
+    ["src/current.ts", 1],
+    ["src/missing.ts", 1]
+  ]);
 });
 
 test("snapshot-first contextGraph builds require history assertions before projection", async () => {

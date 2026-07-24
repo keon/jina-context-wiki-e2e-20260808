@@ -333,6 +333,46 @@ export async function validateContextGraphEvidence(
 }
 
 /**
+ * Drops optional model claims whose repository citations cannot resolve at the
+ * checked-out ref. Required causal and move contracts are materialized after
+ * this pass and still undergo the full fail-closed evidence validator.
+ */
+export async function discardUnresolvableContextGraphClaims(
+  generated: GeneratedContextGraph,
+  readFile: (path: string) => Promise<string>
+): Promise<GeneratedContextGraph> {
+  const files = new Map<string, Promise<string | undefined>>();
+  const source = (path: string): Promise<string | undefined> => {
+    const existing = files.get(path);
+    if (existing) return existing;
+    const pending = readFile(path).catch(() => undefined);
+    files.set(path, pending);
+    return pending;
+  };
+  const evidenceResolves = async (evidence: readonly string[]): Promise<boolean> =>
+    (
+      await Promise.all(
+        evidence.map(async (value) => {
+          const citation = parseEvidenceCitation(value);
+          const contents = await source(citation.path);
+          if (contents === undefined) return false;
+          const lineCount = contents.split(/\r?\n/).length;
+          return citation.startLine <= lineCount && citation.endLine <= lineCount;
+        })
+      )
+    ).every(Boolean);
+
+  const nodeValidity = await Promise.all(generated.nodes.map((node) => evidenceResolves(node.evidence)));
+  const nodes = generated.nodes.filter((_node, index) => nodeValidity[index]);
+  const nodeIds = new Set(nodes.map((node) => node.id));
+  const edgeValidity = await Promise.all(generated.edges.map((edge) => evidenceResolves(edge.evidence)));
+  const edges = generated.edges.filter(
+    (edge, index) => edgeValidity[index] && nodeIds.has(edge.source) && nodeIds.has(edge.target)
+  );
+  return { ...generated, nodes, edges };
+}
+
+/**
  * A merged PR that explicitly describes an untracked repair and changes a
  * durable problem/evidence file must yield a reviewable derived Issue proposal.
  * The rule only detects a missing proposal; the model still names the problem,

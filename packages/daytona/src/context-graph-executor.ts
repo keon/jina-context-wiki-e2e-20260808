@@ -4,6 +4,7 @@ import {
   CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT,
   assertionsFromGeneratedContextGraph,
   createContextGraph,
+  discardUnresolvableContextGraphClaims,
   materializeRequiredCausalAssertions,
   materializeRequiredMoveAssertions,
   parseGeneratedContextGraph,
@@ -184,11 +185,18 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
         request.signal?.throwIfAborted();
         try {
           const parsedModelOutput = parseJsonResult(resultBuffer.toString("utf8"));
+          const evidenceScoped = await discardUnresolvableContextGraphClaims(
+            sanitizeGeneratedModelOutput(parseGeneratedContextGraph(parsedModelOutput), request.sourceEvidence ?? []),
+            async (path) => {
+              request.signal?.throwIfAborted();
+              await assertSafeRepositoryFile(sandbox!, path);
+              const contents = await sandbox!.fs.downloadFile(`${REPO_DIR}/${path}`, 120);
+              request.signal?.throwIfAborted();
+              return contents.toString("utf8");
+            }
+          );
           const candidate = materializeRequiredMoveAssertions(
-            materializeRequiredCausalAssertions(
-              sanitizeGeneratedModelOutput(parseGeneratedContextGraph(parsedModelOutput), request.sourceEvidence ?? []),
-              input.causalAnchors
-            ),
+            materializeRequiredCausalAssertions(evidenceScoped, input.causalAnchors),
             input.moveAnchors
           );
           const validationErrors: string[] = [];
