@@ -370,7 +370,8 @@ The worker treats changeset processing as coded substeps inside the same leased 
 
 1. validate the submitted contract;
 2. resolve and verify every cited source;
-3. normalize identities, predicates, qualifiers, and natural assertion keys;
+3. normalize identities, predicates, qualifiers, and natural assertion keys, consolidating every cardinality-one
+   subject/predicate/qualifier slot to one best-supported value;
 4. persist an immutable mutation plan and semantic diff;
 5. apply operations eligible for commit in one transaction;
 6. activate claims that pass automatic admission and retain lower-assurance valid claims as `proposed`;
@@ -927,8 +928,10 @@ The assertion service processes a changeset in two phases.
 7. resolves every evidence reference against canonical observations or the pinned checkout;
 8. validates causal mechanism condition sets, outcome identity, baseline scope, validity, and evidence strength;
 9. prevents `necessary` or `sufficient` semantics from being inferred from one ordinary path;
-10. computes natural assertion keys and detects duplicates;
-11. compares operations against current live assertions;
+10. computes natural assertion keys, consolidates exact duplicates, and deterministically resolves contradictory
+    cardinality-one candidates by confidence, evidence count, and stable object identity;
+11. compares operations against current live semantic slots, so a changed cardinality-one object supersedes the
+    prior value instead of competing with it;
 12. computes automatic admission outcomes, risk, and optional review recommendations;
 13. creates an exact semantic diff;
 14. persists an immutable `AssertionMutationPlan`.

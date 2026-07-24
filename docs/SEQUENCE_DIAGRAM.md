@@ -100,14 +100,14 @@ sequenceDiagram
         Worker->>Daytona: Clone and checkout immutable commit SHA
         Worker->>Codex: Analyze bounded current paths with typed causal schema
         Codex-->>Worker: Cited Feature, derived Issue, movement, impact, and causal proposals
-        Worker->>Daytona: Validate citations and deterministic source identities
+        Worker->>Daytona: Prune optional claims with unresolvable citations; validate required claims and source identities
         alt output validation fails once
             Worker->>Codex: Repair citations or required derived Issue in the same task
             Codex-->>Worker: Complete corrected JSON
             Worker->>Daytona: Validate again or fail closed
         end
         Worker->>API: Complete with model-output observation
-        API->>DB: Store registry-validated model assertions as proposed
+        API->>DB: Consolidate semantic slots; store policy-admitted assertions as active or proposed
     end
     Worker->>API: Claim run-context-graph-project
     API->>DB: Claim repository/ref canonical outbox rows with SKIP LOCKED
@@ -126,7 +126,7 @@ sequenceDiagram
     end
 ```
 
-Graph identity is content-addressed by tenant, repository, commit, projection version, and canonical graph content, so a later projection cannot rewrite a graph referenced by an older task and an unchanged projection reuses the same ID. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation uses only an exact evidence-fingerprint cache hit; a mismatch runs the generator. Re-emitted semantic facts preserve their original provenance and review status and update only confirmation time. Model facts stay proposed until an audited command accepts them. Projections carry forward accepted assertions only while every cited path still resolves to the same blob.
+Graph identity is content-addressed by tenant, repository, commit, projection version, and canonical graph content, so a later projection cannot rewrite a graph referenced by an older task and an unchanged projection reuses the same ID. Blob parsing is keyed by tenant, blob SHA, and parser version. Assertion generation uses only an exact evidence-fingerprint cache hit; a mismatch runs the generator. Re-emitted semantic facts preserve their original provenance and review status and update only confirmation time. Assertions that satisfy automatic admission become active immediately; lower-assurance valid assertions may remain proposed for optional review, but no build waits for a human. Cardinality-one claims share a subject/predicate/qualifier live slot: contradictory candidates are consolidated before persistence, and a changed value supersedes the prior live value. Projections carry forward active assertions only while every cited path still resolves to the same blob.
 
 ## Cited repository question
 

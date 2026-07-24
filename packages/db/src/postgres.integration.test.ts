@@ -3925,6 +3925,88 @@ test(
 );
 
 test(
+  "Postgres assertion batches keep one live value per cardinality-one semantic slot",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantId = `assert-cardinality-${suffix}`;
+    const repository = `omxyz/assert-cardinality-${suffix}`;
+    const store = new PostgresContextGraphStore({ connectionString });
+    const admin = new Pool({ connectionString });
+    const subject = {
+      kind: "PullRequest" as const,
+      naturalKey: `github:pr:${repository}#1`,
+      label: "#1"
+    };
+    const candidate = (sha: string, confidence: number, line: number) => ({
+      subject,
+      predicate: "MERGED_AS",
+      object: {
+        kind: "Commit" as const,
+        naturalKey: `repo:${repository}:sha:${sha}`,
+        label: sha.slice(0, 7)
+      },
+      confidence,
+      explanation: `PR #1 merged as ${sha}.`,
+      evidence: [`CHANGELOG.md:${line}`]
+    });
+    const batch = (fingerprint: string, generatedAt: string, assertions: readonly ReturnType<typeof candidate>[]) => ({
+      tenantId,
+      repository,
+      ref: "main",
+      commitSha: "f".repeat(40),
+      taskId: `assert-${fingerprint}`,
+      generatedAt,
+      generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+      registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
+      evidenceFingerprint: fingerprint,
+      evidenceObservationIds: [],
+      model: "fixture",
+      summary: "PR merge identity",
+      rawOutput: { summary: "PR merge identity", nodes: [], edges: [] },
+      assertions
+    });
+    const shaA = "a".repeat(40);
+    const shaB = "b".repeat(40);
+    const shaC = "c".repeat(40);
+    try {
+      await store.saveAssertionBatch(batch("first", "2026-07-24T00:00:00.000Z", [candidate(shaA, 0.8, 1)]));
+      const changed = await store.saveAssertionBatch(
+        batch("changed", "2026-07-24T01:00:00.000Z", [candidate(shaB, 0.7, 2), candidate(shaC, 0.95, 3)])
+      );
+      assert.equal(changed.assertionCount, 1);
+      assert.match(changed.warnings[0] ?? "", /cardinality-one contextGraph assertion consolidated/);
+      const rows = await admin.query<{
+        object_natural_key: string;
+        status: string;
+        superseded_by: string | null;
+      }>(
+        `select object_natural_key,status,superseded_by
+         from jina_context_graph.assertions
+         where tenant_id=$1 and repository=$2 and predicate='MERGED_AS'
+         order by recorded_at,id`,
+        [tenantId, repository]
+      );
+      assert.deepEqual(
+        rows.rows.map((row) => [row.object_natural_key, row.status]),
+        [
+          [`repo:${repository}:sha:${shaA}`, "superseded"],
+          [`repo:${repository}:sha:${shaC}`, "active"]
+        ]
+      );
+      assert.equal(rows.rows[0]?.superseded_by !== null, true);
+      assert.equal(rows.rows[1]?.superseded_by, null);
+    } finally {
+      await admin.end();
+      await store.close();
+    }
+  }
+);
+
+test(
   "Postgres batches assertion writes while matching sequential per-assertion semantics",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"

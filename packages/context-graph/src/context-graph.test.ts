@@ -27,6 +27,7 @@ import {
   derivedIssueNaturalKey,
   featureNaturalKey,
   movedFromSimilarityCandidates,
+  normalizeAssertionBatchLenient,
   selectAssertionFocusPaths
 } from "./pipeline.js";
 import { analyzeSourceBlob } from "./parser.js";
@@ -1159,6 +1160,65 @@ test("a new model contract confirms identical content and versions changed conte
     "The README documents the administrator access mechanism."
   );
   assert.equal(revised.find((assertion) => assertion.status === "superseded")?.generator, "model:model-v1");
+});
+
+test("cardinality-one model claims consolidate deterministically and supersede changed values", async () => {
+  const store = new MemoryContextGraphStore();
+  const repository = "omxyz/cardinality";
+  const subject = {
+    kind: "PullRequest" as const,
+    naturalKey: `github:pr:${repository}#1`,
+    label: "#1"
+  };
+  const candidate = (sha: string, confidence: number, line: number) => ({
+    subject,
+    predicate: "MERGED_AS",
+    object: {
+      kind: "Commit" as const,
+      naturalKey: `repo:${repository}:sha:${sha}`,
+      label: sha.slice(0, 7)
+    },
+    confidence,
+    explanation: `PR #1 merged as ${sha}.`,
+    evidence: [`CHANGELOG.md:${line}`]
+  });
+  const batch = (fingerprint: string, generatedAt: string, assertions: readonly ReturnType<typeof candidate>[]) => ({
+    tenantId: "tenant-cardinality",
+    repository,
+    ref: "main",
+    commitSha: "f".repeat(40),
+    taskId: `assert-${fingerprint}`,
+    generatedAt,
+    generatorVersion: "model-cardinality",
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
+    evidenceFingerprint: fingerprint,
+    evidenceObservationIds: [],
+    model: "fixture",
+    summary: "PR merge identity",
+    rawOutput: { summary: "PR merge identity", nodes: [], edges: [] },
+    assertions
+  });
+  const shaA = "a".repeat(40);
+  const shaB = "b".repeat(40);
+  const normalized = normalizeAssertionBatchLenient(
+    batch("conflict", "2026-07-24T00:00:00.000Z", [candidate(shaA, 0.7, 1), candidate(shaB, 0.9, 2)])
+  );
+  assert.equal(normalized.assertions.length, 1);
+  assert.equal(normalized.assertions[0]?.object.naturalKey, `repo:${repository}:sha:${shaB}`);
+  assert.match(normalized.warnings[0] ?? "", /cardinality-one contextGraph assertion consolidated/);
+
+  await store.saveAssertionBatch(
+    batch("first", "2026-07-24T00:00:00.000Z", [candidate(shaA, 0.7, 1), candidate(shaB, 0.9, 2)])
+  );
+  await store.saveAssertionBatch(batch("second", "2026-07-24T01:00:00.000Z", [candidate("c".repeat(40), 1, 3)]));
+  const assertions = await store.listAssertions("tenant-cardinality", repository);
+  assert.equal(assertions.length, 2);
+  assert.equal(assertions.filter((assertion) => assertion.status === "active").length, 1);
+  assert.equal(
+    assertions.find((assertion) => assertion.status === "active")?.objectNaturalKey,
+    `repo:${repository}:sha:${"c".repeat(40)}`
+  );
+  assert.equal(assertions.filter((assertion) => assertion.status === "superseded").length, 1);
 });
 
 test("memory operational metrics exclude assertions outside the requested ref", async () => {
