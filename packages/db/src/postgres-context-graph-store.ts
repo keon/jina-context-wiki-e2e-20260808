@@ -3235,7 +3235,19 @@ export class PostgresContextGraphStore implements ContextGraphStore {
          and analysis.blob_sha is null`,
       [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repositories, ref]
     );
-    const [outbox, backlog, parsed, proposed, unexplained, erasure, freshness, labels, retrieval] = await Promise.all([
+    const [
+      outbox,
+      backlog,
+      parsed,
+      proposed,
+      unexplained,
+      erasure,
+      freshness,
+      labels,
+      retrieval,
+      retrievalAccess,
+      retrievalChannels
+    ] = await Promise.all([
       this.pool.query<{ event_type: string; consumer: string; count: string; oldest: Date | null }>(
         `select event_type,consumer,count(*),min(created_at) as oldest from jina_context_graph.outbox
          where tenant_id=$1 and processed_at is null
@@ -3343,6 +3355,47 @@ export class PostgresContextGraphStore implements ContextGraphStore {
            and ($2::text[] is null or repository=any($2))
          group by template order by template`,
         [tenantId, repositories]
+      ),
+      this.pool.query<{
+        principal_id: string;
+        access_channel: "mcp" | "api" | "admin" | "direct";
+        template: string;
+        requests: string;
+        average: string;
+        p95: string;
+        truncated: string;
+        last_accessed_at: Date;
+      }>(
+        `select principal_id,access_channel,template,count(*) as requests,avg(duration_ms) as average,
+                percentile_cont(0.95) within group (order by duration_ms) as p95,
+                avg(case when truncated then 1.0 else 0.0 end) as truncated,
+                max(recorded_at) as last_accessed_at
+         from jina_context_graph.retrieval_metrics
+         where tenant_id=$1 and recorded_at>=now()-interval '24 hours'
+           and ($2::text[] is null or repository=any($2))
+         group by principal_id,access_channel,template
+         order by count(*) desc,max(recorded_at) desc
+         limit 501`,
+        [tenantId, repositories]
+      ),
+      this.pool.query<{
+        access_channel: "mcp" | "api" | "admin" | "direct";
+        retrievals: string;
+        requests: string;
+        actors: string;
+        average: string;
+        p95: string;
+        truncated: string;
+      }>(
+        `select access_channel,count(*) as retrievals,count(distinct request_id) as requests,
+                count(distinct principal_id) as actors,avg(duration_ms) as average,
+                percentile_cont(0.95) within group (order by duration_ms) as p95,
+                avg(case when truncated then 1.0 else 0.0 end) as truncated
+         from jina_context_graph.retrieval_metrics
+         where tenant_id=$1 and recorded_at>=now()-interval '24 hours'
+           and ($2::text[] is null or repository=any($2))
+         group by access_channel order by access_channel`,
+        [tenantId, repositories]
       )
     ]);
     const nowMs = new Date(now).getTime();
@@ -3380,6 +3433,26 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       retrievalTemplates: retrieval.rows.map((row) => ({
         template: row.template,
         requests: Number(row.requests),
+        averageLatencyMs: Number(row.average),
+        p95LatencyMs: Number(row.p95),
+        truncationRate: Number(row.truncated)
+      })),
+      retrievalAccess: retrievalAccess.rows.slice(0, 500).map((row) => ({
+        principalId: row.principal_id,
+        accessChannel: row.access_channel,
+        template: row.template,
+        requests: Number(row.requests),
+        averageLatencyMs: Number(row.average),
+        p95LatencyMs: Number(row.p95),
+        truncationRate: Number(row.truncated),
+        lastAccessedAt: row.last_accessed_at.toISOString()
+      })),
+      retrievalAccessTruncated: retrievalAccess.rows.length > 500,
+      retrievalChannels: retrievalChannels.rows.map((row) => ({
+        accessChannel: row.access_channel,
+        retrievals: Number(row.retrievals),
+        requests: Number(row.requests),
+        actors: Number(row.actors),
         averageLatencyMs: Number(row.average),
         p95LatencyMs: Number(row.p95),
         truncationRate: Number(row.truncated)
@@ -3580,13 +3653,22 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       totalBeforeLimit: permitted.length,
       limit
     };
+    const access = request.access ?? {
+      principalId: "svc:direct",
+      channel: "direct" as const,
+      requestId: randomUUID()
+    };
     await this.pool.query(
-      `insert into jina_context_graph.retrieval_metrics (tenant_id,repository,template,duration_ms,truncated,recorded_at)
-       values ($1,$2,$3,$4,$5,now())`,
+      `insert into jina_context_graph.retrieval_metrics
+       (tenant_id,repository,template,request_id,principal_id,access_channel,duration_ms,truncated,recorded_at)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,now())`,
       [
         request.tenantId,
         request.repository,
         request.template,
+        access.requestId,
+        access.principalId,
+        access.channel,
         Math.max(0, performance.now() - startedAt),
         result.truncated
       ]

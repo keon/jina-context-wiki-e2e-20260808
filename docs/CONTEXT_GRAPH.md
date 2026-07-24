@@ -242,7 +242,12 @@ Ingest and rebuild consult `erasure_filters`, so replay cannot resurrect removed
 - proposed and unexplained legacy assertion counts;
 - pending erasure events;
 - per-template 24-hour request count, average and p95 latency, and truncation rate;
+- per-channel request/retrieval counts and per-actor/template 24-hour access groups, correlated by request trace ID;
 - accept/reject rates per generator and predicate.
+
+Retrieval audit rows retain the authenticated principal, repository, bounded access channel, and request ID, but never
+the user's query text. The high-cardinality actor identity remains in PostgreSQL and structured logs rather than becoming
+a Cloud Monitoring metric label. Retrieval metrics follow the existing 30-day garbage-collection window.
 
 The service-level targets originally defined in v5.1 remain unchanged in v5.6: ref-to-manifest p95 ≤30s, observation-to-search p95 ≤60s, redirect-to-reconciliation p95 ≤5m, warm template p95 ≤400ms, and personal erasure ≤24h. The metrics expose the required timestamps/counters; production alert thresholds belong in Cloud Monitoring.
 

@@ -46,6 +46,25 @@ export default async function ObservabilityPage({
         tenantId: tenant.tenantId
       }))
     );
+  const readAccess = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .flatMap((tenant) =>
+      tenant.metrics.retrievalAccess.map((metric) => ({
+        ...metric,
+        tenantId: tenant.tenantId
+      }))
+    );
+  const readAccessTruncated = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .some((tenant) => tenant.metrics.retrievalAccessTruncated);
+  const readChannels = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .flatMap((tenant) =>
+      tenant.metrics.retrievalChannels.map((metric) => ({
+        ...metric,
+        tenantId: tenant.tenantId
+      }))
+    );
 
   return (
     <main>
@@ -103,7 +122,12 @@ export default async function ObservabilityPage({
         labels={metrics.labels}
         series={[{ name: "P95", values: metrics.p95DurationMinutes, tone: "blue" }]}
       />
-      <ReadTrafficMonitors metrics={readTraffic} />
+      <ReadTrafficMonitors
+        metrics={readTraffic}
+        accessMetrics={readAccess}
+        accessMetricsTruncated={readAccessTruncated}
+        channelMetrics={readChannels}
+      />
     </main>
   );
 }

@@ -1251,6 +1251,9 @@ test("context graph retrieval forwards generalized Issue identity and Feature te
     });
     assert.equal(featureResponse.status, 200);
     assert.equal(contextGraphStore.request?.featureText, "administrator deletion");
+    assert.equal(contextGraphStore.request?.access?.channel, "api");
+    assert.equal(contextGraphStore.request?.access?.principalId, "svc:dev");
+    assert.match(contextGraphStore.request?.access?.requestId ?? "", /^[0-9a-f]{32}$/);
   } finally {
     await close(server);
   }
@@ -1258,11 +1261,14 @@ test("context graph retrieval forwards generalized Issue identity and Feature te
 
 test("MCP exposes one authorized graph query with cited structured output", async () => {
   class QueryContextGraphStore extends MemoryContextGraphStore {
+    readonly requests: RetrievalRequest[] = [];
+
     override async repositoriesForPrincipal(_tenantId: string, principalId: string): Promise<readonly string[]> {
       return principalId === "user:reader@example.com" ? ["omxyz/context-graph-fixture"] : [];
     }
 
     override async retrieve(request: RetrievalRequest): Promise<RetrievalResult> {
+      this.requests.push(request);
       if (!request.allowedRepositories.includes(request.repository)) throw new Error("repository access denied");
       return {
         template: request.template,
@@ -1294,8 +1300,9 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
     }
   }
 
+  const queryStore = new QueryContextGraphStore();
   const server = createApiServer({
-    contextGraphStore: new QueryContextGraphStore(),
+    contextGraphStore: queryStore,
     internalApiToken: INTERNAL_TOKEN,
     tenantId: "tenant-a"
   });
@@ -1381,6 +1388,16 @@ test("MCP exposes one authorized graph query with cited structured output", asyn
       incomplete: false,
       notes: []
     });
+    assert.equal(queryStore.requests.length > 0, true);
+    assert.equal(
+      queryStore.requests.every((request) => request.access?.channel === "mcp"),
+      true
+    );
+    assert.equal(
+      queryStore.requests.every((request) => request.access?.principalId === "user:reader@example.com"),
+      true
+    );
+    assert.equal(new Set(queryStore.requests.map((request) => request.access?.requestId)).size, 1);
 
     await strangerClient.connect(strangerTransport as unknown as Transport);
     const denied = (await strangerClient.callTool({

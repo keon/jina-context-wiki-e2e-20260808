@@ -12,6 +12,17 @@ export const retrievalTemplateNames = [
 ] as const;
 export type RetrievalTemplateName = (typeof retrievalTemplateNames)[number];
 export type RepositoryContextOperation = "lookup" | "counterfactual";
+export const retrievalAccessChannelNames = ["mcp", "api", "admin", "direct"] as const;
+export type RetrievalAccessChannel = (typeof retrievalAccessChannelNames)[number];
+
+export interface RetrievalAccessContext {
+  /** Authenticated user, tenant, administrator, or service that initiated the read. */
+  readonly principalId: string;
+  /** Bounded calling surface; safe to group in operational reports. */
+  readonly channel: RetrievalAccessChannel;
+  /** One inbound request/trace ID shared by every template call it causes. */
+  readonly requestId: string;
+}
 
 export interface RetrievalCitation {
   readonly kind: "code" | "commit_change" | "assertion" | "observation" | "entity";
@@ -33,6 +44,7 @@ export interface RetrievalItem {
 
 export interface RetrievalRequest {
   readonly tenantId: string;
+  readonly access?: RetrievalAccessContext;
   /** Repositories already authorized by the command/API boundary. */
   readonly allowedRepositories: readonly string[];
   readonly repository: string;

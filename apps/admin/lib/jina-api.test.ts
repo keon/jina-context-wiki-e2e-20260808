@@ -79,7 +79,7 @@ test("graph reads and queries use the internal credential with the graph tenant"
 
   const graph = await getGraph("graph/b", "tenant-b");
   assert.ok(graph);
-  await askGraph(graph, "Where is authentication?");
+  await askGraph(graph, "Where is authentication?", "user:admin@example.com");
 
   assert.equal(requests.length, 2);
   for (const request of requests) {
@@ -88,6 +88,8 @@ test("graph reads and queries use the internal credential with the graph tenant"
   }
   assert.equal(requests[0]?.url, "https://api.example.test/context-graph/graphs/graph%2Fb");
   assert.equal(requests[1]?.url, "https://api.example.test/context-graph/ask");
+  assert.equal(requests[1]?.headers.get("x-jina-actor-id"), "user:admin@example.com");
+  assert.equal(requests[1]?.headers.get("x-jina-access-channel"), "admin");
 });
 
 test("global operations use the read-only cross-tenant credential", { concurrency: false }, async () => {

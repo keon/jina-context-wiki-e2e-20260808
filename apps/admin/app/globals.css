@@ -640,6 +640,77 @@ code {
   text-align: center;
 }
 
+.read-access,
+.mcp-traffic {
+  margin-top: 32px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.access-channel-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.access-channel-card {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--panel);
+  padding: 15px 16px;
+}
+
+.access-channel-card > span {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.access-channel-card strong {
+  font-size: 24px;
+  font-weight: 500;
+}
+
+.access-channel-card small,
+.access-audit-note,
+.mcp-monitor-detail {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.access-audit-note {
+  margin: 0 0 12px;
+}
+
+.read-access-table {
+  min-width: 940px;
+}
+
+.mcp-traffic {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+  padding: 24px 24px 6px;
+}
+
+.mcp-traffic .read-traffic-heading {
+  margin-bottom: 20px;
+}
+
+.mcp-monitor-detail {
+  margin: 0 0 20px;
+}
+
+.mcp-monitor-detail strong {
+  color: var(--text);
+  font-weight: 550;
+}
+
 .metric-chart {
   border-bottom: 1px solid var(--border);
   padding: 0 0 24px;
@@ -1464,10 +1535,18 @@ section.listing h3 {
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .access-channel-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .read-traffic-heading {
     align-items: flex-start;
     flex-direction: column;
     gap: 10px;
+  }
+
+  .mcp-traffic {
+    padding-inline: 18px;
   }
 
   .access-boundary {
