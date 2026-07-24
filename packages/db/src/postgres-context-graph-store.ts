@@ -2965,6 +2965,9 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     }
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
     await this.initialize();
+    if (options?.repositories && options.repositories.length === 0) {
+      return { processedEventCount: 0, rebuiltRepositories: [] };
+    }
     const rebuiltRepositories = new Set<string>();
     let processedEventCount = 0;
     // A repository whose ingest stage is mid-flight would have its projections
