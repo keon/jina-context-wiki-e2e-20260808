@@ -26,6 +26,7 @@ api_max_instances="${JINA_API_MAX_INSTANCES:-3}"
 api_concurrency="${JINA_API_CONCURRENCY:-20}"
 api_cpu="${JINA_API_CPU:-1}"
 api_memory="${JINA_API_MEMORY:-512Mi}"
+context_graph_worker_memory="${JINA_CONTEXT_GRAPH_WORKER_MEMORY:-1Gi}"
 
 validate_positive_integer() {
   local name="$1"
@@ -272,6 +273,7 @@ gcloud run deploy jina-context-graph-worker \
   --allow-unauthenticated \
   --service-account="${runtime_service_account}" \
   --concurrency=1 \
+  --memory="${context_graph_worker_memory}" \
   --timeout=300 \
   --min-instances=3 \
   --max-instances=3 \
@@ -378,4 +380,5 @@ Tenancy mode: ${tenancy_mode}
 API instances: ${api_min_instances}-${api_max_instances}
 API concurrency: ${api_concurrency}
 API size: ${api_cpu} CPU / ${api_memory}
+Context graph worker memory: ${context_graph_worker_memory}
 SUMMARY

@@ -24,6 +24,7 @@ steps:
       - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
       - JINA_API_CPU=${_JINA_API_CPU}
       - JINA_API_MEMORY=${_JINA_API_MEMORY}
+      - JINA_CONTEXT_GRAPH_WORKER_MEMORY=${_JINA_CONTEXT_GRAPH_WORKER_MEMORY}
     timeout: 4200s
 
 substitutions:
@@ -46,6 +47,7 @@ substitutions:
   _JINA_API_CONCURRENCY: "20"
   _JINA_API_CPU: "1"
   _JINA_API_MEMORY: 512Mi
+  _JINA_CONTEXT_GRAPH_WORKER_MEMORY: 1Gi
 timeout: 4200s
 serviceAccount: projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com
 options:

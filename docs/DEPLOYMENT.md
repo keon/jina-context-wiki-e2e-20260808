@@ -57,13 +57,14 @@ headroom for ingestion bursts. The following Cloud Build substitutions make
 the API envelope explicit and allow operators to tune it without editing the
 deployment script:
 
-| Substitution              | Default | Guidance                                                                          |
-| ------------------------- | ------: | --------------------------------------------------------------------------------- |
-| `_JINA_API_MIN_INSTANCES` |     `1` | Keep at least one warm for interactive reads.                                     |
-| `_JINA_API_MAX_INSTANCES` |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.         |
-| `_JINA_API_CONCURRENCY`   |    `20` | Lowering this can reduce per-instance contention, but may require more instances. |
-| `_JINA_API_CPU`           |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
-| `_JINA_API_MEMORY`        | `512Mi` | Increase if graph hydration/cache memory approaches the container limit.          |
+| Substitution                        | Default | Guidance                                                                          |
+| ----------------------------------- | ------: | --------------------------------------------------------------------------------- |
+| `_JINA_API_MIN_INSTANCES`           |     `1` | Keep at least one warm for interactive reads.                                     |
+| `_JINA_API_MAX_INSTANCES`           |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.         |
+| `_JINA_API_CONCURRENCY`             |    `20` | Lowering this can reduce per-instance contention, but may require more instances. |
+| `_JINA_API_CPU`                     |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
+| `_JINA_API_MEMORY`                  | `512Mi` | Increase if graph hydration/cache memory approaches the container limit.          |
+| `_JINA_CONTEXT_GRAPH_WORKER_MEMORY` |   `1Gi` | Memory reserved for git history ingestion and assertion synthesis.                |
 
 Each Cloud Run instance creates independent primary, shared-identity, graph
 store, and graph-coordinator pools. Raising maximum instances multiplies
