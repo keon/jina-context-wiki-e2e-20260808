@@ -1213,6 +1213,16 @@ const PIPELINE_SCHEMA_SQL = `
   alter table jina_board.tasks add column if not exists started_at timestamptz;
   alter table jina_board.tasks add column if not exists completed_at timestamptz;
   alter table jina_board.tasks add column if not exists duration_ms bigint;
+  create table if not exists jina_board.events (
+    id bigint generated always as identity primary key,
+    tenant_id text not null,
+    task_id text not null,
+    type text not null,
+    at timestamptz not null,
+    payload jsonb not null default '{}'::jsonb
+  );
+  create index if not exists task_board_events_task_idx
+    on jina_board.events (tenant_id,task_id,id);
   -- Retired ontology workflows are not compatible with the current worker
   -- contract. Remove them before tightening the topic constraint; current
   -- graph work is never rewritten into a second execution mode.
@@ -1275,17 +1285,6 @@ const PIPELINE_SCHEMA_SQL = `
     created_at timestamptz not null,
     primary key (workflow_id,task_id,depends_on_task_id,relationship)
   );
-
-  create table if not exists jina_board.events (
-    id bigint generated always as identity primary key,
-    tenant_id text not null,
-    task_id text not null,
-    type text not null,
-    at timestamptz not null,
-    payload jsonb not null default '{}'::jsonb
-  );
-  create index if not exists task_board_events_task_idx
-    on jina_board.events (tenant_id,task_id,id);
 
   create table if not exists jina_board.task_checkpoints (
     stage_id text not null references jina_board.tasks(id) on delete cascade,

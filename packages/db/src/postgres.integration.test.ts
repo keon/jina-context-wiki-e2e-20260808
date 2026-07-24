@@ -4350,6 +4350,36 @@ const LEGACY_PIPELINE_SCHEMA_SQL = `
 `;
 
 test(
+  "Postgres contextGraph pipeline initializes the current schema in a fresh database",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const databaseName = `jina_board_fresh_${Date.now().toString(36)}`;
+    const control = new Pool({ connectionString });
+    await control.query(`create database "${databaseName}"`);
+    const isolatedUrl = new URL(connectionString);
+    isolatedUrl.pathname = `/${databaseName}`;
+    const isolatedConnectionString = isolatedUrl.toString();
+    const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString: isolatedConnectionString });
+    const inspect = new Pool({ connectionString: isolatedConnectionString });
+    try {
+      await coordinator.initialize();
+      const schema = await inspect.query<{ workflows: string | null; events: string | null }>(
+        `select to_regclass('jina_board.workflows')::text as workflows,
+                to_regclass('jina_board.events')::text as events`
+      );
+      assert.deepEqual(schema.rows, [{ workflows: "jina_board.workflows", events: "jina_board.events" }]);
+    } finally {
+      await Promise.all([coordinator.close(), inspect.end()]);
+      await control.query(`drop database if exists "${databaseName}" with (force)`);
+      await control.end();
+    }
+  }
+);
+
+test(
   "Postgres contextGraph pipeline removes retired ontology workflows and enforces current topics",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
