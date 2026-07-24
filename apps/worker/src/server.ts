@@ -743,24 +743,22 @@ async function discoverNewCommits(
 }> {
   const headSha = requiredGitSha(head.sha, "GitHub head SHA");
   const commits = new Map<string, Record<string, unknown>>([[headSha, head]]);
-  const pending = [headSha];
   const expanded = new Set<string>();
   const knownCommitShas = new Set<string>();
-  let truncated = false;
-  while (pending.length > 0) {
-    const discoveredHistoryCount = commits.size - 1;
-    if (discoveredHistoryCount >= policy.limit || expanded.size >= policy.traversalLimit) {
-      truncated = true;
-      break;
-    }
-    const batchSize = Math.min(25, policy.limit - discoveredHistoryCount, policy.traversalLimit - expanded.size);
-    const batch = [...new Set(pending.splice(0, Math.max(1, batchSize)))].filter((sha) => !expanded.has(sha));
-    if (batch.length === 0) continue;
+  const pageSize = 100;
+  const maximumPages = Math.ceil(policy.traversalLimit / pageSize);
+  for (let page = 1; page <= maximumPages; page += 1) {
+    const pageCommits = await githubJsonArray(
+      `/repos/${repository}/commits?sha=${encodeURIComponent(headSha)}&per_page=${pageSize}&page=${page}`
+    );
+    const batch = pageCommits.slice(0, policy.traversalLimit - expanded.size);
+    if (batch.length === 0) return { commits, knownCommitShas, truncated: false };
+    const batchShas = batch.map((commit) => requiredGitSha(commit.sha, "GitHub history commit SHA"));
     const known = await internalApiJson<{ readonly knownCommits: unknown }>("/internal/context-graph/ingest/known", {
       taskId: work.task.id,
       messageId: work.message.id,
       leaseId: work.message.leaseId,
-      commitShas: batch
+      commitShas: batchShas
     });
     if (!Array.isArray(known.knownCommits)) throw new Error("known commits response must be an array");
     const knownBySha = new Map(
@@ -773,37 +771,29 @@ async function discoverNewCommits(
         return [sha, { sha, parents }] as const;
       })
     );
-    const unknownShas = batch.filter((sha) => !knownBySha.has(sha) && !commits.has(sha));
-    const fetchedCommits = new Map(
-      await mapWithConcurrency(
-        unknownShas,
-        8,
-        async (sha) => [sha, await githubJson(`/repos/${repository}/commits/${sha}`)] as const
-      )
-    );
-    for (const sha of batch) {
+    for (const [index, commit] of batch.entries()) {
+      const sha = batchShas[index]!;
+      if (expanded.has(sha)) continue;
       expanded.add(sha);
       const knownCommit = knownBySha.get(sha);
       if (knownCommit) {
         knownCommitShas.add(sha);
         if (sha !== headSha) commits.delete(sha);
-        for (const parentSha of knownCommit.parents) {
-          if (!expanded.has(parentSha)) pending.push(parentSha);
-        }
-        continue;
+      } else if (sha !== headSha) {
+        commits.set(sha, commit);
       }
-      const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
-      commits.set(sha, commit);
-      if (commits.size - 1 > policy.limit)
-        throw new Error(`reachable Git history discovery exceeded its configured limit of ${policy.limit} commits`);
-      for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
-        if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
-        const parentSha = requiredGitSha(parent.sha, "GitHub parent SHA");
-        if (!expanded.has(parentSha)) pending.push(parentSha);
+      if (commits.size - 1 >= policy.limit) {
+        const parents = Array.isArray(commit.parents) ? commit.parents : [];
+        const hasMoreHistory = index < batch.length - 1 || pageCommits.length === pageSize || parents.length > 0;
+        return { commits, knownCommitShas, truncated: hasMoreHistory };
       }
     }
+    if (expanded.size >= policy.traversalLimit) {
+      return { commits, knownCommitShas, truncated: pageCommits.length === pageSize };
+    }
+    if (pageCommits.length < pageSize) return { commits, knownCommitShas, truncated: false };
   }
-  return { commits, knownCommitShas, truncated };
+  return { commits, knownCommitShas, truncated: true };
 }
 
 function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Record<string, unknown>>): string[] {

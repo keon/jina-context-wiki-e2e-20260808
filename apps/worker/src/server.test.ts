@@ -82,6 +82,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   let renewals = 0;
   let projectionDrains = 0;
   let ingestPlanRequests = 0;
+  let historyPageRequests = 0;
   let missingLinkedIssueRequests = 0;
   let ingestedPullRequestNumbers: number[] = [];
   const completions: Record<string, unknown>[] = [];
@@ -230,12 +231,25 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       });
       return;
     }
-    if (request.url === `/github/repos/omlabs/example/commits/${"f".repeat(40)}`) {
-      json(response, 200, {
-        sha: "f".repeat(40),
-        commit: { tree: { sha: "1".repeat(40) } },
-        parents: []
-      });
+    if (request.url === `/github/repos/omlabs/example/commits?sha=${"a".repeat(40)}&per_page=100&page=1`) {
+      historyPageRequests += 1;
+      json(response, 200, [
+        {
+          sha: "a".repeat(40),
+          commit: { tree: { sha: "b".repeat(40) } },
+          parents: [{ sha: "e".repeat(40) }]
+        },
+        {
+          sha: "e".repeat(40),
+          commit: { tree: { sha: "2".repeat(40) } },
+          parents: [{ sha: "f".repeat(40) }]
+        },
+        {
+          sha: "f".repeat(40),
+          commit: { tree: { sha: "1".repeat(40) } },
+          parents: []
+        }
+      ]);
       return;
     }
     if (request.url === "/github/repos/omlabs/example") {
@@ -469,6 +483,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   assert.equal(ingestPlanRequests, 3);
   assert.equal(missingLinkedIssueRequests, 1);
   assert.equal(projectionDrains > 0, true);
+  assert.equal(historyPageRequests, 1);
 });
 
 test("worker rejects malformed topic metadata before dispatch", async (context) => {
