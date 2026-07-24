@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ASSERTION_CHANGESET_CONTRACT_VERSION,
-  assertionBatchToChangeSet,
   assertionSemanticKey,
   parseAssertionChangeSet,
   type AssertionCandidate,
@@ -10,7 +9,6 @@ import {
 } from "./assertion-changeset.js";
 import { parseEvidenceLocator } from "./evidence.js";
 import { ASSERTION_CHANGESET_OUTPUT_SCHEMA } from "./schema.js";
-import type { ContextGraphAssertionBatch } from "./pipeline.js";
 
 const commitSha = "a".repeat(40);
 const repository = "omlabs/jina";
@@ -19,7 +17,7 @@ const scope = {
   repository,
   ref: "refs/heads/main",
   commitSha,
-  mode: "incremental"
+  kind: "incremental"
 } as const;
 const base = {
   assertionSetVersion: "assertion-set-7",
@@ -133,6 +131,14 @@ test("assertion changesets reject untrusted scope and base substitutions", () =>
       }),
     /base.assertionSetVersion does not match trusted base/
   );
+  assert.throws(
+    () =>
+      parseAssertionChangeSet({
+        ...(changeset([]) as Record<string, unknown>),
+        scope: { ...scope, kind: undefined, mode: "incremental" }
+      }),
+    /scope contains unsupported fields: mode/
+  );
 });
 
 test("assertion changesets reject unknown fields and graph-shaped output", () => {
@@ -151,6 +157,8 @@ test("assertion changesets reject unknown fields and graph-shaped output", () =>
   ]);
   assert.equal("nodes" in ASSERTION_CHANGESET_OUTPUT_SCHEMA.properties, false);
   assert.equal("edges" in ASSERTION_CHANGESET_OUTPUT_SCHEMA.properties, false);
+  assert.equal("kind" in ASSERTION_CHANGESET_OUTPUT_SCHEMA.properties.scope.properties, true);
+  assert.equal("mode" in ASSERTION_CHANGESET_OUTPUT_SCHEMA.properties.scope.properties, false);
 });
 
 test("the Codex output schema closes and requires every object property", () => {
@@ -246,47 +254,4 @@ test("semantic assertion keys are stable across qualifier ordering", () => {
     assertionSemanticKey({ ...candidate, qualifiers: { source: "worker", retries: 3 } }),
     assertionSemanticKey({ ...candidate, qualifiers: { retries: 3, source: "worker" } })
   );
-});
-
-test("legacy assertion batches adapt to stable semantic changesets", () => {
-  const batch: ContextGraphAssertionBatch = {
-    tenantId: scope.tenantId,
-    repository,
-    ref: scope.ref,
-    commitSha,
-    taskId: "task-1",
-    generatedAt: "2026-07-24T00:00:00.000Z",
-    generatorVersion: "legacy-generator",
-    registryVersion: base.registryVersion,
-    evidenceFingerprint: base.evidenceFingerprint,
-    evidenceObservationIds: ["observation-1"],
-    model: "codex",
-    summary: "Retry behavior is implemented in the worker.",
-    rawOutput: {
-      summary: "Retry behavior is implemented in the worker.",
-      nodes: [],
-      edges: []
-    },
-    assertions: [
-      {
-        subject: candidate.subject,
-        predicate: candidate.predicate,
-        object: candidate.object,
-        confidence: candidate.confidence,
-        explanation: candidate.explanation,
-        evidence: ["src/retry.ts:10-20"],
-        qualifiers: {}
-      }
-    ]
-  };
-
-  const first = assertionBatchToChangeSet(batch, { assertionSetVersion: base.assertionSetVersion });
-  const second = assertionBatchToChangeSet(batch, { assertionSetVersion: base.assertionSetVersion });
-  assert.deepEqual(second, first);
-  assert.equal(first.operations.length, 1);
-  assert.equal(first.operations[0]?.type, "propose");
-  if (first.operations[0]?.type !== "propose") assert.fail("expected a proposal");
-  assert.deepEqual(first.operations[0].assertion.evidence, [evidence]);
-  assert.equal(first.operations[0].assertion.truthClass, "agent_claim");
-  assert.equal(first.scope.mode, "incremental");
 });

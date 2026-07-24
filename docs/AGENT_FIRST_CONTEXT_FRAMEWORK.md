@@ -156,29 +156,24 @@ the budget allows. These are agent behaviors, not taskboard tasks.
 Only the assertion service commits the persisted plan. Codex cannot directly mutate assertions, lifecycle
 decisions, entities, or projections.
 
-### Execution provider is orthogonal to semantic mode
+### One semantic contract, configurable execution
 
-Provider selection answers “who serves the one Codex session?” It does not change what `ingest`, `assert`, or
-`project` mean and it does not select a different framework:
+The framework has one behavior: the assertion agent emits an `AssertionChangeSet`, Jina applies the versioned
+admission policy, and causal queries use the mechanism evaluator. There are no legacy, shadow, canary, admission, or
+causal execution modes and no runtime flags that select between semantic implementations.
+
+Provider selection answers only “who serves the one Codex session?” It does not change what `ingest`, `assert`, or
+`project` mean:
 
 | Dimension        | Values                                                  | Responsibility                                             |
 | ---------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
-| Assertion mode   | `legacy`, `host_shadow`, `model_shadow`, `changeset`    | Shape of the semantic output and validation path           |
-| Admission mode   | `legacy_proposed`, `shadow`, `enforce`                  | Whether valid proposals remain proposed or auto-activate   |
-| Causal mode      | `legacy`, `mechanism_shadow`, `mechanism`               | Path-removal compatibility versus mechanism evaluation     |
 | Execution source | Jina managed, Codex account, tenant BYOK                | Credential and billing route for the one assertion session |
 | Assertion model  | One model selected from the provider-compatible catalog | Quality, latency, context, and cost role                   |
 
-`legacy` is therefore not a provider. It is the compatibility implementation already in the repository:
-
-- assertion `legacy` asks Codex for `GeneratedContextGraph` and normalizes it into assertions;
-- admission `legacy_proposed` retains valid model claims as proposals;
-- causal `legacy` uses the existing reviewed-path evaluator.
-
-The rollout moves those three semantic contracts independently through shadow modes. Any semantic mode may run on
-managed, Codex, or BYOK. The provider and model are snapshotted when a build starts; credentials are resolved only
-after the assertion task owns its lease. The actual route after fallback is stamped on the generation, while secrets
-never enter task metadata, graph data, prompts, or assertion records.
+The provider and model are snapshotted when a build starts; credentials are resolved only after the assertion task
+owns its lease. The actual route after fallback is stamped on the generation, while secrets never enter task
+metadata, graph data, prompts, or assertion records. Contract evolution uses normal schema and contract versions,
+not parallel runtime modes or dual generation.
 
 There is intentionally one model picker. Planning, repository investigation, assertion comparison, causal-claim
 formation, and changeset reduction happen inside the one Codex session. Deterministic ingest and project do not need
@@ -418,7 +413,7 @@ The system decides the maximum scope. The agent decides how to spend that scope.
 
 ```ts
 interface ContextAnalysisScope {
-  mode: "pull_request" | "bootstrap" | "incremental" | "deep_backfill";
+  kind: "pull_request" | "bootstrap" | "incremental" | "deep_backfill";
   repository: string;
   ref: string;
   headCommitSha: string;
@@ -439,7 +434,7 @@ Codex may prioritize paths, commits, PRs, and questions inside this envelope. It
 that request becomes an explicit policy or operator request; the agent cannot silently turn a PR analysis into a
 full-history scan.
 
-### Pull-request mode
+### Pull-request scope
 
 Use for a single PR or review epoch.
 
@@ -452,7 +447,7 @@ Use for a single PR or review epoch.
 The agent does not need the repository's entire history to explain the PR. It may follow a bounded number of direct
 historical references when the PR evidence requires them.
 
-### Bootstrap mode
+### Bootstrap scope
 
 Use for a repository with no current checkpoint.
 
@@ -465,7 +460,7 @@ Use for a repository with no current checkpoint.
 
 Bootstrap must not require replaying every commit before the repository is queryable.
 
-### Incremental mode
+### Incremental scope
 
 Use after a known checkpoint.
 
@@ -475,7 +470,7 @@ Use after a known checkpoint.
 - Reconfirm, supersede, or challenge assertions affected by the delta.
 - Leave unrelated assertions untouched.
 
-### Deep-backfill mode
+### Deep-backfill scope
 
 Use for explicit historical reconstruction.
 
@@ -487,8 +482,8 @@ Use for explicit historical reconstruction.
 - Reconcile identities and temporal validity after chunks converge.
 - Never expose a partial history as complete; report coverage boundaries.
 
-The existing history safety fence remains useful, but deep backfill should be a product mode rather than the
-default initialization path.
+The existing history safety fence remains useful, but deep backfill should be an explicit product scope rather than
+the default initialization path.
 
 ### Long history versus one PR
 
@@ -503,7 +498,7 @@ default initialization path.
 | Completion      | Exact PR scope processed              | Explicit coverage boundary reached                 |
 | Agent authority | Prioritize within PR budget           | Prioritize within each system-created chunk        |
 
-Codex does not choose between these modes on its own. The intake event, API request, or policy selects the mode.
+Codex does not choose its scope. The intake event, API request, or policy selects it.
 
 ## Ingest contract
 
@@ -516,12 +511,12 @@ Ingest remains deterministic and model-free. It creates the evidence substrate t
 - tree or first-parent delta;
 - task and write-fence identity;
 - source permissions and budgets;
-- initialization mode and history boundary.
+- analysis scope and history boundary.
 
 ### Substeps
 
 1. Resolve the ref to an immutable commit.
-2. Discover unseen commits within the declared mode and limit.
+2. Discover unseen commits within the declared scope and limit.
 3. Record exact commit trees and first-parent changes.
 4. Reuse or create versioned blob analyses.
 5. Normalize explicit repository and provider facts.
@@ -540,7 +535,7 @@ interface ContextIngestCheckpoint {
   ref: string;
   headCommitSha: string;
   treeSha: string;
-  mode: ContextAnalysisScope["mode"];
+  kind: ContextAnalysisScope["kind"];
   codeCheckpoint: string;
   sourceObservationIds: readonly string[];
   changedPaths: readonly string[];
@@ -572,7 +567,7 @@ world-state observations, scope, focus selection, registry version, and relevant
 
 - Every source fact is reproducible from an immutable observation or content-addressed blob.
 - An unavailable optional provider does not invent negative evidence.
-- Exceeding a declared history limit fails or reports partial coverage according to the selected mode; it never
+- Exceeding a declared history limit fails or reports partial coverage according to the selected scope; it never
   presents partial history as complete.
 - Ingest may create deterministic facts but never model inferences.
 - Ingest never depends on graph projection state.
@@ -665,7 +660,7 @@ interface AssertionChangeSet {
     repository: string;
     ref: string;
     commitSha: string;
-    mode: "pull_request" | "incremental" | "initialize" | "backfill";
+    kind: "pull_request" | "incremental" | "initialize" | "backfill";
   };
   base: {
     registryVersion: string;
@@ -1365,8 +1360,8 @@ The minimal v1 registry additions are:
 | `REQUIRES_STATE`              | The mechanism depends on configuration, schema, data, or runtime state        |
 
 Each causal assertion still uses the normal assertion changeset, structured evidence, automatic admission, validity,
-attestations, and lifecycle. `INTRODUCED_BY` remains as a compatibility summary and may compile into a
-single-condition mechanism when the evidence supports that interpretation. It must not imply sufficiency by itself.
+attestations, and lifecycle. The agent emits mechanisms and conditions directly; it does not emit a parallel
+`INTRODUCED_BY` summary representation.
 
 An agent may assert that evidence supports or contradicts a causal assertion through the existing assertion-relation
 contract. Disproved candidates remain auditable rather than disappearing from analysis history.
@@ -1604,7 +1599,7 @@ The target schema adds or separates the following canonical records:
 
 | Record                      | Purpose                                                                      |
 | --------------------------- | ---------------------------------------------------------------------------- |
-| `assertion_scopes`          | Immutable analysis mode, budgets, commit boundary, and evidence fingerprint  |
+| `assertion_scopes`          | Immutable analysis kind, budgets, commit boundary, and evidence fingerprint  |
 | `assertion_agent_runs`      | Bounded Codex execution, tool audit, submitted changeset, and outcome        |
 | `assertion_changesets`      | Exact Codex semantic output before normalization                             |
 | `assertion_mutation_plans`  | Persisted normalized plan, admission outcomes, diff, risk, and base versions |
@@ -1893,34 +1888,23 @@ must demonstrate equivalent cited retrieval for the supported templates before r
 | `apps/api/src/mcp.ts`                             | Add authorized evidence, changeset, world-state, and causal-analysis tools while retaining a narrow typed surface           |
 | `packages/context-graph/src/retrieval.ts`         | Return ranked evidence, causal analyses, and explicit coverage suitable for agent synthesis                                 |
 
-## Migration plan
+## Implementation sequence
 
-### Phase 1: contracts and attestations
+### Phase 1: contracts, persistence, and direct assertion replacement
 
 - Introduce structured evidence, truth class, assertion attestations, assertion-set versions, automatic-admission
-  outcomes, and unresolved findings.
-- Preserve the current generator and projection behavior.
-- Migrate existing evidence strings into structured records where exact information is available.
-- Keep legacy evidence text for audit when it cannot be losslessly upgraded.
-
-### Phase 2: one-session changeset shadow mode
-
+  outcomes, unresolved findings, and immutable mutation plans.
 - Give the existing assertion task one Codex session with the bounded read-tool surface.
-- Add `AssertionChangeSet` output to the Daytona executor.
-- Continue generating the current graph-shaped output in production.
-- Compare normalized assertions from both paths without committing changeset output.
-- Measure parity, additional findings, unsupported operations, evidence failures, and cost.
-
-### Phase 3: automatic proposal and exact-plan commit
-
-- Add persisted mutation plans and semantic diffs.
-- Route the single Codex changeset through coded validation, admission, commit, and verification inside the existing
+- Replace graph-shaped Codex output with `AssertionChangeSet`; do not add an adapter or dual-generation path.
+- Route the changeset through coded validation, admission, exact-plan commit, and verification inside the existing
   assertion task.
-- Activate claims that pass registry admission policy.
-- Retain lower-assurance valid claims as proposed and defer unsupported or conflicting claims.
+- Activate claims that pass registry admission policy, retain lower-assurance valid claims as proposed, and defer
+  unsupported or conflicting claims.
 - Keep human review available as an optional correction surface with no waitpoint.
+- Deploy the schema and application change together. A failed deployment rolls back the application and database
+  transaction; it does not switch to another semantic implementation.
 
-### Phase 4: Causal Analysis Layer v1
+### Phase 2: Causal Analysis Layer
 
 - Add bounded assertion and evidence read tools.
 - Expose changeset proposal to trusted internal agents.
@@ -1931,20 +1915,14 @@ must demonstrate equivalent cited retrieval for the supported templates before r
   assurance, assumptions, falsifiers, and coverage gaps.
 - Expose causal-analysis tools to the query agent and return ranked evidence envelopes with structured causal results.
 
-### Phase 5: optional virtual revisions and experiments
+### Phase 3: optional virtual revisions and experiments
 
 - Add content-addressed virtual PR, commit, revert, cherry-pick, reorder, and dependency worlds.
 - Reparse and reproject virtual revisions without making them canonical.
 - Add separately gated sandbox test, isolated database, and runtime replay adapters.
 - Preserve evaluator-specific assurance and ingest experiment results only as immutable observations.
 
-### Phase 6: remove graph-shaped assertion output
-
-- Stop asking Codex for `GeneratedContextGraph`.
-- Keep a compatibility adapter only for retained historical model observations.
-- Remove it after replay and audit requirements are satisfied.
-
-### Phase 7: initialization and world-state policy rollout
+### Phase 4: initialization and world-state policy
 
 - Make current-tree bootstrap the default for new repositories.
 - Add bounded recent PR/issue backfill.
@@ -1953,7 +1931,6 @@ must demonstrate equivalent cited retrieval for the supported templates before r
 - Add optional configuration, flag, IAM, deployment, artifact, schema, data-shape, runtime, and CI observation sources
   without blocking code-only repositories.
 
-Every phase is independently deployable and reversible until canonical writes switch to the new plan contract.
 Explicit taskboard decomposition is intentionally absent. It remains a future optimization gated by the measurable
 criteria in [When explicit subtasks become justified](#when-explicit-subtasks-become-justified).
 
@@ -2008,7 +1985,7 @@ and UI layouts are workload-specific read models. They should remain rebuildable
 ### Replay all history during initialization
 
 Rejected as the default because time-to-first-context grows with repository age rather than current complexity.
-Deep history remains available as an explicit, chunked mode.
+Deep history remains available as an explicit, chunked scope.
 
 ### Encode every Codex reasoning step as a taskboard subtask
 

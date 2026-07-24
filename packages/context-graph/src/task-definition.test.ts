@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { contextGraphTaskTypeDefinitions, contextGraphTaskTypeDependencies } from "./task-definition.js";
 
-test("agent-first rollout preserves the three context graph stage tasks", () => {
+test("agent-first framework preserves the three context graph stage tasks", () => {
   assert.deepEqual(
     contextGraphTaskTypeDefinitions.map((definition) => definition.type),
     ["context_graph_build", "context_graph_ingest", "context_graph_assert", "context_graph_project"]

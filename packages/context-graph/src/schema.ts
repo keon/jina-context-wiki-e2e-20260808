@@ -4,7 +4,7 @@ import {
   ASSERTION_CHANGESET_LIMITS,
   assertionQualifierKeys,
   assertionRelationKinds,
-  assertionScopeModes,
+  assertionScopeKinds,
   assertionTruthClasses
 } from "./assertion-changeset.js";
 import { predicateRegistry } from "./registry.js";
@@ -183,13 +183,13 @@ export const ASSERTION_CHANGESET_OUTPUT_SCHEMA = {
     scope: {
       type: "object",
       additionalProperties: false,
-      required: ["tenantId", "repository", "ref", "commitSha", "mode"],
+      required: ["tenantId", "repository", "ref", "commitSha", "kind"],
       properties: {
         tenantId: { type: "string", minLength: 1 },
         repository: { type: "string", minLength: 1 },
         ref: { type: "string", minLength: 1 },
         commitSha: { type: "string", pattern: "^[a-fA-F0-9]{40}$" },
-        mode: { type: "string", enum: assertionScopeModes }
+        kind: { type: "string", enum: assertionScopeKinds }
       }
     },
     base: {

@@ -3,13 +3,13 @@
 ## Status
 
 This document is the execution plan for
-[AGENT_FIRST_CONTEXT_FRAMEWORK.md](AGENT_FIRST_CONTEXT_FRAMEWORK.md). It translates the target design into
-small, reversible pull requests against the current implementation.
+[AGENT_FIRST_CONTEXT_FRAMEWORK.md](AGENT_FIRST_CONTEXT_FRAMEWORK.md). It translates the target design into focused
+pull requests against the current implementation.
 
 - Planning date: 2026-07-24.
 - [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md) remains authoritative for behavior that is deployed today.
-- This plan does not authorize a flag cutover by itself.
-- Every migration is expand-first and compatible with the current assertion and projection paths.
+- The framework has one assertion, admission, and causal implementation. It does not add compatibility modes,
+  shadow execution, dual generation, or a graph-output adapter.
 - Human review remains available, but no task, assertion run, admission decision, projection, or causal answer waits
   for it.
 
@@ -52,8 +52,8 @@ analysis subtasks in the first implementation. A regression test should make thi
 The new agent boundary is an `AssertionChangeSet`. Codex does not emit graph nodes and edges, SQL, Cypher, or a
 sequence of database mutations.
 
-The existing `GeneratedContextGraph` contract remains available behind a legacy mode until model-native
-changesets have passed shadow evaluation and canary writes. The graph remains a rebuildable projection.
+The `GeneratedContextGraph` agent-output contract is replaced directly. The graph remains a rebuildable projection,
+not an alternate agent boundary.
 
 ### Let Codex reason; make services enforce
 
@@ -94,24 +94,23 @@ separate, explicitly scheduled scope. Codex does not decide to walk an unbounded
 
 ## Current code seams
 
-The migration should extend these seams rather than build a second pipeline.
+The implementation changes these seams in place rather than building a second pipeline.
 
-| Concern                  | Current seam                                           | Planned change                                                                           |
-| ------------------------ | ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
-| Task topology            | `packages/context-graph/src/task-definition.ts`        | Preserve topology; add invariant coverage only                                           |
-| Agent request/result     | `packages/context-graph/src/model.ts`                  | Add changeset request/result types beside the legacy graph result                        |
-| Agent schema and prompt  | `packages/context-graph/src/schema.ts`                 | Add strict changeset schema and agent-first prompt                                       |
-| Daytona Codex execution  | `packages/daytona/src/context-graph-executor.ts`       | Select legacy or changeset contract; configure a required read-only MCP server           |
-| Worker orchestration     | `apps/worker/src/server.ts`                            | Select mode, load prior state, run agent, propose plan, and commit admitted operations   |
-| Legacy normalization     | `packages/context-graph/src/pipeline.ts`               | Keep compatibility; move new contracts to focused modules                                |
-| Ontology and policy      | `packages/context-graph/src/registry.ts`               | Add admission and source-authority policy without removing review metadata               |
-| In-memory behavior       | `packages/context-graph/src/store.ts`                  | Implement the same propose/verify/commit semantics as PostgreSQL                         |
-| PostgreSQL schema        | `packages/db/src/context-graph-schema.ts`              | Add runs, changesets, plans, operations, versions, attestations, and unresolved findings |
-| PostgreSQL behavior      | `packages/db/src/postgres-context-graph-store.ts`      | Add transactional propose and commit methods while retaining existing write fences       |
-| Database roles           | `packages/db/src/context-graph-roles.ts`               | Grant least-privilege access for each new table and operation                            |
-| API/MCP                  | `apps/api/src/mcp.ts`                                  | Keep `query_graph`; later add one qualified `analyze_causality` tool                     |
-| Current causal evaluator | `packages/context-graph/src/causal.ts`                 | Keep compatibility while a mechanism-based evaluator is introduced beside it             |
-| Public exports           | `packages/context-graph/src/index.ts`, package indexes | Export versioned contracts without breaking current imports                              |
+| Concern                 | Current seam                                           | Planned change                                                                           |
+| ----------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
+| Task topology           | `packages/context-graph/src/task-definition.ts`        | Preserve topology; add invariant coverage only                                           |
+| Agent request/result    | `packages/context-graph/src/model.ts`                  | Replace graph result types with the changeset request/result                             |
+| Agent schema and prompt | `packages/context-graph/src/schema.ts`                 | Require the strict changeset schema and agent-first prompt                               |
+| Daytona execution       | `packages/daytona/src/context-graph-executor.ts`       | Run the changeset contract with a required read-only MCP server                          |
+| Worker orchestration    | `apps/worker/src/server.ts`                            | Load prior state, run the agent, propose a plan, and commit admitted operations          |
+| Ontology and policy     | `packages/context-graph/src/registry.ts`               | Add admission and source-authority policy while keeping optional-review metadata         |
+| In-memory behavior      | `packages/context-graph/src/store.ts`                  | Implement the same propose/verify/commit semantics as PostgreSQL                         |
+| PostgreSQL schema       | `packages/db/src/context-graph-schema.ts`              | Add runs, changesets, plans, operations, versions, attestations, and unresolved findings |
+| PostgreSQL behavior     | `packages/db/src/postgres-context-graph-store.ts`      | Add transactional propose and commit methods with existing write fences                  |
+| Database roles          | `packages/db/src/context-graph-roles.ts`               | Grant least-privilege access for each new table and operation                            |
+| API/MCP                 | `apps/api/src/mcp.ts`                                  | Keep `query_graph`; later add one qualified `analyze_causality` tool                     |
+| Causal evaluator        | `packages/context-graph/src/causal.ts`                 | Replace path deletion with the mechanism-based evaluator                                 |
+| Public exports          | `packages/context-graph/src/index.ts`, package indexes | Export the single versioned contract                                                     |
 
 ## Target runtime
 
@@ -141,62 +140,33 @@ concurrent assertion changes may have made the plan stale.
 
 ## Delivery strategy
 
-The work is divided into independently deployable slices. A slice may contain more than one commit, but should be
-small enough for one pull request unless noted otherwise.
+The work is divided into focused slices. A slice may contain more than one commit, but should be small enough for
+one pull request unless noted otherwise. A slice can add schema before use, but there is never more than one
+semantic execution path in a running application version.
 
 The critical path is:
 
 ```text
-baseline flags
+topology invariant and execution profile
   -> changeset contract
   -> additive schema
   -> pure planner/admission
   -> transactional store
   -> attestations and semantic identity
-  -> host shadow
-  -> model-native shadow
-  -> canary writes
-  -> changeset default
+  -> direct changeset execution
+  -> mechanism-based causal analysis
 ```
 
-The mechanism-based Causal Analysis Layer can begin after the changeset contract exists, but must not become the
-default until the assertion ledger can preserve causal condition grouping.
+The mechanism-based Causal Analysis Layer can begin after the changeset contract exists. The assertion and causal
+replacements ship as ordinary versioned application changes, not selectable modes.
 
-## Slice 0 — Baseline modes and topology invariants
+## Slice 0 — Topology invariants and assertion execution profile
 
 ### Purpose
 
-Create rollout controls and observability without changing runtime behavior.
+Preserve the three durable stage boundaries and add the one tenant-scoped provider/model profile.
 
 ### Changes
-
-Add one validated mode parser rather than reading unrelated environment variables throughout the worker:
-
-```ts
-type AssertionExecutionMode = "legacy" | "host_shadow" | "model_shadow" | "changeset";
-
-type AdmissionExecutionMode = "legacy_proposed" | "shadow" | "enforce";
-
-type CausalExecutionMode = "legacy" | "mechanism_shadow" | "mechanism";
-
-interface ContextFrameworkModes {
-  assertion: AssertionExecutionMode;
-  admission: AdmissionExecutionMode;
-  causal: CausalExecutionMode;
-  modelShadowSampleBps: number;
-}
-```
-
-Recommended environment variables:
-
-| Variable                                    | Initial default   | Meaning                                          |
-| ------------------------------------------- | ----------------- | ------------------------------------------------ |
-| `CONTEXT_GRAPH_ASSERTION_MODE`              | `legacy`          | Selects the assertion path                       |
-| `CONTEXT_GRAPH_ADMISSION_MODE`              | `legacy_proposed` | Preserves current proposal behavior              |
-| `CONTEXT_GRAPH_CAUSAL_MODE`                 | `legacy`          | Preserves current path-removal evaluator         |
-| `CONTEXT_GRAPH_CHANGESET_SHADOW_SAMPLE_BPS` | `0`               | Samples model-native shadow runs in basis points |
-
-Record the selected modes in worker start diagnostics and assertion-run metrics. Reject unknown values at startup.
 
 Add a task-definition test that proves:
 
@@ -206,24 +176,8 @@ Add a task-definition test that proves:
 - assertion is still optional for aggregate completion; and
 - no private Codex reasoning phase becomes a board task.
 
-### Acceptance
-
-- Default configuration produces byte-for-byte equivalent task planning.
-- Existing worker and board tests pass.
-- Invalid configuration fails before a task is leased.
-- No database schema or API behavior changes.
-
-### Rollback
-
-Remove the new parser and metrics. There is no persisted state to migrate.
-
-## Slice 0A — Assertion execution profile
-
-### Purpose
-
 Give the one assertion session the same managed, Codex-account, and BYOK choices as the v1 review flow without
-turning agent internals into separately configured planner, investigation, or review tasks. This slice is compatible
-with every semantic rollout mode and may ship before model-native changesets.
+turning agent internals into separately configured planner, investigation, or review tasks.
 
 ### Contract
 
@@ -333,7 +287,7 @@ interface AssertionChangeSetV1 {
     repository: string;
     ref: string;
     commitSha: string;
-    mode: "pull_request" | "incremental" | "initialize" | "backfill";
+    kind: "pull_request" | "incremental" | "initialize" | "backfill";
   };
   base: {
     assertionSetVersion: string;
@@ -395,25 +349,6 @@ authorized source observations, so evidence remains tenant-scoped and reproducib
 tool. The service verifies repository membership and current lifecycle state. `relate` records support or
 contradiction between existing or same-changeset assertions; it does not create graph edges.
 
-### Legacy adapter
-
-Implement:
-
-```ts
-function assertionBatchToChangeSet(
-  batch: ContextGraphAssertionBatch,
-  options: {
-    assertionSetVersion: string;
-    mode?: "pull_request" | "incremental" | "initialize" | "backfill";
-  }
-): AssertionChangeSetV1;
-```
-
-This adapter is intentionally host-side. It provides a no-extra-model-cost way to exercise changeset validation,
-planning, and persistence before changing the prompt.
-
-Do not implement the reverse adapter as a long-term dependency. Projection consumes assertions, not agent output.
-
 ### Validation layers
 
 Keep validation explicitly layered:
@@ -446,14 +381,12 @@ Recommended limits should be configuration with conservative hard ceilings:
 - source observation and attestation references are tenant/repository scoped;
 - duplicate operation IDs are rejected;
 - contradictory lifecycle operations in one changeset are rejected;
-- the legacy adapter produces stable results;
 - graph vocabulary is absent from the new output schema.
 
 ### Acceptance
 
 - The package can parse and validate a changeset without a database.
-- No worker uses the new contract yet.
-- Existing `GeneratedContextGraph` tests remain unchanged.
+- The contract is ready to replace the worker's graph-shaped output.
 
 ## Slice 2 — Additive persistence schema
 
@@ -588,7 +521,7 @@ Add:
 - `packages/context-graph/src/admission.ts`
 - focused unit tests
 
-Extend `registry.ts` with an optional admission policy while preserving the current review policy during migration.
+Extend `registry.ts` with an admission policy while preserving optional-review metadata.
 
 ### Interfaces
 
@@ -646,9 +579,7 @@ cardinality, and freshness rule plus any confidence threshold.
 Initial policy:
 
 - deterministic facts continue through deterministic ingest, not the assertion agent;
-- existing semantic predicates remain `proposed` under `legacy_proposed`;
-- shadow mode computes and records what admission would do without changing status;
-- enforce mode may auto-activate only predicate policies explicitly calibrated and enabled;
+- explicitly calibrated predicate policies may auto-activate claims that satisfy every requirement;
 - uncalibrated valid claims remain `proposed`, which is a terminal non-blocking result;
 - invalid citations or unauthorized sources are rejected;
 - missing resolvable identity or required evidence is deferred.
@@ -818,13 +749,11 @@ interface AssertionAttestation {
 1. Add nullable semantic-key columns.
 2. Backfill them from current subject, predicate, object, and canonical qualifiers.
 3. Detect collisions and emit a migration report before adding a unique live-key constraint.
-4. Create one legacy attestation from each current assertion's evidence and provenance.
-5. Make new writes require semantic keys.
-6. Preserve existing assertion primary keys; do not rewrite every historical reference.
+4. Make new writes require semantic keys.
+5. Schedule a current-state assertion rebuild for every connected repository.
 
-For legacy rows whose current IDs include commit or evidence data, keep the ID stable and use the new semantic key
-for reconciliation. A later compaction may rewrite identifiers only if every foreign key and audit consumer is
-migrated.
+Do not synthesize attestations from graph-shaped model output, preserve old model-generated assertion IDs as an
+execution dependency, or add a read adapter. The current-state rebuild establishes the new assertion set.
 
 ### Behavior
 
@@ -839,72 +768,18 @@ migrated.
 - repeated support from the same evidence is idempotent;
 - different source observations produce different attestations;
 - retracted source evidence is retained for audit but excluded from current support;
-- legacy assertion IDs still resolve;
 - projection produces one semantic edge for multiple attestations;
 - current retrieval can cite every applicable independent attestation.
 
 ### Acceptance
 
-The legacy `saveAssertionBatch` path records attestations too. This exercises the new representation before
-model-native changesets write canonically.
+Every new assertion write is a semantic changeset operation with one or more structured attestations.
 
-## Slice 6 — Host-generated changeset shadow
-
-### Purpose
-
-Exercise the whole new validation and plan path with no extra model call and no canonical assertion mutation.
-
-### Worker flow
-
-In `host_shadow`:
-
-```text
-current Codex graph output
-  -> current assertionsFromGeneratedContextGraph
-  -> current saveAssertionBatch
-  -> host assertionBatchToChangeSet adapter
-  -> propose new mutation plan
-  -> compare plan with legacy result
-  -> do not commit the plan
-```
-
-Persist the shadow plan and comparison record. Mark it `expired` after the comparison window.
-
-### Comparison metrics
-
-Measure by predicate and repository:
-
-- semantic assertions present on both sides;
-- only in legacy;
-- only in changeset plan;
-- evidence normalization differences;
-- lifecycle differences;
-- automatic-admission outcome distribution;
-- validation/rejection/defer reason codes;
-- planning and database latency.
-
-Because both paths derive from the same model output, this slice isolates host-contract and persistence differences
-from prompt/model differences.
-
-### Acceptance gate
-
-Before model-native shadow:
-
-- no unexplained semantic-key divergence on the fixed corpus;
-- no cross-tenant or write-fence regression;
-- host-shadow p95 planning overhead is within the agreed service budget;
-- every divergence has a stable reason code;
-- default remains `legacy`.
-
-### Rollback
-
-Set assertion mode to `legacy`. Shadow tables may remain for audit and expire normally.
-
-## Slice 7 — Read-only assertion MCP and model-native changesets
+## Slice 6 — Direct agent changeset execution
 
 ### Purpose
 
-Give one Codex session the minimum semantic tools it needs and replace graph-shaped output in sampled shadow runs.
+Give one Codex session the minimum semantic tools it needs and replace graph-shaped assertion output directly.
 
 ### Supported Codex integration
 
@@ -975,27 +850,26 @@ It should not script a fixed list of planner/investigator/reducer steps. A short
 inspect the change and current implementation, retrieve applicable assertions, investigate conflicting or missing
 evidence, then return the smallest complete changeset.
 
-### Model-shadow flow
-
-Sample by a deterministic hash of tenant, repository, and task so retries stay in the same cohort:
+### Worker flow
 
 ```text
-legacy run and write
-  + sampled changeset Codex run
-  -> propose shadow plan
-  -> compare semantic outputs
-  -> no changeset commit
+load trusted agent context and assertion-set version
+  -> run one changeset Codex session
+  -> validate and persist one immutable mutation plan
+  -> apply versioned admission policy
+  -> verify and commit
+  -> complete context_graph_assert
 ```
 
-This mode intentionally costs a second model run only for the sampled cohort. Do not double model cost globally.
+The worker has no graph-shaped fallback, compatibility adapter, dual model run, or mode selector. Application
+rollback means deploying the preceding release; it does not keep two semantic paths in one binary.
 
 ### Failure behavior
 
-- MCP initialization failure: fail the shadow run closed and record a tool-infrastructure reason.
-- Schema failure: allow the current bounded repair attempt, then fail the shadow run.
+- MCP initialization failure: fail the assertion run closed and record a tool-infrastructure reason.
+- Schema failure: allow the bounded repair attempt, then fail the assertion run.
 - Evidence failure: reject or defer affected operations; do not relax validation.
 - Budget exhaustion: Codex returns the best bounded changeset plus unresolved findings when possible.
-- Legacy production behavior continues in shadow mode.
 
 ### Tests
 
@@ -1008,7 +882,7 @@ This mode intentionally costs a second model run only for the sampled cohort. Do
 - a model repair cannot alter trusted scope;
 - telemetry captures tool calls without leaking secrets or unrestricted source contents.
 
-### Acceptance gate
+### Acceptance
 
 Use a frozen evaluation corpus containing:
 
@@ -1021,64 +895,12 @@ Use a frozen evaluation corpus containing:
 - derived issue and causal claims; and
 - repositories with long history where only a bounded slice is supplied.
 
-Required gate:
-
-- citation validity is not worse than legacy;
+- every accepted operation has valid structured evidence;
 - unsupported-assertion rate is at or below the agreed threshold;
 - lifecycle operation precision is manually sampled but not human-gated;
 - unresolved findings increase when context is genuinely missing rather than speculative claims increasing;
 - token, tool-call, and wall-clock budgets are respected;
-- no tool escapes the task scope.
-
-## Slice 8 — Changeset commit canary
-
-### Purpose
-
-Make model-native changesets canonical for selected repositories while retaining a flag rollback.
-
-### Worker flow
-
-In `changeset` mode:
-
-```text
-load trusted agent context and assertion-set version
-  -> run one changeset Codex session
-  -> propose immutable mutation plan
-  -> verify
-  -> commit
-  -> complete context_graph_assert
-```
-
-Do not run legacy generation by default in the canary cohort. Sampled dual generation may continue only for
-evaluation because it doubles cost.
-
-### Admission rollout
-
-Roll admission separately from changeset generation:
-
-1. `legacy_proposed`: commit valid agent assertions as proposed.
-2. `shadow`: commit with legacy statuses but record automatic-admission decisions.
-3. `enforce`: use versioned predicate admission decisions.
-
-This separation makes it possible to validate the semantic contract before allowing newly generated assertions to
-become active automatically.
-
-### Canary controls
-
-- explicit tenant/repository allowlist or stable percentage cohort;
-- maximum concurrent changeset runs;
-- per-run token/tool/duration budgets;
-- automatic circuit breaker on validation, tool, or commit error rates;
-- dashboard of assertions, operations, admission outcomes, conflicts, and projection lag.
-
-### Rollback
-
-Set assertion mode to `legacy`. New assertions and attestations remain valid canonical records; do not delete them.
-Projection rebuilds from the ledger. If a policy version is defective, disable that admission policy and issue
-ordinary retraction or supersession plans with audit history.
-
-### Acceptance gate
-
+- no tool escapes the task scope;
 - no duplicate semantic propositions under retries;
 - conflict rate is understood and bounded;
 - all commits have a run, raw changeset, immutable plan, policy version, and outbox event;
@@ -1086,35 +908,7 @@ ordinary retraction or supersession plans with audit history.
 - optional human corrections do not reveal a systematic precision regression;
 - the aggregate task never waits for human action.
 
-## Slice 9 — Default cutover and legacy containment
-
-### Purpose
-
-Make changesets the normal assertion boundary while retaining enough legacy code for rollback and historical
-decoding.
-
-### Changes
-
-- Set new deployments to `changeset` only after canary gates hold.
-- Keep parsing of historical `GeneratedContextGraph` observations.
-- Stop writing new graph-shaped raw outputs in the changeset path.
-- Keep the legacy adapter and mode for at least one full retention/rollback window.
-- Mark legacy generator metrics distinctly.
-- Update current-behavior documentation only when the default actually changes.
-
-### Removal criteria
-
-Do not remove legacy execution until:
-
-- no production repository has used it during the rollback window;
-- all stored legacy output remains readable;
-- all projection rebuilds operate from the assertion ledger;
-- support tooling can explain a changeset and mutation plan; and
-- rollback has been tested from a production-like snapshot.
-
-Legacy decoding may remain indefinitely even after legacy generation is removed.
-
-## Slice 10 — Causal Analysis Layer contracts and evaluator
+## Slice 7 — Causal Analysis Layer contracts and evaluator
 
 ### Purpose
 
@@ -1128,7 +922,7 @@ Add:
 - `packages/context-graph/src/causal-analysis.ts`
 - `packages/context-graph/src/causal-analysis.test.ts`
 
-Keep `causal.ts` as the compatibility evaluator until cutover.
+Replace the path-removal implementation in `causal.ts`; do not retain a selectable compatibility evaluator.
 
 ### Core types
 
@@ -1213,12 +1007,6 @@ Implement pure, bounded algorithms for:
 Set explicit maximums for mechanisms, conditions, paths, hitting-set size, and search time. If bounds are reached,
 return a partial result with coverage warnings.
 
-### Compatibility adapter
-
-Translate each current causal path into a temporary single-condition or sequential compatibility mechanism so the
-new answer envelope can run in shadow before native mechanisms exist. Label its assurance `graph_derived`; do not
-pretend the adapter recovered AND/OR causality.
-
 ### Tests
 
 - removing one condition from an AND mechanism disables that mechanism;
@@ -1226,10 +1014,9 @@ pretend the adapter recovered AND/OR causality.
 - minimal hitting sets cover every known alternative mechanism;
 - an uncovered world-state dimension lowers or bounds the conclusion;
 - cycles and duplicate conditions terminate;
-- path compatibility output preserves current evidence;
 - answers always include the `within_model` boundary unless backed by an explicit experiment or observation.
 
-## Slice 11 — Causal ontology and projection
+## Slice 8 — Causal ontology and projection
 
 ### Purpose
 
@@ -1283,7 +1070,7 @@ should include a mechanism summary and its condition set. The ledger remains can
 - old projections rebuild deterministically under the new projection version;
 - retrieval returns mechanisms and conditions with citations.
 
-## Slice 12 — Code-first world states and causal query API
+## Slice 9 — Code-first world states and causal query API
 
 ### Purpose
 
@@ -1330,20 +1117,10 @@ Natural-language lowering may use Codex, but the evaluator consumes only a valid
 lowering is ambiguous, return candidate interpretations or `unknown`; do not silently select a materially different
 intervention.
 
-### Shadow and cutover
+The public query path calls the mechanism evaluator directly. Contract tests and the evaluation corpus are the
+release gate; there is no path-removal fallback.
 
-In `mechanism_shadow`, run both current counterfactual evaluation and the new evaluator, return the legacy result,
-and record:
-
-- intervention resolution agreement;
-- removed/remaining mechanism agreement;
-- conclusion disagreement;
-- coverage warnings;
-- latency.
-
-Switch to `mechanism` only after native mechanisms exist for the evaluation corpus and disagreements are explained.
-
-## Slice 13 — Optional virtual revisions
+## Slice 10 — Optional virtual revisions
 
 ### Purpose
 
@@ -1362,9 +1139,9 @@ Materialize the revision in an isolated sandbox, run deterministic parsers, and 
 all resulting evidence and assertions `hypothetical`. They may support a causal result but cannot become canonical
 observed facts without a separate observed ingest.
 
-This slice is not required for the initial agent-first assertion cutover.
+This slice is not required for the initial agent-first assertion implementation.
 
-## Slice 14 — Optional experiment adapters
+## Slice 11 — Optional experiment adapters
 
 ### Purpose
 
@@ -1376,7 +1153,7 @@ Adapters may include:
 - database snapshot replay;
 - CI workflow replay;
 - runtime trace replay; and
-- controlled shadow deployment.
+- controlled isolated deployment.
 
 Each adapter requires its own authorization, resource budget, secret policy, isolation, cleanup, and evidence
 contract. The Causal Analysis Layer requests an experiment plan; it does not grant itself execution authority.
@@ -1393,10 +1170,10 @@ This slice is intentionally outside the critical path.
 Add a host-owned scope classifier:
 
 ```ts
-type AssertionScopeMode = "pull_request" | "incremental" | "initialize" | "backfill";
+type AssertionScopeKind = "pull_request" | "incremental" | "initialize" | "backfill";
 
 interface AssertionScopePolicy {
-  mode: AssertionScopeMode;
+  kind: AssertionScopeKind;
   pinnedCommit: string;
   changedPaths: string[];
   sourceObservationIds: string[];
@@ -1494,7 +1271,7 @@ context window on unrelated assertions.
 
 Add metrics with bounded labels; never label by raw repository or assertion text:
 
-- agent runs by mode and outcome;
+- agent runs by scope kind and outcome;
 - schema repair attempts;
 - tool initialization and call failures;
 - tool calls and returned items per run;
@@ -1504,7 +1281,6 @@ Add metrics with bounded labels; never label by raw repository or assertion text
 - admission outcome by predicate class and policy version;
 - plan conflicts and retry outcomes;
 - attestations appended and reused;
-- shadow semantic precision/recall proxies;
 - projection lag from plan commit;
 - causal conclusions and assurance level;
 - causal coverage gaps by dimension;
@@ -1549,7 +1325,7 @@ must state this, but enforcement comes from the tool and service boundary.
 
 ## Evaluation corpus
 
-Build a checked-in, redacted fixture corpus plus a production-shadow report. The fixture corpus should include:
+Build a checked-in, redacted fixture corpus plus a production evaluation report. The fixture corpus should include:
 
 - current structural repository truth;
 - a one-PR feature implementation;
@@ -1606,26 +1382,22 @@ Evaluation may contain optional human labels. Production execution does not wait
 
 ## Pull request dependency map
 
-| PR    | Slice                                           | Depends on   | Runtime change                  |
-| ----- | ----------------------------------------------- | ------------ | ------------------------------- |
-| PR-01 | Baseline modes and topology invariant           | none         | none by default                 |
-| PR-02 | Changeset/evidence contracts and legacy adapter | PR-01        | none                            |
-| PR-03 | Additive run/changeset/plan schema              | PR-02        | schema only                     |
-| PR-04 | Pure planner and admission policy               | PR-02        | none                            |
-| PR-05 | Transactional plan store                        | PR-03, PR-04 | unused API                      |
-| PR-06 | Attestations and semantic key                   | PR-03, PR-04 | legacy writes also attest       |
-| PR-07 | Host changeset shadow                           | PR-05, PR-06 | opt-in shadow                   |
-| PR-08 | Read-only MCP and model changeset shadow        | PR-07        | sampled opt-in shadow           |
-| PR-09 | Changeset canonical canary                      | PR-08        | allowlisted writes              |
-| PR-10 | Changeset default and legacy containment        | PR-09        | default cutover                 |
-| PR-11 | Causal contracts and pure evaluator             | PR-02        | unused/shadow evaluator         |
-| PR-12 | Causal ontology and projection                  | PR-06, PR-11 | versioned projection            |
-| PR-13 | Code-first world state and causal API           | PR-12        | opt-in public query             |
-| PR-14 | Mechanism evaluator cutover                     | PR-13        | causal default cutover          |
-| PR-15 | Virtual revisions                               | PR-14        | optional                        |
-| PR-16 | Experiment adapters                             | PR-14        | optional, separately authorized |
+| PR    | Slice                                      | Depends on   | Runtime change                         |
+| ----- | ------------------------------------------ | ------------ | -------------------------------------- |
+| PR-01 | Topology invariant and execution profile   | none         | provider/model settings                |
+| PR-02 | Changeset and evidence contracts           | PR-01        | contract only                          |
+| PR-03 | Run, changeset, and mutation-plan schema   | PR-02        | schema only                            |
+| PR-04 | Pure planner and admission policy          | PR-02        | deterministic service                  |
+| PR-05 | Transactional plan store                   | PR-03, PR-04 | canonical plan API                     |
+| PR-06 | Attestations and semantic identity         | PR-03, PR-04 | canonical assertion representation     |
+| PR-07 | Read-only MCP and direct changeset runtime | PR-05, PR-06 | replaces graph-shaped assertion output |
+| PR-08 | Causal contracts and evaluator             | PR-02        | replaces path-removal evaluation       |
+| PR-09 | Causal ontology and projection             | PR-06, PR-08 | versioned mechanism projection         |
+| PR-10 | Code-first world state and causal API      | PR-09        | public qualified causal query          |
+| PR-11 | Virtual revisions                          | PR-10        | optional                               |
+| PR-12 | Experiment adapters                        | PR-10        | optional, separately authorized        |
 
-PR-11 may proceed alongside PR-03 through PR-08. PR-12 must wait for stable assertion identity and attestations.
+PR-08 may proceed alongside PR-03 through PR-07. PR-09 must wait for stable assertion identity and attestations.
 
 ## First implementation PR
 
@@ -1633,18 +1405,16 @@ Start with PR-01 and PR-02 together only if the diff stays focused. Otherwise ke
 
 The first code-bearing PR should deliver:
 
-1. validated mode configuration with legacy defaults;
-2. task-topology invariant tests;
-3. `EvidenceLocator`;
-4. `AssertionChangeSetV1` and operation types;
-5. a strict JSON Schema;
-6. pure parsing and structural validation;
-7. the legacy batch-to-changeset adapter; and
-8. unit tests.
+1. task-topology invariant tests;
+2. `EvidenceLocator`;
+3. `AssertionChangeSetV1` and operation types;
+4. a strict JSON Schema;
+5. pure parsing and structural validation;
+6. provider/model execution settings; and
+7. unit tests.
 
 It must not:
 
-- change the worker's default assertion behavior;
 - add database tables;
 - add an MCP server;
 - modify current assertion IDs;
@@ -1652,7 +1422,7 @@ It must not:
 - change projection output; or
 - change counterfactual answers.
 
-This gives every later PR an executable contract while keeping the first review and rollback surface small.
+This gives every later PR an executable contract while keeping the first review surface small.
 
 ## Definition of done
 
@@ -1688,20 +1458,18 @@ This gives every later PR an executable contract while keeping the first review 
 
 ### Operations
 
-- Legacy rollback remains available through the agreed window.
-- Shadow and canary metrics are available.
 - Projection failure cannot corrupt canonical assertions.
 - Optional human review and correction remain available.
 - No pipeline waits for human review.
 
 ## Decisions to record before canonical changeset writes
 
-The following decisions do not block contract and shadow work, but must be recorded before PR-09:
+The following decisions do not block contract work, but must be recorded before canonical changeset writes:
 
 1. Initial per-predicate automatic-admission policies and calibration thresholds.
 2. Run, raw prompt, changeset, plan, and attestation retention periods.
-3. Canary tenant/repository selection and circuit-breaker thresholds.
-4. Maximum operation, tool-call, token, and duration budgets by scope mode.
+3. Circuit-breaker thresholds.
+4. Maximum operation, tool-call, token, and duration budgets by scope kind.
 5. Plan expiration and automatic rerun policy after a version conflict.
 6. Whether attestation evidence remains JSONB-only or also gets a relational locator table.
 7. Which current GitHub observations are authoritative for each semantic predicate.
@@ -1709,5 +1477,6 @@ The following decisions do not block contract and shadow work, but must be recor
 9. Causal mechanism and hitting-set search bounds.
 10. Authorization policy for future virtual revisions and experiments.
 
-Recommended defaults are conservative: preserve current statuses, shadow admission, sample model-native comparison,
-and make no destructive schema migration until the new path has been the stable default for a full rollback window.
+Recommended defaults are conservative: auto-activate only predicates with explicit calibrated policy, keep all
+other valid claims proposed, fail closed on invalid scope or evidence, and rebuild current repository assertions
+after the direct contract replacement.

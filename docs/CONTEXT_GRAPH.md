@@ -110,9 +110,8 @@ provenance records the actual provider and credential class after fallback. Cach
 provider and model, so changing either causes a new generation for an otherwise unchanged semantic scope; automatic
 credential refresh does not.
 
-Execution-provider selection is independent of framework rollout mode. In particular, `legacy` means the current
-graph-shaped assertion contract, not “Jina managed.” A legacy run may use managed, Codex, or BYOK, and a future
-changeset run has the same three choices.
+Execution-provider selection does not select framework behavior. There is one semantic implementation at a time;
+managed, Codex, and BYOK change only the credential, billing, and model route used by the assertion task.
 
 An Issue is the generalized problem entity. It may come directly from a provider or be derived from repository evidence such as a PR, commit, review finding, or incident. A GitHub issue uses a `github:issue:<repository>#<number>` natural key, and its explicit `RESOLVES` relationships come only from deterministic intake. When a merged PR has no linked issue, explicitly repairs a bug/regression, and changes durable problem evidence, the assertion contract derives one `Issue` candidate and an `Issue RESOLVED_BY PullRequest` relationship. Its natural key is `derived:issue:<repository>:<anchor-digest>`. Refactors, dependency updates, documentation, chores, feature-only work, and text explicitly saying the PR is not a fix do not qualify. The model cannot mint a GitHub issue number, create more than one candidate for a PR, change the PR anchor, or create one when intake found an explicit resolution. A later provider-backed Issue can be joined through the existing entity-redirect mechanism without rewriting history.
 

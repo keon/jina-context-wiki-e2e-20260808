@@ -133,7 +133,6 @@ expected = os.environ["EXPECTED_TOPICS"].split("|")
 allowed = {
     "active",
     "consecutiveApiFailures",
-    "contextFrameworkModes",
     "lastApiError",
     "lastApiErrorAt",
     "lastApiSuccessAt",

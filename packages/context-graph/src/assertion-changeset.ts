@@ -1,12 +1,12 @@
 import { canonicalJson } from "./knowledge.js";
-import { contextGraphNodeKinds, parseEvidenceCitation, stableId, type ContextGraphNodeKind } from "./model.js";
-import type { ContextGraphAssertionBatch, ContextGraphEntityRef, GeneratedAssertion } from "./pipeline.js";
+import { contextGraphNodeKinds, type ContextGraphNodeKind } from "./model.js";
+import type { ContextGraphEntityRef } from "./pipeline.js";
 import { evidenceLocatorKey, parseEvidenceLocator, type EvidenceLocator } from "./evidence.js";
 import { predicateRegistry, type PredicateDefinition } from "./registry.js";
 
 export const ASSERTION_CHANGESET_CONTRACT_VERSION = "assertion-changeset/v1" as const;
-export const assertionScopeModes = ["pull_request", "incremental", "initialize", "backfill"] as const;
-export type AssertionScopeMode = (typeof assertionScopeModes)[number];
+export const assertionScopeKinds = ["pull_request", "incremental", "initialize", "backfill"] as const;
+export type AssertionScopeKind = (typeof assertionScopeKinds)[number];
 
 export const assertionTruthClasses = [
   "authoritative_fact",
@@ -44,7 +44,7 @@ export interface AssertionChangeSetScope {
   readonly repository: string;
   readonly ref: string;
   readonly commitSha: string;
-  readonly mode: AssertionScopeMode;
+  readonly kind: AssertionScopeKind;
 }
 
 export interface AssertionChangeSetBase {
@@ -171,60 +171,6 @@ export function parseAssertionChangeSet(
   return parsed;
 }
 
-export function assertionBatchToChangeSet(
-  batch: ContextGraphAssertionBatch,
-  options: {
-    readonly assertionSetVersion: string;
-    readonly mode?: AssertionScopeMode;
-  }
-): AssertionChangeSetV1 {
-  const scope: AssertionChangeSetScope = {
-    tenantId: batch.tenantId,
-    repository: batch.repository,
-    ref: batch.ref,
-    commitSha: batch.commitSha,
-    mode: options.mode ?? "incremental"
-  };
-  const base: AssertionChangeSetBase = {
-    assertionSetVersion: requiredString(options.assertionSetVersion, "assertionSetVersion"),
-    registryVersion: batch.registryVersion,
-    evidenceFingerprint: batch.evidenceFingerprint
-  };
-  const changeSetId = stableId(
-    "changeset",
-    [
-      batch.tenantId,
-      batch.repository,
-      batch.ref,
-      batch.commitSha,
-      batch.taskId,
-      batch.generatorVersion,
-      batch.registryVersion,
-      batch.evidenceFingerprint
-    ].join(":")
-  );
-  const operations = batch.assertions.map((assertion, index): ProposeAssertionOperation => {
-    const candidate = assertionCandidateFromGeneratedAssertion(assertion, batch);
-    return {
-      operationId: stableId("operation", `${changeSetId}:${index}:${assertionSemanticKey(candidate)}`),
-      type: "propose",
-      assertion: candidate
-    };
-  });
-  return parseAssertionChangeSet(
-    {
-      contractVersion: ASSERTION_CHANGESET_CONTRACT_VERSION,
-      changeSetId,
-      scope,
-      base,
-      summary: batch.summary.trim() || "No semantic assertion changes were generated.",
-      operations,
-      unresolved: []
-    },
-    { scope, base }
-  );
-}
-
 export function assertionSemanticKey(candidate: AssertionCandidate): string {
   return [
     entityKey(candidate.subject),
@@ -234,48 +180,19 @@ export function assertionSemanticKey(candidate: AssertionCandidate): string {
   ].join(":");
 }
 
-function assertionCandidateFromGeneratedAssertion(
-  assertion: GeneratedAssertion,
-  batch: ContextGraphAssertionBatch
-): AssertionCandidate {
-  return {
-    subject: assertion.subject,
-    predicate: assertion.predicate,
-    object: assertion.object,
-    qualifiers: assertion.qualifiers ?? {},
-    truthClass: "agent_claim",
-    confidence: assertion.confidence,
-    explanation: assertion.explanation,
-    validFrom: null,
-    validUntil: null,
-    evidence: assertion.evidence.map((value) => {
-      const citation = parseEvidenceCitation(value);
-      return {
-        type: "repository_range",
-        repository: batch.repository,
-        commitSha: batch.commitSha,
-        path: citation.path,
-        startLine: citation.startLine,
-        endLine: citation.endLine,
-        contentDigest: null
-      };
-    })
-  };
-}
-
 function parseScope(value: unknown): AssertionChangeSetScope {
   if (!isRecord(value)) throw new Error("scope must be an object");
-  assertOnlyKeys(value, ["tenantId", "repository", "ref", "commitSha", "mode"], "scope");
-  const mode = requiredString(value.mode, "scope.mode");
-  if (!assertionScopeModes.includes(mode as AssertionScopeMode)) {
-    throw new Error(`scope.mode is unsupported: ${mode}`);
+  assertOnlyKeys(value, ["tenantId", "repository", "ref", "commitSha", "kind"], "scope");
+  const kind = requiredString(value.kind, "scope.kind");
+  if (!assertionScopeKinds.includes(kind as AssertionScopeKind)) {
+    throw new Error(`scope.kind is unsupported: ${kind}`);
   }
   return {
     tenantId: requiredString(value.tenantId, "scope.tenantId"),
     repository: requiredString(value.repository, "scope.repository"),
     ref: requiredString(value.ref, "scope.ref"),
     commitSha: requiredCommitSha(value.commitSha, "scope.commitSha"),
-    mode: mode as AssertionScopeMode
+    kind: kind as AssertionScopeKind
   };
 }
 
@@ -523,7 +440,7 @@ function operationEvidence(operation: AssertionOperation): readonly EvidenceLoca
 
 function validateExpectedScope(actual: AssertionChangeSetScope, expected: AssertionChangeSetScope | undefined): void {
   if (!expected) return;
-  for (const key of ["tenantId", "repository", "ref", "commitSha", "mode"] as const) {
+  for (const key of ["tenantId", "repository", "ref", "commitSha", "kind"] as const) {
     if (actual[key] !== expected[key]) throw new Error(`assertion changeset scope.${key} does not match trusted scope`);
   }
 }

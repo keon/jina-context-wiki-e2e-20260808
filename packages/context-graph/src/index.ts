@@ -3,7 +3,6 @@ export * from "./assertion-changeset.js";
 export * from "./causal.js";
 export * from "./evidence.js";
 export * from "./execution-settings.js";
-export * from "./framework-modes.js";
 export * from "./normalizers.js";
 export * from "./knowledge.js";
 export * from "./outbox.js";
