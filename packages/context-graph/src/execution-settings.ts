@@ -83,10 +83,10 @@ export function publicContextGraphExecutionSettings(
 }
 
 /**
- * Resolve one whole assertion run. This mirrors the v1 review flow:
- * explicitly selected Codex uses the connected harness, otherwise falls
- * through BYOK and then managed; explicitly selected BYOK falls through to
- * managed when no connected key can run the chosen model.
+ * Resolve one whole assertion run. Explicitly selected Codex uses the
+ * connected harness, otherwise it falls through BYOK and then managed;
+ * explicitly selected BYOK falls through to managed when no connected key
+ * can run the chosen model.
  */
 export function resolveContextGraphExecutionRoute(
   settings: DecryptedContextGraphExecutionSettings

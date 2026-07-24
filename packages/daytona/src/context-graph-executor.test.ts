@@ -244,6 +244,24 @@ test("focus evidence streaming stops at the configured byte budget", async () =>
   }
 });
 
+test("focus evidence allows symlinks whose resolved regular file remains in the repository", async () => {
+  let safetyCommand = "";
+  const fs = {
+    downloadFileStream: async () => Readable.from("repository docs")
+  } as unknown as Pick<Sandbox["fs"], "downloadFileStream">;
+  const processApi = {
+    executeCommand: async (command: string) => {
+      safetyCommand = command;
+      return { exitCode: 0, result: "" };
+    }
+  } as unknown as Pick<Sandbox["process"], "executeCommand">;
+  const result = await buildFocusEvidenceBundle({ fs, process: processApi }, ["docs/symlink.md"]);
+  assert.equal(result.files[0]?.content, "repository docs");
+  assert.match(safetyCommand, /realpath/);
+  assert.doesNotMatch(safetyCommand, /test ! -L/);
+  assert.match(safetyCommand, /"\$root"\/\*/);
+});
+
 test("focus evidence rejects symlink escapes before downloading", async () => {
   let downloaded = false;
   const fs = {

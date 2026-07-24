@@ -61,7 +61,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v22-agent-consolidation/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v23-semantic-revisions/);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.nodes.maxItems, 128);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.maxItems, 256);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.items.properties.evidence.maxItems, 4);
@@ -1007,7 +1007,7 @@ test("recognizes explicit problem evidence paths without matching incidental sub
     assert.equal(isProblemEvidencePath(path), false, path);
 });
 
-test("a new model contract confirms rather than overwrites an active assertion", async () => {
+test("a new model contract confirms identical content and versions changed content", async () => {
   const store = new MemoryContextGraphStore();
   const common = {
     tenantId: "tenant",
@@ -1051,6 +1051,29 @@ test("a new model contract confirms rather than overwrites an active assertion",
   assert.equal(assertions.length, 1);
   assert.equal(assertions[0]?.generator, "model:model-v1");
   assert.equal(assertions[0]?.status, "active");
+  await store.saveAssertionBatch({
+    ...common,
+    taskId: "v3",
+    generatedAt: "2026-07-20T00:02:00Z",
+    generatorVersion: "model-v3",
+    evidenceFingerprint: "stronger-input",
+    assertions: [
+      {
+        ...common.assertions[0]!,
+        confidence: 1,
+        explanation: "The README documents the administrator access mechanism.",
+        evidence: ["README.md:1-2"]
+      }
+    ]
+  });
+  const revised = await store.listAssertions("tenant", "omxyz/demo");
+  assert.equal(revised.length, 2);
+  assert.equal(revised.find((assertion) => assertion.status === "active")?.generator, "model:model-v3");
+  assert.equal(
+    revised.find((assertion) => assertion.status === "active")?.explanation,
+    "The README documents the administrator access mechanism."
+  );
+  assert.equal(revised.find((assertion) => assertion.status === "superseded")?.generator, "model:model-v1");
 });
 
 test("memory operational metrics exclude assertions outside the requested ref", async () => {

@@ -204,19 +204,43 @@ async function prefetchLiveAssertionsByNaturalKey(
     readonly qualifiersHash: string;
     readonly assertion: Pick<StoredAssertion, "predicate">;
   }[]
-): Promise<ReadonlyMap<string, { readonly id: string; readonly status: "proposed" | "active" }>> {
-  const live = new Map<string, { id: string; status: "proposed" | "active" }>();
+): Promise<
+  ReadonlyMap<
+    string,
+    {
+      readonly id: string;
+      readonly status: "proposed" | "active";
+      readonly confidence: number;
+      readonly explanation?: string;
+      readonly evidence: readonly string[];
+    }
+  >
+> {
+  const live = new Map<
+    string,
+    {
+      id: string;
+      status: "proposed" | "active";
+      confidence: number;
+      explanation?: string;
+      evidence: readonly string[];
+    }
+  >();
   if (keys.length === 0) return live;
   const result = await client.query<{
     id: string;
     status: "proposed" | "active";
+    confidence: number;
+    explanation: string | null;
+    evidence: unknown;
     subject_id: string;
     predicate: string;
     object_id: string;
     qualifiers_hash: string;
   }>(
     `select distinct on (assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash)
-       assertion.id,assertion.status,assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash
+       assertion.id,assertion.status,assertion.confidence,assertion.explanation,assertion.evidence,
+       assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash
      from jina_context_graph.assertions assertion
      join unnest($3::text[],$4::text[],$5::text[],$6::text[]) as source(subject_id,predicate,object_id,qualifiers_hash)
        on assertion.subject_id=source.subject_id and assertion.predicate=source.predicate
@@ -236,10 +260,35 @@ async function prefetchLiveAssertionsByNaturalKey(
   for (const row of result.rows) {
     live.set(`${row.subject_id}:${row.predicate}:${row.object_id}:${row.qualifiers_hash}`, {
       id: row.id,
-      status: row.status
+      status: row.status,
+      confidence: row.confidence,
+      ...(row.explanation ? { explanation: row.explanation } : {}),
+      evidence: stringArray(row.evidence)
     });
   }
   return live;
+}
+
+function stringArray(value: unknown): readonly string[] {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) {
+    throw new Error("stored assertion evidence is invalid");
+  }
+  return value;
+}
+
+function storedAssertionContentMatches(
+  existing: {
+    readonly confidence: number;
+    readonly explanation?: string;
+    readonly evidence: readonly string[];
+  },
+  candidate: StoredAssertion
+): boolean {
+  return (
+    existing.confidence === candidate.confidence &&
+    (existing.explanation ?? "") === (candidate.explanation ?? "") &&
+    canonicalJson([...existing.evidence].sort()) === canonicalJson([...candidate.evidence].sort())
+  );
 }
 
 /**
@@ -1983,6 +2032,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
             resolved
           );
           const confirmations: { readonly id: string; readonly explanation: string | undefined }[] = [];
+          const revisions: { readonly previousId: string; readonly nextId: string }[] = [];
           const freshInserts: (typeof resolved)[number][] = [];
           const assertionEvents: OutboxBatchEvent[] = [];
           for (const item of resolved) {
@@ -1990,12 +2040,19 @@ export class PostgresContextGraphStore implements ContextGraphStore {
               `${item.subjectId}:${item.assertion.predicate}:${item.objectId}:${item.qualifiersHash}`
             );
             if (existingLive) {
-              confirmations.push({ id: existingLive.id, explanation: item.assertion.explanation });
+              if (storedAssertionContentMatches(existingLive, item.assertion)) {
+                confirmations.push({ id: existingLive.id, explanation: item.assertion.explanation });
+                assertionEvents.push({
+                  aggregateId: existingLive.id,
+                  payload: { assertionId: existingLive.id, repoId: batch.repository }
+                });
+                continue;
+              }
+              revisions.push({ previousId: existingLive.id, nextId: item.assertion.id });
               assertionEvents.push({
                 aggregateId: existingLive.id,
-                payload: { assertionId: existingLive.id, repoId: batch.repository }
+                payload: { assertionId: existingLive.id, repoId: batch.repository, status: "superseded" }
               });
-              continue;
             }
             freshInserts.push(item);
             assertionEvents.push({
@@ -2017,6 +2074,19 @@ export class PostgresContextGraphStore implements ContextGraphStore {
                set last_confirmed_at=greatest(last_confirmed_at,$3)
                where tenant_id=$1 and id=any($2::text[])`,
               [batch.tenantId, confirmations.map((confirmation) => confirmation.id), batch.generatedAt]
+            );
+          }
+          if (revisions.length > 0) {
+            // Release the partial unique live-candidate key before inserting
+            // the immutable replacement. The supersession link is filled
+            // after the replacement exists so its immediate foreign key is
+            // never temporarily violated.
+            await client.query(
+              `update jina_context_graph.assertions assertion
+               set status='superseded',valid_to=$3::timestamptz
+               where assertion.tenant_id=$1 and assertion.id=any($2::text[])
+                 and assertion.status in ('active','proposed')`,
+              [batch.tenantId, revisions.map((revision) => revision.previousId), batch.generatedAt]
             );
           }
           if (freshInserts.length > 0) {
@@ -2065,6 +2135,20 @@ export class PostgresContextGraphStore implements ContextGraphStore {
                 freshInserts.map((item) => item.qualifiersHash),
                 freshInserts.map((item) => item.assertion.status),
                 freshInserts.map((item) => `model:${item.assertion.generatorVersion}`)
+              ]
+            );
+          }
+          if (revisions.length > 0) {
+            await client.query(
+              `update jina_context_graph.assertions assertion
+               set superseded_by=source.next_id
+               from unnest($2::text[],$3::text[]) as source(previous_id,next_id)
+               where assertion.tenant_id=$1 and assertion.id=source.previous_id
+                 and assertion.status='superseded'`,
+              [
+                batch.tenantId,
+                revisions.map((revision) => revision.previousId),
+                revisions.map((revision) => revision.nextId)
               ]
             );
           }

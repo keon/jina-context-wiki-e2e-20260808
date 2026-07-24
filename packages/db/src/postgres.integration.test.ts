@@ -1997,6 +1997,28 @@ test(
       assert.equal(assertions.length, 1);
       assert.equal(assertions[0]?.generator, "model:model-v1");
       assert.equal(assertions[0]?.status, "active");
+      await store.saveAssertionBatch({
+        ...common,
+        taskId: `v3-${suffix}`,
+        generatedAt: "2026-07-20T00:02:00Z",
+        generatorVersion: "model-v3",
+        evidenceFingerprint: "stronger-input",
+        assertions: [
+          {
+            ...common.assertions[0]!,
+            confidence: 1,
+            explanation: "The README documents the administrator access mechanism.",
+            evidence: ["README.md:1-2"]
+          }
+        ]
+      });
+      const revisedAssertions = await store.listAssertions(tenantId, repository);
+      assert.equal(revisedAssertions.length, 2);
+      assert.equal(revisedAssertions[0]?.generator, "model:model-v3");
+      assert.equal(revisedAssertions[0]?.status, "active");
+      assert.equal(revisedAssertions[0]?.explanation, "The README documents the administrator access mechanism.");
+      assert.equal(revisedAssertions[1]?.generator, "model:model-v1");
+      assert.equal(revisedAssertions[1]?.status, "superseded");
       const guardPool = new Pool({ connectionString });
       await assert.rejects(
         guardPool.query(

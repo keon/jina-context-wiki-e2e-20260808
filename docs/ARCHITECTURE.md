@@ -12,12 +12,14 @@ PostgreSQL 17 ContextGraph database:
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
 - `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
 
-The dashboard and admin are Next.js applications deployed automatically from `main` by the Om Labs Vercel projects `jina-dashboard` and `jina-admin`. They call the Cloud Run API only from server routes, forwarding the internal bearer credential and shared tenant identity after app-level authentication. A legacy Cloud Run dashboard remains during traffic cutover but is not updated by the active pipeline; see [DEPLOYMENT.md](DEPLOYMENT.md).
+The dashboard and admin are Next.js applications deployed automatically from `main` by the Om Labs Vercel projects
+`jina-dashboard` and `jina-admin`. They call the Cloud Run API only from server routes, forwarding the internal
+bearer credential and shared tenant identity after app-level authentication.
 
 ```text
 GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
 Browser -> authenticated web app -> API -> PostgreSQL
-Trusted graph caller -> graph API or MCP -> repository-scoped retrieval
+Trusted context caller -> context API or MCP -> repository-scoped retrieval
 ```
 
 The API performs short state transitions. Workers perform external I/O outside the mutation lock, renew their leases, and complete through the API. Expired work is reclaimable; a stale completion changes no state.
@@ -31,7 +33,12 @@ Production does not maintain a second user, organization, installation, or repos
 - `repositories` binds an enabled GitHub repository to that tenant;
 - `tenant_members` remains owned by the original application and supports its membership boundary.
 
-Production GitHub intake is owned by the original application. It resolves an enabled repository and active installation in the authoritative tables, starts the review, then submits an idempotent v2 graph build under the same original tenant UUID and PR head. The UUID becomes the partition key for the graph pipeline and every context graph row. Tenant, author, and sender identity from the verified delivery remains attached to the build, board tasks, and canonical observations. V2's signed webhook parser remains available for local development and rollback but is disabled in production.
+Graph intake is branch-oriented and independent of review completion. A non-deleted branch push, or an explicit
+`POST /context-graph/build` using a branch or tag, starts the current ingest/assert/project pipeline. A commit SHA is
+the immutable result of resolving that ref during ingest; it is never stored as the ref itself. Retired review
+completion callbacks and commit-SHA build refs are rejected at the API boundary. The authoritative identity tables
+still resolve the enabled repository and active installation, and the tenant UUID partitions every pipeline and
+ContextGraph row.
 
 Workers do not connect to PostgreSQL. An unscoped worker claim asks the API to enumerate active original tenants; all later lease, completion, and graph requests carry the concrete original tenant UUID. The original application exposes its member-authenticated work overview by calling this API with the same UUID and `tenant:<uuid>` principal. Fixed mode remains available only for local development and rollback.
 
@@ -54,10 +61,15 @@ The task worker fetches PR data from GitHub, calls the configured review harness
 The context graph worker runs three stages:
 
 1. `context_graph_ingest` walks unseen commit history, records exact trees and first-parent changes, parses new blobs, and normalizes explicit repository and GitHub facts.
-2. `context_graph_assert` checks out the pinned commit in Daytona and records cited semantic output as proposed assertions.
+2. `context_graph_assert` checks out the pinned commit in Daytona and records cited semantic assertions. Valid
+   model assertions become active automatically; optional human commands may later correct or retract them.
 3. `context_graph_project` drains consumer-owned canonical events and rebuilds manifests, search documents, redirects, and immutable content-addressed graphs.
 
-Only assertion generation uses a model. Assertions must carry checked repository evidence, a relationship explanation, and known typed identities. Reviewed assertions retain evidence, explanation, provenance, and review state when reconfirmed. Exact evidence fingerprints cache unchanged generations; generator-contract changes trigger one bounded refresh.
+Only assertion generation uses a model. Assertions must carry checked repository evidence, a relationship
+explanation, and known typed identities. Reconfirmation of identical content advances `last_confirmed_at`; changed
+evidence, explanation, or confidence creates a new immutable assertion version and supersedes the previous
+version. Exact evidence fingerprints cache unchanged generations; generator-contract changes trigger one bounded
+refresh.
 
 ## Read interfaces
 
@@ -65,7 +77,8 @@ The dashboard is a Next.js application that reads board, history, task-type, gra
 
 `POST /mcp` implements stateless Streamable HTTP MCP with one read-only `query_graph` tool. The server chooses bounded retrieval templates and returns cited results; callers do not choose SQL, graph generations, or internal tools.
 
-The simulation-facing graph API uses a dedicated credential and maps each simulation tenant to a bound principal. ACL synchronization replaces the complete repository set, so removed repositories are revoked on the next sync.
+The graph build credential maps each tenant to a bound principal. ACL synchronization replaces the complete
+repository set, so removed repositories are revoked on the next sync.
 
 ## Persistence and idempotency
 
@@ -87,7 +100,10 @@ Fixed mode uses `JINA_TENANT_ID`. Shared mode resolves the original tenant UUID 
 
 The web applications authenticate users with server-only Vercel environment variables before forwarding a verified principal and service credential. The dashboard forwards its configured user principal and remains fixed to its configured tenant. The admin app uses the global-admin credential only to discover graph heads and read cross-tenant operational history, then uses the service credential plus the selected graph's tenant ID for detail, retrieval, and validated build calls. The API applies tenant-administrator and repository ACL checks, validates manual build installation ownership against the shared identity database, and rechecks repository scope while assembling retrieval results.
 
-MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
+MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential
+alone. Browser MCP calls also require an exact origin allowlist match. `GRAPH_API_TOKEN` is restricted to current
+branch-build intake and ACL synchronization; it does not expose a separate graph-read API and must not be exposed to
+browsers or agents.
 
 Repository credentials remain in the worker boundary. Daytona isolates repository inspection. Jina does not execute untrusted repository code, install repository dependencies, or run repository tests.
 

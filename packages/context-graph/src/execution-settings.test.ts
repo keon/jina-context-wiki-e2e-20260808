@@ -42,7 +42,7 @@ test("Codex selection uses native model names when a harness is connected", () =
   );
 });
 
-test("Codex selection follows the v1 fallback order without leaking managed credentials", () => {
+test("Codex selection follows the current fallback order without leaking managed credentials", () => {
   assert.deepEqual(
     resolveContextGraphExecutionRoute({
       provider: "codex",
