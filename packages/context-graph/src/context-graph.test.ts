@@ -63,7 +63,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v24-evidence-scoped/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v25-feature-coverage/);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.nodes.maxItems, 128);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.maxItems, 256);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.items.properties.evidence.maxItems, 4);
@@ -74,6 +74,8 @@ test("assertion generation requires evidence-backed move continuity", () => {
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /emit current MOVED_FROM previous/);
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /final synthesis pass/);
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /exactly one edge per semantic identity/);
+  assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /inventory every distinct current File or Symbol/);
+  assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /coverage check for every named Feature/);
 });
 
 test("final synthesis discards only claims whose checked-out evidence cannot resolve", async () => {
