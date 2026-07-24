@@ -484,11 +484,12 @@ test(
         false
       );
       assert.equal(
-        failed.stages.find((stage) => stage.phase === "snapshot" && stage.stage === "project")?.status,
-        "canceled"
+        failed.stages
+          .filter((stage) => stage.phase === "history" && (stage.stage === "assert" || stage.stage === "project"))
+          .every((stage) => stage.status === "canceled"),
+        true,
+        "required assertion and projection stages are canceled after history ingestion fails"
       );
-      const staleProject = failed.stages.find((stage) => stage.phase === "snapshot" && stage.stage === "project")!;
-      await cleanup.query("update jina_board.tasks set status='queued' where id=$1", [staleProject.id]);
       assert.equal(
         await coordinator.claim({
           tenantId,
@@ -499,10 +500,6 @@ test(
         }),
         undefined
       );
-      const reconciled = (await coordinator.list(tenantId, { repositories: [repository] }))
-        .find(({ build }) => build.ref === "failure")!
-        .stages.find((stage) => stage.id === staleProject.id);
-      assert.equal(reconciled?.status, "canceled");
     } finally {
       await cleanup.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]);
       await cleanup.end();
@@ -1390,8 +1387,8 @@ test(
           }
         ]
       });
-      assert.equal(asserted.activeCount, 0);
-      assert.equal(asserted.proposedCount, 1);
+      assert.equal(asserted.activeCount, 1);
+      assert.equal(asserted.proposedCount, 0);
       assert.equal(
         (
           await store.hasAssertionGeneration(
@@ -1414,9 +1411,9 @@ test(
         generatedAt: "2026-07-19T12:02:00.000Z"
       });
       assert.equal(graph.generator.executor, "projection");
-      const reviewableEdge = graph.edges.find((edge) => edge.predicate === "DOCUMENTED_BY");
-      assert.ok(reviewableEdge);
-      assert.equal(reviewableEdge.qualifiers?.assertionStatus, "proposed");
+      const assertedEdge = graph.edges.find((edge) => edge.predicate === "DOCUMENTED_BY");
+      assert.ok(assertedEdge);
+      assert.equal(assertedEdge.qualifiers?.assertionStatus, "active");
       assert.equal(
         graph.nodes.some((node) => node.kind === "Symbol"),
         true
@@ -1712,7 +1709,7 @@ test(
 );
 
 test(
-  "Postgres scopes live assertions by repository and preserves qualifier-distinct projection edges",
+  "Postgres scopes live assertions by repository and consolidates causal reason variants",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -1772,20 +1769,9 @@ test(
         batch(secondRepository, secondCommitSha, "second", ["First mechanism", "Second mechanism"])
       );
       assert.equal((await store.listAssertions(tenantId, firstRepository)).length, 1);
-      const secondAssertions = await store.listAssertions(tenantId, secondRepository, { status: "proposed" });
-      assert.equal(secondAssertions.length, 2, "a live assertion in another repository is not reused");
-      for (const assertion of secondAssertions) {
-        await store.executeCommand(
-          tenantId,
-          "svc:test",
-          {
-            type: "review_assertion",
-            assertionId: assertion.id,
-            decision: "accept"
-          },
-          "2026-07-21T00:02:00.000Z"
-        );
-      }
+      const secondAssertions = await store.listAssertions(tenantId, secondRepository, { status: "active" });
+      assert.equal(secondAssertions.length, 1, "repository scope is preserved while causal prose variants dedupe");
+      assert.equal(secondAssertions[0]?.explanation, "First mechanism");
       const graph = await store.project({
         tenantId,
         repository: secondRepository,
@@ -1795,16 +1781,9 @@ test(
         generatedAt: "2026-07-21T00:03:00.000Z"
       });
       const causes = graph.edges.filter((edge) => edge.predicate === "INTRODUCED_BY");
-      assert.equal(causes.length, 2);
-      assert.deepEqual(causes.map((edge) => edge.qualifiers?.reason).sort(), ["First mechanism", "Second mechanism"]);
+      assert.equal(causes.length, 1);
       const hydrated = await store.get(graph.id, tenantId);
-      assert.deepEqual(
-        hydrated?.edges
-          .filter((edge) => edge.predicate === "INTRODUCED_BY")
-          .map((edge) => edge.qualifiers?.reason)
-          .sort(),
-        ["First mechanism", "Second mechanism"]
-      );
+      assert.equal(hydrated?.edges.filter((edge) => edge.predicate === "INTRODUCED_BY").length, 1);
     } finally {
       await store.close();
     }
@@ -1942,7 +1921,7 @@ test(
 );
 
 test(
-  "Postgres preserves review and provenance when a new model contract confirms a fact",
+  "Postgres preserves provenance when a new model contract confirms an active fact",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -1981,32 +1960,9 @@ test(
         generatedAt: "2026-07-20T00:00:00Z",
         generatorVersion: "model-v1"
       });
-      const [proposal] = await store.listAssertions(tenantId, repository);
-      assert.ok(proposal);
-      await assert.rejects(
-        store.executeCommand(
-          tenantId,
-          "svc:reviewer",
-          {
-            type: "review_assertion",
-            assertionId: proposal.id,
-            decision: "reject",
-            reason: "not supported"
-          },
-          "2026-07-20T00:00:20Z"
-        ),
-        /rejection.*code/
-      );
-      await store.executeCommand(
-        tenantId,
-        "svc:reviewer",
-        {
-          type: "review_assertion",
-          assertionId: proposal.id,
-          decision: "accept"
-        },
-        "2026-07-20T00:00:30Z"
-      );
+      const [activeAssertion] = await store.listAssertions(tenantId, repository);
+      assert.ok(activeAssertion);
+      assert.equal(activeAssertion.status, "active");
       await store.saveAssertionBatch({
         ...common,
         taskId: `v2-${suffix}`,
@@ -2022,7 +1978,7 @@ test(
       await assert.rejects(
         guardPool.query(
           `update jina_context_graph.assertions set explanation='rewritten' where tenant_id=$1 and id=$2`,
-          [tenantId, proposal.id]
+          [tenantId, activeAssertion.id]
         ),
         /explanation is immutable/
       );
@@ -2252,7 +2208,7 @@ test(
 );
 
 test(
-  "Postgres projects an accepted derived issue by entity identity",
+  "Postgres projects an agent-derived issue by entity identity",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -2362,20 +2318,11 @@ test(
           }
         ]
       });
-      const proposals = await store.listAssertions(tenantId, repository, { status: "proposed", predicate: "RESOLVES" });
-      assert.equal(proposals.length, 2);
-      for (const [index, proposal] of proposals.entries()) {
-        await store.executeCommand(
-          tenantId,
-          "svc:test",
-          {
-            type: "review_assertion",
-            assertionId: proposal.id,
-            decision: "accept"
-          },
-          `2026-07-20T00:02:0${index}.000Z`
-        );
-      }
+      const activeResolutions = await store.listAssertions(tenantId, repository, {
+        status: "active",
+        predicate: "RESOLVES"
+      });
+      assert.equal(activeResolutions.length, 2);
       await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:03:00.000Z");
       assert.equal(
         (
@@ -2471,7 +2418,7 @@ test(
 );
 
 test(
-  "Postgres projects and retrieves a reviewed Feature",
+  "Postgres projects and retrieves an agent-derived Feature",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -2555,20 +2502,10 @@ test(
           }
         ]
       });
-      const proposal = (
-        await store.listAssertions(tenantId, repository, { status: "proposed", predicate: "IMPLEMENTS" })
+      const activeFeatureAssertion = (
+        await store.listAssertions(tenantId, repository, { status: "active", predicate: "IMPLEMENTS" })
       )[0];
-      assert.ok(proposal);
-      await store.executeCommand(
-        tenantId,
-        "svc:test",
-        {
-          type: "review_assertion",
-          assertionId: proposal.id,
-          decision: "accept"
-        },
-        "2026-07-20T00:02:00.000Z"
-      );
+      assert.ok(activeFeatureAssertion);
       await store.rebuildDerivedProjections(tenantId, repository, "main", "2026-07-20T00:02:30.000Z");
       const graph = await store.project({
         tenantId,
@@ -2932,16 +2869,9 @@ test(
           }
         ]
       };
-      const proposed = await store.saveAssertionBatch(batch);
-      assert.equal(proposed.proposedCount, 2);
-      const assertionId = stableId(
-        "assertion",
-        `${tenantId}:${repository}:${headSha}:${CONTEXT_GRAPH_REGISTRY_VERSION}:evidence-causal-fixture:Repository:github:repo:${repository}:DOCUMENTED_BY:Document:repo:${repository}:path:README.md:{}`
-      );
-      const causalAssertionId = stableId(
-        "assertion",
-        `${tenantId}:${repository}:${headSha}:${CONTEXT_GRAPH_REGISTRY_VERSION}:evidence-causal-fixture:Issue:github:issue:${repository}#7:INTRODUCED_BY:Commit:repo:${repository}:sha:${headSha}:{"reason":"The commit bypassed the app guard."}`
-      );
+      const generated = await store.saveAssertionBatch(batch);
+      assert.equal(generated.activeCount, 2);
+      assert.equal(generated.proposedCount, 0);
       await store.executeCommand(
         tenantId,
         "svc:api",
@@ -2952,28 +2882,6 @@ test(
           role: "writer"
         },
         "2026-07-20T00:03:30.000Z"
-      );
-      await store.executeCommand(
-        tenantId,
-        "user:curator",
-        {
-          type: "review_assertion",
-          assertionId,
-          decision: "accept",
-          reason: "verified against README"
-        },
-        "2026-07-20T00:04:00.000Z"
-      );
-      await store.executeCommand(
-        tenantId,
-        "user:curator",
-        {
-          type: "review_assertion",
-          assertionId: causalAssertionId,
-          decision: "accept",
-          reason: "verified against root-cause evidence"
-        },
-        "2026-07-20T00:04:10.000Z"
       );
       await store.executeCommand(
         tenantId,
@@ -3200,10 +3108,7 @@ test(
       );
       const metrics = await store.operationalMetrics(tenantId, "2026-07-20T00:07:00.000Z");
       assert.equal(metrics.unparsedBlobCount, 0);
-      assert.equal(
-        metrics.acceptanceRates.some((item) => item.predicate === "DOCUMENTED_BY" && item.accepted === 1),
-        true
-      );
+      assert.equal(metrics.proposedAssertionCount, 0, "agent assertions do not wait for human acceptance");
 
       const legacyLabelPool = new Pool({ connectionString });
       try {
@@ -4015,14 +3920,15 @@ test(
       const seedIndexes = Array.from({ length: 20 }, (_, index) => index);
       const allIndexes = Array.from({ length: 50 }, (_, index) => index);
       const seeded = await store.saveAssertionBatch(batchInput(batchedTenantId, "seed", seededAt, "v1-", seedIndexes));
-      assert.equal(seeded.proposedCount, 20);
+      assert.equal(seeded.activeCount, 20);
+      assert.equal(seeded.proposedCount, 0);
       // A 50-assertion batch where 20 assertions are already live and 30 are new.
       const mixed = await store.saveAssertionBatch(batchInput(batchedTenantId, "mixed", mixedAt, "v2-", allIndexes));
       assert.equal(mixed.cached, false);
       assert.deepEqual(mixed.warnings, []);
       assert.equal(mixed.assertionCount, 50);
-      assert.equal(mixed.proposedCount, 50);
-      assert.equal(mixed.activeCount, 0);
+      assert.equal(mixed.proposedCount, 0);
+      assert.equal(mixed.activeCount, 50);
       // The sequential comparison tenant runs the same workload one assertion per call.
       for (const index of seedIndexes) {
         await store.saveAssertionBatch(batchInput(sequentialTenantId, `seed-${index}`, seededAt, "v1-", [index]));
@@ -4031,8 +3937,8 @@ test(
         const single = await store.saveAssertionBatch(
           batchInput(sequentialTenantId, `mixed-${index}`, mixedAt, "v2-", [index])
         );
-        assert.equal(single.proposedCount, 1);
-        assert.equal(single.activeCount, 0);
+        assert.equal(single.proposedCount, 0);
+        assert.equal(single.activeCount, 1);
       }
       const batchedState = await tenantState(batchedTenantId);
       const sequentialState = await tenantState(sequentialTenantId);
@@ -4071,8 +3977,8 @@ test(
       const rerun = await store.saveAssertionBatch(batchInput(batchedTenantId, "rerun", rerunAt, "v2-", allIndexes));
       assert.equal(rerun.cached, false);
       assert.equal(rerun.assertionCount, 50);
-      assert.equal(rerun.proposedCount, 50);
-      assert.equal(rerun.activeCount, 0);
+      assert.equal(rerun.proposedCount, 0);
+      assert.equal(rerun.activeCount, 50);
       const afterRerun = await admin.query<{ count: number; confirmed: number }>(
         `select count(*)::int as count,
            (count(*) filter (where last_confirmed_at=$2::timestamptz))::int as confirmed
@@ -4086,7 +3992,8 @@ test(
         batchInput(batchedTenantId, "mixed", mixedAt, "v2-", allIndexes)
       );
       assert.equal(cachedRun.cached, true);
-      assert.equal(cachedRun.proposedCount, 50);
+      assert.equal(cachedRun.proposedCount, 0);
+      assert.equal(cachedRun.activeCount, 50);
     } finally {
       await admin.end();
       await store.close();

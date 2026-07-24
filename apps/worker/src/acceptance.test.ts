@@ -540,11 +540,9 @@ test("production acceptance rejects a newest project stage without a published g
   );
 });
 
-test("production acceptance reviews causality, queries it in both directions, and verifies the graph edge", async () => {
+test("production acceptance requires active causality in the first projected graph", async () => {
   const causingCommitSha = "c".repeat(40);
   let buildCount = 0;
-  let contextGraphReads = 0;
-  let reviewed = false;
   const causalQuestions: string[] = [];
   const buildBodies: unknown[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
@@ -571,48 +569,34 @@ test("production acceptance reviews causality, queries it in both directions, an
       });
     }
     if (url.pathname.startsWith("/context-graph/graphs/")) {
-      contextGraphReads += 1;
       return json({
         id: "graph-e2e",
         repository: "omxyz/jina-context-graph-e2e",
         ref: "main",
         commitSha: "a".repeat(40),
-        nodes:
-          contextGraphReads === 1
-            ? [{ id: "repo", kind: "Repository", evidence: ["README.md:1"] }]
-            : [
-                {
-                  id: "issue",
-                  kind: "Issue",
-                  description: "github:issue:omxyz/jina-context-graph-e2e#7",
-                  evidence: ["ROOT_CAUSE.md:2"]
-                },
-                {
-                  id: "commit",
-                  kind: "Commit",
-                  description: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
-                  evidence: ["ROOT_CAUSE.md:2"]
-                }
-              ],
-        edges:
-          contextGraphReads === 1
-            ? [
-                {
-                  source: "repo",
-                  target: "repo",
-                  predicate: "CONTAINS",
-                  evidence: ["README.md:1"]
-                }
-              ]
-            : [
-                {
-                  source: "issue",
-                  target: "commit",
-                  predicate: "INTRODUCED_BY",
-                  why: "The guard was bypassed.",
-                  evidence: ["ROOT_CAUSE.md:2"]
-                }
-              ]
+        nodes: [
+          {
+            id: "issue",
+            kind: "Issue",
+            description: "github:issue:omxyz/jina-context-graph-e2e#7",
+            evidence: ["ROOT_CAUSE.md:2"]
+          },
+          {
+            id: "commit",
+            kind: "Commit",
+            description: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
+            evidence: ["ROOT_CAUSE.md:2"]
+          }
+        ],
+        edges: [
+          {
+            source: "issue",
+            target: "commit",
+            predicate: "INTRODUCED_BY",
+            why: "The guard was bypassed.",
+            evidence: ["ROOT_CAUSE.md:2"]
+          }
+        ]
       });
     }
     if (url.pathname === "/context-graph") {
@@ -634,26 +618,22 @@ test("production acceptance reviews causality, queries it in both directions, an
         assertions: [
           {
             id: "weaker-cause-assertion",
-            status: "proposed",
+            status: "active",
             subjectNaturalKey: "github:issue:omxyz/jina-context-graph-e2e#7",
             objectNaturalKey: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
             evidence: ["ROOT_CAUSE.md:1"],
-            qualifiers: { reason: "The root-cause record names this commit." }
+            explanation: "The root-cause record names this commit."
           },
           {
             id: "cause-assertion",
-            status: "proposed",
+            status: "active",
             subjectNaturalKey: "github:issue:omxyz/jina-context-graph-e2e#7",
             objectNaturalKey: `repo:omxyz/jina-context-graph-e2e:sha:${causingCommitSha}`,
             evidence: ["ROOT_CAUSE.md:2"],
-            qualifiers: { reason: "The guard was bypassed." }
+            explanation: "The guard was bypassed."
           }
         ]
       });
-    if (url.pathname === "/context-graph/commands") {
-      reviewed = true;
-      return json({ affectedIds: ["cause-assertion"] });
-    }
     if (url.pathname === "/context-graph/ask") {
       const body = JSON.parse(String(init?.body ?? "{}")) as {
         question?: string;
@@ -774,11 +754,10 @@ test("production acceptance reviews causality, queries it in both directions, an
     fetchImpl
   );
 
-  assert.equal(reviewed, true);
-  assert.equal(buildCount, 2);
+  assert.equal(buildCount, 1);
   assert.deepEqual(
     buildBodies.map((body) => (body as { githubInstallationId?: number }).githubInstallationId),
-    [99, 99]
+    [99]
   );
   assert.equal(causalQuestions.length, 4);
   assert.equal(

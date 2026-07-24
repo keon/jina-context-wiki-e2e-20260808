@@ -4,6 +4,7 @@ import {
   ContextGraphProjectionDrainBusyError,
   CONTEXT_GRAPH_REGISTRY_VERSION,
   assertionObservationId,
+  assertionIdentityQualifiers,
   canonicalJson,
   causalTraceItemsFromGraph,
   codeownersPatternMatches,
@@ -147,7 +148,7 @@ const RESTORE_GITHUB_ENTITY_LABELS_SQL = `
 function assertionNaturalKey(
   assertion: Pick<StoredAssertion, "subject" | "predicate" | "object" | "qualifiers">
 ): string {
-  return `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
+  return `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
 }
 
 async function lockAssertionNaturalKey(
@@ -1534,7 +1535,10 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           const subjectId = entityIdFor(observation.tenantId, intent.subject.kind, intent.subject.key);
           const objectId = entityIdFor(observation.tenantId, intent.object.kind, intent.object.key);
           const qualifiers = intent.qualifiers ?? {};
-          const qualifiersHash = stableId("q", canonicalJson(qualifiers));
+          const qualifiersHash = stableId(
+            "q",
+            canonicalJson(assertionIdentityQualifiers(intent.predicate, qualifiers))
+          );
           const assertionId = stableId(
             "assertion",
             `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${qualifiersHash}:${observationId}`
@@ -1940,7 +1944,10 @@ export class PostgresContextGraphStore implements ContextGraphStore {
             assertion,
             subjectId: entityIds.get(`${assertion.subject.kind}:${assertion.subject.naturalKey}`)!,
             objectId: entityIds.get(`${assertion.object.kind}:${assertion.object.naturalKey}`)!,
-            qualifiersHash: stableId("q", canonicalJson(assertion.qualifiers ?? {}))
+            qualifiersHash: stableId(
+              "q",
+              canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))
+            )
           }));
           // Advisory locks stay one query per assertion and are taken in batch order —
           // exactly the order the sequential loop used — so concurrent writers acquire
@@ -2119,7 +2126,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
         `select * from jina_context_graph.assertions
-       where tenant_id=$1 and repository=$2 and status in ('active','proposed') and object_id is not null
+       where tenant_id=$1 and repository=$2 and status='active' and object_id is not null
        order by recorded_at,id`,
         [request.tenantId, request.repository]
       ),
@@ -2604,7 +2611,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           now
         );
         const qualifiers = command.qualifiers ?? {};
-        const qualifiersHash = stableId("q", canonicalJson(qualifiers));
+        const qualifiersHash = stableId("q", canonicalJson(assertionIdentityQualifiers(definition.name, qualifiers)));
         const assertionId = stableId(
           "assertion",
           `${tenantId}:${repositoryScope}:${subjectId}:${definition.name}:${objectId}:${qualifiersHash}:${now}`
@@ -4190,7 +4197,7 @@ function applicableAssertions(
             return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
           });
     if (!current) continue;
-    const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
+    const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
     const prior = selected.get(key);
     if (!prior || prior.recordedAt < assertion.recordedAt) selected.set(key, assertion);
   }

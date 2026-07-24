@@ -149,10 +149,9 @@ export async function runProductionContextGraphAcceptance(
   // graphId and commitSha are recorded in the completed stage's result —
   // never a newest-in-scope lookup that a concurrent build could win.
   const receipt = publishedProjectReceipt(completedBoardTasks ?? [], taskId);
-  let latest = await certifiedGraphForReceipt(fetchImpl, apiUrl, headers, receipt, repository, ref);
-  const certifiedCommitSha = requiredString(latest.commitSha, "contextGraph.latest.commitSha");
-  let nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
-  let edges = requiredArray(latest.edges, "contextGraph.latest.edges");
+  const latest = await certifiedGraphForReceipt(fetchImpl, apiUrl, headers, receipt, repository, ref);
+  const nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
+  const edges = requiredArray(latest.edges, "contextGraph.latest.edges");
   if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
   if (![...nodes, ...edges].every(hasEvidence)) throw new Error("production contextGraph graph contains uncited items");
 
@@ -211,14 +210,13 @@ export async function runProductionContextGraphAcceptance(
     const causalAssertions = assertions.filter(
       (value) =>
         isRecord(value) &&
-        (value.status === "proposed" || value.status === "active") &&
+        value.status === "active" &&
         value.subjectNaturalKey === `github:issue:${repository}#${expectedIssueNumber}` &&
         value.objectNaturalKey === `repo:${repository}:sha:${causingCommitSha}`
     );
     const causalAssertion = causalAssertions.find((value) => {
       if (!isRecord(value) || !Array.isArray(value.evidence) || value.evidence.length === 0) return false;
-      const qualifiers = isRecord(value.qualifiers) ? value.qualifiers : {};
-      const reason = typeof qualifiers.reason === "string" ? qualifiers.reason : "";
+      const reason = typeof value.explanation === "string" ? value.explanation : "";
       return (
         !config.causality?.reasonIncludes ||
         reason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())
@@ -229,20 +227,8 @@ export async function runProductionContextGraphAcceptance(
         `production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`
       );
     }
-    if (config.verifyV51Fixture) {
-      await reviewFixtureProposals(
-        fetchImpl,
-        apiUrl,
-        headers,
-        repository,
-        new Set(
-          causalAssertions.flatMap((value) => (isRecord(value) && typeof value.id === "string" ? [value.id] : []))
-        )
-      );
-    }
     const causalEvidence = requiredArray(causalAssertion.evidence, "causality assertion evidence");
-    const causalQualifiers = requiredRecord(causalAssertion.qualifiers, "causality assertion qualifiers");
-    const causalReason = requiredString(causalQualifiers.reason, "causality assertion reason");
+    const causalReason = requiredString(causalAssertion.explanation, "causality assertion explanation");
     if (
       causalEvidence.length === 0 ||
       (config.causality.reasonIncludes &&
@@ -250,21 +236,6 @@ export async function runProductionContextGraphAcceptance(
     ) {
       throw new Error("production causality assertion is missing its expected reason or evidence");
     }
-    if (causalAssertion.status === "proposed") {
-      await apiJson(fetchImpl, `${apiUrl}/context-graph/commands`, {
-        method: "POST",
-        headers: { ...headers, "content-type": "application/json" },
-        body: JSON.stringify({
-          type: "review_assertion",
-          assertionId: requiredString(causalAssertion.id, "causality assertion id"),
-          decision: "accept",
-          reason: "production fixture causal evidence verified"
-        })
-      });
-    } else if (causalAssertion.status !== "active") {
-      throw new Error(`production causality assertion is ${String(causalAssertion.status)}, not reviewable`);
-    }
-
     const questions = [
       `Which PR or commit caused issue #${expectedIssueNumber}, and why?`,
       `Which PR or commit caused "${expectedIssueTitle}", and why?`,
@@ -306,32 +277,9 @@ export async function runProductionContextGraphAcceptance(
       );
     }
 
-    const causal = await runFollowupContextGraphBuild(
-      fetchImpl,
-      apiUrl,
-      headers,
-      repository,
-      ref,
-      `${config.requestKey}:causal`,
-      githubInstallationId,
-      deadline,
-      pollIntervalMs,
-      log
-    );
-    // The causal pass certifies the follow-up build's own published
-    // generation, and it must project the same repository head the first pass
-    // certified — a concurrent build for another commit cannot substitute.
-    const causalReceipt = publishedProjectReceipt(causal.tasks, causal.taskId);
-    latest = await certifiedGraphForReceipt(fetchImpl, apiUrl, headers, causalReceipt, repository, ref);
-    if (latest.commitSha !== certifiedCommitSha) {
-      throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
-    }
-    nodes = requiredArray(latest.nodes, "causal contextGraph.latest.nodes");
-    edges = requiredArray(latest.edges, "causal contextGraph.latest.edges");
-    // The causal follow-up legitimately certifies a newer generation for the
-    // same commit (it materializes the just-reviewed causal assertions), so
-    // every certified generation gets the full structural checks — a
-    // substituted generation must pass everything, not just the edge check.
+    // Assertion is a required predecessor of projection, so the first
+    // certified graph must already contain the active causal assertion. No
+    // human review or second build is required to materialize it.
     if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
     if (![...nodes, ...edges].every(hasEvidence)) {
       throw new Error("production contextGraph graph contains uncited items");
@@ -370,21 +318,7 @@ export async function runProductionContextGraphAcceptance(
     }
   }
 
-  const metrics = await apiJson(
-    fetchImpl,
-    `${apiUrl}/context-graph/metrics?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`,
-    { headers }
-  );
-  const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");
-  const pendingEvents = Object.values(outboxDepth).reduce<number>(
-    (sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"),
-    0
-  );
-  if (pendingEvents !== 0 || metrics.unparsedBlobCount !== 0) {
-    throw new Error(
-      `production contextGraph backlog is not empty (outbox=${pendingEvents}, unparsed=${String(metrics.unparsedBlobCount)})`
-    );
-  }
+  await waitForBacklogConvergence(fetchImpl, apiUrl, headers, repository, ref, deadline, pollIntervalMs);
 
   return {
     taskId,
@@ -395,6 +329,38 @@ export async function runProductionContextGraphAcceptance(
     edgeCount: edges.length,
     citationCount: citations.length
   };
+}
+
+async function waitForBacklogConvergence(
+  fetchImpl: typeof fetch,
+  apiUrl: string,
+  headers: Record<string, string>,
+  repository: string,
+  ref: string,
+  deadline: number,
+  pollIntervalMs: number
+): Promise<void> {
+  let lastBacklog: { pendingEvents: number; unparsedBlobCount: number } | undefined;
+  while (true) {
+    const metrics = await apiJson(
+      fetchImpl,
+      `${apiUrl}/context-graph/metrics?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`,
+      { headers }
+    );
+    const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");
+    const pendingEvents = Object.values(outboxDepth).reduce<number>(
+      (sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"),
+      0
+    );
+    const unparsedBlobCount = requiredNonNegativeNumber(metrics.unparsedBlobCount, "metrics.unparsedBlobCount");
+    if (pendingEvents === 0 && unparsedBlobCount === 0) return;
+    lastBacklog = { pendingEvents, unparsedBlobCount };
+    if (Date.now() >= deadline) break;
+    await delay(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())));
+  }
+  throw new Error(
+    `production contextGraph backlog did not converge (outbox=${String(lastBacklog?.pendingEvents)}, unparsed=${String(lastBacklog?.unparsedBlobCount)})`
+  );
 }
 
 async function verifyCounterfactualAnswer(
@@ -710,59 +676,6 @@ async function waitForCausalTrace(
     await delay(expected.pollIntervalMs);
   }
   throw new Error(`production causal context retrieval timed out for: ${question}`);
-}
-
-async function runFollowupContextGraphBuild(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  repository: string,
-  ref: string,
-  requestKey: string,
-  githubInstallationId: number,
-  deadline: number,
-  pollIntervalMs: number,
-  log: (message: string) => void
-): Promise<{ readonly taskId: string; readonly tasks: readonly unknown[] }> {
-  const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
-    method: "POST",
-    headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, requestKey, githubInstallationId })
-  });
-  const taskId = requiredNestedString(created, "task", "id");
-  let lastSummary = "";
-  while (Date.now() < deadline) {
-    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
-    const tasks = requiredArray(board.tasks, "board.tasks");
-    const task = tasks.find((value) => isRecord(value) && value.id === taskId);
-    if (!isRecord(task)) throw new Error(`causal projection task ${taskId} is missing from the board`);
-    const status = requiredString(task.status, "causal projection task.status");
-    const summary = summarizeWorkflowTasks(tasks, taskId);
-    if (summary !== lastSummary) {
-      log(`Production causal projection task ${taskId}: ${summary}`);
-      lastSummary = summary;
-    }
-    const stageFailure = failedWorkflowStage(tasks, taskId);
-    if (TERMINAL_FAILURES.has(status) || stageFailure) {
-      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-      const terminalStatus = TERMINAL_FAILURES.has(status)
-        ? status
-        : `${String(stageFailure?.type)} ${String(stageFailure?.status)}`;
-      throw new Error(
-        `production causal projection task ${taskId} ended as ${terminalStatus} (${summary}${failureSummary})`
-      );
-    }
-    if (status === "done" && workflowStagesAreDone(tasks, taskId)) {
-      const blocked = blockedContextGraphTaskIds(tasks, repository, ref);
-      if (blocked.length > 0)
-        throw new Error(
-          `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blocked.join(", ")}`
-        );
-      return { taskId, tasks };
-    }
-    await delay(pollIntervalMs);
-  }
-  throw new Error(`production causal projection task ${taskId} timed out`);
 }
 
 interface PublishedGraphReceipt {

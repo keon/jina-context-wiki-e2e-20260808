@@ -172,8 +172,8 @@ Add a task-definition test that proves:
 
 - the three existing child task types remain present;
 - `context_graph_assert` still depends on ingest;
-- project still depends on ingest;
-- assertion is still optional for aggregate completion; and
+- project depends on successful assertion completion;
+- assertion is required for aggregate completion; and
 - no private Codex reasoning phase becomes a board task.
 
 Give the one assertion session the same managed, Codex-account, and BYOK choices as the v1 review flow without

@@ -1,6 +1,6 @@
 import type { ContextGraphNodeKind } from "./model.js";
 
-export const CONTEXT_GRAPH_REGISTRY_VERSION = "repository-context-v5.7-causal";
+export const CONTEXT_GRAPH_REGISTRY_VERSION = "repository-context-v5.8-semantic-identity";
 
 export const literalTypes = ["string", "int", "decimal", "bool", "timestamp", "json"] as const;
 export type LiteralType = (typeof literalTypes)[number];
@@ -230,6 +230,21 @@ export function normalizePredicateName(value: string): string {
     .toUpperCase();
 }
 
+/**
+ * Qualifiers describe assertion identity only when they change the fact itself.
+ * Causal prose is retained for compatibility and display, but belongs to the
+ * explanation/evidence of INTRODUCED_BY rather than its semantic key.
+ */
+export function assertionIdentityQualifiers(
+  predicate: string,
+  qualifiers: Readonly<Record<string, unknown>> = {}
+): Readonly<Record<string, unknown>> {
+  if (normalizePredicateName(predicate) !== "INTRODUCED_BY" || !("reason" in qualifiers)) return qualifiers;
+  const identity = { ...qualifiers };
+  delete identity.reason;
+  return identity;
+}
+
 export function validatePredicateEndpoints(
   definition: PredicateDefinition,
   subjectKind: ContextGraphNodeKind,
@@ -260,8 +275,5 @@ export function validateQualifiers(
     if (!["string", "number", "boolean"].includes(typeof value)) {
       throw new Error(`${definition.name} qualifier ${key} must be a string, number, or boolean`);
     }
-  }
-  if (definition.name === "INTRODUCED_BY" && (typeof qualifiers.reason !== "string" || !qualifiers.reason.trim())) {
-    throw new Error("INTRODUCED_BY requires a nonempty causal reason qualifier");
   }
 }

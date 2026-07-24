@@ -91,10 +91,10 @@ import { openSecret, sealSecret, secretAssociatedData } from "./secret-envelope.
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
-// Context graph writes for large repositories can hold the durable mutation transaction
-// for several minutes. Keep the lease comfortably beyond that transaction so the
-// owning worker is not fenced while its write is still committing.
-const WORKER_LEASE_MS = 30 * 60 * 1000;
+// Workers renew every minute while doing long writes. A five-minute lease still
+// tolerates transient API failures, but recovers a claim whose HTTP response was
+// lost without leaving the workflow stalled for half an hour.
+const WORKER_LEASE_MS = 5 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const HEALTH_CHECK_CACHE_MS = 25_000;
 const WORKER_TOPICS = [
@@ -1747,6 +1747,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const now = nowIso();
     const repository = requiredString(task.metadata.repository, "task.repository");
     const ref = requiredString(task.metadata.ref, "task.ref");
+    requiredString(task.metadata.knowledgeCheckpoint, "task.knowledgeCheckpoint");
     const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
     // Drain and rebuild produce disposable, rebuildable read models, so a lease
     // lost mid-run cannot corrupt canonical state; the graph save below is the
@@ -2228,18 +2229,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
     const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
     const contextGraphTopics = requestedTopics.filter(isContextGraphWorkerTopic);
-    const repositoryScopes = config.sharedIdentityResolver
-      ? (
-          await Promise.all(
-            tenantIds.map(async (tenantId) =>
-              (await config.sharedIdentityResolver!.resolveTenantRepositories({ tenantId })).map((repository) => ({
-                tenantId,
-                repository
-              }))
-            )
-          )
-        ).flat()
-      : undefined;
     if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
       const now = nowIso();
       const claimContextGraphWork = () =>
@@ -2247,18 +2236,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           {
             tenantId: tenantIds[0]!,
             ...(tenantIds.length > 1 ? { tenantIds } : {}),
-            ...(repositoryScopes ? { repositoryScopes } : {}),
             ...(claimId ? { claimId } : {}),
             workerId,
             topics: contextGraphTopics,
             now: nowIso(),
             leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
           },
-          config.sharedIdentityResolver ? requireStageRepositoryAuthority : undefined
+          undefined
         );
       let claimed = await claimContextGraphWork();
       if (!claimed && contextGraphTopics.includes("run-context-graph-ingest")) {
-        const queuedRepairs = await enqueueParserBacklogRepairs(tenantIds, repositoryScopes, now);
+        const queuedRepairs = await enqueueParserBacklogRepairs(tenantIds, undefined, now);
         if (queuedRepairs > 0) claimed = await claimContextGraphWork();
       }
       if (claimed) {
@@ -2287,6 +2275,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 204, {});
       return;
     }
+    // Legacy review tasks still use repository-scoped intake state. Resolve
+    // those scopes only when a non-contextGraph topic is actually requested;
+    // the durable ContextGraph claim transaction above must stay independent
+    // of slow GitHub identity enumeration.
+    const repositoryScopes = config.sharedIdentityResolver
+      ? (
+          await Promise.all(
+            tenantIds.map(async (tenantId) =>
+              (await config.sharedIdentityResolver!.resolveTenantRepositories({ tenantId })).map((repository) => ({
+                tenantId,
+                repository
+              }))
+            )
+          )
+        ).flat()
+      : undefined;
     const tenantIdSet = new Set(tenantIds);
     const repositoryScopeKeys = repositoryScopes
       ? new Set(repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
@@ -2631,6 +2635,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha: headState.commitSha
       };
     } else {
+      requiredString(stage.metadata.knowledgeCheckpoint, "task.knowledgeCheckpoint");
       const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
       const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
         repositories: [stage.repository],

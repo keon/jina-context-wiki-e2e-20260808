@@ -729,8 +729,7 @@ function normalizeIncident(observation: IncidentSourceObservation): NormalizedGi
               subject: incident,
               predicate: relation.predicate,
               object: deployment,
-              explanation,
-              ...(relation.predicate === "INTRODUCED_BY" ? { qualifiers: { reason: explanation } } : {})
+              explanation
             };
           })
         ]

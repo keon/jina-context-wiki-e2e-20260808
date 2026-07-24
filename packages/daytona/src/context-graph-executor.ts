@@ -534,7 +534,7 @@ export function codexCommand(
     "-c shell_environment_policy.inherit=core",
     "-c shell_environment_policy.ignore_default_excludes=false",
     `-c ${shellQuote('shell_environment_policy.exclude=["CODEX_HOME","CODEX_API_KEY","OPENAI_API_KEY","OPENROUTER_API_KEY"]')}`,
-    `"$(cat ${shellQuote(PROMPT_PATH)})"`
+    `- < ${shellQuote(PROMPT_PATH)}`
   ];
   if (resolved.provider === "openrouter") {
     command.splice(

@@ -311,6 +311,8 @@ start pinned Codex session
     -> make an internal plan
     -> inspect code and typed provider context with read tools
     -> revise or extend the internal plan as evidence changes
+    -> aggregate evidence and consolidate semantically equivalent candidates
+    -> synthesize one canonical claim per semantic identity
     -> submit one AssertionChangeSet
     -> host validates and persists an exact mutation plan
     -> host commits allowed operations transactionally
@@ -323,12 +325,13 @@ fingerprint, model run, tool audit, raw changeset, persisted mutation plan, comm
 recorded. A worker crash retries the assertion task; it does not attempt to resume an opaque model thought process.
 Idempotent changeset and plan identities prevent duplicate writes.
 
-`context_graph_project` continues to depend only on ingest. This lets Jina publish a structural/current-source
-projection without waiting for model work. A later assertion commit emits a canonical outbox event and causes the
-projector to publish a new graph generation.
+`context_graph_project` depends on successful completion of `context_graph_assert`. Jina never publishes a build
+generation that silently omitted the assertion stage. Snapshot-first initialization still ingests the head before
+bounded history, but publishing waits for the history ingest, assertion synthesis, and durable knowledge checkpoint.
 
-The assertion task is optional for initial aggregate completion for the same reason. Its own success or failure
-remains visible even if the required ingest and initial project stages have already completed.
+The assertion task is required for aggregate completion. A failed assertion cancels projection and fails the build;
+no graph head is advanced. Human review remains an optional correction surface after publication and is never a
+pipeline waitpoint.
 
 ### Codex session protocol
 

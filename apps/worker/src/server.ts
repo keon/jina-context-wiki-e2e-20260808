@@ -246,7 +246,11 @@ async function drainContextGraphProjectionEvents(): Promise<void> {
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
-  const response = await apiRequest("/internal/worker/claim", { workerId, topics, claimId: randomUUID() });
+  const response = await apiRequest(
+    "/internal/worker/claim",
+    { workerId, topics, claimId: randomUUID() },
+    contextGraphApiTimeoutMs
+  );
   if (response.status === 204) {
     recordApiSuccess(!drainsContextGraphProjections);
     return undefined;

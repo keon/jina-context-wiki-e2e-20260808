@@ -31,6 +31,7 @@ import {
 } from "./normalizers.js";
 import {
   CONTEXT_GRAPH_REGISTRY_VERSION,
+  assertionIdentityQualifiers,
   predicateDefinition,
   validatePredicateEndpoints,
   validateQualifiers
@@ -450,7 +451,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     const assertions = dedupeApplicableAssertions(
       this.allAssertions()
         .filter((assertion) => assertion.tenantId === request.tenantId && assertion.repository === request.repository)
-        .filter((assertion) => assertion.status === "active" || assertion.status === "proposed")
+        .filter((assertion) => assertion.status === "active")
         .filter((assertion) => {
           if (assertion.commitSha === "source") return true;
           // Audited human commands carry no code evidence to go stale; the
@@ -659,7 +660,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       validateQualifiers(definition, command.qualifiers);
       const id = stableId(
         "assertion",
-        `${tenantId}:${command.repository ?? ""}:${command.subject.key}:${definition.name}:${command.object.key}:${canonicalJson(command.qualifiers ?? {})}:${now}`
+        `${tenantId}:${command.repository ?? ""}:${command.subject.key}:${definition.name}:${command.object.key}:${canonicalJson(assertionIdentityQualifiers(definition.name, command.qualifiers ?? {}))}:${now}`
       );
       this.humanAssertions.set(id, {
         id,
@@ -1005,7 +1006,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         const qualifiers = intent.qualifiers ?? {};
         const assertionId = stableId(
           "assertion",
-          `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${stableId("q", canonicalJson(qualifiers))}:${observationId}`
+          `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${stableId("q", canonicalJson(assertionIdentityQualifiers(intent.predicate, qualifiers)))}:${observationId}`
         );
         this.sourceAssertions.set(assertionId, {
           id: assertionId,
@@ -1608,9 +1609,9 @@ export function createContextGraphProjection(
   assertions: readonly StoredAssertion[],
   request: ContextGraphProjectionRequest
 ): ContextGraph {
-  const files = [...snapshot.files]
-    .sort((a, b) => filePriority(a.path) - filePriority(b.path) || a.path.localeCompare(b.path))
-    .slice(0, 80);
+  const files = [...snapshot.files].sort(
+    (a, b) => filePriority(a.path) - filePriority(b.path) || a.path.localeCompare(b.path)
+  );
   if (files.length === 0) throw new Error("cannot project an empty repository snapshot");
   const fallbackEvidence = `${files[0]!.path}:1`;
   const nodes = new Map<string, ContextGraphNode>();
@@ -1636,8 +1637,7 @@ export function createContextGraphProjection(
     });
     edges.push({ source: "repo", target: fileId, predicate: "CONTAINS", plane: "code", evidence: [`${file.path}:1`] });
     const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
-    for (const symbol of analysis?.symbols.slice(0, 8) ?? []) {
-      if (nodes.size >= 200) break;
+    for (const symbol of analysis?.symbols ?? []) {
       const symbolId = `symbol:${file.path}:${symbol.moniker}`;
       nodes.set(symbolId, {
         id: symbolId,
@@ -1702,7 +1702,7 @@ export function createContextGraphProjection(
           symbolsByName.get(fromName)?.[0] ??
           `file:${file.path}`);
       let targetId = symbolByScopedName.get(`${file.path}:${targetName}`) ?? symbolsByName.get(targetName)?.[0];
-      if (!targetId && nodes.size < 200) {
+      if (!targetId) {
         targetId = `external:${stableId("moniker", item.toMoniker)}`;
         nodes.set(targetId, {
           id: targetId,
@@ -1857,12 +1857,12 @@ function assertionKey(
   return `${tenantId}:${repository}:${commitSha}:${generatorVersion}:${registryVersion}:${evidenceFingerprint}`;
 }
 function storedAssertionNaturalKey(assertion: StoredAssertion): string {
-  return `${assertion.repository}:${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
+  return `${assertion.repository}:${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
 }
 function dedupeApplicableAssertions(assertions: readonly StoredAssertion[]): readonly StoredAssertion[] {
   const selected = new Map<string, StoredAssertion>();
   for (const assertion of assertions) {
-    const key = `${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
+    const key = `${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
     const current = selected.get(key);
     if (!current || current.recordedAt < assertion.recordedAt) selected.set(key, assertion);
   }

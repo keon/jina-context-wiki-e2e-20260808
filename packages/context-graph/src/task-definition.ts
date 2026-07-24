@@ -25,8 +25,8 @@ const contextGraphTaskSpecs = [
     kind: "dispatchable",
     defaultAssigneeRole: "context_graph_worker",
     dispatchTopic: "run-context-graph-project",
-    dependsOn: "context_graph_ingest",
-    description: "Builds a disposable dashboard graph from canonical code facts and available assertions."
+    dependsOn: "context_graph_assert",
+    description: "Builds a disposable dashboard graph after same-commit semantic assertions complete successfully."
   }
 ] as const;
 
@@ -64,8 +64,7 @@ export const contextGraphTaskTypeTriggers = [
     workflow: "context_graph_build",
     taskType: "context_graph_project",
     source: "POST /context-graph/build",
-    description:
-      "Creates the projection task in a waiting state; context_graph_ingest completion unblocks it independently of model assertions."
+    description: "Creates the projection task in a waiting state; context_graph_assert completion unblocks it."
   },
   {
     workflow: "context_graph_build",
@@ -99,7 +98,7 @@ export const contextGraphTaskTypeDependencies = [
     taskType: "context_graph_build",
     dependsOnTaskType: spec.type,
     relationship: "blocks",
-    required: spec.type !== "context_graph_assert"
+    required: true
   })),
   ...contextGraphTaskSpecs.flatMap((spec) =>
     "dependsOn" in spec

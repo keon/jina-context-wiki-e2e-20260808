@@ -161,6 +161,85 @@ for attempt in range(1, 21):
 PY
 }
 
+require_secret() {
+  local secret_spec="$1"
+  local secret_name="${secret_spec%%:*}"
+  gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
+}
+
+route_latest_revision() {
+  local service="$1"
+  local revision
+  local ready
+  revision="$(gcloud run services describe "${service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --format='value(status.latestCreatedRevisionName)')"
+  if [[ -z "${revision}" ]]; then
+    echo "${service} did not report a latest created revision" >&2
+    exit 2
+  fi
+  for _attempt in $(seq 1 60); do
+    ready="$(gcloud run revisions describe "${revision}" \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --format='value(status.conditions[0].status)' 2>/dev/null || true)"
+    if [[ "${ready}" == "True" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ "${ready}" != "True" ]]; then
+    echo "${service} revision ${revision} did not become ready" >&2
+    exit 2
+  fi
+  gcloud run services update-traffic "${service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --to-revisions="${revision}=100" \
+    --quiet >/dev/null
+  echo "Routed ${service} 100% to ${revision}"
+}
+
+for secret_spec in \
+  "${db_pass_secret}" \
+  "${graph_db_pass_secret}" \
+  "jina-internal-api-token:latest" \
+  "jina-graph-api-token:latest" \
+  "jina-global-admin-token:latest" \
+  "jina-secrets-encryption-key:latest" \
+  "jina-daytona-api-key:latest" \
+  "jina-openrouter-api-key:latest" \
+  "jina-github-app-id:latest" \
+  "jina-github-app-private-key:latest" \
+  "jina-openai-api-key:latest" \
+  "jina-github-api-token:latest" \
+  "jina-github-clone-token:latest"; do
+  require_secret "${secret_spec}"
+done
+
+# Apply owner-only DDL before any new runtime revision starts. Runtime services
+# intentionally run with JINA_DB_MANAGE_SCHEMA=false and must never discover a
+# missing table under live traffic.
+gcloud run jobs deploy jina-context-graph-migrate \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --image="${api_image}" \
+  --service-account="${runtime_service_account}" \
+  --set-cloudsql-instances="${graph_cloud_sql_instance}" \
+  --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${graph_cloud_sql_instance}~DB_NAME=${graph_db_name}~DB_USER=${graph_db_user}" \
+  --set-secrets="DB_PASS=${graph_db_pass_secret}" \
+  --args=node_modules/@jina/db/dist/migrate.js \
+  --tasks=1 \
+  --max-retries=0 \
+  --task-timeout=15m \
+  --quiet
+
+gcloud run jobs execute jina-context-graph-migrate \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --wait
+
 gcloud run deploy jina-api \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -179,6 +258,7 @@ gcloud run deploy jina-api \
   --set-secrets="${api_secrets}" \
   --quiet
 
+route_latest_revision "jina-api"
 api_url="$(gcloud run services describe jina-api \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -200,6 +280,7 @@ gcloud run deploy jina-context-graph-worker \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest" \
   --quiet
 
+route_latest_revision "jina-context-graph-worker"
 context_graph_worker_url="$(gcloud run services describe jina-context-graph-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -232,6 +313,7 @@ gcloud run deploy jina-task-worker \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_API_TOKEN=jina-github-api-token:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
+route_latest_revision "jina-task-worker"
 task_worker_url="$(gcloud run services describe jina-task-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \

@@ -780,9 +780,9 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
           snapshot_published: boolean;
         }>(
           `select build.snapshot_first,
-                  bool_or(stage.stage<>'assert' and stage.status='failed') as required_failed,
+                  bool_or(stage.status='failed') as required_failed,
                   bool_and(stage.status in ('done','failed','canceled','superseded')) as all_terminal,
-                  bool_or(stage.phase='snapshot' and stage.stage='project' and stage.status='done') as snapshot_published
+                  false as snapshot_published
            from jina_board.workflows build
            join jina_board.tasks stage on stage.build_id=build.id
            where build.id=$1 group by build.snapshot_first`,

@@ -2,7 +2,7 @@ import { canonicalJson } from "./knowledge.js";
 import { contextGraphNodeKinds, type ContextGraphNodeKind } from "./model.js";
 import type { ContextGraphEntityRef } from "./pipeline.js";
 import { evidenceLocatorKey, parseEvidenceLocator, type EvidenceLocator } from "./evidence.js";
-import { predicateRegistry, type PredicateDefinition } from "./registry.js";
+import { assertionIdentityQualifiers, predicateRegistry, type PredicateDefinition } from "./registry.js";
 
 export const ASSERTION_CHANGESET_CONTRACT_VERSION = "assertion-changeset/v1" as const;
 export const assertionScopeKinds = ["pull_request", "incremental", "initialize", "backfill"] as const;
@@ -176,7 +176,7 @@ export function assertionSemanticKey(candidate: AssertionCandidate): string {
     entityKey(candidate.subject),
     candidate.predicate.trim().toUpperCase(),
     entityKey(candidate.object),
-    canonicalJson(candidate.qualifiers)
+    canonicalJson(assertionIdentityQualifiers(candidate.predicate, candidate.qualifiers))
   ].join(":");
 }
 

@@ -59,6 +59,8 @@ test("runs Codex through OpenRouter Responses with catalog-aware authentication"
   assert.match(command, /model_reasoning_effort='medium'/);
   assert.match(command, /shell_environment_policy\.inherit=core/);
   assert.match(command, /shell_environment_policy\.exclude=/);
+  assert.match(command, /- < '\/home\/daytona\/context-graph\/prompt\.txt'/);
+  assert.doesNotMatch(command, /\$\(cat/);
   assert.doesNotMatch(command, /chat\/completions/);
 });
 

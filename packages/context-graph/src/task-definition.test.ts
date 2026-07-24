@@ -21,7 +21,7 @@ test("agent-first framework preserves the three context graph stage tasks", () =
   );
 });
 
-test("assertion and projection remain independently unblocked by ingest", () => {
+test("assertion is required and projection is blocked by assertion completion", () => {
   const stageDependencies = contextGraphTaskTypeDependencies.filter(
     (dependency) => dependency.taskType !== "context_graph_build"
   );
@@ -36,7 +36,7 @@ test("assertion and projection remain independently unblocked by ingest", () => 
     {
       workflow: "context_graph_build",
       taskType: "context_graph_project",
-      dependsOnTaskType: "context_graph_ingest",
+      dependsOnTaskType: "context_graph_assert",
       relationship: "blocks",
       required: true
     }
@@ -49,7 +49,7 @@ test("assertion and projection remain independently unblocked by ingest", () => 
     aggregateDependencies.map(({ dependsOnTaskType, required }) => ({ dependsOnTaskType, required })),
     [
       { dependsOnTaskType: "context_graph_ingest", required: true },
-      { dependsOnTaskType: "context_graph_assert", required: false },
+      { dependsOnTaskType: "context_graph_assert", required: true },
       { dependsOnTaskType: "context_graph_project", required: true }
     ]
   );

@@ -771,7 +771,7 @@ function validateCausalEvidenceContents(generated: GeneratedContextGraph, files:
       const causeReference = commitSha ? `commit ${commitSha}` : `Deployment ${cause.label}`;
       throw new Error(`INTRODUCED_BY evidence must explicitly name ${rootReference} and ${causeReference}`);
     }
-    if (!edge.why) throw new Error("INTRODUCED_BY must include a causal explanation for human review");
+    if (!edge.why) throw new Error("INTRODUCED_BY must include a causal explanation");
   }
 }
 
