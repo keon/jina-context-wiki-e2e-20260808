@@ -2559,6 +2559,8 @@ test("concurrent health requests share one dependency check", async (context) =>
     await Promise.all([first, second]).then((responses) => responses.map((response) => response.status)),
     [200, 200]
   );
+  assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+  assert.equal(pingCount, 1);
 });
 
 test("a fast health failure stays coalesced until slower dependency probes settle", async (context) => {

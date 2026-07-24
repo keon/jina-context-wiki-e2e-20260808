@@ -81,6 +81,9 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     const { manageSchema = true, ...poolConfig } = config;
     this.manageSchema = manageSchema;
     this.pool = new Pool({ ...poolConfig, application_name: "jina-context-graph-pipeline", max: poolConfig.max ?? 5 });
+    this.pool.on("error", (error) => {
+      console.error("context graph pipeline postgres idle connection error", error);
+    });
   }
 
   async createBuild(
@@ -932,7 +935,6 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
   }
 
   async ping(): Promise<void> {
-    await this.initialize();
     await pingPostgresPool(this.pool);
   }
 

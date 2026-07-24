@@ -372,6 +372,12 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       application_name: "jina-context-graph-projection-lock",
       max: 1
     });
+    this.pool.on("error", (error) => {
+      console.error("context graph postgres idle connection error", error);
+    });
+    this.projectionLockPool.on("error", (error) => {
+      console.error("context graph projection-lock postgres idle connection error", error);
+    });
   }
 
   async save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void> {
@@ -3625,7 +3631,6 @@ export class PostgresContextGraphStore implements ContextGraphStore {
   }
 
   async ping(): Promise<void> {
-    await this.initialize();
     // The projection pool has one client by design and may legitimately hold
     // it for a multi-minute drain. Only probe it when doing so cannot queue
     // health behind active projection work.

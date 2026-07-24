@@ -87,6 +87,7 @@ const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
 // owning worker is not fenced while its write is still committing.
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
+const HEALTH_CHECK_CACHE_MS = 25_000;
 const WORKER_TOPICS = [
   "run-review",
   "run-research",
@@ -206,21 +207,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let restoredVersion = 0;
 
   async function checkHealth(): Promise<void> {
-    healthCheck ??= Promise.allSettled([
-      Promise.resolve().then(() => config.stateStore?.ping()),
-      Promise.resolve().then(() => contextGraphStore.ping()),
-      Promise.resolve().then(() => contextGraphCoordinator.ping()),
-      Promise.resolve().then(() => config.sharedIdentityResolver?.ping())
-    ])
-      .then((results) => {
+    if (!healthCheck) {
+      const current = Promise.allSettled([
+        Promise.resolve().then(() => config.stateStore?.ping()),
+        Promise.resolve().then(() => contextGraphStore.ping()),
+        Promise.resolve().then(() => contextGraphCoordinator.ping()),
+        Promise.resolve().then(() => config.sharedIdentityResolver?.ping())
+      ]).then((results) => {
         const failure = results.find((result) => result.status === "rejected");
         if (failure?.status === "rejected") {
           throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
         }
-      })
-      .finally(() => {
-        healthCheck = undefined;
       });
+      healthCheck = current;
+      const expire = () => {
+        const timer = setTimeout(() => {
+          if (healthCheck === current) healthCheck = undefined;
+        }, HEALTH_CHECK_CACHE_MS);
+        timer.unref();
+      };
+      current.then(expire, expire);
+    }
     return healthCheck;
   }
 

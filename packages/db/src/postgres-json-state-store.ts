@@ -81,7 +81,6 @@ export class PostgresJsonStateStore<T> {
   }
 
   async ping(): Promise<void> {
-    await this.initialize();
     await pingPostgresPool(this.pool);
   }
 
