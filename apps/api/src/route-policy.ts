@@ -19,6 +19,7 @@ const METRICS_ROUTES = new Set([
   "/context-graph/assertions",
   "/context-graph/build",
   "/context-graph/commands",
+  "/context-graph/execution-settings",
   "/context-graph/metrics",
   "/context-graph/retrieve",
   "/internal/admin/context-graph",
@@ -27,6 +28,8 @@ const METRICS_ROUTES = new Set([
   "/internal/observability",
   "/internal/context-graph/assertions/cached",
   "/internal/context-graph/assertions/evidence",
+  "/internal/context-graph/assertions/execution",
+  "/internal/context-graph/assertions/execution/refresh",
   "/internal/context-graph/assertions/save",
   "/internal/context-graph/ingest/blobs",
   "/internal/context-graph/ingest/github",
@@ -88,7 +91,15 @@ export function isDirectContextGraphRead(method: string | undefined, pathname: s
   )
     return true;
   if (isPublicGraphRoute(pathname)) return true;
-  if (method === "GET" && ["/context-graph", "/context-graph/metrics", "/context-graph/assertions"].includes(pathname))
+  if (
+    method === "GET" &&
+    [
+      "/context-graph",
+      "/context-graph/metrics",
+      "/context-graph/assertions",
+      "/context-graph/execution-settings"
+    ].includes(pathname)
+  )
     return true;
   return (
     (method === "GET" && pathname.startsWith("/context-graph/graphs/")) ||

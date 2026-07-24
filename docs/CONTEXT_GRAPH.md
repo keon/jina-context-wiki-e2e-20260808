@@ -2,7 +2,12 @@
 
 ## Status
 
-This document describes the implementation in this repository as of 2026-07-22. ContextGraph is one workflow on Jina's generic task board. The board controls work; ContextGraph owns repository facts and cited retrieval. The graph shown on `/context-graph` is a disposable read model, not the canonical store.
+This document describes the implementation in this repository as of 2026-07-24. ContextGraph is one workflow on Jina's generic task board. The board controls work; ContextGraph owns repository facts and cited retrieval. The graph shown on `/context-graph` is a disposable read model, not the canonical store.
+
+The proposed agent-first successor framework is documented separately in
+[AGENT_FIRST_CONTEXT_FRAMEWORK.md](AGENT_FIRST_CONTEXT_FRAMEWORK.md). That proposal does not describe deployed
+behavior until its phases are implemented. Its executable migration sequence is in
+[AGENT_FIRST_CONTEXT_IMPLEMENTATION_PLAN.md](AGENT_FIRST_CONTEXT_IMPLEMENTATION_PLAN.md).
 
 The implementation contains the Repository Context Architecture v5.1 causal model (registry contract `repository-context-v5.7-causal`) with three board-visible chunks rather than a card per internal mechanism:
 
@@ -83,6 +88,31 @@ Ingest reports GitHub snapshots as `new`, `updated`, or `confirmed` independentl
 
 The assertion worker checks out the immutable commit in Daytona and asks Codex about one bounded focus list. Head changes come first; when several commits are newly ingested, still-present documentation/tests and then recent historical changes are included up to `CONTEXT_GRAPH_ASSERTION_FOCUS_LIMIT` (default 200). If a new generator has no cached output for an already-known commit, its one uncached run uses the same bounded selector over the current tree, prioritizing documentation and tests, and rehydrates only recent merged PRs that look like untracked repairs so older derived Issue candidates are not lost without scanning every PR. That rehydration is not limited to PRs whose immediate base was the default branch: it verifies that each candidate merge commit is an ancestor of the requested head, so stacked PRs survive a later integration merge while unrelated branch work stays out of scope. Before the model call, the worker streams bounded prefixes from up to 32 prioritized files concurrently and includes a bounded, line-numbered evidence bundle in the prompt (`CONTEXT_GRAPH_FOCUS_BUNDLE_MAX_CHARS`, default 16000; `CONTEXT_GRAPH_FOCUS_BUNDLE_FILE_CHARS`, default 3000). Each remote stream is aborted at its byte budget, so transfer and memory use are bounded before prompt construction. This removes sequential model tool turns without creating parallel assertion writers; repository tools remain a fallback for unresolved citations. It also rehydrates the exact immutable GitHub/CODEOWNERS observations named by ingestion and supplies them inline as untrusted evidence data. For every PR in scope, ingest fetches its complete commit membership and changed-file list with bounded concurrency (`CONTEXT_GRAPH_GITHUB_PR_CONCURRENCY`, default 4) and fails closed if the bounded pagination cannot prove completeness. A PR is required to produce a derived Issue only when its own current changed files contain durable problem evidence; another PR in the same backfill cannot trigger it, and a later GitHub edit cannot replace its canonical `INCLUDES` facts with a partial discovery-frontier list. Problem evidence is recognized only by evidence-oriented path components or complete filename tokens, not substrings such as `debugger.ts` or `regression_metrics.ts`. The host lists those anchors and explicit root-cause anchors found in named root-cause/incident records, plus the exact deterministic Package/Service/Deployment/Incident IDs the model is allowed to reference. Any model-created source identity outside that set is rejected. Explicit `Incident X was introduced by Deployment Y` and `Incident X was resolved by Deployment Y` statements are materialized after generation when both endpoints resolve to those source-backed IDs; the incident issue number and deployment external-ID suffix permit a historical postmortem repository name to survive a later fixture or repository rename without minting a new entity. An explicit untracked root-cause record likewise materializes the required derived Issue, repairing PR, `RESOLVED_BY`, and `INTRODUCED_BY` structure; the model may enrich it but cannot probabilistically omit the host contract. The model remains responsible for all other semantic titles, explanations, confidences, relationships, and exact citations. Every semantic edge must include both checked citations and a nonempty `why` that explains how those citations support the relationship rather than restating the predicate. Deterministic source relationships receive explanations directly from their normalizer and do not call the model. Every model-supplied code citation is checked against the checkout before completion. Causal citations for tracked issues must cover the explicit root-cause span naming the Issue, full SHA, and mechanism. For a derived repair whose record explicitly says that no GitHub issue was opened, the citation instead covers that no-issue statement, the full introducing SHA, and the mechanism; the generated issue title is not required to appear verbatim in repository history. Semantic agreement between the cited span and `why` remains part of the required human review rather than a brittle lexical heuristic. The exact parsed model document is retained separately from the normalized graph used to create assertion intents. A parse, explanation, line-range, source-identity, causal-citation, or unsupported optional model assertion receives one repair attempt inside the same assertion task and sandbox; a second failure remains fail-closed.
 
+### Execution provider and model
+
+The `/models` page configures one tenant-scoped assertion-agent model; ingest and project stay deterministic and do
+not receive model credentials. The provider is one of Jina managed, Codex, or BYOK. A build snapshots only the
+selected provider, model, and settings revision. After the assertion stage holds its durable lease, the API resolves
+the current encrypted integration into an ephemeral whole-run route:
+
+```text
+managed -> managed OpenRouter
+Codex connected + trusted private repository -> native Codex account auth
+Codex unavailable/ineligible -> BYOK OpenRouter -> BYOK OpenAI -> managed
+BYOK -> OpenRouter -> OpenAI for openai/* -> managed
+```
+
+Public repositories never receive ChatGPT account auth; they use the fallback chain. OpenAI API keys are exposed to
+only the single `codex exec` process as `CODEX_API_KEY`. Codex account auth is installed with owner-only permissions
+outside the checkout, token fields are redacted from errors, and a refreshed `auth.json` is re-encrypted before the
+ephemeral sandbox is deleted unless the administrator changed settings while the run was active. Model-output
+provenance records the actual provider and credential class after fallback. Cache identity includes the selected
+provider and model, so changing either causes a new generation for an otherwise unchanged semantic scope; automatic
+credential refresh does not.
+
+Execution-provider selection does not select framework behavior. There is one semantic implementation at a time;
+managed, Codex, and BYOK change only the credential, billing, and model route used by the assertion task.
+
 An Issue is the generalized problem entity. It may come directly from a provider or be derived from repository evidence such as a PR, commit, review finding, or incident. A GitHub issue uses a `github:issue:<repository>#<number>` natural key, and its explicit `RESOLVES` relationships come only from deterministic intake. When a merged PR has no linked issue, explicitly repairs a bug/regression, and changes durable problem evidence, the assertion contract derives one `Issue` candidate and an `Issue RESOLVED_BY PullRequest` relationship. Its natural key is `derived:issue:<repository>:<anchor-digest>`. Refactors, dependency updates, documentation, chores, feature-only work, and text explicitly saying the PR is not a fix do not qualify. The model cannot mint a GitHub issue number, create more than one candidate for a PR, change the PR anchor, or create one when intake found an explicit resolution. A later provider-backed Issue can be joined through the existing entity-redirect mechanism without rewriting history.
 
 A Feature is a repository-scoped, model-inferred identity for a named externally observable capability, never a synonym for a file, component, or task. Its host-validated natural key is `repo:<repository>:feature:<stable-slug>`. Explicit repository evidence may propose `File | Symbol IMPLEMENTS Feature`, `Feature DOCUMENTED_BY Document`, `Commit | PullRequest | Issue LIKELY_AFFECTS Feature`, and reviewed Feature/Service ownership. Deterministic old/new blob similarity supplies only `MOVED_FROM` candidates; the model must cite continuity before the assertion can be reviewed. These predicates remain manual-review inferences. Acceptance makes them canonical knowledge; the existing project task renders them in the disposable dashboard graph without adding another board task.
@@ -125,7 +155,7 @@ All tables are in PostgreSQL under `jina_context_graph`, and every row is tenant
 | Intake                  | `observations`                                                                                                |
 | Code                    | `commits`, `refs`, `commit_changes`, `blobs`, `blob_analyses`, `blob_symbols`, `blob_imports`, `symbol_edges` |
 | Knowledge               | `entities`, `identities`, `entity_redirects`, `assertions`, `assertion_relations`, `audit_log`                |
-| Infrastructure          | `outbox`, `erasure_filters`, `repository_acl`, `retrieval_metrics`                                            |
+| Infrastructure          | `execution_settings`, `outbox`, `erasure_filters`, `repository_acl`, `retrieval_metrics`                      |
 | Rebuildable projections | `ref_manifest`, `search_documents`, `graphs`, `graph_heads`, `nodes`, `edges`                                 |
 
 Exact trees on `commits` are canonical historical state; `commit_changes` is the compact, queryable first-parent delta record. `commit_manifest(...)` returns a requested commit tree, and `ref_manifest` stores the hot-ref result used by retrieval and projection. Schema upgrades drop the superseded `commit_files` table. Graph rows are immutable and content-addressed by commit, projection version, and canonical graph content; `graph_heads` records which immutable generation is current for each ref, so reverting content to an older graph ID remains ref-correct.

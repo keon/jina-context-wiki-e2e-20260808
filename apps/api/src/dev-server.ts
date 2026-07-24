@@ -66,6 +66,7 @@ const server = createApiServer({
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
   ...(process.env.JINA_GLOBAL_ADMIN_TOKEN ? { globalAdminToken: process.env.JINA_GLOBAL_ADMIN_TOKEN } : {}),
   ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
+  ...(process.env.SECRETS_ENCRYPTION_KEY ? { secretsEncryptionKey: process.env.SECRETS_ENCRYPTION_KEY } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")
 });

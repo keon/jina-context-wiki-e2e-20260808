@@ -40,6 +40,71 @@ test("Postgres schema backstops every cardinality-one predicate from the registr
 });
 
 test(
+  "Postgres execution settings use optimistic full-record replacement",
+  { skip: connectionString ? false : "TEST_DATABASE_URL is not configured" },
+  async () => {
+    assert.ok(connectionString);
+    const store = new PostgresContextGraphStore({ connectionString });
+    const tenantId = `execution-${Date.now().toString(36)}`;
+    try {
+      assert.equal(await store.executionSettings(tenantId), undefined);
+      const first = await store.saveExecutionSettings(
+        {
+          tenantId,
+          provider: "byok",
+          assertionModel: "openai/gpt-5.6-terra",
+          openrouterApiKey: "enc:v1:test",
+          updatedAt: "2026-07-24T00:00:00.000Z"
+        },
+        0
+      );
+      assert.equal(first?.revision, 1);
+      assert.equal(
+        await store.saveExecutionSettings(
+          {
+            tenantId,
+            provider: "managed",
+            assertionModel: "openai/gpt-5.6-luna",
+            updatedAt: "2026-07-24T00:01:00.000Z"
+          },
+          0
+        ),
+        undefined
+      );
+      const second = await store.saveExecutionSettings(
+        {
+          tenantId,
+          provider: "managed",
+          assertionModel: "openai/gpt-5.6-luna",
+          updatedAt: "2026-07-24T00:02:00.000Z"
+        },
+        1
+      );
+      assert.equal(second?.revision, 2);
+      assert.equal(second?.provider, "managed");
+      assert.equal(second?.openrouterApiKey, undefined);
+      assert.deepEqual(await store.executionSettings(tenantId), second);
+
+      const missingTenant = `${tenantId}-missing`;
+      assert.equal(
+        await store.saveExecutionSettings(
+          {
+            tenantId: missingTenant,
+            provider: "managed",
+            assertionModel: "openai/gpt-5.6-luna",
+            updatedAt: "2026-07-24T00:03:00.000Z"
+          },
+          1
+        ),
+        undefined
+      );
+    } finally {
+      await store.close();
+    }
+  }
+);
+
+test(
   "Postgres schema reconciles legacy cardinality-one duplicates before widening the backstop index",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
@@ -906,6 +971,9 @@ test(
         query_writes_metrics: boolean;
         query_writes_assertions: boolean;
         knowledge_writes_assertion_relations: boolean;
+        knowledge_writes_execution_settings: boolean;
+        reader_reads_execution_settings: boolean;
+        query_reads_execution_settings: boolean;
       }>(`select
       has_table_privilege('jina_context_graph_manifest','jina_context_graph.ref_manifest','INSERT') as manifest_writes_manifest,
       has_table_privilege('jina_context_graph_manifest','jina_context_graph.blobs','INSERT') as manifest_writes_blobs,
@@ -913,7 +981,10 @@ test(
       has_table_privilege('jina_context_graph_projection','jina_context_graph.assertions','INSERT') as graph_writes_assertions,
       has_table_privilege('jina_context_graph_query','jina_context_graph.retrieval_metrics','INSERT') as query_writes_metrics,
       has_table_privilege('jina_context_graph_query','jina_context_graph.assertions','INSERT') as query_writes_assertions,
-      has_table_privilege('jina_context_graph_knowledge','jina_context_graph.assertion_relations','INSERT') as knowledge_writes_assertion_relations`);
+      has_table_privilege('jina_context_graph_knowledge','jina_context_graph.assertion_relations','INSERT') as knowledge_writes_assertion_relations,
+      has_table_privilege('jina_context_graph_knowledge','jina_context_graph.execution_settings','UPDATE') as knowledge_writes_execution_settings,
+      has_table_privilege('jina_context_graph_reader','jina_context_graph.execution_settings','SELECT') as reader_reads_execution_settings,
+      has_table_privilege('jina_context_graph_query','jina_context_graph.execution_settings','SELECT') as query_reads_execution_settings`);
       assert.deepEqual(privileges.rows[0], {
         manifest_writes_manifest: true,
         manifest_writes_blobs: false,
@@ -921,7 +992,10 @@ test(
         graph_writes_assertions: false,
         query_writes_metrics: true,
         query_writes_assertions: false,
-        knowledge_writes_assertion_relations: true
+        knowledge_writes_assertion_relations: true,
+        knowledge_writes_execution_settings: true,
+        reader_reads_execution_settings: false,
+        query_reads_execution_settings: false
       });
 
       const client = await pool.connect();
