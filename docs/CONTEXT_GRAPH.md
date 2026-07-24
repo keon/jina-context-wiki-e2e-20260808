@@ -76,7 +76,16 @@ The pipeline has one topic vocabulary:
 board events left on the retired `run-ontology-*` topics before enforcing a
 current-only constraint. Retired tasks are not rewritten or resumed.
 
-The contextGraph worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree it asks the canonical store which SHAs already exist. A repeated build therefore reads only the head tree; a new head ingests only the previously unseen subgraph until it reaches known parents. Automated builds use a 500-commit partial-history boundary by default. Dashboard builds may override that boundary up to the `CONTEXT_GRAPH_HISTORY_LIMIT` physical safety ceiling (default and production value: 10,000 commits).
+The contextGraph worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree
+it asks the canonical store which SHAs already exist and receives their stored parent links. A repeated build
+therefore traverses cheap canonical ancestry but reads only the head tree; a new head ingests only the previously
+unseen subgraph. Snapshot-first initialization cannot mistake its newly recorded head for a complete history:
+the history stage follows the head's stored parents until it reaches the real missing frontier. The same contract
+lets a later run continue a bounded partial backfill without refetching known commits from GitHub. Automated builds
+use a 500-new-commit partial-history boundary by default. Known ancestry does not consume that discovery budget, so
+the next run can reach and extend the prior frontier. All traversal, including known commits, remains bounded by the
+`CONTEXT_GRAPH_HISTORY_LIMIT` physical safety ceiling (default and production value: 10,000 commits). Dashboard builds
+may raise the discovery boundary up to that ceiling.
 
 Each commit stores parents, author external ID, commit time, message, its exact observed path/blob tree, and first-parent churn. The root churn is a set of adds; later `commit_changes` rows record add, modify, delete, and exact-content rename. `commit_manifest(tenant, repository, sha)` returns the exact recorded tree independently of parent order; ancestry replay exists only for legacy rows that predate exact-tree recording. `context_graph_project` materializes that state only for hot refs. A force-push moves a ref; it does not rewrite commit facts.
 

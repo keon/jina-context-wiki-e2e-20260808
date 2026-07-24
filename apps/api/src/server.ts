@@ -1771,7 +1771,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!Array.isArray(body.commitShas)) throw invalidRequest("commitShas must be an array");
     const commitShas = body.commitShas.map((sha) => requiredGitSha(sha, "commitSha"));
     json(response, 200, {
-      knownCommitShas: await contextGraphStore.knownCommits(
+      knownCommits: await contextGraphStore.knownCommits(
         tenantId,
         requiredString(task.metadata.repository, "task.repository"),
         commitShas

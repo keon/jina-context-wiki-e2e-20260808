@@ -242,8 +242,15 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     return structuredClone(saved);
   }
 
-  async knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]> {
-    return commitShas.filter((sha) => this.snapshots.has(snapshotKey(tenantId, repository, sha)));
+  async knownCommits(
+    tenantId: string,
+    repository: string,
+    commitShas: readonly string[]
+  ): Promise<readonly { readonly sha: string; readonly parents: readonly string[] }[]> {
+    return commitShas.flatMap((sha) => {
+      const snapshot = this.snapshots.get(snapshotKey(tenantId, repository, sha));
+      return snapshot ? [{ sha, parents: snapshot.parents }] : [];
+    });
   }
 
   async planIngestion(

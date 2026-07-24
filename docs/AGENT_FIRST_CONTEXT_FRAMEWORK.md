@@ -468,7 +468,10 @@ Bootstrap must not require replaying every commit before the repository is query
 
 Use after a known checkpoint.
 
-- Walk new reachable commits until a known parent boundary.
+- Traverse stored parent links through known commits and ingest new reachable commits at the actual missing frontier;
+  the presence of a snapshot-first head alone never proves that its ancestry is complete.
+- Budget newly discovered commits separately from bounded traversal through known ancestry, so later runs extend a
+  prior partial-history frontier instead of repeatedly stopping at it.
 - Reuse content-addressed blob analyses.
 - Scope semantic work to changed paths plus still-applicable documentation and prior assertions.
 - Reconfirm, supersede, or challenge assertions affected by the delta.

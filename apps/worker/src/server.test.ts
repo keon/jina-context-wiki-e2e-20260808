@@ -112,7 +112,8 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
               repository: "omlabs/example",
               ref: "main",
               githubInstallationId: 99,
-              pipelinePhase: "history"
+              pipelinePhase: "history",
+              historyLimit: 2
             }
           }
         });
@@ -157,22 +158,29 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       }
       assert.equal(request.headers["x-jina-tenant-id"], "omlabs");
       const snapshot = (body as { snapshot: { commitSha: string; files: unknown[] } }).snapshot;
-      assert.equal(snapshot.commitSha, "a".repeat(40));
       assert.equal(snapshot.files.length, 1);
+      const isHistoricalParent = snapshot.commitSha === "f".repeat(40);
+      assert.equal(isHistoricalParent || snapshot.commitSha === "a".repeat(40), true);
       json(response, 200, {
-        observationId: "observation-1",
-        commitSha: "a".repeat(40),
+        observationId: isHistoricalParent ? "observation-parent" : "observation-head",
+        commitSha: snapshot.commitSha,
         fileCount: 1,
         discoveredBlobCount: 1,
-        reusedBlobCount: 0,
-        changedPaths: ["src/index.test.ts"],
-        changes: [{ path: "src/index.test.ts", change: "add", newBlobSha: "c".repeat(40) }],
-        missingBlobs: [{ blobSha: "c".repeat(40), path: "src/index.test.ts", size: 42 }]
+        reusedBlobCount: isHistoricalParent ? 0 : 1,
+        changedPaths: isHistoricalParent ? ["src/index.test.ts"] : [],
+        changes: isHistoricalParent ? [{ path: "src/index.test.ts", change: "add", newBlobSha: "c".repeat(40) }] : [],
+        missingBlobs: isHistoricalParent ? [{ blobSha: "c".repeat(40), path: "src/index.test.ts", size: 42 }] : []
       });
       return;
     }
     if (request.url === "/internal/context-graph/ingest/known") {
-      json(response, 200, { knownCommitShas: ["a".repeat(40)] });
+      const commitShas = (body as { commitShas: string[] }).commitShas;
+      json(response, 200, {
+        knownCommits: [
+          ...(commitShas.includes("a".repeat(40)) ? [{ sha: "a".repeat(40), parents: ["e".repeat(40)] }] : []),
+          ...(commitShas.includes("e".repeat(40)) ? [{ sha: "e".repeat(40), parents: ["f".repeat(40)] }] : [])
+        ]
+      });
       return;
     }
     if (request.url === "/internal/context-graph/outbox/drain") {
@@ -218,6 +226,14 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       json(response, 200, {
         sha: "a".repeat(40),
         commit: { tree: { sha: "b".repeat(40) } },
+        parents: [{ sha: "e".repeat(40) }]
+      });
+      return;
+    }
+    if (request.url === `/github/repos/omlabs/example/commits/${"f".repeat(40)}`) {
+      json(response, 200, {
+        sha: "f".repeat(40),
+        commit: { tree: { sha: "1".repeat(40) } },
         parents: []
       });
       return;
@@ -232,6 +248,22 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
     }
     if (request.url === `/github/repos/omlabs/example/commits/${"a".repeat(40)}/pulls`) {
       json(response, 200, []);
+      return;
+    }
+    if (request.url === `/github/repos/omlabs/example/commits/${"f".repeat(40)}/pulls`) {
+      json(response, 200, [
+        {
+          number: 3,
+          title: "Align destructive action policy",
+          body: "Align administrator and member handling.",
+          state: "closed",
+          html_url: "https://github.com/omlabs/example/pull/3",
+          merged_at: "2026-07-20T23:59:00Z",
+          updated_at: "2026-07-20T23:59:00Z",
+          merge_commit_sha: "f".repeat(40),
+          user: { login: "reviewer" }
+        }
+      ]);
       return;
     }
     if (request.url === "/github/repos/omlabs/example/pulls?state=closed&sort=updated&direction=desc&per_page=100") {
@@ -272,6 +304,14 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       json(response, 200, [{ sha: "d".repeat(40) }]);
       return;
     }
+    if (request.url === "/github/repos/omlabs/example/pulls/3/commits?per_page=100&page=1") {
+      json(response, 200, [{ sha: "f".repeat(40) }]);
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/pulls/3/files?per_page=100&page=1") {
+      json(response, 200, [{ filename: "src/index.test.ts" }]);
+      return;
+    }
     if (request.url === "/github/repos/omlabs/example/pulls/11/files?per_page=100&page=1") {
       json(response, 200, [{ filename: "src/index.test.ts" }]);
       return;
@@ -302,6 +342,13 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       return;
     }
     if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
+      json(response, 200, {
+        truncated: false,
+        tree: [{ type: "blob", path: "src/index.test.ts", sha: "c".repeat(40), size: 42 }]
+      });
+      return;
+    }
+    if (request.url === `/github/repos/omlabs/example/git/trees/${"1".repeat(40)}?recursive=1`) {
       json(response, 200, {
         truncated: false,
         tree: [{ type: "blob", path: "src/index.test.ts", sha: "c".repeat(40), size: 42 }]
@@ -410,16 +457,16 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   const ingestionResult = completions[1]?.result as Record<string, unknown>;
   assert.equal(ingestionResult.commitSha, "a".repeat(40));
   assert.equal(ingestionResult.effect, "changed");
-  assert.equal(ingestionResult.ingestedCommitCount, 0);
-  assert.equal(ingestionResult.newCommitCount, 0);
+  assert.equal(ingestionResult.ingestedCommitCount, 1);
+  assert.equal(ingestionResult.newCommitCount, 1);
   assert.equal(ingestionResult.confirmedCommitCount, 1);
   assert.equal(ingestionResult.parsedBlobCount, 1);
-  assert.equal(ingestionResult.reusedBlobCount, 0);
-  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, [11, 12]);
+  assert.equal(ingestionResult.reusedBlobCount, 1);
+  assert.deepEqual(ingestionResult.sourcePullRequestNumbers, [3, 11, 12]);
   assert.deepEqual(ingestionResult.resolvedPullRequestNumbers, [12]);
-  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [11, 12]);
-  assert.deepEqual(ingestedPullRequestNumbers, [11, 12]);
-  assert.equal(ingestPlanRequests, 2);
+  assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [3, 11, 12]);
+  assert.deepEqual(ingestedPullRequestNumbers, [3, 11, 12]);
+  assert.equal(ingestPlanRequests, 3);
   assert.equal(missingLinkedIssueRequests, 1);
   assert.equal(projectionDrains > 0, true);
 });

@@ -2,6 +2,7 @@ import { CONTEXT_GRAPH_DEFAULT_HISTORY_LIMIT, CONTEXT_GRAPH_MAX_HISTORY_LIMIT } 
 
 export interface ContextGraphHistoryPolicy {
   readonly limit: number;
+  readonly traversalLimit: number;
 }
 
 export function contextGraphHistoryPolicy(
@@ -15,12 +16,14 @@ export function contextGraphHistoryPolicy(
   if (!Number.isSafeInteger(defaultLimit) || defaultLimit <= 0) {
     throw new Error("context graph default history limit must be a positive integer");
   }
-  if (requestedLimit === undefined) return { limit: Math.min(defaultLimit, serviceLimit) };
+  if (requestedLimit === undefined) {
+    return { limit: Math.min(defaultLimit, serviceLimit), traversalLimit: serviceLimit };
+  }
   if (typeof requestedLimit !== "number" || !Number.isSafeInteger(requestedLimit) || requestedLimit <= 0) {
     throw new Error("requested context graph history limit must be a positive integer");
   }
   if (requestedLimit > serviceLimit) {
     throw new Error(`requested context graph history limit ${requestedLimit} exceeds service maximum ${serviceLimit}`);
   }
-  return { limit: requestedLimit };
+  return { limit: requestedLimit, traversalLimit: serviceLimit };
 }

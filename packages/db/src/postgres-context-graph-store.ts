@@ -741,14 +741,19 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     }));
   }
 
-  async knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]> {
+  async knownCommits(
+    tenantId: string,
+    repository: string,
+    commitShas: readonly string[]
+  ): Promise<readonly { readonly sha: string; readonly parents: readonly string[] }[]> {
     await this.initialize();
     if (commitShas.length === 0) return [];
-    const result = await this.pool.query<{ sha: string }>(
-      `select sha from jina_context_graph.commits where tenant_id=$1 and repository=$2 and sha=any($3::text[])`,
+    const result = await this.pool.query<{ sha: string; parents: string[] }>(
+      `select sha,parents from jina_context_graph.commits
+       where tenant_id=$1 and repository=$2 and sha=any($3::text[])`,
       [tenantId, repository, commitShas]
     );
-    return result.rows.map((row) => row.sha);
+    return result.rows;
   }
 
   async planIngestion(

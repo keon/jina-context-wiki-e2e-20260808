@@ -748,24 +748,32 @@ async function discoverNewCommits(
   const knownCommitShas = new Set<string>();
   let truncated = false;
   while (pending.length > 0) {
-    if (commits.size >= policy.limit) {
+    const discoveredHistoryCount = commits.size - 1;
+    if (discoveredHistoryCount >= policy.limit || expanded.size >= policy.traversalLimit) {
       truncated = true;
       break;
     }
-    const batchSize = Math.min(25, policy.limit - commits.size);
-    const batch = pending.splice(0, Math.max(1, batchSize)).filter((sha) => !expanded.has(sha));
+    const batchSize = Math.min(25, policy.limit - discoveredHistoryCount, policy.traversalLimit - expanded.size);
+    const batch = [...new Set(pending.splice(0, Math.max(1, batchSize)))].filter((sha) => !expanded.has(sha));
     if (batch.length === 0) continue;
-    const known = await internalApiJson<{ readonly knownCommitShas: readonly string[] }>(
-      "/internal/context-graph/ingest/known",
-      {
-        taskId: work.task.id,
-        messageId: work.message.id,
-        leaseId: work.message.leaseId,
-        commitShas: batch
-      }
+    const known = await internalApiJson<{ readonly knownCommits: unknown }>("/internal/context-graph/ingest/known", {
+      taskId: work.task.id,
+      messageId: work.message.id,
+      leaseId: work.message.leaseId,
+      commitShas: batch
+    });
+    if (!Array.isArray(known.knownCommits)) throw new Error("known commits response must be an array");
+    const knownBySha = new Map(
+      known.knownCommits.map((value) => {
+        if (!isRecord(value)) throw new Error("known commit must be an object");
+        const sha = requiredGitSha(value.sha, "known commit SHA");
+        const parents = requiredStringArray(value.parents, "known commit parents").map((parent) =>
+          requiredGitSha(parent, "known commit parent SHA")
+        );
+        return [sha, { sha, parents }] as const;
+      })
     );
-    const knownSet = new Set(known.knownCommitShas);
-    const unknownShas = batch.filter((sha) => !knownSet.has(sha) && !commits.has(sha));
+    const unknownShas = batch.filter((sha) => !knownBySha.has(sha) && !commits.has(sha));
     const fetchedCommits = new Map(
       await mapWithConcurrency(
         unknownShas,
@@ -775,14 +783,18 @@ async function discoverNewCommits(
     );
     for (const sha of batch) {
       expanded.add(sha);
-      if (knownSet.has(sha)) {
+      const knownCommit = knownBySha.get(sha);
+      if (knownCommit) {
         knownCommitShas.add(sha);
         if (sha !== headSha) commits.delete(sha);
+        for (const parentSha of knownCommit.parents) {
+          if (!expanded.has(parentSha)) pending.push(parentSha);
+        }
         continue;
       }
       const commit = commits.get(sha) ?? fetchedCommits.get(sha)!;
       commits.set(sha, commit);
-      if (commits.size > policy.limit)
+      if (commits.size - 1 > policy.limit)
         throw new Error(`reachable Git history discovery exceeded its configured limit of ${policy.limit} commits`);
       for (const parent of Array.isArray(commit.parents) ? commit.parents : []) {
         if (!isRecord(parent)) throw new Error("GitHub commit parent is invalid");
@@ -807,6 +819,9 @@ function topologicalCommitOrder(headSha: string, commits: ReadonlyMap<string, Re
     }
     ordered.push(sha);
   };
+  for (const sha of commits.keys()) {
+    if (sha !== headSha) visit(sha);
+  }
   visit(headSha);
   return ordered;
 }

@@ -3,12 +3,12 @@ import test from "node:test";
 import { contextGraphHistoryPolicy } from "./history-limit.js";
 
 test("uses a 500-commit partial-history default when a build does not request a limit", () => {
-  assert.deepEqual(contextGraphHistoryPolicy(undefined, 10_000), { limit: 500 });
-  assert.deepEqual(contextGraphHistoryPolicy(undefined, 250), { limit: 250 });
+  assert.deepEqual(contextGraphHistoryPolicy(undefined, 10_000), { limit: 500, traversalLimit: 10_000 });
+  assert.deepEqual(contextGraphHistoryPolicy(undefined, 250), { limit: 250, traversalLimit: 250 });
 });
 
 test("uses an explicit commit limit as a partial-history boundary", () => {
-  assert.deepEqual(contextGraphHistoryPolicy(2_500, 10_000), { limit: 2_500 });
+  assert.deepEqual(contextGraphHistoryPolicy(2_500, 10_000), { limit: 2_500, traversalLimit: 10_000 });
 });
 
 test("rejects malformed limits and requests above the service maximum", () => {

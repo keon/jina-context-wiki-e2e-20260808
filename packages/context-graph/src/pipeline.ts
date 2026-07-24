@@ -271,8 +271,17 @@ export interface ContextGraphWriteFence {
   readonly authorityGuard?: () => Promise<void>;
 }
 
+export interface ContextGraphKnownCommit {
+  readonly sha: string;
+  readonly parents: readonly string[];
+}
+
 export interface ContextGraphPipelineStore {
-  knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]>;
+  knownCommits(
+    tenantId: string,
+    repository: string,
+    commitShas: readonly string[]
+  ): Promise<readonly ContextGraphKnownCommit[]>;
   planIngestion(snapshot: RepositorySnapshot, writeFence?: ContextGraphWriteFence): Promise<ContextGraphIngestPlan>;
   applyBlobAnalyses(
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
