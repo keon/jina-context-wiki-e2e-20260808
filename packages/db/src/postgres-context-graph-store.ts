@@ -3629,8 +3629,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     // The projection pool has one client by design and may legitimately hold
     // it for a multi-minute drain. Only probe it when doing so cannot queue
     // health behind active projection work.
-    const projectionPoolIsAvailable =
-      this.projectionLockPool.totalCount === 0 || this.projectionLockPool.idleCount > 0;
+    const projectionPoolIsAvailable = this.projectionLockPool.totalCount === 0 || this.projectionLockPool.idleCount > 0;
     await Promise.all([
       pingPostgresPool(this.pool),
       projectionPoolIsAvailable ? pingPostgresPool(this.projectionLockPool) : undefined
