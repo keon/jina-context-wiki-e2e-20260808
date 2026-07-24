@@ -664,11 +664,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
         await readRawBody(request);
-        const results = await Promise.all(
-          (await config.sharedIdentityResolver.listTenantIds()).map((tenantId) =>
-            drainConnectedProjectionEvents(tenantId, nowIso())
-          )
-        );
+        const results = [];
+        // Each tenant drain holds a dedicated session-level advisory-lock
+        // connection while its projection queries use the remaining pool.
+        // Running one lock acquisition per tenant concurrently can exhaust the
+        // pool before any drain gets a query connection.
+        for (const tenantId of await config.sharedIdentityResolver.listTenantIds()) {
+          results.push(await drainConnectedProjectionEvents(tenantId, nowIso()));
+        }
         json(response, 200, {
           processedEventCount: results.reduce((sum, result) => sum + result.processedEventCount, 0),
           rebuiltRepositories: [...new Set(results.flatMap((result) => result.rebuiltRepositories))].sort()

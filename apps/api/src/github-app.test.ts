@@ -205,6 +205,63 @@ test("concurrent projection drain requests share one in-process drain", async (c
   assert.equal(contextGraphStore.calls, 1);
 });
 
+test("shared projection drains visit tenants sequentially without exhausting the graph pool", async (context) => {
+  const tenantIds = Array.from({ length: 6 }, (_, index) => `shared-drain-${index + 1}`);
+  class SequentialContextGraphStore extends MemoryContextGraphStore {
+    activeDrains = 0;
+    maximumActiveDrains = 0;
+    calls = 0;
+
+    override async drainDerivedProjectionEvents(): Promise<{
+      readonly processedEventCount: number;
+      readonly rebuiltRepositories: readonly string[];
+    }> {
+      this.calls += 1;
+      this.activeDrains += 1;
+      this.maximumActiveDrains = Math.max(this.maximumActiveDrains, this.activeDrains);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      this.activeDrains -= 1;
+      return { processedEventCount: 1, rebuiltRepositories: [] };
+    }
+  }
+
+  const contextGraphStore = new SequentialContextGraphStore();
+  const server = createApiServer({
+    internalApiToken: INTERNAL_TOKEN,
+    contextGraphStore,
+    sharedIdentityResolver: {
+      async resolveRepository() {
+        return undefined;
+      },
+      async resolveTenantRepositories() {
+        return [];
+      },
+      async listTenantIds() {
+        return tenantIds;
+      },
+      async listTenants() {
+        return [];
+      },
+      async ping() {},
+      async close() {}
+    }
+  });
+  const baseUrl = await listen(server);
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const response = await fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: "{}"
+  });
+  assert.equal(response.status, 200);
+  assert.equal(contextGraphStore.calls, tenantIds.length);
+  assert.equal(contextGraphStore.maximumActiveDrains, 1);
+  assert.equal(((await response.json()) as { processedEventCount: number }).processedEventCount, tenantIds.length);
+});
+
 test("disabled GitHub intake acknowledges signed deliveries without creating work", async (context) => {
   const server = createApiServer({
     githubWebhookSecret: SECRET,
