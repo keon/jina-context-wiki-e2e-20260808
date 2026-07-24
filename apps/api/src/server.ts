@@ -724,6 +724,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         repositories = [...connectedRepositories].sort();
       }
       await contextGraphStore.replaceRepositoryAccess(syncTenantId, principalId, repositories);
+      if (config.sharedIdentityResolver) {
+        const stillConnected = await config.sharedIdentityResolver.resolveTenantRepositories({
+          tenantId: syncTenantId,
+          repositories
+        });
+        const stillConnectedKeys = new Set(stillConnected.map((repository) => repository.toLowerCase()));
+        if (
+          stillConnectedKeys.size !== repositories.length ||
+          repositories.some((repository) => !stillConnectedKeys.has(repository.toLowerCase()))
+        ) {
+          // Identity and graph state are separate databases. If authority changes
+          // between validation and replacement, immediately compensate to the
+          // surviving authoritative subset and make the caller retry.
+          await contextGraphStore.replaceRepositoryAccess(syncTenantId, principalId, stillConnected);
+          throw new ApiError(
+            409,
+            "repository_disconnected",
+            "repository connectivity changed while graph access was synchronized"
+          );
+        }
+      }
       json(response, 200, { principalId, repositoryCount: repositories.length });
       return;
     }
@@ -763,10 +784,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         response,
         async ({ repository, query, ref }) => {
           const allowedRepositories = await repositoriesForPrincipal(principal);
+          const canonicalRepository = canonicalRepositoryForRead(allowedRepositories, repository);
           const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
             tenantId,
             allowedRepositories,
-            repository,
+            repository: canonicalRepository,
             question: query,
             ...(ref ? { ref } : {})
           });
@@ -780,13 +802,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname === "/v1/graphs") {
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const requestedRepository = url.searchParams.get("repository")?.trim();
-      if (requestedRepository && !allowedRepositories.includes(requestedRepository)) {
-        json(response, 404, { error: "graph not found" });
-        return;
-      }
+      const canonicalRepository = requestedRepository
+        ? canonicalAllowedRepository(allowedRepositories, requestedRepository)
+        : undefined;
+      if (requestedRepository && !canonicalRepository) return json(response, 404, { error: "graph not found" });
       const graphs = (await contextGraphStore.listSummaries(tenantId))
-        .filter((graph) => allowedRepositories.includes(graph.repository))
-        .filter((graph) => !requestedRepository || graph.repository === requestedRepository)
+        .filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository))
+        .filter((graph) => !canonicalRepository || graph.repository.toLowerCase() === canonicalRepository.toLowerCase())
         .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
         .map(publicGraphSummary);
       json(response, 200, { graphs });
@@ -801,7 +823,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!graph || !allowedRepositories.includes(graph.repository)) {
+      if (!graph || !repositoryIsAllowed(allowedRepositories, graph.repository)) {
         json(response, 404, { error: "graph not found" });
         return;
       }
@@ -816,7 +838,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (query.length > 4_000) throw new Error("query must not exceed 4000 characters");
       const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!graph || !allowedRepositories.includes(graph.repository)) {
+      if (!graph || !repositoryIsAllowed(allowedRepositories, graph.repository)) {
         json(response, 404, { error: "graph not found" });
         return;
       }
@@ -882,15 +904,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? requiredPositiveInteger(Number(assertionLimitValue), "assertionLimit")
         : undefined;
       if (assertionLimit && assertionLimit > 500) throw invalidRequest("assertionLimit must not exceed 500");
+      const canonicalRepositoryFilter = repositoryFilter
+        ? requireAllowedRepository(allowedRepositories, repositoryFilter)
+        : undefined;
 
       // The validator is derived from graph heads and mutation clocks only. Check it
       // before loading node/edge rows, summary pages, entities, or assertions.
       const revision = await contextGraphStore.readRevision(tenantId, {
         repositories: allowedRepositories,
-        ...(repositoryFilter ? { repository: repositoryFilter } : {}),
+        ...(canonicalRepositoryFilter ? { repository: canonicalRepositoryFilter } : {}),
         ...(refFilter ? { ref: refFilter } : {}),
         includeAssertions,
-        ...(includeAssertions && repositoryFilter ? { assertionRepository: repositoryFilter } : {}),
+        ...(includeAssertions && canonicalRepositoryFilter ? { assertionRepository: canonicalRepositoryFilter } : {}),
         ...(assertionStatus ? { assertionStatus } : {})
       });
       if (respondNotModified(request, response, revision)) return;
@@ -898,17 +923,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const graphValues = dashboardView
         ? []
         : await contextGraphStore.listSummaries(tenantId, {
-            ...(repositoryFilter ? { repository: repositoryFilter } : {}),
+            ...(canonicalRepositoryFilter ? { repository: canonicalRepositoryFilter } : {}),
             ...(refFilter ? { ref: refFilter } : {})
           });
-      const graphs = graphValues.filter((graph) => allowedRepositories.includes(graph.repository));
+      const graphs = graphValues.filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository));
       // A scoped response must be internally consistent: its latest is the
       // newest graph within the scope (summaries are ordered newest-first),
       // never the unscoped tenant-wide head, which can belong to another
       // repository entirely.
       const latest = dashboardView
         ? await contextGraphStore.latest(tenantId, allowedRepositories, {
-            ...(repositoryFilter ? { repository: repositoryFilter } : {}),
+            ...(canonicalRepositoryFilter ? { repository: canonicalRepositoryFilter } : {}),
             ...(refFilter ? { ref: refFilter } : {})
           })
         : scoped
@@ -916,7 +941,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             ? await contextGraphStore.get(graphs[0].id, tenantId)
             : undefined
           : await contextGraphStore.latest(tenantId, allowedRepositories);
-      const permittedLatest = latest && allowedRepositories.includes(latest.repository) ? latest : null;
+      const permittedLatest = latest && repositoryIsAllowed(allowedRepositories, latest.repository) ? latest : null;
       // ?include=assertions folds the assertion-review fetch into this
       // response so the client does not need a dependent second round trip.
       const assertions = includeAssertions
@@ -942,7 +967,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       const graph = await contextGraphStore.get(graphId, tenantId);
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      const permitted = graph && allowedRepositories.includes(graph.repository) ? graph : undefined;
+      const permitted = graph && repositoryIsAllowed(allowedRepositories, graph.repository) ? graph : undefined;
       json(response, permitted ? 200 : 404, permitted ?? { error: "contextGraph graph not found" });
       return;
     }
@@ -959,11 +984,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const connectedRepositories = config.sharedIdentityResolver
         ? await repositoriesForPrincipal(principal)
         : undefined;
-      if (
-        repository &&
-        connectedRepositories &&
-        !connectedRepositories.some((candidate) => candidate.toLowerCase() === repository.toLowerCase())
-      ) {
+      const canonicalRepository =
+        repository && connectedRepositories
+          ? canonicalAllowedRepository(connectedRepositories, repository)
+          : repository;
+      if (repository && connectedRepositories && !canonicalRepository) {
         json(response, 404, { error: "repository not found" });
         return;
       }
@@ -973,8 +998,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         await contextGraphStore.operationalMetrics(
           tenantId,
           nowIso(),
-          repository
-            ? { repository, ...(ref ? { ref } : {}) }
+          canonicalRepository
+            ? { repository: canonicalRepository, ...(ref ? { ref } : {}) }
             : connectedRepositories
               ? { repositories: connectedRepositories }
               : undefined
@@ -984,8 +1009,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/context-graph/retrieve") {
       const body = parseJsonObject(await readRawBody(request));
-      const repository = requiredString(body.repository, "repository");
       const allowedRepositories = await repositoriesForPrincipal(principal);
+      const repository = canonicalRepositoryForRead(allowedRepositories, requiredString(body.repository, "repository"));
       const template = requiredString(body.template, "template");
       if (!retrievalTemplateNames.includes(template as (typeof retrievalTemplateNames)[number])) {
         throw invalidRequest("unsupported retrieval template");
@@ -1012,7 +1037,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         await orchestrator.answer({
           tenantId,
           allowedRepositories,
-          repository: requiredString(body.repository, "repository"),
+          repository: canonicalRepositoryForRead(allowedRepositories, requiredString(body.repository, "repository")),
           question: requiredString(body.question, "question"),
           ...parseContextGraphSelectors(body),
           ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
@@ -1024,9 +1049,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/context-graph/assertions") {
-      const repository = requiredString(url.searchParams.get("repository"), "repository");
       const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!allowedRepositories.includes(repository)) throw new DomainError("repository access denied", "forbidden");
+      const repository = requireAllowedRepository(
+        allowedRepositories,
+        requiredString(url.searchParams.get("repository"), "repository")
+      );
       const statusValue = url.searchParams.get("status");
       const status = statusValue === null ? undefined : requiredAssertionStatus(statusValue);
       const predicate = url.searchParams.get("predicate")?.trim().toUpperCase() || undefined;
@@ -1057,15 +1084,45 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         return;
       }
       const body = parseJsonObject(await readRawBody(request));
+      let command = parseContextGraphCommand(body);
+      if (config.sharedIdentityResolver) {
+        const connectedRepositories = await repositoriesForPrincipal(principal);
+        if ("repository" in command && command.repository) {
+          command = {
+            ...command,
+            repository: requireAllowedRepository(connectedRepositories, command.repository)
+          };
+        } else if (connectedRepositories.length === 0) {
+          throw new ApiError(409, "repository_disconnected", "tenant has no connected repositories");
+        }
+      }
       json(
         response,
         200,
         await contextGraphStore.executeCommand(
           tenantId,
           principal.principalId,
-          parseContextGraphCommand(body),
+          command,
           nowIso(),
-          isTenantAdmin(principal)
+          isTenantAdmin(principal),
+          config.sharedIdentityResolver
+            ? async (repository) => {
+                const connected = await config.sharedIdentityResolver!.resolveTenantRepositories({
+                  tenantId,
+                  ...(repository ? { repositories: [repository] } : {})
+                });
+                if (
+                  connected.length === 0 ||
+                  (repository && !connected.some((candidate) => candidate.toLowerCase() === repository.toLowerCase()))
+                ) {
+                  throw new ApiError(
+                    409,
+                    "repository_disconnected",
+                    "repository is no longer connected to this tenant"
+                  );
+                }
+              }
+            : undefined
         )
       );
       return;
@@ -1083,9 +1140,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/build") {
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
+      const allowedRepositories =
+        !config.sharedIdentityResolver && isTenantAdmin(principal)
+          ? undefined
+          : new Set(await repositoriesForPrincipal(principal));
       await createContextGraphTask(request, response, tenantId, allowedRepositories);
       return;
     }
@@ -1183,48 +1241,73 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const event = result.webhook.event;
       const ref = event.ref.slice("refs/heads/".length);
       const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
+      const repository = identity?.repository ?? result.webhook.repository;
       const builds = await contextGraphCoordinator.list(tenantId, {
-        repositories: [result.webhook.repository]
+        repositories: [repository]
       });
       const latest = builds
-        .filter(({ build }) => build.repository === result.webhook!.repository && build.ref === ref)
+        .filter(({ build }) => build.repository.toLowerCase() === repository.toLowerCase() && build.ref === ref)
         .sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt))[0];
       const duplicateHead = latest?.build.metadata.githubHeadSha === event.headSha;
+      let createdBuild: ContextGraphBuildRecord | undefined;
       let createdTaskIds: readonly string[] = [];
       if (!duplicateHead) {
-        const build = await contextGraphCoordinator.createBuild({
-          tenantId,
-          repository: result.webhook.repository,
-          ref,
-          requestKey: `push:${event.headSha}:delivery:${result.deliveryId}`,
-          dedupeHeadSha: event.headSha,
-          snapshotFirst: true,
-          createdAt: nowIso(),
-          metadata: {
-            githubDeliveryId: result.deliveryId,
-            githubHeadSha: event.headSha,
-            ...(identity
-              ? {
-                  workspaceLabel: identity.githubAccountLogin,
-                  githubAccountId: identity.githubAccountId,
-                  githubAccountType: identity.githubAccountType
-                }
-              : {}),
-            ...(result.webhook.repositoryId !== undefined ? { githubRepositoryId: result.webhook.repositoryId } : {}),
-            ...(result.webhook.installationId !== undefined
-              ? { githubInstallationId: result.webhook.installationId }
-              : {})
-          }
-        });
+        const build = await contextGraphCoordinator.createBuild(
+          {
+            tenantId,
+            repository,
+            ref,
+            requestKey: `push:${event.headSha}:delivery:${result.deliveryId}`,
+            dedupeHeadSha: event.headSha,
+            snapshotFirst: true,
+            createdAt: nowIso(),
+            metadata: {
+              githubDeliveryId: result.deliveryId,
+              githubHeadSha: event.headSha,
+              ...(identity
+                ? {
+                    workspaceLabel: identity.githubAccountLogin,
+                    githubAccountId: identity.githubAccountId,
+                    githubAccountType: identity.githubAccountType
+                  }
+                : {}),
+              ...(result.webhook.repositoryId !== undefined ? { githubRepositoryId: result.webhook.repositoryId } : {}),
+              ...(result.webhook.installationId !== undefined
+                ? { githubInstallationId: result.webhook.installationId }
+                : {})
+            }
+          },
+          async () => requireCurrentWebhookIdentity(result.webhook!, identity)
+        );
+        await confirmBuildAuthority(
+          build,
+          async () => requireCurrentWebhookIdentity(result.webhook!, identity),
+          "repository authority changed during webhook build creation"
+        );
+        createdBuild = build;
         const workflow = (
           await contextGraphCoordinator.list(build.tenantId, { repositories: [build.repository] })
         ).find((candidate) => candidate.build.id === build.id);
         createdTaskIds = [build.id, ...(workflow?.stages.map((stage) => stage.id) ?? [])];
       }
-      const committed = await mutate(async () => {
-        if (!config.stateStore) await persist(result.deliveryId);
-        return true;
-      }, result.deliveryId);
+      let committed: boolean | undefined;
+      try {
+        committed = await mutate(async () => {
+          await requireCurrentWebhookIdentity(result.webhook!, identity);
+          if (!config.stateStore) await persist(result.deliveryId);
+          return true;
+        }, result.deliveryId);
+      } catch (error) {
+        if (createdBuild) {
+          await contextGraphCoordinator.cancelBuild({
+            tenantId: createdBuild.tenantId,
+            buildId: createdBuild.id,
+            now: nowIso(),
+            reason: "repository authority changed before webhook delivery commit"
+          });
+        }
+        throw error;
+      }
       if (!committed) {
         metrics.count("github.webhooks", { outcome: "duplicate" });
         json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
@@ -1252,6 +1335,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         await persist(result.deliveryId);
         return { statusCode: result.statusCode, payload: result };
       }
+      await requireCurrentWebhookIdentity(result.webhook, identity);
       const intake = acceptWebhook(result.webhook, result.deliveryId!, identity);
       await persist(result.deliveryId);
       return {
@@ -1314,6 +1398,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return identity;
   }
 
+  async function requireCurrentWebhookIdentity(
+    webhook: ParsedGitHubWebhook,
+    expected: ResolvedRepositoryIdentity | undefined
+  ): Promise<void> {
+    if (!config.sharedIdentityResolver) return;
+    const current = await resolveWebhookIdentity(webhook);
+    if (
+      !current ||
+      !expected ||
+      current.tenantId !== expected.tenantId ||
+      current.githubRepositoryId !== expected.githubRepositoryId
+    ) {
+      throw new ApiError(409, "repository_disconnected", "repository connectivity changed during webhook intake");
+    }
+  }
+
   async function createContextGraphTask(
     request: IncomingMessage,
     response: ServerResponse,
@@ -1321,26 +1421,52 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     allowedRepositories?: ReadonlySet<string>
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const repository = requiredRepositoryName(body.repository, "repository");
-    if (allowedRepositories && !allowedRepositories.has(repository)) {
-      throw new DomainError("repository access denied", "forbidden");
-    }
+    const requestedRepository = requiredRepositoryName(body.repository, "repository");
+    const repository = allowedRepositories
+      ? requireAllowedRepository([...allowedRepositories], requestedRepository)
+      : requestedRepository;
     const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
     const suppliedRequestKey =
       typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
     const requestKey = suppliedRequestKey ?? randomUUID();
     const metadata = parseContextGraphBuildMetadata(body.metadata);
     const githubInstallationId = await contextGraphInstallationId(body, metadata, tenantId, repository);
-    const created = await contextGraphCoordinator.createBuild({
-      tenantId,
-      repository,
-      ref,
-      requestKey,
-      snapshotFirst: body.snapshotFirst !== false,
-      createdAt: nowIso(),
-      metadata: { ...metadata, githubInstallationId }
-    });
+    const created = await contextGraphCoordinator.createBuild(
+      {
+        tenantId,
+        repository,
+        ref,
+        requestKey,
+        snapshotFirst: body.snapshotFirst !== false,
+        createdAt: nowIso(),
+        metadata: { ...metadata, githubInstallationId }
+      },
+      async () => requireConnectedInstallation(tenantId, repository, githubInstallationId)
+    );
+    await confirmBuildAuthority(
+      created,
+      async () => requireConnectedInstallation(tenantId, repository, githubInstallationId),
+      "repository authority changed during manual build creation"
+    );
     json(response, 202, { accepted: true, task: pipelineBuildTask(created) });
+  }
+
+  async function confirmBuildAuthority(
+    build: ContextGraphBuildRecord,
+    authorityGuard: () => Promise<void>,
+    reason: string
+  ): Promise<void> {
+    try {
+      await authorityGuard();
+    } catch (error) {
+      await contextGraphCoordinator.cancelBuild({
+        tenantId: build.tenantId,
+        buildId: build.id,
+        now: nowIso(),
+        reason
+      });
+      throw error;
+    }
   }
 
   async function contextGraphInstallationId(
@@ -1360,21 +1486,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (new Set(installationIds).size !== 1) throw invalidRequest("GitHub installation id fields must agree");
       const githubInstallationId = installationIds[0]!;
       if (config.sharedIdentityResolver) {
-        const identity = await config.sharedIdentityResolver.resolveRepository({
-          repository,
-          githubInstallationId
-        });
-        if (
-          !identity ||
-          identity.tenantId !== tenantId ||
-          identity.repository.toLowerCase() !== repository.toLowerCase()
-        ) {
-          throw new ApiError(
-            409,
-            "repository_installation_mismatch",
-            "repository, tenant, and GitHub installation do not identify one active installation"
-          );
-        }
+        await requireConnectedInstallation(tenantId, repository, githubInstallationId);
       }
       return githubInstallationId;
     }
@@ -1394,6 +1506,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (typeof recorded === "number" && Number.isSafeInteger(recorded) && recorded > 0) return recorded;
     if (config.enableDevEndpoints) return 1;
     throw invalidRequest("githubInstallationId is required for context graph builds");
+  }
+
+  async function requireConnectedInstallation(
+    tenantId: string,
+    repository: string,
+    githubInstallationId: number
+  ): Promise<void> {
+    if (!config.sharedIdentityResolver) return;
+    const identity = await config.sharedIdentityResolver.resolveRepository({
+      repository,
+      githubInstallationId
+    });
+    if (!identity || identity.tenantId !== tenantId || identity.repository.toLowerCase() !== repository.toLowerCase()) {
+      throw new ApiError(
+        409,
+        "repository_installation_mismatch",
+        "repository, tenant, and GitHub installation do not identify one active installation"
+      );
+    }
   }
 
   /**
@@ -1649,7 +1780,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const tenantIdSet = new Set(tenantIds);
     const repositoryScopeKeys = repositoryScopes
-      ? new Set(repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository}`))
+      ? new Set(repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
       : undefined;
     const claimed = await mutate(async () => {
       const taskIds = intakeState.board.tasks
@@ -1659,7 +1790,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             tenantIdSet.has(task.metadata.tenantId) &&
             (!repositoryScopeKeys ||
               (typeof task.metadata.repository === "string" &&
-                repositoryScopeKeys.has(`${task.metadata.tenantId}:${task.metadata.repository}`))) &&
+                repositoryScopeKeys.has(`${task.metadata.tenantId}:${task.metadata.repository.toLowerCase()}`))) &&
             (task.status === "queued" || task.status === "in_progress")
         )
         .map((task) => task.id);
@@ -1700,14 +1831,29 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (rawMessageId.startsWith("context-graph-stage_")) {
       const now = nowIso();
       await requireConnectedLease(tenantId, rawMessageId, leaseId, now);
-      const renewed = await contextGraphCoordinator.renew({
-        tenantId,
-        stageId: rawMessageId,
-        leaseId,
-        now,
-        leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
-      });
+      const renewed = await contextGraphCoordinator.renew(
+        {
+          tenantId,
+          stageId: rawMessageId,
+          leaseId,
+          now,
+          leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+        },
+        async (repository) => requireConnectedRepository(tenantId, repository)
+      );
       if (!renewed) throw staleLease();
+      try {
+        await requireConnectedLease(tenantId, rawMessageId, leaseId, nowIso());
+      } catch (error) {
+        await contextGraphCoordinator.release({
+          tenantId,
+          stageId: rawMessageId,
+          leaseId,
+          now: nowIso(),
+          reason: "repository authority changed during lease renewal"
+        });
+        throw error;
+      }
       json(response, 200, { accepted: true });
       return;
     }
@@ -1742,15 +1888,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest("only contextGraph task-board leases can be released");
     }
     const now = nowIso();
-    await requireConnectedLease(tenantId, messageId, leaseId, now);
-    const released = await contextGraphCoordinator.release({
-      tenantId,
-      stageId: messageId,
-      leaseId,
-      now,
-      reason
-    });
+    const repository = await requireConnectedLease(tenantId, messageId, leaseId, now);
+    const released = await contextGraphCoordinator.release(
+      {
+        tenantId,
+        stageId: messageId,
+        leaseId,
+        now,
+        reason
+      },
+      async (repository) => requireConnectedRepository(tenantId, repository)
+    );
     if (!released) throw staleLease();
+    if (repository) await requireConnectedRepository(tenantId, repository);
     json(response, 200, { accepted: true });
   }
 
@@ -1850,15 +2000,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!stage) throw staleLease();
     await requireConnectedRepository(tenantId, stage.repository);
     if (outcome === "failed") {
-      const completed = await contextGraphCoordinator.complete({
-        tenantId,
-        stageId,
-        leaseId,
-        outcome,
-        now,
-        reason: stringValue(body.reason, "worker failed").slice(0, 2_000)
-      });
+      const completed = await contextGraphCoordinator.complete(
+        {
+          tenantId,
+          stageId,
+          leaseId,
+          outcome,
+          now,
+          reason: stringValue(body.reason, "worker failed").slice(0, 2_000)
+        },
+        async (repository) => requireConnectedRepository(tenantId, repository)
+      );
       if (!completed) throw staleLease();
+      await requireConnectedRepository(tenantId, stage.repository);
       return undefined;
     }
 
@@ -1936,16 +2090,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha: graph.commitSha
       };
     }
-    const completed = await contextGraphCoordinator.complete({
-      tenantId,
-      stageId,
-      leaseId,
-      outcome: "done",
-      now: nowIso(),
-      result,
-      nextMetadata
-    });
+    const completed = await contextGraphCoordinator.complete(
+      {
+        tenantId,
+        stageId,
+        leaseId,
+        outcome: "done",
+        now: nowIso(),
+        result,
+        nextMetadata
+      },
+      async (repository) => requireConnectedRepository(tenantId, repository)
+    );
     if (!completed) throw staleLease();
+    await requireConnectedRepository(tenantId, stage.repository);
     return graph;
   }
 
@@ -1996,11 +2154,39 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
   }
 
-  async function requireConnectedLease(tenantId: string, stageId: string, leaseId: string, now: string): Promise<void> {
-    if (!config.sharedIdentityResolver) return;
+  function canonicalAllowedRepository(allowedRepositories: readonly string[], repository: string): string | undefined {
+    const key = repository.toLowerCase();
+    return allowedRepositories.find((candidate) => candidate.toLowerCase() === key);
+  }
+
+  function repositoryIsAllowed(allowedRepositories: readonly string[], repository: string): boolean {
+    return canonicalAllowedRepository(allowedRepositories, repository) !== undefined;
+  }
+
+  function requireAllowedRepository(allowedRepositories: readonly string[], repository: string): string {
+    const canonical = canonicalAllowedRepository(allowedRepositories, repository);
+    if (!canonical) throw new DomainError("repository access denied", "forbidden");
+    return canonical;
+  }
+
+  function canonicalRepositoryForRead(allowedRepositories: readonly string[], repository: string): string {
+    const canonical = canonicalAllowedRepository(allowedRepositories, repository);
+    if (canonical) return canonical;
+    if (!config.sharedIdentityResolver) return repository;
+    throw new DomainError("repository access denied", "forbidden");
+  }
+
+  async function requireConnectedLease(
+    tenantId: string,
+    stageId: string,
+    leaseId: string,
+    now: string
+  ): Promise<string | undefined> {
+    if (!config.sharedIdentityResolver) return undefined;
     const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
     if (!stage) throw staleLease();
     await requireConnectedRepository(tenantId, stage.repository);
+    return stage.repository;
   }
 
   async function requireConnectedRepository(tenantId: string, repository: string): Promise<void> {

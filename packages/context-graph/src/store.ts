@@ -422,7 +422,8 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     actorId: string,
     command: ContextGraphCommand,
     now: string,
-    actorIsTenantAdmin = false
+    actorIsTenantAdmin = false,
+    mutationGuard?: (repository?: string) => Promise<void>
   ): Promise<ContextGraphCommandResult> {
     if (!actorId.startsWith("svc:") && !actorIsTenantAdmin) {
       const repository = "repository" in command ? command.repository : undefined;
@@ -432,6 +433,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         throw new DomainError("contextGraph command access denied", "forbidden");
       }
     }
+    await mutationGuard?.("repository" in command ? command.repository : undefined);
     const affectedIds: string[] = [];
     if (command.type === "review_assertion") {
       if (command.decision === "reject" && (!command.reason || !command.rejectionCode)) {
@@ -440,6 +442,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       let found = false;
       const human = this.humanAssertions.get(command.assertionId);
       if (human?.tenantId === tenantId) {
+        await mutationGuard?.(human.repository);
         const allowed =
           command.decision === "accept"
             ? human.status === "proposed"
@@ -458,6 +461,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
           (assertion) => assertion.tenantId === tenantId && assertion.id === command.assertionId
         );
         if (!current) continue;
+        await mutationGuard?.(current.repository);
         const allowed =
           command.decision === "accept"
             ? current.status === "proposed"
@@ -489,6 +493,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       if (source.id === target.id || source.repository !== target.repository) {
         throw new DomainError("assertion relation endpoints are invalid", "conflict");
       }
+      await mutationGuard?.(source.repository);
       if (
         !this.sourceObservations.some(
           (observation) =>
@@ -549,6 +554,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
           observation.tenantId === tenantId && sourceObservationIdForRepository(observation) === command.observationId
       );
       if (index < 0) throw new DomainError("observation not found or already redacted", "not_found");
+      await mutationGuard?.(this.sourceObservations[index]!.repository);
       this.sourceObservations.splice(index, 1);
       this.rebuildSourceAssertions();
       for (const [key, stored] of this.assertionBatches) {
@@ -680,6 +686,9 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         (!repositories || repositories.has(snapshot.repository)) &&
         (!scope?.ref || snapshot.ref === scope.ref)
     );
+    const scopedRefCommits = scope?.ref
+      ? new Set(scopedSnapshots.map((snapshot) => `${snapshot.repository}:${snapshot.commitSha}`))
+      : undefined;
     return {
       outboxDepth: {},
       outboxDepthByConsumer: {},
@@ -698,12 +707,14 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         (assertion) =>
           assertion.tenantId === tenantId &&
           (!repositories || repositories.has(assertion.repository)) &&
+          (!scopedRefCommits || scopedRefCommits.has(`${assertion.repository}:${assertion.commitSha}`)) &&
           assertion.status === "proposed"
       ).length,
       unexplainedAssertionCount: this.allAssertions().filter(
         (assertion) =>
           assertion.tenantId === tenantId &&
           (!repositories || repositories.has(assertion.repository)) &&
+          (!scopedRefCommits || scopedRefCommits.has(`${assertion.repository}:${assertion.commitSha}`)) &&
           !assertion.explanation
       ).length,
       pendingErasureEventCount: 0,

@@ -85,7 +85,8 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
     actorId: string,
     command: ContextGraphCommand,
     now: string,
-    actorIsTenantAdmin?: boolean
+    actorIsTenantAdmin?: boolean,
+    mutationGuard?: (repository?: string) => Promise<void>
   ): Promise<ContextGraphCommandResult>;
   rebuildDerivedProjections(
     tenantId: string,

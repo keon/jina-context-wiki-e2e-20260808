@@ -2076,7 +2076,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     actorId: string,
     command: ContextGraphCommand,
     now: string,
-    actorIsTenantAdmin = false
+    actorIsTenantAdmin = false,
+    mutationGuard?: (repository?: string) => Promise<void>
   ): Promise<ContextGraphCommandResult> {
     await this.initialize();
     const auditId = stableId("audit", `${tenantId}:${actorId}:${command.type}:${canonicalJson(command)}:${now}`);
@@ -2086,6 +2087,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     try {
       await client.query("begin");
       await authorizeContextGraphCommand(client, tenantId, actorId, command, actorIsTenantAdmin);
+      await mutationGuard?.("repository" in command ? command.repository : undefined);
       if (
         command.type === "review_assertion" &&
         command.decision === "reject" &&
@@ -2125,6 +2127,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         );
         const pending = candidate.rows[0];
         if (!pending) throw new Error("assertion not found");
+        await mutationGuard?.(pending.repository);
         await lockAssertionNaturalKey(
           client,
           tenantId,
@@ -2207,6 +2210,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         }
         const repositories = [...new Set(assertions.rows.map((assertion) => assertion.repository))];
         if (repositories.length !== 1) throw new Error("assertion relations must stay within one repository");
+        await mutationGuard?.(repositories[0]);
         const evidence = await client.query(
           `select 1 from jina_context_graph.observations
            where tenant_id=$1 and id=$2 and repository=$3 and redacted_at is null`,
@@ -2302,6 +2306,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           [tenantId, command.observationId, now, command.reason]
         );
         if (redacted.rowCount !== 1) throw new Error("observation not found or already redacted");
+        await mutationGuard?.(redacted.rows[0]?.repository ?? undefined);
         await insertErasureFilter(client, tenantId, "observation", command.observationId, auditId, now);
         if (command.commitShas?.length) {
           await client.query(
@@ -3211,8 +3216,21 @@ export class PostgresContextGraphStore implements ContextGraphStore {
              and ($3::text is null or ref_name=$3)
          ) as manifest,
          (
-           select max(projected_at) from jina_context_graph.search_documents
-           where tenant_id=$1 and ($2::text[] is null or repository=any($2))
+           select case
+             when $3::text is null then max(search.projected_at)
+             else least(
+               max(search.projected_at),
+               (
+                 select max(manifest.projected_at)
+                 from jina_context_graph.ref_manifest manifest
+                 where manifest.tenant_id=$1
+                   and ($2::text[] is null or manifest.repository=any($2))
+                   and manifest.ref_name=$3
+               )
+             )
+           end
+           from jina_context_graph.search_documents search
+           where search.tenant_id=$1 and ($2::text[] is null or search.repository=any($2))
          ) as search`,
         [tenantId, repositories, ref]
       ),

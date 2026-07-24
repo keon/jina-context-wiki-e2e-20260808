@@ -273,8 +273,10 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 test("shared tenancy resolves original Jina organizations and scopes workers and board reads", async (context) => {
   const resolutions: unknown[] = [];
   let repositoryConnected = true;
+  let revokeAfterNextRepositoryResolution = false;
   class TrackingContextGraphStore extends MemoryContextGraphStore {
     syncCount = 0;
+    revokeOnNextSync = false;
 
     override async replaceRepositoryAccess(
       tenantId: string,
@@ -283,15 +285,20 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     ): Promise<void> {
       this.syncCount += 1;
       await super.replaceRepositoryAccess(tenantId, principalId, repositories);
+      if (this.revokeOnNextSync) {
+        this.revokeOnNextSync = false;
+        repositoryConnected = false;
+      }
     }
   }
   const contextGraphStore = new TrackingContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
   const sharedIdentityResolver = {
     async resolveRepository(input: unknown) {
       resolutions.push(input);
       const repository = (input as { repository: string }).repository;
       if (!repositoryConnected || repository !== "omlabs/example") return undefined;
-      return {
+      const identity = {
         tenantId: SHARED_TENANT,
         githubAccountId: "202",
         githubAccountLogin: "omlabs",
@@ -300,6 +307,11 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
         repository,
         defaultBranch: "main"
       };
+      if (revokeAfterNextRepositoryResolution) {
+        revokeAfterNextRepositoryResolution = false;
+        repositoryConnected = false;
+      }
+      return identity;
     },
     async resolveTenantRepositories(input: { tenantId: string; repositories?: readonly string[] }) {
       return repositoryConnected && input.tenantId === SHARED_TENANT
@@ -345,6 +357,7 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     internalApiToken: INTERNAL_TOKEN,
     graphApiToken: GRAPH_TOKEN,
     contextGraphStore,
+    contextGraphCoordinator,
     sharedIdentityResolver
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -355,7 +368,10 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
 
   const delivered = await deliver(baseUrl, "pull_request", "shared-pr-1", pullRequestPayload(42, "abc123"));
   assert.equal(delivered.status, 202);
-  assert.deepEqual(resolutions, [{ repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 }]);
+  assert.deepEqual(resolutions, [
+    { repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 },
+    { repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 }
+  ]);
 
   assert.equal((await authenticatedFetch(`${baseUrl}/board`)).status, 401);
   const boardResponse = await fetch(`${baseUrl}/board`, {
@@ -452,6 +468,11 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   assert.equal(contextGraphStore.syncCount, 0);
   assert.equal((await activeSync(["OMLABS/EXAMPLE"])).status, 200);
   assert.equal(contextGraphStore.syncCount, 1);
+  contextGraphStore.revokeOnNextSync = true;
+  assert.equal((await activeSync(["omlabs/example"])).status, 409);
+  assert.deepEqual(await contextGraphStore.repositoriesForPrincipal(SHARED_TENANT, `tenant:${SHARED_TENANT}`), []);
+  repositoryConnected = true;
+  assert.equal((await activeSync(["omlabs/example"])).status, 200);
 
   const graphHeaders = {
     authorization: `Bearer ${GRAPH_TOKEN}`,
@@ -463,6 +484,13 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   );
   assert.deepEqual(
     connectedGraphs.graphs.map((graph) => graph.repository),
+    ["omlabs/example"]
+  );
+  const caseVariantGraphs = await fetch(`${baseUrl}/v1/graphs?repository=OMLABS%2FEXAMPLE`, {
+    headers: graphHeaders
+  }).then((response) => response.json() as Promise<{ graphs: { repository: string }[] }>);
+  assert.deepEqual(
+    caseVariantGraphs.graphs.map((graph) => graph.repository),
     ["omlabs/example"]
   );
   repositoryConnected = false;
@@ -484,6 +512,46 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
       })
     ).status,
     404
+  );
+  const disconnectedCommand = await fetch(`${baseUrl}/context-graph/commands`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "x-jina-tenant-id": SHARED_TENANT,
+      "x-jina-principal-id": `tenant:${SHARED_TENANT}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      type: "tombstone_repository",
+      repository: "omlabs/example",
+      reason: "must not run after disconnect"
+    })
+  });
+  assert.ok([403, 409].includes(disconnectedCommand.status));
+  assert.ok(await contextGraphStore.get(sharedGraph.id, SHARED_TENANT));
+  repositoryConnected = true;
+
+  revokeAfterNextRepositoryResolution = true;
+  const racedBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      repository: "omlabs/example",
+      ref: "main",
+      requestKey: "shared-revoked-during-build",
+      githubInstallationId: 99
+    })
+  });
+  assert.equal(racedBuild.status, 409);
+  assert.equal(
+    (await contextGraphCoordinator.list(SHARED_TENANT)).some(
+      ({ build }) => build.requestKey === "shared-revoked-during-build"
+    ),
+    false
   );
   repositoryConnected = true;
 
