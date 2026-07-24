@@ -3623,6 +3623,11 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     }
   }
 
+  async ping(): Promise<void> {
+    await this.initialize();
+    await this.pool.query("select 1");
+  }
+
   async close(): Promise<void> {
     await Promise.all([this.pool.end(), this.projectionLockPool.end()]);
   }

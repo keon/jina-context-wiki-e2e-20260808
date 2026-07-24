@@ -2516,6 +2516,21 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("health fails when the context graph read store is unavailable", async (context) => {
+  class UnhealthyContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      throw new Error("context graph store unavailable");
+    }
+  }
+
+  const server = createApiServer({ contextGraphStore: new UnhealthyContextGraphStore() });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const response = await fetch(`${baseUrl}/health`);
+  assert.equal(response.status, 500);
+});
+
 test("context graph task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();

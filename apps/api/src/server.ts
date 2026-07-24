@@ -544,6 +544,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
       await Promise.all([
         config.stateStore?.ping(),
+        contextGraphStore.ping(),
         contextGraphCoordinator.ping(),
         config.sharedIdentityResolver?.ping()
       ]);
