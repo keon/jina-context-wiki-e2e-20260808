@@ -3,11 +3,23 @@ import type { Pool, PoolClient } from "pg";
 const POSTGRES_HEALTH_TIMEOUT_MS = 5_000;
 
 /**
+ * Probes every currently idle pool member in parallel so one healthy socket
+ * cannot mask a stale sibling. An empty pool still gets one connection probe.
+ */
+export async function pingPostgresPool(pool: Pool): Promise<void> {
+  const results = await Promise.allSettled(
+    Array.from({ length: Math.max(1, pool.idleCount) }, () => pingPostgresConnection(pool))
+  );
+  const failure = results.find((result) => result.status === "rejected");
+  if (failure?.status === "rejected") throw asError(failure.reason);
+}
+
+/**
  * Bounds both pool checkout and the query itself. A timed-out query has its
  * client destroyed so an abandoned HTTP probe cannot leave database work
  * running in the background.
  */
-export async function pingPostgresPool(pool: Pool): Promise<void> {
+async function pingPostgresConnection(pool: Pool): Promise<void> {
   const deadline = Date.now() + POSTGRES_HEALTH_TIMEOUT_MS;
   const connection = pool.connect();
   let client: PoolClient | undefined;

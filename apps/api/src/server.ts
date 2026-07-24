@@ -205,6 +205,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   /** Version of the last snapshot restored via loadNewer; 0 = never restored. */
   let restoredVersion = 0;
 
+  async function checkHealth(): Promise<void> {
+    healthCheck ??= Promise.allSettled([
+      Promise.resolve().then(() => config.stateStore?.ping()),
+      Promise.resolve().then(() => contextGraphStore.ping()),
+      Promise.resolve().then(() => contextGraphCoordinator.ping()),
+      Promise.resolve().then(() => config.sharedIdentityResolver?.ping())
+    ])
+      .then((results) => {
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") {
+          throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+        }
+      })
+      .finally(() => {
+        healthCheck = undefined;
+      });
+    return healthCheck;
+  }
+
   function mutate<T>(operation: () => Promise<T>): Promise<T>;
   function mutate<T>(operation: () => Promise<T>, deliveryId: string): Promise<T | undefined>;
   function mutate<T>(operation: () => Promise<T>, deliveryId?: string): Promise<T | undefined> {
@@ -522,8 +541,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   });
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
+    // Liveness must remain reachable while fixed-tenant startup migrations are
+    // waiting on database locks. Application routes still wait for ready below.
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
+      await checkHealth();
+      json(response, 200, {
+        ok: true,
+        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
+        storage: config.stateStore ? "postgres" : "memory",
+        durableWorker: true
+      });
+      return;
+    }
+    await ready;
     // Published context graph generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
@@ -540,26 +571,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "OPTIONS") {
       json(response, 204, {});
-      return;
-    }
-    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      healthCheck ??= Promise.all([
-        config.stateStore?.ping(),
-        contextGraphStore.ping(),
-        contextGraphCoordinator.ping(),
-        config.sharedIdentityResolver?.ping()
-      ])
-        .then(() => undefined)
-        .finally(() => {
-          healthCheck = undefined;
-        });
-      await healthCheck;
-      json(response, 200, {
-        ok: true,
-        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
-        storage: config.stateStore ? "postgres" : "memory",
-        durableWorker: true
-      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/task-types") {
