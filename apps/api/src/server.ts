@@ -87,6 +87,7 @@ const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
 // owning worker is not fenced while its write is still committing.
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
+const HEALTH_CHECK_CACHE_MS = 25_000;
 const WORKER_TOPICS = [
   "run-review",
   "run-research",
@@ -199,10 +200,36 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let nextParserRepairScanAt = 0;
   let parserRepairScan: Promise<number> | undefined;
   const ready = initializeState();
+  let healthCheck: Promise<void> | undefined;
   let mutations = Promise.resolve();
   let transactionActive = false;
   /** Version of the last snapshot restored via loadNewer; 0 = never restored. */
   let restoredVersion = 0;
+
+  async function checkHealth(): Promise<void> {
+    if (!healthCheck) {
+      const current = Promise.allSettled([
+        Promise.resolve().then(() => config.stateStore?.ping()),
+        Promise.resolve().then(() => contextGraphStore.ping()),
+        Promise.resolve().then(() => contextGraphCoordinator.ping()),
+        Promise.resolve().then(() => config.sharedIdentityResolver?.ping())
+      ]).then((results) => {
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") {
+          throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+        }
+      });
+      healthCheck = current;
+      const expire = () => {
+        const timer = setTimeout(() => {
+          if (healthCheck === current) healthCheck = undefined;
+        }, HEALTH_CHECK_CACHE_MS);
+        timer.unref();
+      };
+      current.then(expire, expire);
+    }
+    return healthCheck;
+  }
 
   function mutate<T>(operation: () => Promise<T>): Promise<T>;
   function mutate<T>(operation: () => Promise<T>, deliveryId: string): Promise<T | undefined>;
@@ -521,8 +548,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   });
 
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
+    // Liveness must remain reachable while fixed-tenant startup migrations are
+    // waiting on database locks. Application routes still wait for ready below.
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
+      await checkHealth();
+      json(response, 200, {
+        ok: true,
+        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
+        storage: config.stateStore ? "postgres" : "memory",
+        durableWorker: true
+      });
+      return;
+    }
+    await ready;
     // Published context graph generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
@@ -539,20 +578,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "OPTIONS") {
       json(response, 204, {});
-      return;
-    }
-    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await Promise.all([
-        config.stateStore?.ping(),
-        contextGraphCoordinator.ping(),
-        config.sharedIdentityResolver?.ping()
-      ]);
-      json(response, 200, {
-        ok: true,
-        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
-        storage: config.stateStore ? "postgres" : "memory",
-        durableWorker: true
-      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/task-types") {

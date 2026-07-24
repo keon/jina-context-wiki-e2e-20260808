@@ -68,6 +68,11 @@ compare warm p50/p95/p99 latency, CPU, memory, instance count, and per-database
 connections. Min instances improves cold-start latency; it does not fix slow
 SQL or cross-region round trips.
 
+Cloud Run probes the API's database-aware `/health` route every 30 seconds and
+recycles an instance after three consecutive 10-second failures. This allows a
+warm instance with stale Cloud SQL sockets to recover after database
+maintenance while tolerating brief connection interruptions.
+
 See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants, cutover checks, and rollback.
 
 The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health and task-type definitions remain public; the disabled webhook route only acknowledges and discards deliveries. Tenant data does not become public.

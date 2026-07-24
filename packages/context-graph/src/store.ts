@@ -100,6 +100,7 @@ export interface ContextGraphStore extends ContextGraphPipelineStore, Repository
   ): Promise<readonly ContextGraphParserBacklogRef[]>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
+  ping(): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -445,6 +446,10 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     for (const [id, graph] of this.graphs) {
       if (aliases.includes(graph.tenantId)) this.graphs.set(id, { ...graph, tenantId });
     }
+  }
+
+  async ping(): Promise<void> {
+    // The in-memory store has no external dependency to probe.
   }
 
   async close(): Promise<void> {

@@ -2516,6 +2516,136 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("health fails when the context graph read store is unavailable", async (context) => {
+  class UnhealthyContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      throw new Error("context graph store unavailable");
+    }
+  }
+
+  const server = createApiServer({ contextGraphStore: new UnhealthyContextGraphStore() });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const response = await fetch(`${baseUrl}/health`);
+  assert.equal(response.status, 500);
+});
+
+test("concurrent health requests share one dependency check", async (context) => {
+  let pingCount = 0;
+  let releasePing: (() => void) | undefined;
+  const pingBlocked = new Promise<void>((resolve) => {
+    releasePing = resolve;
+  });
+  class BlockingContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      pingCount += 1;
+      await pingBlocked;
+    }
+  }
+
+  const server = createApiServer({ contextGraphStore: new BlockingContextGraphStore() });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const first = fetch(`${baseUrl}/health`);
+  const second = fetch(`${baseUrl}/healthz`);
+  for (let attempt = 0; attempt < 20 && pingCount === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(pingCount, 1);
+  releasePing?.();
+  assert.deepEqual(
+    await Promise.all([first, second]).then((responses) => responses.map((response) => response.status)),
+    [200, 200]
+  );
+  assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+  assert.equal(pingCount, 1);
+});
+
+test("a fast health failure stays coalesced until slower dependency probes settle", async (context) => {
+  let failedPingCount = 0;
+  let blockedPingCount = 0;
+  let releaseBlockedPing: (() => void) | undefined;
+  const pingBlocked = new Promise<void>((resolve) => {
+    releaseBlockedPing = resolve;
+  });
+  class FailingContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      failedPingCount += 1;
+      throw new Error("context graph store unavailable");
+    }
+  }
+  class BlockingContextGraphCoordinator extends MemoryContextGraphPipelineCoordinator {
+    override async ping(): Promise<void> {
+      blockedPingCount += 1;
+      await pingBlocked;
+    }
+  }
+
+  const server = createApiServer({
+    contextGraphStore: new FailingContextGraphStore(),
+    contextGraphCoordinator: new BlockingContextGraphCoordinator()
+  });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  let firstSettled = false;
+  const first = fetch(`${baseUrl}/health`).finally(() => {
+    firstSettled = true;
+  });
+  for (let attempt = 0; attempt < 20 && blockedPingCount === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(failedPingCount, 1);
+  assert.equal(blockedPingCount, 1);
+  assert.equal(firstSettled, false);
+
+  const second = fetch(`${baseUrl}/healthz`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(failedPingCount, 1);
+  assert.equal(blockedPingCount, 1);
+
+  releaseBlockedPing?.();
+  assert.deepEqual(
+    await Promise.all([first, second]).then((responses) => responses.map((response) => response.status)),
+    [500, 500]
+  );
+});
+
+test("health remains available while fixed-tenant initialization is blocked", async (context) => {
+  let markMigrationStarted: (() => void) | undefined;
+  let releaseMigration: (() => void) | undefined;
+  const migrationStarted = new Promise<void>((resolve) => {
+    markMigrationStarted = resolve;
+  });
+  const migrationBlocked = new Promise<void>((resolve) => {
+    releaseMigration = resolve;
+  });
+  class MigratingContextGraphStore extends MemoryContextGraphStore {
+    override async migrateTenantAliases(): Promise<void> {
+      markMigrationStarted?.();
+      await migrationBlocked;
+    }
+  }
+
+  const server = createApiServer({
+    tenantId: TENANT,
+    tenantAliases: ["github:legacy"],
+    contextGraphStore: new MigratingContextGraphStore()
+  });
+  const baseUrl = await listen(server);
+  context.after(async () => {
+    releaseMigration?.();
+    await close(server);
+  });
+  await migrationStarted;
+
+  const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(500) });
+  assert.equal(response.status, 200);
+  releaseMigration?.();
+});
+
 test("context graph task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();

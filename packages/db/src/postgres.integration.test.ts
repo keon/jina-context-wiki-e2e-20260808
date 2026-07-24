@@ -4336,7 +4336,7 @@ test(
         // rows: non-terminal rows move to the new vocabulary (keeping any
         // lease so the retired worker's renew/complete still key on task id +
         // lease id), while terminal rows keep their historical topics.
-        await coordinator.ping();
+        await coordinator.initialize();
         const drained = await admin.query<{ id: string; topic: string; status: string; lease_id: string | null }>(
           "select id,topic,status,lease_id from jina_board.tasks where build_id=$1 order by ordinal",
           [legacyBuildId]
@@ -4431,7 +4431,7 @@ test(
       );
       const second = new PostgresContextGraphPipelineCoordinator({ connectionString });
       try {
-        await second.ping();
+        await second.initialize();
         const straggler = await admin.query<{ topic: string }>("select topic from jina_board.tasks where id=$1", [
           `legacy-straggler-${suffix}`
         ]);
@@ -4456,7 +4456,7 @@ test(
       // still allows, and the terminal rows keep their legacy topics.
       const third = new PostgresContextGraphPipelineCoordinator({ connectionString });
       try {
-        await third.ping();
+        await third.initialize();
       } finally {
         await third.close();
       }

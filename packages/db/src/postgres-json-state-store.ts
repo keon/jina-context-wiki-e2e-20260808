@@ -1,4 +1,5 @@
 import { Pool, type PoolConfig } from "pg";
+import { pingPostgresPool } from "./postgres-health.js";
 
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
@@ -80,8 +81,7 @@ export class PostgresJsonStateStore<T> {
   }
 
   async ping(): Promise<void> {
-    await this.initialize();
-    await this.pool.query("select 1");
+    await pingPostgresPool(this.pool);
   }
 
   /**

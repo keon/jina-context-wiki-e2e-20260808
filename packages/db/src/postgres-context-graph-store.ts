@@ -50,6 +50,7 @@ import {
   type ContextGraphReadRevisionOptions
 } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { pingPostgresPool } from "./postgres-health.js";
 import { DomainError } from "@jina/shared-kernel";
 import { applySchema } from "./apply-schema.js";
 import { CONTEXT_GRAPH_SCHEMA_SQL } from "./context-graph-schema.js";
@@ -370,6 +371,12 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       ...poolConfig,
       application_name: "jina-context-graph-projection-lock",
       max: 1
+    });
+    this.pool.on("error", (error) => {
+      console.error("context graph postgres idle connection error", error);
+    });
+    this.projectionLockPool.on("error", (error) => {
+      console.error("context graph projection-lock postgres idle connection error", error);
     });
   }
 
@@ -3621,6 +3628,17 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     } finally {
       client.release();
     }
+  }
+
+  async ping(): Promise<void> {
+    // The projection pool has one client by design and may legitimately hold
+    // it for a multi-minute drain. Only probe it when doing so cannot queue
+    // health behind active projection work.
+    const projectionPoolIsAvailable = this.projectionLockPool.totalCount === 0 || this.projectionLockPool.idleCount > 0;
+    await Promise.all([
+      pingPostgresPool(this.pool),
+      projectionPoolIsAvailable ? pingPostgresPool(this.projectionLockPool) : undefined
+    ]);
   }
 
   async close(): Promise<void> {

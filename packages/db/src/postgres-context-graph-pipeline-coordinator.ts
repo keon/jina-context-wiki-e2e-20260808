@@ -17,6 +17,7 @@ import {
 } from "@jina/context-graph";
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { pingPostgresPool } from "./postgres-health.js";
 
 export interface PostgresContextGraphPipelineCoordinatorConfig extends PoolConfig {
   readonly manageSchema?: boolean;
@@ -80,6 +81,9 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     const { manageSchema = true, ...poolConfig } = config;
     this.manageSchema = manageSchema;
     this.pool = new Pool({ ...poolConfig, application_name: "jina-context-graph-pipeline", max: poolConfig.max ?? 5 });
+    this.pool.on("error", (error) => {
+      console.error("context graph pipeline postgres idle connection error", error);
+    });
   }
 
   async createBuild(
@@ -931,15 +935,15 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
   }
 
   async ping(): Promise<void> {
-    await this.initialize();
-    await this.pool.query("select 1");
+    await pingPostgresPool(this.pool);
   }
 
   async close(): Promise<void> {
     await this.pool.end();
   }
 
-  private initialize(): Promise<void> {
+  /** Explicit schema bootstrap for migrations; liveness intentionally bypasses it. */
+  initialize(): Promise<void> {
     this.initialized ??= this.manageSchema ? this.createSchema() : Promise.resolve();
     return this.initialized;
   }
