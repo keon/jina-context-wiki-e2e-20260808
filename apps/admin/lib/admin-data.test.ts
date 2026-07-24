@@ -20,7 +20,7 @@ test("graph filters combine tenant, repository, ref, query, and time", () => {
   );
 });
 
-test("tenant summaries preserve real tenant IDs and derive installation coverage", () => {
+test("tenant summaries preserve real tenant IDs and legacy installation coverage", () => {
   const operations = operation([build("done", "2026-07-23T10:00:00.000Z", { githubInstallationId: 140435029 })]);
   const summaries = tenantSummaries(
     [graph("tenant-a", "omxyz/jina", "main", "2026-07-23T11:00:00.000Z")],
@@ -29,8 +29,61 @@ test("tenant summaries preserve real tenant IDs and derive installation coverage
   );
   assert.equal(summaries[0]?.tenantId, "tenant-a");
   assert.equal(summaries[0]?.name, "omxyz");
-  assert.equal(summaries[0]?.installationId, "140435029");
+  assert.deepEqual(summaries[0]?.githubConnections, [
+    {
+      installationId: "140435029",
+      login: "GitHub installation 140435029",
+      type: "Organization",
+      repositoryCount: 0
+    }
+  ]);
   assert.equal(summaries[0]?.status, "active");
+});
+
+test("tenant summaries prefer authoritative Jina identity and connected repository counts", () => {
+  const base = operation([]);
+  const operations: AdminOperations = {
+    ...base,
+    tenants: [
+      {
+        ...base.tenants[0]!,
+        name: "Acme Workspace",
+        kind: "team",
+        repositoryCount: 12,
+        githubConnections: [
+          { installationId: "101", login: "acme-inc", type: "Organization", repositoryCount: 7 },
+          { installationId: "202", login: "acme-labs", type: "Organization", repositoryCount: 5 }
+        ]
+      }
+    ]
+  };
+  const summary = tenantSummaries([], operations, NOW)[0];
+  assert.equal(summary?.name, "Acme Workspace");
+  assert.equal(summary?.kind, "team");
+  assert.equal(summary?.repositoryCount, 12);
+  assert.deepEqual(
+    summary?.githubConnections.map((connection) => connection.login),
+    ["acme-inc", "acme-labs"]
+  );
+  assert.equal(summary?.status, "inactive");
+});
+
+test("tenant summaries keep zero-repository tenants inactive despite recent legacy activity", () => {
+  const recentBuild = build("done", "2026-07-23T11:00:00.000Z", {});
+  const base = operation([recentBuild]);
+  const operations: AdminOperations = {
+    ...base,
+    tenants: [{ ...base.tenants[0]!, repositoryCount: 0 }]
+  };
+
+  const summary = tenantSummaries(
+    [graph("tenant-a", "omxyz/jina", "main", "2026-07-23T11:30:00.000Z")],
+    operations,
+    NOW
+  )[0];
+
+  assert.equal(summary?.repositoryCount, 0);
+  assert.equal(summary?.status, "inactive");
 });
 
 test("build labels are stable and metrics use real workflow timestamps", () => {

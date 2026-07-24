@@ -369,20 +369,34 @@ test("expired contextGraph lease sweeps stay tenant-scoped", async () => {
   assert.notEqual(second.message.leaseId, first.message.leaseId);
 });
 
-test("shared workers claim queued context graph stages across an explicit tenant set", async () => {
+test("shared workers claim case-variant repository stages across an explicit tenant set", async () => {
   const coordinator = new MemoryContextGraphPipelineCoordinator();
   await coordinator.createBuild({
     tenantId: "tenant-b",
-    repository: "omxyz/jina",
+    repository: "Omxyz/Jina",
     ref: "main",
     requestKey: "shared-claim",
     snapshotFirst: true,
     createdAt: "2026-07-21T00:00:00.000Z"
   });
 
+  assert.equal(
+    await coordinator.claim({
+      tenantId: "tenant-a",
+      tenantIds: ["tenant-a", "tenant-b"],
+      repositoryScopes: [{ tenantId: "tenant-a", repository: "omxyz/jina" }],
+      workerId: "shared-worker",
+      topics: ["run-context-graph-ingest"],
+      now: "2026-07-21T00:00:30.000Z",
+      leaseExpiresAt: "2026-07-21T00:05:30.000Z"
+    }),
+    undefined
+  );
+
   const claimed = await coordinator.claim({
     tenantId: "tenant-a",
     tenantIds: ["tenant-a", "tenant-b"],
+    repositoryScopes: [{ tenantId: "tenant-b", repository: "omxyz/jina" }],
     workerId: "shared-worker",
     topics: ["run-context-graph-ingest"],
     now: "2026-07-21T00:01:00.000Z",
@@ -947,6 +961,44 @@ test("a new model contract confirms rather than overwrites a reviewed assertion"
   assert.equal(assertions.length, 1);
   assert.equal(assertions[0]?.generator, "model:model-v1");
   assert.equal(assertions[0]?.status, "active");
+});
+
+test("memory operational metrics exclude assertions outside the requested ref", async () => {
+  const store = new MemoryContextGraphStore();
+  await store.saveAssertionBatch({
+    tenantId: "tenant",
+    repository: "omxyz/demo",
+    ref: "main",
+    commitSha: "a".repeat(40),
+    taskId: "metrics-ref",
+    generatedAt: "2026-07-20T00:00:00Z",
+    generatorVersion: "model-v1",
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
+    evidenceFingerprint: "metrics-ref-input",
+    evidenceObservationIds: [],
+    model: "fixture",
+    summary: "README documents the repository",
+    rawOutput: { summary: "fixture", nodes: [], edges: [] },
+    assertions: [
+      {
+        subject: { kind: "Repository", naturalKey: "github:repo:omxyz/demo", label: "demo" },
+        predicate: "DOCUMENTED_BY",
+        object: { kind: "Document", naturalKey: "repo:omxyz/demo:path:README.md", label: "README" },
+        confidence: 0.95,
+        explanation: "The README explicitly documents this repository.",
+        evidence: ["README.md:1"]
+      }
+    ]
+  });
+
+  const unscoped = await store.operationalMetrics("tenant");
+  const otherRef = await store.operationalMetrics("tenant", undefined, {
+    repository: "omxyz/demo",
+    ref: "release"
+  });
+  assert.equal(unscoped.proposedAssertionCount, 1);
+  assert.equal(otherRef.proposedAssertionCount, 0);
+  assert.equal(otherRef.unexplainedAssertionCount, 0);
 });
 
 test("does not reuse a live model assertion across repositories in the same tenant", async () => {

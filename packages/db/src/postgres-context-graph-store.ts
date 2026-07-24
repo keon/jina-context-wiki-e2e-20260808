@@ -2076,7 +2076,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     actorId: string,
     command: ContextGraphCommand,
     now: string,
-    actorIsTenantAdmin = false
+    actorIsTenantAdmin = false,
+    mutationGuard?: (repository?: string) => Promise<void>
   ): Promise<ContextGraphCommandResult> {
     await this.initialize();
     const auditId = stableId("audit", `${tenantId}:${actorId}:${command.type}:${canonicalJson(command)}:${now}`);
@@ -2086,6 +2087,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     try {
       await client.query("begin");
       await authorizeContextGraphCommand(client, tenantId, actorId, command, actorIsTenantAdmin);
+      await mutationGuard?.("repository" in command ? command.repository : undefined);
       if (
         command.type === "review_assertion" &&
         command.decision === "reject" &&
@@ -2125,6 +2127,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         );
         const pending = candidate.rows[0];
         if (!pending) throw new Error("assertion not found");
+        await mutationGuard?.(pending.repository);
         await lockAssertionNaturalKey(
           client,
           tenantId,
@@ -2207,6 +2210,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         }
         const repositories = [...new Set(assertions.rows.map((assertion) => assertion.repository))];
         if (repositories.length !== 1) throw new Error("assertion relations must stay within one repository");
+        await mutationGuard?.(repositories[0]);
         const evidence = await client.query(
           `select 1 from jina_context_graph.observations
            where tenant_id=$1 and id=$2 and repository=$3 and redacted_at is null`,
@@ -2302,6 +2306,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           [tenantId, command.observationId, now, command.reason]
         );
         if (redacted.rowCount !== 1) throw new Error("observation not found or already redacted");
+        await mutationGuard?.(redacted.rows[0]?.repository ?? undefined);
         await insertErasureFilter(client, tenantId, "observation", command.observationId, auditId, now);
         if (command.commitShas?.length) {
           await client.query(
@@ -2953,9 +2958,16 @@ export class PostgresContextGraphStore implements ContextGraphStore {
 
   async drainDerivedProjectionEvents(
     tenantId: string,
-    now: string
+    now: string,
+    options?: {
+      readonly repositories?: readonly string[];
+      readonly authorityGuard?: (repository: string) => Promise<void>;
+    }
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
     await this.initialize();
+    if (options?.repositories && options.repositories.length === 0) {
+      return { processedEventCount: 0, rebuiltRepositories: [] };
+    }
     const rebuiltRepositories = new Set<string>();
     let processedEventCount = 0;
     // A repository whose ingest stage is mid-flight would have its projections
@@ -2969,6 +2981,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       )
       .catch(() => ({ rows: [] as { repository: string }[] }));
     const suppressedRepositories = new Set(activeIngests.rows.map((row) => row.repository));
+    const repositoryKeys = options?.repositories?.map((repository) => repository.toLowerCase()) ?? null;
     const consumers = ["legacy", "manifest", "search", "reconciliation", "graph"] as const;
     for (const consumer of consumers) {
       const claimOwner = `projection:${consumer}:${randomUUID()}`;
@@ -2983,12 +2996,17 @@ export class PostgresContextGraphStore implements ContextGraphStore {
            from jina_context_graph.outbox
            where tenant_id=$1 and consumer=$3 and processed_at is null and available_at<=now()
              and (claim_expires_at is null or claim_expires_at<now())
+             and (
+               $5::text[] is null
+               or coalesce(payload->>'repoId',payload#>>'{scope,repository}') is null
+               or lower(coalesce(payload->>'repoId',payload#>>'{scope,repository}'))=any($5::text[])
+             )
            order by created_at,id for update skip locked limit 10000
          )
          update jina_context_graph.outbox o
          set claimed_by=$4,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
          from candidates where o.id=candidates.id returning o.id,candidates.repository,o.event_type,o.payload`,
-        [tenantId, now, consumer, claimOwner]
+        [tenantId, now, consumer, claimOwner, repositoryKeys]
       );
       if (allClaimed.rows.length === 0) continue;
       const suppressed = allClaimed.rows.filter(
@@ -3010,8 +3028,9 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       const affectedRepositories = new Set(claimed.rows.flatMap((row) => (row.repository ? [row.repository] : [])));
       if (claimed.rows.some((row) => row.repository === null)) {
         const all = await this.pool.query<{ repository: string }>(
-          `select distinct repository from jina_context_graph.refs where tenant_id=$1`,
-          [tenantId]
+          `select distinct repository from jina_context_graph.refs
+           where tenant_id=$1 and ($2::text[] is null or lower(repository)=any($2::text[]))`,
+          [tenantId, repositoryKeys]
         );
         for (const row of all.rows) affectedRepositories.add(row.repository);
       }
@@ -3030,6 +3049,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           }
         }
         for (const repository of [...affectedRepositories].sort()) {
+          if (repositoryKeys && !repositoryKeys.includes(repository.toLowerCase())) continue;
+          await options?.authorityGuard?.(repository);
           const refs = await this.pool.query<{ ref_name: string; commit_sha: string }>(
             `select ref_name,commit_sha from jina_context_graph.refs
              where tenant_id=$1 and repository=$2 order by is_default desc,ref_name`,
@@ -3086,6 +3107,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
               });
             }
           }
+          await options?.authorityGuard?.(repository);
           rebuiltRepositories.add(repository);
         }
         const acknowledged = await this.pool.query(
@@ -3113,12 +3135,16 @@ export class PostgresContextGraphStore implements ContextGraphStore {
   async operationalMetrics(
     tenantId: string,
     now: string,
-    scope?: { readonly repository: string; readonly ref?: string }
+    scope?: {
+      readonly repository?: string;
+      readonly repositories?: readonly string[];
+      readonly ref?: string;
+    }
   ): Promise<ContextGraphOperationalMetrics> {
     await this.initialize();
-    const repository = scope?.repository ?? null;
+    const repositories = scope?.repositories ?? (scope?.repository ? [scope.repository] : null);
     const ref = scope?.ref ?? null;
-    const backlogQuery = repository
+    const backlogQuery = repositories
       ? this.pool.query<{ count: string }>(
           `select count(distinct manifest.blob_sha)
            from jina_context_graph.refs ref
@@ -3130,10 +3156,10 @@ export class PostgresContextGraphStore implements ContextGraphStore {
            left join jina_context_graph.blob_analyses analysis
              on analysis.tenant_id=blob.tenant_id and analysis.blob_sha=blob.blob_sha
             and analysis.parser_version=$2
-           where ref.tenant_id=$1 and ref.repository=$3
+           where ref.tenant_id=$1 and ref.repository=any($3::text[])
              and ($4::text is null or ref.ref_name=$4)
              and analysis.blob_sha is null`,
-          [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repository, ref]
+          [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repositories, ref]
         )
       : this.pool.query<{ count: string }>(
           `select count(distinct (b.blob_sha,b.tenant_id)) from jina_context_graph.blobs b
@@ -3146,33 +3172,84 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       this.pool.query<{ event_type: string; consumer: string; count: string; oldest: Date | null }>(
         `select event_type,consumer,count(*),min(created_at) as oldest from jina_context_graph.outbox
          where tenant_id=$1 and processed_at is null
-           and ($2::text is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=$2)
+           and ($2::text[] is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=any($2))
            and ($3::text is null or payload->>'refName' is null or payload->>'refName'=$3)
          group by event_type,consumer`,
-        [tenantId, repository, ref]
+        [tenantId, repositories, ref]
       ),
       backlogQuery,
+      repositories
+        ? this.pool.query<{ count: string }>(
+            `select count(distinct analysis.blob_sha)
+             from jina_context_graph.refs ref
+             cross join lateral jina_context_graph.commit_manifest(
+               ref.tenant_id,ref.repository,ref.commit_sha
+             ) manifest
+             join jina_context_graph.blob_analyses analysis
+               on analysis.tenant_id=ref.tenant_id and analysis.blob_sha=manifest.blob_sha
+              and analysis.parsed_at>=now()-interval '1 hour'
+             where ref.tenant_id=$1 and ref.repository=any($2::text[])
+               and ($3::text is null or ref.ref_name=$3)`,
+            [tenantId, repositories, ref]
+          )
+        : this.pool.query<{ count: string }>(
+            `select count(*) from jina_context_graph.blob_analyses
+             where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`,
+            [tenantId]
+          ),
       this.pool.query<{ count: string }>(
-        `select count(*) from jina_context_graph.blob_analyses where tenant_id=$1 and parsed_at>=now()-interval '1 hour'`,
-        [tenantId]
+        `select count(*) from jina_context_graph.assertions assertion
+         where assertion.tenant_id=$1 and assertion.status='proposed'
+           and ($2::text[] is null or assertion.repository=any($2))
+           and ($3::text is null or exists (
+             select 1 from jina_context_graph.refs ref
+             where ref.tenant_id=assertion.tenant_id and ref.repository=assertion.repository
+               and ref.commit_sha=assertion.commit_sha and ref.ref_name=$3
+           ))`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ count: string }>(
-        `select count(*) from jina_context_graph.assertions where tenant_id=$1 and status='proposed'`,
-        [tenantId]
-      ),
-      this.pool.query<{ count: string }>(
-        `select count(*) from jina_context_graph.assertions where tenant_id=$1 and explanation is null`,
-        [tenantId]
+        `select count(*) from jina_context_graph.assertions assertion
+         where assertion.tenant_id=$1 and assertion.explanation is null
+           and ($2::text[] is null or assertion.repository=any($2))
+           and ($3::text is null or exists (
+             select 1 from jina_context_graph.refs ref
+             where ref.tenant_id=assertion.tenant_id and ref.repository=assertion.repository
+               and ref.commit_sha=assertion.commit_sha and ref.ref_name=$3
+           ))`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ count: string }>(
         `select count(distinct (event_type,aggregate_id)) from jina_context_graph.outbox
-         where tenant_id=$1 and processed_at is null and event_type in ('observation_redacted','tombstone')`,
-        [tenantId]
+         where tenant_id=$1 and processed_at is null and event_type in ('observation_redacted','tombstone')
+           and ($2::text[] is null or coalesce(payload->>'repoId',payload#>>'{scope,repository}')=any($2))
+           and ($3::text is null or payload->>'refName' is null or payload->>'refName'=$3)`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ manifest: Date | null; search: Date | null }>(
-        `select (select max(projected_at) from jina_context_graph.ref_manifest where tenant_id=$1) as manifest,
-                (select max(projected_at) from jina_context_graph.search_documents where tenant_id=$1) as search`,
-        [tenantId]
+        `select (
+           select max(projected_at) from jina_context_graph.ref_manifest
+           where tenant_id=$1 and ($2::text[] is null or repository=any($2))
+             and ($3::text is null or ref_name=$3)
+         ) as manifest,
+         (
+           select case
+             when $3::text is null then max(search.projected_at)
+             else least(
+               max(search.projected_at),
+               (
+                 select max(manifest.projected_at)
+                 from jina_context_graph.ref_manifest manifest
+                 where manifest.tenant_id=$1
+                   and ($2::text[] is null or manifest.repository=any($2))
+                   and manifest.ref_name=$3
+               )
+             )
+           end
+           from jina_context_graph.search_documents search
+           where search.tenant_id=$1 and ($2::text[] is null or search.repository=any($2))
+         ) as search`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ generator: string; predicate: string; accepted: string; rejected: string }>(
         `select a.generator,a.predicate,
@@ -3180,8 +3257,15 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           count(*) filter (where l.action='review_assertion' and l.input->>'decision' in ('reject','retract')) as rejected
          from jina_context_graph.audit_log l
          join jina_context_graph.assertions a on a.id=l.input->>'assertionId'
-         where l.tenant_id=$1 and a.generator is not null group by a.generator,a.predicate`,
-        [tenantId]
+         where l.tenant_id=$1 and a.generator is not null
+           and ($2::text[] is null or a.repository=any($2))
+           and ($3::text is null or exists (
+             select 1 from jina_context_graph.refs ref
+             where ref.tenant_id=a.tenant_id and ref.repository=a.repository
+               and ref.commit_sha=a.commit_sha and ref.ref_name=$3
+           ))
+         group by a.generator,a.predicate`,
+        [tenantId, repositories, ref]
       ),
       this.pool.query<{ template: string; requests: string; average: string; p95: string; truncated: string }>(
         `select template,count(*) as requests,avg(duration_ms) as average,
@@ -3189,8 +3273,9 @@ export class PostgresContextGraphStore implements ContextGraphStore {
                 avg(case when truncated then 1.0 else 0.0 end) as truncated
          from jina_context_graph.retrieval_metrics
          where tenant_id=$1 and recorded_at>=now()-interval '24 hours'
+           and ($2::text[] is null or repository=any($2))
          group by template order by template`,
-        [tenantId]
+        [tenantId, repositories]
       )
     ]);
     const nowMs = new Date(now).getTime();
@@ -4157,6 +4242,7 @@ async function assertPipelineWriteFence(
   writeFence?: ContextGraphWriteFence
 ): Promise<void> {
   if (!writeFence) return;
+  await writeFence.authorityGuard?.();
   const result = await client.query(
     `select 1 from jina_board.tasks
      where id=$1 and tenant_id=$2 and repository=$3 and topic=$4
@@ -4168,6 +4254,7 @@ async function assertPipelineWriteFence(
 
 async function reassertPipelineWriteFence(client: PoolClient, writeFence?: ContextGraphWriteFence): Promise<void> {
   if (!writeFence) return;
+  await writeFence.authorityGuard?.();
   const result = await client.query(
     `select 1 from jina_board.tasks
      where id=$1 and lease_id=$2 and status='in_progress' and lease_expires_at>now()`,

@@ -122,29 +122,51 @@ export interface ContextGraphGlobalWorkflowFilter {
 }
 
 export interface ContextGraphPipelineCoordinator {
-  createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord>;
-  claim(input: {
+  createBuild(
+    request: ContextGraphPipelineBuildRequest,
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<ContextGraphBuildRecord>;
+  cancelBuild(input: {
     readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined>;
-  renew(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<boolean>;
-  release(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
+    readonly buildId: string;
     readonly now: string;
     readonly reason: string;
   }): Promise<boolean>;
+  claim(
+    input: {
+      readonly tenantId: string;
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined>;
+  renew(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean>;
+  release(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly now: string;
+      readonly reason: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean>;
   leasedStage(input: {
     readonly tenantId: string;
     readonly stageId: string;
@@ -152,16 +174,19 @@ export interface ContextGraphPipelineCoordinator {
     readonly topic?: ContextGraphWorkerTopic;
     readonly now: string;
   }): Promise<ContextGraphStageLease | undefined>;
-  complete(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly outcome: "done" | "failed";
-    readonly now: string;
-    readonly result?: Readonly<Record<string, unknown>>;
-    readonly nextMetadata?: Readonly<Record<string, unknown>>;
-    readonly reason?: string;
-  }): Promise<boolean>;
+  complete(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly outcome: "done" | "failed";
+      readonly now: string;
+      readonly result?: Readonly<Record<string, unknown>>;
+      readonly nextMetadata?: Readonly<Record<string, unknown>>;
+      readonly reason?: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean>;
   checkpoint(input: {
     readonly tenantId: string;
     readonly stageId: string;
@@ -213,7 +238,11 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
   private readonly checkpoints = new Map<string, Readonly<Record<string, unknown>>>();
   private readonly events: ContextGraphTaskBoardEvent[] = [];
 
-  async createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord> {
+  async createBuild(
+    request: ContextGraphPipelineBuildRequest,
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<ContextGraphBuildRecord> {
+    await authorityGuard?.(request.repository);
     if (request.dedupeHeadSha) {
       const latest = [...this.builds.values()]
         .filter(
@@ -270,15 +299,54 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     return structuredClone(build);
   }
 
-  async claim(input: {
+  async cancelBuild(input: {
     readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
+    readonly buildId: string;
     readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined> {
+    readonly reason: string;
+  }): Promise<boolean> {
+    const build = this.builds.get(input.buildId);
+    if (!build || build.tenantId !== input.tenantId || ["done", "failed", "superseded"].includes(build.status)) {
+      return false;
+    }
+    build.status = "failed";
+    build.updatedAt = input.now;
+    this.recordEvent(build.id, "task.transitioned", input.now, {
+      toStatus: "failed",
+      reason: input.reason
+    });
+    for (const stage of this.stages.values()) {
+      if (stage.buildId !== build.id || ["done", "failed", "canceled", "superseded"].includes(stage.status)) continue;
+      stage.status = "canceled";
+      stage.updatedAt = input.now;
+      clearLease(stage);
+      this.recordEvent(stage.id, "task.transitioned", input.now, {
+        toStatus: "canceled",
+        reason: input.reason
+      });
+    }
+    return true;
+  }
+
+  async claim(
+    input: {
+      readonly tenantId: string;
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined> {
     const tenantIds = new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId]);
+    const repositoryScopes = input.repositoryScopes
+      ? new Set(input.repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
+      : undefined;
     for (const stage of this.stages.values()) {
       if (
         tenantIds.has(stage.tenantId) &&
@@ -309,7 +377,10 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     const stage = [...this.stages.values()]
       .filter(
         (candidate) =>
-          tenantIds.has(candidate.tenantId) && candidate.status === "queued" && input.topics.includes(candidate.topic)
+          tenantIds.has(candidate.tenantId) &&
+          (!repositoryScopes || repositoryScopes.has(`${candidate.tenantId}:${candidate.repository.toLowerCase()}`)) &&
+          candidate.status === "queued" &&
+          input.topics.includes(candidate.topic)
       )
       .sort(
         (left, right) =>
@@ -318,6 +389,11 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
           left.id.localeCompare(right.id)
       )[0];
     if (!stage) return undefined;
+    await authorityGuard?.({
+      tenantId: stage.tenantId,
+      repository: stage.repository,
+      metadata: structuredClone(stage.metadata)
+    });
     stage.status = "in_progress";
     stage.attempt += 1;
     stage.leaseId = randomUUID();
@@ -340,29 +416,37 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     return claimView(stage);
   }
 
-  async renew(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<boolean> {
+  async renew(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean> {
     const stage = this.stages.get(input.stageId);
     if (!validLease(stage, input.tenantId, input.leaseId, input.now)) return false;
+    await authorityGuard?.(stage!.repository);
     stage!.leaseExpiresAt = input.leaseExpiresAt;
     stage!.updatedAt = input.now;
     return true;
   }
 
-  async release(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly now: string;
-    readonly reason: string;
-  }): Promise<boolean> {
+  async release(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly now: string;
+      readonly reason: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean> {
     const stage = this.stages.get(input.stageId);
     if (!validLease(stage, input.tenantId, input.leaseId, input.now)) return false;
+    await authorityGuard?.(stage!.repository);
     const startedAt = stage!.startedAt ?? input.now;
     const durationMs = Math.max(0, Date.parse(input.now) - Date.parse(startedAt));
     stage!.status = "queued";
@@ -400,18 +484,22 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     return leaseView(stage!);
   }
 
-  async complete(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly outcome: "done" | "failed";
-    readonly now: string;
-    readonly result?: Readonly<Record<string, unknown>>;
-    readonly nextMetadata?: Readonly<Record<string, unknown>>;
-    readonly reason?: string;
-  }): Promise<boolean> {
+  async complete(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly outcome: "done" | "failed";
+      readonly now: string;
+      readonly result?: Readonly<Record<string, unknown>>;
+      readonly nextMetadata?: Readonly<Record<string, unknown>>;
+      readonly reason?: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean> {
     const stage = this.stages.get(input.stageId);
     if (!validLease(stage, input.tenantId, input.leaseId, input.now)) return false;
+    await authorityGuard?.(stage!.repository);
     stage!.status = input.outcome;
     stage!.metadata = {
       ...stage!.metadata,

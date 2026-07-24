@@ -9,7 +9,8 @@ layout:
   `jina_board` on that original database.
 - The graph store and graph pipeline coordinator own `jina_context_graph` on
   `jina-v2:us-central1:jina-postgres`.
-- Webhooks resolve their tenant from `public.repositories`, `public.installations`, and `public.tenants` before creating work.
+- Webhooks resolve their tenant and GitHub account from each repository's exact
+  `public.installations` row before creating work.
 - Workers receive the resolved original tenant UUID with each task and send it on subsequent API calls.
 - No Cloud Run service moves regions. Workers never receive a database credential.
 
@@ -21,7 +22,15 @@ state.
 
 ## Identity resolution and propagation
 
-The original Jina webhook intake resolves an enabled repository to exactly one original tenant using the GitHub repository ID, installation ID, and `owner/repository` name. Resolution requires a non-suspended installation. After accepting an automatic or `@usejina` review, it submits an idempotent v2 build for the PR head with the original tenant UUID. V2 direct webhook intake is disabled in production and never becomes a second source of review work.
+The original Jina webhook intake resolves an enabled repository to exactly one
+original tenant using the GitHub repository ID, installation ID, and
+`owner/repository` name. Resolution requires the repository's linked
+installation to be active and to match the webhook installation exactly. This
+allows one Jina tenant to contain repositories from multiple GitHub
+organizations without confusing their credentials or provenance. After
+accepting an automatic or `@usejina` review, it submits an idempotent v2 build
+for the PR head with the original tenant UUID. V2 direct webhook intake is
+disabled in production and never becomes a second source of review work.
 
 The resolved values flow through the system as follows:
 
@@ -35,7 +44,19 @@ public.tenants/repositories/installations
   -> dashboard and original-app work overview
 ```
 
-`workspaceLabel`, `githubAccountId`, and `githubAccountType` name the original organization/account. Verified webhook payload fields add `authorGithubUserId`, `authorLogin`, `authorAccountType`, `senderGithubUserId`, `senderLogin`, and `senderAccountType`. The dashboard displays and searches workspace and author labels. These are external identity references and provenance, not duplicated user rows.
+The Jina tenant name is the workspace label and billing boundary.
+`githubAccountId` and `githubAccountType` identify the exact GitHub installation
+that owns the repository; they do not define the tenant. Verified webhook
+payload fields add `authorGithubUserId`, `authorLogin`, `authorAccountType`,
+`senderGithubUserId`, `senderLogin`, and `senderAccountType`. The dashboard
+displays and searches workspace and author labels. These are external identity
+references and provenance, not duplicated user rows.
+
+The global admin operations projection reads tenant name, kind, GitHub
+connections, and enabled repository counts from these authoritative identity
+tables. The admin UI never derives a Jina tenant name from a graph repository
+owner, because a tenant can have no graphs or can span several GitHub
+organizations.
 
 Shared-mode workers claim across the active tenant UUIDs returned by the original tables. After a claim, every worker request carries the concrete tenant header; workers do not receive a database credential.
 

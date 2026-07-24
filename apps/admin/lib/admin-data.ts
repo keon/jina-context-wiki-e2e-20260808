@@ -2,6 +2,7 @@ import type {
   AdminGraphBuild,
   AdminGraphSummary,
   AdminGraphWorkflow,
+  AdminGithubConnection,
   AdminOperations,
   AdminOperationsTenant
 } from "./jina-api";
@@ -17,7 +18,8 @@ export interface GraphFilters {
 export interface TenantSummary {
   readonly tenantId: string;
   readonly name: string;
-  readonly installationId?: string;
+  readonly kind?: "personal" | "team";
+  readonly githubConnections: readonly AdminGithubConnection[];
   readonly repositoryCount: number;
   readonly graphCount: number;
   readonly lastActivity?: string;
@@ -91,16 +93,20 @@ export function tenantSummaries(
       ]
         .sort()
         .at(-1);
-      const githubInstallationId = installationId(workflows);
+      const githubConnections = operationsTenant?.githubConnections ?? legacyGithubConnections(workflows);
+      const repositoryCount = operationsTenant?.repositoryCount ?? repositories.size;
       return {
         tenantId,
-        name: tenantName(tenantId, tenantGraphs, workflows),
-        ...(githubInstallationId ? { installationId: githubInstallationId } : {}),
-        repositoryCount: repositories.size,
+        name: operationsTenant?.name?.trim() || tenantName(tenantId, tenantGraphs, workflows),
+        ...(operationsTenant?.kind ? { kind: operationsTenant.kind } : {}),
+        githubConnections,
+        repositoryCount,
         graphCount: tenantGraphs.length,
         ...(lastActivity ? { lastActivity } : {}),
         status:
-          lastActivity && now.getTime() - new Date(lastActivity).getTime() <= 30 * 24 * 60 * 60 * 1_000
+          repositoryCount > 0 &&
+          lastActivity &&
+          now.getTime() - new Date(lastActivity).getTime() <= 30 * 24 * 60 * 60 * 1_000
             ? ("active" as const)
             : ("inactive" as const)
       };
@@ -222,15 +228,29 @@ function tenantName(
   return [...counts].sort((left, right) => right[1] - left[1] || left[0].localeCompare(right[0]))[0]?.[0] ?? tenantId;
 }
 
-function installationId(workflows: readonly AdminGraphWorkflow[]): string | undefined {
+function legacyGithubConnections(workflows: readonly AdminGraphWorkflow[]): readonly AdminGithubConnection[] {
   for (const { build } of [...workflows].sort((left, right) =>
     right.build.updatedAt.localeCompare(left.build.updatedAt)
   )) {
     const value = build.metadata.githubInstallationId;
-    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) return String(value);
-    if (typeof value === "string" && /^\d+$/.test(value)) return value;
+    const installationId =
+      typeof value === "number" && Number.isSafeInteger(value) && value > 0
+        ? String(value)
+        : typeof value === "string" && /^\d+$/.test(value)
+          ? value
+          : undefined;
+    if (installationId) {
+      return [
+        {
+          installationId,
+          login: `GitHub installation ${installationId}`,
+          type: "Organization",
+          repositoryCount: 0
+        }
+      ];
+    }
   }
-  return undefined;
+  return [];
 }
 
 function dateCutoff(value: string | undefined, now: Date): Date | undefined {

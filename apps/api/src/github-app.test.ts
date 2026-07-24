@@ -12,6 +12,9 @@ import {
   MemoryContextGraphPipelineCoordinator,
   CONTEXT_GRAPH_PARSER_VERSION,
   type BlobAnalysis,
+  type ContextGraphReadRevisionOptions,
+  type ContextGraphWriteFence,
+  type RepositorySnapshot,
   type RetrievalRequest,
   type RetrievalResult
 } from "@jina/context-graph";
@@ -272,12 +275,58 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 
 test("shared tenancy resolves original Jina organizations and scopes workers and board reads", async (context) => {
   const resolutions: unknown[] = [];
+  let repositoryConnected = true;
+  let currentInstallationId = 99;
+  let revokeAfterNextRepositoryResolution = false;
+  let revokeAfterNextRevision = false;
+  let reconnectDuringNextPlan = false;
+  class TrackingContextGraphStore extends MemoryContextGraphStore {
+    syncCount = 0;
+    revokeOnNextSync = false;
+
+    override async replaceRepositoryAccess(
+      tenantId: string,
+      principalId: string,
+      repositories: readonly string[]
+    ): Promise<void> {
+      this.syncCount += 1;
+      await super.replaceRepositoryAccess(tenantId, principalId, repositories);
+      if (this.revokeOnNextSync) {
+        this.revokeOnNextSync = false;
+        repositoryConnected = false;
+      }
+    }
+
+    override async readRevision(tenantId: string, options?: ContextGraphReadRevisionOptions): Promise<string> {
+      const revision = await super.readRevision(tenantId, options);
+      if (revokeAfterNextRevision) {
+        revokeAfterNextRevision = false;
+        repositoryConnected = false;
+      }
+      return revision;
+    }
+
+    override async planIngestion(snapshot: RepositorySnapshot, writeFence?: ContextGraphWriteFence) {
+      if (reconnectDuringNextPlan) {
+        reconnectDuringNextPlan = false;
+        await writeFence?.authorityGuard?.();
+        currentInstallationId = 100;
+      }
+      return super.planIngestion(snapshot, writeFence);
+    }
+  }
+  const contextGraphStore = new TrackingContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
   const sharedIdentityResolver = {
     async resolveRepository(input: unknown) {
       resolutions.push(input);
-      const repository = (input as { repository: string }).repository;
-      if (repository !== "omlabs/example") return undefined;
-      return {
+      const request = input as { repository: string; githubInstallationId?: number };
+      const repository = request.repository;
+      if (!repositoryConnected || repository !== "omlabs/example") return undefined;
+      if (request.githubInstallationId !== undefined && request.githubInstallationId !== currentInstallationId) {
+        return undefined;
+      }
+      const identity = {
         tenantId: SHARED_TENANT,
         githubAccountId: "202",
         githubAccountLogin: "omlabs",
@@ -286,17 +335,57 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
         repository,
         defaultBranch: "main"
       };
+      if (revokeAfterNextRepositoryResolution) {
+        revokeAfterNextRepositoryResolution = false;
+        repositoryConnected = false;
+      }
+      return identity;
+    },
+    async resolveTenantRepositories(input: { tenantId: string; repositories?: readonly string[] }) {
+      return repositoryConnected && input.tenantId === SHARED_TENANT
+        ? (input.repositories ?? ["omlabs/example"]).filter(
+            (repository) => repository.toLowerCase() === "omlabs/example"
+          )
+        : [];
     },
     async listTenantIds() {
       return [SHARED_TENANT];
     },
+    async listTenants() {
+      return [
+        {
+          tenantId: SHARED_TENANT,
+          name: "omlabs",
+          kind: "team" as const,
+          githubAccountLogin: "omlabs",
+          repositoryCount: 1,
+          githubConnections: [
+            {
+              installationId: "99",
+              login: "omlabs",
+              type: "Organization",
+              repositoryCount: 1
+            }
+          ]
+        }
+      ];
+    },
     async ping() {},
     async close() {}
   };
+  const sharedGraph = fixtureGraph({
+    tenantId: SHARED_TENANT,
+    repository: "omlabs/example",
+    ref: "main",
+    taskId: "shared-graph"
+  });
+  await contextGraphStore.save(sharedGraph);
   const server = createApiServer({
     githubWebhookSecret: SECRET,
     internalApiToken: INTERNAL_TOKEN,
     graphApiToken: GRAPH_TOKEN,
+    contextGraphStore,
+    contextGraphCoordinator,
     sharedIdentityResolver
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -307,7 +396,10 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
 
   const delivered = await deliver(baseUrl, "pull_request", "shared-pr-1", pullRequestPayload(42, "abc123"));
   assert.equal(delivered.status, 202);
-  assert.deepEqual(resolutions, [{ repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 }]);
+  assert.deepEqual(resolutions, [
+    { repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 },
+    { repository: "omlabs/example", githubRepositoryId: 10, githubInstallationId: 99 }
+  ]);
 
   assert.equal((await authenticatedFetch(`${baseUrl}/board`)).status, 401);
   const boardResponse = await fetch(`${baseUrl}/board`, {
@@ -350,8 +442,315 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     body: JSON.stringify({ workerId: "shared-worker", topics: ["run-review"] })
   });
   assert.equal(claim.status, 200);
-  const claimed = (await claim.json()) as { task: { metadata: Record<string, unknown> } };
+  const claimed = (await claim.json()) as {
+    message: { id: string; leaseId: string };
+    task: { id: string; metadata: Record<string, unknown> };
+  };
   assert.equal(claimed.task.metadata.tenantId, SHARED_TENANT);
+  repositoryConnected = false;
+  const revokedLegacyRenew = await fetch(`${baseUrl}/internal/worker/renew`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({ messageId: claimed.message.id, leaseId: claimed.message.leaseId })
+  });
+  assert.equal(revokedLegacyRenew.status, 409);
+  repositoryConnected = true;
+
+  const inactiveTenantId = "6f4d1548-7e14-4f9e-a6e2-e7d38b61b1c3";
+  const inactiveSync = await fetch(`${baseUrl}/internal/graph/access/sync`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${GRAPH_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": inactiveTenantId
+    },
+    body: JSON.stringify({
+      principalId: `tenant:${inactiveTenantId}`,
+      repositories: ["omlabs/example"]
+    })
+  });
+  assert.equal(inactiveSync.status, 403);
+  assert.equal(contextGraphStore.syncCount, 0);
+
+  const inactivePaths = [
+    "/internal/worker/claim",
+    "/internal/worker/renew",
+    "/internal/worker/release",
+    "/internal/worker/complete",
+    "/internal/context-graph/outbox/drain"
+  ];
+  for (const path of inactivePaths) {
+    const response = await fetch(`${baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${INTERNAL_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": inactiveTenantId
+      },
+      body: "{}"
+    });
+    assert.equal(response.status, 403, `${path} must reject an inactive tenant before mutation`);
+  }
+
+  const activeSync = (repositories: readonly string[]) =>
+    fetch(`${baseUrl}/internal/graph/access/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${GRAPH_TOKEN}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": SHARED_TENANT
+      },
+      body: JSON.stringify({ principalId: `tenant:${SHARED_TENANT}`, repositories })
+    });
+  assert.equal((await activeSync(["elsewhere/foreign"])).status, 409);
+  assert.equal((await activeSync(["omlabs/example", "elsewhere/foreign"])).status, 409);
+  assert.equal(contextGraphStore.syncCount, 0);
+  assert.equal((await activeSync(["OMLABS/EXAMPLE"])).status, 200);
+  assert.equal(contextGraphStore.syncCount, 1);
+  contextGraphStore.revokeOnNextSync = true;
+  assert.equal((await activeSync(["omlabs/example"])).status, 409);
+  assert.deepEqual(await contextGraphStore.repositoriesForPrincipal(SHARED_TENANT, `tenant:${SHARED_TENANT}`), []);
+  repositoryConnected = true;
+  assert.equal((await activeSync(["omlabs/example"])).status, 200);
+
+  const graphHeaders = {
+    authorization: `Bearer ${GRAPH_TOKEN}`,
+    "x-jina-tenant-id": SHARED_TENANT,
+    "x-jina-principal-id": `tenant:${SHARED_TENANT}`
+  };
+  const connectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
+    (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
+  );
+  assert.deepEqual(
+    connectedGraphs.graphs.map((graph) => graph.repository),
+    ["omlabs/example"]
+  );
+  const caseVariantGraphs = await fetch(`${baseUrl}/v1/graphs?repository=OMLABS%2FEXAMPLE`, {
+    headers: graphHeaders
+  }).then((response) => response.json() as Promise<{ graphs: { repository: string }[] }>);
+  assert.deepEqual(
+    caseVariantGraphs.graphs.map((graph) => graph.repository),
+    ["omlabs/example"]
+  );
+  const contextGraphHeaders = {
+    authorization: `Bearer ${INTERNAL_TOKEN}`,
+    "x-jina-tenant-id": SHARED_TENANT,
+    "x-jina-principal-id": `tenant:${SHARED_TENANT}`
+  };
+  const cacheableGraph = await fetch(`${baseUrl}/context-graph`, { headers: contextGraphHeaders });
+  assert.equal(cacheableGraph.status, 200);
+  const graphEtag = cacheableGraph.headers.get("etag");
+  assert.ok(graphEtag);
+  revokeAfterNextRevision = true;
+  const revokedConditionalGraph = await fetch(`${baseUrl}/context-graph`, {
+    headers: { ...contextGraphHeaders, "if-none-match": graphEtag }
+  });
+  assert.equal(revokedConditionalGraph.status, 200);
+  assert.deepEqual((await revokedConditionalGraph.json()) as { graphs: unknown[] }, {
+    latest: null,
+    graphs: []
+  });
+  repositoryConnected = true;
+  repositoryConnected = false;
+  const disconnectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
+    (response) => response.json() as Promise<{ graphs: unknown[] }>
+  );
+  assert.deepEqual(disconnectedGraphs.graphs, []);
+  assert.equal(
+    (await fetch(`${baseUrl}/v1/graphs/${encodeURIComponent(sharedGraph.id)}`, { headers: graphHeaders })).status,
+    404
+  );
+  assert.equal(
+    (
+      await fetch(`${baseUrl}/context-graph/metrics?repository=omlabs%2Fexample`, {
+        headers: {
+          authorization: `Bearer ${INTERNAL_TOKEN}`,
+          "x-jina-tenant-id": SHARED_TENANT
+        }
+      })
+    ).status,
+    404
+  );
+  const disconnectedCommand = await fetch(`${baseUrl}/context-graph/commands`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "x-jina-tenant-id": SHARED_TENANT,
+      "x-jina-principal-id": `tenant:${SHARED_TENANT}`,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      type: "tombstone_repository",
+      repository: "omlabs/example",
+      reason: "must not run after disconnect"
+    })
+  });
+  assert.ok([403, 409].includes(disconnectedCommand.status));
+  assert.ok(await contextGraphStore.get(sharedGraph.id, SHARED_TENANT));
+  repositoryConnected = true;
+
+  revokeAfterNextRepositoryResolution = true;
+  const racedBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      repository: "omlabs/example",
+      ref: "main",
+      requestKey: "shared-revoked-during-build",
+      githubInstallationId: 99
+    })
+  });
+  assert.equal(racedBuild.status, 409);
+  assert.equal(
+    (await contextGraphCoordinator.list(SHARED_TENANT)).some(
+      ({ build }) => build.requestKey === "shared-revoked-during-build"
+    ),
+    false
+  );
+  repositoryConnected = true;
+
+  const explicitBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      repository: "omlabs/example",
+      ref: "main",
+      requestKey: "shared-explicit-installation",
+      githubInstallationId: 99
+    })
+  });
+  assert.equal(explicitBuild.status, 202);
+  repositoryConnected = false;
+  const revokedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "revoked-worker", topics: ["run-context-graph-ingest"] })
+  });
+  assert.equal(revokedClaim.status, 204);
+  repositoryConnected = true;
+  currentInstallationId = 100;
+  const reconnectedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "reconnected-worker", topics: ["run-context-graph-ingest"] })
+  });
+  assert.equal(reconnectedClaim.status, 409);
+  currentInstallationId = 99;
+  const connectedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "connected-worker", topics: ["run-context-graph-ingest"] })
+  });
+  assert.equal(connectedClaim.status, 200);
+  const leased = (await connectedClaim.json()) as {
+    message: { id: string; leaseId: string };
+    task: { id: string };
+  };
+  reconnectDuringNextPlan = true;
+  const racedPlan = await fetch(`${baseUrl}/internal/context-graph/ingest/plan`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      messageId: leased.message.id,
+      leaseId: leased.message.leaseId,
+      snapshot: {
+        tenantId: SHARED_TENANT,
+        repository: "omlabs/example",
+        ref: "main",
+        commitSha: "a".repeat(40),
+        treeSha: "b".repeat(40),
+        parents: [],
+        recordedAt: new Date().toISOString(),
+        taskId: leased.task.id,
+        files: []
+      }
+    })
+  });
+  assert.equal(racedPlan.status, 409);
+  currentInstallationId = 99;
+  repositoryConnected = false;
+  const workerHeaders = {
+    authorization: `Bearer ${INTERNAL_TOKEN}`,
+    "content-type": "application/json",
+    "x-jina-tenant-id": SHARED_TENANT
+  };
+  const revokedRenew = await fetch(`${baseUrl}/internal/worker/renew`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: JSON.stringify({ messageId: leased.message.id, leaseId: leased.message.leaseId })
+  });
+  assert.equal(revokedRenew.status, 409);
+  const revokedRelease = await fetch(`${baseUrl}/internal/worker/release`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: JSON.stringify({ messageId: leased.message.id, leaseId: leased.message.leaseId, reason: "revoked" })
+  });
+  assert.equal(revokedRelease.status, 409);
+  const revokedCompletion = await fetch(`${baseUrl}/internal/worker/complete`, {
+    method: "POST",
+    headers: workerHeaders,
+    body: JSON.stringify({
+      messageId: leased.message.id,
+      taskId: leased.task.id,
+      leaseId: leased.message.leaseId,
+      outcome: "failed",
+      reason: "revoked"
+    })
+  });
+  assert.equal(revokedCompletion.status, 409);
+  repositoryConnected = true;
+
+  const staleHistoricalBuild = await fetch(`${baseUrl}/context-graph/build`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      repository: "omlabs/example",
+      ref: "main",
+      requestKey: "shared-stale-historical-installation"
+    })
+  });
+  assert.equal(staleHistoricalBuild.status, 400);
+
+  const missingInstallationPayload = pullRequestPayload(44, "fed456") as Record<string, unknown>;
+  delete missingInstallationPayload.installation;
+  const missingInstallation = await deliver(
+    baseUrl,
+    "pull_request",
+    "shared-pr-missing-installation",
+    missingInstallationPayload
+  );
+  assert.equal(missingInstallation.status, 409);
+  assert.equal(((await missingInstallation.json()) as { code: string }).code, "repository_installation_missing");
+
+  const mismatchedRepositoryId = pullRequestPayload(43, "def456") as Record<string, unknown>;
+  mismatchedRepositoryId.repository = {
+    id: 11,
+    full_name: "omlabs/example",
+    owner: { id: 202, login: "omlabs", type: "Organization" }
+  };
+  const mismatched = await deliver(baseUrl, "pull_request", "shared-pr-mismatched-id", mismatchedRepositoryId);
+  assert.equal(mismatched.status, 409);
+  assert.equal(((await mismatched.json()) as { code: string }).code, "repository_identity_mismatch");
 
   const unknownPayload = pullRequestPayload(43, "def456") as Record<string, unknown>;
   unknownPayload.repository = {
@@ -1297,8 +1696,45 @@ test("global admin graph listing requires its own credential and returns every t
         }
         return undefined;
       },
+      async resolveTenantRepositories(input) {
+        return input.tenantId === tenantA
+          ? (input.repositories ?? ["omxyz/a"]).filter((repository) => repository.toLowerCase() === "omxyz/a")
+          : [];
+      },
       async listTenantIds() {
         return [tenantA];
+      },
+      async listTenants() {
+        return [
+          {
+            tenantId: tenantA,
+            name: "Jina Workspace",
+            kind: "team" as const,
+            repositoryCount: 1,
+            githubConnections: [
+              {
+                installationId: "101",
+                login: "omxyz",
+                type: "Organization",
+                repositoryCount: 1
+              }
+            ]
+          },
+          {
+            tenantId: tenantB,
+            name: "External Workspace",
+            kind: "team" as const,
+            repositoryCount: 1,
+            githubConnections: [
+              {
+                installationId: "202",
+                login: "external",
+                type: "Organization",
+                repositoryCount: 1
+              }
+            ]
+          }
+        ];
       },
       async ping() {},
       async close() {}
@@ -1331,6 +1767,10 @@ test("global admin graph listing requires its own credential and returns every t
       readonly observedAt: string;
       readonly tenants: readonly {
         readonly tenantId: string;
+        readonly name?: string;
+        readonly kind?: string;
+        readonly repositoryCount?: number;
+        readonly githubConnections?: readonly { readonly installationId: string; readonly login: string }[];
         readonly workflows: readonly unknown[];
         readonly metrics: { readonly unparsedBlobCount: number };
       }[];
@@ -1338,6 +1778,30 @@ test("global admin graph listing requires its own credential and returns every t
       readonly queueDepth: number;
     };
     assert.equal(Number.isNaN(new Date(operations.observedAt).getTime()), false);
+    const authoritativeTenant = operations.tenants.find((tenant) => tenant.tenantId === tenantA);
+    assert.deepEqual(
+      authoritativeTenant && {
+        tenantId: authoritativeTenant.tenantId,
+        name: authoritativeTenant.name,
+        kind: authoritativeTenant.kind,
+        repositoryCount: authoritativeTenant.repositoryCount,
+        githubConnections: authoritativeTenant.githubConnections
+      },
+      {
+        tenantId: tenantA,
+        name: "Jina Workspace",
+        kind: "team",
+        repositoryCount: 1,
+        githubConnections: [
+          {
+            installationId: "101",
+            login: "omxyz",
+            type: "Organization",
+            repositoryCount: 1
+          }
+        ]
+      }
+    );
     assert.deepEqual(
       operations.tenants.map((tenant) => [tenant.tenantId, tenant.workflows.length, tenant.metrics.unparsedBlobCount]),
       [
@@ -1347,6 +1811,40 @@ test("global admin graph listing requires its own credential and returns every t
     );
     assert.equal(typeof operations.nextCursor, "string");
     assert.equal(operations.queueDepth, 2);
+
+    const filteredOperationsResponse = await fetch(`${operationsRoute}&tenantId=${tenantA}`, {
+      headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
+    });
+    assert.equal(filteredOperationsResponse.status, 200);
+    const filteredOperations = (await filteredOperationsResponse.json()) as {
+      readonly tenants: readonly {
+        readonly tenantId: string;
+        readonly name?: string;
+        readonly githubConnections?: readonly { readonly login: string }[];
+      }[];
+    };
+    assert.deepEqual(
+      filteredOperations.tenants.map((tenant) => ({
+        tenantId: tenant.tenantId,
+        name: tenant.name,
+        githubConnections: tenant.githubConnections
+      })),
+      [
+        {
+          tenantId: tenantA,
+          name: "Jina Workspace",
+          githubConnections: [
+            {
+              installationId: "101",
+              login: "omxyz",
+              type: "Organization",
+              repositoryCount: 1
+            }
+          ]
+        }
+      ]
+    );
+
     const olderOperations = (await fetch(`${operationsRoute}&cursor=${encodeURIComponent(operations.nextCursor!)}`, {
       headers: { authorization: `Bearer ${GLOBAL_ADMIN_TOKEN}` }
     }).then((response) => response.json())) as {
@@ -1391,8 +1889,8 @@ test("global admin graph listing requires its own credential and returns every t
         githubInstallationId: 101
       })
     });
-    assert.equal(mismatchedBuild.status, 409);
-    assert.equal(((await mismatchedBuild.json()) as { code?: string }).code, "repository_installation_mismatch");
+    assert.equal(mismatchedBuild.status, 403);
+    assert.equal(((await mismatchedBuild.json()) as { error?: string }).error, "inactive_tenant");
 
     const tenantBList = await fetch(`${baseUrl}/context-graph`, {
       headers: {
@@ -1400,13 +1898,7 @@ test("global admin graph listing requires its own credential and returns every t
         "x-jina-tenant-id": tenantB
       }
     });
-    assert.equal(tenantBList.status, 200);
-    assert.deepEqual(
-      ((await tenantBList.json()) as { readonly graphs: readonly { readonly repository: string }[] }).graphs.map(
-        (graph) => graph.repository
-      ),
-      ["external/b"]
-    );
+    assert.equal(tenantBList.status, 403);
     assert.equal(
       (
         await fetch(`${baseUrl}/context-graph/graphs/${tenantBGraph.id}`, {
@@ -1416,7 +1908,7 @@ test("global admin graph listing requires its own credential and returns every t
           }
         })
       ).status,
-      200
+      403
     );
     assert.equal(
       (

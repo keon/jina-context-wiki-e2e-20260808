@@ -85,7 +85,8 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
     actorId: string,
     command: ContextGraphCommand,
     now: string,
-    actorIsTenantAdmin?: boolean
+    actorIsTenantAdmin?: boolean,
+    mutationGuard?: (repository?: string) => Promise<void>
   ): Promise<ContextGraphCommandResult>;
   rebuildDerivedProjections(
     tenantId: string,
@@ -95,13 +96,21 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
   ): Promise<ProjectionRebuildResult>;
   drainDerivedProjectionEvents(
     tenantId: string,
-    now: string
+    now: string,
+    options?: {
+      readonly repositories?: readonly string[];
+      readonly authorityGuard?: (repository: string) => Promise<void>;
+    }
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }>;
   /** Omit scope for tenant-wide administration; release checks should name the repository and ref they certify. */
   operationalMetrics(
     tenantId: string,
     now: string,
-    scope?: { readonly repository: string; readonly ref?: string }
+    scope?: {
+      readonly repository?: string;
+      readonly repositories?: readonly string[];
+      readonly ref?: string;
+    }
   ): Promise<ContextGraphOperationalMetrics>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<readonly string[]>;
   listAssertions(

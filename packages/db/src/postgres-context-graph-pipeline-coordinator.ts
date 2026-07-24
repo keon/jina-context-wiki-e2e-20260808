@@ -81,7 +81,10 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     this.pool = new Pool({ ...poolConfig, application_name: "jina-context-graph-pipeline", max: poolConfig.max ?? 5 });
   }
 
-  async createBuild(request: ContextGraphPipelineBuildRequest): Promise<ContextGraphBuildRecord> {
+  async createBuild(
+    request: ContextGraphPipelineBuildRequest,
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<ContextGraphBuildRecord> {
     await this.initialize();
     const client = await this.pool.connect();
     const id = stableId(
@@ -109,6 +112,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
           return buildRecord(latest.rows[0]);
         }
       }
+      await authorityGuard?.(request.repository);
       const supersededBuilds = await client.query<{ id: string }>(
         `update jina_board.workflows
          set status='superseded',updated_at=$4
@@ -216,20 +220,74 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     }
   }
 
-  async claim(input: {
+  async cancelBuild(input: {
     readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
+    readonly buildId: string;
     readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined> {
+    readonly reason: string;
+  }): Promise<boolean> {
+    await this.initialize();
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const failed = await client.query(
+        `update jina_board.workflows
+         set status='failed',updated_at=$3
+         where id=$1 and tenant_id=$2 and status in ('queued','in_progress','enriching')`,
+        [input.buildId, input.tenantId, input.now]
+      );
+      if (failed.rowCount !== 1) {
+        await client.query("rollback");
+        return false;
+      }
+      const canceled = await client.query<{ id: string }>(
+        `update jina_board.tasks
+         set status='canceled',lease_id=null,worker_id=null,lease_expires_at=null,updated_at=$3
+         where build_id=$1 and tenant_id=$2 and status not in ('done','failed','canceled','superseded')
+         returning id`,
+        [input.buildId, input.tenantId, input.now]
+      );
+      await insertBoardEvent(client, input.tenantId, input.buildId, "task.transitioned", input.now, {
+        toStatus: "failed",
+        reason: input.reason
+      });
+      for (const stage of canceled.rows) {
+        await insertBoardEvent(client, input.tenantId, stage.id, "task.transitioned", input.now, {
+          toStatus: "canceled",
+          reason: input.reason
+        });
+      }
+      await client.query("commit");
+      return true;
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  async claim(
+    input: {
+      readonly tenantId: string;
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined> {
     await this.initialize();
     // Claim transactions lock jina_board.tasks then jina_board.workflows and can
     // deadlock against concurrent createBuild supersede sweeps; retry 40P01.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.claimOnce(input);
+        return await this.claimOnce(input, authorityGuard);
       } catch (error) {
         if (attempt >= 3 || (error as { code?: string }).code !== "40P01") throw error;
         await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
@@ -237,15 +295,24 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     }
   }
 
-  private async claimOnce(input: {
-    readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined> {
+  private async claimOnce(
+    input: {
+      readonly tenantId: string;
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined> {
     const tenantIds = [...new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId])];
+    const repositoryScopeTenantIds = input.repositoryScopes?.map((scope) => scope.tenantId) ?? null;
+    const repositoryScopeRepositories = input.repositoryScopes?.map((scope) => scope.repository) ?? null;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
@@ -328,15 +395,28 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
          join jina_board.workflows build on build.id=stage.build_id
          where stage.tenant_id=any($1::text[]) and stage.status='queued' and stage.topic=any($2::text[])
            and build.status in ('queued','in_progress','enriching')
+           and (
+             $3::text[] is null
+             or exists (
+               select 1
+               from unnest($3::text[], $4::text[]) scope(tenant_id, repository)
+               where scope.tenant_id=stage.tenant_id and lower(scope.repository)=lower(build.repository)
+             )
+           )
          order by stage.priority desc,stage.created_at,stage.id
          for update of stage skip locked limit 1`,
-        [tenantIds, input.topics]
+        [tenantIds, input.topics, repositoryScopeTenantIds, repositoryScopeRepositories]
       );
       const stage = selected.rows[0];
       if (!stage) {
         await client.query("commit");
         return undefined;
       }
+      await authorityGuard?.({
+        tenantId: stage.tenant_id,
+        repository: stage.repository,
+        metadata: stage.metadata
+      });
       const leased = await client.query<StageRow>(
         `update jina_board.tasks
          set status='in_progress',attempt=attempt+1,lease_id=$2,worker_id=$3,
@@ -370,29 +450,57 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     }
   }
 
-  async renew(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<boolean> {
+  async renew(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean> {
     await this.initialize();
-    const result = await this.pool.query(
-      `update jina_board.tasks set lease_expires_at=$5,updated_at=$4
-       where id=$1 and tenant_id=$2 and lease_id=$3 and status='in_progress' and lease_expires_at>$4`,
-      [input.stageId, input.tenantId, input.leaseId, input.now, input.leaseExpiresAt]
-    );
-    return result.rowCount === 1;
+    const client = await this.pool.connect();
+    try {
+      await client.query("begin");
+      const selected = await client.query<StageRow>(
+        `select * from jina_board.tasks
+         where id=$1 and tenant_id=$2 and lease_id=$3 and status='in_progress' and lease_expires_at>$4
+         for update`,
+        [input.stageId, input.tenantId, input.leaseId, input.now]
+      );
+      const stage = selected.rows[0];
+      if (!stage) {
+        await client.query("rollback");
+        return false;
+      }
+      await authorityGuard?.(stage.repository);
+      await client.query(`update jina_board.tasks set lease_expires_at=$2,updated_at=$3 where id=$1`, [
+        stage.id,
+        input.leaseExpiresAt,
+        input.now
+      ]);
+      await client.query("commit");
+      return true;
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
   }
 
-  async release(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly now: string;
-    readonly reason: string;
-  }): Promise<boolean> {
+  async release(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly now: string;
+      readonly reason: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
@@ -409,6 +517,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         await client.query("rollback");
         return false;
       }
+      await authorityGuard?.(stage.repository);
       await client.query(`update jina_board.workflows set status=$2,updated_at=$3 where id=$1`, [
         stage.build_id,
         stage.phase === "history" ? "enriching" : "in_progress",
@@ -454,16 +563,19 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     return result.rows[0] ? leaseRecord(result.rows[0]) : undefined;
   }
 
-  async complete(input: {
-    readonly tenantId: string;
-    readonly stageId: string;
-    readonly leaseId: string;
-    readonly outcome: "done" | "failed";
-    readonly now: string;
-    readonly result?: Readonly<Record<string, unknown>>;
-    readonly nextMetadata?: Readonly<Record<string, unknown>>;
-    readonly reason?: string;
-  }): Promise<boolean> {
+  async complete(
+    input: {
+      readonly tenantId: string;
+      readonly stageId: string;
+      readonly leaseId: string;
+      readonly outcome: "done" | "failed";
+      readonly now: string;
+      readonly result?: Readonly<Record<string, unknown>>;
+      readonly nextMetadata?: Readonly<Record<string, unknown>>;
+      readonly reason?: string;
+    },
+    authorityGuard?: (repository: string) => Promise<void>
+  ): Promise<boolean> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
@@ -479,6 +591,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         await client.query("rollback");
         return false;
       }
+      await authorityGuard?.(stage.repository);
       const metadata = {
         ...stage.metadata,
         ...(input.result ? { result: input.result } : {}),

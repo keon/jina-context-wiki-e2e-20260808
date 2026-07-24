@@ -116,9 +116,11 @@ export class MemoryContextGraphStore implements ContextGraphStore {
   }[] = [];
   private readonly sourceObservations: RepositorySourceObservation[] = [];
 
-  async save(graph: ContextGraph): Promise<void> {
+  async save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void> {
+    await writeFence?.authorityGuard?.();
     this.assertRepositoryWritable(graph.tenantId, graph.repository);
     if (!this.graphs.has(graph.id)) this.graphs.set(graph.id, graph);
+    await writeFence?.authorityGuard?.();
   }
 
   async latest(tenantId: string, repositories?: readonly string[], filter: ContextGraphSummaryFilter = {}) {
@@ -207,7 +209,11 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     return commitShas.filter((sha) => this.snapshots.has(snapshotKey(tenantId, repository, sha)));
   }
 
-  async planIngestion(snapshot: RepositorySnapshot): Promise<ContextGraphIngestPlan> {
+  async planIngestion(
+    snapshot: RepositorySnapshot,
+    writeFence?: ContextGraphWriteFence
+  ): Promise<ContextGraphIngestPlan> {
+    await writeFence?.authorityGuard?.();
     this.assertRepositoryWritable(snapshot.tenantId, snapshot.repository);
     const parent = snapshot.parents[0]
       ? this.snapshots.get(snapshotKey(snapshot.tenantId, snapshot.repository, snapshot.parents[0]))
@@ -252,7 +258,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     const changes = computeCommitChanges(files, parent?.files);
     const changedPaths = changes.filter((change) => change.change !== "delete").map((change) => change.path);
     const discoveredBlobCount = new Set(files.map((file) => file.blobSha)).size;
-    return {
+    const plan = {
       observationId: sourceObservationId(snapshot),
       commitSha: snapshot.commitSha,
       fileCount: files.length,
@@ -262,12 +268,16 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       changes,
       missingBlobs
     };
+    await writeFence?.authorityGuard?.();
+    return plan;
   }
 
   async applyBlobAnalyses(
     scope: Pick<RepositorySnapshot, "tenantId" | "repository" | "commitSha">,
-    analyses: readonly BlobAnalysis[]
+    analyses: readonly BlobAnalysis[],
+    writeFence?: ContextGraphWriteFence
   ): Promise<void> {
+    await writeFence?.authorityGuard?.();
     this.assertRepositoryWritable(scope.tenantId, scope.repository);
     const snapshot = this.snapshots.get(snapshotKey(scope.tenantId, scope.repository, scope.commitSha));
     if (!snapshot) throw new Error("repository snapshot must be recorded before blob analysis");
@@ -277,11 +287,14 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       const key = blobKey(scope.tenantId, analysis.blobSha, analysis.parserVersion);
       if (!this.blobAnalyses.has(key)) this.blobAnalyses.set(key, structuredClone(analysis));
     }
+    await writeFence?.authorityGuard?.();
   }
 
   async applyGitHubObservations(
-    observations: readonly RepositorySourceObservation[]
+    observations: readonly RepositorySourceObservation[],
+    writeFence?: ContextGraphWriteFence
   ): Promise<ContextGraphSourceIngestResult> {
+    await writeFence?.authorityGuard?.();
     for (const observation of observations) this.assertRepositoryWritable(observation.tenantId, observation.repository);
     let newObservationCount = 0;
     let updatedObservationCount = 0;
@@ -303,7 +316,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       this.sourceObservations.push(structuredClone(observation));
     }
     this.rebuildSourceAssertions();
-    return {
+    const result = {
       observationCount: observations.length,
       observationIds: [...new Set(observations.map(sourceObservationIdForRepository))],
       assertionCount: observations.reduce(
@@ -314,6 +327,8 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       updatedObservationCount,
       confirmedObservationCount
     };
+    await writeFence?.authorityGuard?.();
+    return result;
   }
 
   async loadAssertionEvidence(
@@ -355,7 +370,11 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     return stored ? assertionResult(stored.batch, stored.assertions, true) : undefined;
   }
 
-  async saveAssertionBatch(batch: ContextGraphAssertionBatch): Promise<ContextGraphAssertionResult> {
+  async saveAssertionBatch(
+    batch: ContextGraphAssertionBatch,
+    writeFence?: ContextGraphWriteFence
+  ): Promise<ContextGraphAssertionResult> {
+    await writeFence?.authorityGuard?.();
     this.assertRepositoryWritable(batch.tenantId, batch.repository);
     const key = assertionKey(
       batch.tenantId,
@@ -366,7 +385,10 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       batch.evidenceFingerprint
     );
     const existing = this.assertionBatches.get(key);
-    if (existing) return assertionResult(existing.batch, existing.assertions, true);
+    if (existing) {
+      await writeFence?.authorityGuard?.();
+      return assertionResult(existing.batch, existing.assertions, true);
+    }
     const normalized = normalizeAssertionBatchLenient(batch);
     const prior = new Map(
       this.allAssertions()
@@ -379,10 +401,13 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       return existingAssertion ? { ...existingAssertion, lastConfirmedAt: batch.generatedAt } : assertion;
     });
     this.assertionBatches.set(key, { batch: structuredClone(batch), assertions });
-    return assertionResult(batch, assertions, false, normalized.warnings);
+    const result = assertionResult(batch, assertions, false, normalized.warnings);
+    await writeFence?.authorityGuard?.();
+    return result;
   }
 
   async project(request: ContextGraphProjectionRequest): Promise<ContextGraph> {
+    await request.writeFence?.authorityGuard?.();
     this.assertRepositoryWritable(request.tenantId, request.repository);
     const snapshot = this.snapshots.get(snapshotKey(request.tenantId, request.repository, request.commitSha));
     if (!snapshot) throw new Error("cannot project an contextGraph before repository ingestion");
@@ -403,7 +428,8 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         })
     );
     const graph = createContextGraphProjection(snapshot, this.blobAnalyses, assertions, request);
-    await this.save(graph);
+    await this.save(graph, request.writeFence);
+    await request.writeFence?.authorityGuard?.();
     return graph;
   }
 
@@ -422,7 +448,8 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     actorId: string,
     command: ContextGraphCommand,
     now: string,
-    actorIsTenantAdmin = false
+    actorIsTenantAdmin = false,
+    mutationGuard?: (repository?: string) => Promise<void>
   ): Promise<ContextGraphCommandResult> {
     if (!actorId.startsWith("svc:") && !actorIsTenantAdmin) {
       const repository = "repository" in command ? command.repository : undefined;
@@ -432,6 +459,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         throw new DomainError("contextGraph command access denied", "forbidden");
       }
     }
+    await mutationGuard?.("repository" in command ? command.repository : undefined);
     const affectedIds: string[] = [];
     if (command.type === "review_assertion") {
       if (command.decision === "reject" && (!command.reason || !command.rejectionCode)) {
@@ -440,6 +468,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       let found = false;
       const human = this.humanAssertions.get(command.assertionId);
       if (human?.tenantId === tenantId) {
+        await mutationGuard?.(human.repository);
         const allowed =
           command.decision === "accept"
             ? human.status === "proposed"
@@ -458,6 +487,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
           (assertion) => assertion.tenantId === tenantId && assertion.id === command.assertionId
         );
         if (!current) continue;
+        await mutationGuard?.(current.repository);
         const allowed =
           command.decision === "accept"
             ? current.status === "proposed"
@@ -489,6 +519,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       if (source.id === target.id || source.repository !== target.repository) {
         throw new DomainError("assertion relation endpoints are invalid", "conflict");
       }
+      await mutationGuard?.(source.repository);
       if (
         !this.sourceObservations.some(
           (observation) =>
@@ -549,6 +580,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
           observation.tenantId === tenantId && sourceObservationIdForRepository(observation) === command.observationId
       );
       if (index < 0) throw new DomainError("observation not found or already redacted", "not_found");
+      await mutationGuard?.(this.sourceObservations[index]!.repository);
       this.sourceObservations.splice(index, 1);
       this.rebuildSourceAssertions();
       for (const [key, stored] of this.assertionBatches) {
@@ -653,7 +685,14 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     };
   }
 
-  async drainDerivedProjectionEvents(): Promise<{
+  async drainDerivedProjectionEvents(
+    _tenantId?: string,
+    _now?: string,
+    _options?: {
+      readonly repositories?: readonly string[];
+      readonly authorityGuard?: (repository: string) => Promise<void>;
+    }
+  ): Promise<{
     readonly processedEventCount: number;
     readonly rebuiltRepositories: readonly string[];
   }> {
@@ -663,13 +702,26 @@ export class MemoryContextGraphStore implements ContextGraphStore {
   async operationalMetrics(
     tenantId: string,
     _now?: string,
-    scope?: { readonly repository: string; readonly ref?: string }
+    scope?: {
+      readonly repository?: string;
+      readonly repositories?: readonly string[];
+      readonly ref?: string;
+    }
   ): Promise<ContextGraphOperationalMetrics> {
+    const repositories = scope?.repositories
+      ? new Set(scope.repositories.map((repository) => repository.toLowerCase()))
+      : scope?.repository
+        ? new Set([scope.repository.toLowerCase()])
+        : undefined;
     const scopedSnapshots = [...this.snapshots.values()].filter(
       (snapshot) =>
         snapshot.tenantId === tenantId &&
-        (!scope || (snapshot.repository === scope.repository && (!scope.ref || snapshot.ref === scope.ref)))
+        (!repositories || repositories.has(snapshot.repository.toLowerCase())) &&
+        (!scope?.ref || snapshot.ref === scope.ref)
     );
+    const scopedRefCommits = scope?.ref
+      ? new Set(scopedSnapshots.map((snapshot) => `${snapshot.repository.toLowerCase()}:${snapshot.commitSha}`))
+      : undefined;
     return {
       outboxDepth: {},
       outboxDepthByConsumer: {},
@@ -685,10 +737,18 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       manifestStalenessSeconds: 0,
       searchStalenessSeconds: 0,
       proposedAssertionCount: this.allAssertions().filter(
-        (assertion) => assertion.tenantId === tenantId && assertion.status === "proposed"
+        (assertion) =>
+          assertion.tenantId === tenantId &&
+          (!repositories || repositories.has(assertion.repository.toLowerCase())) &&
+          (!scopedRefCommits || scopedRefCommits.has(`${assertion.repository.toLowerCase()}:${assertion.commitSha}`)) &&
+          assertion.status === "proposed"
       ).length,
       unexplainedAssertionCount: this.allAssertions().filter(
-        (assertion) => assertion.tenantId === tenantId && !assertion.explanation
+        (assertion) =>
+          assertion.tenantId === tenantId &&
+          (!repositories || repositories.has(assertion.repository.toLowerCase())) &&
+          (!scopedRefCommits || scopedRefCommits.has(`${assertion.repository.toLowerCase()}:${assertion.commitSha}`)) &&
+          !assertion.explanation
       ).length,
       pendingErasureEventCount: 0,
       retrievalTemplates: [],

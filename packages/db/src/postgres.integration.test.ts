@@ -201,10 +201,22 @@ test(
         snapshotFirst: true,
         createdAt: "2026-07-21T00:00:00.000Z"
       });
+      assert.equal(
+        await first.claim({
+          tenantId,
+          repositoryScopes: [{ tenantId, repository: `${repository}-revoked` }],
+          workerId: "revoked-worker",
+          topics: ["run-context-graph-ingest"],
+          now: "2026-07-21T00:00:30.000Z",
+          leaseExpiresAt: "2026-07-21T00:30:00.000Z"
+        }),
+        undefined
+      );
       const claims = await Promise.all(
         [first, second].map((coordinator, index) =>
           coordinator.claim({
             tenantId,
+            repositoryScopes: [{ tenantId, repository }],
             workerId: `worker-${index}`,
             topics: ["run-context-graph-ingest"],
             now: "2026-07-21T00:01:00.000Z",
@@ -2987,6 +2999,11 @@ test(
       assert.equal(scopedRepositoryMetrics.unparsedBlobCount, 0);
       assert.equal(scopedOtherMetrics.unparsedBlobCount, 1);
       assert.equal(scopedMissingRefMetrics.unparsedBlobCount, 0);
+      assert.equal(scopedOtherMetrics.parsedBlobCountLastHour, 0);
+      assert.equal(scopedOtherMetrics.proposedAssertionCount, 0);
+      assert.equal(scopedOtherMetrics.unexplainedAssertionCount, 0);
+      assert.deepEqual(scopedOtherMetrics.acceptanceRates, []);
+      assert.deepEqual(scopedOtherMetrics.retrievalTemplates, []);
       assert.equal(
         Object.values(scopedRepositoryMetrics.outboxDepth).reduce((sum, count) => sum + count, 0) >
           Object.values(scopedMissingRefMetrics.outboxDepth).reduce((sum, count) => sum + count, 0),

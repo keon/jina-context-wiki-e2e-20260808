@@ -10,6 +10,11 @@ export interface ResolveSharedRepositoryInput {
   readonly repository: string;
 }
 
+export interface ResolveSharedTenantRepositoriesInput {
+  readonly tenantId: string;
+  readonly repositories?: readonly string[];
+}
+
 export interface SharedRepositoryIdentity {
   readonly tenantId: string;
   readonly githubAccountId: string;
@@ -18,6 +23,22 @@ export interface SharedRepositoryIdentity {
   readonly githubRepositoryId?: string;
   readonly repository: string;
   readonly defaultBranch?: string;
+}
+
+export interface SharedTenantGithubConnection {
+  readonly installationId: string;
+  readonly login: string;
+  readonly type: string;
+  readonly repositoryCount: number;
+}
+
+export interface SharedTenantSummary {
+  readonly tenantId: string;
+  readonly name: string;
+  readonly kind: "personal" | "team";
+  readonly githubAccountLogin?: string;
+  readonly repositoryCount: number;
+  readonly githubConnections: readonly SharedTenantGithubConnection[];
 }
 
 export interface ResolveSharedTenantMemberInput {
@@ -52,36 +73,54 @@ interface SharedTenantMemberRow {
   readonly synced_at: Date | string;
 }
 
+interface SharedTenantSummaryRow {
+  readonly tenant_id: string;
+  readonly tenant_name: string;
+  readonly tenant_kind: string;
+  readonly github_account_login: string | null;
+  readonly github_installation_id: string | number | null;
+  readonly installation_login: string | null;
+  readonly installation_type: string | null;
+  readonly repository_count: string | number;
+}
+
 export interface SharedRepositoryIdentityQuery {
   readonly text: string;
   readonly values: readonly (string | null)[];
 }
 
+export interface SharedTenantRepositoriesQuery {
+  readonly text: string;
+  readonly values: readonly [string, readonly string[] | null];
+}
+
 const RESOLVE_REPOSITORY_SQL = `
   select
     t.id::text as tenant_id,
-    t.github_account_id::text as github_account_id,
-    t.github_account_login,
-    t.github_account_type,
+    i.github_account_id::text as github_account_id,
+    i.github_account_login,
+    i.github_account_type,
     r.github_repo_id::text as github_repository_id,
     r.owner as repository_owner,
     r.name as repository_name,
     r.default_branch
   from public.repositories r
   join public.tenants t on t.id = r.tenant_id
+  join public.installations i
+    on i.id = r.installation_id
+   and i.tenant_id = r.tenant_id
   where
     r.enabled = true
-    and exists (
-      select 1
-      from public.installations i
-      where i.tenant_id = r.tenant_id
-        and ($2::bigint is null or i.github_installation_id = $2::bigint)
-        and i.suspended_at is null
-    )
+    and t.merged_into_tenant_id is null
+    and i.suspended_at is null
+    and i.deleted_at is null
+    and $2::bigint is not null
+    and i.github_installation_id = $2::bigint
     and (
       ($1::bigint is not null and r.github_repo_id = $1::bigint)
       or (
-        lower(r.owner) = lower($3)
+        $1::bigint is null
+        and lower(r.owner) = lower($3)
         and lower(r.name) = lower($4)
       )
     )
@@ -101,19 +140,72 @@ const RESOLVE_TENANT_MEMBER_SQL = `
   join public.tenants t on t.id = tm.tenant_id
   where tm.tenant_id = $1::uuid
     and tm.github_user_id = $2::bigint
+    and t.merged_into_tenant_id is null
   limit 1`;
+
+const RESOLVE_TENANT_REPOSITORIES_SQL = `
+  select
+    r.owner as repository_owner,
+    r.name as repository_name
+  from public.repositories r
+  join public.tenants t on t.id = r.tenant_id
+  join public.installations i
+    on i.id = r.installation_id
+   and i.tenant_id = r.tenant_id
+  where r.tenant_id = $1::uuid
+    and r.enabled = true
+    and t.merged_into_tenant_id is null
+    and i.suspended_at is null
+    and i.deleted_at is null
+    and (
+      $2::text[] is null
+      or lower(r.owner) || '/' || lower(r.name) = any($2::text[])
+    )
+  order by lower(r.owner), lower(r.name)`;
 
 const LIST_ACTIVE_TENANT_IDS_SQL = `
   select distinct t.id::text as tenant_id
   from public.tenants t
-  join public.repositories r on r.tenant_id = t.id and r.enabled = true
-  where exists (
-    select 1
-    from public.installations i
-    where i.tenant_id = t.id
-      and i.suspended_at is null
-  )
+  join public.repositories r
+    on r.tenant_id = t.id
+   and r.enabled = true
+  join public.installations i
+    on i.id = r.installation_id
+   and i.tenant_id = r.tenant_id
+   and i.suspended_at is null
+   and i.deleted_at is null
+  where t.merged_into_tenant_id is null
   order by tenant_id`;
+
+const LIST_TENANTS_SQL = `
+  select
+    tenant.id::text as tenant_id,
+    coalesce(
+      nullif(btrim(tenant.name), ''),
+      nullif(btrim(tenant.github_account_login), ''),
+      tenant.id::text
+    ) as tenant_name,
+    coalesce(
+      tenant.kind,
+      case when lower(coalesce(tenant.github_account_type, '')) = 'user' then 'personal' else 'team' end
+    ) as tenant_kind,
+    tenant.github_account_login,
+    installation.github_installation_id,
+    installation.github_account_login as installation_login,
+    installation.github_account_type as installation_type,
+    count(repository.id) filter (where repository.enabled = true)::int as repository_count
+  from public.tenants tenant
+  left join public.installations installation
+    on installation.tenant_id = tenant.id
+   and installation.suspended_at is null
+   and installation.deleted_at is null
+  left join public.repositories repository
+    on repository.tenant_id = tenant.id
+   and repository.installation_id = installation.id
+  where tenant.merged_into_tenant_id is null
+  group by tenant.id, installation.id
+  order by lower(coalesce(tenant.name, tenant.github_account_login, tenant.id::text)),
+           installation.github_installation_id`;
 
 /**
  * Read-only access to identity and tenancy records owned by the original Jina
@@ -161,9 +253,26 @@ export class PostgresSharedIdentityStore {
     };
   }
 
+  async resolveTenantRepositories(input: ResolveSharedTenantRepositoriesInput): Promise<readonly string[]> {
+    const query = buildSharedTenantRepositoriesQuery(input);
+    const result = await this.pool.query<{ readonly repository_owner: string; readonly repository_name: string }>(
+      query.text,
+      [...query.values]
+    );
+    return result.rows.map(
+      (row) =>
+        `${requiredText(row.repository_owner, "repository_owner")}/${requiredText(row.repository_name, "repository_name")}`
+    );
+  }
+
   async listTenantIds(): Promise<readonly string[]> {
-    const result = await this.pool.query<{ readonly tenant_id: string }>(LIST_ACTIVE_TENANT_IDS_SQL);
+    const result = await this.pool.query<{ readonly tenant_id: string }>(buildSharedActiveTenantIdsQuery());
     return result.rows.map((row) => requiredText(row.tenant_id, "tenant_id"));
+  }
+
+  async listTenants(): Promise<readonly SharedTenantSummary[]> {
+    const result = await this.pool.query<SharedTenantSummaryRow>(LIST_TENANTS_SQL);
+    return normalizeSharedTenantSummaryRows(result.rows);
   }
 
   async ping(): Promise<void> {
@@ -185,6 +294,27 @@ export function buildSharedRepositoryIdentityQuery(input: ResolveSharedRepositor
   };
 }
 
+export function buildSharedTenantRepositoriesQuery(
+  input: ResolveSharedTenantRepositoriesInput
+): SharedTenantRepositoriesQuery {
+  const tenantId = requiredText(input.tenantId, "tenantId");
+  const repositories = input.repositories
+    ? [
+        ...new Set(
+          input.repositories.map((repository) => {
+            const [owner, name] = splitRepository(repository);
+            return `${owner.toLowerCase()}/${name.toLowerCase()}`;
+          })
+        )
+      ].sort()
+    : null;
+  return { text: RESOLVE_TENANT_REPOSITORIES_SQL, values: [tenantId, repositories] };
+}
+
+export function buildSharedActiveTenantIdsQuery(): string {
+  return LIST_ACTIVE_TENANT_IDS_SQL;
+}
+
 export function normalizeSharedRepositoryIdentityRow(row: SharedRepositoryIdentityRow): SharedRepositoryIdentity {
   const owner = requiredText(row.repository_owner, "repository_owner");
   const name = requiredText(row.repository_name, "repository_name");
@@ -197,6 +327,49 @@ export function normalizeSharedRepositoryIdentityRow(row: SharedRepositoryIdenti
     repository: `${owner}/${name}`,
     defaultBranch: requiredText(row.default_branch, "default_branch")
   };
+}
+
+export function normalizeSharedTenantSummaryRows(
+  rows: readonly SharedTenantSummaryRow[]
+): readonly SharedTenantSummary[] {
+  const tenants = new Map<
+    string,
+    {
+      name: string;
+      kind: "personal" | "team";
+      githubAccountLogin?: string;
+      repositoryCount: number;
+      githubConnections: SharedTenantGithubConnection[];
+    }
+  >();
+  for (const row of rows) {
+    const tenantId = requiredText(row.tenant_id, "tenant_id");
+    const kind = requiredText(row.tenant_kind, "tenant_kind");
+    if (kind !== "personal" && kind !== "team") throw new TypeError("tenant_kind must be personal or team");
+    const current = tenants.get(tenantId) ?? {
+      name: requiredText(row.tenant_name, "tenant_name"),
+      kind,
+      ...(row.github_account_login
+        ? { githubAccountLogin: requiredText(row.github_account_login, "github_account_login") }
+        : {}),
+      repositoryCount: 0,
+      githubConnections: []
+    };
+    const repositoryCount = nonNegativeInteger(row.repository_count, "repository_count");
+    current.repositoryCount += repositoryCount;
+    if (row.github_installation_id !== null) {
+      current.githubConnections.push({
+        installationId: decimalId(row.github_installation_id, "github_installation_id"),
+        login: row.installation_login
+          ? requiredText(row.installation_login, "installation_login")
+          : `GitHub installation ${row.github_installation_id}`,
+        type: row.installation_type ? requiredText(row.installation_type, "installation_type") : "Organization",
+        repositoryCount
+      });
+    }
+    tenants.set(tenantId, current);
+  }
+  return [...tenants.entries()].map(([tenantId, tenant]) => ({ tenantId, ...tenant }));
 }
 
 function splitRepository(repository: string): readonly [string, string] {
@@ -223,6 +396,14 @@ function decimalId(value: string | number, field: string): string {
   const normalized = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : String(value).trim();
   if (!/^[1-9]\d*$/.test(normalized)) {
     throw new TypeError(`${field} must be a positive decimal identifier`);
+  }
+  return normalized;
+}
+
+function nonNegativeInteger(value: string | number, field: string): number {
+  const normalized = Number(value);
+  if (!Number.isSafeInteger(normalized) || normalized < 0) {
+    throw new TypeError(`${field} must be a non-negative safe integer`);
   }
   return normalized;
 }
