@@ -61,7 +61,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v21-source-owned-incidents-bounded-output/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v22-agent-consolidation/);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.nodes.maxItems, 128);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.maxItems, 256);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.items.properties.evidence.maxItems, 4);
@@ -70,9 +70,11 @@ test("assertion generation requires evidence-backed move continuity", () => {
     /explicitly states that a current File or Symbol moved or was renamed from a previous File or Symbol/
   );
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /emit current MOVED_FROM previous/);
+  assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /final synthesis pass/);
+  assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /exactly one edge per semantic identity/);
 });
 
-test("snapshot-first contextGraph builds publish and ingest history without waiting for assertions", async () => {
+test("snapshot-first contextGraph builds require history assertions before projection", async () => {
   const coordinator = new MemoryContextGraphPipelineCoordinator();
   const createdAt = "2026-07-21T00:00:00.000Z";
   await coordinator.createBuild({
@@ -127,23 +129,21 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
     { startedAt: "2026-07-21T00:01:00.000Z", completedAt: "2026-07-21T00:02:00.000Z", durationMs: 60_000 }
   );
   const ready = (await coordinator.list("tenant"))[0]!.stages.filter((stage) => stage.status === "queued");
-  assert.deepEqual(ready.map((stage) => `${stage.phase}:${stage.stage}`).sort(), [
-    "history:ingest",
-    "snapshot:project"
-  ]);
-  const projection = await claim("run-context-graph-project", "2026-07-21T00:03:00.000Z");
-  assert.equal(projection.task.metadata.pipelinePhase, "snapshot");
-  assert.equal(
-    await coordinator.complete({
-      tenantId: "tenant",
-      stageId: projection.task.id,
-      leaseId: projection.message.leaseId,
-      outcome: "done",
-      now: "2026-07-21T00:04:00.000Z"
-    }),
-    true
+  assert.deepEqual(
+    ready.map((stage) => `${stage.phase}:${stage.stage}`),
+    ["history:ingest"]
   );
-  const history = await claim("run-context-graph-ingest", "2026-07-21T00:05:00.000Z");
+  assert.equal(
+    await coordinator.claim({
+      tenantId: "tenant",
+      workerId: "worker",
+      topics: ["run-context-graph-project"],
+      now: "2026-07-21T00:03:00.000Z",
+      leaseExpiresAt: "2026-07-21T01:00:00.000Z"
+    }),
+    undefined
+  );
+  const history = await claim("run-context-graph-ingest", "2026-07-21T00:04:00.000Z");
   assert.equal(history.task.metadata.pipelinePhase, "history");
   assert.equal(
     await coordinator.complete({
@@ -151,14 +151,29 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
       stageId: history.task.id,
       leaseId: history.message.leaseId,
       outcome: "done",
-      now: "2026-07-21T00:06:00.000Z",
+      now: "2026-07-21T00:05:00.000Z",
       nextMetadata: metadata
     }),
     true
   );
-  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:07:00.000Z");
+  const assertion = await claim("run-context-graph-assert", "2026-07-21T00:06:00.000Z");
   assert.equal(assertion.task.metadata.pipelinePhase, "history");
   assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
+  assert.equal(
+    await coordinator.complete({
+      tenantId: "tenant",
+      stageId: assertion.task.id,
+      leaseId: assertion.message.leaseId,
+      outcome: "done",
+      now: "2026-07-21T00:07:00.000Z",
+      nextMetadata: { commitSha: metadata.commitSha, knowledgeCheckpoint: "knowledge" }
+    }),
+    true
+  );
+  const projection = await claim("run-context-graph-project", "2026-07-21T00:08:00.000Z");
+  assert.equal(projection.task.metadata.pipelinePhase, "history");
+  assert.equal(projection.task.metadata.commitSha, metadata.commitSha);
+  assert.equal(projection.task.metadata.knowledgeCheckpoint, "knowledge");
 });
 
 test("parser repair builds contain only a durable snapshot ingest stage", async () => {
@@ -232,9 +247,12 @@ test("required stage failure cancels siblings that were already queued", async (
 
   const workflow = (await coordinator.list("tenant"))[0]!;
   assert.equal(workflow.build.status, "failed");
-  assert.equal(
-    workflow.stages.find((stage) => stage.phase === "snapshot" && stage.stage === "project")?.status,
-    "canceled"
+  assert.deepEqual(
+    workflow.stages
+      .filter((stage) => stage.phase === "history" && (stage.stage === "assert" || stage.stage === "project"))
+      .map((stage) => `${stage.stage}:${stage.status}`)
+      .sort(),
+    ["assert:canceled", "project:canceled"]
   );
   assert.equal(
     workflow.stages.some((stage) => stage.status === "queued"),
@@ -989,7 +1007,7 @@ test("recognizes explicit problem evidence paths without matching incidental sub
     assert.equal(isProblemEvidencePath(path), false, path);
 });
 
-test("a new model contract confirms rather than overwrites a reviewed assertion", async () => {
+test("a new model contract confirms rather than overwrites an active assertion", async () => {
   const store = new MemoryContextGraphStore();
   const common = {
     tenantId: "tenant",
@@ -1021,16 +1039,7 @@ test("a new model contract confirms rather than overwrites a reviewed assertion"
   });
   const [proposal] = await store.listAssertions("tenant", "omxyz/demo");
   assert.ok(proposal);
-  await store.executeCommand(
-    "tenant",
-    "svc:reviewer",
-    {
-      type: "review_assertion",
-      assertionId: proposal.id,
-      decision: "accept"
-    },
-    "2026-07-20T00:00:30Z"
-  );
+  assert.equal(proposal.status, "active");
   await store.saveAssertionBatch({
     ...common,
     taskId: "v2",
@@ -1077,7 +1086,7 @@ test("memory operational metrics exclude assertions outside the requested ref", 
     repository: "omxyz/demo",
     ref: "release"
   });
-  assert.equal(unscoped.proposedAssertionCount, 1);
+  assert.equal(unscoped.proposedAssertionCount, 0);
   assert.equal(otherRef.proposedAssertionCount, 0);
   assert.equal(otherRef.unexplainedAssertionCount, 0);
 });
@@ -1116,7 +1125,7 @@ test("does not reuse a live model assertion across repositories in the same tena
   assert.equal((await store.listAssertions("shared-tenant", "org/two"))[0]?.repository, "org/two");
 });
 
-test("projects assertions with distinct qualifiers as distinct knowledge edges", async () => {
+test("consolidates causal prose variants into one semantic knowledge edge", async () => {
   const store = new MemoryContextGraphStore();
   const tenantId = "qualified-tenant";
   const repository = "org/qualified";
@@ -1147,7 +1156,7 @@ test("projects assertions with distinct qualifiers as distinct knowledge edges",
     model: "fixture",
     summary: "Two independently qualified causal claims",
     rawOutput: { summary: "fixture", nodes: [], edges: [] },
-    assertions: ["First mechanism", "Second mechanism"].map((reason) => ({
+    assertions: ["First mechanism", "Second mechanism"].map((reason, index) => ({
       subject: { kind: "Issue" as const, naturalKey: `github:issue:${repository}#1`, label: "Issue #1" },
       predicate: "INTRODUCED_BY",
       object: {
@@ -1155,24 +1164,16 @@ test("projects assertions with distinct qualifiers as distinct knowledge edges",
         naturalKey: `repo:${repository}:sha:${commitSha}`,
         label: commitSha.slice(0, 12)
       },
-      confidence: 0.9,
+      confidence: 0.9 + index * 0.05,
       explanation: reason,
-      evidence: ["docs/root-cause.md:1"],
+      evidence: [`docs/root-cause.md:${index + 1}`],
       qualifiers: { reason }
     }))
   });
-  for (const assertion of await store.listAssertions(tenantId, repository, { status: "proposed" })) {
-    await store.executeCommand(
-      tenantId,
-      "svc:test",
-      {
-        type: "review_assertion",
-        assertionId: assertion.id,
-        decision: "accept"
-      },
-      "2026-07-21T00:02:00.000Z"
-    );
-  }
+  const [assertion] = await store.listAssertions(tenantId, repository);
+  assert.equal((await store.listAssertions(tenantId, repository)).length, 1);
+  assert.ok(Math.abs((assertion?.confidence ?? 0) - 0.95) < Number.EPSILON);
+  assert.deepEqual(assertion?.evidence, ["docs/root-cause.md:1", "docs/root-cause.md:2"]);
   const graph = await store.project({
     tenantId,
     repository,
@@ -1182,8 +1183,7 @@ test("projects assertions with distinct qualifiers as distinct knowledge edges",
     generatedAt: "2026-07-21T00:03:00.000Z"
   });
   const causes = graph.edges.filter((edge) => edge.predicate === "INTRODUCED_BY");
-  assert.equal(causes.length, 2);
-  assert.deepEqual(causes.map((edge) => edge.qualifiers?.reason).sort(), ["First mechanism", "Second mechanism"]);
+  assert.equal(causes.length, 1);
 });
 
 test("memory assertion dedup never reuses another tenant's assertion", async () => {
@@ -1228,14 +1228,14 @@ test("memory assertion dedup never reuses another tenant's assertion", async () 
   assert.notEqual(tenantA?.id, tenantB?.id);
 });
 
-test("registry validates endpoints and qualifier keys and keeps model inferences reviewable", () => {
+test("registry validates endpoints and qualifier keys while causal prose remains optional", () => {
   const ownership = predicateDefinition("owned-by");
   validatePredicateEndpoints(ownership, "File", "Team");
   validateQualifiers(ownership, { pattern: "src/**" });
   assert.equal(ownership.review, "manual");
   const causality = predicateDefinition("INTRODUCED_BY");
   validateQualifiers(causality, { reason: "the null branch bypassed authorization" });
-  assert.throws(() => validateQualifiers(causality), /requires a nonempty causal reason/);
+  validateQualifiers(causality);
   assert.throws(() => validateQualifiers(ownership, { branch: "main" }), /does not declare qualifier branch/);
   assert.throws(
     () => validatePredicateEndpoints(predicateDefinition("INCLUDES"), "Issue", "Commit"),
@@ -2253,7 +2253,7 @@ test("memory repository roles enforce administration boundaries and tombstones b
   await assert.rejects(store.executeCommand(tenantId, "svc:test", assignment, now), /repository is tombstoned/);
 });
 
-test("reviews and retrieves a derived issue through the generalized Issue assertion", async () => {
+test("retrieves an agent-derived issue without requiring human review", async () => {
   const store = new MemoryContextGraphStore();
   const repository = "org/repo";
   const observedAt = "2026-07-20T00:00:00.000Z";
@@ -2324,8 +2324,8 @@ test("reviews and retrieves a derived issue through the generalized Issue assert
     rawOutput,
     assertions: assertionsFromGeneratedContextGraph(rawOutput, repository, { sourcePullRequestNumbers: [42] })
   });
-  const proposal = (await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" }))[0];
-  assert.ok(proposal);
+  const assertion = (await store.listAssertions("t", repository, { status: "active", predicate: "RESOLVES" }))[0];
+  assert.ok(assertion);
   await store.planIngestion({
     tenantId: "t",
     repository,
@@ -2341,33 +2341,21 @@ test("reviews and retrieves a derived issue through the generalized Issue assert
       { path: "src/auth.ts", blobSha: "d".repeat(40), size: 20 }
     ]
   });
-  const proposedGraph = await store.project({
+  const activeGraph = await store.project({
     tenantId: "t",
     repository,
     ref: "main",
     commitSha: "a".repeat(40),
-    taskId: "virtual-proposed-project",
+    taskId: "virtual-active-project",
     generatedAt: "2026-07-20T00:02:40.000Z"
   });
   assert.equal(
-    proposedGraph.nodes.some((node) => node.kind === "Issue"),
+    activeGraph.nodes.some((node) => node.kind === "Issue"),
     true
   );
   assert.equal(
-    proposedGraph.edges.some(
-      (edge) => edge.predicate === "RESOLVES" && edge.qualifiers?.assertionStatus === "proposed"
-    ),
+    activeGraph.edges.some((edge) => edge.predicate === "RESOLVES" && edge.qualifiers?.assertionStatus === "active"),
     true
-  );
-  await store.executeCommand(
-    "t",
-    "svc:test",
-    {
-      type: "review_assertion",
-      assertionId: proposal.id,
-      decision: "accept"
-    },
-    "2026-07-20T00:03:00.000Z"
   );
   await store.project({
     tenantId: "t",
@@ -2499,19 +2487,8 @@ test("resolves derived issue descriptions by PR anchor when titles collide", asy
     rawOutput,
     assertions: assertionsFromGeneratedContextGraph(rawOutput, repository, { sourcePullRequestNumbers: [42, 43] })
   });
-  const resolutions = await store.listAssertions("t", repository, { status: "proposed", predicate: "RESOLVES" });
-  for (const [index, resolution] of resolutions.entries()) {
-    await store.executeCommand(
-      "t",
-      "svc:test",
-      {
-        type: "review_assertion",
-        assertionId: resolution.id,
-        decision: "accept"
-      },
-      `2026-07-20T00:02:0${index}.000Z`
-    );
-  }
+  const resolutions = await store.listAssertions("t", repository, { status: "active", predicate: "RESOLVES" });
+  assert.equal(resolutions.length, 2);
   await store.planIngestion({
     tenantId: "t",
     repository,
@@ -2891,7 +2868,7 @@ test("drops model duplicates of source-owned incident deployment history", () =>
   assert.deepEqual(assertions, []);
 });
 
-test("infers a reviewed Feature and answers from its projected relationships", async () => {
+test("infers an evidence-backed Feature and answers without required human review", async () => {
   const tenantId = "feature-tenant";
   const repository = "omxyz/feature-fixture";
   const commitSha = "f".repeat(40);
@@ -3040,20 +3017,8 @@ test("infers a reviewed Feature and answers from its projected relationships", a
     rawOutput,
     assertions: generatedAssertions
   });
-  const proposals = await store.listAssertions(tenantId, repository, { status: "proposed" });
-  assert.equal(proposals.length, 3);
-  for (const [index, proposal] of proposals.entries()) {
-    await store.executeCommand(
-      tenantId,
-      "svc:test",
-      {
-        type: "review_assertion",
-        assertionId: proposal.id,
-        decision: "accept"
-      },
-      `2026-07-20T00:02:0${index}.000Z`
-    );
-  }
+  const active = await store.listAssertions(tenantId, repository, { status: "active" });
+  assert.equal(active.filter((assertion) => assertion.generator.startsWith("model:")).length, 3);
   const graph = await store.project({
     tenantId,
     repository,
@@ -3348,7 +3313,8 @@ test("canonicalizes cited causal model assertions and rejects ambiguous entity i
   const [assertion] = assertionsFromGeneratedContextGraph(generated, "omxyz/demo");
   assert.equal(assertion?.subject.naturalKey, "github:issue:omxyz/demo#7");
   assert.equal(assertion?.object.naturalKey, `repo:omxyz/demo:sha:${sha}`);
-  assert.deepEqual(assertion?.qualifiers, { reason: "The commit bypassed the authorization guard." });
+  assert.equal(assertion?.explanation, "The commit bypassed the authorization guard.");
+  assert.equal(assertion?.qualifiers, undefined);
   assert.throws(
     () =>
       assertionsFromGeneratedContextGraph(
@@ -3647,9 +3613,8 @@ test("normalizes complete incident deployment history independently of model evi
     ]
   );
   assert.equal(
-    normalized.assertions.find((assertion) => assertion.predicate === "INTRODUCED_BY")?.qualifiers?.reason !==
-      undefined,
-    true
+    normalized.assertions.find((assertion) => assertion.predicate === "INTRODUCED_BY")?.qualifiers?.reason,
+    undefined
   );
 });
 
@@ -3739,6 +3704,58 @@ test("creates a stable graph and removes dangling edges", () => {
   assert.equal(graph.edges.length, 1);
   assert.equal(graph.edges[0]?.predicate, "CONTAINS");
   assert.match(graph.id, /^graph_/);
+});
+
+test("projection includes every ingested file and parsed symbol without arbitrary caps", async () => {
+  const store = new MemoryContextGraphStore();
+  const tenantId = "complete-projection-tenant";
+  const repository = "omxyz/complete-projection";
+  const commitSha = "a".repeat(40);
+  const files = Array.from({ length: 90 }, (_, fileIndex) => ({
+    path: `src/file-${fileIndex}.ts`,
+    blobSha: fileIndex.toString(16).padStart(40, "0"),
+    size: 100
+  }));
+  await store.planIngestion({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha,
+    treeSha: "b".repeat(40),
+    parents: [],
+    updateRef: true,
+    recordedAt: "2026-07-24T00:00:00.000Z",
+    taskId: "complete-ingest",
+    files
+  });
+  await store.applyBlobAnalyses(
+    { tenantId, repository, commitSha },
+    files.map((file, fileIndex) => ({
+      blobSha: file.blobSha,
+      parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
+      language: "typescript",
+      symbols: Array.from({ length: 3 }, (_, symbolIndex) => ({
+        moniker: `symbol-${fileIndex}-${symbolIndex}`,
+        name: `symbol${symbolIndex}`,
+        kind: "function",
+        signatureHash: `${fileIndex}-${symbolIndex}`.padEnd(64, "0"),
+        startLine: symbolIndex + 1,
+        endLine: symbolIndex + 1
+      })),
+      imports: [],
+      edges: []
+    }))
+  );
+  const graph = await store.project({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha,
+    taskId: "complete-project",
+    generatedAt: "2026-07-24T00:01:00.000Z"
+  });
+  assert.equal(graph.nodes.filter((node) => node.kind === "File").length, 90);
+  assert.equal(graph.nodes.filter((node) => node.kind === "Symbol").length, 270);
 });
 
 test("keeps graph generations immutable per task", () => {
@@ -4064,7 +4081,7 @@ test("requires a derived Issue proposal for an explicit untracked repair", () =>
   );
 });
 
-test("reuses parsed blobs and projects canonical code facts plus reviewable assertions", async () => {
+test("reuses parsed blobs and projects canonical code facts plus active agent assertions", async () => {
   const store = new MemoryContextGraphStore();
   const snapshot = {
     tenantId: "tenant",
@@ -4155,8 +4172,8 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
       }
     ]
   });
-  assert.equal(assertions.activeCount, 0);
-  assert.equal(assertions.proposedCount, 1);
+  assert.equal(assertions.activeCount, 1);
+  assert.equal(assertions.proposedCount, 0);
   assert.equal(
     (
       await store.hasAssertionGeneration(
@@ -4211,7 +4228,7 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
       (edge) =>
         edge.plane === "knowledge" &&
         edge.predicate === "DOCUMENTED_BY" &&
-        edge.qualifiers?.assertionStatus === "proposed"
+        edge.qualifiers?.assertionStatus === "active"
     ),
     true
   );
@@ -4265,9 +4282,9 @@ test("reuses parsed blobs and projects canonical code facts plus reviewable asse
     generatedAt: "2026-07-19T00:03:00.000Z"
   });
   assert.equal(
-    carried.edges.some((edge) => edge.predicate === "DOCUMENTED_BY" && edge.qualifiers?.assertionStatus === "proposed"),
+    carried.edges.some((edge) => edge.predicate === "DOCUMENTED_BY" && edge.qualifiers?.assertionStatus === "active"),
     true,
-    "current unreviewed model assertions remain visible as proposals"
+    "current evidence-backed model assertions remain active"
   );
 
   const changedReadme = {

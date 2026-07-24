@@ -4,9 +4,11 @@ import { test } from "node:test";
 import type { Sandbox } from "@daytona/sdk";
 import {
   buildFocusEvidenceBundle,
+  collectCodexHarnessTokenSecrets,
   codexCommand,
   contextGraphCheckout,
   contextGraphGitAuthEnv,
+  contextGraphModelEnvironment,
   executeAbortableSandboxCommand,
   findExistingCodex,
   isTransientModelExecutionFailure,
@@ -55,7 +57,51 @@ test("runs Codex through OpenRouter Responses with catalog-aware authentication"
   assert.match(command, /auth\.command=printenv/);
   assert.match(command, /OPENROUTER_API_KEY/);
   assert.match(command, /model_reasoning_effort='medium'/);
+  assert.match(command, /shell_environment_policy\.inherit=core/);
+  assert.match(command, /shell_environment_policy\.exclude=/);
+  assert.match(command, /- < '\/home\/daytona\/context-graph\/prompt\.txt'/);
+  assert.doesNotMatch(command, /\$\(cat/);
   assert.doesNotMatch(command, /chat\/completions/);
+});
+
+test("native OpenAI and Codex harness routes do not inherit OpenRouter configuration", () => {
+  const openai = codexCommand("/opt/codex", {
+    provider: "openai",
+    model: "gpt-5.6-luna"
+  });
+  const codex = codexCommand("/opt/codex", {
+    provider: "codex",
+    model: "gpt-5.6-sol"
+  });
+  assert.doesNotMatch(openai, /model_provider=openrouter|model_providers\.openrouter/);
+  assert.doesNotMatch(codex, /model_provider=openrouter|model_providers\.openrouter/);
+  assert.match(openai, /gpt-5\.6-luna/);
+  assert.match(codex, /gpt-5\.6-sol/);
+  assert.deepEqual(contextGraphModelEnvironment("openrouter", "or-key"), {
+    OPENROUTER_API_KEY: "or-key"
+  });
+  assert.deepEqual(contextGraphModelEnvironment("openai", "oa-key"), {
+    CODEX_API_KEY: "oa-key"
+  });
+  assert.deepEqual(contextGraphModelEnvironment("codex", "auth-json"), {
+    CODEX_HOME: "/home/daytona/context-graph/.codex"
+  });
+});
+
+test("extracts nested Codex account tokens for field-level error redaction", () => {
+  assert.deepEqual(
+    collectCodexHarnessTokenSecrets(
+      JSON.stringify({
+        tokens: {
+          access_token: "access-secret",
+          refresh_token: "refresh-secret",
+          nested: { id_token: "identity-secret" }
+        }
+      })
+    ).sort(),
+    ["access-secret", "identity-secret", "refresh-secret"]
+  );
+  assert.deepEqual(collectCodexHarnessTokenSecrets("not-json"), []);
 });
 
 test("uses a prebaked Codex binary when the sandbox image provides one", async () => {

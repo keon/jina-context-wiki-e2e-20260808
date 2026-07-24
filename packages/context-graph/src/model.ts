@@ -123,6 +123,16 @@ export interface ContextGraphExecutor {
 /** Ephemeral credentials supplied by the worker and never persisted in graph data or task metadata. */
 export interface ContextGraphExecutionCredentials {
   readonly githubToken: string;
+  readonly source: "managed" | "codex" | "byok";
+  readonly provider: "openrouter" | "openai" | "codex";
+  readonly model: string;
+  readonly apiKey?: string;
+  readonly codexHarnessAuth?: string;
+  /**
+   * Persists a token refresh performed by Codex before its ephemeral sandbox is
+   * deleted. The callback is transport-only and never enters graph data.
+   */
+  readonly refreshCodexHarnessAuth?: (authJson: string) => Promise<void>;
 }
 
 export function createContextGraph(input: {
@@ -761,7 +771,7 @@ function validateCausalEvidenceContents(generated: GeneratedContextGraph, files:
       const causeReference = commitSha ? `commit ${commitSha}` : `Deployment ${cause.label}`;
       throw new Error(`INTRODUCED_BY evidence must explicitly name ${rootReference} and ${causeReference}`);
     }
-    if (!edge.why) throw new Error("INTRODUCED_BY must include a causal explanation for human review");
+    if (!edge.why) throw new Error("INTRODUCED_BY must include a causal explanation");
   }
 }
 

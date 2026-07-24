@@ -29,7 +29,13 @@ Cloud Build runs entirely with user-specified Google service accounts. No Google
 
 ## Runtime configuration
 
-The API requires PostgreSQL plus `INTERNAL_API_TOKEN`, `GRAPH_API_TOKEN`, and the distinct read-only `JINA_GLOBAL_ADMIN_TOKEN`. Fixed mode requires `JINA_TENANT_ID`; shared mode requires it to be unset and resolves original tenant UUIDs from the database. Production sets `JINA_GITHUB_WEBHOOK_ENABLED=false` and omits `GITHUB_WEBHOOK_SECRET`; the original Jina service owns GitHub intake and submits tenant-scoped review graph builds. Local signed intake requires both the secret and an enabled switch.
+The API requires PostgreSQL plus `INTERNAL_API_TOKEN`, `GRAPH_API_TOKEN`, the distinct read-only
+`JINA_GLOBAL_ADMIN_TOKEN`, and `SECRETS_ENCRYPTION_KEY`. The encryption key must be one base64-encoded 32-byte value
+and is mounted from `jina-secrets-encryption-key`; it protects tenant Codex/BYOK envelopes. Fixed mode requires
+`JINA_TENANT_ID`; shared mode requires it to be unset and resolves original tenant UUIDs from the database.
+Production sets `JINA_GITHUB_WEBHOOK_ENABLED=false` and omits `GITHUB_WEBHOOK_SECRET`; the original Jina service owns
+GitHub intake and submits tenant-scoped review graph builds. Local signed intake requires both the secret and an
+enabled switch.
 
 Backend services remain in `jina-v2/us-central1`. The API attaches both Cloud
 SQL instances. Original identity tables and the lightweight v2 runtime/board
@@ -68,6 +74,11 @@ compare warm p50/p95/p99 latency, CPU, memory, instance count, and per-database
 connections. Min instances improves cold-start latency; it does not fix slow
 SQL or cross-region round trips.
 
+Cloud Run probes the API's database-aware `/health` route every 30 seconds and
+recycles an instance after three consecutive 10-second failures. This allows a
+warm instance with stale Cloud SQL sockets to recover after database
+maintenance while tolerating brief connection interruptions.
+
 See [Shared original Jina database](SHARED_TENANCY.md) for IAM, database grants, cutover checks, and rollback.
 
 The existing Cloud Run dashboard uses direct Cloud Run IAP. It forwards the verified user email and adds the service credential. Configure tenant administrators with `JINA_TENANT_ADMIN_PRINCIPALS`; other principals require repository ACL entries. Health and task-type definitions remain public; the disabled webhook route only acknowledges and discards deliveries. Tenant data does not become public.
@@ -91,6 +102,11 @@ The simulation graph integration uses `GRAPH_API_TOKEN` for graph routes and exa
 
 The integration maps each simulation UUID to `tenant:<uuid>` and replaces that principal's complete repository ACL through `POST /internal/graph/access/sync`; repository removal or App uninstall is therefore revoked on the next sync.
 
+Provision `jina-secrets-encryption-key` once from 32 random bytes, grant only the API runtime service account access,
+and keep the prior key available during any planned rotation. Changing the key without re-encrypting
+`jina_context_graph.execution_settings` makes existing integrations unreadable. Public settings responses return
+only configured booleans; reporting, query, and projection database roles cannot select the integration table.
+
 The context graph worker requires `GITHUB_APP_ID` and `GITHUB_APP_PRIVATE_KEY`. Store them as
 `jina-github-app-id` and `jina-github-app-private-key`; the deployment mounts both through Secret Manager. Each
 build's `githubInstallationId` is exchanged for a short-lived installation token used by REST ingestion, local git,
@@ -100,7 +116,7 @@ The GitHub App needs read access to Contents, Issues, Pull requests, Metadata, D
 v5.1 acceptance fixture requires Deployments access so its source-backed deployment identities can enter the graph.
 Other optional-source failures remain fail-closed only where the source is required by the requested contract.
 
-The production context graph uses the `jina-openrouter-api-key` secret with:
+The production context graph defaults to Jina-managed execution using the `jina-openrouter-api-key` secret with:
 
 ```text
 CONTEXT_GRAPH_MODEL=openai/gpt-5.6-luna
@@ -114,7 +130,21 @@ CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=200000
 
 The worker creates or reuses the immutable Daytona snapshot `jina-context-graph-codex-0-145-0`, which installs the pinned Codex binary once while building the snapshot rather than during each assertion task. `DAYTONA_SNAPSHOT` can override that snapshot name. Every assertion sandbox verifies that Codex 0.145.0 is present at `/home/daytona/context-graph/node_modules/.bin/codex` or on `PATH` and fails fast on version drift.
 
-The assertion worker runs Codex 0.145.0 inside the Daytona checkout and routes the pinned `openai/gpt-5.6-luna` model through OpenRouter's Responses API. This July 2026 model supports Codex's shell-tool envelope and is cheaper than `google/gemini-3.6-flash`; Gemini rejects that Codex request shape even though it accepts reasoning and structured output without tools. Codex obtains the key through command-backed authentication without persisting it, and `--output-schema` keeps graph assertions schema-constrained and bounded. Transient provider and sandbox failures retry once within the same checkout. Losing the durable task lease deletes the active Daytona sandbox, terminating the paid model run before another worker retries it. Host validation can trigger up to two complete repair generations with the default three-attempt setting.
+The `/models` page lets a tenant administrator change the assertion model and select Jina managed, Codex account
+auth, or tenant BYOK. The selection and model are snapshotted into each build, but no secret is stored in board
+metadata. The API decrypts the chosen credential only after the assertion stage is leased. A Codex account route is
+allowed only for a trusted private GitHub repository; a public repository falls through to BYOK and then managed.
+Codex account state is written outside the checkout with owner-only permissions and refreshed state is re-encrypted
+before sandbox deletion. OpenAI BYOK uses `CODEX_API_KEY` only on the `codex exec` process. Codex's shell environment
+policy excludes API keys, token variables, and `CODEX_HOME` from model-proposed subprocesses.
+
+The assertion worker runs Codex 0.145.0 inside the Daytona checkout. Managed and OpenRouter BYOK use OpenRouter's
+Responses API; OpenAI BYOK and a connected Codex account use native Codex routes. `--output-schema` keeps graph
+assertions schema-constrained and bounded. Transient provider and sandbox failures retry once within the same
+checkout. Losing the durable task lease deletes the active Daytona sandbox, terminating the paid model run before
+another worker retries it. Host validation can trigger up to two complete repair generations with the default
+three-attempt setting. Model-output observations record the actual provider/credential class after fallback without
+recording a secret.
 
 Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew 30-minute leases. The API keeps one minimum instance and can scale to three by default; unlike workers it uses request-time CPU allocation. Projection drains are coalesced in-process and serialized per tenant with a PostgreSQL advisory lock, so additional API capacity does not duplicate projection work. The durable lease, not process identity, is the source of truth.
 

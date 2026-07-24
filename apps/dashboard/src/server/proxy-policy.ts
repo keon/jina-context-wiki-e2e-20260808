@@ -10,10 +10,14 @@ export function isAllowedDashboardApiRequest(
       pathname === "/api/overview" ||
       pathname === "/api/task-types" ||
       pathname === "/api/context-graph" ||
-      pathname === "/api/context-graph/assertions");
+      pathname === "/api/context-graph/assertions" ||
+      pathname === "/api/context-graph/execution-settings");
   const allowedLocalDemo = !hasInternalApiToken && method === "POST" && pathname === "/api/dev/webhooks/github";
   const allowedContextGraphQuery =
-    method === "POST" && (pathname === "/api/context-graph/ask" || pathname === "/api/context-graph/commands");
+    method === "POST" &&
+    (pathname === "/api/context-graph/ask" ||
+      pathname === "/api/context-graph/commands" ||
+      pathname === "/api/context-graph/execution-settings");
 
   return allowedRead || allowedLocalDemo || allowedContextGraphQuery;
 }

@@ -19,6 +19,7 @@ import { isContextGraphTrigger } from "@jina/github";
 import {
   createContextGraph,
   assertionsFromGeneratedContextGraph,
+  contextGraphAssertionModels,
   MemoryContextGraphPipelineCoordinator,
   MemoryContextGraphStore,
   ContextGraphProjectionDrainBusyError,
@@ -35,10 +36,17 @@ import {
   contextGraphTaskTypeDefinitions,
   contextGraphTaskTypeTriggers,
   parseGeneratedContextGraph,
+  publicContextGraphExecutionSettings,
+  normalizeContextGraphAssertionModel,
+  normalizeContextGraphExecutionProvider,
+  resolveContextGraphExecutionRoute,
+  scopedContextGraphGeneratorVersion,
+  DEFAULT_CONTEXT_GRAPH_ASSERTION_MODEL,
   type BlobAnalysis,
   type RepositorySourceObservation,
   type ContextGraphCommand,
   type ContextGraphAssertionBatch,
+  type ContextGraphExecutionSettingsRecord,
   type ContextGraphBuildRecord,
   type ContextGraphBuildStatus,
   type ContextGraphBuildTrigger,
@@ -81,14 +89,16 @@ import {
   isSnapshotExemptInternalRoute,
   metricsRoute
 } from "./route-policy.js";
+import { openSecret, sealSecret, secretAssociatedData } from "./secret-envelope.js";
 
 const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
 const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
-// Context graph writes for large repositories can hold the durable mutation transaction
-// for several minutes. Keep the lease comfortably beyond that transaction so the
-// owning worker is not fenced while its write is still committing.
-const WORKER_LEASE_MS = 30 * 60 * 1000;
+// Workers renew every minute while doing long writes. A five-minute lease still
+// tolerates transient API failures, but recovers a claim whose HTTP response was
+// lost without leaving the workflow stalled for half an hour.
+const WORKER_LEASE_MS = 5 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
+const HEALTH_CHECK_CACHE_MS = 25_000;
 const WORKER_TOPICS = [
   "run-review",
   "run-research",
@@ -120,6 +130,8 @@ export interface ApiServerConfig {
   readonly globalAdminToken?: string;
   /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
   readonly graphApiToken?: string;
+  /** Base64-encoded 32-byte AES-GCM key used for tenant model integrations. */
+  readonly secretsEncryptionKey?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   /** Browser origins allowed to call the MCP endpoint. Non-browser clients normally omit Origin. */
   readonly mcpAllowedOrigins?: readonly string[];
@@ -201,10 +213,36 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let nextParserRepairScanAt = 0;
   let parserRepairScan: Promise<number> | undefined;
   const ready = initializeState();
+  let healthCheck: Promise<void> | undefined;
   let mutations = Promise.resolve();
   let transactionActive = false;
   /** Version of the last snapshot restored via loadNewer; 0 = never restored. */
   let restoredVersion = 0;
+
+  async function checkHealth(): Promise<void> {
+    if (!healthCheck) {
+      const current = Promise.allSettled([
+        Promise.resolve().then(() => config.stateStore?.ping()),
+        Promise.resolve().then(() => contextGraphStore.ping()),
+        Promise.resolve().then(() => contextGraphCoordinator.ping()),
+        Promise.resolve().then(() => config.sharedIdentityResolver?.ping())
+      ]).then((results) => {
+        const failure = results.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") {
+          throw failure.reason instanceof Error ? failure.reason : new Error(String(failure.reason));
+        }
+      });
+      healthCheck = current;
+      const expire = () => {
+        const timer = setTimeout(() => {
+          if (healthCheck === current) healthCheck = undefined;
+        }, HEALTH_CHECK_CACHE_MS);
+        timer.unref();
+      };
+      current.then(expire, expire);
+    }
+    return healthCheck;
+  }
 
   function mutate<T>(operation: () => Promise<T>): Promise<T>;
   function mutate<T>(operation: () => Promise<T>, deliveryId: string): Promise<T | undefined>;
@@ -528,8 +566,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     requestId: string,
     requestLogger: Logger
   ): Promise<void> {
-    await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
+    // Liveness must remain reachable while fixed-tenant startup migrations are
+    // waiting on database locks. Application routes still wait for ready below.
+    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
+      await checkHealth();
+      json(response, 200, {
+        ok: true,
+        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
+        storage: config.stateStore ? "postgres" : "memory",
+        durableWorker: true
+      });
+      return;
+    }
+    await ready;
     // Published context graph generations and repository ACLs live in their own
     // relational store. Reads must never queue behind board/control-plane
     // mutations; they serve the last atomically published graph head.
@@ -546,20 +596,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "OPTIONS") {
       json(response, 204, {});
-      return;
-    }
-    if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await Promise.all([
-        config.stateStore?.ping(),
-        contextGraphCoordinator.ping(),
-        config.sharedIdentityResolver?.ping()
-      ]);
-      json(response, 200, {
-        ok: true,
-        githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,
-        storage: config.stateStore ? "postgres" : "memory",
-        durableWorker: true
-      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/task-types") {
@@ -796,6 +832,44 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       !normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))
     ) {
       json(response, 401, { error: "a bound principal is required" });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname === "/context-graph/execution-settings") {
+      json(response, 200, {
+        ...publicContextGraphExecutionSettings(
+          await contextGraphStore.executionSettings(tenantId),
+          defaultContextGraphAssertionModel()
+        ),
+        models: contextGraphAssertionModels
+      });
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/context-graph/execution-settings") {
+      if (!principal.forwarded) {
+        json(response, 401, { error: "a bound principal is required" });
+        return;
+      }
+      if (!isTenantAdmin(principal)) {
+        json(response, 403, { error: "tenant administrator access required" });
+        return;
+      }
+      const body = parseJsonObject(await readRawBody(request, 128 * 1024));
+      const current = await contextGraphStore.executionSettings(tenantId);
+      const expectedRevision = requiredNonNegativeInteger(body.revision, "revision");
+      if (expectedRevision !== (current?.revision ?? 0)) {
+        throw new ApiError(409, "settings_conflict", "execution settings changed; reload and try again");
+      }
+      const saved = await contextGraphStore.saveExecutionSettings(
+        updatedContextGraphExecutionSettings(tenantId, current, body),
+        expectedRevision
+      );
+      if (!saved) throw new ApiError(409, "settings_conflict", "execution settings changed; reload and try again");
+      json(response, 200, {
+        ...publicContextGraphExecutionSettings(saved, defaultContextGraphAssertionModel()),
+        models: contextGraphAssertionModels
+      });
       return;
     }
 
@@ -1263,6 +1337,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await loadContextGraphAssertionEvidence(request, response, tenantId);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/execution") {
+      await resolveContextGraphAssertionExecution(request, response, tenantId);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/execution/refresh") {
+      await refreshContextGraphAssertionExecution(request, response, tenantId);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
       await readRawBody(request);
       json(response, 200, await drainConnectedProjectionEvents(tenantId, nowIso()));
@@ -1346,6 +1428,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             snapshotFirst: true,
             createdAt: nowIso(),
             metadata: {
+              ...(await contextGraphExecutionProfileMetadata(tenantId)),
               githubDeliveryId: result.deliveryId,
               githubHeadSha: event.headSha,
               ...(identity
@@ -1523,7 +1606,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         requestKey,
         snapshotFirst: body.snapshotFirst !== false,
         createdAt: nowIso(),
-        metadata: { ...metadata, githubInstallationId }
+        metadata: {
+          ...metadata,
+          ...(await contextGraphExecutionProfileMetadata(tenantId)),
+          githubInstallationId
+        }
       },
       async () => requireConnectedInstallation(tenantId, repository, githubInstallationId)
     );
@@ -1684,6 +1771,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const now = nowIso();
     const repository = requiredString(task.metadata.repository, "task.repository");
     const ref = requiredString(task.metadata.ref, "task.ref");
+    requiredString(task.metadata.knowledgeCheckpoint, "task.knowledgeCheckpoint");
     const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
     // Drain and rebuild produce disposable, rebuildable read models, so a lease
     // lost mid-run cannot corrupt canonical state; the graph save below is the
@@ -1809,7 +1897,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       tenantId,
       requiredString(task.metadata.repository, "task.repository"),
       requiredGitSha(body.commitSha, "commitSha"),
-      CONTEXT_GRAPH_GENERATOR_VERSION,
+      contextGraphGeneratorVersionForMetadata(task.metadata),
       CONTEXT_GRAPH_REGISTRY_VERSION,
       requiredString(body.evidenceFingerprint, "evidenceFingerprint")
     );
@@ -1830,6 +1918,176 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       : [];
     const evidence = await contextGraphStore.loadAssertionEvidence(tenantId, repository, observationIds);
     json(response, 200, { evidence });
+  }
+
+  async function resolveContextGraphAssertionExecution(
+    request: IncomingMessage,
+    response: ServerResponse,
+    tenantId: string
+  ): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
+    if (Object.hasOwn(body, "allowCodex") && typeof body.allowCodex !== "boolean") {
+      throw invalidRequest("allowCodex must be a boolean");
+    }
+    const allowCodex = body.allowCodex !== false;
+    const stored = await contextGraphStore.executionSettings(tenantId);
+    const provider = normalizeContextGraphExecutionProvider(task.metadata.executionProvider ?? stored?.provider);
+    const assertionModel = normalizeContextGraphAssertionModel(
+      task.metadata.assertionModel ?? stored?.assertionModel,
+      defaultContextGraphAssertionModel()
+    );
+    const codexHarnessAuth =
+      provider === "codex" && allowCodex && stored?.codexHarnessAuth
+        ? openSecret(stored.codexHarnessAuth, secretAssociatedData(tenantId, "codex"), config.secretsEncryptionKey)
+        : undefined;
+    const canUseCodex = Boolean(codexHarnessAuth) && assertionModel.startsWith("openai/");
+    const needsByokFallback = provider === "byok" || (provider === "codex" && !canUseCodex);
+    const route = resolveContextGraphExecutionRoute({
+      provider,
+      assertionModel,
+      ...(needsByokFallback && stored?.openrouterApiKey
+        ? {
+            openrouterApiKey: openSecret(
+              stored.openrouterApiKey,
+              secretAssociatedData(tenantId, "openrouter"),
+              config.secretsEncryptionKey
+            )
+          }
+        : {}),
+      ...(needsByokFallback && stored?.openaiApiKey
+        ? {
+            openaiApiKey: openSecret(
+              stored.openaiApiKey,
+              secretAssociatedData(tenantId, "openai"),
+              config.secretsEncryptionKey
+            )
+          }
+        : {}),
+      ...(codexHarnessAuth ? { codexHarnessAuth } : {})
+    });
+    json(response, 200, route);
+  }
+
+  async function refreshContextGraphAssertionExecution(
+    request: IncomingMessage,
+    response: ServerResponse,
+    tenantId: string
+  ): Promise<void> {
+    const body = parseJsonObject(await readRawBody(request, 128 * 1024));
+    const taskId = requiredString(body.taskId, "taskId");
+    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
+    if (normalizeContextGraphExecutionProvider(task.metadata.executionProvider) !== "codex") {
+      throw new ApiError(409, "execution_route_changed", "the leased task did not select Codex");
+    }
+    const snapshotRevision = task.metadata.executionSettingsRevision;
+    if (typeof snapshotRevision !== "number" || !Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1) {
+      json(response, 200, { updated: false, reason: "settings_snapshot_missing" });
+      return;
+    }
+    const current = await contextGraphStore.executionSettings(tenantId);
+    if (!current || current.revision !== snapshotRevision || !current.codexHarnessAuth) {
+      // Never overwrite a user disconnect or a newer credential/model choice
+      // with state produced by an older in-flight sandbox.
+      json(response, 200, { updated: false, reason: "settings_changed" });
+      return;
+    }
+    const codexHarnessAuth = requiredString(body.codexHarnessAuth, "codexHarnessAuth");
+    const saved = await contextGraphStore.saveExecutionSettings(
+      updatedContextGraphExecutionSettings(tenantId, current, {
+        revision: snapshotRevision,
+        codexHarnessAuth
+      }),
+      snapshotRevision
+    );
+    if (!saved) {
+      json(response, 200, { updated: false, reason: "settings_changed" });
+      return;
+    }
+    json(response, 200, { updated: true, revision: saved.revision });
+  }
+
+  function updatedContextGraphExecutionSettings(
+    tenantId: string,
+    current: ContextGraphExecutionSettingsRecord | undefined,
+    body: Record<string, unknown>
+  ): Omit<ContextGraphExecutionSettingsRecord, "revision"> {
+    const allowed = new Set([
+      "revision",
+      "provider",
+      "assertionModel",
+      "openrouterApiKey",
+      "openaiApiKey",
+      "codexHarnessAuth"
+    ]);
+    for (const key of Object.keys(body)) {
+      if (!allowed.has(key)) throw invalidRequest(`unsupported execution settings field: ${key}`);
+    }
+    const provider = Object.hasOwn(body, "provider")
+      ? normalizeContextGraphExecutionProvider(body.provider)
+      : (current?.provider ?? "managed");
+    if (Object.hasOwn(body, "provider") && !["managed", "codex", "byok"].includes(String(body.provider))) {
+      throw invalidRequest("provider must be managed, codex, or byok");
+    }
+    const assertionModel = Object.hasOwn(body, "assertionModel")
+      ? requiredModelSlug(body.assertionModel)
+      : (current?.assertionModel ?? defaultContextGraphAssertionModel());
+    return {
+      tenantId,
+      provider,
+      assertionModel,
+      ...updatedEncryptedIntegration(current, body, tenantId, "openrouter", "openrouterApiKey"),
+      ...updatedEncryptedIntegration(current, body, tenantId, "openai", "openaiApiKey"),
+      ...updatedEncryptedIntegration(current, body, tenantId, "codex", "codexHarnessAuth"),
+      updatedAt: nowIso()
+    };
+  }
+
+  function updatedEncryptedIntegration(
+    current: ContextGraphExecutionSettingsRecord | undefined,
+    body: Record<string, unknown>,
+    tenantId: string,
+    integration: "openrouter" | "openai" | "codex",
+    field: "openrouterApiKey" | "openaiApiKey" | "codexHarnessAuth"
+  ): Partial<Pick<ContextGraphExecutionSettingsRecord, "openrouterApiKey" | "openaiApiKey" | "codexHarnessAuth">> {
+    const existing = current?.[field];
+    if (!Object.hasOwn(body, field)) return existing ? { [field]: existing } : {};
+    if (typeof body[field] !== "string") throw invalidRequest(`${field} must be a string`);
+    const value = body[field].trim();
+    if (!value) return {};
+    if (integration === "codex") validateCodexHarnessAuth(value);
+    else validateProviderApiKey(value, field);
+    try {
+      return {
+        [field]: sealSecret(value, secretAssociatedData(tenantId, integration), config.secretsEncryptionKey)
+      };
+    } catch (error) {
+      throw new ApiError(
+        503,
+        "secret_encryption_unavailable",
+        error instanceof Error ? error.message : "secret encryption is unavailable"
+      );
+    }
+  }
+
+  async function contextGraphExecutionProfileMetadata(tenantId: string): Promise<Readonly<Record<string, unknown>>> {
+    const status = publicContextGraphExecutionSettings(
+      await contextGraphStore.executionSettings(tenantId),
+      defaultContextGraphAssertionModel()
+    );
+    return {
+      executionProvider: status.provider,
+      assertionModel: status.assertionModel,
+      executionSettingsRevision: status.revision
+    };
+  }
+
+  function defaultContextGraphAssertionModel(): string {
+    return normalizeContextGraphAssertionModel(
+      process.env.CONTEXT_GRAPH_MODEL ?? process.env.CONTEXT_GRAPH_CODEX_MODEL,
+      DEFAULT_CONTEXT_GRAPH_ASSERTION_MODEL
+    );
   }
 
   async function requireLeasedContextGraphTask(
@@ -1995,18 +2253,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
     const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
     const contextGraphTopics = requestedTopics.filter(isContextGraphWorkerTopic);
-    const repositoryScopes = config.sharedIdentityResolver
-      ? (
-          await Promise.all(
-            tenantIds.map(async (tenantId) =>
-              (await config.sharedIdentityResolver!.resolveTenantRepositories({ tenantId })).map((repository) => ({
-                tenantId,
-                repository
-              }))
-            )
-          )
-        ).flat()
-      : undefined;
     if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
       const now = nowIso();
       const claimContextGraphWork = () =>
@@ -2014,18 +2260,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           {
             tenantId: tenantIds[0]!,
             ...(tenantIds.length > 1 ? { tenantIds } : {}),
-            ...(repositoryScopes ? { repositoryScopes } : {}),
             ...(claimId ? { claimId } : {}),
             workerId,
             topics: contextGraphTopics,
             now: nowIso(),
             leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
           },
-          config.sharedIdentityResolver ? requireStageRepositoryAuthority : undefined
+          undefined
         );
       let claimed = await claimContextGraphWork();
       if (!claimed && contextGraphTopics.includes("run-context-graph-ingest")) {
-        const queuedRepairs = await enqueueParserBacklogRepairs(tenantIds, repositoryScopes, now);
+        const queuedRepairs = await enqueueParserBacklogRepairs(tenantIds, undefined, now);
         if (queuedRepairs > 0) claimed = await claimContextGraphWork();
       }
       if (claimed) {
@@ -2054,6 +2299,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 204, {});
       return;
     }
+    // Legacy review tasks still use repository-scoped intake state. Resolve
+    // those scopes only when a non-contextGraph topic is actually requested;
+    // the durable ContextGraph claim transaction above must stay independent
+    // of slow GitHub identity enumeration.
+    const repositoryScopes = config.sharedIdentityResolver
+      ? (
+          await Promise.all(
+            tenantIds.map(async (tenantId) =>
+              (await config.sharedIdentityResolver!.resolveTenantRepositories({ tenantId })).map((repository) => ({
+                tenantId,
+                repository
+              }))
+            )
+          )
+        ).flat()
+      : undefined;
     const tenantIdSet = new Set(tenantIds);
     const repositoryScopeKeys = repositoryScopes
       ? new Set(repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
@@ -2373,7 +2634,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         tenantId,
         requiredString(stage.metadata.repository, "task.repository"),
         requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
-        CONTEXT_GRAPH_GENERATOR_VERSION,
+        contextGraphGeneratorVersionForMetadata(stage.metadata),
         CONTEXT_GRAPH_REGISTRY_VERSION,
         requiredString(stage.metadata.evidenceFingerprint, "task.evidenceFingerprint")
       );
@@ -2398,6 +2659,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha: headState.commitSha
       };
     } else {
+      requiredString(stage.metadata.knowledgeCheckpoint, "task.knowledgeCheckpoint");
       const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
       const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
         repositories: [stage.repository],
@@ -3530,11 +3792,17 @@ function parseContextGraphAssertionBatch(
     commitSha,
     taskId: task.id,
     generatedAt: requiredString(value.generatedAt, "assertionBatch.generatedAt"),
-    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+    generatorVersion: contextGraphGeneratorVersionForMetadata(task.metadata),
     registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
     evidenceFingerprint,
     evidenceObservationIds,
     model: requiredString(value.model, "assertionBatch.model"),
+    ...(value.modelProvider === "openrouter" || value.modelProvider === "openai" || value.modelProvider === "codex"
+      ? { modelProvider: value.modelProvider }
+      : {}),
+    ...(value.credentialSource === "managed" || value.credentialSource === "byok" || value.credentialSource === "codex"
+      ? { credentialSource: value.credentialSource }
+      : {}),
     ...(typeof value.sandboxId === "string" && value.sandboxId ? { sandboxId: value.sandboxId } : {}),
     summary: requiredString(value.summary, "assertionBatch.summary"),
     ...(value.modelOutputRaw !== undefined ? { modelOutputRaw: value.modelOutputRaw } : {}),
@@ -3544,6 +3812,14 @@ function parseContextGraphAssertionBatch(
       resolvedPullRequestNumbers
     })
   };
+}
+
+function contextGraphGeneratorVersionForMetadata(metadata: Readonly<Record<string, unknown>>): string {
+  return scopedContextGraphGeneratorVersion(
+    CONTEXT_GRAPH_GENERATOR_VERSION,
+    normalizeContextGraphExecutionProvider(metadata.executionProvider),
+    normalizeContextGraphAssertionModel(metadata.assertionModel, DEFAULT_CONTEXT_GRAPH_ASSERTION_MODEL)
+  );
 }
 
 function requiredRepositoryPath(value: unknown, field: string): string {
@@ -3728,6 +4004,47 @@ function requiredPositiveInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
     throw invalidRequest(`${field} must be a positive integer`);
   return value;
+}
+
+function requiredNonNegativeInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidRequest(`${field} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function requiredModelSlug(value: unknown): string {
+  const model = requiredString(value, "assertionModel");
+  if (model.length > 200 || !/^[a-z0-9][a-z0-9._:/-]*$/i.test(model)) {
+    throw invalidRequest("assertionModel must be a valid provider/model slug");
+  }
+  return model;
+}
+
+function validateProviderApiKey(value: string, field: string): void {
+  if (Buffer.byteLength(value, "utf8") > 4_096 || /[\r\n\0]/.test(value)) {
+    throw invalidRequest(`${field} is not a valid API key`);
+  }
+}
+
+function validateCodexHarnessAuth(value: string): void {
+  if (Buffer.byteLength(value, "utf8") > 64 * 1024) {
+    throw invalidRequest("codexHarnessAuth is not valid auth.json content");
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch {
+    throw invalidRequest("codexHarnessAuth is not valid auth.json content");
+  }
+  if (
+    !isRecord(parsed) ||
+    !isRecord(parsed.tokens) ||
+    typeof parsed.tokens.refresh_token !== "string" ||
+    !parsed.tokens.refresh_token.trim()
+  ) {
+    throw invalidRequest("codexHarnessAuth is not valid auth.json content");
+  }
 }
 
 function metadataGithubId(value: unknown): number | undefined {

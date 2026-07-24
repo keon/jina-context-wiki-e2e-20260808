@@ -32,6 +32,16 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
       end
       $$;
       create schema if not exists jina_context_graph;
+      create table if not exists jina_context_graph.execution_settings (
+        tenant_id text primary key,
+        provider text not null check (provider in ('managed','codex','byok')),
+        assertion_model text not null,
+        openrouter_api_key text,
+        openai_api_key text,
+        codex_harness_auth text,
+        revision bigint not null check (revision > 0),
+        updated_at timestamptz not null
+      );
       drop table if exists jina_context_graph.commit_files;
       drop table if exists jina_context_graph.model_outputs;
       drop table if exists jina_context_graph.issue_traces;

@@ -31,6 +31,7 @@ revoke execute on all functions in schema jina_context_graph from public;
 
 grant usage on schema jina_context_graph to jina_context_graph_reader,jina_context_graph_writer,${componentRoles.join(",")};
 grant select on all tables in schema jina_context_graph to jina_context_graph_reader;
+revoke all on jina_context_graph.execution_settings from jina_context_graph_reader;
 
 grant select,insert,update on jina_context_graph.observations,jina_context_graph.outbox to jina_context_graph_intake;
 
@@ -46,6 +47,7 @@ grant select,insert,update,delete on
   jina_context_graph.entities,jina_context_graph.identities,jina_context_graph.assertions,jina_context_graph.entity_redirects,
   jina_context_graph.audit_log,jina_context_graph.erasure_filters,jina_context_graph.repository_acl
   to jina_context_graph_knowledge;
+grant select,insert,update on jina_context_graph.execution_settings to jina_context_graph_knowledge;
 grant select,insert on jina_context_graph.assertion_relations to jina_context_graph_knowledge;
 grant select,insert,update on jina_context_graph.outbox to jina_context_graph_knowledge;
 
@@ -65,10 +67,12 @@ grant select,insert on jina_context_graph.audit_log to jina_context_graph_reconc
 grant select,insert,update on jina_context_graph.outbox to jina_context_graph_reconciliation;
 
 grant select on all tables in schema jina_context_graph to jina_context_graph_projection;
+revoke all on jina_context_graph.execution_settings from jina_context_graph_projection;
 grant insert,update,delete on jina_context_graph.graphs,jina_context_graph.graph_heads,jina_context_graph.nodes,jina_context_graph.edges to jina_context_graph_projection;
 grant update on jina_context_graph.outbox to jina_context_graph_projection;
 
 grant select on all tables in schema jina_context_graph to jina_context_graph_query;
+revoke all on jina_context_graph.execution_settings from jina_context_graph_query;
 grant insert,delete on jina_context_graph.retrieval_metrics to jina_context_graph_query;
 grant usage,select on sequence jina_context_graph.retrieval_metrics_id_seq to jina_context_graph_query;
 

@@ -25,7 +25,6 @@ import {
   type RequiredMoveAnchor
 } from "@jina/context-graph";
 
-const DEFAULT_OPENROUTER_MODEL = "openai/gpt-5.6-luna";
 const DEFAULT_IMAGE = "node:22-bookworm";
 const WORK_DIR = "/home/daytona/context-graph";
 const REPO_DIR = `${WORK_DIR}/repo`;
@@ -35,6 +34,8 @@ const CODEX_SNAPSHOT_NAME = "jina-context-graph-codex-0-145-0";
 const SCHEMA_PATH = `${WORK_DIR}/context-graph-schema.json`;
 const RESULT_PATH = `${WORK_DIR}/context-graph-result.json`;
 const PROMPT_PATH = `${WORK_DIR}/prompt.txt`;
+const CODEX_HOME = `${WORK_DIR}/.codex`;
+const CODEX_AUTH_PATH = `${CODEX_HOME}/auth.json`;
 const FULL_GIT_SHA = /^[a-f0-9]{40}$/i;
 
 export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
@@ -58,11 +59,19 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
   ): Promise<ContextGraph> {
     request.signal?.throwIfAborted();
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
-    const openrouterKey = requiredEnv("OPENROUTER_API_KEY");
     const cloneToken = credentials.githubToken.trim();
     if (!cloneToken) throw new Error("GitHub installation token is required for Daytona repository access");
-    const model = selectedModel();
-    const secrets = [daytonaApiKey, openrouterKey, cloneToken].filter((value): value is string => Boolean(value));
+    const model = credentials.model.trim();
+    if (!model) throw new Error("ContextGraph execution model is required");
+    const providerSecret =
+      credentials.provider === "codex" ? credentials.codexHarnessAuth?.trim() : credentials.apiKey?.trim();
+    if (!providerSecret) throw new Error(`${credentials.provider} execution credential is required`);
+    const secrets = [
+      daytonaApiKey,
+      providerSecret,
+      ...collectCodexHarnessTokenSecrets(credentials.codexHarnessAuth),
+      cloneToken
+    ].filter((value): value is string => Boolean(value));
 
     const daytona = new Daytona({ apiKey: daytonaApiKey });
     let sandbox: Sandbox | undefined;
@@ -87,6 +96,27 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
         await checkoutExpectedCommit(sandbox, checkout.expectedCommitSha, cloneToken);
       }
       const codexBinary = await prepareCodex(sandbox);
+      if (credentials.provider === "codex") {
+        const authDirectory = await sandbox.process.executeCommand(
+          `mkdir -p ${shellQuote(CODEX_HOME)} && chmod 700 ${shellQuote(CODEX_HOME)}`,
+          undefined,
+          undefined,
+          60
+        );
+        if (authDirectory.exitCode !== 0) {
+          throw new Error(`Daytona Codex auth setup failed: ${truncate(authDirectory.result)}`);
+        }
+        await sandbox.fs.uploadFile(Buffer.from(providerSecret), CODEX_AUTH_PATH, 120);
+        const authMode = await sandbox.process.executeCommand(
+          `chmod 600 ${shellQuote(CODEX_AUTH_PATH)}`,
+          undefined,
+          undefined,
+          60
+        );
+        if (authMode.exitCode !== 0) {
+          throw new Error(`Daytona Codex auth permissions failed: ${truncate(authMode.result)}`);
+        }
+      }
       const input = await prepareModelInput(sandbox, request);
       const basePrompt = `${systemPrompt}\n\n${input.prompt}`;
       await Promise.all([
@@ -114,9 +144,13 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
           try {
             run = await executeAbortableSandboxCommand(
               sandbox,
-              codexCommand(codexBinary, model),
+              codexCommand(codexBinary, {
+                provider: credentials.provider,
+                model,
+                reasoningEffort: process.env.CONTEXT_GRAPH_CODEX_EFFORT?.trim() || "medium"
+              }),
               REPO_DIR,
-              { OPENROUTER_API_KEY: openrouterKey },
+              contextGraphModelEnvironment(credentials.provider, providerSecret),
               positiveInt(
                 process.env.CONTEXT_GRAPH_MODEL_TIMEOUT_MS,
                 positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800) * 1_000
@@ -227,6 +261,12 @@ export class DaytonaCodexContextGraphExecutor implements ContextGraphExecutor {
           `Repository ref moved before checkout: expected ${checkout.expectedCommitSha}, got ${commitSha}`
         );
       }
+      if (credentials.provider === "codex" && credentials.refreshCodexHarnessAuth) {
+        const refreshedAuth = (await sandbox.fs.downloadFile(CODEX_AUTH_PATH, 120)).toString("utf8").trim();
+        if (refreshedAuth && refreshedAuth !== providerSecret) {
+          await credentials.refreshCodexHarnessAuth(refreshedAuth);
+        }
+      }
 
       return {
         ...createContextGraph({
@@ -293,12 +333,6 @@ function canonicalModelWorkItemId(kind: string, id: string): string {
 export function isTransientModelExecutionFailure(output: string): boolean {
   return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:408|409|429|500|502|503|504)|rate limit|fetch failed|network error|(?:daytona|sandbox).*(?:unavailable|failed|connection|timeout|timed out|gateway)|failed to .*sandbox)/i.test(
     output
-  );
-}
-
-function selectedModel(): string {
-  return (
-    process.env.CONTEXT_GRAPH_MODEL?.trim() || process.env.CONTEXT_GRAPH_CODEX_MODEL?.trim() || DEFAULT_OPENROUTER_MODEL
   );
 }
 
@@ -469,11 +503,22 @@ export async function executeAbortableSandboxCommand(
   }
 }
 
-export function codexCommand(codexBinary: string, model: string): string {
+export function codexCommand(
+  codexBinary: string,
+  execution:
+    | string
+    | {
+        readonly provider: "openrouter" | "openai" | "codex";
+        readonly model: string;
+        readonly reasoningEffort?: string;
+      }
+): string {
+  const resolved = typeof execution === "string" ? { provider: "openrouter" as const, model: execution } : execution;
   const contextWindow = positiveInt(process.env.CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS, 256_000);
   const compactLimit = Math.min(positiveInt(process.env.CONTEXT_GRAPH_CODEX_COMPACT_TOKENS, 200_000), contextWindow);
-  const reasoningEffort = process.env.CONTEXT_GRAPH_CODEX_EFFORT?.trim() || "medium";
-  return [
+  const reasoningEffort =
+    resolved.reasoningEffort?.trim() || process.env.CONTEXT_GRAPH_CODEX_EFFORT?.trim() || "medium";
+  const command = [
     shellQuote(codexBinary),
     "exec",
     "--json",
@@ -482,18 +527,70 @@ export function codexCommand(codexBinary: string, model: string): string {
     `-C ${shellQuote(REPO_DIR)}`,
     `--output-schema ${shellQuote(SCHEMA_PATH)}`,
     `--output-last-message ${shellQuote(RESULT_PATH)}`,
-    `-m ${shellQuote(model)}`,
-    "-c model_provider=openrouter",
-    "-c model_providers.openrouter.name=OpenRouter",
-    "-c model_providers.openrouter.base_url=https://openrouter.ai/api/v1",
-    "-c model_providers.openrouter.wire_api=responses",
-    "-c model_providers.openrouter.auth.command=printenv",
-    `-c ${shellQuote('model_providers.openrouter.auth.args=["OPENROUTER_API_KEY"]')}`,
+    `-m ${shellQuote(resolved.model)}`,
     `-c model_context_window=${contextWindow}`,
     `-c model_auto_compact_token_limit=${compactLimit}`,
     `-c model_reasoning_effort=${shellQuote(reasoningEffort)}`,
-    `"$(cat ${shellQuote(PROMPT_PATH)})"`
-  ].join(" ");
+    "-c shell_environment_policy.inherit=core",
+    "-c shell_environment_policy.ignore_default_excludes=false",
+    `-c ${shellQuote('shell_environment_policy.exclude=["CODEX_HOME","CODEX_API_KEY","OPENAI_API_KEY","OPENROUTER_API_KEY"]')}`,
+    `- < ${shellQuote(PROMPT_PATH)}`
+  ];
+  if (resolved.provider === "openrouter") {
+    command.splice(
+      9,
+      0,
+      "-c model_provider=openrouter",
+      "-c model_providers.openrouter.name=OpenRouter",
+      "-c model_providers.openrouter.base_url=https://openrouter.ai/api/v1",
+      "-c model_providers.openrouter.wire_api=responses",
+      "-c model_providers.openrouter.auth.command=printenv",
+      `-c ${shellQuote('model_providers.openrouter.auth.args=["OPENROUTER_API_KEY"]')}`
+    );
+  }
+  return command.join(" ");
+}
+
+export function contextGraphModelEnvironment(
+  provider: "openrouter" | "openai" | "codex",
+  secret: string
+): Record<string, string> {
+  if (provider === "openrouter") return { OPENROUTER_API_KEY: secret };
+  // CODEX_API_KEY is intentionally scoped to this one `codex exec` process.
+  // Repository-controlled subprocesses never inherit it from a job-level env.
+  if (provider === "openai") return { CODEX_API_KEY: secret };
+  return { CODEX_HOME };
+}
+
+/** Token-level redaction covers errors that contain one field, not the whole auth.json blob. */
+export function collectCodexHarnessTokenSecrets(authJson: string | undefined): string[] {
+  if (!authJson) return [];
+  try {
+    const parsed = JSON.parse(authJson) as unknown;
+    const found = new Set<string>();
+    const visit = (value: unknown): void => {
+      if (Array.isArray(value)) {
+        value.forEach(visit);
+        return;
+      }
+      if (!value || typeof value !== "object") return;
+      for (const [key, nested] of Object.entries(value as Record<string, unknown>)) {
+        if (
+          (key === "access_token" || key === "refresh_token" || key === "id_token") &&
+          typeof nested === "string" &&
+          nested
+        ) {
+          found.add(nested);
+        } else {
+          visit(nested);
+        }
+      }
+    };
+    visit(parsed);
+    return [...found];
+  } catch {
+    return [];
+  }
 }
 
 function sandboxResources(): Resources {

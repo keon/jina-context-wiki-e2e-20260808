@@ -30,6 +30,7 @@ The context graph is normalized under `jina_context_graph`:
 
 | Area               | Tables                                                                                         |
 | ------------------ | ---------------------------------------------------------------------------------------------- |
+| Execution control  | `execution_settings`                                                                           |
 | Source intake      | `observations`                                                                                 |
 | Repository history | `commits`, `trees`, `refs`, `commit_changes`                                                   |
 | Parsed code        | `blobs`, `blob_analyses`, `blob_symbols`, `blob_imports`, `symbol_edges`                       |
@@ -40,6 +41,12 @@ The context graph is normalized under `jina_context_graph`:
 `commits` records each immutable commit; `trees` stores the exact path/blob tree content-addressed by tree SHA; `commit_changes` records first-parent churn. `ref_manifest` is the disposable current-ref projection. Blob analysis is keyed by tenant, content hash, and parser version.
 
 Entities have stable natural keys. Identities and redirects reconcile provider identifiers without rewriting assertion history. Assertions retain status, confidence, typed qualifiers, checked evidence, an immutable explanation, generator/registry versions, validity, supersession, confirmation time, and audit provenance. Model facts begin as proposals; reviewed facts are projected only while their cited source paths still match canonical content.
+
+`execution_settings` stores one tenant-scoped assertion provider, model, optimistic revision, and optional encrypted
+OpenRouter, OpenAI, and Codex auth envelopes. Public APIs expose only connection booleans. Ciphertext is bound to the
+tenant and integration with AES-256-GCM associated data. General graph readers, projection roles, and query roles
+cannot select this table; only the knowledge-capability writer can read or update it. A model-output observation
+records the actual model provider and credential class after fallback, never the credential.
 
 Canonical outbox deliveries are consumer-owned so manifest, search, reconciliation, and graph consumers acknowledge their own work independently. Graphs are immutable and content-addressed; `graph_heads` selects the current generation per ref. Counterfactual retrieval changes no persisted state.
 

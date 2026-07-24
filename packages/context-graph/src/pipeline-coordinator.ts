@@ -743,12 +743,6 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     const stages = [...this.stages.values()].filter((candidate) => candidate.buildId === build.id);
     if (stages.some((stage) => contextGraphStageRequired(stage) && stage.status === "failed")) return "failed";
     if (stages.every((stage) => ["done", "failed", "canceled", "superseded"].includes(stage.status))) return "done";
-    if (
-      build.snapshotFirst &&
-      stages.some((stage) => stage.phase === "snapshot" && stage.stage === "project" && stage.status === "done")
-    ) {
-      return "enriching";
-    }
     return "in_progress";
   }
 }
@@ -833,11 +827,7 @@ function plannedStages(build: MutableBuild): MutableStage[] {
   );
 }
 
-/**
- * Snapshot-first builds publish a fast structural projection while history is
- * still loading. Semantic assertions belong to the history phase because they
- * require the complete work-item and causal evidence scope.
- */
+/** Snapshot-first builds ingest the head quickly, but publish only after history assertions complete. */
 export function contextGraphPlannedStageSpecs(
   snapshotFirst: boolean,
   repairOnly = false
@@ -850,7 +840,7 @@ export function contextGraphPlannedStageSpecs(
   if (repairOnly) return [{ phase: "snapshot", stage: "ingest", priority: 100, ordinal: 0 }];
   const phases = snapshotFirst
     ? [
-        { phase: "snapshot" as const, priority: 100, stages: ["ingest", "project"] as const },
+        { phase: "snapshot" as const, priority: 100, stages: ["ingest"] as const },
         { phase: "history" as const, priority: 10, stages: ["ingest", "assert", "project"] as const }
       ]
     : [{ phase: "history" as const, priority: 50, stages: ["ingest", "assert", "project"] as const }];
@@ -868,12 +858,13 @@ export function contextGraphStagePrerequisites(
   stage: Pick<ContextGraphStageRecord, "phase" | "stage">,
   snapshotFirst: boolean
 ): readonly Pick<ContextGraphStageRecord, "phase" | "stage">[] {
-  if (stage.stage !== "ingest") return [{ phase: stage.phase, stage: "ingest" }];
+  if (stage.stage === "project") return [{ phase: stage.phase, stage: "assert" }];
+  if (stage.stage === "assert") return [{ phase: stage.phase, stage: "ingest" }];
   return snapshotFirst && stage.phase === "history" ? [{ phase: "snapshot", stage: "ingest" }] : [];
 }
 
-export function contextGraphStageRequired(stage: Pick<ContextGraphStageRecord, "stage">): boolean {
-  return stage.stage !== "assert";
+export function contextGraphStageRequired(_stage: Pick<ContextGraphStageRecord, "stage">): boolean {
+  return true;
 }
 
 function validLease(stage: MutableStage | undefined, tenantId: string, leaseId: string, now: string): boolean {

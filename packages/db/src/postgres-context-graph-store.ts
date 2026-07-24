@@ -4,6 +4,7 @@ import {
   ContextGraphProjectionDrainBusyError,
   CONTEXT_GRAPH_REGISTRY_VERSION,
   assertionObservationId,
+  assertionIdentityQualifiers,
   canonicalJson,
   causalTraceItemsFromGraph,
   codeownersPatternMatches,
@@ -49,7 +50,9 @@ import {
   type ContextGraphSummaryFilter,
   type ContextGraphReadRevisionOptions
 } from "@jina/context-graph";
+import type { ContextGraphExecutionSettingsRecord } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { pingPostgresPool } from "./postgres-health.js";
 import { DomainError } from "@jina/shared-kernel";
 import { applySchema } from "./apply-schema.js";
 import { CONTEXT_GRAPH_SCHEMA_SQL } from "./context-graph-schema.js";
@@ -67,6 +70,34 @@ interface GraphRow {
   model: string;
   sandbox_id: string | null;
   summary: string;
+}
+
+interface ExecutionSettingsRow {
+  tenant_id: string;
+  provider: ContextGraphExecutionSettingsRecord["provider"];
+  assertion_model: string;
+  openrouter_api_key: string | null;
+  openai_api_key: string | null;
+  codex_harness_auth: string | null;
+  revision: string | number;
+  updated_at: Date;
+}
+
+function executionSettingsRecord(row: ExecutionSettingsRow): ContextGraphExecutionSettingsRecord {
+  const revision = Number(row.revision);
+  if (!Number.isSafeInteger(revision) || revision <= 0) {
+    throw new Error("invalid context graph execution settings revision");
+  }
+  return {
+    tenantId: row.tenant_id,
+    provider: row.provider,
+    assertionModel: row.assertion_model,
+    ...(row.openrouter_api_key ? { openrouterApiKey: row.openrouter_api_key } : {}),
+    ...(row.openai_api_key ? { openaiApiKey: row.openai_api_key } : {}),
+    ...(row.codex_harness_auth ? { codexHarnessAuth: row.codex_harness_auth } : {}),
+    revision,
+    updatedAt: row.updated_at.toISOString()
+  };
 }
 
 interface NodeRow {
@@ -117,7 +148,7 @@ const RESTORE_GITHUB_ENTITY_LABELS_SQL = `
 function assertionNaturalKey(
   assertion: Pick<StoredAssertion, "subject" | "predicate" | "object" | "qualifiers">
 ): string {
-  return `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
+  return `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
 }
 
 async function lockAssertionNaturalKey(
@@ -371,6 +402,12 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       application_name: "jina-context-graph-projection-lock",
       max: 1
     });
+    this.pool.on("error", (error) => {
+      console.error("context graph postgres idle connection error", error);
+    });
+    this.projectionLockPool.on("error", (error) => {
+      console.error("context graph projection-lock postgres idle connection error", error);
+    });
   }
 
   async save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void> {
@@ -421,6 +458,57 @@ export class PostgresContextGraphStore implements ContextGraphStore {
        where jina_context_graph.repository_acl.role is distinct from excluded.role`,
       [tenantId, principalId, repositories]
     );
+  }
+
+  async executionSettings(tenantId: string): Promise<ContextGraphExecutionSettingsRecord | undefined> {
+    await this.initialize();
+    const result = await this.pool.query<ExecutionSettingsRow>(
+      `select tenant_id,provider,assertion_model,openrouter_api_key,openai_api_key,codex_harness_auth,
+              revision,updated_at
+         from jina_context_graph.execution_settings where tenant_id=$1`,
+      [tenantId]
+    );
+    return result.rows[0] ? executionSettingsRecord(result.rows[0]) : undefined;
+  }
+
+  async saveExecutionSettings(
+    record: Omit<ContextGraphExecutionSettingsRecord, "revision">,
+    expectedRevision: number
+  ): Promise<ContextGraphExecutionSettingsRecord | undefined> {
+    await this.initialize();
+    const result = await this.pool.query<ExecutionSettingsRow>(
+      `insert into jina_context_graph.execution_settings
+         (tenant_id,provider,assertion_model,openrouter_api_key,openai_api_key,codex_harness_auth,revision,updated_at)
+       select $1,$2,$3,$4,$5,$6,1,$7
+       where $8::bigint=0
+          or exists (
+               select 1
+                 from jina_context_graph.execution_settings
+                where tenant_id=$1 and revision=$8::bigint
+             )
+       on conflict (tenant_id) do update
+         set provider=excluded.provider,
+             assertion_model=excluded.assertion_model,
+             openrouter_api_key=excluded.openrouter_api_key,
+             openai_api_key=excluded.openai_api_key,
+             codex_harness_auth=excluded.codex_harness_auth,
+             revision=jina_context_graph.execution_settings.revision+1,
+             updated_at=excluded.updated_at
+       where jina_context_graph.execution_settings.revision=$8::bigint
+       returning tenant_id,provider,assertion_model,openrouter_api_key,openai_api_key,codex_harness_auth,
+                 revision,updated_at`,
+      [
+        record.tenantId,
+        record.provider,
+        record.assertionModel,
+        record.openrouterApiKey ?? null,
+        record.openaiApiKey ?? null,
+        record.codexHarnessAuth ?? null,
+        record.updatedAt,
+        expectedRevision
+      ]
+    );
+    return result.rows[0] ? executionSettingsRecord(result.rows[0]) : undefined;
   }
 
   /** The durable graph generation currently published for a ref, if any. */
@@ -1447,7 +1535,10 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           const subjectId = entityIdFor(observation.tenantId, intent.subject.kind, intent.subject.key);
           const objectId = entityIdFor(observation.tenantId, intent.object.kind, intent.object.key);
           const qualifiers = intent.qualifiers ?? {};
-          const qualifiersHash = stableId("q", canonicalJson(qualifiers));
+          const qualifiersHash = stableId(
+            "q",
+            canonicalJson(assertionIdentityQualifiers(intent.predicate, qualifiers))
+          );
           const assertionId = stableId(
             "assertion",
             `${observation.tenantId}:${observation.repository}:${subjectId}:${intent.predicate}:${objectId}:${qualifiersHash}:${observationId}`
@@ -1853,7 +1944,10 @@ export class PostgresContextGraphStore implements ContextGraphStore {
             assertion,
             subjectId: entityIds.get(`${assertion.subject.kind}:${assertion.subject.naturalKey}`)!,
             objectId: entityIds.get(`${assertion.object.kind}:${assertion.object.naturalKey}`)!,
-            qualifiersHash: stableId("q", canonicalJson(assertion.qualifiers ?? {}))
+            qualifiersHash: stableId(
+              "q",
+              canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))
+            )
           }));
           // Advisory locks stay one query per assertion and are taken in batch order —
           // exactly the order the sequential loop used — so concurrent writers acquire
@@ -2032,7 +2126,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const [assertionRows, assertionFiles, redirectRows, entityRows] = await Promise.all([
       this.pool.query<StoredAssertionRow>(
         `select * from jina_context_graph.assertions
-       where tenant_id=$1 and repository=$2 and status in ('active','proposed') and object_id is not null
+       where tenant_id=$1 and repository=$2 and status='active' and object_id is not null
        order by recorded_at,id`,
         [request.tenantId, request.repository]
       ),
@@ -2517,7 +2611,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           now
         );
         const qualifiers = command.qualifiers ?? {};
-        const qualifiersHash = stableId("q", canonicalJson(qualifiers));
+        const qualifiersHash = stableId("q", canonicalJson(assertionIdentityQualifiers(definition.name, qualifiers)));
         const assertionId = stableId(
           "assertion",
           `${tenantId}:${repositoryScope}:${subjectId}:${definition.name}:${objectId}:${qualifiersHash}:${now}`
@@ -3705,6 +3799,17 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     }
   }
 
+  async ping(): Promise<void> {
+    // The projection pool has one client by design and may legitimately hold
+    // it for a multi-minute drain. Only probe it when doing so cannot queue
+    // health behind active projection work.
+    const projectionPoolIsAvailable = this.projectionLockPool.totalCount === 0 || this.projectionLockPool.idleCount > 0;
+    await Promise.all([
+      pingPostgresPool(this.pool),
+      projectionPoolIsAvailable ? pingPostgresPool(this.projectionLockPool) : undefined
+    ]);
+  }
+
   async close(): Promise<void> {
     await Promise.all([this.pool.end(), this.projectionLockPool.end()]);
   }
@@ -4174,7 +4279,7 @@ function applicableAssertions(
             return sourceBlob !== undefined && sourceBlob === currentMap.get(path);
           });
     if (!current) continue;
-    const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertion.qualifiers ?? {})}`;
+    const key = `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
     const prior = selected.get(key);
     if (!prior || prior.recordedAt < assertion.recordedAt) selected.set(key, assertion);
   }

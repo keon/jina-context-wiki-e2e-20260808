@@ -627,7 +627,7 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
   );
   assert.deepEqual(taskTypes.find((definition) => definition.type === "context_graph_project")?.dependsOn, [
     {
-      taskType: "context_graph_ingest",
+      taskType: "context_graph_assert",
       relationships: ["blocks"],
       workflows: ["context_graph_build"],
       required: true,
@@ -1016,7 +1016,7 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
     body: JSON.stringify({ workerId: "revoked-worker", topics: ["run-context-graph-ingest"] })
   });
-  assert.equal(revokedClaim.status, 204);
+  assert.equal(revokedClaim.status, 409);
   repositoryConnected = true;
   currentInstallationId = 100;
   const reconnectedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
@@ -1151,15 +1151,15 @@ test("branch pushes create and supersede the existing context graph workflow", a
 
   const first = await deliver(baseUrl, "push", "push-1", pushPayload("a".repeat(40)));
   assert.equal(first.status, 202);
-  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 6);
+  assert.equal(((await first.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 5);
   const repeatedHead = await deliver(baseUrl, "push", "push-2", pushPayload("a".repeat(40)));
   assert.equal(((await repeatedHead.json()) as { outcome: string }).outcome, "duplicate");
   const second = await deliver(baseUrl, "push", "push-3", pushPayload("b".repeat(40)));
-  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 6);
+  assert.equal(((await second.json()) as { createdTaskIds: string[] }).createdTaskIds.length, 5);
   const returned = await deliver(baseUrl, "push", "push-4", pushPayload("a".repeat(40)));
   assert.equal(
     ((await returned.json()) as { createdTaskIds: string[] }).createdTaskIds.length,
-    6,
+    5,
     "moving a branch back to an earlier SHA is a new ref transition, not a redelivery"
   );
 
@@ -1176,7 +1176,6 @@ test("branch pushes create and supersede the existing context graph workflow", a
     "context_graph_build",
     "context_graph_ingest",
     "context_graph_ingest",
-    "context_graph_project",
     "context_graph_project"
   ]);
   assert.equal(current.find((task) => task.type === "context_graph_ingest")?.status, "queued");
@@ -1200,7 +1199,7 @@ test("branch pushes create and supersede the existing context graph workflow", a
     (response) => response.json() as Promise<{ tasks: { metadata: Record<string, unknown> }[] }>
   );
   const retried = retriedBoard.tasks.filter((task) => task.metadata.requestKey === "operator-retry");
-  assert.equal(retried.length, 6);
+  assert.equal(retried.length, 5);
   assert.equal(
     retried.every((task) => task.metadata.githubInstallationId === 99),
     true,
@@ -1706,9 +1705,6 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
     });
     assert.equal(asserted.status, 200);
 
-    const snapshotProjection = await claimTopic(baseUrl, "run-context-graph-project");
-    assert.equal(snapshotProjection.task.metadata?.pipelinePhase, "snapshot");
-    assert.equal(await completeClaim(baseUrl, snapshotProjection, { projected: true }), 200);
     const historyProjection = await claimTopic(baseUrl, "run-context-graph-project");
     assert.equal(historyProjection.task.metadata?.pipelinePhase, "history");
     assert.equal(await completeClaim(baseUrl, historyProjection, { projected: true }), 200);
@@ -1811,12 +1807,12 @@ test("a new context graph attempt supersedes older active work for the same repo
     );
     const first = board.tasks.filter((task) => task.metadata.requestKey === "first");
     const second = board.tasks.filter((task) => task.metadata.requestKey === "second");
-    assert.equal(first.length, 6);
+    assert.equal(first.length, 5);
     assert.equal(
       first.every((task) => task.status === "superseded"),
       true
     );
-    assert.equal(second.length, 6, "an idempotent request key does not duplicate the attempt");
+    assert.equal(second.length, 5, "an idempotent request key does not duplicate the attempt");
     assert.equal(second.find((task) => task.type === "context_graph_ingest")?.status, "queued");
     assert.equal(
       "timing" in (second.find((task) => task.type === "context_graph_ingest")?.metadata ?? {}),
@@ -2533,6 +2529,136 @@ test("durable state survives an API server restart", async () => {
   }
 });
 
+test("health fails when the context graph read store is unavailable", async (context) => {
+  class UnhealthyContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      throw new Error("context graph store unavailable");
+    }
+  }
+
+  const server = createApiServer({ contextGraphStore: new UnhealthyContextGraphStore() });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const response = await fetch(`${baseUrl}/health`);
+  assert.equal(response.status, 500);
+});
+
+test("concurrent health requests share one dependency check", async (context) => {
+  let pingCount = 0;
+  let releasePing: (() => void) | undefined;
+  const pingBlocked = new Promise<void>((resolve) => {
+    releasePing = resolve;
+  });
+  class BlockingContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      pingCount += 1;
+      await pingBlocked;
+    }
+  }
+
+  const server = createApiServer({ contextGraphStore: new BlockingContextGraphStore() });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const first = fetch(`${baseUrl}/health`);
+  const second = fetch(`${baseUrl}/healthz`);
+  for (let attempt = 0; attempt < 20 && pingCount === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(pingCount, 1);
+  releasePing?.();
+  assert.deepEqual(
+    await Promise.all([first, second]).then((responses) => responses.map((response) => response.status)),
+    [200, 200]
+  );
+  assert.equal((await fetch(`${baseUrl}/health`)).status, 200);
+  assert.equal(pingCount, 1);
+});
+
+test("a fast health failure stays coalesced until slower dependency probes settle", async (context) => {
+  let failedPingCount = 0;
+  let blockedPingCount = 0;
+  let releaseBlockedPing: (() => void) | undefined;
+  const pingBlocked = new Promise<void>((resolve) => {
+    releaseBlockedPing = resolve;
+  });
+  class FailingContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      failedPingCount += 1;
+      throw new Error("context graph store unavailable");
+    }
+  }
+  class BlockingContextGraphCoordinator extends MemoryContextGraphPipelineCoordinator {
+    override async ping(): Promise<void> {
+      blockedPingCount += 1;
+      await pingBlocked;
+    }
+  }
+
+  const server = createApiServer({
+    contextGraphStore: new FailingContextGraphStore(),
+    contextGraphCoordinator: new BlockingContextGraphCoordinator()
+  });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  let firstSettled = false;
+  const first = fetch(`${baseUrl}/health`).finally(() => {
+    firstSettled = true;
+  });
+  for (let attempt = 0; attempt < 20 && blockedPingCount === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(failedPingCount, 1);
+  assert.equal(blockedPingCount, 1);
+  assert.equal(firstSettled, false);
+
+  const second = fetch(`${baseUrl}/healthz`);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(failedPingCount, 1);
+  assert.equal(blockedPingCount, 1);
+
+  releaseBlockedPing?.();
+  assert.deepEqual(
+    await Promise.all([first, second]).then((responses) => responses.map((response) => response.status)),
+    [500, 500]
+  );
+});
+
+test("health remains available while fixed-tenant initialization is blocked", async (context) => {
+  let markMigrationStarted: (() => void) | undefined;
+  let releaseMigration: (() => void) | undefined;
+  const migrationStarted = new Promise<void>((resolve) => {
+    markMigrationStarted = resolve;
+  });
+  const migrationBlocked = new Promise<void>((resolve) => {
+    releaseMigration = resolve;
+  });
+  class MigratingContextGraphStore extends MemoryContextGraphStore {
+    override async migrateTenantAliases(): Promise<void> {
+      markMigrationStarted?.();
+      await migrationBlocked;
+    }
+  }
+
+  const server = createApiServer({
+    tenantId: TENANT,
+    tenantAliases: ["github:legacy"],
+    contextGraphStore: new MigratingContextGraphStore()
+  });
+  const baseUrl = await listen(server);
+  context.after(async () => {
+    releaseMigration?.();
+    await close(server);
+  });
+  await migrationStarted;
+
+  const response = await fetch(`${baseUrl}/health`, { signal: AbortSignal.timeout(500) });
+  assert.equal(response.status, 200);
+  releaseMigration?.();
+});
+
 test("context graph task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
@@ -2563,7 +2689,7 @@ test("context graph task-board state is independent of the legacy JSON board sna
           outbox: { id: string; status: string; topic: string }[];
         }>
     );
-    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 6);
+    assert.equal(board.tasks.filter((task) => task.metadata.repository === "omxyz/legacy").length, 5);
     assert.equal(
       board.outbox.some((message) => message.topic === "run-context-graph-ingest" && message.status === "pending"),
       true
@@ -2978,6 +3104,180 @@ test("dashboard context graph revalidation skips graph hydration and assertion r
     });
     assert.equal(revalidated.status, 304);
     assert.deepEqual(store.calls, { latest: 0, summaries: 0, assertions: 0, get: 0 });
+  } finally {
+    await close(server);
+  }
+});
+
+test("context graph model settings encrypt integrations, snapshot builds, and resolve leased assertions", async () => {
+  const tenantId = "model-settings-tenant";
+  const repository = "omxyz/model-settings";
+  const contextGraphStore = new MemoryContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  const encryptionKey = Buffer.alloc(32, 9).toString("base64");
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId,
+    contextGraphStore,
+    contextGraphCoordinator,
+    secretsEncryptionKey: encryptionKey
+  });
+  const baseUrl = await listen(server);
+  try {
+    const initial = await fetch(`${baseUrl}/context-graph/execution-settings`).then(
+      (response) => response.json() as Promise<Record<string, unknown>>
+    );
+    assert.equal(initial.provider, "managed");
+    assert.equal(initial.revision, 0);
+
+    const authJson = JSON.stringify({ tokens: { refresh_token: "codex-refresh-secret" } });
+    const savedResponse = await fetch(`${baseUrl}/context-graph/execution-settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 0,
+        provider: "codex",
+        assertionModel: "openai/gpt-5.6-sol",
+        codexHarnessAuth: authJson,
+        openrouterApiKey: "openrouter-secret"
+      })
+    });
+    assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+    const saved = (await savedResponse.json()) as Record<string, unknown>;
+    assert.equal(saved.provider, "codex");
+    assert.equal(saved.revision, 1);
+    assert.equal(JSON.stringify(saved).includes("secret"), false);
+    const stored = await contextGraphStore.executionSettings(tenantId);
+    assert.match(stored?.codexHarnessAuth ?? "", /^enc:v1:/);
+    assert.equal(stored?.codexHarnessAuth?.includes("codex-refresh-secret"), false);
+
+    const buildResponse = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository, ref: "main" })
+    });
+    assert.equal(buildResponse.status, 202, await buildResponse.clone().text());
+    const workflow = (await contextGraphCoordinator.list(tenantId, { repositories: [repository] }))[0];
+    assert.equal(workflow?.build.metadata.executionProvider, "codex");
+    assert.equal(workflow?.build.metadata.assertionModel, "openai/gpt-5.6-sol");
+    assert.equal(workflow?.build.metadata.executionSettingsRevision, 1);
+
+    const isolated = new MemoryContextGraphPipelineCoordinator();
+    await isolated.createBuild({
+      tenantId,
+      repository,
+      ref: "main",
+      requestKey: "credential-resolution",
+      snapshotFirst: false,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      metadata: {
+        executionProvider: "codex",
+        assertionModel: "openai/gpt-5.6-sol",
+        executionSettingsRevision: 1,
+        githubInstallationId: 1
+      }
+    });
+    const leaseNow = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const ingest = await isolated.claim({
+      tenantId,
+      workerId: "test",
+      topics: ["run-context-graph-ingest"],
+      now: leaseNow,
+      leaseExpiresAt
+    });
+    assert.ok(ingest);
+    await isolated.complete({
+      tenantId,
+      stageId: ingest.task.id,
+      leaseId: ingest.message.leaseId,
+      outcome: "done",
+      now: new Date(Date.now() + 1_000).toISOString(),
+      result: {},
+      nextMetadata: {
+        commitSha: "a".repeat(40),
+        evidenceFingerprint: "evidence",
+        sourceObservationIds: []
+      }
+    });
+    const assertion = await isolated.claim({
+      tenantId,
+      workerId: "test",
+      topics: ["run-context-graph-assert"],
+      now: new Date(Date.now() + 2_000).toISOString(),
+      leaseExpiresAt
+    });
+    assert.ok(assertion);
+
+    const resolverServer = createApiServer({
+      enableDevEndpoints: true,
+      tenantId,
+      contextGraphStore,
+      contextGraphCoordinator: isolated,
+      secretsEncryptionKey: encryptionKey
+    });
+    const resolverUrl = await listen(resolverServer);
+    try {
+      const resolutionResponse = await fetch(`${resolverUrl}/internal/context-graph/assertions/execution`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: assertion.task.id,
+          messageId: assertion.message.id,
+          leaseId: assertion.message.leaseId,
+          allowCodex: true
+        })
+      });
+      assert.equal(resolutionResponse.status, 200, await resolutionResponse.clone().text());
+      assert.deepEqual(await resolutionResponse.json(), {
+        selectedProvider: "codex",
+        source: "codex",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        codexHarnessAuth: authJson
+      });
+
+      const publicRepositoryResponse = await fetch(`${resolverUrl}/internal/context-graph/assertions/execution`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: assertion.task.id,
+          messageId: assertion.message.id,
+          leaseId: assertion.message.leaseId,
+          allowCodex: false
+        })
+      });
+      assert.equal(publicRepositoryResponse.status, 200, await publicRepositoryResponse.clone().text());
+      assert.deepEqual(await publicRepositoryResponse.json(), {
+        selectedProvider: "codex",
+        source: "byok",
+        provider: "openrouter",
+        model: "openai/gpt-5.6-sol",
+        apiKey: "openrouter-secret",
+        fallbackReason: "codex_not_connected"
+      });
+
+      const refreshedAuth = JSON.stringify({
+        tokens: { refresh_token: "rotated-refresh-secret", access_token: "rotated-access-secret" }
+      });
+      const refreshResponse = await fetch(`${resolverUrl}/internal/context-graph/assertions/execution/refresh`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: assertion.task.id,
+          messageId: assertion.message.id,
+          leaseId: assertion.message.leaseId,
+          codexHarnessAuth: refreshedAuth
+        })
+      });
+      assert.equal(refreshResponse.status, 200, await refreshResponse.clone().text());
+      assert.deepEqual(await refreshResponse.json(), { updated: true, revision: 2 });
+      const refreshedStored = await contextGraphStore.executionSettings(tenantId);
+      assert.match(refreshedStored?.codexHarnessAuth ?? "", /^enc:v1:/);
+      assert.equal(refreshedStored?.codexHarnessAuth?.includes("rotated"), false);
+    } finally {
+      await close(resolverServer);
+    }
   } finally {
     await close(server);
   }

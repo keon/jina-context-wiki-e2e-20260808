@@ -9,6 +9,7 @@ import {
 import { canonicalJson, type AssertionStatus } from "./knowledge.js";
 import type { RepositorySourceObservation } from "./normalizers.js";
 import {
+  assertionIdentityQualifiers,
   normalizePredicateName,
   predicateDefinition,
   validatePredicateEndpoints,
@@ -17,8 +18,8 @@ import {
 
 export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
 export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
-export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v21-source-owned-incidents-bounded-output";
-export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v3";
+export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v22-agent-consolidation";
+export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v4-complete-active";
 
 export interface RepositoryTreeEntry {
   readonly path: string;
@@ -212,6 +213,10 @@ export interface ContextGraphAssertionBatch {
   readonly evidenceFingerprint: string;
   readonly evidenceObservationIds: readonly string[];
   readonly model: string;
+  /** Provider that actually served the run after fallback resolution. */
+  readonly modelProvider?: "openrouter" | "openai" | "codex";
+  /** Credential class actually billed for the run after fallback resolution. */
+  readonly credentialSource?: "managed" | "codex" | "byok";
   readonly sandboxId?: string;
   readonly summary: string;
   /** Exact parsed model document before graph normalization. */
@@ -312,7 +317,7 @@ function normalizeAssertionBatch(batch: ContextGraphAssertionBatch): readonly St
     const explanation = requiredAssertionExplanation(predicate, assertion.explanation);
     if (assertion.evidence.length === 0) throw new Error(`${predicate} must include evidence`);
     const evidence = assertion.evidence.map((value) => parseEvidenceCitation(value).value);
-    const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}:${canonicalJson(assertion.qualifiers ?? {})}`;
+    const key = `${entityKey(assertion.subject)}:${predicate}:${entityKey(assertion.object)}:${canonicalJson(assertionIdentityQualifiers(predicate, assertion.qualifiers ?? {}))}`;
     if (seen.has(key)) throw new Error(`duplicate contextGraph assertion: ${key}`);
     seen.add(key);
     return {
@@ -327,7 +332,7 @@ function normalizeAssertionBatch(batch: ContextGraphAssertionBatch): readonly St
       tenantId: batch.tenantId,
       repository: batch.repository,
       commitSha: batch.commitSha,
-      status: "proposed",
+      status: "active",
       sourceObservationId: observationId,
       lastConfirmedAt: batch.generatedAt,
       generatorVersion: batch.generatorVersion,
@@ -343,17 +348,24 @@ export function normalizeAssertionBatchLenient(batch: ContextGraphAssertionBatch
 } {
   const assertions: StoredAssertion[] = [];
   const warnings: string[] = [];
-  const seen = new Set<string>();
+  const indexByKey = new Map<string, number>();
   for (const proposal of batch.assertions) {
     try {
       const normalized = normalizeAssertionBatch({ ...batch, assertions: [proposal] })[0];
       if (!normalized) continue;
-      const key = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}:${canonicalJson(normalized.qualifiers ?? {})}`;
-      if (seen.has(key)) {
-        warnings.push(`duplicate contextGraph assertion ignored: ${key}`);
+      const key = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}:${canonicalJson(assertionIdentityQualifiers(normalized.predicate, normalized.qualifiers ?? {}))}`;
+      const existingIndex = indexByKey.get(key);
+      if (existingIndex !== undefined) {
+        const existing = assertions[existingIndex]!;
+        assertions[existingIndex] = {
+          ...existing,
+          confidence: Math.max(existing.confidence, normalized.confidence),
+          evidence: [...new Set([...existing.evidence, ...normalized.evidence])]
+        };
+        warnings.push(`duplicate contextGraph assertion consolidated: ${key}`);
         continue;
       }
-      seen.add(key);
+      indexByKey.set(key, assertions.length);
       assertions.push(normalized);
     } catch (error) {
       warnings.push(error instanceof Error ? error.message : String(error));
@@ -556,8 +568,7 @@ export function assertionsFromGeneratedContextGraph(
       },
       confidence: edge.confidence ?? 0,
       explanation: requiredAssertionExplanation(edge.predicate, edge.why),
-      evidence: edge.evidence,
-      ...(edge.predicate === "INTRODUCED_BY" ? { qualifiers: { reason: requiredCausalReason(edge.why) } } : {})
+      evidence: edge.evidence
     };
     return [assertion];
   });
@@ -651,11 +662,6 @@ function canonicalWorkItemId(value: string, kind: "Issue" | "PullRequest"): stri
     throw new Error(`${kind} node id must be a positive GitHub number: ${value}`);
   }
   return match[1];
-}
-
-function requiredCausalReason(value: string | undefined): string {
-  if (!value?.trim()) throw new Error("INTRODUCED_BY must explain why the commit caused the issue");
-  return value.trim();
 }
 
 function requiredAssertionExplanation(predicate: string, value: string | undefined): string {
