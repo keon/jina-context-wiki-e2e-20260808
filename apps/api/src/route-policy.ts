@@ -12,6 +12,8 @@ const METRICS_ROUTES = new Set([
   "/mcp",
   "/board",
   "/events",
+  "/v1/graphs",
+  "/v1/graph/query",
   "/context-graph",
   "/context-graph/ask",
   "/context-graph/assertions",
@@ -42,6 +44,7 @@ const METRICS_ROUTES = new Set([
 ]);
 
 export function metricsRoute(pathname: string): string {
+  if (graphRouteId(pathname, "/v1/graphs/") !== undefined) return "/v1/graphs/:id";
   if (graphRouteId(pathname, "/context-graph/graphs/") !== undefined) return "/context-graph/graphs/:id";
   return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
 }
@@ -58,7 +61,12 @@ export function graphRouteId(pathname: string, prefix: string): string | undefin
 }
 
 export function isPublicGraphRoute(pathname: string): boolean {
-  return pathname === "/mcp";
+  return (
+    pathname === "/mcp" ||
+    pathname === "/v1/graphs" ||
+    pathname.startsWith("/v1/graphs/") ||
+    pathname === "/v1/graph/query"
+  );
 }
 
 export function isSnapshotExemptInternalRoute(method: string | undefined, pathname: string): boolean {

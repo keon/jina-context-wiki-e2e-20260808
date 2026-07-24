@@ -81,6 +81,7 @@ import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } 
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 import { handleGraphMcpRequest, publicGraphQueryResult } from "./mcp.js";
+import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publicGraphSummary } from "./graph-api.js";
 import {
   graphRouteId,
   isDirectContextGraphRead,
@@ -902,6 +903,73 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         },
         parsedBody
       );
+      return;
+    }
+
+    // Compatibility surface for the original Jina dashboard. These routes use
+    // the dedicated graph credential, require a bound tenant principal, and
+    // apply the same live repository ACL checks as the canonical graph API.
+    if (request.method === "GET" && url.pathname === "/v1/graphs") {
+      let allowedRepositories = await repositoriesForPrincipal(principal);
+      const requestedRepository = url.searchParams.get("repository")?.trim();
+      const canonicalRepository = requestedRepository
+        ? canonicalAllowedRepository(allowedRepositories, requestedRepository)
+        : undefined;
+      if (requestedRepository && !canonicalRepository) return json(response, 404, { error: "graph not found" });
+      const graphValues = await contextGraphStore.listSummaries(tenantId);
+      allowedRepositories = await repositoriesForPrincipal(principal);
+      const graphs = graphValues
+        .filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository))
+        .filter((graph) => !canonicalRepository || graph.repository.toLowerCase() === canonicalRepository.toLowerCase())
+        .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
+        .map(publicGraphSummary);
+      json(response, 200, { graphs });
+      return;
+    }
+
+    if (request.method === "GET" && url.pathname.startsWith("/v1/graphs/")) {
+      const graphId = graphRouteId(url.pathname, "/v1/graphs/");
+      if (graphId === undefined) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      const graph = await contextGraphStore.get(graphId, tenantId);
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      if (!graph || !repositoryIsAllowed(allowedRepositories, graph.repository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      json(response, 200, publicGraph(graph));
+      return;
+    }
+
+    if (request.method === "POST" && url.pathname === "/v1/graph/query") {
+      const readAccess = access("api");
+      const body = parseJsonObject(await readRawBody(request));
+      const graphId = requiredString(body.graphId, "graphId");
+      const query = requiredString(body.query, "query");
+      if (query.length > 4_000) throw new Error("query must not exceed 4000 characters");
+      const graph = await contextGraphStore.get(graphId, tenantId);
+      const allowedRepositories = await repositoriesForPrincipal(principal);
+      if (!graph || !repositoryIsAllowed(allowedRepositories, graph.repository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
+        tenantId,
+        access: readAccess,
+        allowedRepositories,
+        repository: graph.repository,
+        ref: graph.ref,
+        question: query
+      });
+      const currentRepositories = await repositoriesForPrincipal(principal);
+      if (!repositoryIsAllowed(currentRepositories, graph.repository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
+      logContextGraphRead(requestLogger, readAccess, tenantId, graph.repository, context.calls);
+      json(response, 200, publicRestGraphQueryResult(graph, publicGraphQueryResult(context)));
       return;
     }
 
@@ -2788,6 +2856,9 @@ function parseContextGraphBuildMetadata(value: unknown): Readonly<Record<string,
     "workspaceLabel",
     "githubAccountId",
     "githubAccountType",
+    "indexMode",
+    "senderGithubUserId",
+    "senderLogin",
     "historyLimit"
   ]);
   const metadata: Record<string, unknown> = {};
@@ -2808,7 +2879,7 @@ function parseContextGraphBuildMetadata(value: unknown): Readonly<Record<string,
 }
 
 function rejectRetiredContextGraphBuild(value: unknown): void {
-  if (isRecord(value) && typeof value.source === "string" && /^jina-v1(?:-|$)/i.test(value.source.trim())) {
+  if (isRecord(value) && typeof value.source === "string" && /^jina-v1-review(?:-|$)/i.test(value.source.trim())) {
     throw new ApiError(
       410,
       "retired_context_graph_intake",
