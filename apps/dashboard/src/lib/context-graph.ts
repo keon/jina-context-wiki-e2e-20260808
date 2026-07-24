@@ -430,11 +430,20 @@ export function contextMatchConfidence(
 }
 
 export function citationLabels(citations: readonly ContextCitation[] | undefined): string[] {
-  return (citations ?? []).map((citation) =>
-    citation.path
-      ? citation.path + (citation.startLine ? `:${citation.startLine}` : "")
-      : `${citation.kind}:${citation.id}`
-  );
+  return [
+    ...new Set(
+      (citations ?? []).map((citation) => {
+        if (citation.path) return citation.path + (citation.startLine ? `:${citation.startLine}` : "");
+        if (citation.commitSha) return `commit ${citation.commitSha.slice(0, 12)}`;
+        if (citation.kind === "assertion") return "Semantic assertion";
+        if (citation.kind === "observation") return "Repository observation";
+        if (citation.kind === "entity") return "Repository entity";
+        if (citation.kind === "commit_change") return "Commit change";
+        if (citation.kind === "code") return "Code evidence";
+        return "Cited evidence";
+      })
+    )
+  ];
 }
 
 export function contextPrimaryCitations(

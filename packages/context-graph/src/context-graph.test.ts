@@ -1266,6 +1266,7 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   ]);
   assert.deepEqual(classifyTemplates("What changed in PR #5?"), ["change"]);
   assert.deepEqual(classifyTemplates("Which PR explains why src/auth.ts exists?"), ["intent"]);
+  assert.deepEqual(classifyTemplates("What is this repository about?"), ["intent"]);
   assert.equal(
     extractIssueText("What caused “Administrators   cannot delete resources”?"),
     "Administrators cannot delete resources"
@@ -1462,6 +1463,15 @@ test("orchestrator composes only fixed cited retrieval templates", async () => {
   assert.deepEqual(paths, ["src/access-policy.ts"]);
   assert.equal(extractRepositoryPath("Who owns README.md?"), "README.md");
   assert.equal(extractRepositoryPath("Why does Dockerfile exist?"), "Dockerfile");
+
+  called.length = 0;
+  await orchestrator.answer({
+    tenantId: "t",
+    allowedRepositories: ["org/repo"],
+    repository: "org/repo",
+    question: "What is this repository about?"
+  });
+  assert.deepEqual(called, ["intent"]);
 });
 
 test("orchestrator produces a direct cited causal answer and withholds unreviewed causality", async () => {
@@ -3365,13 +3375,21 @@ test("requires explicit root-cause records to appear as causal assertions", () =
     [11]
   );
   assert.deepEqual(anchors, [
-    { issueId: "8", commitSha: sha, evidencePath: "docs/editor-root-cause.md", startLine: 1, endLine: 2 },
+    {
+      issueId: "8",
+      commitSha: sha,
+      evidencePath: "docs/editor-root-cause.md",
+      startLine: 1,
+      endLine: 2,
+      mechanism: `GitHub issue #8 was introduced by PR #7, merged as commit ${sha}. The change removed editor access.`
+    },
     {
       issueId: "derived:pr:11",
       commitSha: "b".repeat(40),
       evidencePath: "docs/audit-root-cause.md",
       startLine: 1,
-      endLine: 2
+      endLine: 2,
+      mechanism: `The regression was introduced by PR #10, merged as commit ${"b".repeat(40)}. No GitHub issue was opened.`
     }
   ]);
   assert.deepEqual(
@@ -3442,7 +3460,12 @@ test("validates an untracked causal issue through its explicit no-issue statemen
       commitSha: sha,
       evidencePath,
       startLine: 3,
-      endLine: 7
+      endLine: 7,
+      mechanism:
+        `The audit export regression was introduced by PR #10, merged as commit ${sha}. ` +
+        "That change reversed the sequence comparator and returned row 3 before row 1. " +
+        "This change restores the ascending comparator and its regression test. " +
+        "No GitHub issue was opened for this repair."
     }
   ]);
   const generated = parseGeneratedContextGraph({
@@ -3523,7 +3546,9 @@ test("materializes explicit causal contracts and drops malformed optional causal
       }
     ]
   });
-  const anchors = [{ issueId: "derived:pr:11", commitSha: sha, evidencePath, startLine: 1, endLine: 2 }] as const;
+  const anchors = [
+    { issueId: "derived:pr:11", commitSha: sha, evidencePath, startLine: 1, endLine: 2, mechanism: content }
+  ] as const;
 
   const materialized = materializeRequiredCausalAssertions(generated, anchors);
 
@@ -3532,6 +3557,10 @@ test("materializes explicit causal contracts and drops malformed optional causal
     materialized.edges.some(
       (edge) => edge.predicate === "INTRODUCED_BY" && edge.source === "derived:pr:11" && edge.target === sha
     )
+  );
+  assert.equal(
+    materialized.edges.find((edge) => edge.predicate === "INTRODUCED_BY" && edge.target === sha)?.why,
+    content
   );
   assert.ok(
     materialized.edges.some(
@@ -3706,7 +3735,7 @@ test("creates a stable graph and removes dangling edges", () => {
   assert.match(graph.id, /^graph_/);
 });
 
-test("projection includes every ingested file and parsed symbol without arbitrary caps", async () => {
+test("projection keeps exhaustive parser data canonical and materializes only semantic entities", async () => {
   const store = new MemoryContextGraphStore();
   const tenantId = "complete-projection-tenant";
   const repository = "omxyz/complete-projection";
@@ -3754,8 +3783,24 @@ test("projection includes every ingested file and parsed symbol without arbitrar
     taskId: "complete-project",
     generatedAt: "2026-07-24T00:01:00.000Z"
   });
-  assert.equal(graph.nodes.filter((node) => node.kind === "File").length, 90);
-  assert.equal(graph.nodes.filter((node) => node.kind === "Symbol").length, 270);
+  assert.equal(graph.nodes.length, 2);
+  assert.equal(graph.nodes.filter((node) => node.kind === "File").length, 1);
+  assert.equal(graph.edges.length, 1);
+  assert.match(graph.summary, /canonical snapshot retains 90 files and 270 parsed symbols/);
+  const structure = await store.retrieve({
+    tenantId,
+    allowedRepositories: [repository],
+    repository,
+    ref: "main",
+    template: "structure",
+    symbol: "symbol1",
+    limit: 200
+  });
+  assert.equal(structure.totalBeforeLimit, 90);
+  assert.equal(
+    structure.items.every((item) => item.kind === "symbol_definition"),
+    true
+  );
 });
 
 test("keeps graph generations immutable per task", () => {
@@ -4220,7 +4265,20 @@ test("reuses parsed blobs and projects canonical code facts plus active agent as
   });
   assert.equal(graph.generator.executor, "projection");
   assert.equal(
-    graph.nodes.some((node) => node.kind === "Symbol" && node.label === "main"),
+    graph.nodes.some((node) => node.kind === "Symbol"),
+    false
+  );
+  assert.equal(
+    (
+      await store.retrieve({
+        tenantId: snapshot.tenantId,
+        allowedRepositories: [snapshot.repository],
+        repository: snapshot.repository,
+        ref: snapshot.ref,
+        template: "structure",
+        symbol: "main"
+      })
+    ).items.some((item) => item.kind === "symbol_definition" && item.title.includes("main")),
     true
   );
   assert.equal(

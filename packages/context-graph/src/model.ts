@@ -400,6 +400,8 @@ export interface RequiredCausalAnchor {
   readonly evidencePath: string;
   readonly startLine: number;
   readonly endLine: number;
+  /** Exact repository-authored passage containing the causal mechanism. */
+  readonly mechanism: string;
 }
 
 export interface RequiredMoveAnchor {
@@ -442,7 +444,13 @@ export function requiredCausalAnchors(
         commitSha,
         evidencePath: file.path,
         startLine: Math.min(issueLine, shaLine),
-        endLine: Math.min(lines.length, Math.max(issueLine, shaLine + 2))
+        endLine: Math.min(lines.length, Math.max(issueLine, shaLine + 2)),
+        mechanism: lines
+          .slice(Math.min(issueLine, shaLine) - 1, Math.min(lines.length, Math.max(issueLine, shaLine + 2)))
+          .join(" ")
+          .replace(/\s+/g, " ")
+          .trim()
+          .slice(0, 1_000)
       });
     }
   }
@@ -662,7 +670,7 @@ export function materializeRequiredCausalAssertions(
       predicate: "INTRODUCED_BY",
       plane: "knowledge",
       confidence: 1,
-      why: `The cited root-cause record explicitly attributes Issue ${anchor.issueId} to commit ${anchor.commitSha}.`,
+      why: anchor.mechanism,
       evidence: [evidence]
     };
     if (existing === -1) edges.push(requiredEdge);

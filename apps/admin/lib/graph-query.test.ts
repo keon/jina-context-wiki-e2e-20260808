@@ -40,5 +40,6 @@ test("graphQueryMatches maps cited paths and relationships back to the graph", (
 
 test("graphCitationLabel prefers precise source locations", () => {
   assert.equal(graphCitationLabel({ path: "src/auth.ts", startLine: 4, endLine: 8 }), "src/auth.ts:4-8");
-  assert.equal(graphCitationLabel({ id: "entity:auth" }), "entity:auth");
+  assert.equal(graphCitationLabel({ kind: "entity", id: "entity:auth" }), "Repository entity");
+  assert.equal(graphCitationLabel({ kind: "assertion", id: "assertion:auth" }), "Semantic assertion");
 });

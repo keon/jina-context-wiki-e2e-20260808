@@ -1417,7 +1417,29 @@ test(
       assert.equal(assertedEdge.qualifiers?.assertionStatus, "active");
       assert.equal(
         graph.nodes.some((node) => node.kind === "Symbol"),
+        false,
+        "exhaustive parser symbols do not inflate the semantic projection"
+      );
+      assert.match(graph.summary, /canonical snapshot retains 2 files and 1 parsed symbol/);
+      await store.rebuildDerivedProjections(
+        snapshot.tenantId,
+        snapshot.repository,
+        snapshot.ref,
+        "2026-07-19T12:02:30.000Z",
         true
+      );
+      const structure = await store.retrieve({
+        tenantId: snapshot.tenantId,
+        allowedRepositories: [snapshot.repository],
+        repository: snapshot.repository,
+        ref: snapshot.ref,
+        template: "structure",
+        symbol: "main"
+      });
+      assert.equal(
+        structure.items.some((item) => item.kind === "symbol_definition" && item.title.includes("main")),
+        true,
+        "canonical parser symbols remain available through cited structural retrieval"
       );
     } finally {
       await store.close();
@@ -2992,6 +3014,14 @@ test(
         intent.items.some((item) => item.kind === "work_intent" && item.title.includes("Issue #7")),
         true
       );
+      const unrelatedIntent = await store.retrieve({
+        tenantId,
+        allowedRepositories,
+        repository,
+        template: "intent",
+        query: "quasarxylophone"
+      });
+      assert.equal(unrelatedIntent.items.length, 0, "intent fallback never ranks lexically unrelated repository rows");
       const issueTrace = await store.retrieve({
         tenantId,
         allowedRepositories,
@@ -3163,7 +3193,8 @@ test(
       );
       assert.equal(
         graph.edges.some((edge) => edge.predicate === "CALLS"),
-        true
+        false,
+        "canonical call edges stay out of the semantic projection"
       );
       assert.equal(
         graph.edges.some((edge) => edge.predicate === "DOCUMENTED_BY"),

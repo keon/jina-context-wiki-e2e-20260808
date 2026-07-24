@@ -1619,8 +1619,13 @@ export function createContextGraphProjection(
   const fallbackEvidence = `${files[0]!.path}:1`;
   const nodes = new Map<string, ContextGraphNode>();
   const edges: Omit<ContextGraphEdge, "id">[] = [];
-  const symbolByScopedName = new Map<string, string>();
-  const symbolsByName = new Map<string, string[]>();
+  const selectedPaths = new Set<string>();
+  const canonicalSymbolCount = files.reduce(
+    (count, file) =>
+      count +
+      (analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION))?.symbols.length ?? 0),
+    0
+  );
   nodes.set("repo", {
     id: "repo",
     kind: "Repository",
@@ -1628,103 +1633,22 @@ export function createContextGraphProjection(
     description: `Repository at ${snapshot.commitSha.slice(0, 12)}`,
     evidence: [fallbackEvidence]
   });
-  for (const file of files) {
-    const fileId = `file:${file.path}`;
-    nodes.set(fileId, {
-      id: fileId,
-      kind: isDocument(file.path) ? "Document" : "File",
-      label: file.path.split("/").at(-1) ?? file.path,
-      description: file.path,
-      path: file.path,
-      evidence: [`${file.path}:1`]
-    });
-    edges.push({ source: "repo", target: fileId, predicate: "CONTAINS", plane: "code", evidence: [`${file.path}:1`] });
-    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
-    for (const symbol of analysis?.symbols ?? []) {
-      const symbolId = `symbol:${file.path}:${symbol.moniker}`;
-      nodes.set(symbolId, {
-        id: symbolId,
-        kind: "Symbol",
-        label: symbol.name,
-        description: `${symbol.kind} in ${file.path}`,
-        path: file.path,
-        evidence: [`${file.path}:${symbol.startLine}-${symbol.endLine}`]
-      });
-      symbolByScopedName.set(`${file.path}:${symbol.name}`, symbolId);
-      symbolsByName.set(symbol.name, [...(symbolsByName.get(symbol.name) ?? []), symbolId]);
-      edges.push({
-        source: fileId,
-        target: symbolId,
-        predicate: "DECLARES",
-        plane: "code",
-        evidence: [`${file.path}:${symbol.startLine}`]
-      });
-    }
-  }
-  const projectedPaths = new Set(files.map((file) => file.path));
   const packageBySpecifier = new Map<string, string>();
   for (const assertion of assertions) {
-    if (assertion.object.kind !== "Package") continue;
-    const packageId = projectionEntityId(assertion.object);
-    ensureAssertionNode(nodes, packageId, assertion.object, projectionEvidence(assertion));
-    const naturalName = assertion.object.naturalKey.split(":").slice(2).join(":").toLowerCase();
-    packageBySpecifier.set(naturalName, packageId);
-    packageBySpecifier.set(assertion.object.label.toLowerCase(), packageId);
-  }
-  for (const file of files) {
-    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
-    for (const item of analysis?.imports ?? []) {
-      const targetPath = resolveImportPath(file.path, item.specifier, projectedPaths);
-      if (targetPath) {
-        edges.push({
-          source: `file:${file.path}`,
-          target: `file:${targetPath}`,
-          predicate: "IMPORTS",
-          plane: "code",
-          evidence: [`${file.path}:${item.line}`]
-        });
-      } else {
-        const packageId = packageBySpecifier.get(packageSpecifier(item.specifier));
-        if (packageId)
-          edges.push({
-            source: `file:${file.path}`,
-            target: packageId,
-            predicate: "IMPORTS",
-            plane: "code",
-            evidence: [`${file.path}:${item.line}`]
-          });
-      }
-    }
-    for (const item of analysis?.edges ?? []) {
-      if (item.kind === "imports") continue;
-      const fromName = item.fromMoniker.split(/[.#]/).filter(Boolean).at(-1) ?? item.fromMoniker;
-      const targetName = item.toMoniker.split(/[.(#]/).filter(Boolean).at(-1) ?? item.toMoniker;
-      const sourceId = item.fromMoniker.includes("<module>")
-        ? `file:${file.path}`
-        : (symbolByScopedName.get(`${file.path}:${fromName}`) ??
-          symbolsByName.get(fromName)?.[0] ??
-          `file:${file.path}`);
-      let targetId = symbolByScopedName.get(`${file.path}:${targetName}`) ?? symbolsByName.get(targetName)?.[0];
-      if (!targetId) {
-        targetId = `external:${stableId("moniker", item.toMoniker)}`;
-        nodes.set(targetId, {
-          id: targetId,
-          kind: "Symbol",
-          label: item.toMoniker,
-          description: "Unresolved external or cross-file moniker",
-          evidence: [`${file.path}:${item.startLine}-${item.endLine}`]
-        });
-      }
-      if (!targetId) continue;
-      edges.push({
-        source: sourceId,
-        target: targetId,
-        predicate: item.kind.toUpperCase(),
-        plane: "code",
-        evidence: [`${file.path}:${item.startLine}-${item.endLine}`]
-      });
+    for (const entity of [assertion.subject, assertion.object]) {
+      if (entity.kind === "File" || entity.kind === "Document") selectedPaths.add(entityPath(entity.naturalKey));
+      if (entity.kind !== "Package") continue;
+      const packageId = projectionEntityId(entity);
+      ensureAssertionNode(nodes, packageId, entity, projectionEvidence(assertion));
+      const naturalName = entity.naturalKey.split(":").slice(2).join(":").toLowerCase();
+      packageBySpecifier.set(naturalName, packageId);
+      packageBySpecifier.set(entity.label.toLowerCase(), packageId);
     }
   }
+  // The graph format intentionally requires one connected edge. Repositories
+  // with no active semantic assertions receive only their highest-priority
+  // entry document/file; exhaustive code data remains in the canonical plane.
+  if (assertions.length === 0) selectedPaths.add(files[0]!.path);
   for (const assertion of assertions) {
     const evidence = projectionEvidence(assertion);
     const source = projectionEntityId(assertion.subject);
@@ -1750,6 +1674,47 @@ export function createContextGraphProjection(
       evidence
     });
   }
+  const fileByPath = new Map(files.map((file) => [file.path, file]));
+  for (const path of [...selectedPaths].sort()) {
+    const file = fileByPath.get(path);
+    const fileId = `file:${path}`;
+    if (!nodes.has(fileId)) {
+      nodes.set(fileId, {
+        id: fileId,
+        kind: isDocument(path) ? "Document" : "File",
+        label: path.split("/").at(-1) ?? path,
+        description: path,
+        path,
+        evidence: [`${path}:1`]
+      });
+    }
+    const fileEvidence = nodes.get(fileId)?.evidence ?? [`${path}:1`];
+    edges.push({ source: "repo", target: fileId, predicate: "CONTAINS", plane: "code", evidence: fileEvidence });
+    if (!file) continue;
+    const analysis = analyses.get(blobKey(snapshot.tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION));
+    for (const item of analysis?.imports ?? []) {
+      const targetPath = resolveImportPath(file.path, item.specifier, selectedPaths);
+      if (targetPath) {
+        edges.push({
+          source: fileId,
+          target: `file:${targetPath}`,
+          predicate: "IMPORTS",
+          plane: "code",
+          evidence: [`${file.path}:${item.line}`]
+        });
+      } else {
+        const packageId = packageBySpecifier.get(packageSpecifier(item.specifier));
+        if (packageId)
+          edges.push({
+            source: fileId,
+            target: packageId,
+            predicate: "IMPORTS",
+            plane: "code",
+            evidence: [`${file.path}:${item.line}`]
+          });
+      }
+    }
+  }
   return createContextGraph({
     request: {
       tenantId: request.tenantId,
@@ -1764,7 +1729,7 @@ export function createContextGraphProjection(
     model: CONTEXT_GRAPH_PROJECTION_VERSION,
     contentAddressed: true,
     generated: {
-      summary: `Projected ${files.length} files, ${[...nodes.values()].filter((node) => node.kind === "Symbol").length} symbols, and ${assertions.length} semantic assertions (${assertions.filter((assertion) => assertion.status === "active").length} accepted, ${assertions.filter((assertion) => assertion.status === "proposed").length} proposed) from canonical ContextGraph data.`,
+      summary: `Projected ${assertions.length} active semantic assertion${assertions.length === 1 ? "" : "s"} across ${nodes.size} decision-relevant entit${nodes.size === 1 ? "y" : "ies"}. The canonical snapshot retains ${files.length} file${files.length === 1 ? "" : "s"} and ${canonicalSymbolCount} parsed symbol${canonicalSymbolCount === 1 ? "" : "s"} for cited retrieval.`,
       nodes: [...nodes.values()],
       edges
     }

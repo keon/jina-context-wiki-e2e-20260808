@@ -175,7 +175,11 @@ export function graphCitationLabel(citation: AdminGraphCitation): string {
       : "";
     return `${citation.path}${line}`;
   }
-  if (citation.id) return citation.id;
-  if (citation.commitSha) return citation.commitSha.slice(0, 12);
-  return citation.kind || "cited evidence";
+  if (citation.commitSha) return `commit ${citation.commitSha.slice(0, 12)}`;
+  if (citation.kind === "assertion") return "Semantic assertion";
+  if (citation.kind === "observation") return "Repository observation";
+  if (citation.kind === "entity") return "Repository entity";
+  if (citation.kind === "commit_change") return "Commit change";
+  if (citation.kind === "code") return "Code evidence";
+  return "Cited evidence";
 }

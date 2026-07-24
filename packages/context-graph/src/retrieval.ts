@@ -194,6 +194,18 @@ export class RepositoryContextOrchestrator {
     );
     const calls: RetrievalResult[] = [];
     for (const template of templates) {
+      if (template === "structure" && !symbol && !path) {
+        calls.push({
+          template,
+          repository: input.repository,
+          ref: input.ref ?? "main",
+          items: [],
+          truncated: false,
+          totalBeforeLimit: 0,
+          limit: perCallLimit
+        });
+        continue;
+      }
       calls.push(
         await this.executor.retrieve({
           ...input,
@@ -263,7 +275,7 @@ export function classifyTemplates(question: string): readonly RetrievalTemplateN
   if (/why|intent|issue|introduced|history|exist/.test(value)) selected.push("intent");
   if (/\b(?:who|owner|owners|owned|owns|maintain|maintainer|maintainers|worked|author|authors)\b/.test(value))
     selected.push("ownership");
-  return selected.length > 0 ? [...new Set(selected)] : ["structure", "intent"];
+  return selected.length > 0 ? [...new Set(selected)] : ["intent"];
 }
 
 export function extractPullRequestNumber(question: string): number | undefined {

@@ -122,9 +122,11 @@ Validated model assertions become active without a human waitpoint. Causality st
 ### Projection
 
 Projection is blocked on the durable knowledge checkpoint produced by the required assertion stage. It materializes
-the complete recorded tree and every parsed symbol; it does not truncate repositories to a file, symbol-per-file,
-or node cap. Large-repository scope is controlled during history and assertion evidence selection, not by silently
-discarding canonical code-plane data at projection time.
+the active semantic assertion network and the small structural closure needed to connect assertion-backed files and
+packages. It does not duplicate every parser symbol and relation into the interactive causal graph. The complete
+recorded tree, parsed symbols, imports, and symbol edges remain canonical and queryable through cited structural
+retrieval. This is a semantic boundary rather than an arbitrary first-N node cap: decision-relevant facts are
+projected, while exhaustive parser data stays in its purpose-built canonical tables.
 
 The canonical outbox fans one aggregate event into consumer-owned delivery rows for manifest, search, reconciliation, and graph work as applicable. Consumers use queue-claim semantics (`FOR UPDATE SKIP LOCKED`), and a consumer acknowledges only its own delivery after its projection succeeds. The project runner may host these consumers in one process. It then:
 

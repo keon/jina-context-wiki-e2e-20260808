@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   canonicalNodeContext,
+  citationLabels,
   commitShaForNode,
   contextGraphMatches,
   filterContextGraph,
@@ -108,6 +109,25 @@ test("contextGraphMatches honours evidence line ranges", () => {
   };
   assert.deepEqual(contextGraphMatches(state, overlapping), [{ kind: "node", id: "n1" }]);
   assert.deepEqual(contextGraphMatches(state, disjoint), []);
+});
+
+test("citationLabels never expose internal graph identifiers", () => {
+  assert.deepEqual(
+    citationLabels([
+      { kind: "entity", id: "entity_private" },
+      { kind: "assertion", id: "assertion_private" },
+      { kind: "observation", id: "observation_private" },
+      {
+        kind: "code",
+        id: "blob_private",
+        commitSha: "a".repeat(40),
+        path: "src/auth.ts",
+        startLine: 12,
+        endLine: 14
+      }
+    ]),
+    ["Repository entity", "Semantic assertion", "Repository observation", "src/auth.ts:12"]
+  );
 });
 
 test("isCausationQuestion detects causal phrasings", () => {

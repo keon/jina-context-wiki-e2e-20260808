@@ -5947,16 +5947,16 @@ async function retrieveIntent(pool: Pool, request: RetrievalRequest, limit: numb
       title: string;
       body: string;
       score: number;
-      embedding: number[] | null;
     }>(
-      `select source_id,source_kind,title,body,ts_rank(search_vector,plainto_tsquery('english',$3)) as score,embedding
-       from jina_context_graph.search_documents where tenant_id=$1 and repository=$2
+      `select source_id,source_kind,title,body,ts_rank(search_vector,plainto_tsquery('english',$3)) as score
+       from jina_context_graph.search_documents
+       where tenant_id=$1 and repository=$2
+         and search_vector @@ plainto_tsquery('english',$3)
        order by score desc,projected_at desc limit $4`,
       [request.tenantId, request.repository, query, Math.min(200, limit * 4)]
     );
-    const queryEmbedding = embeddingForText(query);
     const ranked = search.rows
-      .map((row) => ({ row, score: Number(row.score) + cosine(queryEmbedding, row.embedding ?? []) }))
+      .map((row) => ({ row, score: Number(row.score) }))
       .sort((a, b) => b.score - a.score)
       .slice(0, limit - items.length);
     items.push(
@@ -6102,20 +6102,4 @@ function embeddingForText(text: string, dimensions = 64): number[] {
   }
   const norm = Math.sqrt(vector.reduce((sum, value) => sum + value * value, 0)) || 1;
   return vector.map((value) => value / norm);
-}
-
-function cosine(left: readonly number[], right: readonly number[]): number {
-  const length = Math.min(left.length, right.length);
-  if (length === 0) return 0;
-  let product = 0;
-  let leftNorm = 0;
-  let rightNorm = 0;
-  for (let index = 0; index < length; index += 1) {
-    const a = left[index] ?? 0;
-    const b = right[index] ?? 0;
-    product += a * b;
-    leftNorm += a * a;
-    rightNorm += b * b;
-  }
-  return product / ((Math.sqrt(leftNorm) || 1) * (Math.sqrt(rightNorm) || 1));
 }

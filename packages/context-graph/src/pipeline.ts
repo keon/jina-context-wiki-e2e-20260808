@@ -19,7 +19,7 @@ import {
 export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
 export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
 export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v22-agent-consolidation";
-export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v4-complete-active";
+export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v5-semantic-active";
 
 export interface RepositoryTreeEntry {
   readonly path: string;
