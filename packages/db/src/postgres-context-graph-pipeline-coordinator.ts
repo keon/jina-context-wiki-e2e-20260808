@@ -942,7 +942,8 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     await this.pool.end();
   }
 
-  private initialize(): Promise<void> {
+  /** Explicit schema bootstrap for migrations; liveness intentionally bypasses it. */
+  initialize(): Promise<void> {
     this.initialized ??= this.manageSchema ? this.createSchema() : Promise.resolve();
     return this.initialized;
   }
