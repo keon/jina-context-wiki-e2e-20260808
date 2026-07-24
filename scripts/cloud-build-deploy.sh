@@ -172,6 +172,7 @@ gcloud run deploy jina-api \
   --cpu="${api_cpu}" \
   --memory="${api_memory}" \
   --timeout=900 \
+  --liveness-probe="initialDelaySeconds=30,timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/health,httpGet.port=8080" \
   --min-instances="${api_min_instances}" \
   --max-instances="${api_max_instances}" \
   --set-env-vars="${api_env_vars}" \
