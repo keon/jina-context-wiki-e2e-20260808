@@ -8,6 +8,7 @@ import {
   type ContextGraphPipelineBuildRequest,
   type ContextGraphPipelineCoordinator,
   type ContextGraphStageClaim,
+  type ContextGraphStageCompletionReceipt,
   type ContextGraphStageLease,
   type ContextGraphStageRecord,
   type ContextGraphTaskBoardEvent,
@@ -288,6 +289,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         readonly tenantId: string;
         readonly repository: string;
       }[];
+      readonly claimId?: string;
       readonly workerId: string;
       readonly topics: readonly ContextGraphWorkerTopic[];
       readonly now: string;
@@ -316,6 +318,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         readonly tenantId: string;
         readonly repository: string;
       }[];
+      readonly claimId?: string;
       readonly workerId: string;
       readonly topics: readonly ContextGraphWorkerTopic[];
       readonly now: string;
@@ -382,6 +385,43 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
           endedAt: input.now,
           durationMs: Math.max(0, Date.parse(input.now) - stage.started_at.getTime())
         });
+      }
+      if (input.claimId) {
+        const replayed = await client.query<StageRow>(
+          `select stage.* from jina_board.tasks stage
+           join jina_board.workflows build on build.id=stage.build_id
+           where stage.tenant_id=any($1::text[]) and stage.status='in_progress'
+             and stage.lease_id=$2 and stage.worker_id=$3 and stage.lease_expires_at>$4
+             and stage.topic=any($5::text[]) and build.status in ('queued','in_progress','enriching')
+             and (
+               $6::text[] is null
+               or exists (
+                 select 1
+                 from unnest($6::text[], $7::text[]) scope(tenant_id, repository)
+                 where scope.tenant_id=stage.tenant_id and lower(scope.repository)=lower(build.repository)
+               )
+             )
+           limit 1`,
+          [
+            tenantIds,
+            input.claimId,
+            input.workerId,
+            input.now,
+            input.topics,
+            repositoryScopeTenantIds,
+            repositoryScopeRepositories
+          ]
+        );
+        if (replayed.rows[0]) {
+          const row = replayed.rows[0];
+          await authorityGuard?.({
+            tenantId: row.tenant_id,
+            repository: row.repository,
+            metadata: row.metadata
+          });
+          await client.query("commit");
+          return claimRecord(row);
+        }
       }
       // Cheap probabilistic retention: roughly one in fifty claims prunes
       // month-old board events and terminal workflows. Deleting a workflow
@@ -455,7 +495,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
          set status='in_progress',attempt=attempt+1,lease_id=$2,worker_id=$3,
              lease_expires_at=$4,started_at=$5,completed_at=null,duration_ms=null,updated_at=$5
          where id=$1 returning *`,
-        [stage.id, randomUUID(), input.workerId, input.leaseExpiresAt, input.now]
+        [stage.id, input.claimId ?? randomUUID(), input.workerId, input.leaseExpiresAt, input.now]
       );
       const row = leased.rows[0]!;
       await insertBoardEvent(client, row.tenant_id, row.id, "task.transitioned", input.now, {
@@ -596,6 +636,34 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     return result.rows[0] ? leaseRecord(result.rows[0]) : undefined;
   }
 
+  async completionReceipt(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+  }): Promise<ContextGraphStageCompletionReceipt | undefined> {
+    await this.initialize();
+    const result = await this.pool.query<StageRow>(
+      `select * from jina_board.tasks
+       where id=$1 and tenant_id=$2 and status in ('done','failed')
+         and metadata->>'completionLeaseId'=$3`,
+      [input.stageId, input.tenantId, input.leaseId]
+    );
+    const row = result.rows[0];
+    if (!row || (row.status !== "done" && row.status !== "failed")) return undefined;
+    const storedResult = recordMetadata(row.metadata.result);
+    return {
+      stageId: row.id,
+      leaseId: input.leaseId,
+      tenantId: row.tenant_id,
+      repository: row.repository,
+      ref: row.ref_name,
+      topic: row.topic,
+      metadata: row.metadata,
+      outcome: row.status,
+      ...(storedResult ? { result: storedResult } : {})
+    };
+  }
+
   async complete(
     input: {
       readonly tenantId: string;
@@ -628,7 +696,9 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
       const metadata = {
         ...stage.metadata,
         ...(input.result ? { result: input.result } : {}),
-        ...(input.reason ? { reason: input.reason } : {})
+        ...(input.reason ? { reason: input.reason } : {}),
+        completionLeaseId: input.leaseId,
+        completionOutcome: input.outcome
       };
       await client.query(
         `update jina_board.tasks
@@ -1093,6 +1163,12 @@ function claimRecord(row: StageRow): ContextGraphStageClaim {
     },
     task: { id: row.id, type: `context_graph_${row.stage}`, status: "in_progress", metadata: row.metadata }
   };
+}
+
+function recordMetadata(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
 }
 
 async function insertBoardEvent(

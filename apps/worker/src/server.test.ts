@@ -5,6 +5,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
+import { retryAfterDelayMs } from "./internal-api-retry.js";
 import { byteBoundedJsonArrayBatches, serializedJsonBytes } from "./json-batches.js";
 
 test("blob analysis batches honor the complete serialized request budget", () => {
@@ -33,6 +34,14 @@ test("blob analysis batches honor the complete serialized request budget", () =>
   assert.equal(serializedJsonBytes(envelope(batches[0]!)) <= maximumBytes, true);
   assert.equal(serializedJsonBytes(envelope(batches[1]!)) <= maximumBytes, true);
   assert.equal(serializedJsonBytes(envelope(batches[2]!)) > maximumBytes, true);
+});
+
+test("internal API retries honor numeric and HTTP-date Retry-After values", () => {
+  const now = Date.parse("2026-07-24T04:00:00.000Z");
+  assert.equal(retryAfterDelayMs("1.5", 10_000, now), 1_500);
+  assert.equal(retryAfterDelayMs("Thu, 24 Jul 2026 04:00:05 GMT", 10_000, now), 5_000);
+  assert.equal(retryAfterDelayMs("Thu, 24 Jul 2026 04:01:00 GMT", 10_000, now), 10_000);
+  assert.equal(retryAfterDelayMs("not-a-date", 10_000, now), undefined);
 });
 
 test("known-head reconciliation includes linked, known-commit, and untracked repair pull requests", () => {

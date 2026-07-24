@@ -7,6 +7,8 @@ export interface PostgresSharedIdentityStoreConfig extends PoolConfig {
 export interface ResolveSharedRepositoryInput {
   readonly githubRepositoryId?: number;
   readonly githubInstallationId?: number;
+  /** Trusted tenant scope used to discover current installation provenance. */
+  readonly tenantId?: string;
   readonly repository: string;
 }
 
@@ -21,6 +23,7 @@ export interface SharedRepositoryIdentity {
   readonly githubAccountLogin: string;
   readonly githubAccountType: string;
   readonly githubRepositoryId?: string;
+  readonly githubInstallationId?: string;
   readonly repository: string;
   readonly defaultBranch?: string;
 }
@@ -60,6 +63,7 @@ interface SharedRepositoryIdentityRow {
   readonly github_account_login: string;
   readonly github_account_type: string;
   readonly github_repository_id: string | number;
+  readonly github_installation_id: string | number;
   readonly repository_owner: string;
   readonly repository_name: string;
   readonly default_branch: string;
@@ -100,6 +104,7 @@ const RESOLVE_REPOSITORY_SQL = `
     i.github_account_id::text as github_account_id,
     i.github_account_login,
     i.github_account_type,
+    i.github_installation_id::text as github_installation_id,
     r.github_repo_id::text as github_repository_id,
     r.owner as repository_owner,
     r.name as repository_name,
@@ -114,8 +119,10 @@ const RESOLVE_REPOSITORY_SQL = `
     and t.merged_into_tenant_id is null
     and i.suspended_at is null
     and i.deleted_at is null
-    and $2::bigint is not null
-    and i.github_installation_id = $2::bigint
+    and (
+      ($2::bigint is not null and i.github_installation_id = $2::bigint)
+      or ($2::bigint is null and $5::uuid is not null and r.tenant_id = $5::uuid)
+    )
     and (
       ($1::bigint is not null and r.github_repo_id = $1::bigint)
       or (
@@ -288,9 +295,10 @@ export function buildSharedRepositoryIdentityQuery(input: ResolveSharedRepositor
   const [owner, name] = splitRepository(input.repository);
   const githubRepositoryId = optionalGithubId(input.githubRepositoryId, "githubRepositoryId");
   const githubInstallationId = optionalGithubId(input.githubInstallationId, "githubInstallationId");
+  const tenantId = input.tenantId ? requiredText(input.tenantId, "tenantId") : null;
   return {
     text: RESOLVE_REPOSITORY_SQL,
-    values: [githubRepositoryId, githubInstallationId, owner, name]
+    values: [githubRepositoryId, githubInstallationId, owner, name, tenantId]
   };
 }
 
@@ -324,6 +332,7 @@ export function normalizeSharedRepositoryIdentityRow(row: SharedRepositoryIdenti
     githubAccountLogin: requiredText(row.github_account_login, "github_account_login"),
     githubAccountType: requiredText(row.github_account_type, "github_account_type"),
     githubRepositoryId: decimalId(row.github_repository_id, "github_repository_id"),
+    githubInstallationId: decimalId(row.github_installation_id, "github_installation_id"),
     repository: `${owner}/${name}`,
     defaultBranch: requiredText(row.default_branch, "default_branch")
   };

@@ -4,6 +4,7 @@ import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
   CONTEXT_GRAPH_PARSER_VERSION,
   CONTEXT_GRAPH_REGISTRY_VERSION,
+  ContextGraphProjectionDrainBusyError,
   RepositoryContextOrchestrator,
   type CausalTraceProjection,
   createContextGraph,
@@ -309,21 +310,57 @@ test(
       );
       const repairClaim = await coordinator.claim({
         tenantId,
+        claimId: "postgres-repair-claim-retry",
         workerId: "repair-worker",
         topics: ["run-context-graph-ingest"],
         now: "2026-07-23T20:00:01.000Z",
         leaseExpiresAt: "2026-07-23T20:10:01.000Z"
       });
       assert.ok(repairClaim);
+      assert.deepEqual(
+        await coordinator.claim({
+          tenantId,
+          claimId: "postgres-repair-claim-retry",
+          workerId: "repair-worker",
+          topics: ["run-context-graph-ingest"],
+          now: "2026-07-23T20:00:01.500Z",
+          leaseExpiresAt: "2026-07-23T20:10:01.000Z"
+        }),
+        repairClaim
+      );
       assert.equal(
         await coordinator.complete({
           tenantId,
           stageId: repairClaim.task.id,
           leaseId: repairClaim.message.leaseId,
           outcome: "done",
-          now: "2026-07-23T20:00:02.000Z"
+          now: "2026-07-23T20:00:02.000Z",
+          result: { repaired: true }
         }),
         true
+      );
+      assert.deepEqual(
+        await coordinator.completionReceipt({
+          tenantId,
+          stageId: repairClaim.task.id,
+          leaseId: repairClaim.message.leaseId
+        }),
+        {
+          stageId: repairClaim.task.id,
+          leaseId: repairClaim.message.leaseId,
+          tenantId,
+          repository,
+          ref: "repair",
+          topic: "run-context-graph-ingest",
+          metadata: {
+            ...repairClaim.task.metadata,
+            result: { repaired: true },
+            completionLeaseId: repairClaim.message.leaseId,
+            completionOutcome: "done"
+          },
+          outcome: "done",
+          result: { repaired: true }
+        }
       );
 
       await coordinator.createBuild({
@@ -410,7 +447,7 @@ test(
 );
 
 test(
-  "Postgres exposes parser backlog refs and skips a concurrently locked tenant drain",
+  "Postgres exposes parser backlog refs and reports a concurrently locked tenant drain",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
@@ -469,14 +506,44 @@ test(
         [lockName]
       );
       assert.equal(acquired.rows[0]?.acquired, true);
-      assert.deepEqual(await store.drainDerivedProjectionEvents(tenantId, "2026-07-23T20:00:01.000Z"), {
-        processedEventCount: 0,
-        rebuiltRepositories: []
-      });
+      await assert.rejects(
+        () => store.drainDerivedProjectionEvents(tenantId, "2026-07-23T20:00:01.000Z"),
+        ContextGraphProjectionDrainBusyError
+      );
     } finally {
       await session.query("select pg_advisory_unlock(hashtextextended($1,0))", [lockName]).catch(() => undefined);
       session.release();
       await lockClient.end();
+      await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres projection locks stay outside the query pool under concurrent tenant drains",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const store = new PostgresContextGraphStore({ connectionString, max: 1 });
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      const drains = Promise.all(
+        Array.from({ length: 5 }, (_, index) =>
+          store.drainDerivedProjectionEvents(`projection-pool-${suffix}-${index}`, "2026-07-24T04:00:00.000Z")
+        )
+      );
+      const results = await Promise.race([
+        drains,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("projection drains exhausted the query pool")), 5_000);
+        })
+      ]);
+      assert.equal(results.length, 5);
+    } finally {
+      if (timeout) clearTimeout(timeout);
       await store.close();
     }
   }

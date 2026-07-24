@@ -79,6 +79,14 @@ export interface ContextGraphAssertionSummary {
   readonly contradictingAssertionIds: readonly string[];
 }
 
+/** Another API instance currently owns the tenant-wide projection drain. */
+export class ContextGraphProjectionDrainBusyError extends Error {
+  constructor() {
+    super("context graph projection drain is already in progress");
+    this.name = "ContextGraphProjectionDrainBusyError";
+  }
+}
+
 export interface RepositoryContextOperations extends RetrievalExecutor {
   executeCommand(
     tenantId: string,

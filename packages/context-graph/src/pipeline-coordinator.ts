@@ -85,6 +85,11 @@ export interface ContextGraphStageLease {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
+export interface ContextGraphStageCompletionReceipt extends ContextGraphStageLease {
+  readonly outcome: "done" | "failed";
+  readonly result?: Readonly<Record<string, unknown>>;
+}
+
 export interface ContextGraphTaskBoardEvent {
   readonly id: string;
   readonly taskId: string;
@@ -140,6 +145,8 @@ export interface ContextGraphPipelineCoordinator {
         readonly tenantId: string;
         readonly repository: string;
       }[];
+      /** Stable across transport retries of one claim request. */
+      readonly claimId?: string;
       readonly workerId: string;
       readonly topics: readonly ContextGraphWorkerTopic[];
       readonly now: string;
@@ -174,6 +181,11 @@ export interface ContextGraphPipelineCoordinator {
     readonly topic?: ContextGraphWorkerTopic;
     readonly now: string;
   }): Promise<ContextGraphStageLease | undefined>;
+  completionReceipt(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+  }): Promise<ContextGraphStageCompletionReceipt | undefined>;
   complete(
     input: {
       readonly tenantId: string;
@@ -349,6 +361,7 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
         readonly tenantId: string;
         readonly repository: string;
       }[];
+      readonly claimId?: string;
       readonly workerId: string;
       readonly topics: readonly ContextGraphWorkerTopic[];
       readonly now: string;
@@ -360,6 +373,27 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     const repositoryScopes = input.repositoryScopes
       ? new Set(input.repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
       : undefined;
+    const replayed = input.claimId
+      ? [...this.stages.values()].find(
+          (candidate) =>
+            tenantIds.has(candidate.tenantId) &&
+            (!repositoryScopes ||
+              repositoryScopes.has(`${candidate.tenantId}:${candidate.repository.toLowerCase()}`)) &&
+            candidate.status === "in_progress" &&
+            candidate.leaseId === input.claimId &&
+            candidate.workerId === input.workerId &&
+            Boolean(candidate.leaseExpiresAt && candidate.leaseExpiresAt > input.now) &&
+            input.topics.includes(candidate.topic)
+        )
+      : undefined;
+    if (replayed) {
+      await authorityGuard?.({
+        tenantId: replayed.tenantId,
+        repository: replayed.repository,
+        metadata: structuredClone(replayed.metadata)
+      });
+      return claimView(replayed);
+    }
     for (const stage of this.stages.values()) {
       if (
         tenantIds.has(stage.tenantId) &&
@@ -409,7 +443,7 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     });
     stage.status = "in_progress";
     stage.attempt += 1;
-    stage.leaseId = randomUUID();
+    stage.leaseId = input.claimId ?? randomUUID();
     stage.workerId = input.workerId;
     stage.leaseExpiresAt = input.leaseExpiresAt;
     stage.startedAt = input.now;
@@ -497,6 +531,34 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     return leaseView(stage!);
   }
 
+  async completionReceipt(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+  }): Promise<ContextGraphStageCompletionReceipt | undefined> {
+    const stage = this.stages.get(input.stageId);
+    if (
+      !stage ||
+      stage.tenantId !== input.tenantId ||
+      (stage.status !== "done" && stage.status !== "failed") ||
+      stage.metadata.completionLeaseId !== input.leaseId
+    ) {
+      return undefined;
+    }
+    const result = recordMetadata(stage.metadata.result);
+    return {
+      stageId: stage.id,
+      leaseId: input.leaseId,
+      tenantId: stage.tenantId,
+      repository: stage.repository,
+      ref: stage.ref,
+      topic: stage.topic,
+      metadata: structuredClone(stage.metadata),
+      outcome: stage.status,
+      ...(result ? { result: structuredClone(result) } : {})
+    };
+  }
+
   async complete(
     input: {
       readonly tenantId: string;
@@ -517,7 +579,9 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     stage!.metadata = {
       ...stage!.metadata,
       ...(input.result ? { result: structuredClone(input.result) } : {}),
-      ...(input.reason ? { reason: input.reason } : {})
+      ...(input.reason ? { reason: input.reason } : {}),
+      completionLeaseId: input.leaseId,
+      completionOutcome: input.outcome
     };
     stage!.updatedAt = input.now;
     stage!.completedAt = input.now;
@@ -855,4 +919,10 @@ function claimView(stage: MutableStage): ContextGraphStageClaim {
       metadata: structuredClone(stage.metadata)
     }
   };
+}
+
+function recordMetadata(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
 }

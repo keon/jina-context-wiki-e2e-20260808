@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -47,6 +48,7 @@ import {
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
 import { contextGraphHistoryPolicy, type ContextGraphHistoryPolicy } from "./history-limit.js";
+import { retryAfterDelayMs } from "./internal-api-retry.js";
 import { byteBoundedJsonArrayBatches, serializedJsonBytes } from "./json-batches.js";
 
 const SUPPORTED_TOPICS = [
@@ -239,7 +241,7 @@ async function drainContextGraphProjectionEvents(): Promise<void> {
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
-  const response = await apiRequest("/internal/worker/claim", { workerId, topics });
+  const response = await apiRequest("/internal/worker/claim", { workerId, topics, claimId: randomUUID() });
   if (response.status === 204) {
     recordApiSuccess(!drainsContextGraphProjections);
     return undefined;
@@ -1540,10 +1542,8 @@ function isTransientInternalApiStatus(status: number): boolean {
 }
 
 function internalApiRetryDelayMs(retryAfter: string | undefined | null, attempt: number): number {
-  const retryAfterSeconds = Number(retryAfter);
-  if (retryAfter?.trim() && Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
-    return Math.min(Math.max(1, retryAfterSeconds * 1_000), internalApiRetryMaxWaitMs);
-  }
+  const requestedDelay = retryAfterDelayMs(retryAfter, internalApiRetryMaxWaitMs);
+  if (requestedDelay !== undefined) return requestedDelay;
   const exponential = Math.min(internalApiRetryBaseMs * 2 ** attempt, internalApiRetryMaxWaitMs);
   return Math.max(1, Math.floor(exponential * (0.8 + Math.random() * 0.4)));
 }

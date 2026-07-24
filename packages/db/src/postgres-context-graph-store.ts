@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   CONTEXT_GRAPH_PARSER_VERSION,
+  ContextGraphProjectionDrainBusyError,
   CONTEXT_GRAPH_REGISTRY_VERSION,
   assertionObservationId,
   canonicalJson,
@@ -354,6 +355,7 @@ export interface PostgresContextGraphStoreConfig extends PoolConfig {
 
 export class PostgresContextGraphStore implements ContextGraphStore {
   private readonly pool: Pool;
+  private readonly projectionLockPool: Pool;
   private readonly manageSchema: boolean;
   private initialized?: Promise<void>;
 
@@ -361,6 +363,14 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     const { manageSchema = true, ...poolConfig } = config;
     this.manageSchema = manageSchema;
     this.pool = new Pool({ ...poolConfig, application_name: "jina-context-graph", max: poolConfig.max ?? 5 });
+    // Session advisory locks must not consume the query pool. Otherwise N
+    // concurrent tenant drains can hold all N query clients while each drain
+    // waits for one more client to rebuild its projections.
+    this.projectionLockPool = new Pool({
+      ...poolConfig,
+      application_name: "jina-context-graph-projection-lock",
+      max: 1
+    });
   }
 
   async save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void> {
@@ -2969,7 +2979,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       return { processedEventCount: 0, rebuiltRepositories: [] };
     }
     const lockName = `jina:context-graph:projection-drain:${tenantId}`;
-    const lockClient = await this.pool.connect();
+    const lockClient = await this.projectionLockPool.connect();
     let acquired = false;
     try {
       const result = await lockClient.query<{ acquired: boolean }>(
@@ -2977,7 +2987,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
         [lockName]
       );
       acquired = result.rows[0]?.acquired === true;
-      if (!acquired) return { processedEventCount: 0, rebuiltRepositories: [] };
+      if (!acquired) throw new ContextGraphProjectionDrainBusyError();
       return await this.drainDerivedProjectionEventsLocked(tenantId, now, options);
     } finally {
       if (acquired) {
@@ -3614,7 +3624,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    await Promise.all([this.pool.end(), this.projectionLockPool.end()]);
   }
 
   private async retrieveCausalTrace(
