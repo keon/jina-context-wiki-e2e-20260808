@@ -180,6 +180,13 @@ test("canonicalizes GitHub work items and drops unanchored deterministic source 
         label: "Old incident alias",
         description: "Unanchored",
         evidence: ["docs/postmortem.md:1"]
+      },
+      {
+        id: "issue:derived:pr:11",
+        kind: "Issue",
+        label: "Derived issue for PR 11",
+        description: "Untracked regression",
+        evidence: ["docs/root-cause.md:2"]
       }
     ],
     edges: [
@@ -196,7 +203,7 @@ test("canonicalizes GitHub work items and drops unanchored deterministic source 
   });
   assert.deepEqual(
     sanitized.nodes.map((node) => node.id),
-    ["8"]
+    ["8", "derived:pr:11"]
   );
   assert.deepEqual(sanitized.edges, []);
 });

@@ -324,7 +324,10 @@ export function sanitizeGeneratedModelOutput(
 
 function canonicalModelWorkItemId(kind: string, id: string): string {
   if (kind !== "Issue" && kind !== "PullRequest") return id;
-  if (kind === "Issue" && /^derived:pr:\d+$/i.test(id)) return id;
+  if (kind === "Issue") {
+    const derivedAnchor = /^(?:issue:)?derived:pr:([1-9]\d*)$/i.exec(id)?.[1];
+    if (derivedAnchor) return `derived:pr:${derivedAnchor}`;
+  }
   if (/^[1-9]\d*$/.test(id)) return id;
   const suffix = /#([1-9]\d*)$/.exec(id)?.[1] ?? /^(?:issue|pr):([1-9]\d*)$/i.exec(id)?.[1];
   return suffix ?? id;
