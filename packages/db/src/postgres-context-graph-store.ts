@@ -2958,7 +2958,11 @@ export class PostgresContextGraphStore implements ContextGraphStore {
 
   async drainDerivedProjectionEvents(
     tenantId: string,
-    now: string
+    now: string,
+    options?: {
+      readonly repositories?: readonly string[];
+      readonly authorityGuard?: (repository: string) => Promise<void>;
+    }
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
     await this.initialize();
     const rebuiltRepositories = new Set<string>();
@@ -2974,6 +2978,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       )
       .catch(() => ({ rows: [] as { repository: string }[] }));
     const suppressedRepositories = new Set(activeIngests.rows.map((row) => row.repository));
+    const repositoryKeys = options?.repositories?.map((repository) => repository.toLowerCase()) ?? null;
     const consumers = ["legacy", "manifest", "search", "reconciliation", "graph"] as const;
     for (const consumer of consumers) {
       const claimOwner = `projection:${consumer}:${randomUUID()}`;
@@ -2988,12 +2993,17 @@ export class PostgresContextGraphStore implements ContextGraphStore {
            from jina_context_graph.outbox
            where tenant_id=$1 and consumer=$3 and processed_at is null and available_at<=now()
              and (claim_expires_at is null or claim_expires_at<now())
+             and (
+               $5::text[] is null
+               or coalesce(payload->>'repoId',payload#>>'{scope,repository}') is null
+               or lower(coalesce(payload->>'repoId',payload#>>'{scope,repository}'))=any($5::text[])
+             )
            order by created_at,id for update skip locked limit 10000
          )
          update jina_context_graph.outbox o
          set claimed_by=$4,claimed_at=$2,claim_expires_at=$2::timestamptz+interval '15 minutes',attempts=o.attempts+1
          from candidates where o.id=candidates.id returning o.id,candidates.repository,o.event_type,o.payload`,
-        [tenantId, now, consumer, claimOwner]
+        [tenantId, now, consumer, claimOwner, repositoryKeys]
       );
       if (allClaimed.rows.length === 0) continue;
       const suppressed = allClaimed.rows.filter(
@@ -3015,8 +3025,9 @@ export class PostgresContextGraphStore implements ContextGraphStore {
       const affectedRepositories = new Set(claimed.rows.flatMap((row) => (row.repository ? [row.repository] : [])));
       if (claimed.rows.some((row) => row.repository === null)) {
         const all = await this.pool.query<{ repository: string }>(
-          `select distinct repository from jina_context_graph.refs where tenant_id=$1`,
-          [tenantId]
+          `select distinct repository from jina_context_graph.refs
+           where tenant_id=$1 and ($2::text[] is null or lower(repository)=any($2::text[]))`,
+          [tenantId, repositoryKeys]
         );
         for (const row of all.rows) affectedRepositories.add(row.repository);
       }
@@ -3035,6 +3046,8 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           }
         }
         for (const repository of [...affectedRepositories].sort()) {
+          if (repositoryKeys && !repositoryKeys.includes(repository.toLowerCase())) continue;
+          await options?.authorityGuard?.(repository);
           const refs = await this.pool.query<{ ref_name: string; commit_sha: string }>(
             `select ref_name,commit_sha from jina_context_graph.refs
              where tenant_id=$1 and repository=$2 order by is_default desc,ref_name`,
@@ -3091,6 +3104,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
               });
             }
           }
+          await options?.authorityGuard?.(repository);
           rebuiltRepositories.add(repository);
         }
         const acknowledged = await this.pool.query(
@@ -4225,6 +4239,7 @@ async function assertPipelineWriteFence(
   writeFence?: ContextGraphWriteFence
 ): Promise<void> {
   if (!writeFence) return;
+  await writeFence.authorityGuard?.();
   const result = await client.query(
     `select 1 from jina_board.tasks
      where id=$1 and tenant_id=$2 and repository=$3 and topic=$4
@@ -4236,6 +4251,7 @@ async function assertPipelineWriteFence(
 
 async function reassertPipelineWriteFence(client: PoolClient, writeFence?: ContextGraphWriteFence): Promise<void> {
   if (!writeFence) return;
+  await writeFence.authorityGuard?.();
   const result = await client.query(
     `select 1 from jina_board.tasks
      where id=$1 and lease_id=$2 and status='in_progress' and lease_expires_at>now()`,

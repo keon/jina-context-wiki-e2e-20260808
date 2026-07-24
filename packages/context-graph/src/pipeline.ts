@@ -263,6 +263,7 @@ export interface ContextGraphProjectionRequest {
 export interface ContextGraphWriteFence {
   readonly stageId: string;
   readonly leaseId: string;
+  readonly authorityGuard?: () => Promise<void>;
 }
 
 export interface ContextGraphPipelineStore {

@@ -47,6 +47,7 @@ import {
   type ContextGraphPipelineCoordinator,
   type ContextGraphStageLease,
   type ContextGraphStageRecord,
+  type ContextGraphWriteFence,
   type ContextGraphWorkflowCursor,
   type ContextGraphWorkerTopic,
   type ContextGraphNodeKind,
@@ -659,7 +660,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         await readRawBody(request);
         const results = await Promise.all(
           (await config.sharedIdentityResolver.listTenantIds()).map((tenantId) =>
-            contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso())
+            drainConnectedProjectionEvents(tenantId, nowIso())
           )
         );
         json(response, 200, {
@@ -792,6 +793,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             question: query,
             ...(ref ? { ref } : {})
           });
+          if (config.sharedIdentityResolver) {
+            await requireConnectedRepository(tenantId, canonicalRepository);
+          }
           return publicGraphQueryResult(context);
         },
         parsedBody
@@ -800,13 +804,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (request.method === "GET" && url.pathname === "/v1/graphs") {
-      const allowedRepositories = await repositoriesForPrincipal(principal);
+      let allowedRepositories = await repositoriesForPrincipal(principal);
       const requestedRepository = url.searchParams.get("repository")?.trim();
       const canonicalRepository = requestedRepository
         ? canonicalAllowedRepository(allowedRepositories, requestedRepository)
         : undefined;
       if (requestedRepository && !canonicalRepository) return json(response, 404, { error: "graph not found" });
-      const graphs = (await contextGraphStore.listSummaries(tenantId))
+      const graphValues = await contextGraphStore.listSummaries(tenantId);
+      allowedRepositories = await repositoriesForPrincipal(principal);
+      const graphs = graphValues
         .filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository))
         .filter((graph) => !canonicalRepository || graph.repository.toLowerCase() === canonicalRepository.toLowerCase())
         .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
@@ -849,6 +855,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ref: graph.ref,
         question: query
       });
+      const currentRepositories = await repositoriesForPrincipal(principal);
+      if (!repositoryIsAllowed(currentRepositories, graph.repository)) {
+        json(response, 404, { error: "graph not found" });
+        return;
+      }
       json(response, 200, publicRestGraphQueryResult(graph, publicGraphQueryResult(context)));
       return;
     }
@@ -888,7 +899,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && url.pathname === "/context-graph") {
-      const allowedRepositories = await repositoriesForPrincipal(principal);
+      let allowedRepositories = await repositoriesForPrincipal(principal);
       // Optional repository/ref scope narrows the summary listing in the
       // store, before its row limit, so a scoped caller's graphs cannot be
       // pushed out of the page by other repositories' fresher heads.
@@ -904,13 +915,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? requiredPositiveInteger(Number(assertionLimitValue), "assertionLimit")
         : undefined;
       if (assertionLimit && assertionLimit > 500) throw invalidRequest("assertionLimit must not exceed 500");
-      const canonicalRepositoryFilter = repositoryFilter
+      let canonicalRepositoryFilter = repositoryFilter
         ? requireAllowedRepository(allowedRepositories, repositoryFilter)
         : undefined;
 
       // The validator is derived from graph heads and mutation clocks only. Check it
       // before loading node/edge rows, summary pages, entities, or assertions.
-      const revision = await contextGraphStore.readRevision(tenantId, {
+      let revision = await contextGraphStore.readRevision(tenantId, {
         repositories: allowedRepositories,
         ...(canonicalRepositoryFilter ? { repository: canonicalRepositoryFilter } : {}),
         ...(refFilter ? { ref: refFilter } : {}),
@@ -918,7 +929,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(includeAssertions && canonicalRepositoryFilter ? { assertionRepository: canonicalRepositoryFilter } : {}),
         ...(assertionStatus ? { assertionStatus } : {})
       });
-      if (respondNotModified(request, response, revision)) return;
+      // Authority can change while the graph database computes its revision.
+      // Re-resolve it before a 304 so a revoked caller cannot retain cached data.
+      const revisionRepositories = allowedRepositories;
+      allowedRepositories = await repositoriesForPrincipal(principal);
+      canonicalRepositoryFilter = repositoryFilter
+        ? canonicalAllowedRepository(allowedRepositories, repositoryFilter)
+        : undefined;
+      if (repositoryFilter && !canonicalRepositoryFilter) {
+        json(response, 404, { error: "contextGraph graph not found" });
+        return;
+      }
+      // If the scope changed, always send a fresh representation. Its final
+      // ETag is recomputed below after the data load and one more authority check.
+      if (
+        sameRepositorySet(revisionRepositories, allowedRepositories) &&
+        respondNotModified(request, response, revision)
+      )
+        return;
 
       const graphValues = dashboardView
         ? []
@@ -926,7 +954,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             ...(canonicalRepositoryFilter ? { repository: canonicalRepositoryFilter } : {}),
             ...(refFilter ? { ref: refFilter } : {})
           });
-      const graphs = graphValues.filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository));
+      const candidateGraphs = graphValues.filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository));
       // A scoped response must be internally consistent: its latest is the
       // newest graph within the scope (summaries are ordered newest-first),
       // never the unscoped tenant-wide head, which can belong to another
@@ -937,25 +965,44 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             ...(refFilter ? { ref: refFilter } : {})
           })
         : scoped
-          ? graphs[0]
-            ? await contextGraphStore.get(graphs[0].id, tenantId)
+          ? candidateGraphs[0]
+            ? await contextGraphStore.get(candidateGraphs[0].id, tenantId)
             : undefined
           : await contextGraphStore.latest(tenantId, allowedRepositories);
-      const permittedLatest = latest && repositoryIsAllowed(allowedRepositories, latest.repository) ? latest : null;
       // ?include=assertions folds the assertion-review fetch into this
       // response so the client does not need a dependent second round trip.
       const assertions = includeAssertions
-        ? permittedLatest
-          ? await contextGraphStore.listAssertions(tenantId, permittedLatest.repository, {
+        ? latest && repositoryIsAllowed(allowedRepositories, latest.repository)
+          ? await contextGraphStore.listAssertions(tenantId, latest.repository, {
               ...(assertionStatus ? { status: assertionStatus } : {}),
               ...(assertionLimit ? { limit: assertionLimit } : {})
             })
           : []
         : undefined;
+      // Data loads can be slower than the authority lookup. Fence the response
+      // again, then derive both the payload and ETag from that final live scope.
+      allowedRepositories = await repositoriesForPrincipal(principal);
+      canonicalRepositoryFilter = repositoryFilter
+        ? canonicalAllowedRepository(allowedRepositories, repositoryFilter)
+        : undefined;
+      if (repositoryFilter && !canonicalRepositoryFilter) {
+        json(response, 404, { error: "contextGraph graph not found" });
+        return;
+      }
+      revision = await contextGraphStore.readRevision(tenantId, {
+        repositories: allowedRepositories,
+        ...(canonicalRepositoryFilter ? { repository: canonicalRepositoryFilter } : {}),
+        ...(refFilter ? { ref: refFilter } : {}),
+        includeAssertions,
+        ...(includeAssertions && canonicalRepositoryFilter ? { assertionRepository: canonicalRepositoryFilter } : {}),
+        ...(assertionStatus ? { assertionStatus } : {})
+      });
+      const graphs = graphValues.filter((graph) => repositoryIsAllowed(allowedRepositories, graph.repository));
+      const permittedLatest = latest && repositoryIsAllowed(allowedRepositories, latest.repository) ? latest : null;
       jsonCacheableWithRevision(request, response, revision, {
         latest: permittedLatest,
         graphs,
-        ...(assertions ? { assertions } : {})
+        ...(assertions ? { assertions: permittedLatest ? assertions : [] } : {})
       });
       return;
     }
@@ -981,9 +1028,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         : undefined;
       const ref = url.searchParams.has("ref") ? requiredString(url.searchParams.get("ref"), "ref") : undefined;
       if (ref && !repository) throw invalidRequest("repository is required when metrics are scoped by ref");
-      const connectedRepositories = config.sharedIdentityResolver
-        ? await repositoriesForPrincipal(principal)
-        : undefined;
+      const connectedRepositories =
+        config.sharedIdentityResolver || repository ? await repositoriesForPrincipal(principal) : undefined;
       const canonicalRepository =
         repository && connectedRepositories
           ? canonicalAllowedRepository(connectedRepositories, repository)
@@ -992,19 +1038,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 404, { error: "repository not found" });
         return;
       }
-      json(
-        response,
-        200,
-        await contextGraphStore.operationalMetrics(
-          tenantId,
-          nowIso(),
-          canonicalRepository
-            ? { repository: canonicalRepository, ...(ref ? { ref } : {}) }
-            : connectedRepositories
-              ? { repositories: connectedRepositories }
-              : undefined
-        )
+      const result = await contextGraphStore.operationalMetrics(
+        tenantId,
+        nowIso(),
+        canonicalRepository
+          ? { repository: canonicalRepository, ...(ref ? { ref } : {}) }
+          : connectedRepositories
+            ? { repositories: connectedRepositories }
+            : undefined
       );
+      if (config.sharedIdentityResolver && canonicalRepository) {
+        await requireConnectedRepository(tenantId, canonicalRepository);
+      }
+      json(response, 200, result);
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/retrieve") {
@@ -1024,6 +1070,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.query === "string" ? { query: body.query } : {}),
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
+      if (config.sharedIdentityResolver) await requireConnectedRepository(tenantId, repository);
       json(response, 200, result);
       return;
     }
@@ -1031,21 +1078,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const body = parseJsonObject(await readRawBody(request));
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const orchestrator = new RepositoryContextOrchestrator(contextGraphStore);
-      json(
-        response,
-        200,
-        await orchestrator.answer({
-          tenantId,
-          allowedRepositories,
-          repository: canonicalRepositoryForRead(allowedRepositories, requiredString(body.repository, "repository")),
-          question: requiredString(body.question, "question"),
-          ...parseContextGraphSelectors(body),
-          ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
-          ...(typeof body.tokenBudget === "number"
-            ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") }
-            : {})
-        })
-      );
+      const repository = canonicalRepositoryForRead(allowedRepositories, requiredString(body.repository, "repository"));
+      const result = await orchestrator.answer({
+        tenantId,
+        allowedRepositories,
+        repository,
+        question: requiredString(body.question, "question"),
+        ...parseContextGraphSelectors(body),
+        ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
+        ...(typeof body.tokenBudget === "number"
+          ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") }
+          : {})
+      });
+      if (config.sharedIdentityResolver) await requireConnectedRepository(tenantId, repository);
+      json(response, 200, result);
       return;
     }
     if (request.method === "GET" && url.pathname === "/context-graph/assertions") {
@@ -1066,14 +1112,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const limitValue = url.searchParams.get("limit");
       const limit = limitValue ? requiredPositiveInteger(Number(limitValue), "limit") : undefined;
       if (limit && limit > 500) throw invalidRequest("limit must not exceed 500");
-      jsonCacheable(request, response, {
-        assertions: await contextGraphStore.listAssertions(tenantId, repository, {
-          ...(status ? { status } : {}),
-          ...(predicate ? { predicate } : {}),
-          ...(entityKind ? { entityKind } : {}),
-          ...(limit ? { limit } : {})
-        })
+      const assertions = await contextGraphStore.listAssertions(tenantId, repository, {
+        ...(status ? { status } : {}),
+        ...(predicate ? { predicate } : {}),
+        ...(entityKind ? { entityKind } : {}),
+        ...(limit ? { limit } : {})
       });
+      if (config.sharedIdentityResolver) await requireConnectedRepository(tenantId, repository);
+      jsonCacheable(request, response, { assertions });
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/commands") {
@@ -1181,7 +1227,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
       await readRawBody(request);
-      json(response, 200, await contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso()));
+      json(response, 200, await drainConnectedProjectionEvents(tenantId, nowIso()));
       return;
     }
     if (request.method === "GET" && url.pathname === "/internal/observability") {
@@ -1527,6 +1573,48 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
   }
 
+  async function requireStageRepositoryAuthority(
+    stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">
+  ): Promise<void> {
+    if (!config.sharedIdentityResolver) return;
+    const installationId = metadataGithubId(stage.metadata.githubInstallationId);
+    if (!installationId) {
+      throw new ApiError(
+        409,
+        "repository_installation_missing",
+        "GitHub installation provenance is required for shared tenant work"
+      );
+    }
+    const repositoryId = metadataGithubId(stage.metadata.githubRepositoryId);
+    const identity = await config.sharedIdentityResolver.resolveRepository({
+      repository: stage.repository,
+      githubInstallationId: installationId,
+      ...(repositoryId ? { githubRepositoryId: repositoryId } : {})
+    });
+    if (
+      !identity ||
+      identity.tenantId !== stage.tenantId ||
+      identity.repository.toLowerCase() !== stage.repository.toLowerCase() ||
+      (repositoryId !== undefined && identity.githubRepositoryId !== String(repositoryId))
+    ) {
+      throw new ApiError(
+        409,
+        "repository_installation_mismatch",
+        "work is no longer owned by the active GitHub installation"
+      );
+    }
+  }
+
+  function stageWriteFence(
+    stage: Pick<ContextGraphStageLease, "stageId" | "leaseId" | "tenantId" | "repository" | "metadata">
+  ): ContextGraphWriteFence {
+    return {
+      stageId: stage.stageId,
+      leaseId: stage.leaseId,
+      authorityGuard: async () => requireStageRepositoryAuthority(stage)
+    };
+  }
+
   /**
    * Durable stage work runs on these dedicated long-window routes so that
    * completion stays a fast status flip; the worker's 30-second completion
@@ -1542,7 +1630,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
     const result = await contextGraphStore.saveAssertionBatch(
       parseContextGraphAssertionBatch(body.assertionBatch, { id: task.stageId, metadata: task.metadata }, tenantId),
-      { stageId: task.stageId, leaseId: task.leaseId }
+      stageWriteFence(task)
     );
     json(response, 200, result);
   }
@@ -1564,7 +1652,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // only publication and stays fenced. Still, re-check the lease between the
     // expensive steps so a superseded worker stops early instead of spending
     // minutes on work whose publication will be rejected.
-    const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
+    const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
+      repositories: [task.repository],
+      authorityGuard: async () => requireStageRepositoryAuthority(task)
+    });
     await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
     const rebuilt = await contextGraphStore.rebuildDerivedProjections(tenantId, repository, ref, now);
     await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
@@ -1575,7 +1666,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       commitSha: requiredGitSha(task.metadata.commitSha, "task.commitSha"),
       taskId: task.stageId,
       generatedAt: now,
-      writeFence: { stageId: task.stageId, leaseId: task.leaseId }
+      writeFence: stageWriteFence(task)
     });
     json(response, 200, {
       ...rebuilt,
@@ -1600,7 +1691,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
       throw invalidRequest("repository snapshot does not match contextGraph task");
     }
-    const plan = await contextGraphStore.planIngestion(snapshot, { stageId: task.stageId, leaseId: task.leaseId });
+    const plan = await contextGraphStore.planIngestion(snapshot, stageWriteFence(task));
     json(response, 200, plan);
   }
 
@@ -1640,7 +1731,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha
       },
       analyses,
-      { stageId: task.stageId, leaseId: task.leaseId }
+      stageWriteFence(task)
     );
     json(response, 200, { accepted: true, count: analyses.length });
   }
@@ -1660,8 +1751,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest("GitHub observation repository does not match task");
     }
     const result = await contextGraphStore.applyGitHubObservations(observations, {
-      stageId: task.stageId,
-      leaseId: task.leaseId
+      ...stageWriteFence(task)
     });
     json(response, 200, result);
   }
@@ -1721,7 +1811,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       now: nowIso()
     });
     if (!stage) throw new ApiError(409, "stale_lease", "stale contextGraph worker lease");
-    await requireConnectedRepository(stage.tenantId, stage.repository);
+    await requireStageRepositoryAuthority(stage);
     return { ...stage, id: stage.stageId };
   }
 
@@ -1760,16 +1850,36 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       : undefined;
     if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
       const now = nowIso();
-      const claimed = await contextGraphCoordinator.claim({
-        tenantId: tenantIds[0]!,
-        ...(tenantIds.length > 1 ? { tenantIds } : {}),
-        ...(repositoryScopes ? { repositoryScopes } : {}),
-        workerId,
-        topics: contextGraphTopics,
-        now,
-        leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
-      });
+      const claimed = await contextGraphCoordinator.claim(
+        {
+          tenantId: tenantIds[0]!,
+          ...(tenantIds.length > 1 ? { tenantIds } : {}),
+          ...(repositoryScopes ? { repositoryScopes } : {}),
+          workerId,
+          topics: contextGraphTopics,
+          now,
+          leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+        },
+        config.sharedIdentityResolver ? requireStageRepositoryAuthority : undefined
+      );
       if (claimed) {
+        const claimedStage = {
+          tenantId: requiredString(claimed.task.metadata.tenantId, "task.tenantId"),
+          repository: requiredString(claimed.task.metadata.repository, "task.repository"),
+          metadata: claimed.task.metadata
+        };
+        try {
+          await requireStageRepositoryAuthority(claimedStage);
+        } catch (error) {
+          await contextGraphCoordinator.release({
+            tenantId: claimedStage.tenantId,
+            stageId: claimed.task.id,
+            leaseId: claimed.message.leaseId,
+            now: nowIso(),
+            reason: "repository authority changed during claim"
+          });
+          throw error;
+        }
         json(response, 200, claimed);
         return;
       }
@@ -1806,6 +1916,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!leased) return undefined;
       const task = findTask(leased.state, leased.message.taskId);
       if (!task) return undefined;
+      const taskTenantId = requiredString(task.metadata.tenantId, "task.tenantId");
+      const taskRepository = requiredString(task.metadata.repository, "task.repository");
+      await requireStageRepositoryAuthority({
+        tenantId: taskTenantId,
+        repository: taskRepository,
+        metadata: task.metadata
+      });
       let board = leased.state;
       if (task.status === "queued") {
         board = applyCommand(
@@ -1817,6 +1934,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           }
         ).state;
       }
+      await requireStageRepositoryAuthority({
+        tenantId: taskTenantId,
+        repository: taskRepository,
+        metadata: task.metadata
+      });
       intakeState = { ...intakeState, board };
       await persist();
       return { message: leased.message, task: findTask(board, task.id) };
@@ -1830,7 +1952,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const leaseId = requiredString(body.leaseId, "leaseId");
     if (rawMessageId.startsWith("context-graph-stage_")) {
       const now = nowIso();
-      await requireConnectedLease(tenantId, rawMessageId, leaseId, now);
+      const stage = await requireConnectedLease(tenantId, rawMessageId, leaseId, now);
       const renewed = await contextGraphCoordinator.renew(
         {
           tenantId,
@@ -1839,7 +1961,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           now,
           leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
         },
-        async (repository) => requireConnectedRepository(tenantId, repository)
+        stage ? async () => requireStageRepositoryAuthority(stage) : undefined
       );
       if (!renewed) throw staleLease();
       try {
@@ -1862,6 +1984,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const message = findOutboxMessage(intakeState.board, messageId);
       const task = message ? findTask(intakeState.board, message.taskId) : undefined;
       if (!task || task.metadata.tenantId !== tenantId || task.status !== "in_progress") return false;
+      const repository = requiredString(task.metadata.repository, "task.repository");
+      await requireStageRepositoryAuthority({ tenantId, repository, metadata: task.metadata });
       const now = nowIso();
       const board = renewOutboxLease(
         intakeState.board,
@@ -1871,6 +1995,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         new Date(Date.now() + WORKER_LEASE_MS).toISOString()
       );
       if (!board) return false;
+      await requireStageRepositoryAuthority({ tenantId, repository, metadata: task.metadata });
       intakeState = { ...intakeState, board };
       await persist();
       return true;
@@ -1888,7 +2013,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw invalidRequest("only contextGraph task-board leases can be released");
     }
     const now = nowIso();
-    const repository = await requireConnectedLease(tenantId, messageId, leaseId, now);
+    const stage = await requireConnectedLease(tenantId, messageId, leaseId, now);
     const released = await contextGraphCoordinator.release(
       {
         tenantId,
@@ -1897,10 +2022,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         now,
         reason
       },
-      async (repository) => requireConnectedRepository(tenantId, repository)
+      stage ? async () => requireStageRepositoryAuthority(stage) : undefined
     );
     if (!released) throw staleLease();
-    if (repository) await requireConnectedRepository(tenantId, repository);
+    if (stage) await requireStageRepositoryAuthority(stage);
     json(response, 200, { accepted: true });
   }
 
@@ -1943,6 +2068,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ) {
         return false;
       }
+      const repository = requiredString(currentTask.metadata.repository, "task.repository");
+      await requireStageRepositoryAuthority({ tenantId, repository, metadata: currentTask.metadata });
       const previousIntakeState = intakeState;
       const previousPublications = publications;
       let board = markOutboxDispatched(intakeState.board, message.id, now);
@@ -1965,6 +2092,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         const key = buildPublicationKey(`${repository}#${pullRequestNumber}`, headSha, "summary");
         publications = upsertPublication(publications, { key, headSha, target: "summary" }).records;
       }
+      await requireStageRepositoryAuthority({ tenantId, repository, metadata: currentTask.metadata });
       board = applyCommand(
         board,
         {
@@ -1998,7 +2126,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const now = nowIso();
     const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
     if (!stage) throw staleLease();
-    await requireConnectedRepository(tenantId, stage.repository);
+    await requireStageRepositoryAuthority(stage);
     if (outcome === "failed") {
       const completed = await contextGraphCoordinator.complete(
         {
@@ -2009,10 +2137,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           now,
           reason: stringValue(body.reason, "worker failed").slice(0, 2_000)
         },
-        async (repository) => requireConnectedRepository(tenantId, repository)
+        async () => requireStageRepositoryAuthority(stage)
       );
       if (!completed) throw staleLease();
-      await requireConnectedRepository(tenantId, stage.repository);
+      await requireStageRepositoryAuthority(stage);
       return undefined;
     }
 
@@ -2032,7 +2160,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             { id: stage.stageId, metadata: stage.metadata },
             tenantId
           ),
-          { stageId, leaseId }
+          stageWriteFence(stage)
         );
       }
       // The completion receipt is derived from durable state bound to this
@@ -2068,7 +2196,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       };
     } else {
       const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
-      const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
+      const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
+        repositories: [stage.repository],
+        authorityGuard: async () => requireStageRepositoryAuthority(stage)
+      });
       const rebuilt = await contextGraphStore.rebuildDerivedProjections(tenantId, stage.repository, stage.ref, now);
       graph = await contextGraphStore.project({
         tenantId,
@@ -2077,7 +2208,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         commitSha: requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
         taskId: stage.stageId,
         generatedAt: now,
-        writeFence: { stageId, leaseId }
+        writeFence: stageWriteFence(stage)
       });
       result = {
         ...rebuilt,
@@ -2100,10 +2231,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         result,
         nextMetadata
       },
-      async (repository) => requireConnectedRepository(tenantId, repository)
+      async () => requireStageRepositoryAuthority(stage)
     );
     if (!completed) throw staleLease();
-    await requireConnectedRepository(tenantId, stage.repository);
+    await requireStageRepositoryAuthority(stage);
     return graph;
   }
 
@@ -2163,6 +2294,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return canonicalAllowedRepository(allowedRepositories, repository) !== undefined;
   }
 
+  function sameRepositorySet(left: readonly string[], right: readonly string[]): boolean {
+    if (left.length !== right.length) return false;
+    const rightKeys = new Set(right.map((repository) => repository.toLowerCase()));
+    return left.every((repository) => rightKeys.has(repository.toLowerCase()));
+  }
+
   function requireAllowedRepository(allowedRepositories: readonly string[], repository: string): string {
     const canonical = canonicalAllowedRepository(allowedRepositories, repository);
     if (!canonical) throw new DomainError("repository access denied", "forbidden");
@@ -2181,12 +2318,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     stageId: string,
     leaseId: string,
     now: string
-  ): Promise<string | undefined> {
+  ): Promise<ContextGraphStageLease | undefined> {
     if (!config.sharedIdentityResolver) return undefined;
     const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
     if (!stage) throw staleLease();
-    await requireConnectedRepository(tenantId, stage.repository);
-    return stage.repository;
+    await requireStageRepositoryAuthority(stage);
+    return stage;
   }
 
   async function requireConnectedRepository(tenantId: string, repository: string): Promise<void> {
@@ -2198,6 +2335,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!connected.some((candidate) => candidate.toLowerCase() === repository.toLowerCase())) {
       throw new ApiError(409, "repository_disconnected", "repository is no longer connected to this tenant");
     }
+  }
+
+  async function drainConnectedProjectionEvents(
+    tenantId: string,
+    now: string
+  ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
+    if (!config.sharedIdentityResolver) return contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
+    const repositories = await config.sharedIdentityResolver.resolveTenantRepositories({ tenantId });
+    return contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
+      repositories,
+      authorityGuard: async (repository) => requireConnectedRepository(tenantId, repository)
+    });
   }
 
   if (config.simulateRuns) {
@@ -3327,6 +3476,11 @@ function requiredPositiveInteger(value: unknown, field: string): number {
   if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
     throw invalidRequest(`${field} must be a positive integer`);
   return value;
+}
+
+function metadataGithubId(value: unknown): number | undefined {
+  const parsed = typeof value === "string" && value.trim() ? Number(value) : value;
+  return typeof parsed === "number" && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
 const JSON_RESPONSE_HEADERS = {

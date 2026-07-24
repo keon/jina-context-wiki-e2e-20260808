@@ -96,7 +96,11 @@ export interface RepositoryContextOperations extends RetrievalExecutor {
   ): Promise<ProjectionRebuildResult>;
   drainDerivedProjectionEvents(
     tenantId: string,
-    now: string
+    now: string,
+    options?: {
+      readonly repositories?: readonly string[];
+      readonly authorityGuard?: (repository: string) => Promise<void>;
+    }
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }>;
   /** Omit scope for tenant-wide administration; release checks should name the repository and ref they certify. */
   operationalMetrics(

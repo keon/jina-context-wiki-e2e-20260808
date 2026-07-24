@@ -132,18 +132,21 @@ export interface ContextGraphPipelineCoordinator {
     readonly now: string;
     readonly reason: string;
   }): Promise<boolean>;
-  claim(input: {
-    readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly repositoryScopes?: readonly {
+  claim(
+    input: {
       readonly tenantId: string;
-      readonly repository: string;
-    }[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined>;
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined>;
   renew(
     input: {
       readonly tenantId: string;
@@ -325,18 +328,21 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     return true;
   }
 
-  async claim(input: {
-    readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly repositoryScopes?: readonly {
+  async claim(
+    input: {
       readonly tenantId: string;
-      readonly repository: string;
-    }[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined> {
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined> {
     const tenantIds = new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId]);
     const repositoryScopes = input.repositoryScopes
       ? new Set(input.repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
@@ -383,6 +389,11 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
           left.id.localeCompare(right.id)
       )[0];
     if (!stage) return undefined;
+    await authorityGuard?.({
+      tenantId: stage.tenantId,
+      repository: stage.repository,
+      metadata: structuredClone(stage.metadata)
+    });
     stage.status = "in_progress";
     stage.attempt += 1;
     stage.leaseId = randomUUID();

@@ -267,24 +267,27 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     }
   }
 
-  async claim(input: {
-    readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly repositoryScopes?: readonly {
+  async claim(
+    input: {
       readonly tenantId: string;
-      readonly repository: string;
-    }[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined> {
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined> {
     await this.initialize();
     // Claim transactions lock jina_board.tasks then jina_board.workflows and can
     // deadlock against concurrent createBuild supersede sweeps; retry 40P01.
     for (let attempt = 1; ; attempt += 1) {
       try {
-        return await this.claimOnce(input);
+        return await this.claimOnce(input, authorityGuard);
       } catch (error) {
         if (attempt >= 3 || (error as { code?: string }).code !== "40P01") throw error;
         await new Promise((resolve) => setTimeout(resolve, 25 * attempt));
@@ -292,18 +295,21 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     }
   }
 
-  private async claimOnce(input: {
-    readonly tenantId: string;
-    readonly tenantIds?: readonly string[];
-    readonly repositoryScopes?: readonly {
+  private async claimOnce(
+    input: {
       readonly tenantId: string;
-      readonly repository: string;
-    }[];
-    readonly workerId: string;
-    readonly topics: readonly ContextGraphWorkerTopic[];
-    readonly now: string;
-    readonly leaseExpiresAt: string;
-  }): Promise<ContextGraphStageClaim | undefined> {
+      readonly tenantIds?: readonly string[];
+      readonly repositoryScopes?: readonly {
+        readonly tenantId: string;
+        readonly repository: string;
+      }[];
+      readonly workerId: string;
+      readonly topics: readonly ContextGraphWorkerTopic[];
+      readonly now: string;
+      readonly leaseExpiresAt: string;
+    },
+    authorityGuard?: (stage: Pick<ContextGraphStageLease, "tenantId" | "repository" | "metadata">) => Promise<void>
+  ): Promise<ContextGraphStageClaim | undefined> {
     const tenantIds = [...new Set(input.tenantIds?.length ? input.tenantIds : [input.tenantId])];
     const repositoryScopeTenantIds = input.repositoryScopes?.map((scope) => scope.tenantId) ?? null;
     const repositoryScopeRepositories = input.repositoryScopes?.map((scope) => scope.repository) ?? null;
@@ -406,6 +412,11 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         await client.query("commit");
         return undefined;
       }
+      await authorityGuard?.({
+        tenantId: stage.tenant_id,
+        repository: stage.repository,
+        metadata: stage.metadata
+      });
       const leased = await client.query<StageRow>(
         `update jina_board.tasks
          set status='in_progress',attempt=attempt+1,lease_id=$2,worker_id=$3,

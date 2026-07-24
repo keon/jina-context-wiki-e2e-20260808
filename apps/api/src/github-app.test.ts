@@ -12,6 +12,9 @@ import {
   MemoryContextGraphPipelineCoordinator,
   CONTEXT_GRAPH_PARSER_VERSION,
   type BlobAnalysis,
+  type ContextGraphReadRevisionOptions,
+  type ContextGraphWriteFence,
+  type RepositorySnapshot,
   type RetrievalRequest,
   type RetrievalResult
 } from "@jina/context-graph";
@@ -273,7 +276,10 @@ test("signed GitHub App deliveries create idempotent PR and issue tasks", async 
 test("shared tenancy resolves original Jina organizations and scopes workers and board reads", async (context) => {
   const resolutions: unknown[] = [];
   let repositoryConnected = true;
+  let currentInstallationId = 99;
   let revokeAfterNextRepositoryResolution = false;
+  let revokeAfterNextRevision = false;
+  let reconnectDuringNextPlan = false;
   class TrackingContextGraphStore extends MemoryContextGraphStore {
     syncCount = 0;
     revokeOnNextSync = false;
@@ -290,14 +296,36 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
         repositoryConnected = false;
       }
     }
+
+    override async readRevision(tenantId: string, options?: ContextGraphReadRevisionOptions): Promise<string> {
+      const revision = await super.readRevision(tenantId, options);
+      if (revokeAfterNextRevision) {
+        revokeAfterNextRevision = false;
+        repositoryConnected = false;
+      }
+      return revision;
+    }
+
+    override async planIngestion(snapshot: RepositorySnapshot, writeFence?: ContextGraphWriteFence) {
+      if (reconnectDuringNextPlan) {
+        reconnectDuringNextPlan = false;
+        await writeFence?.authorityGuard?.();
+        currentInstallationId = 100;
+      }
+      return super.planIngestion(snapshot, writeFence);
+    }
   }
   const contextGraphStore = new TrackingContextGraphStore();
   const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
   const sharedIdentityResolver = {
     async resolveRepository(input: unknown) {
       resolutions.push(input);
-      const repository = (input as { repository: string }).repository;
+      const request = input as { repository: string; githubInstallationId?: number };
+      const repository = request.repository;
       if (!repositoryConnected || repository !== "omlabs/example") return undefined;
+      if (request.githubInstallationId !== undefined && request.githubInstallationId !== currentInstallationId) {
+        return undefined;
+      }
       const identity = {
         tenantId: SHARED_TENANT,
         githubAccountId: "202",
@@ -414,8 +442,23 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     body: JSON.stringify({ workerId: "shared-worker", topics: ["run-review"] })
   });
   assert.equal(claim.status, 200);
-  const claimed = (await claim.json()) as { task: { metadata: Record<string, unknown> } };
+  const claimed = (await claim.json()) as {
+    message: { id: string; leaseId: string };
+    task: { id: string; metadata: Record<string, unknown> };
+  };
   assert.equal(claimed.task.metadata.tenantId, SHARED_TENANT);
+  repositoryConnected = false;
+  const revokedLegacyRenew = await fetch(`${baseUrl}/internal/worker/renew`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({ messageId: claimed.message.id, leaseId: claimed.message.leaseId })
+  });
+  assert.equal(revokedLegacyRenew.status, 409);
+  repositoryConnected = true;
 
   const inactiveTenantId = "6f4d1548-7e14-4f9e-a6e2-e7d38b61b1c3";
   const inactiveSync = await fetch(`${baseUrl}/internal/graph/access/sync`, {
@@ -493,6 +536,25 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     caseVariantGraphs.graphs.map((graph) => graph.repository),
     ["omlabs/example"]
   );
+  const contextGraphHeaders = {
+    authorization: `Bearer ${INTERNAL_TOKEN}`,
+    "x-jina-tenant-id": SHARED_TENANT,
+    "x-jina-principal-id": `tenant:${SHARED_TENANT}`
+  };
+  const cacheableGraph = await fetch(`${baseUrl}/context-graph`, { headers: contextGraphHeaders });
+  assert.equal(cacheableGraph.status, 200);
+  const graphEtag = cacheableGraph.headers.get("etag");
+  assert.ok(graphEtag);
+  revokeAfterNextRevision = true;
+  const revokedConditionalGraph = await fetch(`${baseUrl}/context-graph`, {
+    headers: { ...contextGraphHeaders, "if-none-match": graphEtag }
+  });
+  assert.equal(revokedConditionalGraph.status, 200);
+  assert.deepEqual((await revokedConditionalGraph.json()) as { graphs: unknown[] }, {
+    latest: null,
+    graphs: []
+  });
+  repositoryConnected = true;
   repositoryConnected = false;
   const disconnectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
     (response) => response.json() as Promise<{ graphs: unknown[] }>
@@ -578,6 +640,14 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   });
   assert.equal(revokedClaim.status, 204);
   repositoryConnected = true;
+  currentInstallationId = 100;
+  const reconnectedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: JSON.stringify({ workerId: "reconnected-worker", topics: ["run-context-graph-ingest"] })
+  });
+  assert.equal(reconnectedClaim.status, 409);
+  currentInstallationId = 99;
   const connectedClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
     method: "POST",
     headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
@@ -588,6 +658,32 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
     message: { id: string; leaseId: string };
     task: { id: string };
   };
+  reconnectDuringNextPlan = true;
+  const racedPlan = await fetch(`${baseUrl}/internal/context-graph/ingest/plan`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "content-type": "application/json",
+      "x-jina-tenant-id": SHARED_TENANT
+    },
+    body: JSON.stringify({
+      messageId: leased.message.id,
+      leaseId: leased.message.leaseId,
+      snapshot: {
+        tenantId: SHARED_TENANT,
+        repository: "omlabs/example",
+        ref: "main",
+        commitSha: "a".repeat(40),
+        treeSha: "b".repeat(40),
+        parents: [],
+        recordedAt: new Date().toISOString(),
+        taskId: leased.task.id,
+        files: []
+      }
+    })
+  });
+  assert.equal(racedPlan.status, 409);
+  currentInstallationId = 99;
   repositoryConnected = false;
   const workerHeaders = {
     authorization: `Bearer ${INTERNAL_TOKEN}`,
