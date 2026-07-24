@@ -58,7 +58,6 @@ function beforeDeadline<T>(operation: Promise<T>, deadline: number): Promise<T> 
   if (remaining <= 0) return Promise.reject(new PostgresHealthTimeoutError());
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new PostgresHealthTimeoutError()), remaining);
-    timer.unref();
     operation.then(
       (value) => {
         clearTimeout(timer);
