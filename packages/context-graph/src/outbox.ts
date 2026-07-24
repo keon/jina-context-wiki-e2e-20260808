@@ -7,6 +7,13 @@ export interface ProjectionRebuildResult {
   readonly projectedAt: string;
 }
 
+export interface ContextGraphParserBacklogRef {
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly unparsedBlobCount: number;
+}
+
 export interface ContextGraphOperationalMetrics {
   readonly outboxDepth: Readonly<Record<string, number>>;
   readonly outboxDepthByConsumer: Readonly<Record<string, number>>;

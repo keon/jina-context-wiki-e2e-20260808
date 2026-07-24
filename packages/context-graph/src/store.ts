@@ -14,7 +14,11 @@ import type {
   ContextGraphCommandResult,
   RepositoryContextOperations
 } from "./operations.js";
-import type { ContextGraphOperationalMetrics, ProjectionRebuildResult } from "./outbox.js";
+import type {
+  ContextGraphOperationalMetrics,
+  ContextGraphParserBacklogRef,
+  ProjectionRebuildResult
+} from "./outbox.js";
 import { canonicalJson } from "./knowledge.js";
 import {
   codeownersPatternMatches,
@@ -90,6 +94,10 @@ export interface ContextGraphStore extends ContextGraphPipelineStore, Repository
   list(tenantId: string): Promise<readonly ContextGraph[]>;
   listAllSummaries(): Promise<readonly ContextGraphSummary[]>;
   listSummaries(tenantId: string, filter?: ContextGraphSummaryFilter): Promise<readonly ContextGraphSummary[]>;
+  parserBacklogRefs(
+    tenantId: string,
+    options?: { readonly repositories?: readonly string[]; readonly limit?: number }
+  ): Promise<readonly ContextGraphParserBacklogRef[]>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
   close(): Promise<void>;
@@ -699,6 +707,52 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     return { processedEventCount: 0, rebuiltRepositories: [] };
   }
 
+  async parserBacklogRefs(
+    tenantId: string,
+    options: { readonly repositories?: readonly string[]; readonly limit?: number } = {}
+  ): Promise<readonly ContextGraphParserBacklogRef[]> {
+    const repositories = options.repositories
+      ? new Set(options.repositories.map((repository) => repository.toLowerCase()))
+      : undefined;
+    const latest = new Map<string, RepositorySnapshot>();
+    for (const snapshot of this.snapshots.values()) {
+      if (
+        snapshot.tenantId !== tenantId ||
+        snapshot.updateRef === false ||
+        (repositories && !repositories.has(snapshot.repository.toLowerCase()))
+      )
+        continue;
+      const key = `${snapshot.repository.toLowerCase()}:${snapshot.ref}`;
+      const current = latest.get(key);
+      if (!current || current.recordedAt < snapshot.recordedAt) latest.set(key, snapshot);
+    }
+    const grouped = new Map<string, { repository: string; ref: string; blobs: Set<string> }>();
+    for (const [key, snapshot] of latest) {
+      const group = { repository: snapshot.repository, ref: snapshot.ref, blobs: new Set<string>() };
+      for (const file of snapshot.files) {
+        if (!this.blobAnalyses.has(blobKey(tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION))) {
+          group.blobs.add(file.blobSha);
+        }
+      }
+      grouped.set(key, group);
+    }
+    return [...grouped.values()]
+      .filter((group) => group.blobs.size > 0)
+      .sort(
+        (left, right) =>
+          right.blobs.size - left.blobs.size ||
+          left.repository.localeCompare(right.repository) ||
+          left.ref.localeCompare(right.ref)
+      )
+      .slice(0, Math.max(1, Math.min(options.limit ?? 20, 100)))
+      .map((group) => ({
+        tenantId,
+        repository: group.repository,
+        ref: group.ref,
+        unparsedBlobCount: group.blobs.size
+      }));
+  }
+
   async operationalMetrics(
     tenantId: string,
     _now?: string,
@@ -719,6 +773,13 @@ export class MemoryContextGraphStore implements ContextGraphStore {
         (!repositories || repositories.has(snapshot.repository.toLowerCase())) &&
         (!scope?.ref || snapshot.ref === scope.ref)
     );
+    const latestRefSnapshots = new Map<string, RepositorySnapshot>();
+    for (const snapshot of scopedSnapshots) {
+      if (snapshot.updateRef === false) continue;
+      const key = `${snapshot.repository.toLowerCase()}:${snapshot.ref}`;
+      const current = latestRefSnapshots.get(key);
+      if (!current || current.recordedAt < snapshot.recordedAt) latestRefSnapshots.set(key, snapshot);
+    }
     const scopedRefCommits = scope?.ref
       ? new Set(scopedSnapshots.map((snapshot) => `${snapshot.repository.toLowerCase()}:${snapshot.commitSha}`))
       : undefined;
@@ -728,7 +789,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       oldestOutboxAgeSeconds: 0,
       reconciliationLagSeconds: 0,
       unparsedBlobCount: new Set(
-        scopedSnapshots
+        [...latestRefSnapshots.values()]
           .flatMap((snapshot) => snapshot.files)
           .filter((file) => !this.blobAnalyses.has(blobKey(tenantId, file.blobSha, CONTEXT_GRAPH_PARSER_VERSION)))
           .map((file) => file.blobSha)

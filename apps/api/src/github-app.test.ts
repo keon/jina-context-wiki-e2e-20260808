@@ -80,6 +80,131 @@ test("database config fails closed on a partial graph database override", () => 
   );
 });
 
+test("idle ingest claims enqueue a durable parser-only repair workflow", async (context) => {
+  const tenantId = "parser-repair-tenant";
+  const repository = "omxyz/parser-repair";
+  const ref = "a".repeat(40);
+  const blobSha = "b".repeat(40);
+  const contextGraphStore = new MemoryContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  await contextGraphStore.planIngestion({
+    tenantId,
+    repository,
+    ref,
+    commitSha: ref,
+    treeSha: "c".repeat(40),
+    parents: [],
+    recordedAt: "2026-07-23T20:00:00.000Z",
+    taskId: "partial-ingest",
+    files: [{ path: "src/index.ts", blobSha, size: 42 }]
+  });
+  await contextGraphCoordinator.createBuild({
+    tenantId,
+    repository,
+    ref,
+    requestKey: "failed-source-build",
+    snapshotFirst: true,
+    createdAt: "2026-07-23T20:00:00.000Z",
+    metadata: { githubInstallationId: 140435029 }
+  });
+  const failedClaim = await contextGraphCoordinator.claim({
+    tenantId,
+    workerId: "failed-worker",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-23T20:00:01.000Z",
+    leaseExpiresAt: "2026-07-23T20:10:01.000Z"
+  });
+  assert.ok(failedClaim);
+  assert.equal(
+    await contextGraphCoordinator.complete({
+      tenantId,
+      stageId: failedClaim.task.id,
+      leaseId: failedClaim.message.leaseId,
+      outcome: "failed",
+      reason: "payload too large",
+      now: "2026-07-23T20:00:02.000Z"
+    }),
+    true
+  );
+
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId,
+    contextGraphStore,
+    contextGraphCoordinator
+  });
+  const baseUrl = await listen(server);
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const repair = await claimTopic(baseUrl, "run-context-graph-ingest");
+  assert.equal(repair.task.metadata?.repairOnly, true);
+  assert.equal(repair.task.metadata?.pipelinePhase, "snapshot");
+  assert.equal(repair.task.metadata?.githubInstallationId, 140435029);
+  assert.equal(repair.task.metadata?.ref, ref);
+  const workflows = await contextGraphCoordinator.list(tenantId, { repositories: [repository] });
+  const repairWorkflow = workflows.find(({ build }) => build.metadata.repairOnly === true);
+  assert.ok(repairWorkflow);
+  assert.equal(repairWorkflow.stages.length, 1);
+  assert.equal(repairWorkflow.stages[0]?.stage, "ingest");
+});
+
+test("concurrent projection drain requests share one in-process drain", async (context) => {
+  let enterDrain!: () => void;
+  let releaseDrain!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enterDrain = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseDrain = resolve;
+  });
+  class CoalescingContextGraphStore extends MemoryContextGraphStore {
+    calls = 0;
+
+    override async drainDerivedProjectionEvents(): Promise<{
+      readonly processedEventCount: number;
+      readonly rebuiltRepositories: readonly string[];
+    }> {
+      this.calls += 1;
+      enterDrain();
+      await release;
+      return { processedEventCount: 3, rebuiltRepositories: ["omxyz/example"] };
+    }
+  }
+
+  const contextGraphStore = new CoalescingContextGraphStore();
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId: "drain-tenant",
+    contextGraphStore
+  });
+  const baseUrl = await listen(server);
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const first = fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+  await entered;
+  const second = fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  releaseDrain();
+  const responses = await Promise.all([first, second]);
+  assert.deepEqual(
+    responses.map((response) => response.status),
+    [200, 200]
+  );
+  assert.equal(contextGraphStore.calls, 1);
+});
+
 test("disabled GitHub intake acknowledges signed deliveries without creating work", async (context) => {
   const server = createApiServer({
     githubWebhookSecret: SECRET,
@@ -1163,6 +1288,7 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
       taskId: ingestion.task.id,
       ...lease,
       commitSha,
+      padding: "x".repeat(2 * 1024 * 1024 + 1),
       analyses: [
         {
           blobSha: readmeSha,

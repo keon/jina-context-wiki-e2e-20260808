@@ -161,6 +161,87 @@ test("snapshot-first contextGraph builds publish and ingest history without wait
   assert.equal(assertion.task.metadata.commitSha, metadata.commitSha);
 });
 
+test("parser repair builds contain only a durable snapshot ingest stage", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId: "tenant",
+    repository: "omxyz/jina",
+    ref: "a".repeat(40),
+    requestKey: "parser-repair",
+    snapshotFirst: true,
+    createdAt: "2026-07-23T20:00:00.000Z",
+    metadata: { repairOnly: true, githubInstallationId: 99 }
+  });
+
+  const workflow = (await coordinator.list("tenant"))[0]!;
+  assert.equal(workflow.stages.length, 1);
+  assert.deepEqual(
+    workflow.stages.map((stage) => `${stage.phase}:${stage.stage}:${stage.status}`),
+    ["snapshot:ingest:queued"]
+  );
+});
+
+test("required stage failure cancels siblings that were already queued", async () => {
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId: "tenant",
+    repository: "omxyz/jina",
+    ref: "main",
+    requestKey: "failure-reconciliation",
+    snapshotFirst: true,
+    createdAt: "2026-07-23T20:00:00.000Z"
+  });
+  const snapshotIngest = await coordinator.claim({
+    tenantId: "tenant",
+    workerId: "worker",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-23T20:00:01.000Z",
+    leaseExpiresAt: "2026-07-23T20:10:01.000Z"
+  });
+  assert.ok(snapshotIngest);
+  assert.equal(
+    await coordinator.complete({
+      tenantId: "tenant",
+      stageId: snapshotIngest.task.id,
+      leaseId: snapshotIngest.message.leaseId,
+      outcome: "done",
+      now: "2026-07-23T20:00:02.000Z"
+    }),
+    true
+  );
+  const historyIngest = await coordinator.claim({
+    tenantId: "tenant",
+    workerId: "worker",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-23T20:00:03.000Z",
+    leaseExpiresAt: "2026-07-23T20:10:03.000Z"
+  });
+  assert.ok(historyIngest);
+  assert.equal(historyIngest.task.metadata.pipelinePhase, "history");
+  assert.equal(
+    await coordinator.complete({
+      tenantId: "tenant",
+      stageId: historyIngest.task.id,
+      leaseId: historyIngest.message.leaseId,
+      outcome: "failed",
+      reason: "upstream unavailable",
+      now: "2026-07-23T20:00:04.000Z"
+    }),
+    true
+  );
+
+  const workflow = (await coordinator.list("tenant"))[0]!;
+  assert.equal(workflow.build.status, "failed");
+  assert.equal(
+    workflow.stages.find((stage) => stage.phase === "snapshot" && stage.stage === "project")?.status,
+    "canceled"
+  );
+  assert.equal(
+    workflow.stages.some((stage) => stage.status === "queued"),
+    false
+  );
+});
+
 test("new repository builds fence leases from superseded builds", async () => {
   const coordinator = new MemoryContextGraphPipelineCoordinator();
   const request = {

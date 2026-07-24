@@ -243,6 +243,12 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     authorityGuard?: (repository: string) => Promise<void>
   ): Promise<ContextGraphBuildRecord> {
     await authorityGuard?.(request.repository);
+    const id = stableId(
+      "context-graph-job",
+      `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
+    );
+    const existing = this.builds.get(id);
+    if (existing) return structuredClone(existing);
     if (request.dedupeHeadSha) {
       const latest = [...this.builds.values()]
         .filter(
@@ -252,6 +258,19 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
         .at(-1);
       if (latest?.metadata.githubHeadSha === request.dedupeHeadSha) return structuredClone(latest);
+    }
+    if (isParserRepairBuild(request)) {
+      const active = [...this.builds.values()]
+        .filter(
+          (build) =>
+            build.tenantId === request.tenantId &&
+            build.repository === request.repository &&
+            build.ref === request.ref &&
+            ["queued", "in_progress", "enriching"].includes(build.status)
+        )
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .at(-1);
+      if (active) return structuredClone(active);
     }
     for (const build of this.builds.values()) {
       if (
@@ -274,12 +293,6 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
         }
       }
     }
-    const id = stableId(
-      "context-graph-job",
-      `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
-    );
-    const existing = this.builds.get(id);
-    if (existing) return structuredClone(existing);
     const build: MutableBuild = {
       ...request,
       metadata: structuredClone(request.metadata ?? {}),
@@ -526,7 +539,16 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
       if (contextGraphStageRequired(stage!)) {
         build.status = "failed";
         for (const candidate of this.stages.values()) {
-          if (candidate.buildId === build.id && candidate.status === "triage") candidate.status = "canceled";
+          if (
+            candidate.buildId === build.id &&
+            candidate.id !== stage!.id &&
+            !["done", "failed", "canceled", "superseded"].includes(candidate.status)
+          ) {
+            candidate.status = "canceled";
+            candidate.updatedAt = input.now;
+            clearLease(candidate);
+            this.recordEvent(candidate.id, "task.transitioned", input.now, { toStatus: "canceled" });
+          }
         }
       } else {
         this.queueReadyStages(build, stage!, input.nextMetadata ?? {}, input.now);
@@ -716,33 +738,35 @@ function contextGraphBuildTrigger(build: ContextGraphBuildRecord): ContextGraphB
 }
 
 function plannedStages(build: MutableBuild): MutableStage[] {
-  return contextGraphPlannedStageSpecs(build.snapshotFirst).map(({ phase, priority, stage, ordinal }) => {
-    const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
-    return {
-      id,
-      buildId: build.id,
-      tenantId: build.tenantId,
-      repository: build.repository,
-      ref: build.ref,
-      requestKey: build.requestKey,
-      phase,
-      stage,
-      topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
-      status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
-      priority,
-      metadata: {
-        ...structuredClone(build.metadata),
+  return contextGraphPlannedStageSpecs(build.snapshotFirst, isParserRepairBuild(build)).map(
+    ({ phase, priority, stage, ordinal }) => {
+      const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
+      return {
+        id,
+        buildId: build.id,
         tenantId: build.tenantId,
         repository: build.repository,
         ref: build.ref,
         requestKey: build.requestKey,
-        pipelinePhase: phase
-      },
-      attempt: 0,
-      createdAt: build.createdAt,
-      updatedAt: build.createdAt
-    };
-  });
+        phase,
+        stage,
+        topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
+        status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
+        priority,
+        metadata: {
+          ...structuredClone(build.metadata),
+          tenantId: build.tenantId,
+          repository: build.repository,
+          ref: build.ref,
+          requestKey: build.requestKey,
+          pipelinePhase: phase
+        },
+        attempt: 0,
+        createdAt: build.createdAt,
+        updatedAt: build.createdAt
+      };
+    }
+  );
 }
 
 /**
@@ -750,12 +774,16 @@ function plannedStages(build: MutableBuild): MutableStage[] {
  * still loading. Semantic assertions belong to the history phase because they
  * require the complete work-item and causal evidence scope.
  */
-export function contextGraphPlannedStageSpecs(snapshotFirst: boolean): readonly {
+export function contextGraphPlannedStageSpecs(
+  snapshotFirst: boolean,
+  repairOnly = false
+): readonly {
   readonly phase: "snapshot" | "history";
   readonly stage: "ingest" | "assert" | "project";
   readonly priority: number;
   readonly ordinal: number;
 }[] {
+  if (repairOnly) return [{ phase: "snapshot", stage: "ingest", priority: 100, ordinal: 0 }];
   const phases = snapshotFirst
     ? [
         { phase: "snapshot" as const, priority: 100, stages: ["ingest", "project"] as const },
@@ -766,6 +794,10 @@ export function contextGraphPlannedStageSpecs(snapshotFirst: boolean): readonly 
   return phases.flatMap(({ phase, priority, stages }) =>
     stages.map((stage) => ({ phase, stage, priority, ordinal: ordinal++ }))
   );
+}
+
+function isParserRepairBuild(value: { readonly metadata?: Readonly<Record<string, unknown>> }): boolean {
+  return value.metadata?.repairOnly === true;
 }
 
 export function contextGraphStagePrerequisites(

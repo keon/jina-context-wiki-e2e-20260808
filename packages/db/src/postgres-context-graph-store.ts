@@ -2968,6 +2968,33 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     if (options?.repositories && options.repositories.length === 0) {
       return { processedEventCount: 0, rebuiltRepositories: [] };
     }
+    const lockName = `jina:context-graph:projection-drain:${tenantId}`;
+    const lockClient = await this.pool.connect();
+    let acquired = false;
+    try {
+      const result = await lockClient.query<{ acquired: boolean }>(
+        "select pg_try_advisory_lock(hashtextextended($1,0)) as acquired",
+        [lockName]
+      );
+      acquired = result.rows[0]?.acquired === true;
+      if (!acquired) return { processedEventCount: 0, rebuiltRepositories: [] };
+      return await this.drainDerivedProjectionEventsLocked(tenantId, now, options);
+    } finally {
+      if (acquired) {
+        await lockClient.query("select pg_advisory_unlock(hashtextextended($1,0))", [lockName]).catch(() => undefined);
+      }
+      lockClient.release();
+    }
+  }
+
+  private async drainDerivedProjectionEventsLocked(
+    tenantId: string,
+    now: string,
+    options?: {
+      readonly repositories?: readonly string[];
+      readonly authorityGuard?: (repository: string) => Promise<void>;
+    }
+  ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
     const rebuiltRepositories = new Set<string>();
     let processedEventCount = 0;
     // A repository whose ingest stage is mid-flight would have its projections
@@ -3132,6 +3159,45 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     return { processedEventCount, rebuiltRepositories: [...rebuiltRepositories].sort() };
   }
 
+  async parserBacklogRefs(
+    tenantId: string,
+    options: { readonly repositories?: readonly string[]; readonly limit?: number } = {}
+  ): Promise<
+    readonly {
+      readonly tenantId: string;
+      readonly repository: string;
+      readonly ref: string;
+      readonly unparsedBlobCount: number;
+    }[]
+  > {
+    await this.initialize();
+    if (options.repositories && options.repositories.length === 0) return [];
+    const limit = Math.max(1, Math.min(options.limit ?? 20, 100));
+    const result = await this.pool.query<{ repository: string; ref_name: string; count: string }>(
+      `select ref.repository,ref.ref_name,count(distinct manifest.blob_sha) as count
+       from jina_context_graph.refs ref
+       cross join lateral jina_context_graph.commit_manifest(
+         ref.tenant_id,ref.repository,ref.commit_sha
+       ) manifest
+       left join jina_context_graph.blob_analyses analysis
+         on analysis.tenant_id=ref.tenant_id and analysis.blob_sha=manifest.blob_sha
+        and analysis.parser_version=$2
+       where ref.tenant_id=$1
+         and ($3::text[] is null or ref.repository=any($3::text[]))
+         and analysis.blob_sha is null
+       group by ref.repository,ref.ref_name
+       order by count(distinct manifest.blob_sha) desc,ref.repository,ref.ref_name
+       limit $4`,
+      [tenantId, CONTEXT_GRAPH_PARSER_VERSION, options.repositories ?? null, limit]
+    );
+    return result.rows.map((row) => ({
+      tenantId,
+      repository: row.repository,
+      ref: row.ref_name,
+      unparsedBlobCount: Number(row.count)
+    }));
+  }
+
   async operationalMetrics(
     tenantId: string,
     now: string,
@@ -3144,30 +3210,21 @@ export class PostgresContextGraphStore implements ContextGraphStore {
     await this.initialize();
     const repositories = scope?.repositories ?? (scope?.repository ? [scope.repository] : null);
     const ref = scope?.ref ?? null;
-    const backlogQuery = repositories
-      ? this.pool.query<{ count: string }>(
-          `select count(distinct manifest.blob_sha)
-           from jina_context_graph.refs ref
-           cross join lateral jina_context_graph.commit_manifest(
-             ref.tenant_id,ref.repository,ref.commit_sha
-           ) manifest
-           join jina_context_graph.blobs blob
-             on blob.tenant_id=ref.tenant_id and blob.blob_sha=manifest.blob_sha
-           left join jina_context_graph.blob_analyses analysis
-             on analysis.tenant_id=blob.tenant_id and analysis.blob_sha=blob.blob_sha
-            and analysis.parser_version=$2
-           where ref.tenant_id=$1 and ref.repository=any($3::text[])
-             and ($4::text is null or ref.ref_name=$4)
-             and analysis.blob_sha is null`,
-          [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repositories, ref]
-        )
-      : this.pool.query<{ count: string }>(
-          `select count(distinct (b.blob_sha,b.tenant_id)) from jina_context_graph.blobs b
-           left join jina_context_graph.blob_analyses a
-             on a.tenant_id=b.tenant_id and a.blob_sha=b.blob_sha and a.parser_version=$2
-           where b.tenant_id=$1 and a.blob_sha is null`,
-          [tenantId, CONTEXT_GRAPH_PARSER_VERSION]
-        );
+    const backlogQuery = this.pool.query<{ count: string }>(
+      `select count(distinct manifest.blob_sha)
+       from jina_context_graph.refs ref
+       cross join lateral jina_context_graph.commit_manifest(
+         ref.tenant_id,ref.repository,ref.commit_sha
+       ) manifest
+       left join jina_context_graph.blob_analyses analysis
+         on analysis.tenant_id=ref.tenant_id and analysis.blob_sha=manifest.blob_sha
+        and analysis.parser_version=$2
+       where ref.tenant_id=$1
+         and ($3::text[] is null or ref.repository=any($3::text[]))
+         and ($4::text is null or ref.ref_name=$4)
+         and analysis.blob_sha is null`,
+      [tenantId, CONTEXT_GRAPH_PARSER_VERSION, repositories, ref]
+    );
     const [outbox, backlog, parsed, proposed, unexplained, erasure, freshness, labels, retrieval] = await Promise.all([
       this.pool.query<{ event_type: string; consumer: string; count: string; oldest: Date | null }>(
         `select event_type,consumer,count(*),min(created_at) as oldest from jina_context_graph.outbox

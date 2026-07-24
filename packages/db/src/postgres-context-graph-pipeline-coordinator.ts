@@ -112,6 +112,19 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
           return buildRecord(latest.rows[0]);
         }
       }
+      if (isParserRepairBuild(request)) {
+        const active = await client.query<BuildRow>(
+          `select * from jina_board.workflows
+           where tenant_id=$1 and repository=$2 and ref_name=$3
+             and status in ('queued','in_progress','enriching')
+           order by created_at desc limit 1`,
+          [request.tenantId, request.repository, request.ref]
+        );
+        if (active.rows[0]) {
+          await client.query("commit");
+          return buildRecord(active.rows[0]);
+        }
+      }
       await authorityGuard?.(request.repository);
       const supersededBuilds = await client.query<{ id: string }>(
         `update jina_board.workflows
@@ -316,6 +329,26 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      // A required stage can fail while a sibling was already queued or leased.
+      // Reconcile those rows before lease expiry/claim processing so terminal
+      // workflows cannot retain misleading runnable work.
+      const reconciled = await client.query<{ id: string; tenant_id: string; status: "canceled" | "superseded" }>(
+        `update jina_board.tasks stage
+         set status=case when build.status='superseded' then 'superseded' else 'canceled' end,
+             lease_id=null,worker_id=null,lease_expires_at=null,updated_at=$1
+         from jina_board.workflows build
+         where stage.build_id=build.id and build.tenant_id=any($2::text[])
+           and build.status in ('done','failed','superseded')
+           and stage.status not in ('done','failed','canceled','superseded')
+         returning stage.id,stage.tenant_id,stage.status`,
+        [input.now, tenantIds]
+      );
+      for (const stage of reconciled.rows) {
+        await insertBoardEvent(client, stage.tenant_id, stage.id, "task.transitioned", input.now, {
+          toStatus: stage.status,
+          reason: "reconciled with terminal workflow"
+        });
+      }
       // Requeue expired leases. The row must not carry stale timing while
       // queued, so the interrupted attempt's startedAt/duration survive only
       // in a board event — the CTE captures the pre-update columns that the
@@ -617,11 +650,19 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
         ...(input.reason ? { reason: input.reason } : {})
       });
       if (input.outcome === "failed" && contextGraphStageRequired(stage)) {
-        await client.query(
-          `update jina_board.tasks set status='canceled',updated_at=$2
-           where build_id=$1 and status='triage'`,
-          [stage.build_id, input.now]
+        const canceled = await client.query<{ id: string }>(
+          `update jina_board.tasks
+           set status='canceled',lease_id=null,worker_id=null,lease_expires_at=null,updated_at=$2
+           where build_id=$1 and id<>$3
+             and status not in ('done','failed','canceled','superseded')
+           returning id`,
+          [stage.build_id, input.now, stage.id]
         );
+        for (const candidate of canceled.rows) {
+          await insertBoardEvent(client, stage.tenant_id, candidate.id, "task.transitioned", input.now, {
+            toStatus: "canceled"
+          });
+        }
         await client.query("update jina_board.workflows set status='failed',updated_at=$2 where id=$1", [
           stage.build_id,
           input.now
@@ -964,23 +1005,29 @@ function plannedStages(
   readonly ordinal: number;
   readonly metadata: Readonly<Record<string, unknown>>;
 }[] {
-  return contextGraphPlannedStageSpecs(request.snapshotFirst).map(({ phase, priority, stage, ordinal }) => ({
-    id: stableId("context-graph-stage", `${buildId}:${phase}:${stage}`),
-    phase,
-    stage,
-    topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
-    status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
-    priority,
-    ordinal,
-    metadata: {
-      ...request.metadata,
-      tenantId: request.tenantId,
-      repository: request.repository,
-      ref: request.ref,
-      requestKey: request.requestKey,
-      pipelinePhase: phase
-    }
-  }));
+  return contextGraphPlannedStageSpecs(request.snapshotFirst, isParserRepairBuild(request)).map(
+    ({ phase, priority, stage, ordinal }) => ({
+      id: stableId("context-graph-stage", `${buildId}:${phase}:${stage}`),
+      phase,
+      stage,
+      topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
+      status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
+      priority,
+      ordinal,
+      metadata: {
+        ...request.metadata,
+        tenantId: request.tenantId,
+        repository: request.repository,
+        ref: request.ref,
+        requestKey: request.requestKey,
+        pipelinePhase: phase
+      }
+    })
+  );
+}
+
+function isParserRepairBuild(value: { readonly metadata?: Readonly<Record<string, unknown>> }): boolean {
+  return value.metadata?.repairOnly === true;
 }
 
 function buildRecord(row: BuildRow): ContextGraphBuildRecord {
