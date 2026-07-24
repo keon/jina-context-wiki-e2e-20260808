@@ -2531,6 +2531,36 @@ test("health fails when the context graph read store is unavailable", async (con
   assert.equal(response.status, 500);
 });
 
+test("concurrent health requests share one dependency check", async (context) => {
+  let pingCount = 0;
+  let releasePing: (() => void) | undefined;
+  const pingBlocked = new Promise<void>((resolve) => {
+    releasePing = resolve;
+  });
+  class BlockingContextGraphStore extends MemoryContextGraphStore {
+    override async ping(): Promise<void> {
+      pingCount += 1;
+      await pingBlocked;
+    }
+  }
+
+  const server = createApiServer({ contextGraphStore: new BlockingContextGraphStore() });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const first = fetch(`${baseUrl}/health`);
+  const second = fetch(`${baseUrl}/healthz`);
+  for (let attempt = 0; attempt < 20 && pingCount === 0; attempt += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.equal(pingCount, 1);
+  releasePing?.();
+  assert.deepEqual(
+    await Promise.all([first, second]).then((responses) => responses.map((response) => response.status)),
+    [200, 200]
+  );
+});
+
 test("context graph task-board state is independent of the legacy JSON board snapshot", async () => {
   const stateStore = new MemoryStateStore();
   const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();

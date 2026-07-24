@@ -199,6 +199,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   let nextParserRepairScanAt = 0;
   let parserRepairScan: Promise<number> | undefined;
   const ready = initializeState();
+  let healthCheck: Promise<void> | undefined;
   let mutations = Promise.resolve();
   let transactionActive = false;
   /** Version of the last snapshot restored via loadNewer; 0 = never restored. */
@@ -542,12 +543,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await Promise.all([
+      healthCheck ??= Promise.all([
         config.stateStore?.ping(),
         contextGraphStore.ping(),
         contextGraphCoordinator.ping(),
         config.sharedIdentityResolver?.ping()
-      ]);
+      ])
+        .then(() => undefined)
+        .finally(() => {
+          healthCheck = undefined;
+        });
+      await healthCheck;
       json(response, 200, {
         ok: true,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret) && config.githubWebhookEnabled !== false,

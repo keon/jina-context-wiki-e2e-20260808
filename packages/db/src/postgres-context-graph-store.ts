@@ -50,6 +50,7 @@ import {
   type ContextGraphReadRevisionOptions
 } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { pingPostgresPool } from "./postgres-health.js";
 import { DomainError } from "@jina/shared-kernel";
 import { applySchema } from "./apply-schema.js";
 import { CONTEXT_GRAPH_SCHEMA_SQL } from "./context-graph-schema.js";
@@ -3625,7 +3626,13 @@ export class PostgresContextGraphStore implements ContextGraphStore {
 
   async ping(): Promise<void> {
     await this.initialize();
-    await this.pool.query("select 1");
+    await pingPostgresPool(this.pool);
+    // The projection pool has one client by design and may legitimately hold
+    // it for a multi-minute drain. Only probe it when doing so cannot queue
+    // health behind active projection work.
+    if (this.projectionLockPool.totalCount === 0 || this.projectionLockPool.idleCount > 0) {
+      await pingPostgresPool(this.projectionLockPool);
+    }
   }
 
   async close(): Promise<void> {

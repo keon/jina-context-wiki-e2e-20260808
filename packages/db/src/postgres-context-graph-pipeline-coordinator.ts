@@ -17,6 +17,7 @@ import {
 } from "@jina/context-graph";
 import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { pingPostgresPool } from "./postgres-health.js";
 
 export interface PostgresContextGraphPipelineCoordinatorConfig extends PoolConfig {
   readonly manageSchema?: boolean;
@@ -932,7 +933,7 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
 
   async ping(): Promise<void> {
     await this.initialize();
-    await this.pool.query("select 1");
+    await pingPostgresPool(this.pool);
   }
 
   async close(): Promise<void> {
