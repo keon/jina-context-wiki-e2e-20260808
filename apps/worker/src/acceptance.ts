@@ -313,6 +313,7 @@ export async function runProductionContextGraphAcceptance(
       repository,
       ref,
       `${config.requestKey}:causal`,
+      githubInstallationId,
       deadline,
       pollIntervalMs,
       log
@@ -718,6 +719,7 @@ async function runFollowupContextGraphBuild(
   repository: string,
   ref: string,
   requestKey: string,
+  githubInstallationId: number,
   deadline: number,
   pollIntervalMs: number,
   log: (message: string) => void
@@ -725,7 +727,7 @@ async function runFollowupContextGraphBuild(
   const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
     method: "POST",
     headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, requestKey })
+    body: JSON.stringify({ repository, ref, requestKey, githubInstallationId })
   });
   const taskId = requiredNestedString(created, "task", "id");
   let lastSummary = "";

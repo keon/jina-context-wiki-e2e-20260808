@@ -546,9 +546,13 @@ test("production acceptance reviews causality, queries it in both directions, an
   let contextGraphReads = 0;
   let reviewed = false;
   const causalQuestions: string[] = [];
+  const buildBodies: unknown[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
-    if (url.pathname === "/context-graph/build") return json({ task: { id: `context-graph-${++buildCount}` } }, 202);
+    if (url.pathname === "/context-graph/build") {
+      buildBodies.push(JSON.parse(String(init?.body)));
+      return json({ task: { id: `context-graph-${++buildCount}` } }, 202);
+    }
     if (url.pathname === "/board") {
       const taskId = buildCount === 1 ? "context-graph-1" : "context-graph-2";
       return json({
@@ -772,6 +776,10 @@ test("production acceptance reviews causality, queries it in both directions, an
 
   assert.equal(reviewed, true);
   assert.equal(buildCount, 2);
+  assert.deepEqual(
+    buildBodies.map((body) => (body as { githubInstallationId?: number }).githubInstallationId),
+    [99, 99]
+  );
   assert.equal(causalQuestions.length, 4);
   assert.equal(
     causalQuestions.some((question) => question.includes('"Application guard bypassed"')),
