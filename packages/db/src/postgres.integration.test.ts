@@ -4356,8 +4356,14 @@ test(
   },
   async () => {
     assert.ok(connectionString);
-    const admin = new Pool({ connectionString });
     const suffix = Date.now().toString(36);
+    const databaseName = `jina_board_migration_${suffix}`;
+    const control = new Pool({ connectionString });
+    await control.query(`create database "${databaseName}"`);
+    const isolatedUrl = new URL(connectionString);
+    isolatedUrl.pathname = `/${databaseName}`;
+    const isolatedConnectionString = isolatedUrl.toString();
+    const admin = new Pool({ connectionString: isolatedConnectionString });
     const tenantId = `board-migration-${suffix}`;
     const repository = `omxyz/board-migration-${suffix}`;
     const legacyBuildId = `legacy-build-${suffix}`;
@@ -4366,7 +4372,6 @@ test(
     const legacyDoneId = `legacy-done-${suffix}`;
     const seededAt = "2026-07-20T00:00:00.000Z";
     try {
-      await admin.query("drop schema if exists jina_board cascade");
       await admin.query(LEGACY_PIPELINE_SCHEMA_SQL);
       // Production still holds queued/leased/terminal rows carrying legacy
       // topics; the migration must validate its replacement constraint
@@ -4398,7 +4403,7 @@ test(
         [tenantId, legacyTaskId, legacyBuildId, seededAt]
       );
 
-      const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString: isolatedConnectionString });
       try {
         // Bootstrap removes the retired workflow instead of translating it
         // into a second execution mode. Cascades remove its task state, while
@@ -4462,7 +4467,7 @@ test(
 
       // Re-applying the current schema is idempotent and leaves the retired
       // vocabulary impossible to reintroduce.
-      const second = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      const second = new PostgresContextGraphPipelineCoordinator({ connectionString: isolatedConnectionString });
       try {
         await second.initialize();
         const repeatChecks = await admin.query<{ conname: string; definition: string }>(
@@ -4483,8 +4488,9 @@ test(
         await second.close();
       }
     } finally {
-      await admin.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]).catch(() => undefined);
       await admin.end();
+      await control.query(`drop database if exists "${databaseName}" with (force)`);
+      await control.end();
     }
   }
 );
