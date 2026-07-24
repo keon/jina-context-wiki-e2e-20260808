@@ -531,6 +531,115 @@ code {
   font-weight: 450;
 }
 
+.read-traffic {
+  margin-top: 32px;
+  padding-top: 28px;
+  border-top: 1px solid var(--border);
+}
+
+.read-traffic-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 24px;
+}
+
+.read-traffic-heading h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 550;
+}
+
+.read-traffic-heading p {
+  margin: 5px 0 0;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.read-traffic-window {
+  flex: none;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.read-traffic-summary {
+  margin-bottom: 6px;
+}
+
+.read-traffic-summary small {
+  min-height: 22px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.read-traffic-summary .status-success {
+  color: var(--success);
+}
+
+.read-traffic-summary .status-warning {
+  color: var(--warning);
+}
+
+.read-traffic-summary .status > span {
+  color: inherit;
+}
+
+.read-traffic-table-wrap {
+  margin-top: 12px;
+}
+
+.read-traffic-table {
+  min-width: 880px;
+}
+
+.read-traffic-table th,
+.read-traffic-table td {
+  padding-block: 13px;
+}
+
+.read-traffic-table .read-volume {
+  width: 24%;
+}
+
+.read-traffic-table progress {
+  display: block;
+  width: 100%;
+  min-width: 100px;
+  height: 5px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  appearance: none;
+}
+
+.read-traffic-table progress::-webkit-progress-bar {
+  border-radius: 999px;
+  background: var(--panel-raised);
+}
+
+.read-traffic-table progress::-webkit-progress-value {
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.read-traffic-table progress::-moz-progress-bar {
+  border-radius: 999px;
+  background: var(--accent);
+}
+
+.read-traffic-empty {
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+  padding: 24px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 .metric-chart {
   border-bottom: 1px solid var(--border);
   padding: 0 0 24px;
@@ -1353,6 +1462,12 @@ section.listing h3 {
 
   .metric-summary {
     grid-template-columns: repeat(2, 1fr);
+  }
+
+  .read-traffic-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 10px;
   }
 
   .access-boundary {

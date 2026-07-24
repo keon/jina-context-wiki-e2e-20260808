@@ -86,6 +86,14 @@ export interface AdminGraphWorkflow {
   readonly stages: readonly AdminGraphStage[];
 }
 
+export interface AdminReadTrafficMetric {
+  readonly template: string;
+  readonly requests: number;
+  readonly averageLatencyMs: number;
+  readonly p95LatencyMs: number;
+  readonly truncationRate: number;
+}
+
 interface AdminOperationalMetrics {
   readonly outboxDepth: Readonly<Record<string, number>>;
   readonly outboxDepthByConsumer: Readonly<Record<string, number>>;
@@ -98,13 +106,7 @@ interface AdminOperationalMetrics {
   readonly proposedAssertionCount: number;
   readonly unexplainedAssertionCount: number;
   readonly pendingErasureEventCount: number;
-  readonly retrievalTemplates: readonly {
-    readonly template: string;
-    readonly requests: number;
-    readonly averageLatencyMs: number;
-    readonly p95LatencyMs: number;
-    readonly truncationRate: number;
-  }[];
+  readonly retrievalTemplates: readonly AdminReadTrafficMetric[];
 }
 
 export interface AdminGithubConnection {
