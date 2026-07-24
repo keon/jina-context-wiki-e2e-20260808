@@ -64,11 +64,17 @@ The board stores repository/ref inputs and checkpoint IDs. It does not store obs
 
 ### Intake and incrementality
 
-Snapshot-first builds run snapshot ingest and projection to publish structural
-state quickly, then run history ingest, semantic assertion, and final
-projection. Assertions are intentionally history-owned: a snapshot does not
-yet contain the complete work-item and causal evidence scope required for
-fail-closed semantic validation.
+Snapshot-first builds ingest the head quickly, then run history ingest,
+semantic assertion, and projection. They do not publish a snapshot-only graph:
+every published graph has passed the required assertion stage. Assertions are
+history-owned because a snapshot does not yet contain the complete work-item
+and causal evidence scope required for fail-closed semantic validation.
+
+The pipeline has one topic vocabulary:
+`run-context-graph-ingest`, `run-context-graph-assert`, and
+`run-context-graph-project`. Database initialization deletes workflows and
+board events left on the retired `run-ontology-*` topics before enforcing a
+current-only constraint. Retired tasks are not rewritten or resumed.
 
 The contextGraph worker resolves the requested ref, then walks the commit DAG backward. Before fetching a commit tree it asks the canonical store which SHAs already exist. A repeated build therefore reads only the head tree; a new head ingests only the previously unseen subgraph until it reaches known parents. Automated builds use a 500-commit partial-history boundary by default. Dashboard builds may override that boundary up to the `CONTEXT_GRAPH_HISTORY_LIMIT` physical safety ceiling (default and production value: 10,000 commits).
 

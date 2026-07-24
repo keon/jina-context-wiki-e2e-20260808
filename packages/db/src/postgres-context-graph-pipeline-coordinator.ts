@@ -971,35 +971,12 @@ export class PostgresContextGraphPipelineCoordinator implements ContextGraphPipe
            and exists (select 1 from pg_constraint
                        where conrelid=to_regclass('jina_board.tasks') and contype='c'
                          and pg_get_constraintdef(oid) like '%duration_ms%')
-           -- A pre-rename database passes every check above but still
-           -- constrains topic to the run-ontology-* vocabulary only; it must
-           -- take the DDL path so the topic migration runs. The replacement
-           -- constraint deliberately allows both vocabularies, so its
-           -- definition also mentions run-ontology-: a check counts as legacy
-           -- only when it does NOT mention run-context-graph-.
-           and not exists (select 1 from pg_constraint
-                           where conrelid=to_regclass('jina_board.tasks') and contype='c'
-                             and pg_get_constraintdef(oid) like '%run-ontology-%'
-                             and pg_get_constraintdef(oid) not like '%run-context-graph-%') as ready`
+           and exists (select 1 from pg_constraint
+                       where conrelid=to_regclass('jina_board.tasks') and contype='c'
+                         and pg_get_constraintdef(oid) like '%run-context-graph-ingest%'
+                         and pg_get_constraintdef(oid) not like '%run-ontology-%') as ready`
       );
-      let ready = probe.rows[0]?.ready ?? false;
-      if (ready) {
-        // A database whose constraint was already migrated (or that raced past
-        // the constraint fix) can still hold pre-rename rows the renamed
-        // workers never claim; those must send it down the DDL path so the
-        // one-time topic row migration runs. This is a plain snapshot read
-        // (AccessShare only, no relation DDL locks), but it cannot live inside
-        // the catalog probe above: referencing jina_board.tasks directly would
-        // fail to parse on a fresh database, so it only runs once the catalog
-        // probe has confirmed the table exists.
-        const drained = await client.query<{ drained: boolean }>(
-          `select not exists (
-             select 1 from jina_board.tasks
-             where topic like 'run-ontology-%' and status in ('triage','queued','in_progress')
-           ) as drained`
-        );
-        ready = drained.rows[0]?.drained ?? false;
-      }
+      const ready = probe.rows[0]?.ready ?? false;
       if (!ready) await client.query(PIPELINE_SCHEMA_SQL);
       await client.query("commit");
     } catch (error) {
@@ -1236,54 +1213,42 @@ const PIPELINE_SCHEMA_SQL = `
   alter table jina_board.tasks add column if not exists started_at timestamptz;
   alter table jina_board.tasks add column if not exists completed_at timestamptz;
   alter table jina_board.tasks add column if not exists duration_ms bigint;
-  -- The context-graph rename changed the worker topic vocabulary, but "create
-  -- table if not exists" never touches an existing table: a database created
-  -- before the rename still constrains topic to the run-ontology-* values and
-  -- rejects every new task. Drop every check that pins the legacy-only
-  -- vocabulary (whatever name it carries) and install one named replacement
-  -- that allows BOTH vocabularies. Both sets are required: legacy queued and
-  -- leased rows still exist, Postgres re-evaluates check constraints on ANY
-  -- update to a row (superseding or canceling a legacy task would fail under
-  -- a new-only check), and adding a new-only constraint would not even
-  -- validate against those legacy rows. The legacy-only detection excludes
-  -- definitions that already mention run-context-graph- so the replacement
-  -- constraint itself never matches and the migration stays idempotent.
+  -- Retired ontology workflows are not compatible with the current worker
+  -- contract. Remove them before tightening the topic constraint; current
+  -- graph work is never rewritten into a second execution mode.
+  delete from jina_board.events
+  where task_id in (select id from jina_board.tasks where topic like 'run-ontology-%')
+     or task_id in (
+       select distinct build_id from jina_board.tasks where topic like 'run-ontology-%'
+     );
+  delete from jina_board.workflows workflow
+  where exists (
+    select 1 from jina_board.tasks task
+    where task.build_id=workflow.id and task.topic like 'run-ontology-%'
+  );
   do $$
   declare
-    legacy_check record;
-    had_legacy boolean := false;
+    retired_check record;
   begin
-    for legacy_check in
+    for retired_check in
       select conname from pg_constraint
       where conrelid='jina_board.tasks'::regclass and contype='c'
         and pg_get_constraintdef(oid) like '%run-ontology-%'
-        and pg_get_constraintdef(oid) not like '%run-context-graph-%'
     loop
-      had_legacy := true;
-      execute format('alter table jina_board.tasks drop constraint %I', legacy_check.conname);
+      execute format('alter table jina_board.tasks drop constraint %I', retired_check.conname);
     end loop;
-    if had_legacy and not exists (
+    if not exists (
       select 1 from pg_constraint
-      where conrelid='jina_board.tasks'::regclass and conname='task_board_tasks_topic_check'
+      where conrelid='jina_board.tasks'::regclass and contype='c'
+        and pg_get_constraintdef(oid) like '%run-context-graph-ingest%'
+        and pg_get_constraintdef(oid) not like '%run-ontology-%'
     ) then
       alter table jina_board.tasks add constraint task_board_tasks_topic_check
         check (topic in (
-          'run-ontology-ingest','run-ontology-assert','run-ontology-project',
           'run-context-graph-ingest','run-context-graph-assert','run-context-graph-project'
         ));
     end if;
   end $$;
-  -- Drain stranded pre-rename work: rows created before the context-graph
-  -- rename still carry run-ontology-* topics that the renamed workers never
-  -- poll, so non-terminal rows would sit unclaimed forever. Rewrite exactly
-  -- the non-terminal statuses to the new vocabulary; terminal rows keep their
-  -- historical topics. Idempotent: a second apply matches no rows. A lease on
-  -- a rewritten in_progress row belongs to a retired pre-rename worker whose
-  -- renew/release/complete key on task id + lease id, never topic; that lease
-  -- simply expires and the sweep requeues the row under its claimable topic.
-  update jina_board.tasks
-  set topic = replace(topic,'run-ontology-','run-context-graph-')
-  where topic like 'run-ontology-%' and status in ('triage','queued','in_progress');
   do $$
   begin
     if not exists (

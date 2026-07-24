@@ -50,6 +50,11 @@ Task types and dispatch topics are worker-owned strings. The board remains gener
 
 Opened PRs create a `pr_review` aggregate, `review_pass`, and `publish`. A new head SHA increments the epoch and supersedes active work from the old epoch. Opened issues create manual `issue_triage` tasks. Signed branch pushes start the context graph task tree, dedupe unchanged heads, and supersede stale ref work even when a force-push returns to an earlier SHA.
 
+Context graph workers consume only `run-context-graph-ingest`, `run-context-graph-assert`, and
+`run-context-graph-project`. Schema initialization deletes workflows and loose board events that still use the
+retired `run-ontology-*` vocabulary, then installs a current-only topic constraint. It never translates retired work
+into the current pipeline.
+
 Automated dependency failures are terminal: failed work remains `failed`, dispatchable descendants become `canceled`, and the aggregate becomes `failed`. The reducer does not invent recovery tasks. A workflow that supports recovery must declare the human decision and resolution command explicitly.
 
 The board is currently stored as one JSON snapshot. Each mutation holds a cross-instance PostgreSQL transaction lock while loading and saving it, so concurrent API instances cannot derive state from the same stale snapshot.
