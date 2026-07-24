@@ -49,6 +49,7 @@ import {
   type ContextGraphSummaryFilter,
   type ContextGraphReadRevisionOptions
 } from "@jina/context-graph";
+import type { ContextGraphExecutionSettingsRecord } from "@jina/context-graph";
 import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { pingPostgresPool } from "./postgres-health.js";
 import { DomainError } from "@jina/shared-kernel";
@@ -68,6 +69,34 @@ interface GraphRow {
   model: string;
   sandbox_id: string | null;
   summary: string;
+}
+
+interface ExecutionSettingsRow {
+  tenant_id: string;
+  provider: ContextGraphExecutionSettingsRecord["provider"];
+  assertion_model: string;
+  openrouter_api_key: string | null;
+  openai_api_key: string | null;
+  codex_harness_auth: string | null;
+  revision: string | number;
+  updated_at: Date;
+}
+
+function executionSettingsRecord(row: ExecutionSettingsRow): ContextGraphExecutionSettingsRecord {
+  const revision = Number(row.revision);
+  if (!Number.isSafeInteger(revision) || revision <= 0) {
+    throw new Error("invalid context graph execution settings revision");
+  }
+  return {
+    tenantId: row.tenant_id,
+    provider: row.provider,
+    assertionModel: row.assertion_model,
+    ...(row.openrouter_api_key ? { openrouterApiKey: row.openrouter_api_key } : {}),
+    ...(row.openai_api_key ? { openaiApiKey: row.openai_api_key } : {}),
+    ...(row.codex_harness_auth ? { codexHarnessAuth: row.codex_harness_auth } : {}),
+    revision,
+    updatedAt: row.updated_at.toISOString()
+  };
 }
 
 interface NodeRow {
@@ -428,6 +457,57 @@ export class PostgresContextGraphStore implements ContextGraphStore {
        where jina_context_graph.repository_acl.role is distinct from excluded.role`,
       [tenantId, principalId, repositories]
     );
+  }
+
+  async executionSettings(tenantId: string): Promise<ContextGraphExecutionSettingsRecord | undefined> {
+    await this.initialize();
+    const result = await this.pool.query<ExecutionSettingsRow>(
+      `select tenant_id,provider,assertion_model,openrouter_api_key,openai_api_key,codex_harness_auth,
+              revision,updated_at
+         from jina_context_graph.execution_settings where tenant_id=$1`,
+      [tenantId]
+    );
+    return result.rows[0] ? executionSettingsRecord(result.rows[0]) : undefined;
+  }
+
+  async saveExecutionSettings(
+    record: Omit<ContextGraphExecutionSettingsRecord, "revision">,
+    expectedRevision: number
+  ): Promise<ContextGraphExecutionSettingsRecord | undefined> {
+    await this.initialize();
+    const result = await this.pool.query<ExecutionSettingsRow>(
+      `insert into jina_context_graph.execution_settings
+         (tenant_id,provider,assertion_model,openrouter_api_key,openai_api_key,codex_harness_auth,revision,updated_at)
+       select $1,$2,$3,$4,$5,$6,1,$7
+       where $8::bigint=0
+          or exists (
+               select 1
+                 from jina_context_graph.execution_settings
+                where tenant_id=$1 and revision=$8::bigint
+             )
+       on conflict (tenant_id) do update
+         set provider=excluded.provider,
+             assertion_model=excluded.assertion_model,
+             openrouter_api_key=excluded.openrouter_api_key,
+             openai_api_key=excluded.openai_api_key,
+             codex_harness_auth=excluded.codex_harness_auth,
+             revision=jina_context_graph.execution_settings.revision+1,
+             updated_at=excluded.updated_at
+       where jina_context_graph.execution_settings.revision=$8::bigint
+       returning tenant_id,provider,assertion_model,openrouter_api_key,openai_api_key,codex_harness_auth,
+                 revision,updated_at`,
+      [
+        record.tenantId,
+        record.provider,
+        record.assertionModel,
+        record.openrouterApiKey ?? null,
+        record.openaiApiKey ?? null,
+        record.codexHarnessAuth ?? null,
+        record.updatedAt,
+        expectedRevision
+      ]
+    );
+    return result.rows[0] ? executionSettingsRecord(result.rows[0]) : undefined;
   }
 
   /** The durable graph generation currently published for a ref, if any. */

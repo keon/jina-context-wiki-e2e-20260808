@@ -20,6 +20,7 @@ import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
   CONTEXT_GRAPH_PARSER_VERSION,
   CONTEXT_GRAPH_REGISTRY_VERSION,
+  DEFAULT_CONTEXT_GRAPH_ASSERTION_MODEL,
   analyzeSourceBlob,
   assertionEvidenceFingerprint,
   assertionsFromGeneratedContextGraph,
@@ -29,6 +30,7 @@ import {
   isProblemEvidencePath,
   movedFromSimilarityCandidates,
   parseContextFrameworkModes,
+  scopedContextGraphGeneratorVersion,
   parseIncidentDocument,
   parseIncidentDocumentObservations,
   parsePackageManifest,
@@ -91,6 +93,9 @@ interface WorkMetadataByTopic {
     readonly githubInstallationId: number;
     readonly commitSha: string;
     readonly evidenceFingerprint: string;
+    readonly executionProvider?: "managed" | "codex" | "byok";
+    readonly assertionModel?: string;
+    readonly executionSettingsRevision?: number;
     readonly analysisPaths?: readonly string[];
     readonly problemEvidencePullRequestNumbers?: readonly number[];
     readonly sourcePullRequestNumbers?: readonly number[];
@@ -1296,6 +1301,11 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
   const problemEvidencePullRequestNumbers = work.task.metadata.problemEvidencePullRequestNumbers ?? [];
   const sourcePullRequestNumbers = work.task.metadata.sourcePullRequestNumbers ?? [];
   const resolvedPullRequestNumbers = work.task.metadata.resolvedPullRequestNumbers ?? [];
+  const generatorVersion = scopedContextGraphGeneratorVersion(
+    CONTEXT_GRAPH_GENERATOR_VERSION,
+    work.task.metadata.executionProvider ?? "managed",
+    work.task.metadata.assertionModel ?? DEFAULT_CONTEXT_GRAPH_ASSERTION_MODEL
+  );
   const cache = await internalApiJson<{ readonly cached: Record<string, unknown> | null }>(
     "/internal/context-graph/assertions/cached",
     {
@@ -1311,6 +1321,47 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
     "/internal/context-graph/assertions/evidence",
     { taskId: work.task.id, messageId: work.message.id, leaseId: work.message.leaseId }
   );
+  const repositoryMetadata = await githubJson(`/repos/${repository}`);
+  const execution = await internalApiJson<{
+    readonly selectedProvider: "managed" | "codex" | "byok";
+    readonly source: "managed" | "codex" | "byok";
+    readonly provider: "openrouter" | "openai" | "codex";
+    readonly model: string;
+    readonly apiKey?: string;
+    readonly codexHarnessAuth?: string;
+    readonly fallbackReason?: string;
+  }>("/internal/context-graph/assertions/execution", {
+    taskId: work.task.id,
+    messageId: work.message.id,
+    leaseId: work.message.leaseId,
+    // OpenAI's automation guidance reserves account auth for trusted private
+    // repositories. Public repositories fall through to BYOK or managed.
+    allowCodex: repositoryMetadata.private === true
+  });
+  const executionCredentials = {
+    githubToken: access.token,
+    source: execution.source,
+    provider: execution.provider,
+    model: execution.model,
+    ...(execution.provider === "codex"
+      ? {
+          codexHarnessAuth: requiredString(execution.codexHarnessAuth, "Codex harness credential"),
+          refreshCodexHarnessAuth: async (authJson: string) => {
+            await internalApiJson("/internal/context-graph/assertions/execution/refresh", {
+              taskId: work.task.id,
+              messageId: work.message.id,
+              leaseId: work.message.leaseId,
+              codexHarnessAuth: authJson
+            });
+          }
+        }
+      : {
+          apiKey:
+            execution.source === "managed"
+              ? requiredEnv("OPENROUTER_API_KEY")
+              : requiredString(execution.apiKey, `${execution.provider} API key`)
+        })
+  } as const;
   // A generator/schema version change intentionally performs one full semantic
   // scan for an unchanged head. The resulting generation is cached, so routine
   // retries and subsequent builds still avoid Daytona entirely.
@@ -1328,7 +1379,7 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
       taskId: work.task.id,
       ...(activeLease ? { signal: activeLease.controller.signal } : {})
     },
-    { githubToken: access.token }
+    executionCredentials
   );
   assertLeaseOwned();
   const rawOutput = { summary: graph.summary, nodes: graph.nodes, edges: graph.edges };
@@ -1350,11 +1401,13 @@ async function runContextGraphAssertions(work: ClaimedWork<"run-context-graph-as
       commitSha,
       taskId: work.task.id,
       generatedAt: graph.generatedAt,
-      generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
+      generatorVersion,
       registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
       evidenceFingerprint,
       evidenceObservationIds: evidence.evidence.map((observation) => observation.id),
       model: graph.generator.model,
+      modelProvider: execution.provider,
+      credentialSource: execution.source,
       ...(graph.generator.sandboxId ? { sandboxId: graph.generator.sandboxId } : {}),
       summary: graph.summary,
       ...(graph.rawModelOutput !== undefined ? { modelOutputRaw: graph.rawModelOutput } : {}),

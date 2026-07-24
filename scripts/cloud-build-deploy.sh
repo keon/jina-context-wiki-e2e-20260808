@@ -79,7 +79,7 @@ if [[ "${graph_cloud_sql_instance}" != "${cloud_sql_instance}" ]]; then
 fi
 
 api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_GITHUB_WEBHOOK_ENABLED=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${graph_cloud_sql_instance}~GRAPH_DB_NAME=${graph_db_name}~GRAPH_DB_USER=${graph_db_user}~JINA_DB_MANAGE_SCHEMA=false"
-api_secrets="DB_PASS=${db_pass_secret},GRAPH_DB_PASS=${graph_db_pass_secret},INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest,JINA_GLOBAL_ADMIN_TOKEN=jina-global-admin-token:latest"
+api_secrets="DB_PASS=${db_pass_secret},GRAPH_DB_PASS=${graph_db_pass_secret},INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest,JINA_GLOBAL_ADMIN_TOKEN=jina-global-admin-token:latest,SECRETS_ENCRYPTION_KEY=jina-secrets-encryption-key:latest"
 
 case "${tenancy_mode}" in
   fixed)
@@ -133,6 +133,7 @@ expected = os.environ["EXPECTED_TOPICS"].split("|")
 allowed = {
     "active",
     "consecutiveApiFailures",
+    "contextFrameworkModes",
     "lastApiError",
     "lastApiErrorAt",
     "lastApiSuccessAt",

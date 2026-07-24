@@ -212,6 +212,10 @@ export interface ContextGraphAssertionBatch {
   readonly evidenceFingerprint: string;
   readonly evidenceObservationIds: readonly string[];
   readonly model: string;
+  /** Provider that actually served the run after fallback resolution. */
+  readonly modelProvider?: "openrouter" | "openai" | "codex";
+  /** Credential class actually billed for the run after fallback resolution. */
+  readonly credentialSource?: "managed" | "codex" | "byok";
   readonly sandboxId?: string;
   readonly summary: string;
   /** Exact parsed model document before graph normalization. */

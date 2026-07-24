@@ -3096,6 +3096,180 @@ test("dashboard context graph revalidation skips graph hydration and assertion r
   }
 });
 
+test("context graph model settings encrypt integrations, snapshot builds, and resolve leased assertions", async () => {
+  const tenantId = "model-settings-tenant";
+  const repository = "omxyz/model-settings";
+  const contextGraphStore = new MemoryContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  const encryptionKey = Buffer.alloc(32, 9).toString("base64");
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId,
+    contextGraphStore,
+    contextGraphCoordinator,
+    secretsEncryptionKey: encryptionKey
+  });
+  const baseUrl = await listen(server);
+  try {
+    const initial = await fetch(`${baseUrl}/context-graph/execution-settings`).then(
+      (response) => response.json() as Promise<Record<string, unknown>>
+    );
+    assert.equal(initial.provider, "managed");
+    assert.equal(initial.revision, 0);
+
+    const authJson = JSON.stringify({ tokens: { refresh_token: "codex-refresh-secret" } });
+    const savedResponse = await fetch(`${baseUrl}/context-graph/execution-settings`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revision: 0,
+        provider: "codex",
+        assertionModel: "openai/gpt-5.6-sol",
+        codexHarnessAuth: authJson,
+        openrouterApiKey: "openrouter-secret"
+      })
+    });
+    assert.equal(savedResponse.status, 200, await savedResponse.clone().text());
+    const saved = (await savedResponse.json()) as Record<string, unknown>;
+    assert.equal(saved.provider, "codex");
+    assert.equal(saved.revision, 1);
+    assert.equal(JSON.stringify(saved).includes("secret"), false);
+    const stored = await contextGraphStore.executionSettings(tenantId);
+    assert.match(stored?.codexHarnessAuth ?? "", /^enc:v1:/);
+    assert.equal(stored?.codexHarnessAuth?.includes("codex-refresh-secret"), false);
+
+    const buildResponse = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository, ref: "main" })
+    });
+    assert.equal(buildResponse.status, 202, await buildResponse.clone().text());
+    const workflow = (await contextGraphCoordinator.list(tenantId, { repositories: [repository] }))[0];
+    assert.equal(workflow?.build.metadata.executionProvider, "codex");
+    assert.equal(workflow?.build.metadata.assertionModel, "openai/gpt-5.6-sol");
+    assert.equal(workflow?.build.metadata.executionSettingsRevision, 1);
+
+    const isolated = new MemoryContextGraphPipelineCoordinator();
+    await isolated.createBuild({
+      tenantId,
+      repository,
+      ref: "main",
+      requestKey: "credential-resolution",
+      snapshotFirst: false,
+      createdAt: "2026-07-24T00:00:00.000Z",
+      metadata: {
+        executionProvider: "codex",
+        assertionModel: "openai/gpt-5.6-sol",
+        executionSettingsRevision: 1,
+        githubInstallationId: 1
+      }
+    });
+    const leaseNow = new Date().toISOString();
+    const leaseExpiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
+    const ingest = await isolated.claim({
+      tenantId,
+      workerId: "test",
+      topics: ["run-context-graph-ingest"],
+      now: leaseNow,
+      leaseExpiresAt
+    });
+    assert.ok(ingest);
+    await isolated.complete({
+      tenantId,
+      stageId: ingest.task.id,
+      leaseId: ingest.message.leaseId,
+      outcome: "done",
+      now: new Date(Date.now() + 1_000).toISOString(),
+      result: {},
+      nextMetadata: {
+        commitSha: "a".repeat(40),
+        evidenceFingerprint: "evidence",
+        sourceObservationIds: []
+      }
+    });
+    const assertion = await isolated.claim({
+      tenantId,
+      workerId: "test",
+      topics: ["run-context-graph-assert"],
+      now: new Date(Date.now() + 2_000).toISOString(),
+      leaseExpiresAt
+    });
+    assert.ok(assertion);
+
+    const resolverServer = createApiServer({
+      enableDevEndpoints: true,
+      tenantId,
+      contextGraphStore,
+      contextGraphCoordinator: isolated,
+      secretsEncryptionKey: encryptionKey
+    });
+    const resolverUrl = await listen(resolverServer);
+    try {
+      const resolutionResponse = await fetch(`${resolverUrl}/internal/context-graph/assertions/execution`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: assertion.task.id,
+          messageId: assertion.message.id,
+          leaseId: assertion.message.leaseId,
+          allowCodex: true
+        })
+      });
+      assert.equal(resolutionResponse.status, 200, await resolutionResponse.clone().text());
+      assert.deepEqual(await resolutionResponse.json(), {
+        selectedProvider: "codex",
+        source: "codex",
+        provider: "codex",
+        model: "gpt-5.6-sol",
+        codexHarnessAuth: authJson
+      });
+
+      const publicRepositoryResponse = await fetch(`${resolverUrl}/internal/context-graph/assertions/execution`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: assertion.task.id,
+          messageId: assertion.message.id,
+          leaseId: assertion.message.leaseId,
+          allowCodex: false
+        })
+      });
+      assert.equal(publicRepositoryResponse.status, 200, await publicRepositoryResponse.clone().text());
+      assert.deepEqual(await publicRepositoryResponse.json(), {
+        selectedProvider: "codex",
+        source: "byok",
+        provider: "openrouter",
+        model: "openai/gpt-5.6-sol",
+        apiKey: "openrouter-secret",
+        fallbackReason: "codex_not_connected"
+      });
+
+      const refreshedAuth = JSON.stringify({
+        tokens: { refresh_token: "rotated-refresh-secret", access_token: "rotated-access-secret" }
+      });
+      const refreshResponse = await fetch(`${resolverUrl}/internal/context-graph/assertions/execution/refresh`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          taskId: assertion.task.id,
+          messageId: assertion.message.id,
+          leaseId: assertion.message.leaseId,
+          codexHarnessAuth: refreshedAuth
+        })
+      });
+      assert.equal(refreshResponse.status, 200, await refreshResponse.clone().text());
+      assert.deepEqual(await refreshResponse.json(), { updated: true, revision: 2 });
+      const refreshedStored = await contextGraphStore.executionSettings(tenantId);
+      assert.match(refreshedStored?.codexHarnessAuth ?? "", /^enc:v1:/);
+      assert.equal(refreshedStored?.codexHarnessAuth?.includes("rotated"), false);
+    } finally {
+      await close(resolverServer);
+    }
+  } finally {
+    await close(server);
+  }
+});
+
 async function listen(server: ReturnType<typeof createApiServer>): Promise<string> {
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address() as AddressInfo;

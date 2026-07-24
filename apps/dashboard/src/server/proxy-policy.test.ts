@@ -9,12 +9,14 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
     "/api/overview",
     "/api/task-types",
     "/api/context-graph",
-    "/api/context-graph/assertions"
+    "/api/context-graph/assertions",
+    "/api/context-graph/execution-settings"
   ]) {
     assert.equal(isAllowedDashboardApiRequest("GET", pathname, true), true, pathname);
   }
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context-graph/ask", true), true);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context-graph/commands", true), true);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context-graph/execution-settings", true), true);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/internal/worker/claim", true), false);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/board", true), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/context-graph/metrics", true), false);

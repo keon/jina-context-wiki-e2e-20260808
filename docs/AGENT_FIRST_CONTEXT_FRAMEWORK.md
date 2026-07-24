@@ -38,6 +38,8 @@ into canonical facts.
 11. Do not put human review on the critical path. Human review is an optional correction and audit capability.
 12. Put counterfactual reasoning in a named Causal Analysis Layer that distinguishes known-path analysis, static
     prediction, historical observation, sandbox experiment, runtime replay, and production observation.
+13. Let a tenant administrator select the assertion model and Jina-managed, Codex-account, or BYOK execution without
+    creating separate planner, investigator, or reviewer model settings.
 
 ## Why this framework
 
@@ -153,6 +155,35 @@ the budget allows. These are agent behaviors, not taskboard tasks.
 
 Only the assertion service commits the persisted plan. Codex cannot directly mutate assertions, lifecycle
 decisions, entities, or projections.
+
+### Execution provider is orthogonal to semantic mode
+
+Provider selection answers “who serves the one Codex session?” It does not change what `ingest`, `assert`, or
+`project` mean and it does not select a different framework:
+
+| Dimension        | Values                                                  | Responsibility                                             |
+| ---------------- | ------------------------------------------------------- | ---------------------------------------------------------- |
+| Assertion mode   | `legacy`, `host_shadow`, `model_shadow`, `changeset`    | Shape of the semantic output and validation path           |
+| Admission mode   | `legacy_proposed`, `shadow`, `enforce`                  | Whether valid proposals remain proposed or auto-activate   |
+| Causal mode      | `legacy`, `mechanism_shadow`, `mechanism`               | Path-removal compatibility versus mechanism evaluation     |
+| Execution source | Jina managed, Codex account, tenant BYOK                | Credential and billing route for the one assertion session |
+| Assertion model  | One model selected from the provider-compatible catalog | Quality, latency, context, and cost role                   |
+
+`legacy` is therefore not a provider. It is the compatibility implementation already in the repository:
+
+- assertion `legacy` asks Codex for `GeneratedContextGraph` and normalizes it into assertions;
+- admission `legacy_proposed` retains valid model claims as proposals;
+- causal `legacy` uses the existing reviewed-path evaluator.
+
+The rollout moves those three semantic contracts independently through shadow modes. Any semantic mode may run on
+managed, Codex, or BYOK. The provider and model are snapshotted when a build starts; credentials are resolved only
+after the assertion task owns its lease. The actual route after fallback is stamped on the generation, while secrets
+never enter task metadata, graph data, prompts, or assertion records.
+
+There is intentionally one model picker. Planning, repository investigation, assertion comparison, causal-claim
+formation, and changeset reduction happen inside the one Codex session. Deterministic ingest and project do not need
+model choices. A future measured need for specialized models should be introduced as an internal agent policy, not
+as taskboard-visible subtasks or three user-facing defaults.
 
 ### Uncertainty is data
 

@@ -217,6 +217,82 @@ Add a task-definition test that proves:
 
 Remove the new parser and metrics. There is no persisted state to migrate.
 
+## Slice 0A — Assertion execution profile
+
+### Purpose
+
+Give the one assertion session the same managed, Codex-account, and BYOK choices as the v1 review flow without
+turning agent internals into separately configured planner, investigation, or review tasks. This slice is compatible
+with every semantic rollout mode and may ship before model-native changesets.
+
+### Contract
+
+Persist one optimistic, tenant-scoped execution profile:
+
+```ts
+interface ContextGraphExecutionSettingsRecord {
+  tenantId: string;
+  provider: "managed" | "codex" | "byok";
+  assertionModel: string;
+  openrouterApiKey?: EncryptedEnvelope;
+  openaiApiKey?: EncryptedEnvelope;
+  codexHarnessAuth?: EncryptedEnvelope;
+  revision: number;
+  updatedAt: string;
+}
+```
+
+The public settings API returns only provider, model, revision, model catalog, and connection booleans. The save API
+requires a bound tenant administrator and an expected revision. Builds snapshot `executionProvider`,
+`assertionModel`, and `executionSettingsRevision`; they never snapshot a credential.
+
+After the exact assertion lease is verified, an internal route decrypts and resolves one whole-run route:
+
+```text
+managed -> managed OpenRouter
+Codex connected + trusted private repository -> native Codex account
+Codex unavailable/ineligible -> BYOK OpenRouter -> BYOK OpenAI -> managed
+BYOK -> OpenRouter -> OpenAI for openai/* -> managed
+```
+
+Public repositories must not receive account auth. OpenAI API-key automation uses `CODEX_API_KEY` on only the Codex
+process. Codex shell subprocesses inherit a filtered core environment and explicitly exclude credential variables.
+Codex `auth.json` is owner-readable only, outside the checkout, redacted both as a whole blob and by nested token
+value, and downloaded after the run so refreshed state can be re-encrypted before sandbox deletion. A settings
+revision mismatch discards a stale refresh rather than undoing an administrator's disconnect or update.
+
+The generation records both selected model and actual provider/credential class after fallback. Provider/model are
+part of the assertion-generation cache scope. Credential ciphertext and automatic token-refresh revisions are not,
+so a model/provider change reruns an unchanged semantic scope while token rotation does not.
+
+### Files
+
+- `packages/context-graph/src/execution-settings.ts`
+- `packages/context-graph/src/store.ts`
+- `packages/db/src/context-graph-schema.ts`
+- `packages/db/src/postgres-context-graph-store.ts`
+- `apps/api/src/secret-envelope.ts`
+- `apps/api/src/server.ts`
+- `apps/dashboard/src/app/models/page.tsx`
+- `apps/worker/src/server.ts`
+- `packages/daytona/src/context-graph-executor.ts`
+
+### Acceptance
+
+- Model selection persists across reload and changes the cache scope.
+- Managed, OpenRouter BYOK, OpenAI BYOK, and Codex route tests pass.
+- Public repository plus selected Codex uses the fallback chain.
+- Public responses, task metadata, logs, assertion output, and graph output contain no secret.
+- Database reader/query/projection roles cannot select `execution_settings`.
+- Concurrent settings writes use compare-and-swap revisions.
+- Refreshed Codex auth is persisted only while the originating settings revision is current.
+- Ingest and project receive no model credential or model choice.
+
+### Rollback
+
+Select `managed` for every tenant and hide `/models`. Retain encrypted rows during rollback so reconnect is not
+required. Do not drop `execution_settings` until all old API revisions and in-flight assertion leases have drained.
+
 ## Slice 1 — Versioned changeset and evidence contracts
 
 ### Purpose

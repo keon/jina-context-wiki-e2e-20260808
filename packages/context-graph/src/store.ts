@@ -58,6 +58,7 @@ import {
   type StoredAssertion
 } from "./pipeline.js";
 import { DomainError } from "@jina/shared-kernel";
+import type { ContextGraphExecutionSettingsRecord } from "./execution-settings.js";
 
 /**
  * Optional repository/ref scope for graph-summary listings. Stores apply it
@@ -99,6 +100,15 @@ export interface ContextGraphStore extends ContextGraphPipelineStore, Repository
     options?: { readonly repositories?: readonly string[]; readonly limit?: number }
   ): Promise<readonly ContextGraphParserBacklogRef[]>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: readonly string[]): Promise<void>;
+  executionSettings(tenantId: string): Promise<ContextGraphExecutionSettingsRecord | undefined>;
+  /**
+   * Optimistic full-record replacement. expectedRevision=0 creates the first
+   * record; a stale revision returns undefined without changing credentials.
+   */
+  saveExecutionSettings(
+    record: Omit<ContextGraphExecutionSettingsRecord, "revision">,
+    expectedRevision: number
+  ): Promise<ContextGraphExecutionSettingsRecord | undefined>;
   migrateTenantAliases(tenantId: string, aliases: readonly string[]): Promise<void>;
   ping(): Promise<void>;
   close(): Promise<void>;
@@ -124,6 +134,7 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     readonly evidenceObservationId: string;
   }[] = [];
   private readonly sourceObservations: RepositorySourceObservation[] = [];
+  private readonly executionSettingsByTenant = new Map<string, ContextGraphExecutionSettingsRecord>();
 
   async save(graph: ContextGraph, writeFence?: ContextGraphWriteFence): Promise<void> {
     await writeFence?.authorityGuard?.();
@@ -212,6 +223,22 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       `${tenantId}:${principalId}`,
       new Map(repositories.map((repository) => [repository, "reader"] as const))
     );
+  }
+
+  async executionSettings(tenantId: string): Promise<ContextGraphExecutionSettingsRecord | undefined> {
+    const record = this.executionSettingsByTenant.get(tenantId);
+    return record ? structuredClone(record) : undefined;
+  }
+
+  async saveExecutionSettings(
+    record: Omit<ContextGraphExecutionSettingsRecord, "revision">,
+    expectedRevision: number
+  ): Promise<ContextGraphExecutionSettingsRecord | undefined> {
+    const current = this.executionSettingsByTenant.get(record.tenantId);
+    if ((current?.revision ?? 0) !== expectedRevision) return undefined;
+    const saved = { ...structuredClone(record), revision: expectedRevision + 1 };
+    this.executionSettingsByTenant.set(record.tenantId, saved);
+    return structuredClone(saved);
   }
 
   async knownCommits(tenantId: string, repository: string, commitShas: readonly string[]): Promise<readonly string[]> {

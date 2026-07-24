@@ -62,9 +62,14 @@ The context graph workflow runs as three board-visible stages:
 
 Reviewed assertions retain their evidence, explanation, review state, and provenance when later runs confirm them. Counterfactual queries remove selected paths from the reviewed graph in memory; they do not create facts or tasks.
 
-Local context graph execution requires `DAYTONA_API_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and
-`OPENAI_API_KEY` or `OPENROUTER_API_KEY`. Every graph build must carry the repository's GitHub App installation ID;
-the worker mints a short-lived installation token for REST, git, and Daytona access.
+Local managed context graph execution requires `DAYTONA_API_KEY`, `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and
+`OPENROUTER_API_KEY`. A tenant administrator can use `/models` to choose the one assertion-agent model and route it
+through Jina managed, a connected Codex/ChatGPT account, or tenant BYOK OpenRouter/OpenAI credentials.
+`SECRETS_ENCRYPTION_KEY` is required before Codex or BYOK credentials can be stored. Provider and model are
+snapshotted on each build; credentials are decrypted only for the leased assertion stage and never enter board task
+metadata. Codex account auth is restricted to trusted private repositories; public repositories fall through to
+BYOK and then managed. Every graph build must carry the repository's GitHub App installation ID; the worker mints a
+short-lived installation token for REST, git, and Daytona access.
 
 Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST /mcp`. Its single read-only tool, `query_graph`, accepts a repository, natural-language query, and optional ref. Production requires the internal service credential plus a bound application principal, and every request is repository-ACL scoped. The simulation integration uses a separate `GRAPH_API_TOKEN` for graph reads and exact ACL synchronization without granting board or worker access.
 
