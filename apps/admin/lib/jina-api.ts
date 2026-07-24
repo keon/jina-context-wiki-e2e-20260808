@@ -86,6 +86,30 @@ export interface AdminGraphWorkflow {
   readonly stages: readonly AdminGraphStage[];
 }
 
+export interface AdminReadTrafficMetric {
+  readonly template: string;
+  readonly requests: number;
+  readonly averageLatencyMs: number;
+  readonly p95LatencyMs: number;
+  readonly truncationRate: number;
+}
+
+export interface AdminReadAccessMetric extends AdminReadTrafficMetric {
+  readonly principalId: string;
+  readonly accessChannel: "mcp" | "api" | "admin" | "direct";
+  readonly lastAccessedAt: string;
+}
+
+export interface AdminReadChannelMetric {
+  readonly accessChannel: AdminReadAccessMetric["accessChannel"];
+  readonly retrievals: number;
+  readonly requests: number;
+  readonly actors: number;
+  readonly averageLatencyMs: number;
+  readonly p95LatencyMs: number;
+  readonly truncationRate: number;
+}
+
 interface AdminOperationalMetrics {
   readonly outboxDepth: Readonly<Record<string, number>>;
   readonly outboxDepthByConsumer: Readonly<Record<string, number>>;
@@ -98,13 +122,10 @@ interface AdminOperationalMetrics {
   readonly proposedAssertionCount: number;
   readonly unexplainedAssertionCount: number;
   readonly pendingErasureEventCount: number;
-  readonly retrievalTemplates: readonly {
-    readonly template: string;
-    readonly requests: number;
-    readonly averageLatencyMs: number;
-    readonly p95LatencyMs: number;
-    readonly truncationRate: number;
-  }[];
+  readonly retrievalTemplates: readonly AdminReadTrafficMetric[];
+  readonly retrievalAccess: readonly AdminReadAccessMetric[];
+  readonly retrievalAccessTruncated: boolean;
+  readonly retrievalChannels: readonly AdminReadChannelMetric[];
 }
 
 export interface AdminGithubConnection {
@@ -161,6 +182,8 @@ async function apiRequest(
     readonly body?: unknown;
     readonly credential?: "global" | "internal";
     readonly tenantId?: string | undefined;
+    readonly actorId?: string | undefined;
+    readonly accessChannel?: "admin" | undefined;
   }
 ): Promise<unknown> {
   const headers: Record<string, string> = { accept: "application/json" };
@@ -177,6 +200,8 @@ async function apiRequest(
     if (tenantId && !SAFE_TENANT_ID.test(tenantId)) throw new JinaApiError("invalid tenant ID");
     if (tenantId) headers["x-jina-tenant-id"] = tenantId;
   }
+  if (init?.actorId) headers["x-jina-actor-id"] = init.actorId;
+  if (init?.accessChannel) headers["x-jina-access-channel"] = init.accessChannel;
   if (init?.body !== undefined) headers["content-type"] = "application/json";
   let response: Response;
   try {
@@ -419,11 +444,14 @@ export async function getGraph(graphId: string, tenantId?: string): Promise<Admi
 
 export async function askGraph(
   graph: Pick<AdminGraph, "tenantId" | "repository" | "ref" | "commitSha">,
-  question: string
+  question: string,
+  actorId?: string
 ): Promise<AdminGraphQueryResult> {
   return (await apiRequest("/context-graph/ask", {
     method: "POST",
     tenantId: graph.tenantId,
+    accessChannel: "admin",
+    ...(actorId ? { actorId } : {}),
     body: {
       repository: graph.repository,
       ref: graph.ref,

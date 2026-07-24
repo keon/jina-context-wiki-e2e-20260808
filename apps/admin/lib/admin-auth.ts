@@ -13,7 +13,7 @@
 // whether evaluated in the request proxy or a server component.
 
 export type AdminAccessDecision =
-  | { readonly ok: true; readonly email?: string }
+  | { readonly ok: true; readonly actorId: string; readonly email?: string }
   | { readonly ok: false; readonly status: 401 | 403; readonly error: string };
 
 export interface AdminAccessInput {
@@ -84,10 +84,14 @@ export function evaluateAdminAccess(input: AdminAccessInput): AdminAccessDecisio
   // Local and CI runs deploy without API credentials and are not internet
   // reachable; enforcing IAP there would break `pnpm dev`. This matches the
   // dashboard, which only demands an IAP identity once the token is present.
-  if (!input.authRequired) return { ok: true };
+  if (!input.authRequired) return { ok: true, actorId: "svc:admin-dev" };
 
   if (isValidBasicAuthorization(input.authorizationHeader, input.webAuthUsername, input.webAuthPassword)) {
-    return { ok: true };
+    const username = input.webAuthUsername?.trim().toLowerCase() ?? "web";
+    return {
+      ok: true,
+      actorId: /^[a-z0-9._@-]+$/.test(username) ? `admin:${username}` : "admin:web"
+    };
   }
 
   const email = normalizeIapEmail(input.iapEmailHeader);
@@ -100,5 +104,5 @@ export function evaluateAdminAccess(input: AdminAccessInput): AdminAccessDecisio
     return { ok: false, status: 403, error: "administrator access required" };
   }
 
-  return { ok: true, email };
+  return { ok: true, actorId: `user:${email}`, email };
 }

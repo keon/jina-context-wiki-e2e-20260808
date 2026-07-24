@@ -846,6 +846,9 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       ).length,
       pendingErasureEventCount: 0,
       retrievalTemplates: [],
+      retrievalAccess: [],
+      retrievalAccessTruncated: false,
+      retrievalChannels: [],
       acceptanceRates: []
     };
   }

@@ -1,3 +1,5 @@
+import type { RetrievalAccessChannel } from "./retrieval.js";
+
 export interface ProjectionRebuildResult {
   readonly manifestFileCount: number;
   readonly searchDocumentCount: number;
@@ -29,6 +31,26 @@ export interface ContextGraphOperationalMetrics {
   readonly retrievalTemplates: readonly {
     readonly template: string;
     readonly requests: number;
+    readonly averageLatencyMs: number;
+    readonly p95LatencyMs: number;
+    readonly truncationRate: number;
+  }[];
+  readonly retrievalAccess: readonly {
+    readonly principalId: string;
+    readonly accessChannel: RetrievalAccessChannel;
+    readonly template: string;
+    readonly requests: number;
+    readonly averageLatencyMs: number;
+    readonly p95LatencyMs: number;
+    readonly truncationRate: number;
+    readonly lastAccessedAt: string;
+  }[];
+  readonly retrievalAccessTruncated: boolean;
+  readonly retrievalChannels: readonly {
+    readonly accessChannel: RetrievalAccessChannel;
+    readonly retrievals: number;
+    readonly requests: number;
+    readonly actors: number;
     readonly averageLatencyMs: number;
     readonly p95LatencyMs: number;
     readonly truncationRate: number;

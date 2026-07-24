@@ -1011,8 +1011,9 @@ test(
         await client.query("begin");
         await client.query("set local role jina_context_graph_query");
         await client.query(
-          `insert into jina_context_graph.retrieval_metrics (tenant_id,repository,template,duration_ms,truncated,recorded_at)
-         values ('role-fixture','omlabs/role-fixture','structure',1,false,now())`
+          `insert into jina_context_graph.retrieval_metrics
+           (tenant_id,repository,template,request_id,principal_id,access_channel,duration_ms,truncated,recorded_at)
+         values ('role-fixture','omlabs/role-fixture','structure','role-request','svc:role-test','direct',1,false,now())`
         );
         await assert.rejects(
           client.query(`insert into jina_context_graph.assertions
@@ -3102,6 +3103,17 @@ test(
         ownership.items.some((item) => item.title.includes("@omlabs/owners") && item.data.authority === "codeowners"),
         true
       );
+      await store.retrieve({
+        tenantId,
+        allowedRepositories,
+        repository,
+        template: "structure",
+        access: {
+          principalId: "user:reader@example.com",
+          channel: "mcp",
+          requestId: "mcp-request-1"
+        }
+      });
       await assert.rejects(
         store.retrieve({ tenantId, allowedRepositories: [], repository, template: "structure" }),
         /access denied/
@@ -3109,6 +3121,22 @@ test(
       const metrics = await store.operationalMetrics(tenantId, "2026-07-20T00:07:00.000Z");
       assert.equal(metrics.unparsedBlobCount, 0);
       assert.equal(metrics.proposedAssertionCount, 0, "agent assertions do not wait for human acceptance");
+      assert.equal(
+        metrics.retrievalAccess.some(
+          (item) =>
+            item.principalId === "user:reader@example.com" &&
+            item.accessChannel === "mcp" &&
+            item.template === "structure" &&
+            item.requests === 1
+        ),
+        true
+      );
+      assert.equal(
+        metrics.retrievalChannels.some(
+          (item) => item.accessChannel === "mcp" && item.requests === 1 && item.retrievals === 1 && item.actors === 1
+        ),
+        true
+      );
 
       const legacyLabelPool = new Pool({ connectionString });
       try {

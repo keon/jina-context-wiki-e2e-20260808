@@ -23,7 +23,7 @@ The decision logic lives in `lib/admin-auth.ts` and is covered by `lib/admin-aut
 
 - `/` — every current graph head, with tenant, repository, ref, search, and date filters.
 - `/history` — every context-graph build attempt, including failed and in-progress runs.
-- `/observability` — real generation throughput, success rate, latency, and queue depth derived from build records.
+- `/observability` — generation throughput, success rate, latency, queue depth, actor/channel access auditing, and a dedicated rolling 24-hour MCP monitor.
 - `/health` — direct API and worker health checks plus durable graph-pipeline backlog state.
 - `/tenants` — tenant, GitHub installation, repository, and graph coverage.
 - `/access` — the configured IAP/web authentication boundary and global-admin credential state.

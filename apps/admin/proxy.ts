@@ -24,7 +24,11 @@ export function proxy(request: NextRequest): NextResponse {
       }
     );
   }
-  return NextResponse.next();
+  const requestHeaders = new Headers(request.headers);
+  // Never trust a caller-supplied actor. Replace it with the identity that
+  // passed this app's IAP/basic-auth boundary before forwarding internally.
+  requestHeaders.set("x-jina-admin-actor-id", decision.actorId);
+  return NextResponse.next({ request: { headers: requestHeaders } });
 }
 
 export const config = {

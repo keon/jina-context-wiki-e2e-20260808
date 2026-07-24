@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { MetricsChart } from "../../components/metrics-chart";
+import { ReadTrafficMonitors } from "../../components/read-traffic-monitors";
 import { ErrorPanel, formatDuration, PageHeader, shortTenant } from "../../components/ui";
 import { pipelineMetricSeries } from "../../lib/admin-data";
 import { listAllAdminOperations } from "../../lib/jina-api";
@@ -37,6 +38,33 @@ export default async function ObservabilityPage({
   }
   const selectedTenant = requestedTenant;
   const metrics = pipelineMetricSeries(operations, range, selectedTenant);
+  const readTraffic = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .flatMap((tenant) =>
+      tenant.metrics.retrievalTemplates.map((metric) => ({
+        ...metric,
+        tenantId: tenant.tenantId
+      }))
+    );
+  const readAccess = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .flatMap((tenant) =>
+      tenant.metrics.retrievalAccess.map((metric) => ({
+        ...metric,
+        tenantId: tenant.tenantId
+      }))
+    );
+  const readAccessTruncated = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .some((tenant) => tenant.metrics.retrievalAccessTruncated);
+  const readChannels = operations.tenants
+    .filter((tenant) => !selectedTenant || tenant.tenantId === selectedTenant)
+    .flatMap((tenant) =>
+      tenant.metrics.retrievalChannels.map((metric) => ({
+        ...metric,
+        tenantId: tenant.tenantId
+      }))
+    );
 
   return (
     <main>
@@ -93,6 +121,12 @@ export default async function ObservabilityPage({
         unit="minutes"
         labels={metrics.labels}
         series={[{ name: "P95", values: metrics.p95DurationMinutes, tone: "blue" }]}
+      />
+      <ReadTrafficMonitors
+        metrics={readTraffic}
+        accessMetrics={readAccess}
+        accessMetricsTruncated={readAccessTruncated}
+        channelMetrics={readChannels}
       />
     </main>
   );

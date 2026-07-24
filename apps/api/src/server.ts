@@ -62,6 +62,7 @@ import {
   type ContextGraphNodeKind,
   type RepositoryContextOperation,
   type RepositorySnapshot,
+  type RetrievalAccessContext,
   type RetrievalRequest
 } from "@jina/context-graph";
 import {
@@ -69,7 +70,8 @@ import {
   errorLogFields,
   MetricsRegistry,
   recordHttpRequest,
-  requestTraceContext
+  requestTraceContext,
+  type Logger
 } from "@jina/observability";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
@@ -527,7 +529,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     };
     response.once("finish", () => settleRequest(false));
     response.once("close", () => settleRequest(true));
-    void route(request, response).catch((error: unknown) => {
+    void route(request, response, trace.traceId, requestLogger).catch((error: unknown) => {
       // A fully consumed request stream auto-destroys, so request.destroyed
       // does not mean the client left — only a dead response/socket does.
       if (response.destroyed || !response.socket || response.socket.destroyed) {
@@ -558,7 +560,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
   });
 
-  async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  async function route(
+    request: IncomingMessage,
+    response: ServerResponse,
+    requestId: string,
+    requestLogger: Logger
+  ): Promise<void> {
     const url = new URL(request.url ?? "/", "http://localhost");
     // Liveness must remain reachable while fixed-tenant startup migrations are
     // waiting on database locks. Application routes still wait for ready below.
@@ -806,6 +813,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     const { tenantId } = principal;
+    const access = (channel: RetrievalAccessContext["channel"]): RetrievalAccessContext => ({
+      principalId: retrievalActorId(request, principal),
+      channel,
+      requestId
+    });
     if (config.sharedIdentityResolver && !(await config.sharedIdentityResolver.listTenantIds()).includes(tenantId)) {
       json(response, 403, { error: "inactive_tenant" });
       return;
@@ -862,6 +874,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (url.pathname === "/mcp") {
+      const readAccess = access("mcp");
       const origin = firstHeader(request.headers.origin);
       if (origin && !(config.mcpAllowedOrigins ?? []).includes(origin)) {
         json(response, 403, { error: "forbidden" });
@@ -876,6 +889,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           const canonicalRepository = canonicalRepositoryForRead(allowedRepositories, repository);
           const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
             tenantId,
+            access: readAccess,
             allowedRepositories,
             repository: canonicalRepository,
             question: query,
@@ -884,6 +898,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           if (config.sharedIdentityResolver) {
             await requireConnectedRepository(tenantId, canonicalRepository);
           }
+          logContextGraphRead(requestLogger, readAccess, tenantId, canonicalRepository, context.calls);
           return publicGraphQueryResult(context);
         },
         parsedBody
@@ -926,6 +941,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (request.method === "POST" && url.pathname === "/v1/graph/query") {
+      const readAccess = access("api");
       const body = parseJsonObject(await readRawBody(request));
       const graphId = requiredString(body.graphId, "graphId");
       const query = requiredString(body.query, "query");
@@ -938,6 +954,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
         tenantId,
+        access: readAccess,
         allowedRepositories,
         repository: graph.repository,
         ref: graph.ref,
@@ -948,6 +965,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 404, { error: "graph not found" });
         return;
       }
+      logContextGraphRead(requestLogger, readAccess, tenantId, graph.repository, context.calls);
       json(response, 200, publicRestGraphQueryResult(graph, publicGraphQueryResult(context)));
       return;
     }
@@ -1142,6 +1160,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/retrieve") {
+      const readAccess = access(apiRetrievalChannel(request, principal));
       const body = parseJsonObject(await readRawBody(request));
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const repository = canonicalRepositoryForRead(allowedRepositories, requiredString(body.repository, "repository"));
@@ -1151,6 +1170,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       const result = await contextGraphStore.retrieve({
         tenantId,
+        access: readAccess,
         allowedRepositories,
         repository,
         template: template as (typeof retrievalTemplateNames)[number],
@@ -1159,16 +1179,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
       });
       if (config.sharedIdentityResolver) await requireConnectedRepository(tenantId, repository);
+      logContextGraphRead(requestLogger, readAccess, tenantId, repository, [result]);
       json(response, 200, result);
       return;
     }
     if (request.method === "POST" && url.pathname === "/context-graph/ask") {
+      const readAccess = access(apiRetrievalChannel(request, principal));
       const body = parseJsonObject(await readRawBody(request));
       const allowedRepositories = await repositoriesForPrincipal(principal);
       const orchestrator = new RepositoryContextOrchestrator(contextGraphStore);
       const repository = canonicalRepositoryForRead(allowedRepositories, requiredString(body.repository, "repository"));
       const result = await orchestrator.answer({
         tenantId,
+        access: readAccess,
         allowedRepositories,
         repository,
         question: requiredString(body.question, "question"),
@@ -1179,6 +1202,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           : {})
       });
       if (config.sharedIdentityResolver) await requireConnectedRepository(tenantId, repository);
+      logContextGraphRead(requestLogger, readAccess, tenantId, repository, result.calls);
       json(response, 200, result);
       return;
     }
@@ -2975,6 +2999,47 @@ function normalizedForwardedPrincipal(value: string | undefined): string | undef
   return undefined;
 }
 
+function retrievalActorId(request: IncomingMessage, principal: { readonly principalId: string }): string {
+  if (!principal.principalId.startsWith("svc:")) return principal.principalId;
+  return normalizedAuditActor(firstHeader(request.headers["x-jina-actor-id"])) ?? principal.principalId;
+}
+
+function normalizedAuditActor(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const normalized = value.trim().toLowerCase();
+  return /^(?:user|tenant|admin|svc):[^\s]{1,300}$/.test(normalized) ? normalized : undefined;
+}
+
+function apiRetrievalChannel(
+  request: IncomingMessage,
+  principal: { readonly principalId: string }
+): RetrievalAccessContext["channel"] {
+  return principal.principalId.startsWith("svc:") &&
+    firstHeader(request.headers["x-jina-access-channel"])?.toLowerCase() === "admin"
+    ? "admin"
+    : "api";
+}
+
+function logContextGraphRead(
+  logger: Logger,
+  access: RetrievalAccessContext,
+  tenantId: string,
+  repository: string,
+  calls: readonly { readonly template: string; readonly truncated: boolean }[]
+): void {
+  logger.info("context graph read", {
+    event: "context_graph.read",
+    tenantId,
+    repository,
+    principalId: access.principalId,
+    accessChannel: access.channel,
+    requestId: access.requestId,
+    templates: calls.map((call) => call.template),
+    retrievalCount: calls.length,
+    truncated: calls.some((call) => call.truncated)
+  });
+}
+
 function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
   return Boolean(
     config.graphApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.graphApiToken}`
@@ -3991,7 +4056,7 @@ const JSON_RESPONSE_HEADERS = {
   "content-type": "application/json; charset=utf-8",
   "access-control-allow-origin": "*",
   "access-control-allow-headers":
-    "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
+    "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-jina-actor-id, x-jina-access-channel, x-github-event, x-github-delivery, x-hub-signature-256",
   "access-control-allow-methods": "GET, POST, OPTIONS"
 } as const;
 

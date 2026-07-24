@@ -168,7 +168,10 @@ function operation(builds: readonly AdminGraphBuild[], queueDepth = 0): AdminOpe
           proposedAssertionCount: 0,
           unexplainedAssertionCount: 0,
           pendingErasureEventCount: 0,
-          retrievalTemplates: []
+          retrievalTemplates: [],
+          retrievalAccess: [],
+          retrievalAccessTruncated: false,
+          retrievalChannels: []
         }
       }
     ]

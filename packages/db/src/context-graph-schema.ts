@@ -512,12 +512,33 @@ export const CONTEXT_GRAPH_SCHEMA_SQL = `
         tenant_id text not null,
         repository text not null,
         template text not null,
+        request_id text not null,
+        principal_id text not null,
+        access_channel text not null,
         duration_ms double precision not null check (duration_ms>=0),
         truncated boolean not null,
         recorded_at timestamptz not null
       );
+      alter table jina_context_graph.retrieval_metrics add column if not exists request_id text;
+      alter table jina_context_graph.retrieval_metrics add column if not exists principal_id text;
+      alter table jina_context_graph.retrieval_metrics add column if not exists access_channel text;
+      update jina_context_graph.retrieval_metrics
+         set request_id=coalesce(request_id,'legacy-' || id::text),
+             principal_id=coalesce(principal_id,'svc:legacy'),
+             access_channel=coalesce(access_channel,'direct')
+       where request_id is null or principal_id is null or access_channel is null;
+      alter table jina_context_graph.retrieval_metrics alter column request_id set not null;
+      alter table jina_context_graph.retrieval_metrics alter column principal_id set not null;
+      alter table jina_context_graph.retrieval_metrics alter column access_channel set not null;
+      alter table jina_context_graph.retrieval_metrics
+        drop constraint if exists context_graph_retrieval_metrics_access_channel_check;
+      alter table jina_context_graph.retrieval_metrics
+        add constraint context_graph_retrieval_metrics_access_channel_check
+        check (access_channel in ('mcp','api','admin','direct'));
       create index if not exists context_graph_retrieval_metrics_recent
         on jina_context_graph.retrieval_metrics (tenant_id,recorded_at desc,template);
+      create index if not exists context_graph_retrieval_metrics_access_recent
+        on jina_context_graph.retrieval_metrics (tenant_id,recorded_at desc,access_channel,principal_id);
       create table if not exists jina_context_graph.erasure_filters (
         id text primary key,
         tenant_id text not null,

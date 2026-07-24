@@ -36,7 +36,7 @@ export async function POST(
   try {
     const graph = await getGraph(decodeURIComponent(id), tenantId);
     if (!graph) return Response.json({ error: "graph not found" }, { status: 404 });
-    return Response.json(await askGraph(graph, question));
+    return Response.json(await askGraph(graph, question, request.headers.get("x-jina-admin-actor-id") ?? undefined));
   } catch (error) {
     const status =
       error instanceof JinaApiError && error.status && error.status >= 400 && error.status < 600 ? error.status : 502;
