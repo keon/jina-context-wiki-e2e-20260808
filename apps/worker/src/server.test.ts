@@ -5,6 +5,44 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
+import { retryAfterDelayMs } from "./internal-api-retry.js";
+import { byteBoundedJsonArrayBatches, serializedJsonBytes } from "./json-batches.js";
+
+test("blob analysis batches honor the complete serialized request budget", () => {
+  const envelope = (analyses: readonly unknown[]) => ({
+    taskId: "task",
+    messageId: "message",
+    leaseId: "lease",
+    commitSha: "a".repeat(40),
+    analyses
+  });
+  const analyses = [
+    { id: 1, content: "a".repeat(700) },
+    { id: 2, content: "b".repeat(700) },
+    { id: 3, content: "c".repeat(1_200) }
+  ];
+  const maximumBytes = 1_000;
+  const batches = byteBoundedJsonArrayBatches(analyses, {
+    maximumBytes,
+    emptyPayloadBytes: serializedJsonBytes(envelope([]))
+  });
+
+  assert.deepEqual(
+    batches.map((batch) => batch.map((item) => item.id)),
+    [[1], [2], [3]]
+  );
+  assert.equal(serializedJsonBytes(envelope(batches[0]!)) <= maximumBytes, true);
+  assert.equal(serializedJsonBytes(envelope(batches[1]!)) <= maximumBytes, true);
+  assert.equal(serializedJsonBytes(envelope(batches[2]!)) > maximumBytes, true);
+});
+
+test("internal API retries honor numeric and HTTP-date Retry-After values", () => {
+  const now = Date.parse("2026-07-24T04:00:00.000Z");
+  assert.equal(retryAfterDelayMs("1.5", 10_000, now), 1_500);
+  assert.equal(retryAfterDelayMs("Thu, 24 Jul 2026 04:00:05 GMT", 10_000, now), 5_000);
+  assert.equal(retryAfterDelayMs("Thu, 24 Jul 2026 04:01:00 GMT", 10_000, now), 10_000);
+  assert.equal(retryAfterDelayMs("not-a-date", 10_000, now), undefined);
+});
 
 test("known-head reconciliation includes linked, known-commit, and untracked repair pull requests", () => {
   const merged = {
@@ -43,6 +81,8 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   let installationTokenRequests = 0;
   let renewals = 0;
   let projectionDrains = 0;
+  let ingestPlanRequests = 0;
+  let missingLinkedIssueRequests = 0;
   let ingestedPullRequestNumbers: number[] = [];
   const completions: Record<string, unknown>[] = [];
   let resolveCompletion!: () => void;
@@ -110,6 +150,11 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       return;
     }
     if (request.url === "/internal/context-graph/ingest/plan") {
+      ingestPlanRequests += 1;
+      if (ingestPlanRequests === 1) {
+        json(response, 429, { error: "temporarily unavailable" });
+        return;
+      }
       assert.equal(request.headers["x-jina-tenant-id"], "omlabs");
       const snapshot = (body as { snapshot: { commitSha: string; files: unknown[] } }).snapshot;
       assert.equal(snapshot.commitSha, "a".repeat(40));
@@ -194,7 +239,7 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
         {
           number: 11,
           title: "Restore the broken export order",
-          body: "Fixes the regression without a tracked issue.",
+          body: "The upstream cmux regression is tracked separately (#3691).",
           state: "closed",
           html_url: "https://github.com/omlabs/example/pull/11",
           merged_at: "2026-07-21T00:00:00Z",
@@ -249,6 +294,11 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
         updated_at: "2026-07-21T00:01:00Z",
         user: { login: "reporter" }
       });
+      return;
+    }
+    if (request.url === "/github/repos/omlabs/example/issues/3691") {
+      missingLinkedIssueRequests += 1;
+      json(response, 404, { message: "Not Found" });
       return;
     }
     if (request.url === `/github/repos/omlabs/example/git/trees/${"b".repeat(40)}?recursive=1`) {
@@ -317,6 +367,8 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
       WORKER_TOPICS: "run-review|run-context-graph-ingest",
       WORKER_HEARTBEAT_INTERVAL_MS: "10",
       WORKER_POLL_INTERVAL_MS: "10",
+      INTERNAL_API_RETRY_BASE_MS: "1",
+      INTERNAL_API_RETRY_MAX_WAIT_MS: "5",
       GITHUB_API_URL: `${mockUrl}/github`,
       OPENAI_API_URL: `${mockUrl}/openai`,
       OPENAI_API_KEY: "test-openai-key",
@@ -367,6 +419,8 @@ test("worker reviews pull requests and incrementally ingests context graph sourc
   assert.deepEqual(ingestionResult.resolvedPullRequestNumbers, [12]);
   assert.deepEqual(ingestionResult.problemEvidencePullRequestNumbers, [11, 12]);
   assert.deepEqual(ingestedPullRequestNumbers, [11, 12]);
+  assert.equal(ingestPlanRequests, 2);
+  assert.equal(missingLinkedIssueRequests, 1);
   assert.equal(projectionDrains > 0, true);
 });
 
@@ -559,7 +613,8 @@ test("worker health remains degraded when context graph outbox draining fails", 
       JINA_API_URL: `http://127.0.0.1:${address.port}`,
       INTERNAL_API_TOKEN: "test-token",
       WORKER_TOPICS: "run-context-graph-project",
-      WORKER_POLL_INTERVAL_MS: "10"
+      WORKER_POLL_INTERVAL_MS: "10",
+      INTERNAL_API_RETRY_ATTEMPTS: "1"
     },
     stdio: ["ignore", "pipe", "pipe"]
   });

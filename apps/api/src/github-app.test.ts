@@ -11,6 +11,7 @@ import {
   MemoryContextGraphStore,
   MemoryContextGraphPipelineCoordinator,
   CONTEXT_GRAPH_PARSER_VERSION,
+  ContextGraphProjectionDrainBusyError,
   type BlobAnalysis,
   type ContextGraphReadRevisionOptions,
   type ContextGraphWriteFence,
@@ -78,6 +79,383 @@ test("database config fails closed on a partial graph database override", () => 
       }),
     /GRAPH_DATABASE_URL or GRAPH_INSTANCE_UNIX_SOCKET\/GRAPH_DB_HOST is required/
   );
+});
+
+test("idle ingest claims enqueue a durable parser-only repair workflow", async (context) => {
+  const tenantId = "parser-repair-tenant";
+  const repository = "omxyz/parser-repair";
+  const ref = "a".repeat(40);
+  const blobSha = "b".repeat(40);
+  const contextGraphStore = new MemoryContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  await contextGraphStore.planIngestion({
+    tenantId,
+    repository,
+    ref,
+    commitSha: ref,
+    treeSha: "c".repeat(40),
+    parents: [],
+    recordedAt: "2026-07-23T20:00:00.000Z",
+    taskId: "partial-ingest",
+    files: [{ path: "src/index.ts", blobSha, size: 42 }]
+  });
+  await contextGraphCoordinator.createBuild({
+    tenantId,
+    repository,
+    ref,
+    requestKey: "failed-source-build",
+    snapshotFirst: true,
+    createdAt: "2026-07-23T20:00:00.000Z",
+    metadata: { githubInstallationId: 140435029 }
+  });
+  const failedClaim = await contextGraphCoordinator.claim({
+    tenantId,
+    workerId: "failed-worker",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-23T20:00:01.000Z",
+    leaseExpiresAt: "2026-07-23T20:10:01.000Z"
+  });
+  assert.ok(failedClaim);
+  assert.equal(
+    await contextGraphCoordinator.complete({
+      tenantId,
+      stageId: failedClaim.task.id,
+      leaseId: failedClaim.message.leaseId,
+      outcome: "failed",
+      reason: "payload too large",
+      now: "2026-07-23T20:00:02.000Z"
+    }),
+    true
+  );
+
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId,
+    contextGraphStore,
+    contextGraphCoordinator
+  });
+  const baseUrl = await listen(server);
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const repair = await claimTopic(baseUrl, "run-context-graph-ingest");
+  assert.equal(repair.task.metadata?.repairOnly, true);
+  assert.equal(repair.task.metadata?.pipelinePhase, "snapshot");
+  assert.equal(repair.task.metadata?.githubInstallationId, 140435029);
+  assert.equal(repair.task.metadata?.ref, ref);
+  const workflows = await contextGraphCoordinator.list(tenantId, { repositories: [repository] });
+  const repairWorkflow = workflows.find(({ build }) => build.metadata.repairOnly === true);
+  assert.ok(repairWorkflow);
+  assert.equal(repairWorkflow.stages.length, 1);
+  assert.equal(repairWorkflow.stages[0]?.stage, "ingest");
+});
+
+test("worker claim and completion retries replay their committed receipts", async (context) => {
+  const tenantId = "retry-receipt-tenant";
+  const coordinator = new MemoryContextGraphPipelineCoordinator();
+  await coordinator.createBuild({
+    tenantId,
+    repository: "omxyz/retry-receipt",
+    ref: "main",
+    requestKey: "retry-receipt",
+    snapshotFirst: true,
+    createdAt: "2026-07-24T04:00:00.000Z",
+    metadata: { githubInstallationId: 99 }
+  });
+  const server = createApiServer({ enableDevEndpoints: true, tenantId, contextGraphCoordinator: coordinator });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const claimBody = {
+    workerId: "retry-worker",
+    topics: ["run-context-graph-ingest"],
+    claimId: "f3a34ff3-7bf7-42e7-8138-b85b8b774113"
+  };
+  const claimOnce = async (): Promise<TestClaim> => {
+    const response = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(claimBody)
+    });
+    assert.equal(response.status, 200);
+    return response.json() as Promise<TestClaim>;
+  };
+  const first = await claimOnce();
+  const replayed = await claimOnce();
+  assert.deepEqual(replayed, first);
+  assert.equal(first.message.leaseId, claimBody.claimId);
+
+  const complete = async (): Promise<Response> =>
+    fetch(`${baseUrl}/internal/worker/complete`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        messageId: first.message.id,
+        leaseId: first.message.leaseId,
+        taskId: first.task.id,
+        outcome: "failed",
+        reason: "reproduced failure"
+      })
+    });
+  assert.equal((await complete()).status, 200);
+  assert.equal((await complete()).status, 200);
+});
+
+test("shared parser repairs use current installation provenance and retry failed repairs immediately", async (context) => {
+  const tenantId = SHARED_TENANT;
+  const repository = "omxyz/parser-rotation";
+  const ref = "a".repeat(40);
+  const contextGraphStore = new MemoryContextGraphStore();
+  const contextGraphCoordinator = new MemoryContextGraphPipelineCoordinator();
+  await contextGraphStore.planIngestion({
+    tenantId,
+    repository,
+    ref,
+    commitSha: ref,
+    treeSha: "b".repeat(40),
+    parents: [],
+    recordedAt: "2026-07-24T04:00:00.000Z",
+    taskId: "partial-rotation-ingest",
+    files: [{ path: "src/index.ts", blobSha: "c".repeat(40), size: 42 }]
+  });
+  await contextGraphCoordinator.createBuild({
+    tenantId,
+    repository,
+    ref,
+    requestKey: "historical-installation",
+    snapshotFirst: true,
+    createdAt: "2026-07-24T04:00:00.000Z",
+    metadata: { githubInstallationId: 101, githubRepositoryId: 10 }
+  });
+  const historical = await contextGraphCoordinator.claim({
+    tenantId,
+    workerId: "historical-worker",
+    topics: ["run-context-graph-ingest"],
+    now: "2026-07-24T04:00:01.000Z",
+    leaseExpiresAt: "2026-07-24T04:10:01.000Z"
+  });
+  assert.ok(historical);
+  assert.equal(
+    await contextGraphCoordinator.complete({
+      tenantId,
+      stageId: historical.task.id,
+      leaseId: historical.message.leaseId,
+      outcome: "failed",
+      now: "2026-07-24T04:00:02.000Z",
+      reason: "old installation failed"
+    }),
+    true
+  );
+
+  const server = createApiServer({
+    internalApiToken: INTERNAL_TOKEN,
+    contextGraphStore,
+    contextGraphCoordinator,
+    parserRepairScanIntervalMs: 0,
+    sharedIdentityResolver: {
+      async resolveRepository(input) {
+        if (
+          input.repository.toLowerCase() !== repository.toLowerCase() ||
+          (input.tenantId !== tenantId && input.githubInstallationId !== 202)
+        ) {
+          return undefined;
+        }
+        return {
+          tenantId,
+          githubAccountId: "1",
+          githubAccountLogin: "omxyz",
+          githubAccountType: "Organization",
+          githubRepositoryId: "10",
+          githubInstallationId: "202",
+          repository
+        };
+      },
+      async resolveTenantRepositories(input) {
+        return input.tenantId === tenantId ? [repository] : [];
+      },
+      async listTenantIds() {
+        return [tenantId];
+      },
+      async listTenants() {
+        return [];
+      },
+      async ping() {},
+      async close() {}
+    }
+  });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const claimRepair = async (claimId: string): Promise<TestClaim> => {
+    const response = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+      body: JSON.stringify({ workerId: "repair-worker", topics: ["run-context-graph-ingest"], claimId })
+    });
+    assert.equal(response.status, 200, await response.clone().text());
+    return response.json() as Promise<TestClaim>;
+  };
+  const first = await claimRepair("parser-repair-first");
+  assert.equal(first.task.metadata?.githubInstallationId, 202);
+  assert.equal(first.task.metadata?.githubRepositoryId, "10");
+
+  const failed = await fetch(`${baseUrl}/internal/worker/complete`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${INTERNAL_TOKEN}`,
+      "x-jina-tenant-id": tenantId,
+      "content-type": "application/json"
+    },
+    body: JSON.stringify({
+      messageId: first.message.id,
+      leaseId: first.message.leaseId,
+      taskId: first.task.id,
+      outcome: "failed",
+      reason: "transient parser failure"
+    })
+  });
+  assert.equal(failed.status, 200);
+
+  const retry = await claimRepair("parser-repair-second");
+  assert.notEqual(retry.task.id, first.task.id);
+  assert.match(String(retry.task.metadata?.requestKey), /:retry:1$/);
+  assert.equal(retry.task.metadata?.githubInstallationId, 202);
+});
+
+test("projection lock contention is exposed as a retryable service response", async (context) => {
+  class BusyContextGraphStore extends MemoryContextGraphStore {
+    override async drainDerivedProjectionEvents(): Promise<never> {
+      throw new ContextGraphProjectionDrainBusyError();
+    }
+  }
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId: "busy-projection-tenant",
+    contextGraphStore: new BusyContextGraphStore()
+  });
+  const baseUrl = await listen(server);
+  context.after(() => close(server));
+
+  const response = await fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+  assert.equal(response.status, 503);
+  assert.equal(((await response.json()) as { code?: string }).code, "projection_drain_busy");
+});
+
+test("concurrent projection drain requests share one in-process drain", async (context) => {
+  let enterDrain!: () => void;
+  let releaseDrain!: () => void;
+  const entered = new Promise<void>((resolve) => {
+    enterDrain = resolve;
+  });
+  const release = new Promise<void>((resolve) => {
+    releaseDrain = resolve;
+  });
+  class CoalescingContextGraphStore extends MemoryContextGraphStore {
+    calls = 0;
+
+    override async drainDerivedProjectionEvents(): Promise<{
+      readonly processedEventCount: number;
+      readonly rebuiltRepositories: readonly string[];
+    }> {
+      this.calls += 1;
+      enterDrain();
+      await release;
+      return { processedEventCount: 3, rebuiltRepositories: ["omxyz/example"] };
+    }
+  }
+
+  const contextGraphStore = new CoalescingContextGraphStore();
+  const server = createApiServer({
+    enableDevEndpoints: true,
+    tenantId: "drain-tenant",
+    contextGraphStore
+  });
+  const baseUrl = await listen(server);
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const first = fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+  await entered;
+  const second = fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}"
+  });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  releaseDrain();
+  const responses = await Promise.all([first, second]);
+  assert.deepEqual(
+    responses.map((response) => response.status),
+    [200, 200]
+  );
+  assert.equal(contextGraphStore.calls, 1);
+});
+
+test("shared projection drains visit tenants sequentially without exhausting the graph pool", async (context) => {
+  const tenantIds = Array.from({ length: 6 }, (_, index) => `shared-drain-${index + 1}`);
+  class SequentialContextGraphStore extends MemoryContextGraphStore {
+    activeDrains = 0;
+    maximumActiveDrains = 0;
+    calls = 0;
+
+    override async drainDerivedProjectionEvents(): Promise<{
+      readonly processedEventCount: number;
+      readonly rebuiltRepositories: readonly string[];
+    }> {
+      this.calls += 1;
+      this.activeDrains += 1;
+      this.maximumActiveDrains = Math.max(this.maximumActiveDrains, this.activeDrains);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      this.activeDrains -= 1;
+      return { processedEventCount: 1, rebuiltRepositories: [] };
+    }
+  }
+
+  const contextGraphStore = new SequentialContextGraphStore();
+  const server = createApiServer({
+    internalApiToken: INTERNAL_TOKEN,
+    contextGraphStore,
+    sharedIdentityResolver: {
+      async resolveRepository() {
+        return undefined;
+      },
+      async resolveTenantRepositories() {
+        return [];
+      },
+      async listTenantIds() {
+        return tenantIds;
+      },
+      async listTenants() {
+        return [];
+      },
+      async ping() {},
+      async close() {}
+    }
+  });
+  const baseUrl = await listen(server);
+  context.after(
+    () => new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())))
+  );
+
+  const response = await fetch(`${baseUrl}/internal/context-graph/outbox/drain`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${INTERNAL_TOKEN}`, "content-type": "application/json" },
+    body: "{}"
+  });
+  assert.equal(response.status, 200);
+  assert.equal(contextGraphStore.calls, tenantIds.length);
+  assert.equal(contextGraphStore.maximumActiveDrains, 1);
+  assert.equal(((await response.json()) as { processedEventCount: number }).processedEventCount, tenantIds.length);
 });
 
 test("disabled GitHub intake acknowledges signed deliveries without creating work", async (context) => {
@@ -1163,6 +1541,7 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
       taskId: ingestion.task.id,
       ...lease,
       commitSha,
+      padding: "x".repeat(2 * 1024 * 1024 + 1),
       analyses: [
         {
           blobSha: readmeSha,

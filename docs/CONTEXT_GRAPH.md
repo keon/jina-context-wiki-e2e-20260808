@@ -237,7 +237,7 @@ Ingest and rebuild consult `erasure_filters`, so replay cannot resurrect removed
 `GET /context-graph/metrics` reports:
 
 - outbox depth by event and consumer, oldest age, and reconciliation lag;
-- unparsed blob backlog and blobs parsed in the last hour;
+- unparsed blob backlog reachable from the latest live refs, plus blobs parsed in the last hour;
 - manifest and search staleness;
 - proposed and unexplained legacy assertion counts;
 - pending erasure events;
@@ -245,6 +245,11 @@ Ingest and rebuild consult `erasure_filters`, so replay cannot resurrect removed
 - accept/reject rates per generator and predicate.
 
 The service-level targets originally defined in v5.1 remain unchanged in v5.6: ref-to-manifest p95 ≤30s, observation-to-search p95 ≤60s, redirect-to-reconciliation p95 ≤5m, warm template p95 ≤400ms, and personal erasure ≤24h. The metrics expose the required timestamps/counters; production alert thresholds belong in Cloud Monitoring.
+
+Idle snapshot-ingest claims scan this live-ref backlog and enqueue durable,
+ingest-only repair workflows with hourly idempotency keys. A repair does not
+supersede an active repository workflow, and required-stage failure cancels
+nonterminal sibling tasks so terminal workflows cannot leave stale queued work.
 
 ## APIs
 

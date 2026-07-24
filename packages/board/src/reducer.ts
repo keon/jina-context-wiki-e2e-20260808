@@ -23,6 +23,8 @@ export interface BoardOutboxMessage {
   readonly leasedAt?: IsoTimestamp;
   readonly leaseExpiresAt?: IsoTimestamp;
   readonly dispatchedAt?: IsoTimestamp;
+  /** Retained so a completion response lost after commit can be replayed safely. */
+  readonly dispatchedLeaseId?: string;
 }
 
 export interface BoardEvent {
@@ -163,8 +165,13 @@ export function markOutboxDispatched(
     ...state,
     outbox: state.outbox.map((message) => {
       if (message.id !== outboxMessageId || message.status === "dispatched") return message;
-      const { leaseId: _leaseId, leasedAt: _leasedAt, leaseExpiresAt: _leaseExpiresAt, ...unleased } = message;
-      return { ...unleased, status: "dispatched", dispatchedAt: now };
+      const { leaseId, leasedAt: _leasedAt, leaseExpiresAt: _leaseExpiresAt, ...unleased } = message;
+      return {
+        ...unleased,
+        status: "dispatched",
+        dispatchedAt: now,
+        ...(leaseId ? { dispatchedLeaseId: leaseId } : {})
+      };
     })
   };
 }
@@ -192,7 +199,7 @@ export function leaseNextOutboxMessage(state: BoardState, input: LeaseOutboxInpu
   });
   if (!candidate) return undefined;
 
-  const { dispatchedAt: _dispatchedAt, ...claimable } = candidate;
+  const { dispatchedAt: _dispatchedAt, dispatchedLeaseId: _dispatchedLeaseId, ...claimable } = candidate;
   const leased: BoardOutboxMessage = {
     ...claimable,
     status: "leased",

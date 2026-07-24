@@ -15,7 +15,7 @@ test("shared identity repository query uses parameterized public-schema lookups"
     repository: "OmXYZ/Jina"
   });
 
-  assert.deepEqual(query.values, ["987654321", "123456789", "OmXYZ", "Jina"]);
+  assert.deepEqual(query.values, ["987654321", "123456789", "OmXYZ", "Jina", null]);
   assert.match(query.text, /public\.repositories/);
   assert.match(query.text, /public\.tenants/);
   assert.match(query.text, /public\.installations/);
@@ -42,16 +42,26 @@ test("shared identity repository query requires installation provenance for name
     null,
     "123",
     "omxyz",
-    "jina"
+    "jina",
+    null
   ]);
   const missingInstallation = buildSharedRepositoryIdentityQuery({ repository: "omxyz/jina" });
   assert.deepEqual(buildSharedRepositoryIdentityQuery({ repository: "omxyz/jina" }).values, [
     null,
     null,
     "omxyz",
-    "jina"
+    "jina",
+    null
   ]);
   assert.match(missingInstallation.text, /\$2::bigint is not null/);
+  assert.match(missingInstallation.text, /\$5::uuid is not null/);
+  assert.deepEqual(
+    buildSharedRepositoryIdentityQuery({
+      tenantId: "e752bea3-c5f1-49d9-9f6d-51953f5deeb4",
+      repository: "omxyz/jina"
+    }).values,
+    [null, null, "omxyz", "jina", "e752bea3-c5f1-49d9-9f6d-51953f5deeb4"]
+  );
 });
 
 test("shared tenant repository query validates a bounded set against one active tenant", () => {
@@ -92,6 +102,7 @@ test("shared identity repository rows normalize bigint IDs without number coerci
       github_account_id: "9007199254740993",
       github_account_login: "omxyz",
       github_account_type: "Organization",
+      github_installation_id: "9007199254740994",
       github_repository_id: "9007199254740995",
       repository_owner: "omxyz",
       repository_name: "jina",
@@ -103,6 +114,7 @@ test("shared identity repository rows normalize bigint IDs without number coerci
       githubAccountLogin: "omxyz",
       githubAccountType: "Organization",
       githubRepositoryId: "9007199254740995",
+      githubInstallationId: "9007199254740994",
       repository: "omxyz/jina",
       defaultBranch: "main"
     }

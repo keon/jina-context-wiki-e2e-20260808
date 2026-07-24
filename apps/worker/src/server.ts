@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -47,6 +48,8 @@ import {
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { shouldReconcileRecentPullRequest } from "./github-reconciliation.js";
 import { contextGraphHistoryPolicy, type ContextGraphHistoryPolicy } from "./history-limit.js";
+import { retryAfterDelayMs } from "./internal-api-retry.js";
+import { byteBoundedJsonArrayBatches, serializedJsonBytes } from "./json-batches.js";
 
 const SUPPORTED_TOPICS = [
   "run-review",
@@ -146,6 +149,13 @@ const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const contextGraphApiTimeoutMs = positiveInt(process.env.CONTEXT_GRAPH_API_TIMEOUT_MS, 15 * 60_000);
+const internalApiRetryAttempts = positiveInt(process.env.INTERNAL_API_RETRY_ATTEMPTS, 6);
+const internalApiRetryBaseMs = positiveInt(process.env.INTERNAL_API_RETRY_BASE_MS, 1_000);
+const internalApiRetryMaxWaitMs = positiveInt(process.env.INTERNAL_API_RETRY_MAX_WAIT_MS, 10_000);
+const maxBlobAnalysisRequestBytes = positiveInt(
+  process.env.CONTEXT_GRAPH_BLOB_ANALYSIS_REQUEST_BYTES,
+  2 * 1024 * 1024 - 64 * 1024
+);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const drainsContextGraphProjections = topics.some((topic) => topic.startsWith("run-context-graph"));
 const contextGraphExecutor = topics.includes("run-context-graph-assert")
@@ -231,7 +241,7 @@ async function drainContextGraphProjectionEvents(): Promise<void> {
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
-  const response = await apiRequest("/internal/worker/claim", { workerId, topics });
+  const response = await apiRequest("/internal/worker/claim", { workerId, topics, claimId: randomUUID() });
   if (response.status === 204) {
     recordApiSuccess(!drainsContextGraphProjections);
     return undefined;
@@ -496,8 +506,12 @@ async function runContextGraphIngestWithTransport(
     const analyses = await mapWithConcurrency(plan.missingBlobs, 8, (missing) =>
       analyzeGitHubBlob(repository, missing)
     );
-    for (let offset = 0; offset < analyses.length; offset += 50) {
-      await submitBlobAnalyses(work, snapshot.commitSha, analyses.slice(offset, offset + 50));
+    const emptyBlobRequest = blobAnalysisRequest(work, snapshot.commitSha, []);
+    for (const batch of byteBoundedJsonArrayBatches(analyses, {
+      maximumBytes: maxBlobAnalysisRequestBytes,
+      emptyPayloadBytes: serializedJsonBytes(emptyBlobRequest)
+    })) {
+      await submitBlobAnalyses(work, snapshot.commitSha, batch);
     }
     parsedBlobCount += plan.missingBlobs.length;
     reusedBlobCount += plan.reusedBlobCount;
@@ -1020,7 +1034,8 @@ async function githubWorkItemObservations(
     });
   }
   for (const number of issueNumbers) {
-    const item = await githubJson(`/repos/${repository}/issues/${number}`);
+    const item = await githubOptionalJson(`/repos/${repository}/issues/${number}`);
+    if (Object.keys(item).length === 0) continue;
     const user = isRecord(item.user) ? item.user : {};
     observations.push({
       tenantId,
@@ -1381,13 +1396,17 @@ async function submitBlobAnalyses(
   commitSha: string,
   analyses: readonly BlobAnalysis[]
 ): Promise<void> {
-  await internalApiJson("/internal/context-graph/ingest/blobs", {
+  await internalApiJson("/internal/context-graph/ingest/blobs", blobAnalysisRequest(work, commitSha, analyses));
+}
+
+function blobAnalysisRequest(work: ClaimedWork, commitSha: string, analyses: readonly BlobAnalysis[]): unknown {
+  return {
     taskId: work.task.id,
     messageId: work.message.id,
     leaseId: work.message.leaseId,
     commitSha,
     analyses
-  });
+  };
 }
 
 async function internalApiJson<T = Record<string, unknown>>(path: string, body: unknown): Promise<T> {
@@ -1487,19 +1506,46 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   recordApiSuccess(!drainsContextGraphProjections);
 }
 
-function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Response> {
-  assertLeaseOwned();
+async function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Response> {
+  const serializedBody = JSON.stringify(body);
   const tenantId = activeWork?.task.metadata.tenantId;
-  return fetch(`${apiUrl}${path}`, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${token}`,
-      "content-type": "application/json",
-      ...(tenantId ? { "x-jina-tenant-id": tenantId } : {})
-    },
-    body: JSON.stringify(body),
-    signal: requestSignal(timeoutMs)
-  });
+  for (let attempt = 0; ; attempt += 1) {
+    assertLeaseOwned();
+    let response: Response;
+    try {
+      response = await fetch(`${apiUrl}${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+          ...(tenantId ? { "x-jina-tenant-id": tenantId } : {})
+        },
+        body: serializedBody,
+        signal: requestSignal(timeoutMs)
+      });
+    } catch (error) {
+      if (attempt >= internalApiRetryAttempts - 1) throw error;
+      assertLeaseOwned();
+      await delay(internalApiRetryDelayMs(undefined, attempt));
+      continue;
+    }
+    if (!isTransientInternalApiStatus(response.status) || attempt >= internalApiRetryAttempts - 1) return response;
+    const waitMs = internalApiRetryDelayMs(response.headers.get("retry-after"), attempt);
+    await response.body?.cancel().catch(() => undefined);
+    assertLeaseOwned();
+    await delay(waitMs);
+  }
+}
+
+function isTransientInternalApiStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function internalApiRetryDelayMs(retryAfter: string | undefined | null, attempt: number): number {
+  const requestedDelay = retryAfterDelayMs(retryAfter, internalApiRetryMaxWaitMs);
+  if (requestedDelay !== undefined) return requestedDelay;
+  const exponential = Math.min(internalApiRetryBaseMs * 2 ** attempt, internalApiRetryMaxWaitMs);
+  return Math.max(1, Math.floor(exponential * (0.8 + Math.random() * 0.4)));
 }
 
 async function githubJson(path: string): Promise<Record<string, unknown>> {

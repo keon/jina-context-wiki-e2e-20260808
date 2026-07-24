@@ -45,15 +45,16 @@ acceptance testing, and an explicit rollback.
 
 ### Dashboard read runtime sizing
 
-The release keeps one API instance warm by default. This removes scale-to-zero
-cold starts from dashboard graph reads. The following Cloud Build substitutions
-make the API envelope explicit and allow operators to tune it without editing
-the deployment script:
+The release keeps one API instance warm and permits three instances by default.
+This removes scale-to-zero cold starts from dashboard graph reads while leaving
+headroom for ingestion bursts. The following Cloud Build substitutions make
+the API envelope explicit and allow operators to tune it without editing the
+deployment script:
 
 | Substitution              | Default | Guidance                                                                          |
 | ------------------------- | ------: | --------------------------------------------------------------------------------- |
 | `_JINA_API_MIN_INSTANCES` |     `1` | Keep at least one warm for interactive reads.                                     |
-| `_JINA_API_MAX_INSTANCES` |     `1` | Increase only after calculating the aggregate PostgreSQL connection budget.       |
+| `_JINA_API_MAX_INSTANCES` |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.         |
 | `_JINA_API_CONCURRENCY`   |    `20` | Lowering this can reduce per-instance contention, but may require more instances. |
 | `_JINA_API_CPU`           |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
 | `_JINA_API_MEMORY`        | `512Mi` | Increase if graph hydration/cache memory approaches the container limit.          |
@@ -115,11 +116,23 @@ The worker creates or reuses the immutable Daytona snapshot `jina-context-graph-
 
 The assertion worker runs Codex 0.145.0 inside the Daytona checkout and routes the pinned `openai/gpt-5.6-luna` model through OpenRouter's Responses API. This July 2026 model supports Codex's shell-tool envelope and is cheaper than `google/gemini-3.6-flash`; Gemini rejects that Codex request shape even though it accepts reasoning and structured output without tools. Codex obtains the key through command-backed authentication without persisting it, and `--output-schema` keeps graph assertions schema-constrained and bounded. Transient provider and sandbox failures retry once within the same checkout. Losing the durable task lease deletes the active Daytona sandbox, terminating the paid model run before another worker retries it. Host validation can trigger up to two complete repair generations with the default three-attempt setting.
 
-Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew 30-minute leases. The API keeps one minimum instance by default; unlike workers it uses request-time CPU allocation. The durable lease, not process identity, is the source of truth.
+Workers receive pipe-separated `WORKER_TOPICS`; commas are reserved by the Cloud Run CLI. Workers keep minimum instances with CPU allocated, poll continuously, and renew 30-minute leases. The API keeps one minimum instance and can scale to three by default; unlike workers it uses request-time CPU allocation. Projection drains are coalesced in-process and serialized per tenant with a PostgreSQL advisory lock, so additional API capacity does not duplicate projection work. The durable lease, not process identity, is the source of truth.
 
 ## Context graph retry and cache behavior
 
 Canonical observations, exact commit trees, first-parent changes, blob analyses, source facts, and model-output proposals survive retries. The worker stops commit traversal at known parents. Unchanged heads reuse parsed blobs and exact-fingerprint assertion generations. A generator-contract change performs one bounded semantic refresh and then returns to cached execution.
+
+Workers submit analyses in byte-bounded batches below the API's 25 MiB request
+limit and retry transient network, throttling, and server failures with bounded
+backoff. Missing or inaccessible linked issues do not fail an otherwise valid
+pull-request ingest.
+
+When no snapshot-ingest task is immediately available, the API periodically
+scans the live-ref parser backlog and enqueues durable, ingest-only repair
+workflows. Repair request keys are stable within an hourly window, so restarts
+and concurrent workers do not fan out duplicate repairs. Parser health counts
+only blobs reachable from the latest live refs; historical orphan blobs remain
+eligible for retention/GC but do not keep the graph pipeline degraded.
 
 Manifest, search, reconciliation, and graph consumers own separate canonical outbox deliveries. Events are acknowledged only after the affected projection succeeds; global identity/redirect changes fan out to affected repositories. Historical graph lists load summaries, not every node and edge.
 

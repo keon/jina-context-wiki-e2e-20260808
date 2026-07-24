@@ -21,6 +21,7 @@ import {
   assertionsFromGeneratedContextGraph,
   MemoryContextGraphPipelineCoordinator,
   MemoryContextGraphStore,
+  ContextGraphProjectionDrainBusyError,
   CONTEXT_GRAPH_GENERATOR_VERSION,
   CONTEXT_GRAPH_MAX_HISTORY_LIMIT,
   CONTEXT_GRAPH_PARSER_VERSION,
@@ -108,6 +109,8 @@ export interface ApiServerConfig {
   readonly stateStore?: ApiStateStore;
   readonly contextGraphStore?: ContextGraphStore;
   readonly contextGraphCoordinator?: ContextGraphPipelineCoordinator;
+  /** Test/operations override for how often idle claims rescan parser backlog. */
+  readonly parserRepairScanIntervalMs?: number;
   /** Read-only resolver backed by the original Jina public identity tables. */
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
@@ -126,6 +129,7 @@ interface ResolvedRepositoryIdentity {
   readonly githubAccountLogin: string;
   readonly githubAccountType: string;
   readonly githubRepositoryId?: string;
+  readonly githubInstallationId?: string;
   readonly repository: string;
   readonly defaultBranch?: string;
 }
@@ -134,6 +138,7 @@ interface SharedIdentityResolver {
   resolveRepository(input: {
     readonly githubRepositoryId?: number;
     readonly githubInstallationId?: number;
+    readonly tenantId?: string;
     readonly repository: string;
   }): Promise<ResolvedRepositoryIdentity | undefined>;
   resolveTenantRepositories(input: {
@@ -187,6 +192,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const deliveries = new DeliveryCache(10_000);
   const contextGraphStore = config.contextGraphStore ?? new MemoryContextGraphStore();
   const contextGraphCoordinator = config.contextGraphCoordinator ?? new MemoryContextGraphPipelineCoordinator();
+  const projectionDrains = new Map<
+    string,
+    Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }>
+  >();
+  let nextParserRepairScanAt = 0;
+  let parserRepairScan: Promise<number> | undefined;
   const ready = initializeState();
   let mutations = Promise.resolve();
   let transactionActive = false;
@@ -658,11 +669,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
         await readRawBody(request);
-        const results = await Promise.all(
-          (await config.sharedIdentityResolver.listTenantIds()).map((tenantId) =>
-            drainConnectedProjectionEvents(tenantId, nowIso())
-          )
-        );
+        const results = [];
+        // Each tenant drain holds a dedicated session-level advisory-lock
+        // connection while its projection queries use the remaining pool.
+        // Running one lock acquisition per tenant concurrently can exhaust the
+        // pool before any drain gets a query connection.
+        for (const tenantId of await config.sharedIdentityResolver.listTenantIds()) {
+          results.push(await drainConnectedProjectionEvents(tenantId, nowIso()));
+        }
         json(response, 200, {
           processedEventCount: results.reduce((sum, result) => sum + result.processedEventCount, 0),
           rebuiltRepositories: [...new Set(results.flatMap((result) => result.rebuiltRepositories))].sort()
@@ -1719,7 +1733,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     response: ServerResponse,
     tenantId: string
   ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
+    const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES));
     const taskId = requiredString(body.taskId, "taskId");
     const commitSha = requiredGitSha(body.commitSha, "commitSha");
     const analyses = parseBlobAnalyses(body.analyses);
@@ -1819,6 +1833,126 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return [...new Set(await config.sharedIdentityResolver!.listTenantIds())].sort();
   }
 
+  async function enqueueParserBacklogRepairs(
+    tenantIds: readonly string[],
+    repositoryScopes: readonly { readonly tenantId: string; readonly repository: string }[] | undefined,
+    now: string
+  ): Promise<number> {
+    if (Date.now() < nextParserRepairScanAt) return 0;
+    if (parserRepairScan) return parserRepairScan;
+    nextParserRepairScanAt = Date.now() + Math.max(0, config.parserRepairScanIntervalMs ?? 30_000);
+    parserRepairScan = (async () => {
+      let queued = 0;
+      for (const tenantId of tenantIds) {
+        const repositories = repositoryScopes
+          ?.filter((scope) => scope.tenantId === tenantId)
+          .map((scope) => scope.repository);
+        const backlog = await contextGraphStore.parserBacklogRefs(tenantId, {
+          ...(repositories ? { repositories } : {}),
+          limit: 20
+        });
+        const workflowsByRepository = new Map<string, Awaited<ReturnType<ContextGraphPipelineCoordinator["list"]>>>();
+        for (const candidate of backlog) {
+          let workflows = workflowsByRepository.get(candidate.repository);
+          if (!workflows) {
+            workflows = [
+              ...(await contextGraphCoordinator.list(tenantId, { repositories: [candidate.repository] }))
+            ].sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt));
+            workflowsByRepository.set(candidate.repository, workflows);
+          }
+          if (
+            workflows.some(
+              ({ build }) =>
+                build.ref === candidate.ref && ["queued", "in_progress", "enriching"].includes(build.status)
+            )
+          ) {
+            continue;
+          }
+          const currentIdentity = config.sharedIdentityResolver
+            ? await config.sharedIdentityResolver.resolveRepository({
+                tenantId,
+                repository: candidate.repository
+              })
+            : undefined;
+          const source = config.sharedIdentityResolver
+            ? undefined
+            : (workflows.find(
+                ({ build }) =>
+                  build.ref === candidate.ref &&
+                  Number.isSafeInteger(build.metadata.githubInstallationId) &&
+                  Number(build.metadata.githubInstallationId) > 0
+              ) ??
+              workflows.find(
+                ({ build }) =>
+                  Number.isSafeInteger(build.metadata.githubInstallationId) &&
+                  Number(build.metadata.githubInstallationId) > 0
+              ));
+          const githubInstallationId =
+            metadataGithubId(currentIdentity?.githubInstallationId) ??
+            metadataGithubId(source?.build.metadata.githubInstallationId);
+          if (githubInstallationId === undefined) {
+            logger.warn("parser backlog repair lacks GitHub installation metadata", {
+              event: "context_graph.parser_repair_skipped",
+              tenantId,
+              repository: candidate.repository,
+              ref: candidate.ref,
+              unparsedBlobCount: candidate.unparsedBlobCount
+            });
+            continue;
+          }
+          const hourBucket = now.slice(0, 13).replace(/[-T:]/g, "");
+          const requestKeyBase = `parser-repair:${CONTEXT_GRAPH_PARSER_VERSION}:${hourBucket}`;
+          const priorAttempts = workflows.filter(
+            ({ build }) =>
+              build.requestKey === requestKeyBase || build.requestKey.startsWith(`${requestKeyBase}:retry:`)
+          ).length;
+          const requestKey = priorAttempts > 0 ? `${requestKeyBase}:retry:${priorAttempts}` : requestKeyBase;
+          const build = await contextGraphCoordinator.createBuild(
+            {
+              tenantId,
+              repository: candidate.repository,
+              ref: candidate.ref,
+              requestKey,
+              snapshotFirst: true,
+              createdAt: now,
+              metadata: {
+                source: "parser-backlog-repair",
+                trigger: "scheduled",
+                repairOnly: true,
+                parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
+                unparsedBlobCount: candidate.unparsedBlobCount,
+                githubInstallationId,
+                ...((currentIdentity?.githubRepositoryId ?? source?.build.metadata.githubRepositoryId)
+                  ? {
+                      githubRepositoryId:
+                        currentIdentity?.githubRepositoryId ?? source?.build.metadata.githubRepositoryId
+                    }
+                  : {})
+              }
+            },
+            config.sharedIdentityResolver
+              ? async (repository) => requireConnectedRepository(tenantId, repository)
+              : undefined
+          );
+          if (build.requestKey !== requestKey) continue;
+          queued += 1;
+          logger.info("queued parser backlog repair", {
+            event: "context_graph.parser_repair_queued",
+            tenantId,
+            repository: candidate.repository,
+            ref: candidate.ref,
+            unparsedBlobCount: candidate.unparsedBlobCount,
+            buildId: build.id
+          });
+        }
+      }
+      return queued;
+    })().finally(() => {
+      parserRepairScan = undefined;
+    });
+    return parserRepairScan;
+  }
+
   async function claimWork(
     request: IncomingMessage,
     response: ServerResponse,
@@ -1826,6 +1960,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerId = requiredString(body.workerId, "workerId");
+    const claimId = body.claimId === undefined ? undefined : requiredString(body.claimId, "claimId");
     if (!Array.isArray(body.topics) || body.topics.length === 0)
       throw invalidRequest("at least one supported topic is required");
     const topics = body.topics.map((topic) => requiredString(topic, "topics"));
@@ -1850,18 +1985,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       : undefined;
     if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
       const now = nowIso();
-      const claimed = await contextGraphCoordinator.claim(
-        {
-          tenantId: tenantIds[0]!,
-          ...(tenantIds.length > 1 ? { tenantIds } : {}),
-          ...(repositoryScopes ? { repositoryScopes } : {}),
-          workerId,
-          topics: contextGraphTopics,
-          now,
-          leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
-        },
-        config.sharedIdentityResolver ? requireStageRepositoryAuthority : undefined
-      );
+      const claimContextGraphWork = () =>
+        contextGraphCoordinator.claim(
+          {
+            tenantId: tenantIds[0]!,
+            ...(tenantIds.length > 1 ? { tenantIds } : {}),
+            ...(repositoryScopes ? { repositoryScopes } : {}),
+            ...(claimId ? { claimId } : {}),
+            workerId,
+            topics: contextGraphTopics,
+            now: nowIso(),
+            leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+          },
+          config.sharedIdentityResolver ? requireStageRepositoryAuthority : undefined
+        );
+      let claimed = await claimContextGraphWork();
+      if (!claimed && contextGraphTopics.includes("run-context-graph-ingest")) {
+        const queuedRepairs = await enqueueParserBacklogRepairs(tenantIds, repositoryScopes, now);
+        if (queuedRepairs > 0) claimed = await claimContextGraphWork();
+      }
       if (claimed) {
         const claimedStage = {
           tenantId: requiredString(claimed.task.metadata.tenantId, "task.tenantId"),
@@ -1905,7 +2047,26 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         )
         .map((task) => task.id);
       const now = nowIso();
-      const leaseId = randomUUID();
+      const leaseId = claimId ?? randomUUID();
+      const replayedMessage = intakeState.board.outbox.find(
+        (message) =>
+          message.status === "leased" &&
+          message.leaseId === leaseId &&
+          Boolean(message.leaseExpiresAt && message.leaseExpiresAt > now) &&
+          requestedTopics.includes(message.topic as (typeof WORKER_TOPICS)[number]) &&
+          taskIds.includes(message.taskId)
+      );
+      if (replayedMessage) {
+        const replayedTask = findTask(intakeState.board, replayedMessage.taskId);
+        if (replayedTask) {
+          await requireStageRepositoryAuthority({
+            tenantId: requiredString(replayedTask.metadata.tenantId, "task.tenantId"),
+            repository: requiredString(replayedTask.metadata.repository, "task.repository"),
+            metadata: replayedTask.metadata
+          });
+          return { message: replayedMessage, task: replayedTask };
+        }
+      }
       const leased = leaseNextOutboxMessage(intakeState.board, {
         topics: requestedTopics,
         taskIds,
@@ -2038,8 +2199,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const rawTaskId = requiredString(body.taskId, "taskId");
     if (rawMessageId.startsWith("context-graph-stage_") || rawTaskId.startsWith("context-graph-stage_")) {
       if (rawMessageId !== rawTaskId) throw staleLease();
-      const graph = await completeContextGraphStage(body, tenantId, rawTaskId, leaseId, outcome);
-      json(response, 200, { accepted: true, graphId: graph?.id });
+      const graphId = await completeContextGraphStage(body, tenantId, rawTaskId, leaseId, outcome);
+      json(response, 200, { accepted: true, ...(graphId ? { graphId } : {}) });
       return;
     }
     const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
@@ -2055,6 +2216,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const message = findOutboxMessage(intakeState.board, messageId);
       const currentTask = findTask(intakeState.board, taskId);
       const now = nowIso();
+      if (
+        message?.status === "dispatched" &&
+        message.dispatchedLeaseId === leaseId &&
+        currentTask?.status === outcome &&
+        currentTask.metadata.tenantId === tenantId
+      ) {
+        await requireStageRepositoryAuthority({
+          tenantId,
+          repository: requiredString(currentTask.metadata.repository, "task.repository"),
+          metadata: currentTask.metadata
+        });
+        return true;
+      }
       if (
         !message ||
         !currentTask ||
@@ -2122,10 +2296,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     stageId: string,
     leaseId: string,
     outcome: "done" | "failed"
-  ): Promise<ContextGraph | undefined> {
+  ): Promise<string | undefined> {
     const now = nowIso();
     const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
-    if (!stage) throw staleLease();
+    if (!stage) {
+      const receipt = await contextGraphCoordinator.completionReceipt({ tenantId, stageId, leaseId });
+      if (!receipt || receipt.outcome !== outcome) throw staleLease();
+      await requireStageRepositoryAuthority(receipt);
+      return typeof receipt.result?.graphId === "string" ? receipt.result.graphId : undefined;
+    }
     await requireStageRepositoryAuthority(stage);
     if (outcome === "failed") {
       const completed = await contextGraphCoordinator.complete(
@@ -2235,7 +2414,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     );
     if (!completed) throw staleLease();
     await requireStageRepositoryAuthority(stage);
-    return graph;
+    return graph?.id ?? (typeof result.graphId === "string" ? result.graphId : undefined);
   }
 
   function isTenantAdmin(principal: { readonly tenantId?: string; readonly principalId: string }): boolean {
@@ -2341,12 +2520,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     tenantId: string,
     now: string
   ): Promise<{ readonly processedEventCount: number; readonly rebuiltRepositories: readonly string[] }> {
-    if (!config.sharedIdentityResolver) return contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
-    const repositories = await config.sharedIdentityResolver.resolveTenantRepositories({ tenantId });
-    return contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
-      repositories,
-      authorityGuard: async (repository) => requireConnectedRepository(tenantId, repository)
+    const activeDrain = projectionDrains.get(tenantId);
+    if (activeDrain) return activeDrain;
+    const drain = (async () => {
+      if (!config.sharedIdentityResolver) return contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
+      const repositories = await config.sharedIdentityResolver.resolveTenantRepositories({ tenantId });
+      return contextGraphStore.drainDerivedProjectionEvents(tenantId, now, {
+        repositories,
+        authorityGuard: async (repository) => requireConnectedRepository(tenantId, repository)
+      });
+    })().finally(() => {
+      projectionDrains.delete(tenantId);
     });
+    projectionDrains.set(tenantId, drain);
+    return drain;
   }
 
   if (config.simulateRuns) {
@@ -3576,6 +3763,9 @@ function staleLease(): ApiError {
 
 function httpError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
+  if (error instanceof ContextGraphProjectionDrainBusyError) {
+    return new ApiError(503, "projection_drain_busy", error.message);
+  }
   if (error instanceof DomainError) {
     const statusCode =
       error.code === "invalid_argument"

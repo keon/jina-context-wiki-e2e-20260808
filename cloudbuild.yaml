@@ -104,10 +104,10 @@ substitutions:
   _JINA_FIXED_TENANT_ID: omlabs
   _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
-  # start. Raise max instances only after checking the resulting DB connection
-  # budget; each instance owns independent PostgreSQL pools.
+  # start. Scale to three for concurrent ingestion and projection traffic; drain
+  # work is single-flight per process and tenant-locked across instances.
   _JINA_API_MIN_INSTANCES: "1"
-  _JINA_API_MAX_INSTANCES: "1"
+  _JINA_API_MAX_INSTANCES: "3"
   _JINA_API_CONCURRENCY: "20"
   _JINA_API_CPU: "1"
   _JINA_API_MEMORY: 512Mi

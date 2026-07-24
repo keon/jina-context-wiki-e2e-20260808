@@ -4,6 +4,7 @@ import {
   CONTEXT_GRAPH_GENERATOR_VERSION,
   CONTEXT_GRAPH_PARSER_VERSION,
   CONTEXT_GRAPH_REGISTRY_VERSION,
+  ContextGraphProjectionDrainBusyError,
   RepositoryContextOrchestrator,
   type CausalTraceProjection,
   createContextGraph,
@@ -276,6 +277,274 @@ test(
       await cleanup.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]);
       await cleanup.end();
       await Promise.all([first.close(), second.close(), graphStore.close()]);
+    }
+  }
+);
+
+test(
+  "Postgres parser repair workflows are ingest-only and cancel queued siblings after failure",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantId = `repair-pipeline-${suffix}`;
+    const repository = `omxyz/repair-pipeline-${suffix}`;
+    const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString });
+    const cleanup = new Pool({ connectionString });
+    try {
+      await coordinator.createBuild({
+        tenantId,
+        repository,
+        ref: "repair",
+        requestKey: "repair-only",
+        snapshotFirst: true,
+        createdAt: "2026-07-23T20:00:00.000Z",
+        metadata: { repairOnly: true, githubInstallationId: 99 }
+      });
+      const repairWorkflow = (await coordinator.list(tenantId, { repositories: [repository] }))[0]!;
+      assert.deepEqual(
+        repairWorkflow.stages.map((stage) => `${stage.phase}:${stage.stage}:${stage.status}`),
+        ["snapshot:ingest:queued"]
+      );
+      const repairClaim = await coordinator.claim({
+        tenantId,
+        claimId: "postgres-repair-claim-retry",
+        workerId: "repair-worker",
+        topics: ["run-context-graph-ingest"],
+        now: "2026-07-23T20:00:01.000Z",
+        leaseExpiresAt: "2026-07-23T20:10:01.000Z"
+      });
+      assert.ok(repairClaim);
+      assert.deepEqual(
+        await coordinator.claim({
+          tenantId,
+          claimId: "postgres-repair-claim-retry",
+          workerId: "repair-worker",
+          topics: ["run-context-graph-ingest"],
+          now: "2026-07-23T20:00:01.500Z",
+          leaseExpiresAt: "2026-07-23T20:10:01.000Z"
+        }),
+        repairClaim
+      );
+      assert.equal(
+        await coordinator.complete({
+          tenantId,
+          stageId: repairClaim.task.id,
+          leaseId: repairClaim.message.leaseId,
+          outcome: "done",
+          now: "2026-07-23T20:00:02.000Z",
+          result: { repaired: true }
+        }),
+        true
+      );
+      assert.deepEqual(
+        await coordinator.completionReceipt({
+          tenantId,
+          stageId: repairClaim.task.id,
+          leaseId: repairClaim.message.leaseId
+        }),
+        {
+          stageId: repairClaim.task.id,
+          leaseId: repairClaim.message.leaseId,
+          tenantId,
+          repository,
+          ref: "repair",
+          topic: "run-context-graph-ingest",
+          metadata: {
+            ...repairClaim.task.metadata,
+            result: { repaired: true },
+            completionLeaseId: repairClaim.message.leaseId,
+            completionOutcome: "done"
+          },
+          outcome: "done",
+          result: { repaired: true }
+        }
+      );
+
+      await coordinator.createBuild({
+        tenantId,
+        repository,
+        ref: "failure",
+        requestKey: "failure",
+        snapshotFirst: true,
+        createdAt: "2026-07-23T20:01:00.000Z"
+      });
+      const snapshot = await coordinator.claim({
+        tenantId,
+        workerId: "worker",
+        topics: ["run-context-graph-ingest"],
+        now: "2026-07-23T20:01:01.000Z",
+        leaseExpiresAt: "2026-07-23T20:11:01.000Z"
+      });
+      assert.ok(snapshot);
+      assert.equal(snapshot.task.metadata.ref, "failure");
+      assert.equal(
+        await coordinator.complete({
+          tenantId,
+          stageId: snapshot.task.id,
+          leaseId: snapshot.message.leaseId,
+          outcome: "done",
+          now: "2026-07-23T20:01:02.000Z"
+        }),
+        true
+      );
+      const history = await coordinator.claim({
+        tenantId,
+        workerId: "worker",
+        topics: ["run-context-graph-ingest"],
+        now: "2026-07-23T20:01:03.000Z",
+        leaseExpiresAt: "2026-07-23T20:11:03.000Z"
+      });
+      assert.ok(history);
+      assert.equal(history.task.metadata.pipelinePhase, "history");
+      assert.equal(
+        await coordinator.complete({
+          tenantId,
+          stageId: history.task.id,
+          leaseId: history.message.leaseId,
+          outcome: "failed",
+          reason: "upstream unavailable",
+          now: "2026-07-23T20:01:04.000Z"
+        }),
+        true
+      );
+      const failed = (await coordinator.list(tenantId, { repositories: [repository] })).find(
+        ({ build }) => build.ref === "failure"
+      )!;
+      assert.equal(failed.build.status, "failed");
+      assert.equal(
+        failed.stages.some((stage) => stage.status === "queued"),
+        false
+      );
+      assert.equal(
+        failed.stages.find((stage) => stage.phase === "snapshot" && stage.stage === "project")?.status,
+        "canceled"
+      );
+      const staleProject = failed.stages.find((stage) => stage.phase === "snapshot" && stage.stage === "project")!;
+      await cleanup.query("update jina_board.tasks set status='queued' where id=$1", [staleProject.id]);
+      assert.equal(
+        await coordinator.claim({
+          tenantId,
+          workerId: "reconciler",
+          topics: ["run-context-graph-project"],
+          now: "2026-07-23T20:01:05.000Z",
+          leaseExpiresAt: "2026-07-23T20:11:05.000Z"
+        }),
+        undefined
+      );
+      const reconciled = (await coordinator.list(tenantId, { repositories: [repository] }))
+        .find(({ build }) => build.ref === "failure")!
+        .stages.find((stage) => stage.id === staleProject.id);
+      assert.equal(reconciled?.status, "canceled");
+    } finally {
+      await cleanup.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]);
+      await cleanup.end();
+      await coordinator.close();
+    }
+  }
+);
+
+test(
+  "Postgres exposes parser backlog refs and reports a concurrently locked tenant drain",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const tenantId = `repair-store-${suffix}`;
+    const repository = `omxyz/repair-store-${suffix}`;
+    const ref = "a".repeat(40);
+    const firstBlob = "b".repeat(40);
+    const secondBlob = "c".repeat(40);
+    const store = new PostgresContextGraphStore({ connectionString });
+    const lockClient = new Pool({ connectionString });
+    const session = await lockClient.connect();
+    const lockName = `jina:context-graph:projection-drain:${tenantId}`;
+    try {
+      await store.planIngestion({
+        tenantId,
+        repository,
+        ref,
+        commitSha: ref,
+        treeSha: "d".repeat(40),
+        parents: [],
+        recordedAt: "2026-07-23T20:00:00.000Z",
+        taskId: `repair-store-${suffix}`,
+        files: [
+          { path: "src/a.ts", blobSha: firstBlob, size: 10 },
+          { path: "src/b.ts", blobSha: secondBlob, size: 20 }
+        ]
+      });
+      assert.deepEqual(await store.parserBacklogRefs(tenantId), [{ tenantId, repository, ref, unparsedBlobCount: 2 }]);
+      await store.applyBlobAnalyses({ tenantId, repository, commitSha: ref }, [
+        {
+          blobSha: firstBlob,
+          parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
+          language: "typescript",
+          symbols: [],
+          imports: [],
+          edges: []
+        }
+      ]);
+      assert.deepEqual(await store.parserBacklogRefs(tenantId), [{ tenantId, repository, ref, unparsedBlobCount: 1 }]);
+      await lockClient.query(
+        `insert into jina_context_graph.blobs (tenant_id,blob_sha,byte_size)
+         values ($1,$2,1)`,
+        [tenantId, "e".repeat(40)]
+      );
+      assert.equal(
+        (await store.operationalMetrics(tenantId, "2026-07-23T20:00:00.000Z")).unparsedBlobCount,
+        1,
+        "health counts only missing analyses reachable from live refs"
+      );
+
+      const acquired = await session.query<{ acquired: boolean }>(
+        "select pg_try_advisory_lock(hashtextextended($1,0)) as acquired",
+        [lockName]
+      );
+      assert.equal(acquired.rows[0]?.acquired, true);
+      await assert.rejects(
+        () => store.drainDerivedProjectionEvents(tenantId, "2026-07-23T20:00:01.000Z"),
+        ContextGraphProjectionDrainBusyError
+      );
+    } finally {
+      await session.query("select pg_advisory_unlock(hashtextextended($1,0))", [lockName]).catch(() => undefined);
+      session.release();
+      await lockClient.end();
+      await store.close();
+    }
+  }
+);
+
+test(
+  "Postgres projection locks stay outside the query pool under concurrent tenant drains",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
+    const suffix = Date.now().toString(36);
+    const store = new PostgresContextGraphStore({ connectionString, max: 1 });
+    let timeout: NodeJS.Timeout | undefined;
+    try {
+      const drains = Promise.all(
+        Array.from({ length: 5 }, (_, index) =>
+          store.drainDerivedProjectionEvents(`projection-pool-${suffix}-${index}`, "2026-07-24T04:00:00.000Z")
+        )
+      );
+      const results = await Promise.race([
+        drains,
+        new Promise<never>((_, reject) => {
+          timeout = setTimeout(() => reject(new Error("projection drains exhausted the query pool")), 5_000);
+        })
+      ]);
+      assert.equal(results.length, 5);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      await store.close();
     }
   }
 );

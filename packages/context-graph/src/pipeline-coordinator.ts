@@ -85,6 +85,11 @@ export interface ContextGraphStageLease {
   readonly metadata: Readonly<Record<string, unknown>>;
 }
 
+export interface ContextGraphStageCompletionReceipt extends ContextGraphStageLease {
+  readonly outcome: "done" | "failed";
+  readonly result?: Readonly<Record<string, unknown>>;
+}
+
 export interface ContextGraphTaskBoardEvent {
   readonly id: string;
   readonly taskId: string;
@@ -140,6 +145,8 @@ export interface ContextGraphPipelineCoordinator {
         readonly tenantId: string;
         readonly repository: string;
       }[];
+      /** Stable across transport retries of one claim request. */
+      readonly claimId?: string;
       readonly workerId: string;
       readonly topics: readonly ContextGraphWorkerTopic[];
       readonly now: string;
@@ -174,6 +181,11 @@ export interface ContextGraphPipelineCoordinator {
     readonly topic?: ContextGraphWorkerTopic;
     readonly now: string;
   }): Promise<ContextGraphStageLease | undefined>;
+  completionReceipt(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+  }): Promise<ContextGraphStageCompletionReceipt | undefined>;
   complete(
     input: {
       readonly tenantId: string;
@@ -243,6 +255,12 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     authorityGuard?: (repository: string) => Promise<void>
   ): Promise<ContextGraphBuildRecord> {
     await authorityGuard?.(request.repository);
+    const id = stableId(
+      "context-graph-job",
+      `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
+    );
+    const existing = this.builds.get(id);
+    if (existing) return structuredClone(existing);
     if (request.dedupeHeadSha) {
       const latest = [...this.builds.values()]
         .filter(
@@ -252,6 +270,19 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
         .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
         .at(-1);
       if (latest?.metadata.githubHeadSha === request.dedupeHeadSha) return structuredClone(latest);
+    }
+    if (isParserRepairBuild(request)) {
+      const active = [...this.builds.values()]
+        .filter(
+          (build) =>
+            build.tenantId === request.tenantId &&
+            build.repository === request.repository &&
+            build.ref === request.ref &&
+            ["queued", "in_progress", "enriching"].includes(build.status)
+        )
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+        .at(-1);
+      if (active) return structuredClone(active);
     }
     for (const build of this.builds.values()) {
       if (
@@ -274,12 +305,6 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
         }
       }
     }
-    const id = stableId(
-      "context-graph-job",
-      `${request.tenantId}:${request.repository}:${request.ref}:${request.requestKey}`
-    );
-    const existing = this.builds.get(id);
-    if (existing) return structuredClone(existing);
     const build: MutableBuild = {
       ...request,
       metadata: structuredClone(request.metadata ?? {}),
@@ -336,6 +361,7 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
         readonly tenantId: string;
         readonly repository: string;
       }[];
+      readonly claimId?: string;
       readonly workerId: string;
       readonly topics: readonly ContextGraphWorkerTopic[];
       readonly now: string;
@@ -347,6 +373,27 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     const repositoryScopes = input.repositoryScopes
       ? new Set(input.repositoryScopes.map((scope) => `${scope.tenantId}:${scope.repository.toLowerCase()}`))
       : undefined;
+    const replayed = input.claimId
+      ? [...this.stages.values()].find(
+          (candidate) =>
+            tenantIds.has(candidate.tenantId) &&
+            (!repositoryScopes ||
+              repositoryScopes.has(`${candidate.tenantId}:${candidate.repository.toLowerCase()}`)) &&
+            candidate.status === "in_progress" &&
+            candidate.leaseId === input.claimId &&
+            candidate.workerId === input.workerId &&
+            Boolean(candidate.leaseExpiresAt && candidate.leaseExpiresAt > input.now) &&
+            input.topics.includes(candidate.topic)
+        )
+      : undefined;
+    if (replayed) {
+      await authorityGuard?.({
+        tenantId: replayed.tenantId,
+        repository: replayed.repository,
+        metadata: structuredClone(replayed.metadata)
+      });
+      return claimView(replayed);
+    }
     for (const stage of this.stages.values()) {
       if (
         tenantIds.has(stage.tenantId) &&
@@ -396,7 +443,7 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     });
     stage.status = "in_progress";
     stage.attempt += 1;
-    stage.leaseId = randomUUID();
+    stage.leaseId = input.claimId ?? randomUUID();
     stage.workerId = input.workerId;
     stage.leaseExpiresAt = input.leaseExpiresAt;
     stage.startedAt = input.now;
@@ -484,6 +531,34 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     return leaseView(stage!);
   }
 
+  async completionReceipt(input: {
+    readonly tenantId: string;
+    readonly stageId: string;
+    readonly leaseId: string;
+  }): Promise<ContextGraphStageCompletionReceipt | undefined> {
+    const stage = this.stages.get(input.stageId);
+    if (
+      !stage ||
+      stage.tenantId !== input.tenantId ||
+      (stage.status !== "done" && stage.status !== "failed") ||
+      stage.metadata.completionLeaseId !== input.leaseId
+    ) {
+      return undefined;
+    }
+    const result = recordMetadata(stage.metadata.result);
+    return {
+      stageId: stage.id,
+      leaseId: input.leaseId,
+      tenantId: stage.tenantId,
+      repository: stage.repository,
+      ref: stage.ref,
+      topic: stage.topic,
+      metadata: structuredClone(stage.metadata),
+      outcome: stage.status,
+      ...(result ? { result: structuredClone(result) } : {})
+    };
+  }
+
   async complete(
     input: {
       readonly tenantId: string;
@@ -504,7 +579,9 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
     stage!.metadata = {
       ...stage!.metadata,
       ...(input.result ? { result: structuredClone(input.result) } : {}),
-      ...(input.reason ? { reason: input.reason } : {})
+      ...(input.reason ? { reason: input.reason } : {}),
+      completionLeaseId: input.leaseId,
+      completionOutcome: input.outcome
     };
     stage!.updatedAt = input.now;
     stage!.completedAt = input.now;
@@ -526,7 +603,16 @@ export class MemoryContextGraphPipelineCoordinator implements ContextGraphPipeli
       if (contextGraphStageRequired(stage!)) {
         build.status = "failed";
         for (const candidate of this.stages.values()) {
-          if (candidate.buildId === build.id && candidate.status === "triage") candidate.status = "canceled";
+          if (
+            candidate.buildId === build.id &&
+            candidate.id !== stage!.id &&
+            !["done", "failed", "canceled", "superseded"].includes(candidate.status)
+          ) {
+            candidate.status = "canceled";
+            candidate.updatedAt = input.now;
+            clearLease(candidate);
+            this.recordEvent(candidate.id, "task.transitioned", input.now, { toStatus: "canceled" });
+          }
         }
       } else {
         this.queueReadyStages(build, stage!, input.nextMetadata ?? {}, input.now);
@@ -716,33 +802,35 @@ function contextGraphBuildTrigger(build: ContextGraphBuildRecord): ContextGraphB
 }
 
 function plannedStages(build: MutableBuild): MutableStage[] {
-  return contextGraphPlannedStageSpecs(build.snapshotFirst).map(({ phase, priority, stage, ordinal }) => {
-    const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
-    return {
-      id,
-      buildId: build.id,
-      tenantId: build.tenantId,
-      repository: build.repository,
-      ref: build.ref,
-      requestKey: build.requestKey,
-      phase,
-      stage,
-      topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
-      status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
-      priority,
-      metadata: {
-        ...structuredClone(build.metadata),
+  return contextGraphPlannedStageSpecs(build.snapshotFirst, isParserRepairBuild(build)).map(
+    ({ phase, priority, stage, ordinal }) => {
+      const id = stableId("context-graph-stage", `${build.id}:${phase}:${stage}`);
+      return {
+        id,
+        buildId: build.id,
         tenantId: build.tenantId,
         repository: build.repository,
         ref: build.ref,
         requestKey: build.requestKey,
-        pipelinePhase: phase
-      },
-      attempt: 0,
-      createdAt: build.createdAt,
-      updatedAt: build.createdAt
-    };
-  });
+        phase,
+        stage,
+        topic: `run-context-graph-${stage}` as ContextGraphWorkerTopic,
+        status: ordinal === 0 ? ("queued" as const) : ("triage" as const),
+        priority,
+        metadata: {
+          ...structuredClone(build.metadata),
+          tenantId: build.tenantId,
+          repository: build.repository,
+          ref: build.ref,
+          requestKey: build.requestKey,
+          pipelinePhase: phase
+        },
+        attempt: 0,
+        createdAt: build.createdAt,
+        updatedAt: build.createdAt
+      };
+    }
+  );
 }
 
 /**
@@ -750,12 +838,16 @@ function plannedStages(build: MutableBuild): MutableStage[] {
  * still loading. Semantic assertions belong to the history phase because they
  * require the complete work-item and causal evidence scope.
  */
-export function contextGraphPlannedStageSpecs(snapshotFirst: boolean): readonly {
+export function contextGraphPlannedStageSpecs(
+  snapshotFirst: boolean,
+  repairOnly = false
+): readonly {
   readonly phase: "snapshot" | "history";
   readonly stage: "ingest" | "assert" | "project";
   readonly priority: number;
   readonly ordinal: number;
 }[] {
+  if (repairOnly) return [{ phase: "snapshot", stage: "ingest", priority: 100, ordinal: 0 }];
   const phases = snapshotFirst
     ? [
         { phase: "snapshot" as const, priority: 100, stages: ["ingest", "project"] as const },
@@ -766,6 +858,10 @@ export function contextGraphPlannedStageSpecs(snapshotFirst: boolean): readonly 
   return phases.flatMap(({ phase, priority, stages }) =>
     stages.map((stage) => ({ phase, stage, priority, ordinal: ordinal++ }))
   );
+}
+
+function isParserRepairBuild(value: { readonly metadata?: Readonly<Record<string, unknown>> }): boolean {
+  return value.metadata?.repairOnly === true;
 }
 
 export function contextGraphStagePrerequisites(
@@ -823,4 +919,10 @@ function claimView(stage: MutableStage): ContextGraphStageClaim {
       metadata: structuredClone(stage.metadata)
     }
   };
+}
+
+function recordMetadata(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
 }
