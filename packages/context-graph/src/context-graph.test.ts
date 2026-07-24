@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   createContextGraph,
+  discardUnresolvableContextGraphClaims,
   isProblemEvidencePath,
   materializeRequiredCausalAssertions,
   materializeRequiredMoveAssertions,
@@ -26,6 +27,7 @@ import {
   derivedIssueNaturalKey,
   featureNaturalKey,
   movedFromSimilarityCandidates,
+  normalizeAssertionBatchLenient,
   selectAssertionFocusPaths
 } from "./pipeline.js";
 import { analyzeSourceBlob } from "./parser.js";
@@ -61,7 +63,7 @@ import { MemoryContextGraphPipelineCoordinator } from "./pipeline-coordinator.js
 import { CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA, CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT } from "./schema.js";
 
 test("assertion generation requires evidence-backed move continuity", () => {
-  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v23-semantic-revisions/);
+  assert.match(CONTEXT_GRAPH_GENERATOR_VERSION, /codex-assertions-v24-evidence-scoped/);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.nodes.maxItems, 128);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.maxItems, 256);
   assert.equal(CONTEXT_GRAPH_ASSERTION_OUTPUT_SCHEMA.properties.edges.items.properties.evidence.maxItems, 4);
@@ -72,6 +74,90 @@ test("assertion generation requires evidence-backed move continuity", () => {
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /emit current MOVED_FROM previous/);
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /final synthesis pass/);
   assert.match(CONTEXT_GRAPH_ASSERTION_SYSTEM_PROMPT, /exactly one edge per semantic identity/);
+});
+
+test("final synthesis discards only claims whose checked-out evidence cannot resolve", async () => {
+  const reads = new Map([
+    ["src/current.ts", "one\ntwo\nthree"],
+    ["docs/causal.md", "cause\nresolution"]
+  ]);
+  const readCounts = new Map<string, number>();
+  const generated = {
+    summary: "Evidence-scoped assertions",
+    nodes: [
+      {
+        id: "current",
+        kind: "File" as const,
+        label: "current.ts",
+        description: "Current source",
+        path: "src/current.ts",
+        evidence: ["src/current.ts:1-2"]
+      },
+      {
+        id: "missing",
+        kind: "File" as const,
+        label: "missing.ts",
+        description: "Invented source",
+        path: "src/missing.ts",
+        evidence: ["src/missing.ts:1"]
+      },
+      {
+        id: "issue",
+        kind: "Issue" as const,
+        label: "Issue",
+        description: "Valid issue",
+        evidence: ["docs/causal.md:1"]
+      }
+    ],
+    edges: [
+      {
+        source: "issue",
+        target: "current",
+        predicate: "AFFECTS",
+        plane: "knowledge" as const,
+        confidence: 0.9,
+        why: "Supported",
+        evidence: ["docs/causal.md:1-2"]
+      },
+      {
+        source: "issue",
+        target: "current",
+        predicate: "REFERENCES",
+        plane: "knowledge" as const,
+        confidence: 0.7,
+        why: "Range is outside the file",
+        evidence: ["src/current.ts:8"]
+      },
+      {
+        source: "issue",
+        target: "missing",
+        predicate: "AFFECTS",
+        plane: "knowledge" as const,
+        confidence: 0.5,
+        why: "Target is unsupported",
+        evidence: ["docs/causal.md:1"]
+      }
+    ]
+  };
+  const filtered = await discardUnresolvableContextGraphClaims(generated, async (path) => {
+    readCounts.set(path, (readCounts.get(path) ?? 0) + 1);
+    const contents = reads.get(path);
+    if (contents === undefined) throw new Error("missing");
+    return contents;
+  });
+  assert.deepEqual(
+    filtered.nodes.map((node) => node.id),
+    ["current", "issue"]
+  );
+  assert.deepEqual(
+    filtered.edges.map((edge) => edge.predicate),
+    ["AFFECTS"]
+  );
+  assert.deepEqual([...readCounts.entries()].sort(), [
+    ["docs/causal.md", 1],
+    ["src/current.ts", 1],
+    ["src/missing.ts", 1]
+  ]);
 });
 
 test("snapshot-first contextGraph builds require history assertions before projection", async () => {
@@ -1074,6 +1160,65 @@ test("a new model contract confirms identical content and versions changed conte
     "The README documents the administrator access mechanism."
   );
   assert.equal(revised.find((assertion) => assertion.status === "superseded")?.generator, "model:model-v1");
+});
+
+test("cardinality-one model claims consolidate deterministically and supersede changed values", async () => {
+  const store = new MemoryContextGraphStore();
+  const repository = "omxyz/cardinality";
+  const subject = {
+    kind: "PullRequest" as const,
+    naturalKey: `github:pr:${repository}#1`,
+    label: "#1"
+  };
+  const candidate = (sha: string, confidence: number, line: number) => ({
+    subject,
+    predicate: "MERGED_AS",
+    object: {
+      kind: "Commit" as const,
+      naturalKey: `repo:${repository}:sha:${sha}`,
+      label: sha.slice(0, 7)
+    },
+    confidence,
+    explanation: `PR #1 merged as ${sha}.`,
+    evidence: [`CHANGELOG.md:${line}`]
+  });
+  const batch = (fingerprint: string, generatedAt: string, assertions: readonly ReturnType<typeof candidate>[]) => ({
+    tenantId: "tenant-cardinality",
+    repository,
+    ref: "main",
+    commitSha: "f".repeat(40),
+    taskId: `assert-${fingerprint}`,
+    generatedAt,
+    generatorVersion: "model-cardinality",
+    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
+    evidenceFingerprint: fingerprint,
+    evidenceObservationIds: [],
+    model: "fixture",
+    summary: "PR merge identity",
+    rawOutput: { summary: "PR merge identity", nodes: [], edges: [] },
+    assertions
+  });
+  const shaA = "a".repeat(40);
+  const shaB = "b".repeat(40);
+  const normalized = normalizeAssertionBatchLenient(
+    batch("conflict", "2026-07-24T00:00:00.000Z", [candidate(shaA, 0.7, 1), candidate(shaB, 0.9, 2)])
+  );
+  assert.equal(normalized.assertions.length, 1);
+  assert.equal(normalized.assertions[0]?.object.naturalKey, `repo:${repository}:sha:${shaB}`);
+  assert.match(normalized.warnings[0] ?? "", /cardinality-one contextGraph assertion consolidated/);
+
+  await store.saveAssertionBatch(
+    batch("first", "2026-07-24T00:00:00.000Z", [candidate(shaA, 0.7, 1), candidate(shaB, 0.9, 2)])
+  );
+  await store.saveAssertionBatch(batch("second", "2026-07-24T01:00:00.000Z", [candidate("c".repeat(40), 1, 3)]));
+  const assertions = await store.listAssertions("tenant-cardinality", repository);
+  assert.equal(assertions.length, 2);
+  assert.equal(assertions.filter((assertion) => assertion.status === "active").length, 1);
+  assert.equal(
+    assertions.find((assertion) => assertion.status === "active")?.objectNaturalKey,
+    `repo:${repository}:sha:${"c".repeat(40)}`
+  );
+  assert.equal(assertions.filter((assertion) => assertion.status === "superseded").length, 1);
 });
 
 test("memory operational metrics exclude assertions outside the requested ref", async () => {

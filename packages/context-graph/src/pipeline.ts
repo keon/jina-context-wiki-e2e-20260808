@@ -18,7 +18,7 @@ import {
 
 export const CONTEXT_GRAPH_PARSER_VERSION = "tree-sitter-structural-v2";
 export { CONTEXT_GRAPH_REGISTRY_VERSION } from "./registry.js";
-export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v23-semantic-revisions";
+export const CONTEXT_GRAPH_GENERATOR_VERSION = "codex-assertions-v24-evidence-scoped";
 export const CONTEXT_GRAPH_PROJECTION_VERSION = "causal-graph-v5-semantic-active";
 
 export interface RepositoryTreeEntry {
@@ -348,24 +348,45 @@ export function normalizeAssertionBatchLenient(batch: ContextGraphAssertionBatch
 } {
   const assertions: StoredAssertion[] = [];
   const warnings: string[] = [];
-  const indexByKey = new Map<string, number>();
+  const indexByLiveKey = new Map<string, number>();
   for (const proposal of batch.assertions) {
     try {
       const normalized = normalizeAssertionBatch({ ...batch, assertions: [proposal] })[0];
       if (!normalized) continue;
-      const key = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}:${canonicalJson(assertionIdentityQualifiers(normalized.predicate, normalized.qualifiers ?? {}))}`;
-      const existingIndex = indexByKey.get(key);
+      const qualifiers = canonicalJson(assertionIdentityQualifiers(normalized.predicate, normalized.qualifiers ?? {}));
+      const naturalKey = `${entityKey(normalized.subject)}:${normalized.predicate}:${entityKey(normalized.object)}:${qualifiers}`;
+      const definition = predicateDefinition(normalized.predicate);
+      const liveKey =
+        definition.cardinality === "one"
+          ? `${entityKey(normalized.subject)}:${normalized.predicate}:${qualifiers}`
+          : naturalKey;
+      const existingIndex = indexByLiveKey.get(liveKey);
       if (existingIndex !== undefined) {
         const existing = assertions[existingIndex]!;
-        assertions[existingIndex] = {
-          ...existing,
-          confidence: Math.max(existing.confidence, normalized.confidence),
-          evidence: [...new Set([...existing.evidence, ...normalized.evidence])]
-        };
-        warnings.push(`duplicate contextGraph assertion consolidated: ${key}`);
+        if (entityKey(existing.object) === entityKey(normalized.object)) {
+          assertions[existingIndex] = {
+            ...existing,
+            confidence: Math.max(existing.confidence, normalized.confidence),
+            evidence: [...new Set([...existing.evidence, ...normalized.evidence])]
+          };
+          warnings.push(`duplicate contextGraph assertion consolidated: ${naturalKey}`);
+          continue;
+        }
+        const candidateWins =
+          normalized.confidence > existing.confidence ||
+          (normalized.confidence === existing.confidence &&
+            (normalized.evidence.length > existing.evidence.length ||
+              (normalized.evidence.length === existing.evidence.length &&
+                entityKey(normalized.object).localeCompare(entityKey(existing.object)) < 0)));
+        if (candidateWins) assertions[existingIndex] = normalized;
+        const winner = candidateWins ? normalized : existing;
+        const discarded = candidateWins ? existing : normalized;
+        warnings.push(
+          `cardinality-one contextGraph assertion consolidated: ${liveKey}; kept ${entityKey(winner.object)}, discarded ${entityKey(discarded.object)}`
+        );
         continue;
       }
-      indexByKey.set(key, assertions.length);
+      indexByLiveKey.set(liveKey, assertions.length);
       assertions.push(normalized);
     } catch (error) {
       warnings.push(error instanceof Error ? error.message : String(error));

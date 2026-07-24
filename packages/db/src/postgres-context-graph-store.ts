@@ -151,6 +151,18 @@ function assertionNaturalKey(
   return `${assertion.subject.kind}:${assertion.subject.naturalKey}:${assertion.predicate}:${assertion.object.kind}:${assertion.object.naturalKey}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
 }
 
+function assertionLiveLookupKey(
+  subjectId: string,
+  predicate: string,
+  objectId: string,
+  qualifiersHash: string,
+  cardinality: "one" | "many"
+): string {
+  return cardinality === "one"
+    ? `${subjectId}:${predicate}:${qualifiersHash}`
+    : `${subjectId}:${predicate}:${objectId}:${qualifiersHash}`;
+}
+
 async function lockAssertionNaturalKey(
   client: PoolClient,
   tenantId: string,
@@ -161,10 +173,13 @@ async function lockAssertionNaturalKey(
   qualifiersHash: string,
   cardinality: "one" | "many"
 ): Promise<void> {
-  const naturalKey =
-    cardinality === "one"
-      ? `${tenantId}:${repository}:${subjectId}:${predicate}:${qualifiersHash}`
-      : `${tenantId}:${repository}:${subjectId}:${predicate}:${objectId}:${qualifiersHash}`;
+  const naturalKey = `${tenantId}:${repository}:${assertionLiveLookupKey(
+    subjectId,
+    predicate,
+    objectId,
+    qualifiersHash,
+    cardinality
+  )}`;
   await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [naturalKey]);
 }
 
@@ -202,6 +217,7 @@ async function prefetchLiveAssertionsByNaturalKey(
     readonly subjectId: string;
     readonly objectId: string;
     readonly qualifiersHash: string;
+    readonly cardinality: "one" | "many";
     readonly assertion: Pick<StoredAssertion, "predicate">;
   }[]
 ): Promise<
@@ -213,6 +229,7 @@ async function prefetchLiveAssertionsByNaturalKey(
       readonly confidence: number;
       readonly explanation?: string;
       readonly evidence: readonly string[];
+      readonly objectId: string;
     }
   >
 > {
@@ -224,6 +241,7 @@ async function prefetchLiveAssertionsByNaturalKey(
       confidence: number;
       explanation?: string;
       evidence: readonly string[];
+      objectId: string;
     }
   >();
   if (keys.length === 0) return live;
@@ -233,38 +251,59 @@ async function prefetchLiveAssertionsByNaturalKey(
     confidence: number;
     explanation: string | null;
     evidence: unknown;
-    subject_id: string;
-    predicate: string;
+    source_subject_id: string;
+    source_predicate: string;
+    source_object_id: string;
+    source_qualifiers_hash: string;
+    source_cardinality: "one" | "many";
     object_id: string;
-    qualifiers_hash: string;
   }>(
-    `select distinct on (assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash)
+    `select source.subject_id as source_subject_id,source.predicate as source_predicate,
+       source.object_id as source_object_id,source.qualifiers_hash as source_qualifiers_hash,
+       source.cardinality as source_cardinality,
        assertion.id,assertion.status,assertion.confidence,assertion.explanation,assertion.evidence,
-       assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash
-     from jina_context_graph.assertions assertion
-     join unnest($3::text[],$4::text[],$5::text[],$6::text[]) as source(subject_id,predicate,object_id,qualifiers_hash)
-       on assertion.subject_id=source.subject_id and assertion.predicate=source.predicate
-      and assertion.object_id=source.object_id and assertion.qualifiers_hash=source.qualifiers_hash
-     where assertion.tenant_id=$1 and assertion.repository=$2 and assertion.status in ('proposed','active')
-     order by assertion.subject_id,assertion.predicate,assertion.object_id,assertion.qualifiers_hash,
-       assertion.recorded_at,assertion.id`,
+       assertion.object_id
+     from unnest($3::text[],$4::text[],$5::text[],$6::text[],$7::text[])
+       as source(subject_id,predicate,object_id,qualifiers_hash,cardinality)
+     join lateral (
+       select candidate.id,candidate.status,candidate.confidence,candidate.explanation,candidate.evidence,
+         candidate.object_id
+       from jina_context_graph.assertions candidate
+       where candidate.tenant_id=$1 and candidate.repository=$2
+         and candidate.subject_id=source.subject_id and candidate.predicate=source.predicate
+         and candidate.qualifiers_hash=source.qualifiers_hash
+         and (source.cardinality='one' or candidate.object_id=source.object_id)
+         and candidate.status in ('proposed','active')
+       order by candidate.recorded_at,candidate.id limit 1
+     ) assertion on true`,
     [
       tenantId,
       repository,
       keys.map((key) => key.subjectId),
       keys.map((key) => key.assertion.predicate),
       keys.map((key) => key.objectId),
-      keys.map((key) => key.qualifiersHash)
+      keys.map((key) => key.qualifiersHash),
+      keys.map((key) => key.cardinality)
     ]
   );
   for (const row of result.rows) {
-    live.set(`${row.subject_id}:${row.predicate}:${row.object_id}:${row.qualifiers_hash}`, {
-      id: row.id,
-      status: row.status,
-      confidence: row.confidence,
-      ...(row.explanation ? { explanation: row.explanation } : {}),
-      evidence: stringArray(row.evidence)
-    });
+    live.set(
+      assertionLiveLookupKey(
+        row.source_subject_id,
+        row.source_predicate,
+        row.source_object_id,
+        row.source_qualifiers_hash,
+        row.source_cardinality
+      ),
+      {
+        id: row.id,
+        status: row.status,
+        confidence: row.confidence,
+        ...(row.explanation ? { explanation: row.explanation } : {}),
+        evidence: stringArray(row.evidence),
+        objectId: row.object_id
+      }
+    );
   }
   return live;
 }
@@ -1993,6 +2032,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
             assertion,
             subjectId: entityIds.get(`${assertion.subject.kind}:${assertion.subject.naturalKey}`)!,
             objectId: entityIds.get(`${assertion.object.kind}:${assertion.object.naturalKey}`)!,
+            cardinality: predicateDefinition(assertion.predicate).cardinality,
             qualifiersHash: stableId(
               "q",
               canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))
@@ -2013,7 +2053,7 @@ export class PostgresContextGraphStore implements ContextGraphStore {
               item.assertion.predicate,
               item.objectId,
               item.qualifiersHash,
-              predicateDefinition(item.assertion.predicate).cardinality
+              item.cardinality
             );
           }
           // One prefetch replaces the per-assertion findLiveAssertionByNaturalKey calls.
@@ -2023,8 +2063,9 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           // the same pg_advisory_xact_lock — it either committed before we acquired the
           // lock above (visible to this read-committed query) or is blocked until we
           // commit. Intra-batch inserts cannot invalidate it either, because
-          // normalizeAssertionBatchLenient drops duplicate natural keys, so no key in
-          // this batch can be inserted by an earlier iteration of the same batch.
+          // normalizeAssertionBatchLenient drops duplicate live slots, including
+          // contradictory cardinality-one objects, so no slot can be inserted by an
+          // earlier iteration of this batch.
           const liveByKey = await prefetchLiveAssertionsByNaturalKey(
             client,
             batch.tenantId,
@@ -2037,10 +2078,19 @@ export class PostgresContextGraphStore implements ContextGraphStore {
           const assertionEvents: OutboxBatchEvent[] = [];
           for (const item of resolved) {
             const existingLive = liveByKey.get(
-              `${item.subjectId}:${item.assertion.predicate}:${item.objectId}:${item.qualifiersHash}`
+              assertionLiveLookupKey(
+                item.subjectId,
+                item.assertion.predicate,
+                item.objectId,
+                item.qualifiersHash,
+                item.cardinality
+              )
             );
             if (existingLive) {
-              if (storedAssertionContentMatches(existingLive, item.assertion)) {
+              if (
+                existingLive.objectId === item.objectId &&
+                storedAssertionContentMatches(existingLive, item.assertion)
+              ) {
                 confirmations.push({ id: existingLive.id, explanation: item.assertion.explanation });
                 assertionEvents.push({
                   aggregateId: existingLive.id,

@@ -431,12 +431,15 @@ export class MemoryContextGraphStore implements ContextGraphStore {
       this.allAssertions()
         .filter((assertion) => assertion.tenantId === batch.tenantId && assertion.repository === batch.repository)
         .filter((assertion) => assertion.status === "active" || assertion.status === "proposed")
-        .map((assertion) => [storedAssertionNaturalKey(assertion), assertion])
+        .map((assertion) => [storedAssertionLiveKey(assertion), assertion])
     );
     const assertions = normalized.assertions.map((assertion) => {
-      const existingAssertion = prior.get(storedAssertionNaturalKey(assertion));
+      const existingAssertion = prior.get(storedAssertionLiveKey(assertion));
       if (!existingAssertion) return assertion;
-      if (!storedAssertionContentMatches(existingAssertion, assertion)) {
+      if (
+        storedAssertionNaturalKey(existingAssertion) !== storedAssertionNaturalKey(assertion) ||
+        !storedAssertionContentMatches(existingAssertion, assertion)
+      ) {
         for (const [storedKey, stored] of this.assertionBatches) {
           if (!stored.assertions.some((candidate) => candidate.id === existingAssertion.id)) continue;
           this.assertionBatches.set(storedKey, {
@@ -1846,6 +1849,12 @@ function assertionKey(
 }
 function storedAssertionNaturalKey(assertion: StoredAssertion): string {
   return `${assertion.repository}:${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
+}
+function storedAssertionLiveKey(assertion: StoredAssertion): string {
+  const qualifiers = canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}));
+  return predicateDefinition(assertion.predicate).cardinality === "one"
+    ? `${assertion.repository}:${entityKey(assertion.subject)}:${assertion.predicate}:${qualifiers}`
+    : storedAssertionNaturalKey(assertion);
 }
 function storedAssertionContentMatches(left: StoredAssertion, right: StoredAssertion): boolean {
   return (
