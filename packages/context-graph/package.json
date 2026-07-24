@@ -12,7 +12,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/context-graph.test.js"
+    "test": "pnpm build && node --test dist/*.test.js"
   },
   "dependencies": {
     "@ast-grep/napi": "^0.44.1",

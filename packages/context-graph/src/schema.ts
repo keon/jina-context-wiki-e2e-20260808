@@ -1,4 +1,243 @@
 import { contextGraphNodeKinds } from "./model.js";
+import {
+  ASSERTION_CHANGESET_CONTRACT_VERSION,
+  ASSERTION_CHANGESET_LIMITS,
+  assertionQualifierKeys,
+  assertionRelationKinds,
+  assertionScopeModes,
+  assertionTruthClasses
+} from "./assertion-changeset.js";
+import { predicateRegistry } from "./registry.js";
+
+const nullableQualifierSchema = {
+  oneOf: [{ type: "string" }, { type: "number" }, { type: "boolean" }, { type: "null" }]
+} as const;
+
+const assertionQualifierProperties = Object.fromEntries(
+  assertionQualifierKeys.map((key) => [key, nullableQualifierSchema])
+);
+
+const assertionEvidenceLocatorSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "repository", "commitSha", "path", "startLine", "endLine", "contentDigest"],
+      properties: {
+        type: { const: "repository_range" },
+        repository: { type: "string", minLength: 1 },
+        commitSha: { type: "string", pattern: "^[a-fA-F0-9]{40}$" },
+        path: { type: "string", minLength: 1 },
+        startLine: { type: "integer", minimum: 1 },
+        endLine: { type: "integer", minimum: 1 },
+        contentDigest: { type: ["string", "null"] }
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "observationId", "observationType"],
+      properties: {
+        type: { const: "source_observation" },
+        observationId: { type: "string", minLength: 1 },
+        observationType: { type: "string", minLength: 1 }
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["type", "assertionId", "attestationId"],
+      properties: {
+        type: { const: "assertion_attestation" },
+        assertionId: { type: "string", minLength: 1 },
+        attestationId: { type: "string", minLength: 1 }
+      }
+    }
+  ]
+} as const;
+
+const assertionEvidenceListSchema = {
+  type: "array",
+  minItems: 1,
+  maxItems: ASSERTION_CHANGESET_LIMITS.evidencePerOperation,
+  items: assertionEvidenceLocatorSchema
+} as const;
+
+const assertionEntityReferenceSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: ["kind", "naturalKey", "label"],
+  properties: {
+    kind: { type: "string", enum: contextGraphNodeKinds },
+    naturalKey: { type: "string", minLength: 1 },
+    label: { type: "string", minLength: 1 }
+  }
+} as const;
+
+const assertionCandidateSchema = {
+  type: "object",
+  additionalProperties: false,
+  required: [
+    "subject",
+    "predicate",
+    "object",
+    "qualifiers",
+    "truthClass",
+    "confidence",
+    "explanation",
+    "evidence",
+    "validFrom",
+    "validUntil"
+  ],
+  properties: {
+    subject: assertionEntityReferenceSchema,
+    predicate: { type: "string", enum: Object.keys(predicateRegistry) },
+    object: assertionEntityReferenceSchema,
+    qualifiers: {
+      type: "object",
+      additionalProperties: false,
+      required: assertionQualifierKeys,
+      properties: assertionQualifierProperties
+    },
+    truthClass: { type: "string", enum: assertionTruthClasses },
+    confidence: { type: "number", minimum: 0, maximum: 1 },
+    explanation: { type: "string", minLength: 1, maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters },
+    evidence: assertionEvidenceListSchema,
+    validFrom: { type: ["string", "null"] },
+    validUntil: { type: ["string", "null"] }
+  }
+} as const;
+
+const assertionOperationSchema = {
+  oneOf: [
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "type", "assertion"],
+      properties: {
+        operationId: { type: "string", minLength: 1 },
+        type: { const: "propose" },
+        assertion: assertionCandidateSchema
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "type", "assertionId", "attestations", "reason"],
+      properties: {
+        operationId: { type: "string", minLength: 1 },
+        type: { const: "confirm" },
+        assertionId: { type: "string", minLength: 1 },
+        attestations: assertionEvidenceListSchema,
+        reason: { type: "string", minLength: 1, maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters }
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "type", "assertionId", "replacement", "reason"],
+      properties: {
+        operationId: { type: "string", minLength: 1 },
+        type: { const: "supersede" },
+        assertionId: { type: "string", minLength: 1 },
+        replacement: assertionCandidateSchema,
+        reason: { type: "string", minLength: 1, maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters }
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "type", "assertionId", "evidence", "reason"],
+      properties: {
+        operationId: { type: "string", minLength: 1 },
+        type: { const: "retract" },
+        assertionId: { type: "string", minLength: 1 },
+        evidence: assertionEvidenceListSchema,
+        reason: { type: "string", minLength: 1, maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters }
+      }
+    },
+    {
+      type: "object",
+      additionalProperties: false,
+      required: ["operationId", "type", "relation", "sourceAssertionId", "targetAssertionId", "evidence", "reason"],
+      properties: {
+        operationId: { type: "string", minLength: 1 },
+        type: { const: "relate" },
+        relation: { type: "string", enum: assertionRelationKinds },
+        sourceAssertionId: { type: "string", minLength: 1 },
+        targetAssertionId: { type: "string", minLength: 1 },
+        evidence: assertionEvidenceListSchema,
+        reason: { type: "string", minLength: 1, maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters }
+      }
+    }
+  ]
+} as const;
+
+export const ASSERTION_CHANGESET_OUTPUT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["contractVersion", "changeSetId", "scope", "base", "summary", "operations", "unresolved"],
+  properties: {
+    contractVersion: { const: ASSERTION_CHANGESET_CONTRACT_VERSION },
+    changeSetId: { type: "string", minLength: 1 },
+    scope: {
+      type: "object",
+      additionalProperties: false,
+      required: ["tenantId", "repository", "ref", "commitSha", "mode"],
+      properties: {
+        tenantId: { type: "string", minLength: 1 },
+        repository: { type: "string", minLength: 1 },
+        ref: { type: "string", minLength: 1 },
+        commitSha: { type: "string", pattern: "^[a-fA-F0-9]{40}$" },
+        mode: { type: "string", enum: assertionScopeModes }
+      }
+    },
+    base: {
+      type: "object",
+      additionalProperties: false,
+      required: ["assertionSetVersion", "registryVersion", "evidenceFingerprint"],
+      properties: {
+        assertionSetVersion: { type: "string", minLength: 1 },
+        registryVersion: { type: "string", minLength: 1 },
+        evidenceFingerprint: { type: "string", minLength: 1 }
+      }
+    },
+    summary: { type: "string", minLength: 1 },
+    operations: {
+      type: "array",
+      maxItems: ASSERTION_CHANGESET_LIMITS.operations,
+      items: assertionOperationSchema
+    },
+    unresolved: {
+      type: "array",
+      maxItems: ASSERTION_CHANGESET_LIMITS.unresolvedFindings,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["findingId", "question", "reason", "requiredEvidence", "suggestedAction"],
+        properties: {
+          findingId: { type: "string", minLength: 1 },
+          question: {
+            type: "string",
+            minLength: 1,
+            maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters
+          },
+          reason: {
+            type: "string",
+            minLength: 1,
+            maxLength: ASSERTION_CHANGESET_LIMITS.explanationCharacters
+          },
+          requiredEvidence: {
+            type: "array",
+            maxItems: ASSERTION_CHANGESET_LIMITS.requiredEvidencePerFinding,
+            items: { type: "string", minLength: 1 }
+          },
+          suggestedAction: { type: "string", minLength: 1 }
+        }
+      }
+    }
+  }
+} as const;
 
 const contextGraphNodeProperties = {
   id: { type: "string", maxLength: 512 },

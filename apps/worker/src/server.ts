@@ -28,6 +28,7 @@ import {
   linkedIssueNumbers,
   isProblemEvidencePath,
   movedFromSimilarityCandidates,
+  parseContextFrameworkModes,
   parseIncidentDocument,
   parseIncidentDocumentObservations,
   parsePackageManifest,
@@ -157,6 +158,7 @@ const maxBlobAnalysisRequestBytes = positiveInt(
   2 * 1024 * 1024 - 64 * 1024
 );
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
+const contextFrameworkModes = parseContextFrameworkModes(process.env);
 const drainsContextGraphProjections = topics.some((topic) => topic.startsWith("run-context-graph"));
 const contextGraphExecutor = topics.includes("run-context-graph-assert")
   ? new DaytonaCodexContextGraphExecutor()
@@ -193,6 +195,7 @@ const server = createServer((request, response) => {
         lastApiErrorAt,
         consecutiveApiFailures,
         lastWork,
+        contextFrameworkModes,
         metrics: metrics.snapshot()
       })
     );
@@ -207,7 +210,8 @@ server.listen(port, () => {
     event: "worker.started",
     workerId,
     port,
-    topics
+    topics,
+    contextFrameworkModes
   });
   void poll();
 });

@@ -4,6 +4,11 @@
 
 This document describes the implementation in this repository as of 2026-07-22. ContextGraph is one workflow on Jina's generic task board. The board controls work; ContextGraph owns repository facts and cited retrieval. The graph shown on `/context-graph` is a disposable read model, not the canonical store.
 
+The proposed agent-first successor framework is documented separately in
+[AGENT_FIRST_CONTEXT_FRAMEWORK.md](AGENT_FIRST_CONTEXT_FRAMEWORK.md). That proposal does not describe deployed
+behavior until its phases are implemented. Its executable migration sequence is in
+[AGENT_FIRST_CONTEXT_IMPLEMENTATION_PLAN.md](AGENT_FIRST_CONTEXT_IMPLEMENTATION_PLAN.md).
+
 The implementation contains the Repository Context Architecture v5.1 causal model (registry contract `repository-context-v5.7-causal`) with three board-visible chunks rather than a card per internal mechanism:
 
 | Task type               | Internal responsibilities                                                                                                                                                                                       | Durable completion                                                                    |

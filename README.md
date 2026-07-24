@@ -91,6 +91,8 @@ Smaller packages contain review planning, context policy, publication, billing p
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [ContextGraph](docs/CONTEXT_GRAPH.md)
+- [Agent-first repository context framework](docs/AGENT_FIRST_CONTEXT_FRAMEWORK.md)
+- [Agent-first context implementation plan](docs/AGENT_FIRST_CONTEXT_IMPLEMENTATION_PLAN.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)
