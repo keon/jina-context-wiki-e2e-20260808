@@ -1997,6 +1997,28 @@ test(
       assert.equal(assertions.length, 1);
       assert.equal(assertions[0]?.generator, "model:model-v1");
       assert.equal(assertions[0]?.status, "active");
+      await store.saveAssertionBatch({
+        ...common,
+        taskId: `v3-${suffix}`,
+        generatedAt: "2026-07-20T00:02:00Z",
+        generatorVersion: "model-v3",
+        evidenceFingerprint: "stronger-input",
+        assertions: [
+          {
+            ...common.assertions[0]!,
+            confidence: 1,
+            explanation: "The README documents the administrator access mechanism.",
+            evidence: ["README.md:1-2"]
+          }
+        ]
+      });
+      const revisedAssertions = await store.listAssertions(tenantId, repository);
+      assert.equal(revisedAssertions.length, 2);
+      assert.equal(revisedAssertions[0]?.generator, "model:model-v3");
+      assert.equal(revisedAssertions[0]?.status, "active");
+      assert.equal(revisedAssertions[0]?.explanation, "The README documents the administrator access mechanism.");
+      assert.equal(revisedAssertions[1]?.generator, "model:model-v1");
+      assert.equal(revisedAssertions[1]?.status, "superseded");
       const guardPool = new Pool({ connectionString });
       await assert.rejects(
         guardPool.query(
@@ -4328,14 +4350,50 @@ const LEGACY_PIPELINE_SCHEMA_SQL = `
 `;
 
 test(
-  "Postgres contextGraph pipeline migrates a pre-rename task board topic constraint in place",
+  "Postgres contextGraph pipeline initializes the current schema in a fresh database",
   {
     skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
   },
   async () => {
     assert.ok(connectionString);
-    const admin = new Pool({ connectionString });
+    const databaseName = `jina_board_fresh_${Date.now().toString(36)}`;
+    const control = new Pool({ connectionString });
+    await control.query(`create database "${databaseName}"`);
+    const isolatedUrl = new URL(connectionString);
+    isolatedUrl.pathname = `/${databaseName}`;
+    const isolatedConnectionString = isolatedUrl.toString();
+    const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString: isolatedConnectionString });
+    const inspect = new Pool({ connectionString: isolatedConnectionString });
+    try {
+      await coordinator.initialize();
+      const schema = await inspect.query<{ workflows: string | null; events: string | null }>(
+        `select to_regclass('jina_board.workflows')::text as workflows,
+                to_regclass('jina_board.events')::text as events`
+      );
+      assert.deepEqual(schema.rows, [{ workflows: "jina_board.workflows", events: "jina_board.events" }]);
+    } finally {
+      await Promise.all([coordinator.close(), inspect.end()]);
+      await control.query(`drop database if exists "${databaseName}" with (force)`);
+      await control.end();
+    }
+  }
+);
+
+test(
+  "Postgres contextGraph pipeline removes retired ontology workflows and enforces current topics",
+  {
+    skip: connectionString ? false : "TEST_DATABASE_URL is not configured"
+  },
+  async () => {
+    assert.ok(connectionString);
     const suffix = Date.now().toString(36);
+    const databaseName = `jina_board_migration_${suffix}`;
+    const control = new Pool({ connectionString });
+    await control.query(`create database "${databaseName}"`);
+    const isolatedUrl = new URL(connectionString);
+    isolatedUrl.pathname = `/${databaseName}`;
+    const isolatedConnectionString = isolatedUrl.toString();
+    const admin = new Pool({ connectionString: isolatedConnectionString });
     const tenantId = `board-migration-${suffix}`;
     const repository = `omxyz/board-migration-${suffix}`;
     const legacyBuildId = `legacy-build-${suffix}`;
@@ -4344,7 +4402,6 @@ test(
     const legacyDoneId = `legacy-done-${suffix}`;
     const seededAt = "2026-07-20T00:00:00.000Z";
     try {
-      await admin.query("drop schema if exists jina_board cascade");
       await admin.query(LEGACY_PIPELINE_SCHEMA_SQL);
       // Production still holds queued/leased/terminal rows carrying legacy
       // topics; the migration must validate its replacement constraint
@@ -4369,38 +4426,36 @@ test(
          values ($1,$2,$3,$4,'main','pre-rename','snapshot','project','run-ontology-project','done',100,2,'{}'::jsonb,1,$5,$5,0,$5,$5)`,
         [legacyDoneId, legacyBuildId, tenantId, repository, seededAt]
       );
+      await admin.query(
+        `insert into jina_board.events (tenant_id,task_id,type,at,payload)
+         values ($1,$2,'task.created',$4,'{}'::jsonb),
+                ($1,$3,'workflow.created',$4,'{}'::jsonb)`,
+        [tenantId, legacyTaskId, legacyBuildId, seededAt]
+      );
 
-      const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      const coordinator = new PostgresContextGraphPipelineCoordinator({ connectionString: isolatedConnectionString });
       try {
-        // Bootstrap alone must swap the constraint and drain the stranded
-        // rows: non-terminal rows move to the new vocabulary (keeping any
-        // lease so the retired worker's renew/complete still key on task id +
-        // lease id), while terminal rows keep their historical topics.
+        // Bootstrap removes the retired workflow instead of translating it
+        // into a second execution mode. Cascades remove its task state, while
+        // the explicit event cleanup handles the event log's loose references.
         await coordinator.initialize();
-        const drained = await admin.query<{ id: string; topic: string; status: string; lease_id: string | null }>(
-          "select id,topic,status,lease_id from jina_board.tasks where build_id=$1 order by ordinal",
+        const retiredWorkflow = await admin.query<{ count: string }>(
+          "select count(*)::text as count from jina_board.workflows where id=$1",
           [legacyBuildId]
         );
-        assert.deepEqual(drained.rows, [
-          { id: legacyTaskId, topic: "run-context-graph-ingest", status: "queued", lease_id: null },
-          { id: legacyLeasedId, topic: "run-context-graph-assert", status: "in_progress", lease_id: "legacy-lease" },
-          { id: legacyDoneId, topic: "run-ontology-project", status: "done", lease_id: null }
-        ]);
+        assert.equal(retiredWorkflow.rows[0]?.count, "0");
+        const retiredTasks = await admin.query<{ count: string }>(
+          "select count(*)::text as count from jina_board.tasks where build_id=$1",
+          [legacyBuildId]
+        );
+        assert.equal(retiredTasks.rows[0]?.count, "0");
+        const retiredEvents = await admin.query<{ count: string }>(
+          "select count(*)::text as count from jina_board.events where tenant_id=$1 and task_id=any($2::text[])",
+          [tenantId, [legacyBuildId, legacyTaskId, legacyLeasedId, legacyDoneId]]
+        );
+        assert.equal(retiredEvents.rows[0]?.count, "0");
 
-        // The drained queued row is immediately claimable on the new topics.
-        const drainedClaim = await coordinator.claim({
-          tenantId,
-          workerId: "worker-drained",
-          topics: ["run-context-graph-ingest"],
-          now: "2026-07-20T01:00:00.000Z",
-          leaseExpiresAt: "2026-07-20T02:00:00.000Z"
-        });
-        assert.equal(drainedClaim?.task.id, legacyTaskId, "a migrated legacy row is claimable on the new topics");
-
-        // Superseding the legacy build rewrites the status of its legacy-era
-        // tasks, and Postgres re-evaluates the topic check on that update; the
-        // subsequent stage inserts carry the new vocabulary. Both only pass
-        // once the migration has replaced the legacy-only constraint.
+        // New work is created and claimed only through the current vocabulary.
         const build = await coordinator.createBuild({
           tenantId,
           repository,
@@ -4419,29 +4474,10 @@ test(
         });
         assert.ok(claim, "a build submitted after the rename is claimable on the new topics");
         assert.equal(claim.message.topic, "run-context-graph-ingest");
-        assert.notEqual(claim.task.id, legacyTaskId);
-
-        const legacyTask = await admin.query<{ status: string; topic: string }>(
-          "select status,topic from jina_board.tasks where id=$1",
-          [legacyTaskId]
+        await assert.rejects(
+          admin.query("update jina_board.tasks set topic='run-ontology-ingest' where id=$1", [claim.task.id]),
+          /check constraint/
         );
-        assert.equal(legacyTask.rows[0]?.status, "superseded", "the migrated row accepts status updates");
-        assert.equal(legacyTask.rows[0]?.topic, "run-context-graph-ingest");
-        const doneTask = await admin.query<{ topic: string }>("select topic from jina_board.tasks where id=$1", [
-          legacyDoneId
-        ]);
-        assert.equal(doneTask.rows[0]?.topic, "run-ontology-project", "terminal rows keep their historical topics");
-
-        // Legacy-topic rows must stay both insertable and updatable: the
-        // replacement constraint allows both vocabularies.
-        await admin.query(
-          `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,created_at,updated_at)
-           values ($1,$2,$3,$4,'main','pre-rename','history','assert','run-ontology-assert','queued',10,4,'{}'::jsonb,$5,$5)`,
-          [`legacy-extra-${suffix}`, legacyBuildId, tenantId, repository, seededAt]
-        );
-        await admin.query("update jina_board.tasks set status='canceled',updated_at=now() where id=$1", [
-          `legacy-extra-${suffix}`
-        ]);
 
         const checks = await admin.query<{ conname: string; definition: string }>(
           `select conname,pg_get_constraintdef(oid) as definition from pg_constraint
@@ -4454,30 +4490,18 @@ test(
           "exactly one named topic constraint remains"
         );
         assert.ok(checks.rows[0]?.definition.includes("run-context-graph-ingest"));
-        assert.ok(checks.rows[0]?.definition.includes("run-ontology-ingest"));
+        assert.equal(checks.rows[0]?.definition.includes("run-ontology-"), false);
       } finally {
         await coordinator.close();
       }
 
-      // A database that raced past the constraint fix (both-vocabulary check
-      // already in place, rows not yet drained) must still migrate: the
-      // readiness probe's lock-free row read detects the stranded row and
-      // sends the next coordinator down the DDL path, and re-running the
-      // whole apply on the migrated schema is idempotent.
-      await admin.query(
-        `insert into jina_board.tasks (id,build_id,tenant_id,repository,ref_name,request_key,phase,stage,topic,status,priority,ordinal,metadata,created_at,updated_at)
-         values ($1,$2,$3,$4,'main','pre-rename','history','ingest','run-ontology-ingest','queued',10,3,'{}'::jsonb,$5,$5)`,
-        [`legacy-straggler-${suffix}`, legacyBuildId, tenantId, repository, seededAt]
-      );
-      const second = new PostgresContextGraphPipelineCoordinator({ connectionString });
+      // Re-applying the current schema is idempotent and leaves the retired
+      // vocabulary impossible to reintroduce.
+      const second = new PostgresContextGraphPipelineCoordinator({ connectionString: isolatedConnectionString });
       try {
         await second.initialize();
-        const straggler = await admin.query<{ topic: string }>("select topic from jina_board.tasks where id=$1", [
-          `legacy-straggler-${suffix}`
-        ]);
-        assert.equal(straggler.rows[0]?.topic, "run-context-graph-ingest", "a repeat apply drains stragglers");
-        const repeatChecks = await admin.query<{ conname: string }>(
-          `select conname from pg_constraint
+        const repeatChecks = await admin.query<{ conname: string; definition: string }>(
+          `select conname,pg_get_constraintdef(oid) as definition from pg_constraint
            where conrelid='jina_board.tasks'::regclass and contype='c'
              and pg_get_constraintdef(oid) like '%topic%'`
         );
@@ -4486,23 +4510,17 @@ test(
           ["task_board_tasks_topic_check"],
           "repeated applies leave the constraint set unchanged"
         );
+        assert.equal(
+          repeatChecks.rows.some((row) => row.definition.includes("run-ontology-")),
+          false
+        );
       } finally {
         await second.close();
       }
-
-      // With nothing left to migrate, a later coordinator takes the lock-free
-      // fast path: the migrated schema counts as ready even though the
-      // replacement constraint's definition mentions the legacy vocabulary it
-      // still allows, and the terminal rows keep their legacy topics.
-      const third = new PostgresContextGraphPipelineCoordinator({ connectionString });
-      try {
-        await third.initialize();
-      } finally {
-        await third.close();
-      }
     } finally {
-      await admin.query("delete from jina_board.workflows where tenant_id=$1", [tenantId]).catch(() => undefined);
       await admin.end();
+      await control.query(`drop database if exists "${databaseName}" with (force)`);
+      await control.end();
     }
   }
 );

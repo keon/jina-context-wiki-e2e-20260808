@@ -435,7 +435,27 @@ export class MemoryContextGraphStore implements ContextGraphStore {
     );
     const assertions = normalized.assertions.map((assertion) => {
       const existingAssertion = prior.get(storedAssertionNaturalKey(assertion));
-      return existingAssertion ? { ...existingAssertion, lastConfirmedAt: batch.generatedAt } : assertion;
+      if (!existingAssertion) return assertion;
+      if (!storedAssertionContentMatches(existingAssertion, assertion)) {
+        for (const [storedKey, stored] of this.assertionBatches) {
+          if (!stored.assertions.some((candidate) => candidate.id === existingAssertion.id)) continue;
+          this.assertionBatches.set(storedKey, {
+            ...stored,
+            assertions: stored.assertions.map((candidate) =>
+              candidate.id === existingAssertion.id
+                ? {
+                    ...candidate,
+                    status: "superseded",
+                    validTo: batch.generatedAt,
+                    supersededBy: assertion.id
+                  }
+                : candidate
+            )
+          });
+        }
+        return assertion;
+      }
+      return { ...existingAssertion, lastConfirmedAt: batch.generatedAt };
     });
     this.assertionBatches.set(key, { batch: structuredClone(batch), assertions });
     const result = assertionResult(batch, assertions, false, normalized.warnings);
@@ -1826,6 +1846,13 @@ function assertionKey(
 }
 function storedAssertionNaturalKey(assertion: StoredAssertion): string {
   return `${assertion.repository}:${entityKey(assertion.subject)}:${assertion.predicate}:${entityKey(assertion.object)}:${canonicalJson(assertionIdentityQualifiers(assertion.predicate, assertion.qualifiers ?? {}))}`;
+}
+function storedAssertionContentMatches(left: StoredAssertion, right: StoredAssertion): boolean {
+  return (
+    left.confidence === right.confidence &&
+    (left.explanation ?? "") === (right.explanation ?? "") &&
+    canonicalJson([...left.evidence].sort()) === canonicalJson([...right.evidence].sort())
+  );
 }
 function dedupeApplicableAssertions(assertions: readonly StoredAssertion[]): readonly StoredAssertion[] {
   const selected = new Map<string, StoredAssertion>();

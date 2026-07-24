@@ -895,25 +895,6 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   repositoryConnected = true;
   assert.equal((await activeSync(["omlabs/example"])).status, 200);
 
-  const graphHeaders = {
-    authorization: `Bearer ${GRAPH_TOKEN}`,
-    "x-jina-tenant-id": SHARED_TENANT,
-    "x-jina-principal-id": `tenant:${SHARED_TENANT}`
-  };
-  const connectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
-    (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
-  );
-  assert.deepEqual(
-    connectedGraphs.graphs.map((graph) => graph.repository),
-    ["omlabs/example"]
-  );
-  const caseVariantGraphs = await fetch(`${baseUrl}/v1/graphs?repository=OMLABS%2FEXAMPLE`, {
-    headers: graphHeaders
-  }).then((response) => response.json() as Promise<{ graphs: { repository: string }[] }>);
-  assert.deepEqual(
-    caseVariantGraphs.graphs.map((graph) => graph.repository),
-    ["omlabs/example"]
-  );
   const contextGraphHeaders = {
     authorization: `Bearer ${INTERNAL_TOKEN}`,
     "x-jina-tenant-id": SHARED_TENANT,
@@ -934,14 +915,6 @@ test("shared tenancy resolves original Jina organizations and scopes workers and
   });
   repositoryConnected = true;
   repositoryConnected = false;
-  const disconnectedGraphs = await fetch(`${baseUrl}/v1/graphs`, { headers: graphHeaders }).then(
-    (response) => response.json() as Promise<{ graphs: unknown[] }>
-  );
-  assert.deepEqual(disconnectedGraphs.graphs, []);
-  assert.equal(
-    (await fetch(`${baseUrl}/v1/graphs/${encodeURIComponent(sharedGraph.id)}`, { headers: graphHeaders })).status,
-    404
-  );
   assert.equal(
     (
       await fetch(`${baseUrl}/context-graph/metrics?repository=omlabs%2Fexample`, {
@@ -1440,6 +1413,17 @@ test("API maps validation failures to typed client errors", async () => {
   const server = createApiServer({ enableDevEndpoints: true, tenantId: "default" });
   const baseUrl = await listen(server);
   try {
+    assert.equal((await fetch(`${baseUrl}/v1/graphs`)).status, 404);
+    assert.equal(
+      (
+        await fetch(`${baseUrl}/v1/graph/query`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}"
+        })
+      ).status,
+      404
+    );
     const response = await fetch(`${baseUrl}/context-graph/retrieve`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -1456,7 +1440,7 @@ test("API maps validation failures to typed client errors", async () => {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
         repository: "omxyz/example",
-        metadata: { source: "jina-v1-dashboard", historyLimit: 10_001 }
+        metadata: { source: "api", historyLimit: 10_001 }
       })
     });
     assert.equal(excessiveHistory.status, 400);
@@ -1464,6 +1448,35 @@ test("API maps validation failures to typed client errors", async () => {
       accepted: false,
       error: "metadata.historyLimit must be an integer from 1 to 10000",
       code: "invalid_request"
+    });
+    const commitRef = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ repository: "omxyz/example", ref: "a".repeat(40) })
+    });
+    assert.equal(commitRef.status, 400);
+    assert.deepEqual(await commitRef.json(), {
+      accepted: false,
+      error: "ref must be a branch or tag, not a commit SHA",
+      code: "invalid_request"
+    });
+    const retiredIntake = await fetch(`${baseUrl}/context-graph/build`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        repository: "omxyz/example",
+        metadata: {
+          source: "jina-v1-review-complete",
+          reviewRunId: "retired"
+        }
+      })
+    });
+    assert.equal(retiredIntake.status, 410);
+    assert.deepEqual(await retiredIntake.json(), {
+      accepted: false,
+      error:
+        "the v1 review-to-graph integration has been removed; trigger a branch build through the current context graph API",
+      code: "retired_context_graph_intake"
     });
   } finally {
     await close(server);
@@ -1486,9 +1499,7 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         requestKey: "test",
         snapshotFirst: true,
         metadata: {
-          source: "jina-v1-review",
-          pullRequestNumber: 42,
-          authorLogin: "alice",
+          source: "api",
           historyLimit: 2_500
         }
       })
@@ -1769,9 +1780,7 @@ test("context graph pipeline ingests, asserts, projects, and reuses content-addr
         }>
     );
     assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.status, "done");
-    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.source, "jina-v1-review");
-    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.pullRequestNumber, 42);
-    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.authorLogin, "alice");
+    assert.equal(board.tasks.find((task) => task.id === createdBody.task.id)?.metadata.source, "api");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_ingest")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_assert")?.status, "done");
     assert.equal(board.tasks.find((task) => task.type === "context_graph_project")?.status, "done");
@@ -2318,85 +2327,7 @@ test("global admin graph listing requires its own credential and returns every t
   }
 });
 
-test("public graph REST API exposes authorized topology and cited queries without internal metadata", async () => {
-  const contextGraphStore = new MemoryContextGraphStore();
-  const graph = fixtureGraph({
-    tenantId: "tenant-a",
-    repository: "omxyz/a",
-    ref: "refs/heads/main",
-    taskId: "public-graph"
-  });
-  await contextGraphStore.save(graph);
-  await contextGraphStore.executeCommand(
-    "tenant-a",
-    "svc:test",
-    {
-      type: "grant_repository_access",
-      repository: "omxyz/a",
-      principalId: "user:reader@example.com",
-      role: "reader"
-    },
-    "2026-07-20T00:00:00.000Z"
-  );
-  const server = createApiServer({ contextGraphStore, internalApiToken: INTERNAL_TOKEN, tenantId: "tenant-a" });
-  const baseUrl = await listen(server);
-  try {
-    assert.equal((await fetch(`${baseUrl}/v1/graphs`)).status, 401);
-    const listResponse = await authenticatedFetch(`${baseUrl}/v1/graphs`, "user:reader@example.com");
-    assert.equal(listResponse.status, 200);
-    const list = (await listResponse.json()) as { graphs: Record<string, unknown>[] };
-    assert.equal(list.graphs.length, 1);
-    assert.deepEqual(list.graphs[0], {
-      id: graph.id,
-      repository: "omxyz/a",
-      versionLabel: "main",
-      sourceCommit: "fixture-sha",
-      generatedAt: graph.generatedAt,
-      summary: "Fixture repository",
-      nodeCount: 2,
-      edgeCount: 1
-    });
-    assert.equal("tenantId" in list.graphs[0], false);
-    assert.equal("generator" in list.graphs[0], false);
-
-    const detailResponse = await authenticatedFetch(
-      `${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`,
-      "user:reader@example.com"
-    );
-    assert.equal(detailResponse.status, 200);
-    const detail = (await detailResponse.json()) as Record<string, unknown>;
-    assert.equal(Array.isArray(detail.nodes), true);
-    assert.equal(Array.isArray(detail.edges), true);
-    assert.equal("rawModelOutput" in detail, false);
-
-    const queryResponse = await fetch(`${baseUrl}/v1/graph/query`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${INTERNAL_TOKEN}`,
-        "x-jina-principal-id": "user:reader@example.com",
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ graphId: graph.id, query: "Where is the repository documentation?" })
-    });
-    assert.equal(queryResponse.status, 200, await queryResponse.clone().text());
-    const query = (await queryResponse.json()) as Record<string, unknown>;
-    assert.equal(query.graphId, graph.id);
-    assert.equal(typeof query.answer, "string");
-    assert.equal(Array.isArray(query.claims), true);
-    assert.equal(Array.isArray(query.highlightedNodeIds), true);
-    assert.equal(Array.isArray(query.highlightedEdgeIds), true);
-
-    assert.equal(
-      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graph.id)}`, "user:stranger@example.com"))
-        .status,
-      404
-    );
-  } finally {
-    await close(server);
-  }
-});
-
-test("graph API binds simulation tenants to exact repository ACLs", async () => {
+test("graph build API binds simulation tenants to exact repository ACLs", async () => {
   const contextGraphStore = new MemoryContextGraphStore();
   const tenantId = "tenant-a";
   const principalA = "tenant:11111111-1111-4111-8111-111111111111";
@@ -2419,33 +2350,9 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
       body: JSON.stringify({ principalId, repositories })
     });
   try {
-    assert.equal((await authenticatedFetch(`${baseUrl}/v1/graphs`)).status, 401);
     assert.equal((await sync(principalA, ["omxyz/a"], INTERNAL_TOKEN)).status, 401);
     assert.equal((await sync(principalA, ["omxyz/a"])).status, 200);
     assert.equal((await sync(principalB, ["other/b"])).status, 200);
-
-    const listA = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalA).then(
-      (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
-    );
-    const listB = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalB).then(
-      (response) => response.json() as Promise<{ graphs: { repository: string }[] }>
-    );
-    assert.deepEqual(
-      listA.graphs.map((graph) => graph.repository),
-      ["omxyz/a"]
-    );
-    assert.deepEqual(
-      listB.graphs.map((graph) => graph.repository),
-      ["other/b"]
-    );
-    assert.equal(
-      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphB.id)}`, principalA)).status,
-      404
-    );
-    assert.equal(
-      (await authenticatedFetch(`${baseUrl}/v1/graphs/${encodeURIComponent(graphA.id)}`, principalB)).status,
-      404
-    );
 
     const build = (principalId: string | undefined, repository: string) =>
       fetch(`${baseUrl}/context-graph/build`, {
@@ -2476,22 +2383,7 @@ test("graph API binds simulation tenants to exact repository ACLs", async () => 
     assert.equal((await build(principalA, "omxyz/a")).status, 202);
     assert.equal((await build(principalA, "other/b")).status, 403);
 
-    const crossTenantQuery = await fetch(`${baseUrl}/v1/graph/query`, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${INTERNAL_TOKEN}`,
-        "x-jina-principal-id": principalA,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({ graphId: graphB.id, query: "What is in this repository?" })
-    });
-    assert.equal(crossTenantQuery.status, 404);
-
     assert.equal((await sync(principalA, [])).status, 200);
-    const revoked = await authenticatedFetch(`${baseUrl}/v1/graphs`, principalA).then(
-      (response) => response.json() as Promise<{ graphs: unknown[] }>
-    );
-    assert.deepEqual(revoked.graphs, []);
     assert.equal((await sync("svc:api", ["omxyz/a"])).status, 400);
   } finally {
     await close(server);

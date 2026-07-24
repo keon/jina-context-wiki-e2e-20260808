@@ -176,8 +176,8 @@ Add a task-definition test that proves:
 - assertion is required for aggregate completion; and
 - no private Codex reasoning phase becomes a board task.
 
-Give the one assertion session the same managed, Codex-account, and BYOK choices as the v1 review flow without
-turning agent internals into separately configured planner, investigation, or review tasks.
+Give the one assertion session managed, Codex-account, and BYOK execution choices without turning agent internals
+into separately configured planner, investigation, or review tasks.
 
 ### Contract
 

@@ -787,7 +787,6 @@ async function assertSafeRepositoryFile(
     `candidate=${shellQuote(candidate)}`,
     `root=$(realpath -- ${shellQuote(REPO_DIR)})`,
     `resolved=$(realpath -- "$candidate")`,
-    `test ! -L "$candidate"`,
     `test -f "$resolved"`,
     `case "$resolved" in "$root"/*) ;; *) exit 1 ;; esac`
   ].join(" && ");
