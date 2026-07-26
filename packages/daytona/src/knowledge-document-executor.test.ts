@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
   findExistingCodex,
   isTransientKnowledgeGenerationFailure,
+  KNOWLEDGE_PROMPT_STDIN_REDIRECT,
   UNTRUSTED_KNOWLEDGE_CODEX_ARGS
 } from "./knowledge-document-executor.js";
 
@@ -56,4 +57,9 @@ test("untrusted evidence generation disables every agentic tool surface", () => 
     assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes(`--disable ${feature}` as never));
   }
   assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes('-c web_search="disabled"'));
+});
+
+test("knowledge prompts stream over stdin instead of expanding into argv", () => {
+  assert.equal(KNOWLEDGE_PROMPT_STDIN_REDIRECT, "< '/home/daytona/context-engine/prompt.txt'");
+  assert.equal(KNOWLEDGE_PROMPT_STDIN_REDIRECT.includes("$("), false);
 });

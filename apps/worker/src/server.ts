@@ -602,7 +602,7 @@ async function readRepositoryFiles(directory: string, commitSha: string): Promis
     maxBuffer: 100 * 1024 * 1024
   });
   const maximumFileBytes = positiveInt(process.env.CONTEXT_MAX_FILE_BYTES, 5 * 1024 * 1024);
-  const maximumTotalBytes = positiveInt(process.env.CONTEXT_MAX_SNAPSHOT_BYTES, 24 * 1024 * 1024);
+  const maximumTotalBytes = positiveInt(process.env.CONTEXT_MAX_SNAPSHOT_BYTES, 8 * 1024 * 1024);
   const entries = stdout
     .split("\0")
     .filter(Boolean)

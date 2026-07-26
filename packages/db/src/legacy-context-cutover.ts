@@ -65,6 +65,42 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
      $hardening$`
   );
   await pool.query(
+    `do $runtime_support$
+     declare
+       relation_name text;
+       runtime_user constant text := '${runtimeLiteral}';
+     begin
+       if to_regnamespace('jina_runtime') is not null then
+         execute format('grant usage on schema jina_runtime to %I', runtime_user);
+         if to_regclass('jina_runtime.api_state') is not null then
+           execute format(
+             'grant select,insert,update on jina_runtime.api_state to %I',
+             runtime_user
+           );
+         end if;
+         if to_regclass('jina_runtime.github_deliveries') is not null then
+           execute format(
+             'grant select,insert on jina_runtime.github_deliveries to %I',
+             runtime_user
+           );
+         end if;
+       end if;
+
+       foreach relation_name in array array[
+         'repositories','tenants','installations','tenant_members'
+       ] loop
+         if to_regclass(format('public.%I', relation_name)) is not null then
+           execute format(
+             'grant select on public.%I to %I',
+             relation_name,
+             runtime_user
+           );
+         end if;
+       end loop;
+     end
+     $runtime_support$`
+  );
+  await pool.query(
     `do $archive$
      declare
        object record;

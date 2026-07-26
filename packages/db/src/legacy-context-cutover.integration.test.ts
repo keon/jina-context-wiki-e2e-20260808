@@ -105,6 +105,7 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
   const runtimeRole = "jina_context_cutover_test_runtime";
   try {
     await bootstrap.query("drop schema if exists jina_context_graph cascade");
+    await bootstrap.query("drop schema if exists jina_runtime cascade");
     await bootstrap.query("drop role if exists jina_legacy_archive");
     await bootstrap.query(`drop role if exists ${runtimeRole}`);
     await bootstrap.query(
@@ -112,6 +113,16 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
          login inherit createdb createrole bypassrls replication`
     );
     await bootstrap.query(`create schema jina_context_graph authorization ${runtimeRole}`);
+    await bootstrap.query(`create schema jina_runtime`);
+    await bootstrap.query(
+      `create table jina_runtime.api_state (
+         id smallint primary key,
+         snapshot jsonb not null
+       );
+       create table jina_runtime.github_deliveries (
+         delivery_id text primary key
+       )`
+    );
     await bootstrap.query(`set role ${runtimeRole}`);
     await bootstrap.query(
       `create table jina_context_graph.retrieval_metrics (
@@ -168,9 +179,46 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
        ) as is_member`
     );
     assert.equal(migrationMembership.rows[0]?.is_member, false);
+    const supportPrivileges = await bootstrap.query<{
+      api_delete: boolean;
+      api_insert: boolean;
+      api_select: boolean;
+      api_update: boolean;
+      delivery_delete: boolean;
+      delivery_insert: boolean;
+      delivery_select: boolean;
+      runtime_create: boolean;
+      runtime_usage: boolean;
+    }>(
+      `select
+         has_schema_privilege($1,'jina_runtime','USAGE') as runtime_usage,
+         has_schema_privilege($1,'jina_runtime','CREATE') as runtime_create,
+         has_table_privilege($1,'jina_runtime.api_state','SELECT') as api_select,
+         has_table_privilege($1,'jina_runtime.api_state','INSERT') as api_insert,
+         has_table_privilege($1,'jina_runtime.api_state','UPDATE') as api_update,
+         has_table_privilege($1,'jina_runtime.api_state','DELETE') as api_delete,
+         has_table_privilege($1,'jina_runtime.github_deliveries','SELECT') as delivery_select,
+         has_table_privilege($1,'jina_runtime.github_deliveries','INSERT') as delivery_insert,
+         has_table_privilege($1,'jina_runtime.github_deliveries','DELETE') as delivery_delete`,
+      [runtimeRole]
+    );
+    assert.deepEqual(supportPrivileges.rows, [
+      {
+        runtime_usage: true,
+        runtime_create: false,
+        api_select: true,
+        api_insert: true,
+        api_update: true,
+        api_delete: false,
+        delivery_select: true,
+        delivery_insert: true,
+        delivery_delete: false
+      }
+    ]);
   } finally {
     await bootstrap.query("reset role");
     await bootstrap.query("drop schema if exists jina_context_graph cascade");
+    await bootstrap.query("drop schema if exists jina_runtime cascade");
     await bootstrap.query("drop role if exists jina_legacy_archive");
     await bootstrap.query(`drop role if exists ${runtimeRole}`);
     await bootstrap.end();

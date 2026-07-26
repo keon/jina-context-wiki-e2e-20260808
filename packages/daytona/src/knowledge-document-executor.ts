@@ -9,6 +9,7 @@ const CODEX_LOCAL_BIN = `${WORK_DIR}/node_modules/.bin/codex`;
 const SCHEMA_PATH = `${WORK_DIR}/knowledge-document-schema.json`;
 const RESULT_PATH = `${WORK_DIR}/knowledge-document-result.json`;
 const PROMPT_PATH = `${WORK_DIR}/prompt.txt`;
+export const KNOWLEDGE_PROMPT_STDIN_REDIRECT = `< ${shellQuote(PROMPT_PATH)}`;
 export const UNTRUSTED_KNOWLEDGE_CODEX_ARGS = [
   "--ignore-user-config",
   "--strict-config",
@@ -115,7 +116,7 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         `-c model_auto_compact_token_limit=${positiveInt(process.env.CONTEXT_CODEX_COMPACT_TOKENS, 12_000)}`,
         `-c model_reasoning_effort=${shellQuote(process.env.CONTEXT_CODEX_EFFORT?.trim() || "low")}`,
         "-c model_verbosity=low",
-        `"$(cat ${shellQuote(PROMPT_PATH)})"`
+        KNOWLEDGE_PROMPT_STDIN_REDIRECT
       ].join(" ");
 
       const attempts = positiveInt(process.env.CONTEXT_CODEX_EXECUTION_ATTEMPTS, 2);
