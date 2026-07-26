@@ -852,10 +852,15 @@ test(
       revisionIds: [repeatedRevision.id],
       createdAt: repeatedKnowledgeCreatedAt
     };
+    const offsetObservedAt = new Date(Date.parse(createdAt) - 5 * 60 * 60 * 1_000).toISOString().replace("Z", "-05:00");
+    const repeatedProviderCitation = {
+      ...providerCitation,
+      anchor: { ...providerCitation.anchor, observedAt: offsetObservedAt }
+    };
     await store.commitKnowledge({
       run: repeatedRun,
       revisions: [repeatedRevision],
-      citations: [citation, providerCitation]
+      citations: [citation, repeatedProviderCitation]
     });
     assert.equal((await store.getRevision(revision.id))?.createdAt, knowledgeCreatedAt);
     await assert.rejects(
@@ -880,7 +885,32 @@ test(
         revisions: [repeatedRevision],
         citations: [{ ...citation, claim: "divergent claim" }, providerCitation]
       }),
-      /citation identity collision/
+      /citation collection identity collision/
+    );
+    await assert.rejects(
+      store.commitKnowledge({
+        run: {
+          ...repeatedRun,
+          id: stableId("dr", { repeatedRun: repeatedRun.id, divergence: "removed-citation" }),
+          cacheKey: fingerprint({ repeatedRun: repeatedRun.cacheKey, divergence: "removed-citation" })
+        },
+        revisions: [repeatedRevision],
+        citations: [citation]
+      }),
+      /citation collection identity collision/
+    );
+    const addedCitation = createKnowledgeCitation(repeatedRevision.id, 2, citation.claim, citation.anchor);
+    await assert.rejects(
+      store.commitKnowledge({
+        run: {
+          ...repeatedRun,
+          id: stableId("dr", { repeatedRun: repeatedRun.id, divergence: "added-citation" }),
+          cacheKey: fingerprint({ repeatedRun: repeatedRun.cacheKey, divergence: "added-citation" })
+        },
+        revisions: [repeatedRevision],
+        citations: [citation, providerCitation, addedCitation]
+      }),
+      /citation collection identity collision/
     );
     assert.deepEqual(await store.listCitations(revision.id), [citation, providerCitation]);
     const enrichedGeneration = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, nextLiveAt());

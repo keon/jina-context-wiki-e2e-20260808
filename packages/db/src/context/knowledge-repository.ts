@@ -103,6 +103,30 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
   async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
     await this.database.transactionAs("jina_context_derive", { tenantIds: [input.run.tenantId] }, async (client) => {
       const canonicalRevisionCreatedAt = new Map<string, string>();
+      const newlyInsertedRevisionIds = new Set<string>();
+      const revisionById = new Map(input.revisions.map((revision) => [revision.id, revision]));
+      if (revisionById.size !== input.revisions.length) throw new Error("Duplicate revisions in commit");
+      if (
+        input.run.revisionIds.length !== revisionById.size ||
+        input.run.revisionIds.some((revisionId) => !revisionById.has(revisionId))
+      ) {
+        throw new Error("Derivation run revision IDs do not match the committed revisions");
+      }
+      const citationsByRevision = new Map<string, KnowledgeEvidenceCitation[]>(
+        input.revisions.map((revision) => [revision.id, []])
+      );
+      for (const citation of input.citations) {
+        const revisionCitations = citationsByRevision.get(citation.revisionId);
+        if (!revisionCitations) throw new Error(`Citation ${citation.id} references an uncommitted revision`);
+        revisionCitations.push(citation);
+      }
+      for (const [revisionId, citations] of citationsByRevision) {
+        citations.sort((left, right) => left.ordinal - right.ordinal);
+        if (citations.length === 0) throw new Error("Knowledge revisions require source citations");
+        if (citations.some((citation, index) => citation.ordinal !== index)) {
+          throw new Error(`Knowledge citation ordinals must be contiguous for ${revisionId}`);
+        }
+      }
       await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, input.run.checkpointId);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
@@ -134,7 +158,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
             revision.createdAt
           ]
         );
-        await client.query(
+        const insertedRevision = await client.query(
           `insert into jina_context.knowledge_document_revisions
             (id,tenant_id,repository,logical_id,derivation_run_id,title,body_markdown,
              summary,structured_summary,scope,ref_name,commit_sha,evidence_fingerprint,
@@ -165,6 +189,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
             revision.createdAt
           ]
         );
+        if (insertedRevision.rowCount === 1) newlyInsertedRevisionIds.add(revision.id);
         const storedRevision = await client.query<RevisionRow>(
           REVISION_SELECT + ` where revision.tenant_id=$1 and revision.repository=$2 and revision.id=$3`,
           [revision.tenantId, revision.repository, revision.id]
@@ -175,9 +200,15 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
         }
         canonicalRevisionCreatedAt.set(revision.id, canonicalRevision.createdAt);
       }
+      for (const revision of input.revisions) {
+        if (newlyInsertedRevisionIds.has(revision.id)) continue;
+        const storedCitations = await selectStoredCitations(client, revision);
+        if (!sameStoredCitationCollection(storedCitations, citationsByRevision.get(revision.id)!)) {
+          throw new Error(`Knowledge citation collection identity collision for ${revision.id}`);
+        }
+      }
       for (const citation of input.citations) {
-        const revision = input.revisions.find((candidate) => candidate.id === citation.revisionId);
-        if (!revision) throw new Error(`Citation ${citation.id} references an uncommitted revision`);
+        const revision = revisionById.get(citation.revisionId)!;
         await assertCitationInCheckpoint(client, input.run.checkpointId, citation);
         const anchor = citation.anchor;
         await client.query(
@@ -211,9 +242,15 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
            where tenant_id=$1 and repository=$2 and revision_id=$3 and ordinal=$4`,
           [revision.tenantId, revision.repository, citation.revisionId, citation.ordinal]
         );
-        const canonicalCitation = storedCitation.rows[0] && citationFromRow(storedCitation.rows[0]);
-        if (!canonicalCitation || !sameImmutableKnowledgeCitation(canonicalCitation, citation)) {
+        const canonicalCitation = storedCitation.rows[0];
+        if (!canonicalCitation || !sameStoredCitation(canonicalCitation, citation)) {
           throw new Error(`Knowledge citation identity collision for ${citation.revisionId}:${citation.ordinal}`);
+        }
+      }
+      for (const revision of input.revisions) {
+        const storedCitations = await selectStoredCitations(client, revision);
+        if (!sameStoredCitationCollection(storedCitations, citationsByRevision.get(revision.id)!)) {
+          throw new Error(`Knowledge citation collection identity collision for ${revision.id}`);
         }
       }
       for (const revision of input.revisions) {
@@ -829,6 +866,34 @@ function revisionFromRow(row: RevisionRow): KnowledgeDocumentRevision {
     confidence: row.confidence,
     createdAt: dateString(row.created_at)
   };
+}
+
+async function selectStoredCitations(
+  client: PoolClient,
+  revision: Pick<KnowledgeDocumentRevision, "id" | "tenantId" | "repository">
+): Promise<CitationRow[]> {
+  const result = await client.query<CitationRow>(
+    `select * from jina_context.knowledge_revision_evidence
+     where tenant_id=$1 and repository=$2 and revision_id=$3
+     order by ordinal`,
+    [revision.tenantId, revision.repository, revision.id]
+  );
+  return result.rows;
+}
+
+function sameStoredCitation(row: CitationRow, citation: KnowledgeEvidenceCitation): boolean {
+  return (
+    row.claim_ids.length === 1 &&
+    row.claim_ids[0] === citation.id &&
+    sameImmutableKnowledgeCitation(citationFromRow(row), citation)
+  );
+}
+
+function sameStoredCitationCollection(
+  rows: readonly CitationRow[],
+  citations: readonly KnowledgeEvidenceCitation[]
+): boolean {
+  return rows.length === citations.length && rows.every((row, index) => sameStoredCitation(row, citations[index]!));
 }
 
 function citationFromRow(row: CitationRow): KnowledgeEvidenceCitation {

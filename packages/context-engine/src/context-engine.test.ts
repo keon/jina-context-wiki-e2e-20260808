@@ -920,6 +920,25 @@ test("knowledge retries preserve canonical timestamps and reject all other immut
     }),
     /citations cannot be changed/
   );
+  await assert.rejects(
+    store.commitKnowledge({
+      run: { ...retryRun, id: "removed-citation-run", cacheKey: "removed-citation-cache" },
+      revisions: [retryRevision],
+      citations: []
+    }),
+    /require source citations/
+  );
+  await assert.rejects(
+    store.commitKnowledge({
+      run: { ...retryRun, id: "added-citation-run", cacheKey: "added-citation-cache" },
+      revisions: [retryRevision],
+      citations: [
+        ...citations,
+        createKnowledgeCitation(retryRevision.id, citations.length, citations[0]!.claim, citations[0]!.anchor)
+      ]
+    }),
+    /citations cannot be changed/
+  );
 });
 
 test("query routes exact and structural work and return original evidence anchors", async () => {

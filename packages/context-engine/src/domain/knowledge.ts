@@ -67,7 +67,14 @@ export function sameImmutableKnowledgeCitation(
   left: KnowledgeEvidenceCitation,
   right: KnowledgeEvidenceCitation
 ): boolean {
-  return canonicalJson(left) === canonicalJson(right);
+  const canonicalCitation = (citation: KnowledgeEvidenceCitation): KnowledgeEvidenceCitation => ({
+    ...citation,
+    anchor: {
+      ...citation.anchor,
+      ...(citation.anchor.observedAt ? { observedAt: normalizeIsoTime(citation.anchor.observedAt) } : {})
+    }
+  });
+  return canonicalJson(canonicalCitation(left)) === canonicalJson(canonicalCitation(right));
 }
 
 export type KnowledgeRevisionEventType =
