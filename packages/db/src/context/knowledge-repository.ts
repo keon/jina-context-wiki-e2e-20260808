@@ -86,7 +86,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async findSuccessfulRun(cacheKey: string): Promise<DerivationRun | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<DerivationRow>(
+    const result = await this.database.queryAs<DerivationRow>(
+      "jina_context_derive",
       `select * from jina_context.derivation_runs
        where cache_key=$1 and status='succeeded'
        order by completed_at desc,id limit 1`,
@@ -96,7 +97,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
   }
 
   async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_derive", async (client) => {
       await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, input.run.checkpointId);
       await insertDerivationRun(client, input.run, checkpoint);
@@ -245,7 +246,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
   }
 
   async recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_derive", async (client) => {
       await assertContextWriteFence(client, run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, run.checkpointId);
       await insertDerivationRun(client, run, checkpoint);
@@ -255,7 +256,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async getRun(runId: string): Promise<DerivationRun | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<DerivationRow>(
+    const result = await this.database.queryAs<DerivationRow>(
+      "jina_context_derive",
       "select * from jina_context.derivation_runs where id=$1",
       [runId]
     );
@@ -264,7 +266,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async getRevision(revisionId: string): Promise<KnowledgeDocumentRevision | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<RevisionRow>(
+    const result = await this.database.queryAs<RevisionRow>(
+      "jina_context_derive",
       REVISION_SELECT + ` where revision.id=$1 and ${revisionNotErasedSql("revision")}`,
       [revisionId]
     );
@@ -273,7 +276,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<RevisionRow>(
+    const result = await this.database.queryAs<RevisionRow>(
+      "jina_context_derive",
       REVISION_SELECT +
         ` where revision.tenant_id=$1 and revision.repository=$2
           and ${revisionNotErasedSql("revision")}
@@ -285,7 +289,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async listCitations(revisionId: string): Promise<KnowledgeEvidenceCitation[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<CitationRow>(
+    const result = await this.database.queryAs<CitationRow>(
+      "jina_context_derive",
       `select * from jina_context.knowledge_revision_evidence
        where revision_id=$1
          and not exists (
@@ -307,7 +312,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
   }
 
   async appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_derive", async (client) => {
       const revision = await client.query<{ tenant_id: string; repository: string }>(
         `select tenant_id,repository from jina_context.knowledge_document_revisions
          where id=$1`,
@@ -365,7 +370,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async listRevisionEvents(revisionId: string): Promise<KnowledgeRevisionEvent[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<EventRow>(
+    const result = await this.database.queryAs<EventRow>(
+      "jina_context_derive",
       `select * from jina_context.knowledge_revision_events
        where revision_id=$1 order by sequence`,
       [revisionId]
@@ -375,7 +381,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async listCurrentEligibleRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<RevisionRow>(
+    const result = await this.database.queryAs<RevisionRow>(
+      "jina_context_derive",
       `select distinct on (revision.logical_id)
          revision.*,document.kind
        from jina_context.knowledge_document_revisions revision
@@ -425,7 +432,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
   }
 
   private async hydrateRun(row: DerivationRow): Promise<DerivationRun> {
-    const revisions = await this.database.pool.query<{ id: string }>(
+    const revisions = await this.database.queryAs<{ id: string }>(
+      "jina_context_derive",
       `select id from jina_context.knowledge_document_revisions
        where tenant_id=$1 and repository=$2 and derivation_run_id=$3 order by created_at,id`,
       [row.tenant_id, row.repository, row.id]

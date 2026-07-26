@@ -25,10 +25,26 @@ Optional capability decisions remain deliberately closed:
   until it beats the fallback on an expanded long-document evaluation.
 
 `pnpm evaluate:context` currently reports exact completeness `1.0`, citation integrity
-`1.0`, and evidence recall@20 `1.0` on the checked-in v1 fixture. The hard exactness and
-citation gates pass, and recall exceeds the initial `0.90` target.
+`1.0`, evidence recall@20 `1.0`, zero ACL leaks, zero labeled-conflict failures, and zero
+required-source-kind failures on the checked-in v1 fixture. Its PostgreSQL mode also
+requires access revocation to take effect immediately. The hard exactness, citation, ACL,
+conflict, and source-kind gates pass, and recall exceeds the initial `0.90` target.
 Production completion additionally requires the snapshot, exact-commit reingestion, ACL
 audit, drained required outboxes, and real HTTP/MCP acceptance described below.
+
+The final implementation hardening also completed:
+
+- exact citation excerpt resolution with mutually exclusive line-range/JSON-pointer
+  selectors and normalized verbatim claim support;
+- repository ACL fingerprints and SQL prefiltering before candidate creation;
+- consumer-specific outbox leases and scope-bound acknowledgements, plus real drain and
+  rebuild replay;
+- truthful complete/partial checkpoints with a non-shallow blob-filtered clone, bounded
+  persisted Git history, paginated GitHub observations, and omission frontiers;
+- separate migration-owner/runtime credentials, `NOINHERIT` runtime membership, and
+  explicit `SET LOCAL ROLE` capability activation;
+- one coordinated Cloud Run release for API, workers, dashboard, and admin;
+- tenant-admin-only knowledge review.
 
 ## Outcome
 
@@ -104,8 +120,9 @@ The following are non-negotiable implementation constraints:
 2. **Derived content is immutable.** A correction creates a new knowledge revision or an
    append-only review event; it never edits the prior body or evidence set.
 3. **Citations terminate at original evidence.** A knowledge-document citation in an
-   answer must be expandable to the source observations, commit, blob, path, and range
-   that support it.
+   answer must be expandable to the source observations, commit, blob, path, and exact
+   line-range/JSON-pointer excerpt that supports it. The normalized citation claim must
+   occur verbatim in that selected excerpt.
 4. **Indexes are disposable.** Every search document, embedding, hierarchy node, current
    selection, and relation projection can be rebuilt from canonical evidence and immutable
    knowledge revisions.
@@ -447,12 +464,15 @@ Replace graph roles with least-privilege roles:
 ```text
 jina_context_ingest
 jina_context_derive
+jina_context_coordinator
 jina_context_manifest
+jina_context_knowledge_current
 jina_context_lexical
 jina_context_dense
 jina_context_hierarchy
 jina_context_structural
 jina_context_identity
+jina_context_acl
 jina_context_retention
 jina_context_query
 jina_context_admin
@@ -461,7 +481,10 @@ jina_context_admin
 The query role receives read access only to projection tables and approved canonical
 structured-query views. The derive role can read evidence and insert derivation runs,
 revisions, citations, and events. Projector roles own only their projection tables and
-their outbox delivery rows.
+their outbox delivery rows. The schema-owning migration login installs these NOLOGIN
+roles, marks the separate runtime login `NOINHERIT`, and grants membership. Membership is
+not ambient access: every runtime transaction explicitly uses `SET LOCAL ROLE` for the
+required capability.
 
 ## Stage 1: `ingest-evidence`
 
@@ -482,18 +505,20 @@ bounded history policy
 ### Responsibilities
 
 1. Resolve the ref and record the immutable provider observation.
-2. Walk the commit DAG until known commits or the configured complete-history boundary.
+2. Use a full blob-filtered clone, then walk and persist the commit DAG up to the
+   configured history boundary.
 3. Store commits, parents, trees, blobs, and first-parent changes idempotently.
 4. Reuse blob analysis by content digest and parser version.
 5. Parse source into deterministic symbols, imports, definitions, references, calls, and
    inheritance facts.
-6. Ingest complete bounded PR/issue membership, changed files, CODEOWNERS, and other
-   explicit provider facts.
+6. Paginate bounded PR/issue membership and record whether every provider source reached
+   its final page, including an omission reason when it did not.
 7. Record identity and ACL observations.
 8. Apply erasure filters before canonical insert and derived event emission.
 9. Emit consumer-owned outbox deliveries in the same transaction as each canonical write.
-10. Produce an `EvidenceCheckpoint` containing the exact commit, parser version, source
-    completeness, observation frontier, and evidence fingerprint.
+10. Produce an `EvidenceCheckpoint` containing the exact commit, parser version,
+    `complete`/`partial` source completeness, machine-readable Git/GitHub/body-omission
+    frontier, and evidence fingerprint.
 
 ### Idempotency
 
@@ -505,8 +530,10 @@ bounded history policy
 
 ### Failure behavior
 
-- Fail closed on partial trees, truncated provider membership, unverified ref resolution,
-  or exceeded history limits.
+- Fail closed on partial trees and unverified ref/commit identity.
+- When a configured Git/GitHub bound is reached, an optional provider source is
+  unavailable, or a body is intentionally omitted, persist a truthful `partial`
+  checkpoint and surface that state in query coverage; never label it complete.
 - Commit only complete transactional units; retries resume from known immutable objects.
 - Never mark the stage complete if the ACL or manifest consumers lack their outbox
   deliveries.
@@ -584,10 +611,11 @@ Before storing a revision:
 1. validate the JSON schema and bounded kind vocabulary;
 2. resolve the logical ID to an allowed stable subject or reject it;
 3. check every cited source against the checkpoint;
-4. verify code path, blob, digest, and line range;
-5. verify provider source ID, raw observation digest, and JSON pointer;
+4. verify code path, blob, digest, and exact inclusive line range;
+5. verify provider source ID, raw observation digest, and exact JSON pointer;
 6. require every material paragraph or structured claim to have supporting evidence;
-7. reject citations that only support a nearby but different claim;
+7. reject mixed line/JSON selectors, out-of-bounds selectors, and citations whose
+   normalized claim does not occur verbatim in the exact selected excerpt;
 8. reject cross-tenant, unauthorized, stale-ref, missing, or truncated evidence;
 9. compute the ordered evidence fingerprint and body digest on the host;
 10. persist raw output, validation diagnostics, revisions, citations, and outbox events
@@ -608,6 +636,8 @@ second invalid result records a failed derivation run and writes no revision.
   eligibility. Other kinds may be eligible as clearly labeled generated knowledge.
 - Answers cite original evidence and disclose unreviewed generated interpretation when it
   materially affects the conclusion.
+- Only a tenant administrator may append review state through the public API; repository
+  read access alone is insufficient.
 
 ### Idempotency
 
@@ -671,6 +701,8 @@ Do not expose partially published rows through query views.
 
 - a projector can rebuild into a new generation while the current one serves traffic;
 - checkpoints are owned per consumer, never shared through one global processed bit;
+- every delivery claim has a consumer-specific lease; acknowledgement must match that
+  unexpired lease plus tenant, repository, ref, commit, checkpoint/event, and consumer;
 - changing one projector version rebuilds only its outputs and any dependent projectors;
 - erasure invalidates every affected generation and is prioritized ahead of ordinary
   indexing;
@@ -680,6 +712,7 @@ Do not expose partially published rows through query views.
 
 - batch, sequential, retried, and reordered events converge to identical fingerprints;
 - one slow consumer cannot acknowledge another consumer's delivery;
+- concurrent refs cannot cross-acknowledge, and lease loss prevents a stale acknowledgement;
 - required-projector failure prevents publication;
 - optional-projector failure produces a usable degraded generation;
 - concurrent rebuilds cannot publish stale checkpoints over a newer target;
@@ -869,6 +902,7 @@ Requirements:
 - return ref, commit, generation, degraded capabilities, and trace ID;
 - paginate documents and generations with opaque cursors;
 - keep administrative rebuild/review operations separate from the query endpoint;
+- require tenant-administrator identity for review, rebuild, metrics, and erasure;
 - do not expose raw graph generations, nodes, edges, or assertion commands.
 
 ### Internal API
@@ -918,7 +952,9 @@ Do not reproduce internal retriever selection or storage primitives in the MCP c
 `apps/worker/src/server.ts` dispatches three typed handlers, one for each context topic,
 and owns configuration, claim/renew/complete behavior, lease-loss cancellation, and
 health reporting. The clean cutover reads only `CONTEXT_*` configuration; it does not
-read both old and new names.
+read both old and new names. The internal outbox drain is operational rather than
+diagnostic: it selects checkpoints with pending consumer deliveries and idempotently
+re-runs `index-context`; rebuild uses the same publication path.
 
 ## Package and code layout
 
@@ -1051,10 +1087,10 @@ Deliver:
 - final naming registry and prohibited legacy-name test;
 - trace and metric vocabulary.
 
-Evaluation cases must cover exact identifiers, exhaustive lists, structure, architecture,
-intent, changes, incidents, ownership, conflicting sources, stale documents, long
-documents, ref/time selection, ACL boundaries, and unsupported causal/counterfactual
-questions.
+Evaluation cases cover exact identifiers, exhaustive lists, structure, architecture,
+derived knowledge, changes, incidents, ownership, conflicting sources, long documents,
+time selection, private ACL boundaries, and access revocation. Broader stale/multi-ref,
+erasure, and unsupported causal/counterfactual slices remain follow-up fixture expansion.
 
 Gate: baseline results are reproducible, expected evidence is labeled, and each target
 contract has schema tests.
@@ -1070,8 +1106,9 @@ Deliver:
 - append-only outbox with one delivery per consumer;
 - empty `/context` API modules behind non-production routing on the development branch.
 
-Gate: schema installs from an empty database, runtime roles pass privilege tests, stage
-claims and retries are fenced, and the workspace builds without a package alias.
+Gate: schema installs from an empty database, the exact `NOINHERIT` runtime login passes
+capability activation/direct-access denial tests, stage claims and retries are fenced, and
+the workspace builds without a package alias.
 
 ### Phase 2 — Port canonical ingestion
 
@@ -1180,7 +1217,8 @@ Deliver:
 - old writer shutdown;
 - deletion of old context-specific pending/leased board work;
 - creation of the new schema and roles;
-- simultaneous API, worker, dashboard, and MCP deployment;
+- simultaneous exact-source API, worker, dashboard, admin, and MCP-compatible API Cloud
+  Run deployment;
 - full repository reingestion;
 - deletion of the graph package, schema/role files, routes, topics, executor, renderer,
   tests, environment variables, and migration shims;
@@ -1369,16 +1407,20 @@ This is the only supported migration path:
 5. Wait for in-flight old writes to terminate; do not translate or replay their messages.
 6. Archive and delete pending, leased, or blocked graph workflow tasks and outbox messages.
 7. Deploy the new database schema and roles.
-8. Deploy API, worker, dashboard, MCP, and acceptance checks as one coordinated release.
-9. Trigger `build-context` for every active repository/ref.
-10. Require canonical ingestion and a baseline published generation before enabling
+8. Use the separate migration-owner credential to install roles and bind the `NOINHERIT`
+   runtime login.
+9. Deploy API, workers, dashboard, admin, MCP-compatible API, and acceptance checks from
+   the same exact source/build identity as one coordinated Cloud Run release.
+10. Trigger `build-context` for every active repository/ref.
+11. Require canonical ingestion and a baseline published generation before enabling
     `query_context`.
-11. Audit repository counts, selected commits, manifests, ACLs, outbox depth, and exact
+12. Audit repository counts, selected commits, completeness frontiers, manifests, ACLs,
+    outbox depth, and exact
     query fixtures.
-12. Enable derivation, then optional dense and PageIndex consumers only if their earlier
+13. Enable derivation, then optional dense and PageIndex consumers only if their earlier
     gates passed.
-13. Delete `jina_context_graph` after the snapshot retention window.
-14. Remove the old package and every runtime reference in the same release branch.
+14. Delete `jina_context_graph` after the snapshot retention window.
+15. Remove the old package and every runtime reference in the same release branch.
 
 There is no live compatibility rollback. Emergency rollback means redeploying the complete
 old release and restoring its database snapshot, not pointing old code at the new schema.
@@ -1439,6 +1481,8 @@ The successor is done when:
   `index-context`;
 - canonical evidence and knowledge revisions are immutable and independently auditable;
 - every eligible knowledge revision has validated terminal evidence;
+- every knowledge citation selects a valid exact excerpt and contains a verbatim grounded
+  claim after normalization;
 - required indexes rebuild deterministically and publish atomically;
 - exact, structured, structural, lexical, knowledge, and hierarchy routes share one
   storage-neutral query contract;
@@ -1446,7 +1490,8 @@ The successor is done when:
   trace identity;
 - query service remains useful when optional model, dense, or PageIndex capabilities fail;
 - ACL, erasure, citation, exactness, ref, and evaluation gates pass;
-- dashboard and MCP expose context rather than graph internals;
+- ACL fingerprints filter PostgreSQL rows before retrieval candidates exist;
+- dashboard, admin, and MCP expose context rather than graph internals;
 - production repositories have been fully reingested;
 - all graph-first runtime code, data structures, compatibility paths, and configuration
   have been deleted.

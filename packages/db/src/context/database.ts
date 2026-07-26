@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
-import { Pool, type PoolClient, type PoolConfig } from "pg";
+import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 import { applySchema } from "../apply-schema.js";
 import { CONTEXT_ROLES_SQL } from "./roles.js";
+import type { ContextDatabaseRole } from "./roles.js";
 import { CONTEXT_SCHEMA_SQL } from "./schema.js";
 
 export interface PostgresContextDatabaseConfig extends PoolConfig {
@@ -31,10 +32,15 @@ export class ContextDatabase {
   }
 
   async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
+    return this.transactionAs("jina_context_admin", operation);
+  }
+
+  async transactionAs<T>(role: ContextDatabaseRole, operation: (client: PoolClient) => Promise<T>): Promise<T> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await client.query(`set local role ${role}`);
       const result = await operation(client);
       await client.query("commit");
       return result;
@@ -44,6 +50,14 @@ export class ContextDatabase {
     } finally {
       client.release();
     }
+  }
+
+  async queryAs<T extends QueryResultRow = QueryResultRow>(
+    role: ContextDatabaseRole,
+    text: string,
+    values?: readonly unknown[]
+  ) {
+    return this.transactionAs(role, (client) => client.query<T>(text, values ? [...values] : undefined));
   }
 
   async close(): Promise<void> {

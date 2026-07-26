@@ -9,12 +9,16 @@ gar="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/jina"
 image_tag="${IMAGE_TAG:-${CLOUD_BUILD_ID}}"
 api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
+dashboard_image="${gar}/dashboard:${image_tag}"
+admin_image="${gar}/admin:${image_tag}"
 runtime_service_account="jina-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
 tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
 db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
+migration_db_user="${JINA_MIGRATION_DB_USER:-jina_app}"
+migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
 acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-}"
 api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
@@ -61,8 +65,9 @@ if (( api_min_instances > api_max_instances )); then
   echo "JINA_API_MIN_INSTANCES must not exceed JINA_API_MAX_INSTANCES" >&2
   exit 2
 fi
-if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
-  echo "JINA_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
+if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ||
+      "${migration_db_pass_secret}" == *","* || "${migration_db_pass_secret}" == *"~"* ]]; then
+  echo "Database password secrets must be Cloud Run secret specs without commas or tildes" >&2
   exit 2
 fi
 
@@ -191,6 +196,7 @@ route_latest_revision() {
 
 for secret_spec in \
   "${db_pass_secret}" \
+  "${migration_db_pass_secret}" \
   "jina-github-webhook-secret:latest" \
   "jina-internal-api-token:latest" \
   "jina-context-api-token:latest" \
@@ -202,6 +208,7 @@ for secret_spec in \
   "jina-github-clone-token:latest"; do
   require_secret "${secret_spec}"
 done
+require_secret "jina-dashboard-password:latest"
 
 # Apply owner-only DDL before any new runtime revision starts. Runtime services
 # intentionally run with JINA_DB_MANAGE_SCHEMA=false and must never discover a
@@ -212,8 +219,8 @@ gcloud run jobs deploy jina-context-migrate \
   --image="${api_image}" \
   --service-account="${runtime_service_account}" \
   --set-cloudsql-instances="${cloud_sql_instance}" \
-  --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}" \
-  --set-secrets="DB_PASS=${db_pass_secret}" \
+  --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}~CONTEXT_RUNTIME_DB_USER=${db_user}" \
+  --set-secrets="DB_PASS=${migration_db_pass_secret}" \
   --args=node_modules/@jina/db/dist/migrate.js,--install-roles \
   --tasks=1 \
   --max-retries=0 \
@@ -261,7 +268,7 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=25165824~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=25165824~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
@@ -306,6 +313,38 @@ task_worker_url="$(gcloud run services describe jina-task-worker \
 verify_worker_health \
   "${task_worker_url}" \
   "run-review|run-research|run-publish|run-cleanup"
+
+web_env_vars="^~^JINA_API_URL=${api_url}~JINA_TENANT_ID=${acceptance_tenant_id}~JINA_WEB_PRINCIPAL_ID=${acceptance_principal_id}~JINA_WEB_AUTH_USERNAME=omlabs"
+web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WEB_AUTH_PASSWORD=jina-dashboard-password:latest"
+
+gcloud run deploy jina-dashboard \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --image="${dashboard_image}" \
+  --service-account="${runtime_service_account}" \
+  --set-env-vars="${web_env_vars}" \
+  --set-secrets="${web_secrets}" \
+  --quiet
+route_latest_revision "jina-dashboard"
+dashboard_url="$(gcloud run services describe jina-dashboard \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --format='value(status.url)')"
+
+gcloud run deploy jina-admin \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --image="${admin_image}" \
+  --allow-unauthenticated \
+  --service-account="${runtime_service_account}" \
+  --set-env-vars="${web_env_vars}" \
+  --set-secrets="${web_secrets}" \
+  --quiet
+route_latest_revision "jina-admin"
+admin_url="$(gcloud run services describe jina-admin \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --format='value(status.url)')"
 
 gcloud run jobs deploy jina-acceptance \
   --project="${GCP_PROJECT_ID}" \
@@ -357,6 +396,8 @@ Cloud Build deployment complete
 API: ${api_url}
 Context worker: ${context_worker_url}
 Task worker: ${task_worker_url}
+Dashboard: ${dashboard_url}
+Admin: ${admin_url}
 Image tag: ${image_tag}
 Cloud SQL: ${cloud_sql_instance}
 Tenancy mode: ${tenancy_mode}

@@ -1,4 +1,4 @@
-const CONTEXT_ROLES = [
+export const CONTEXT_ROLES = [
   "jina_context_coordinator",
   "jina_context_ingest",
   "jina_context_derive",
@@ -55,6 +55,7 @@ grant usage on schema jina_context to ${CONTEXT_ROLES.join(",")};
 grant select,insert,update on
   jina_context.pipeline_builds,jina_context.pipeline_stages
 to jina_context_coordinator;
+grant select,insert,update on jina_context.repositories to jina_context_coordinator;
 grant select,insert,update on
   jina_context.index_generations,jina_context.generation_projectors,
   jina_context.projection_checkpoints
@@ -132,7 +133,7 @@ grant select,insert,update on
 to jina_context_lexical;
 
 grant select on
-  jina_context.context_fragments,jina_context.index_generations,
+  jina_context.context_documents,jina_context.context_fragments,jina_context.index_generations,
   jina_context.generation_projectors
 to jina_context_dense;
 grant select,insert,update,delete on jina_context.context_embeddings to jina_context_dense;
@@ -194,7 +195,8 @@ grant select,update,delete on jina_context.index_generations to jina_context_ret
 
 grant select on
   jina_context.current_refs,jina_context.published_repository_acl,
-  jina_context.index_generations,jina_context.published_context_documents,
+  jina_context.index_generations,jina_context.generation_projectors,
+  jina_context.repository_acl_projection,jina_context.published_context_documents,
   jina_context.published_context_fragments,
   jina_context.published_structural_relations,jina_context.published_hierarchy_nodes,
   jina_context.published_current_knowledge_revisions,

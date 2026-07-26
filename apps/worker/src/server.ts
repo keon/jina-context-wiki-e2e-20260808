@@ -1,5 +1,4 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
@@ -22,6 +21,7 @@ import type {
   IngestEvidenceInput,
   ProviderObservationInput
 } from "@jina/context-engine";
+import { repositoryAclFingerprint } from "@jina/context-engine";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 
 const execFileAsync = promisify(execFile);
@@ -323,23 +323,34 @@ async function runIngestEvidence(work: ClaimedWork<"run-ingest-evidence">): Prom
   }
   const checkout = await checkoutRepository(repository, ref, expectedCommitSha);
   try {
-    const [files, observations, git] = await Promise.all([
+    const [files, provider, git, history] = await Promise.all([
       readRepositoryFiles(checkout.directory, checkout.commitSha),
       loadProviderObservations(repository, checkout.commitSha),
-      readGitSnapshotMetadata(checkout.directory, checkout.commitSha)
+      readGitSnapshotMetadata(checkout.directory, checkout.commitSha),
+      readGitHistoryMetadata(checkout.directory, checkout.commitSha)
     ]);
+    const omittedFiles = files.filter((file) => file.contentOmitted).map((file) => file.path);
     const input: IngestEvidenceInput = {
       tenantId,
       repository,
       ref,
       commitSha: checkout.commitSha,
       files,
-      observations,
-      git,
-      aclFingerprint: sha256(`${tenantId}:${repository}:repository-access`),
-      observationFrontier: `${checkout.commitSha}:${new Date().toISOString()}`,
+      observations: provider.observations,
+      git: { ...git, history: history.commits },
+      aclFingerprint: repositoryAclFingerprint(tenantId, repository),
+      observationFrontier: JSON.stringify({
+        commitSha: checkout.commitSha,
+        git: {
+          observedCommitCount: history.commits.length,
+          complete: history.complete,
+          oldestObservedCommit: history.commits.at(-1)?.sha ?? checkout.commitSha
+        },
+        github: provider.frontier,
+        omittedFiles
+      }),
       createdAt: new Date().toISOString(),
-      sourceComplete: true
+      sourceComplete: history.complete && provider.complete && omittedFiles.length === 0
     };
     return await internalApiJson("/internal/context/ingest", leaseBody(work, { input }));
   } finally {
@@ -420,7 +431,6 @@ async function checkoutRepository(
         "clone",
         "--filter=blob:none",
         "--no-checkout",
-        "--depth=2",
         "--branch",
         ref,
         `https://github.com/${repository}.git`,
@@ -430,12 +440,12 @@ async function checkoutRepository(
     );
     if (expectedCommitSha) {
       requiredGitSha(expectedCommitSha, "expected commit SHA");
-      await execFileAsync("git", ["fetch", "--depth=2", "origin", expectedCommitSha], {
+      await execFileAsync("git", ["fetch", "origin", expectedCommitSha], {
         cwd: directory,
         env: environment,
         maxBuffer: 10 * 1024 * 1024
       }).catch(async () => {
-        await execFileAsync("git", ["fetch", "--unshallow", "origin"], {
+        await execFileAsync("git", ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
           cwd: directory,
           env: environment,
           maxBuffer: 10 * 1024 * 1024
@@ -498,6 +508,49 @@ async function readGitSnapshotMetadata(directory: string, commitSha: string): Pr
     },
     changes: parseRawGitChanges(rawChanges)
   };
+}
+
+async function readGitHistoryMetadata(
+  directory: string,
+  commitSha: string
+): Promise<{
+  readonly commits: NonNullable<GitSnapshotMetadata["history"]>;
+  readonly complete: boolean;
+}> {
+  const maximum = Math.min(positiveInt(process.env.CONTEXT_GIT_HISTORY_LIMIT, 5_000), 50_000);
+  const { stdout } = await execFileAsync(
+    "git",
+    [
+      "log",
+      "--topo-order",
+      `--max-count=${maximum + 1}`,
+      "--format=%H%x00%T%x00%P%x00%an <%ae>%x00%aI%x00%cI%x00%B%x1e",
+      commitSha
+    ],
+    { cwd: directory, env: gitEnvironment(), maxBuffer: 100 * 1024 * 1024 }
+  );
+  const parsed = stdout
+    .split("\x1e")
+    .map((value) => value.replace(/^\n+|\n+$/g, ""))
+    .filter(Boolean)
+    .map((value) => {
+      const [shaValue, treeValue, parentsValue, authorValue, authoredAtValue, committedAtValue, ...messageParts] =
+        value.split("\0");
+      return {
+        sha: requiredGitSha(shaValue?.trim(), "history commit SHA"),
+        treeSha: requiredGitSha(treeValue?.trim(), "history tree SHA"),
+        parentShas: (parentsValue ?? "")
+          .trim()
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((sha) => requiredGitSha(sha, "history parent SHA")),
+        ...(authorValue?.trim() ? { author: authorValue.trim() } : {}),
+        ...(authoredAtValue?.trim() ? { authoredAt: authoredAtValue.trim() } : {}),
+        ...(committedAtValue?.trim() ? { committedAt: committedAtValue.trim() } : {}),
+        message: messageParts.join("\0").trim()
+      };
+    });
+  return { commits: parsed.slice(0, maximum), complete: parsed.length <= maximum };
 }
 
 function parseRawGitChanges(value: string): GitChange[] {
@@ -605,7 +658,14 @@ function isProbablyBinary(value: Buffer): boolean {
   return suspicious / sample.length > 0.1;
 }
 
-async function loadProviderObservations(repository: string, commitSha: string): Promise<ProviderObservationInput[]> {
+async function loadProviderObservations(
+  repository: string,
+  commitSha: string
+): Promise<{
+  readonly observations: ProviderObservationInput[];
+  readonly complete: boolean;
+  readonly frontier: Record<string, unknown>;
+}> {
   const observedAt = new Date().toISOString();
   const [metadata, pullRequests, issues] = await Promise.all([
     githubJson(`/repos/${repository}`),
@@ -623,7 +683,7 @@ async function loadProviderObservations(repository: string, commitSha: string): 
       metadata: { provider: "github", kind: "repository" }
     }
   ];
-  for (const pullRequest of pullRequests) {
+  for (const pullRequest of pullRequests.values) {
     const number = Number(pullRequest.number);
     if (!Number.isSafeInteger(number) || number <= 0) continue;
     const pathOrUrl = stringValue(pullRequest.html_url);
@@ -637,7 +697,7 @@ async function loadProviderObservations(repository: string, commitSha: string): 
       metadata: { provider: "github", number }
     });
   }
-  for (const issue of issues) {
+  for (const issue of issues.values) {
     if (issue.pull_request) continue;
     const number = Number(issue.number);
     if (!Number.isSafeInteger(number) || number <= 0) continue;
@@ -652,7 +712,22 @@ async function loadProviderObservations(repository: string, commitSha: string): 
       metadata: { provider: "github", number }
     });
   }
-  return observations;
+  return {
+    observations,
+    complete: pullRequests.complete && issues.complete,
+    frontier: {
+      pullRequests: {
+        observed: pullRequests.values.length,
+        complete: pullRequests.complete,
+        ...(pullRequests.reason ? { reason: pullRequests.reason } : {})
+      },
+      issues: {
+        observed: issues.values.length,
+        complete: issues.complete,
+        ...(issues.reason ? { reason: issues.reason } : {})
+      }
+    }
+  };
 }
 
 async function runReview(work: ClaimedWork<"run-review">): Promise<Record<string, unknown>> {
@@ -760,34 +835,39 @@ async function githubJson(path: string): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
-async function githubOptionalJsonArray(path: string): Promise<Record<string, unknown>[]> {
+async function githubOptionalJsonArray(
+  path: string
+): Promise<{ values: Record<string, unknown>[]; complete: boolean; reason?: string }> {
   try {
     const response = await githubRequest(path, "application/vnd.github+json");
     const value: unknown = await response.json();
     if (!Array.isArray(value) || value.some((entry) => !isRecord(entry))) {
       throw new Error(`GitHub response ${path} is not an object array`);
     }
-    return value as Record<string, unknown>[];
+    return { values: value as Record<string, unknown>[], complete: true };
   } catch (error) {
     if (!/GitHub request failed with (?:403|404):/.test(errorMessage(error))) throw error;
     logger.warn(`optional GitHub source unavailable: ${path}`, {
       event: "ingest.github_source_unavailable",
       path
     });
-    return [];
+    return { values: [], complete: false, reason: errorMessage(error).slice(0, 200) };
   }
 }
 
-async function githubOptionalPaginatedArray(path: string): Promise<Record<string, unknown>[]> {
+async function githubOptionalPaginatedArray(
+  path: string
+): Promise<{ values: Record<string, unknown>[]; complete: boolean; reason?: string }> {
   const maximum = Math.min(positiveInt(process.env.CONTEXT_GITHUB_HISTORY_LIMIT, 500), 5_000);
   const values: Record<string, unknown>[] = [];
   for (let page = 1; values.length < maximum; page += 1) {
     const separator = path.includes("?") ? "&" : "?";
     const batch = await githubOptionalJsonArray(`${path}${separator}per_page=100&page=${page}`);
-    values.push(...batch.slice(0, maximum - values.length));
-    if (batch.length < 100) break;
+    if (!batch.complete) return { values, complete: false, ...(batch.reason ? { reason: batch.reason } : {}) };
+    values.push(...batch.values.slice(0, maximum - values.length));
+    if (batch.values.length < 100) return { values, complete: true };
   }
-  return values;
+  return { values, complete: false, reason: `history limit ${maximum} reached` };
 }
 
 async function githubText(path: string, accept: string): Promise<string> {
@@ -1054,10 +1134,6 @@ function stringArray(value: unknown): string[] {
 
 function stringValue(value: unknown): string {
   return typeof value === "string" ? value : "";
-}
-
-function sha256(value: string): string {
-  return createHash("sha256").update(value).digest("hex");
 }
 
 async function boundedFailureDetail(response: Response, secrets: readonly string[] = []): Promise<string> {

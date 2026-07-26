@@ -23,6 +23,8 @@ JINA_TENANCY_MODE=shared-db
 JINA_DB_NAME=jina
 JINA_DB_USER=jina_v2_app
 JINA_DB_PASS_SECRET=jina-shared-db-password:latest
+JINA_MIGRATION_DB_USER=jina_app
+JINA_MIGRATION_DB_PASS_SECRET=jina-db-password:latest
 ```
 
 `JINA_TENANT_ID` must be unset in shared mode. Local deployments can use
@@ -52,8 +54,10 @@ clone, Daytona, and model-provider secrets mounted into its services.
 
 ## Database boundary
 
-`jina_v2_app` is a separate login. It may read the original identity tables and own only
-v2 schemas. It must not mutate `public` or read session/OAuth credential tables.
+`jina_v2_app` is a separate runtime login. It may read the original identity tables and
+operate its board/runtime schemas, but it must not own `jina_context`, mutate `public`, or
+read session/OAuth credential tables. `jina_app` is the separate context
+migration/schema owner used only by the migration job.
 
 If `gcloud sql users create` grants `cloudsqlsuperuser`, revoke it before using the role:
 
@@ -64,12 +68,14 @@ revoke cloudsqlsuperuser from jina_v2_app;
 Run the boundary setup as a database administrator:
 
 ```sql
-create role jina_v2_app login password 'generated-password';
+create role jina_app login password 'migration-owner-password';
+create role jina_v2_app login noinherit password 'runtime-password';
 grant connect on database jina to jina_v2_app;
+grant connect on database jina to jina_app;
 
 create schema if not exists jina_runtime authorization jina_v2_app;
 create schema if not exists jina_board authorization jina_v2_app;
-create schema if not exists jina_context authorization jina_v2_app;
+create schema if not exists jina_context authorization jina_app;
 
 grant usage on schema public to jina_v2_app;
 grant select on table
@@ -86,8 +92,17 @@ sessions and integration secrets. The identity adapter also uses read-only trans
 Install context capability roles through the administrative migration job, not the API:
 
 ```sh
-DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate -- --install-roles
+CONTEXT_RUNTIME_DB_USER=jina_v2_app \
+  DATABASE_URL=postgresql://jina_app:...@.../jina \
+  pnpm --filter @jina/db migrate -- --install-roles
 ```
+
+The migration verifies the runtime role name, applies `ALTER ROLE ... NOINHERIT`, and
+grants membership in every focused context capability role. `NOINHERIT` means membership
+does not grant ambient table access: runtime adapters must enter a transaction and issue
+`SET LOCAL ROLE` for coordinator, ingest, derive, query, projector, or administrative
+work. Tests connect as this exact runtime login and verify capability activation and
+denied direct access.
 
 ## Context-engine cutover
 
@@ -100,9 +115,10 @@ The context engine is a clean replacement. No old index data is copied into
 4. Stop prior context workers and disable new context intake.
 5. Wait for old writes to stop. Archive pending old workflow metadata for audit; do not
    translate or replay it.
-6. Run the new schema/role migration with administrative credentials.
+6. Run the new schema/role migration with the separate owner credential and
+   `CONTEXT_RUNTIME_DB_USER=jina_v2_app`.
 7. Deploy API, `jina-context-worker`, task worker, dashboard, admin, and MCP-compatible
-   API as one coordinated release.
+   API from the same exact source/build identity as one coordinated Cloud Run release.
 8. Trigger `build-context` for every active repository/ref.
 9. Require exact-commit baseline generations before enabling callers, then allow
    knowledge derivation to publish enriched successors.

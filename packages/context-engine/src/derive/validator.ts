@@ -1,4 +1,4 @@
-import type { EvidenceAnchor, EvidenceRecord } from "../domain/evidence.js";
+import { evidenceExcerpt, type EvidenceAnchor, type EvidenceRecord } from "../domain/evidence.js";
 import { fingerprint, isFullCommitSha } from "../domain/fingerprint.js";
 import {
   createKnowledgeCitation,
@@ -32,6 +32,12 @@ function claimSupportsParagraph(claim: string, paragraph: string): boolean {
   const normalizedClaim = claim.toLowerCase().replace(/\s+/g, " ").trim();
   const normalizedParagraph = paragraph.toLowerCase().replace(/\s+/g, " ").trim();
   return normalizedClaim.length >= 12 && normalizedParagraph.includes(normalizedClaim);
+}
+
+function evidenceSupportsClaim(claim: string, excerpt: string): boolean {
+  const normalizedClaim = claim.toLowerCase().replace(/\s+/g, " ").trim();
+  const normalizedExcerpt = excerpt.toLowerCase().replace(/\s+/g, " ").trim();
+  return normalizedClaim.length >= 8 && normalizedExcerpt.includes(normalizedClaim);
 }
 
 export class KnowledgeOutputValidator {
@@ -82,6 +88,17 @@ export class KnowledgeOutputValidator {
         if (record === undefined) {
           diagnostics.push(`documents[${documentIndex}].citations[${citationIndex}] does not resolve`);
         } else {
+          const excerpt = evidenceExcerpt(record, citation);
+          if (excerpt === undefined) {
+            diagnostics.push(`documents[${documentIndex}].citations[${citationIndex}] has an invalid selector`);
+            continue;
+          }
+          if (!evidenceSupportsClaim(citation.claim, excerpt)) {
+            diagnostics.push(
+              `documents[${documentIndex}].citations[${citationIndex}] claim is not present in the cited evidence`
+            );
+            continue;
+          }
           resolved.push({
             claim: citation.claim,
             record,

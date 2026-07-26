@@ -23,7 +23,6 @@ import {
   MemoryContextEngineStore,
   MemoryContextPipelineCoordinator,
   QueryContextService,
-  StaticScopeAuthorizer,
   buildKnowledgePrompt,
   contextQueueTopics,
   contextTaskTypeDefinitions,
@@ -435,7 +434,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname.startsWith("/context/generations/")) {
       const generationId = routeId(url.pathname, "/context/generations/");
       if (!generationId) throw notFound("context generation not found");
-      const projection = await contextStore.getGeneration(generationId);
+      let projection = await contextStore.getGeneration(generationId);
       const repositories = await permittedRepositories(principal);
       if (
         !projection ||
@@ -443,6 +442,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         !repositories.includes(projection.generation.repository)
       ) {
         throw notFound("context generation not found");
+      }
+      if (!isTenantAdmin(principal)) {
+        projection = await contextStore.getAuthorizedGeneration(
+          generationId,
+          new Set(
+            await contextStore.aclFingerprintsForPrincipal(
+              principal.tenantId,
+              principal.principalId,
+              projection.generation.repository
+            )
+          )
+        );
+        if (!projection) throw notFound("context generation not found");
       }
       json(response, 200, {
         generation: {
@@ -466,7 +478,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
       const selected = requested ? [requested] : repositories;
       const revisions = (
-        await Promise.all(selected.map((repository) => contextStore.listRevisions(principal.tenantId, repository)))
+        await Promise.all(
+          selected.map(async (repository) => {
+            const revisions = await contextStore.listRevisions(principal.tenantId, repository);
+            if (isTenantAdmin(principal)) return revisions;
+            const allowed = await allowedKnowledgeRevisionIds(principal, repository);
+            return revisions.filter((revision) => allowed.has(revision.id));
+          })
+        )
       )
         .flat()
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
@@ -486,7 +505,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!revisionId) throw notFound("knowledge document not found");
       const revision = await contextStore.getRevision(revisionId);
       const repositories = await permittedRepositories(principal);
-      if (!revision || revision.tenantId !== principal.tenantId || !repositories.includes(revision.repository)) {
+      const revisionAllowed =
+        revision !== undefined &&
+        (isTenantAdmin(principal) ||
+          (await allowedKnowledgeRevisionIds(principal, revision.repository)).has(revision.id));
+      if (
+        !revision ||
+        revision.tenantId !== principal.tenantId ||
+        !repositories.includes(revision.repository) ||
+        !revisionAllowed
+      ) {
         throw notFound("knowledge document not found");
       }
       json(response, 200, {
@@ -505,7 +533,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       await requireRepositoryAccess(principal, repository);
       const ref = url.searchParams.get("ref")?.trim() || "main";
-      const projection = await contextStore.latestPublished(principal.tenantId, repository, ref);
+      const latest = (await contextStore.listGenerations(principal.tenantId, repository)).find(
+        (generation) => generation.status === "published" && generation.ref === ref
+      );
+      const projection =
+        latest === undefined
+          ? undefined
+          : isTenantAdmin(principal)
+            ? await contextStore.getGeneration(latest.id)
+            : await contextStore.getAuthorizedGeneration(
+                latest.id,
+                new Set(
+                  await contextStore.aclFingerprintsForPrincipal(principal.tenantId, principal.principalId, repository)
+                )
+              );
       if (!projection) throw notFound("published context generation not found");
       const path = url.searchParams.get("path")?.toLowerCase();
       const symbol = url.searchParams.get("symbol")?.toLowerCase();
@@ -528,6 +569,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       url.pathname.endsWith("/review")
     ) {
       requireBoundPrincipal(principal, config);
+      requireTenantAdmin(principal);
       const revisionId = routeId(url.pathname, "/context/knowledge/", "/review");
       if (!revisionId) throw notFound("knowledge revision not found");
       const revision = await contextStore.getRevision(revisionId);
@@ -712,10 +754,21 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/context/outbox/drain") {
-      await readRawBody(request);
+      const body = parseJsonObject(await readRawBody(request));
+      const limit =
+        typeof body.limit === "number" && Number.isSafeInteger(body.limit)
+          ? Math.max(1, Math.min(body.limit, 100))
+          : 20;
+      const checkpoints = await contextStore.pendingProjectionCheckpoints(principal.tenantId, limit);
+      const processed: string[] = [];
+      for (const checkpointId of checkpoints) {
+        await new IndexContextService(contextStore).index(checkpointId, nowIso());
+        processed.push(checkpointId);
+      }
       const backlog = await contextStore.projectionBacklog(principal.tenantId);
       json(response, 200, {
-        processedEventCount: 0,
+        processedCheckpointCount: processed.length,
+        processedCheckpointIds: processed,
         consumers: Object.entries(backlog).map(([consumer, value]) => ({
           consumer,
           pending: value.count,
@@ -845,17 +898,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function queryContext(principal: Principal, requestValue: QueryContextRequest) {
     const allowed = await permittedRepositories(principal);
     if (!allowed.includes(requestValue.repository)) throw notFound("repository context not found");
-    const authorizer = new StaticScopeAuthorizer([
-      {
-        tenantId: principal.tenantId,
-        principalId: principal.principalId,
-        repository: requestValue.repository,
-        aclFingerprints: ["*"]
-      }
-    ]);
     const startedAt = nowIso();
     const started = Date.now();
-    const result = await new QueryContextService(contextStore, authorizer).query(requestValue);
+    const result = await new QueryContextService(contextStore).query(requestValue);
     const completedAt = nowIso();
     await contextStore.recordQueryRun({
       id: result.traceId,
@@ -939,6 +984,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function requireRepositoryAccess(principal: Principal, repository: string): Promise<void> {
     if (isTenantAdmin(principal)) return;
     if (!(await permittedRepositories(principal)).includes(repository)) throw notFound("repository context not found");
+  }
+
+  async function allowedKnowledgeRevisionIds(principal: Principal, repository: string): Promise<Set<string>> {
+    const aclFingerprints = new Set(
+      await contextStore.aclFingerprintsForPrincipal(principal.tenantId, principal.principalId, repository)
+    );
+    const generations = await contextStore.listGenerations(principal.tenantId, repository);
+    const allowed = new Set<string>();
+    for (const generation of generations) {
+      if (generation.status !== "published") continue;
+      const projection = await contextStore.getAuthorizedGeneration(generation.id, aclFingerprints);
+      for (const document of projection?.documents ?? []) {
+        if (document.sourceRevisionId) allowed.add(document.sourceRevisionId);
+      }
+    }
+    return allowed;
   }
 
   function isTenantAdmin(principal: Principal): boolean {

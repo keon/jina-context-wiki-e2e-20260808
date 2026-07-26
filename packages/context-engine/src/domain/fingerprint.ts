@@ -45,6 +45,15 @@ export function normalizeRepository(value: string): string {
   return normalized;
 }
 
+export function repositoryAclFingerprint(tenantId: string, repository: string): string {
+  if (!tenantId.trim()) throw new Error("tenantId is required");
+  return fingerprint({
+    scope: "repository-read",
+    tenantId,
+    repository: normalizeRepository(repository)
+  });
+}
+
 export function normalizeIsoTime(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.valueOf())) {

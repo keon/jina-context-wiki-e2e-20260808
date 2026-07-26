@@ -66,7 +66,11 @@ GITHUB_APP_PRIVATE_KEY=<PEM private key; literal \n escapes are accepted>
 When `ingest-evidence` starts, the worker exchanges a short-lived App JWT for an
 installation access token. It uses that token for both the exact Git checkout and bounded
 GitHub REST pagination, keeps it only in the active lease, and never stores it in task or
-context data. If an installation ID is present and minting fails, ingestion fails closed.
+context data. Git uses a full blob-filtered clone rather than a shallow clone. The worker
+persists bounded commit/parent history and paginates PR/issue sources; reaching a
+configured limit or receiving an optional-source 403/404 records a `partial` checkpoint
+and exact omission reason. If an installation ID is present and token minting fails,
+ingestion fails closed.
 
 Trusted manual callers may include a positive `githubInstallationId` in
 `POST /context/build`. A build with no installation ID falls back to
@@ -92,8 +96,10 @@ curl -X POST "${JINA_API_URL}/internal/context/access/sync" \
   --data '{"repositories":["owner/repository"]}'
 ```
 
-Sending an empty list revokes all context access for that principal. The credential is
-server-only and does not grant board or worker access.
+Sending an empty list revokes all context access for that principal. Each granted
+repository resolves to its deterministic repository ACL fingerprint, which is later used
+to filter projection rows in PostgreSQL before retrieval. The credential is server-only
+and does not grant board or worker access.
 
 ## Verify delivery
 

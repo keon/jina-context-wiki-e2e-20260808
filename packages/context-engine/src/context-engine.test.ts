@@ -24,6 +24,7 @@ import {
   fuseRetrievalCandidates,
   parseGeneratedKnowledgeDocuments,
   planContextQuery,
+  repositoryAclFingerprint,
   stableId,
   validateEvidenceAnchor,
   verifySynthesisCitations,
@@ -43,7 +44,10 @@ const source = ["# Billing", "", "export function handlePayment(total: number) {
   "\n"
 );
 
-async function ingestFixture(store: MemoryContextEngineStore, aclFingerprint = "acl-public") {
+async function ingestFixture(
+  store: MemoryContextEngineStore,
+  aclFingerprint = repositoryAclFingerprint(tenantId, repository)
+) {
   return new IngestEvidenceService(store).ingest({
     tenantId,
     repository,
@@ -82,7 +86,7 @@ async function ingestFixture(store: MemoryContextEngineStore, aclFingerprint = "
 }
 
 function validOutput(): KnowledgeGenerationOutput {
-  const claim = "handlePayment accepts a positive total in src/billing.ts.";
+  const claim = "export function handlePayment(total: number) { return total > 0; }";
   return {
     documents: [
       {
@@ -171,21 +175,18 @@ test("ingestion is content-addressed, idempotent, and produces deterministic str
   const facts = await store.listStructuralFacts(checkpoint.id);
   assert.ok(facts.some((fact) => fact.kind === "defines" && fact.to.endsWith("#handlePayment")));
   assert.equal((await store.listEvidence(checkpoint.id)).length, 3);
-  await assert.rejects(
-    () =>
-      service.ingest({
-        tenantId,
-        repository,
-        ref: "main",
-        commitSha,
-        aclFingerprint: "acl",
-        observationFrontier: "x",
-        sourceComplete: false,
-        createdAt,
-        files: []
-      }),
-    /incomplete/
-  );
+  const partial = await service.ingest({
+    tenantId,
+    repository,
+    ref: "partial",
+    commitSha,
+    aclFingerprint: "acl",
+    observationFrontier: "bounded:1",
+    sourceComplete: false,
+    createdAt,
+    files: []
+  });
+  assert.equal(partial.sourceCompleteness, "partial");
 });
 
 test("provider JSON pointers resolve against immutable raw observations", async () => {
@@ -276,6 +277,43 @@ test("unsupported material paragraphs are rejected", async () => {
         createdAt
       }),
     /unsupported paragraph/
+  );
+});
+
+test("citation claims must be verbatim in the exact cited evidence selection", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const unrelated = validOutput();
+  unrelated.documents[0]!.citations[0]!.claim = "The payment function always retries failed charges.";
+  unrelated.documents[0]!.bodyMarkdown = "The payment function always retries failed charges.";
+  await assert.rejects(
+    () =>
+      new KnowledgeOutputValidator(store).validate({
+        output: unrelated,
+        checkpointId: checkpoint.id,
+        generatorName: "test",
+        generatorVersion: "1",
+        model: "test",
+        promptVersion: "1",
+        createdAt
+      }),
+    /claim is not present in the cited evidence/
+  );
+
+  const mixedSelector = validOutput();
+  mixedSelector.documents[0]!.citations[0]!.jsonPointer = "/state";
+  await assert.rejects(
+    () =>
+      new KnowledgeOutputValidator(store).validate({
+        output: mixedSelector,
+        checkpointId: checkpoint.id,
+        generatorName: "test",
+        generatorVersion: "1",
+        model: "test",
+        promptVersion: "1",
+        createdAt
+      }),
+    /does not resolve|invalid selector/
   );
 });
 
@@ -417,7 +455,7 @@ test("explicit file targets exclude provider records that merely mention the pat
     repository,
     ref: "main",
     commitSha,
-    aclFingerprint: "acl-public",
+    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
     observationFrontier: "github:101",
     sourceComplete: true,
     createdAt,
@@ -465,7 +503,7 @@ test("ownership lookup includes CODEOWNERS while excluding provider chatter", as
     repository,
     ref: "main",
     commitSha,
-    aclFingerprint: "acl-public",
+    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
     observationFrontier: "github:102",
     sourceComplete: true,
     createdAt,

@@ -99,6 +99,8 @@ A production context dashboard should show:
   `index-context`;
 - lease loss and API polling failures;
 - repository/ref ingestion freshness and latest published generation age;
+- complete/partial checkpoint rate plus Git history count/root status, GitHub pagination
+  completion/reason, and omitted-body count from the observation frontier;
 - outbox depth and oldest age by manifest, knowledge-current, lexical, dense, hierarchy,
   structural, identity, ACL, and retention consumer;
 - generation build time and degraded/disabled projector capabilities;
@@ -122,7 +124,7 @@ Alert at an operational threshold when:
 
 - required outbox age exceeds the freshness SLO;
 - stage failure/repair rates change materially;
-- ingestion source completeness fails repeatedly;
+- partial checkpoint rate or a repeated Git/GitHub/body-omission frontier regresses;
 - derivation latency/cost or validation failures move materially;
 - query p95 or insufficient coverage regresses;
 - rebuild fingerprints diverge for identical input;

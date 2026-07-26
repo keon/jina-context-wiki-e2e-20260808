@@ -16,6 +16,7 @@ import { PostgresEvidenceRepository } from "./context/evidence-repository.js";
 import { PostgresContextOutboxRepository } from "./context/outbox-repository.js";
 import { PostgresContextPipelineCoordinator } from "./context/pipeline-coordinator.js";
 import { PostgresContextQueryRepository } from "./context/query-repository.js";
+import { CONTEXT_ROLES } from "./context/roles.js";
 import { PostgresContextEngineStore } from "./context/store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -110,9 +111,7 @@ test(
         sourceId: blobSha,
         contentDigest: fingerprint(source),
         commitSha,
-        pathOrUrl: "src/context.ts",
-        startLine: 1,
-        endLine: 1
+        pathOrUrl: "src/context.ts"
       },
       ref,
       title: "src/context.ts",
@@ -165,6 +164,31 @@ test(
       }
     };
     await store.commitSnapshot(snapshot, ingestClaim.fence);
+    assert.ok(
+      await store.resolveAnchor(snapshot.checkpoint.id, {
+        tenantId,
+        repository,
+        sourceType: "blob",
+        sourceId: blobSha,
+        commitSha,
+        pathOrUrl: "src/context.ts",
+        startLine: 1,
+        endLine: 1
+      })
+    );
+    assert.equal(
+      await store.resolveAnchor(snapshot.checkpoint.id, {
+        tenantId,
+        repository,
+        sourceType: "blob",
+        sourceId: blobSha,
+        commitSha,
+        pathOrUrl: "src/context.ts",
+        startLine: 1,
+        endLine: 3
+      }),
+      undefined
+    );
     for (const table of ["refs", "commits", "commit_parents", "trees", "tree_entries", "blob_analyses"]) {
       const canonical = await database.pool.query<{ count: string }>(
         `select count(*)::text as count from jina_context.${table}`
@@ -195,6 +219,19 @@ test(
     });
     assert.ok(lexicalDeliveries.length > 0);
     assert.ok(lexicalDeliveries.every((delivery) => delivery.consumer === "lexical"));
+    for (const delivery of lexicalDeliveries) {
+      assert.equal(
+        await outbox.fail({
+          deliveryId: delivery.deliveryId,
+          leaseId: delivery.leaseId,
+          now: at(800),
+          retryAt: at(900),
+          error: "simulated projector restart"
+        }),
+        true
+      );
+      assert.equal(await outbox.acknowledge(delivery.deliveryId, delivery.leaseId, at(850)), false);
+    }
     assert.equal(
       await coordinator.complete({
         tenantId,
@@ -325,6 +362,14 @@ test(
     assert.ok(candidates.some((candidate) => candidate.text.includes("deployContext")));
     assert.ok(candidates.some((candidate) => candidate.sourceKind === "knowledge"));
     const enrichedProjection = await store.getGeneration(enrichedGeneration.id);
+    const authorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, new Set([aclFingerprint]));
+    const unauthorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, new Set());
+    assert.equal(authorizedProjection?.documents.length, enrichedProjection?.documents.length);
+    assert.deepEqual(unauthorizedProjection?.documents, []);
+    assert.deepEqual(unauthorizedProjection?.fragments, []);
+    assert.deepEqual(unauthorizedProjection?.exactIndex, []);
+    assert.deepEqual(unauthorizedProjection?.hierarchyNodes, []);
+    assert.deepEqual(unauthorizedProjection?.structuralRelations, []);
     const fragment = enrichedProjection?.fragments[0];
     assert.ok(fragment);
     await embeddings.store({
@@ -403,6 +448,37 @@ test(
     assert.deepEqual(postErasureCandidates, []);
     const backlog = await store.projectionBacklog(tenantId);
     assert.ok(Object.values(backlog).every((value) => value.count === 0));
+    const projectorBarrier = await database.pool.query<{
+      status: string;
+      lease_id: string | null;
+      completed_at: Date | null;
+    }>(
+      `select status,lease_id,completed_at
+       from jina_context.generation_projectors
+       where generation_id=$1
+       order by consumer`,
+      [rebuiltAfterErasure.id]
+    );
+    assert.ok(projectorBarrier.rows.length > 0);
+    assert.ok(
+      projectorBarrier.rows.every(
+        (projector) =>
+          !["pending", "running"].includes(projector.status) &&
+          projector.lease_id === null &&
+          projector.completed_at !== null
+      )
+    );
+    const recordedProjectorCheckpoints = await database.pool.query<{ count: string }>(
+      `select count(*)::text count
+       from jina_context.projection_checkpoints checkpoint
+       join jina_context.generation_projectors projector
+         on projector.generation_id=$1
+        and projector.consumer=checkpoint.consumer
+       where checkpoint.tenant_id=$2 and checkpoint.repository=$3 and checkpoint.ref_name=$4
+         and projector.status <> 'failed'`,
+      [rebuiltAfterErasure.id, tenantId, repository, ref]
+    );
+    assert.equal(Number(recordedProjectorCheckpoints.rows[0]?.count), projectorBarrier.rows.length);
 
     const buildAfter = await coordinator.get(build.id);
     assert.equal(buildAfter?.status, "degraded");
@@ -461,6 +537,32 @@ test(
       await roleClient.query("reset role").catch(() => undefined);
       roleClient.release();
     }
+
+    const runtimeRole = "jina_context_runtime_test";
+    const runtimePassword = "context-runtime-test-password";
+    await database.pool.query(`drop role if exists ${runtimeRole}`);
+    await database.pool.query(`create role ${runtimeRole} login password '${runtimePassword}' noinherit`);
+    await database.pool.query(`grant ${CONTEXT_ROLES.join(",")} to ${runtimeRole}`);
+    const runtimeUrl = new URL(databaseUrl!);
+    runtimeUrl.username = runtimeRole;
+    runtimeUrl.password = runtimePassword;
+    const rawRuntime = new Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+    await assert.rejects(
+      rawRuntime.query("select count(*) from jina_context.evidence_checkpoints"),
+      /permission denied/
+    );
+    await rawRuntime.end();
+    const runtimeDatabase = new ContextDatabase({
+      connectionString: runtimeUrl.toString(),
+      manageSchema: false,
+      manageRoles: false
+    });
+    const runtimeStore = new PostgresContextEngineStore(runtimeDatabase);
+    assert.ok((await runtimeStore.listRepositories(tenantId)).includes(repository));
+    assert.equal((await runtimeStore.getGeneration(rebuiltAfterErasure.id))?.generation.id, rebuiltAfterErasure.id);
+    await runtimeStore.close();
+    await database.pool.query(`revoke ${CONTEXT_ROLES.join(",")} from ${runtimeRole}`);
+    await database.pool.query(`drop role ${runtimeRole}`);
 
     await store.close();
   }

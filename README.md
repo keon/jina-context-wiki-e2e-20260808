@@ -58,14 +58,20 @@ repository test execution are not shipped.
 The context engine has three board-visible stages:
 
 1. `ingest-evidence` pins a full commit SHA and stores immutable provider observations,
-   Git objects, an exact tree, content-addressed blobs, deterministic parser output,
-   structural facts, and ACL observations.
+   an exact tree, content-addressed blobs, bounded commit/parent history, deterministic
+   parser output, structural facts, and ACL observations. Git uses a full
+   blob-filtered clone rather than a shallow clone. Every checkpoint is explicitly
+   `complete` or `partial`; the observation frontier records Git/GitHub limits and
+   omitted file bodies instead of overstating coverage.
 2. `derive-knowledge` turns a bounded evidence bundle into immutable, versioned
-   knowledge-document revisions. Host validation checks stable subject identity and every
-   citation against original evidence before persistence.
+   knowledge-document revisions. Host validation checks stable subject identity, resolves
+   each exact line range or JSON pointer against original evidence, and requires the
+   normalized citation claim to occur verbatim in that selected excerpt before persistence.
 3. `index-context` publishes a coherent generation of indexable context documents,
    fragments, exact and lexical indexes, deterministic structure, current knowledge, and
-   a deterministic long-document hierarchy.
+   a deterministic long-document hierarchy. Projection consumers use independent leases
+   and scoped acknowledgements; rebuild/drain work replays pending checkpoints without
+   sharing a global processed bit.
 
 The baseline index does not depend on a model. Derived knowledge can enrich a later
 generation, while exact and structural context remains available if derivation fails.
@@ -83,7 +89,14 @@ ambiguities, coverage, and a trace ID.
 Stateless Streamable HTTP MCP is served at `POST /mcp`. The `jina-context` server exposes
 exactly one read-only tool, `query_context`, with the same storage-neutral query contract.
 Both HTTP and MCP retrieval enforce repository access before candidate generation and
-require a bound principal.
+require a bound principal. Principal access resolves to repository ACL fingerprints;
+PostgreSQL filters documents, fragments, exact entries, hierarchy rows, manifest rows,
+and current-knowledge rows before retrievers can create candidates.
+
+API, context worker, task worker, dashboard, and admin are built from the same source
+revision and deployed as one Cloud Run release. Database DDL and capability-role grants
+run first under a separate migration login; the runtime login is `NOINHERIT` and every
+context transaction explicitly activates its capability with `SET LOCAL ROLE`.
 
 Webhook-triggered private-repository builds carry the GitHub installation ID and mint a
 short-lived, installation-scoped token for ingestion. Manual builds may pass

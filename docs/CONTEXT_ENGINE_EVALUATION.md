@@ -2,54 +2,65 @@
 
 ## Latest checked-in-fixture result
 
-- **Run:** 2026-07-26T08:48:42.757Z
+- **Run:** 2026-07-26T09:27:12.330Z
 - **Command:** `pnpm evaluate:context`
 - **Fixture:** `packages/context-engine/evaluation/fixtures.v1.json`
 - **Fixture schema:** `context-evaluation-v1`
 - **Report schema:** `context-evaluation-report-v1`
 
-| Gate                     | Full routed hybrid |     Requirement | Result |
-| ------------------------ | -----------------: | --------------: | ------ |
-| Exact-query completeness |              1.000 | 1.000 hard gate | pass   |
-| Citation integrity       |              1.000 | 1.000 hard gate | pass   |
-| Evidence recall@20       |              1.000 |    target 0.900 | pass   |
+| Gate                           | Full routed hybrid |     Requirement | Result |
+| ------------------------------ | -----------------: | --------------: | ------ |
+| Exact-query completeness       |              1.000 | 1.000 hard gate | pass   |
+| Citation anchor integrity      |              1.000 | 1.000 hard gate | pass   |
+| Evidence recall@20             |              1.000 |    target 0.900 | pass   |
+| Unauthorized citation count    |                  0 |     0 hard gate | pass   |
+| Labeled conflict failures      |                  0 |     0 hard gate | pass   |
+| Required source-kind failures  |                  0 |     0 hard gate | pass   |
+| Grounded knowledge citation    |               true |  true hard gate | pass   |
+| Repository revocation enforced |               true |  true hard gate | pass   |
 
 The evaluator's process exit threshold for recall is `0.90`, matching the architecture
-plan's initial target. All three gates pass in this run.
+plan's initial target. It also exits nonzero for any ACL leak, labeled conflict mismatch,
+required source-kind mismatch, derived claim that is absent from its resolved excerpt, or
+post-run revocation failure. All gates pass in this PostgreSQL-adapter run.
 
-The v1 fixture has eight cases: exact symbol, exact path/list, structural call,
-architecture overview, PR/change, incident status, ownership, and long-document
-retrieval. All eight expected source IDs are found. The ownership case retrieves the
-CODEOWNERS evidence through exact/lexical indexing.
+The v1 fixture now has 12 cases: exact symbol, exact path/list, structural call,
+architecture overview, derived knowledge, PR/change, incident status, ownership,
+long-document retrieval, a temporal window, a labeled conflict, and a negative private
+ACL case. The full routed variant finds all 12 expected source IDs, reports the labeled
+conflict, uses the required source kinds, and returns none of the private source IDs. The
+evaluator then revokes the principal's repository access and requires the next query to
+fail.
 
 All citations returned in this run resolve back through the active evidence checkpoint
-with matching source identity and content digest. This is a fixture-level integrity test;
-production acceptance separately verifies HTTP and MCP anchors at a real repository
-commit.
+with matching source identity and content digest. Citation-selector and claim-grounding
+tests separately prove that line ranges/JSON pointers resolve exact excerpts and that a
+derived citation's normalized claim must occur verbatim in the selected excerpt rather
+than a nearby source location. Production acceptance separately verifies HTTP and MCP
+anchors at a real repository commit.
 
 ## Ablation results
 
-| Variant                 | Enabled | Evidence recall | Exact completeness | Citation integrity |
-| ----------------------- | ------- | --------------: | -----------------: | -----------------: |
-| lexical only            | yes     |           1.000 |              1.000 |              1.000 |
-| lexical + structural    | yes     |           1.000 |              1.000 |              1.000 |
-| lexical + dense control | no      |           1.000 |              1.000 |              1.000 |
-| lexical + hierarchy     | yes     |           1.000 |              1.000 |              1.000 |
-| lexical + knowledge     | yes     |           1.000 |              1.000 |              1.000 |
-| full routed hybrid      | yes     |           1.000 |              1.000 |              1.000 |
-| full without reranking  | yes     |           1.000 |              1.000 |              1.000 |
-| routed long context     | yes     |           1.000 |              1.000 |              1.000 |
+| Variant                 | Enabled | Evidence recall | Exact completeness | Citation integrity | ACL leaks |
+| ----------------------- | ------- | --------------: | -----------------: | -----------------: | --------: |
+| lexical only            | yes     |           0.917 |              1.000 |              1.000 |         0 |
+| lexical + structural    | yes     |           0.917 |              1.000 |              1.000 |         0 |
+| lexical + dense control | no      |           0.917 |              1.000 |              1.000 |         0 |
+| lexical + hierarchy     | yes     |           0.917 |              1.000 |              1.000 |         0 |
+| lexical + knowledge     | yes     |           0.917 |              1.000 |              1.000 |         0 |
+| full routed hybrid      | yes     |           1.000 |              1.000 |              1.000 |         0 |
+| full without reranking  | yes     |           1.000 |              1.000 |              1.000 |         0 |
+| routed long context     | yes     |           0.917 |              1.000 |              1.000 |         0 |
 
-The current fixture does not contain derived knowledge revisions, so the knowledge
-ablation cannot demonstrate incremental quality. Likewise, the full and no-reranking
-variants are equivalent because the implementation uses transparent deterministic fusion,
-not a separate learned reranker. These rows establish a reproducible control, not proof
-that those components add value.
+The fixture contains an immutable derived knowledge revision cited to original README
+evidence. The knowledge route retrieves it for architecture/knowledge/long-document
+questions. The full and no-reranking variants remain equivalent because the implementation
+uses transparent deterministic fusion, not a separate learned reranker.
 
-The long-document case uses hierarchy, lexical, and `long_context` in the full routed
-variant and finds its expected source. The architecture overview routes the same three
-retrievers. Exact cases use the exact retriever, structural call uses exact plus
-structural, change uses structured, and incident status uses lexical plus structured.
+The full routed variant's temporal case uses lexical plus structured retrieval and is the
+one expected-source distinction missed by the single-route controls. Exact cases use the
+exact retriever, structural call uses exact plus structural, change uses structured, and
+the conflict case returns both labeled sources plus one conflict group.
 
 ## Optional capability decisions
 
@@ -94,13 +105,34 @@ pnpm install --frozen-lockfile
 pnpm evaluate:context
 ```
 
-The command builds `@jina/context-engine`, ingests the fixture into
-`MemoryContextEngineStore`, publishes a baseline generation, runs every ablation, resolves
-returned citation anchors, prints JSON to stdout, and exits nonzero if:
+Without `TEST_DATABASE_URL`, the command builds the packages, ingests the fixture into
+`MemoryContextEngineStore`, commits a cited derived knowledge revision, publishes a
+generation, runs every ablation, resolves returned anchors, checks revocation, and prints
+JSON to stdout.
+
+For the merge gate, use a disposable PostgreSQL database:
+
+```sh
+TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/jina_test \
+  pnpm evaluate:context
+```
+
+That mode drops only the `jina_context` schema in the named disposable database, then
+repeats the same fixture and gates through `PostgresContextEngineStore`. It exercises
+actual SQL ACL filtering, generation hydration, knowledge projection, and query
+telemetry/storage paths. Never point this evaluator at production or a shared development
+database.
+
+The evaluator exits nonzero if:
 
 - full exact completeness is not `1`;
 - full citation integrity is not `1`;
-- full evidence recall is below the evaluator threshold.
+- full evidence recall is below the evaluator threshold;
+- an unauthorized source is cited;
+- a labeled conflict count differs;
+- a required source kind is missing; or
+- the persisted knowledge claim is absent from its exact resolved evidence excerpt; or
+- the principal can still query after repository access is revoked.
 
 To retain an artifact without modifying the repository:
 
@@ -113,8 +145,9 @@ fragmentation, planner routing, retrieval, fusion, hierarchy, citations, or the 
 
 ## CI use
 
-`scripts/cloud-build-ci.sh` runs `pnpm evaluate:context` after typecheck, lint, tests, and
-the clean-cutover vocabulary check. A pull request must not bypass this step.
+`scripts/cloud-build-ci.sh` runs `pnpm evaluate:context` with its ephemeral PostgreSQL 16
+`TEST_DATABASE_URL` after typecheck, lint, tests, and the clean-cutover vocabulary check.
+A pull request must not bypass this step.
 
 When changing the fixture schema:
 
@@ -147,13 +180,14 @@ must also record the pre-cutover database backup ID and immutable image/source S
 
 Before calling the target evaluation set complete:
 
-- add positive and negative derived-knowledge cases for every supported kind;
-- add conflicts, stale sources, historical refs/time windows, revoked ACL, and erasure
-  replay;
+- add positive and negative derived-knowledge cases for every remaining supported kind;
+- expand stale-source, multi-ref history, and erasure replay coverage beyond the current
+  temporal, conflict, private-ACL, and revocation cases;
 - expand long-document coverage enough to decide PageIndex;
 - add a real dense ablation before enabling embeddings;
 - measure structured and hybrid p95 against the plan's latency budgets;
-- add groundedness and citation-precision scoring beyond anchor integrity.
+- add graded groundedness and citation-precision scoring beyond the enforced exact
+  citation-claim excerpt check.
 
-These gaps do not invalidate the exact/citation hard-gate result above, but they prevent
-using this small fixture as a broad product-quality claim.
+These gaps do not invalidate the exact/citation/ACL/conflict hard-gate result above, but
+they prevent using this small fixture as a broad product-quality claim.

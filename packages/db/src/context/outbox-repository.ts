@@ -45,7 +45,9 @@ export class PostgresContextOutboxRepository {
   constructor(private readonly database: ContextDatabase) {}
 
   async enqueue(event: ContextOutboxEvent, availableAt = event.occurredAt): Promise<void> {
-    await this.database.transaction((client) => enqueueContextEvent(client, event, availableAt));
+    await this.database.transactionAs("jina_context_admin", (client) =>
+      enqueueContextEvent(client, event, availableAt)
+    );
   }
 
   async claim(input: {
@@ -55,10 +57,12 @@ export class PostgresContextOutboxRepository {
     readonly leaseExpiresAt: string;
     readonly tenantId?: string;
     readonly repository?: string;
+    readonly ref?: string;
+    readonly commitSha?: string;
     readonly limit?: number;
   }): Promise<readonly ContextOutboxDelivery[]> {
     const limit = Math.max(1, Math.min(input.limit ?? 50, 500));
-    return this.database.transaction(async (client) => {
+    return this.database.transactionAs("jina_context_admin", async (client) => {
       const result = await client.query<DeliveryRow>(
         `with claimable as (
            select delivery_id
@@ -67,12 +71,36 @@ export class PostgresContextOutboxRepository {
              and (lease_expires_at is null or lease_expires_at <= $2)
              and ($3::text is null or tenant_id=$3)
              and ($4::text is null or repository=$4)
+             and (
+               $5::text is null
+               or aggregate_type not in ('evidence','knowledge')
+               or payload->>'ref'=$5
+               or exists (
+                 select 1 from jina_context.knowledge_document_revisions revision
+                 where revision.tenant_id=outbox.tenant_id
+                   and revision.repository=outbox.repository
+                   and revision.id=outbox.aggregate_id
+                   and revision.ref_name=$5
+               )
+             )
+             and (
+               $6::text is null
+               or aggregate_type not in ('evidence','knowledge')
+               or payload->>'commitSha'=$6
+               or exists (
+                 select 1 from jina_context.knowledge_document_revisions revision
+                 where revision.tenant_id=outbox.tenant_id
+                   and revision.repository=outbox.repository
+                   and revision.id=outbox.aggregate_id
+                   and revision.commit_sha=$6
+               )
+             )
            order by available_at,occurred_at,delivery_id
            for update skip locked
-           limit $5
+           limit $7
          )
          update jina_context.outbox delivery
-         set lease_id=$6,lease_owner=$7,lease_expires_at=$8,attempt=delivery.attempt+1,last_error=null
+         set lease_id=$8,lease_owner=$9,lease_expires_at=$10,attempt=delivery.attempt+1,last_error=null
          from claimable
          where delivery.delivery_id=claimable.delivery_id
          returning delivery.*`,
@@ -81,6 +109,8 @@ export class PostgresContextOutboxRepository {
           input.now,
           input.tenantId ?? null,
           input.repository ?? null,
+          input.ref ?? null,
+          input.commitSha ?? null,
           limit,
           randomUUID(),
           input.workerId,
@@ -93,7 +123,8 @@ export class PostgresContextOutboxRepository {
 
   async acknowledge(deliveryId: string, leaseId: string, processedAt: string): Promise<boolean> {
     await this.database.initialize();
-    const result = await this.database.pool.query(
+    const result = await this.database.queryAs(
+      "jina_context_admin",
       `update jina_context.outbox
        set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
        where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
@@ -110,7 +141,8 @@ export class PostgresContextOutboxRepository {
     readonly error: string;
   }): Promise<boolean> {
     await this.database.initialize();
-    const result = await this.database.pool.query(
+    const result = await this.database.queryAs(
+      "jina_context_admin",
       `update jina_context.outbox
        set available_at=$4,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=$5
        where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
@@ -124,7 +156,8 @@ export class PostgresContextOutboxRepository {
     scope?: { readonly tenantId?: string; readonly repository?: string }
   ): Promise<{ readonly count: number; readonly oldestAvailableAt?: string }> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{ count: string; oldest: Date | null }>(
+    const result = await this.database.queryAs<{ count: string; oldest: Date | null }>(
+      "jina_context_admin",
       `select count(*)::text as count,min(available_at) as oldest
        from jina_context.outbox
        where consumer=$1 and processed_at is null

@@ -7,6 +7,7 @@ import type {
   RefManifestEntry,
   StructuralFact
 } from "@jina/context-engine";
+import { evidenceExcerpt } from "@jina/context-engine";
 import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, contextDigest, contextStableId, dateString } from "./database.js";
@@ -20,7 +21,7 @@ interface CheckpointRow {
   ref_name: string;
   commit_sha: string;
   parser_version: string;
-  source_completeness: "complete";
+  source_completeness: "complete" | "partial";
   observation_frontier: string;
   evidence_fingerprint: string;
   manifest_fingerprint: string;
@@ -122,7 +123,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   constructor(private readonly database: ContextDatabase) {}
 
   async registerRepository(input: RepositoryRegistration, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_ingest", async (client) => {
       await assertContextWriteFence(client, input.tenantId, "run-ingest-evidence", fence);
       await client.query(
         `insert into jina_context.repositories
@@ -153,7 +154,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   }
 
   async appendObservation(observation: ProviderObservation, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_ingest", async (client) => {
       await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
       await insertObservation(client, observation);
       await enqueueContextEvent(client, {
@@ -165,7 +166,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         aggregateId: observation.id,
         eventType: "evidence.observed",
         payload: { observationId: observation.id, sourceType: observation.sourceType },
-        consumers: ["lexical", "structural", "identity", "acl", "retention"],
+        consumers: ["retention"],
         occurredAt: observation.recordedAt
       });
       await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
@@ -173,7 +174,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   }
 
   async appendRepositoryAcl(observation: RepositoryAclObservation, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_ingest", async (client) => {
       await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
       await client.query(
         `insert into jina_context.repository_acl_observations
@@ -209,7 +210,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   }
 
   async commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_ingest", async (client) => {
       await assertContextWriteFence(client, snapshot.checkpoint.tenantId, "run-ingest-evidence", fence);
       await ensureRepository(client, snapshot.checkpoint);
       for (const record of snapshot.records) await insertEvidenceRecord(client, record);
@@ -324,7 +325,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
 
   async getCheckpoint(checkpointId: string): Promise<EvidenceCheckpoint | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<CheckpointRow>(
+    const result = await this.database.queryAs<CheckpointRow>(
+      "jina_context_ingest",
       "select * from jina_context.evidence_checkpoints where id=$1",
       [checkpointId]
     );
@@ -333,7 +335,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
 
   async latestCheckpoint(tenantId: string, repository: string, ref: string): Promise<EvidenceCheckpoint | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<CheckpointRow>(
+    const result = await this.database.queryAs<CheckpointRow>(
+      "jina_context_ingest",
       `select * from jina_context.evidence_checkpoints
        where tenant_id=$1 and repository=$2 and ref_name=$3
        order by created_at desc,id desc limit 1`,
@@ -344,7 +347,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
 
   async listEvidence(checkpointId: string): Promise<EvidenceRecord[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<EvidenceRow>(
+    const result = await this.database.queryAs<EvidenceRow>(
+      "jina_context_ingest",
       `select evidence.*
        from jina_context.evidence_checkpoint_records selection
        join jina_context.evidence_records evidence
@@ -375,7 +379,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
     anchor: Omit<EvidenceAnchor, "contentDigest">
   ): Promise<EvidenceRecord | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<EvidenceRow>(
+    const result = await this.database.queryAs<EvidenceRow>(
+      "jina_context_ingest",
       `select evidence.*
        from jina_context.evidence_checkpoint_records selection
        join jina_context.evidence_records evidence
@@ -386,10 +391,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
          and evidence.tenant_id=$2 and evidence.repository=$3
          and evidence.source_type=$4 and evidence.source_id=$5
          and evidence.commit_sha is not distinct from $6
-         and evidence.path_or_url is not distinct from $7
-         and evidence.start_line is not distinct from $8
-         and evidence.end_line is not distinct from $9
-         and evidence.json_pointer is not distinct from $10
+         and ($7::text is null or evidence.path_or_url=$7)
          and not exists (
            select 1 from jina_context.erasure_filters erasure
            where erasure.tenant_id=evidence.tenant_id
@@ -410,18 +412,17 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         anchor.sourceType,
         anchor.sourceId,
         anchor.commitSha ?? null,
-        anchor.pathOrUrl ?? null,
-        anchor.startLine ?? null,
-        anchor.endLine ?? null,
-        anchor.jsonPointer ?? null
+        anchor.pathOrUrl ?? null
       ]
     );
-    return result.rows[0] ? evidenceFromRow(result.rows[0]) : undefined;
+    const record = result.rows[0] ? evidenceFromRow(result.rows[0]) : undefined;
+    return record && evidenceExcerpt(record, anchor) !== undefined ? record : undefined;
   }
 
   async listManifest(checkpointId: string): Promise<RefManifestEntry[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<ManifestRow>(
+    const result = await this.database.queryAs<ManifestRow>(
+      "jina_context_ingest",
       `select manifest.*
        from jina_context.evidence_checkpoint_manifest manifest
        where manifest.checkpoint_id=$1
@@ -445,7 +446,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
 
   async listStructuralFacts(checkpointId: string): Promise<StructuralFact[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<StructuralFactRow>(
+    const result = await this.database.queryAs<StructuralFactRow>(
+      "jina_context_ingest",
       `select fact.*
        from jina_context.evidence_checkpoint_structural_facts selection
        join jina_context.structural_facts fact
@@ -674,6 +676,59 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
        values ($1,$2,$3,$4,$5) on conflict do nothing`,
       [checkpoint.tenantId, checkpoint.repository, checkpoint.commitSha, ordinal, parentSha]
     );
+  }
+  for (const historical of git.history ?? []) {
+    if (historical.sha === checkpoint.commitSha) continue;
+    const historicalPayload = { commitSha: historical.sha, ...historical };
+    const historicalDigest = contextDigest(historicalPayload);
+    const historicalObservationId = contextStableId("observation", {
+      tenantId: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      source: "git",
+      commitSha: historical.sha,
+      observationDigest: historicalDigest
+    });
+    await client.query(
+      `insert into jina_context.observations
+        (id,tenant_id,repository,source,source_type,external_id,occurred_at,recorded_at,payload,content_digest)
+       values ($1,$2,$3,'git','git_object',$4,$5,$6,$7::jsonb,$8)
+       on conflict (tenant_id,repository,id) do nothing`,
+      [
+        historicalObservationId,
+        checkpoint.tenantId,
+        checkpoint.repository,
+        historical.sha,
+        historical.committedAt ?? checkpoint.createdAt,
+        checkpoint.createdAt,
+        JSON.stringify(historicalPayload),
+        historicalDigest
+      ]
+    );
+    await client.query(
+      `insert into jina_context.commits
+        (tenant_id,repository,sha,tree_sha,author_external_id,authored_at,committed_at,message,source_observation_id)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       on conflict (tenant_id,repository,sha) do nothing`,
+      [
+        checkpoint.tenantId,
+        checkpoint.repository,
+        historical.sha,
+        historical.treeSha,
+        historical.author ?? null,
+        historical.authoredAt ?? null,
+        historical.committedAt ?? null,
+        historical.message,
+        historicalObservationId
+      ]
+    );
+    for (const [ordinal, parentSha] of historical.parentShas.entries()) {
+      await client.query(
+        `insert into jina_context.commit_parents
+          (tenant_id,repository,commit_sha,ordinal,parent_sha)
+         values ($1,$2,$3,$4,$5) on conflict do nothing`,
+        [checkpoint.tenantId, checkpoint.repository, historical.sha, ordinal, parentSha]
+      );
+    }
   }
   const refId = contextStableId("ref", {
     tenantId: checkpoint.tenantId,

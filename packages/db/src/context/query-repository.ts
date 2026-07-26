@@ -40,7 +40,8 @@ export class PostgresContextQueryRepository {
     generationId: string
   ): Promise<{ readonly allowed: boolean; readonly aclFingerprint?: string }> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{ permission: string; acl_fingerprint: string }>(
+    const result = await this.database.queryAs<{ permission: string; acl_fingerprint: string }>(
+      "jina_context_query",
       `select acl.permission,acl.acl_fingerprint
        from jina_context.published_repository_acl acl
        where acl.tenant_id=$1 and acl.repository=$2 and acl.principal_id=$3
@@ -61,7 +62,8 @@ export class PostgresContextQueryRepository {
     principalId: string
   ): Promise<IndexGeneration | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<GenerationQueryRow>(
+    const result = await this.database.queryAs<GenerationQueryRow>(
+      "jina_context_query",
       `select generation.*
        from jina_context.index_generations generation
        where generation.tenant_id=$1 and generation.repository=$2
@@ -76,10 +78,12 @@ export class PostgresContextQueryRepository {
     );
     const row = result.rows[0];
     if (!row) return undefined;
-    const statuses = await this.database.pool.query<{
+    const statuses = await this.database.queryAs<{
       consumer: string;
       status: string;
-    }>("select consumer,status from jina_context.generation_projectors where generation_id=$1", [row.id]);
+    }>("jina_context_query", "select consumer,status from jina_context.generation_projectors where generation_id=$1", [
+      row.id
+    ]);
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -110,7 +114,8 @@ export class PostgresContextQueryRepository {
   }): Promise<readonly StoredRetrievalCandidate[]> {
     await this.database.initialize();
     const limit = Math.max(1, Math.min(input.limit, 200));
-    const result = await this.database.pool.query<CandidateRow>(
+    const result = await this.database.queryAs<CandidateRow>(
+      "jina_context_query",
       `with authorized as materialized (
          select acl.acl_fingerprint
          from jina_context.repository_acl_projection acl
@@ -164,7 +169,8 @@ export class PostgresContextQueryRepository {
     readonly limit: number;
   }): Promise<readonly StoredRetrievalCandidate[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<CandidateRow>(
+    const result = await this.database.queryAs<CandidateRow>(
+      "jina_context_query",
       `select document.id as document_id,fragment.id as fragment_id,
               document.source_kind,document.source_id,document.source_revision_id,
               document.title,fragment.source_text,fragment.contextual_text,
@@ -217,7 +223,7 @@ export class PostgresContextQueryRepository {
     }[]
   > {
     await this.database.initialize();
-    const result = await this.database.pool.query<{
+    const result = await this.database.queryAs<{
       id: string;
       relation_kind: string;
       source_id: string;
@@ -225,6 +231,7 @@ export class PostgresContextQueryRepository {
       source_anchors: EvidenceAnchor[];
       metadata: Record<string, unknown>;
     }>(
+      "jina_context_query",
       `select relation.*
        from jina_context.published_structural_relations relation
        where relation.tenant_id=$1 and relation.repository=$2 and relation.generation_id=$4
@@ -258,7 +265,8 @@ export class PostgresContextQueryRepository {
 
   async startQueryRun(run: QueryRunStart): Promise<void> {
     await this.database.initialize();
-    await this.database.pool.query(
+    await this.database.queryAs(
+      "jina_context_query",
       `insert into jina_context.query_runs
         (id,tenant_id,repository,principal_fingerprint,generation_id,request_fingerprint,
          task_kind,routes,coverage_status,degraded_capabilities,started_at)
@@ -286,7 +294,8 @@ export class PostgresContextQueryRepository {
     readonly failureKind?: string;
   }): Promise<boolean> {
     await this.database.initialize();
-    const result = await this.database.pool.query(
+    const result = await this.database.queryAs(
+      "jina_context_query",
       `update jina_context.query_runs
        set coverage_status=$2,degraded_capabilities=$3,completed_at=$4,duration_ms=$5,failure_kind=$6
        where id=$1 and completed_at is null`,
@@ -304,7 +313,8 @@ export class PostgresContextQueryRepository {
 
   async recordQueryRun(run: QueryRunTelemetry): Promise<void> {
     await this.database.initialize();
-    await this.database.pool.query(
+    await this.database.queryAs(
+      "jina_context_query",
       `insert into jina_context.query_runs
         (id,tenant_id,repository,principal_fingerprint,generation_id,request_fingerprint,
          task_kind,routes,coverage_status,degraded_capabilities,started_at,completed_at,
@@ -333,12 +343,13 @@ export class PostgresContextQueryRepository {
 
   async metrics(tenantId: string): Promise<QueryMetrics> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{
+    const result = await this.database.queryAs<{
       count: string;
       p95_ms: number | null;
       citation_failure_count: string;
       conflict_count: string;
     }>(
+      "jina_context_query",
       `select count(*)::text as count,
               percentile_disc(0.95) within group (order by duration_ms) as p95_ms,
               coalesce(sum(citation_failure_count),0)::text as citation_failure_count,

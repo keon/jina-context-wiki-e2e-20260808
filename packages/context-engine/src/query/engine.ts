@@ -38,9 +38,12 @@ export class StoreScopeAuthorizer implements ScopeAuthorizer {
   }): Promise<{ allowed: boolean; allowedAclFingerprints: ReadonlySet<string>; reason?: string }> {
     const repositories = await this.store.repositoriesForPrincipal(input.tenantId, input.principalId);
     const allowed = repositories.includes(input.repository);
+    const allowedAclFingerprints = allowed
+      ? await this.store.aclFingerprintsForPrincipal(input.tenantId, input.principalId, input.repository)
+      : [];
     return {
       allowed,
-      allowedAclFingerprints: allowed ? new Set(["*"]) : new Set(),
+      allowedAclFingerprints: new Set(allowedAclFingerprints),
       ...(allowed ? {} : { reason: "principal does not have repository access" })
     };
   }
@@ -107,10 +110,12 @@ export class QueryContextService {
       ref
     });
     if (!authorization.allowed) throw new Error(authorization.reason ?? "Repository access denied");
-    const projection =
-      request.ref === undefined
-        ? await this.#latestForRepository(request.tenantId, repository)
-        : await this.store.latestPublished(request.tenantId, repository, ref);
+    const projection = await this.#latestForRepository(
+      request.tenantId,
+      repository,
+      request.ref === undefined ? undefined : ref,
+      authorization.allowedAclFingerprints
+    );
     if (projection === undefined) throw new Error("No published context generation for the requested scope");
     const plan = planContextQuery({ ...request, repository, ref: projection.generation.ref });
     if (
@@ -193,6 +198,9 @@ export class QueryContextService {
     }));
     const used = [...new Set(candidates.map((candidate) => candidate.retriever))].sort();
     const missing = [...synthesis.missing];
+    if (projection.generation.capabilities.sourceCompleteness === "partial") {
+      missing.push("source-completeness:partial");
+    }
     for (const [kind, targets] of Object.entries(plan.targets)) {
       for (const target of targets) {
         if (
@@ -229,10 +237,17 @@ export class QueryContextService {
     };
   }
 
-  async #latestForRepository(tenantId: string, repository: string) {
+  async #latestForRepository(
+    tenantId: string,
+    repository: string,
+    ref: string | undefined,
+    allowedAclFingerprints: ReadonlySet<string>
+  ) {
     const generations = await this.store.listGenerations(tenantId, repository);
-    const latest = generations.find((generation) => generation.status === "published");
-    return latest === undefined ? undefined : this.store.getGeneration(latest.id);
+    const latest = generations.find(
+      (generation) => generation.status === "published" && (ref === undefined || generation.ref === ref)
+    );
+    return latest === undefined ? undefined : this.store.getAuthorizedGeneration(latest.id, allowedAclFingerprints);
   }
 
   async #hydrateOriginalEvidence(checkpointId: string, fused: FusedCandidate[]): Promise<FusedCandidate[]> {

@@ -56,7 +56,6 @@ export class IngestEvidenceService {
   }
 
   async ingest(input: IngestEvidenceInput, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
-    if (!input.sourceComplete) throw new Error("Cannot ingest an incomplete source snapshot");
     if (!isFullCommitSha(input.commitSha)) throw new Error("commitSha must be a full Git SHA");
     if (input.ref.trim() === "") throw new Error("ref is required");
     if (input.aclFingerprint.trim() === "") throw new Error("aclFingerprint is required");
@@ -163,6 +162,7 @@ export class IngestEvidenceService {
         ref: input.ref,
         commitSha: input.commitSha,
         parserVersion: this.#parser.version,
+        sourceCompleteness: input.sourceComplete ? "complete" : "partial",
         observationFrontier: input.observationFrontier,
         evidenceFingerprint,
         manifestFingerprint,
@@ -173,7 +173,7 @@ export class IngestEvidenceService {
       ref: input.ref,
       commitSha: input.commitSha,
       parserVersion: this.#parser.version,
-      sourceCompleteness: "complete",
+      sourceCompleteness: input.sourceComplete ? "complete" : "partial",
       observationFrontier: input.observationFrontier,
       evidenceFingerprint,
       manifestFingerprint,
@@ -195,7 +195,17 @@ export class IngestEvidenceService {
                 ...(input.git.commit.authoredAt ? { authoredAt: normalizeIsoTime(input.git.commit.authoredAt) } : {}),
                 ...(input.git.commit.committedAt ? { committedAt: normalizeIsoTime(input.git.commit.committedAt) } : {})
               },
-              changes: input.git.changes.map((change) => ({ ...change }))
+              changes: input.git.changes.map((change) => ({ ...change })),
+              ...(input.git.history === undefined
+                ? {}
+                : {
+                    history: input.git.history.map((commit) => ({
+                      ...commit,
+                      parentShas: [...commit.parentShas],
+                      ...(commit.authoredAt ? { authoredAt: normalizeIsoTime(commit.authoredAt) } : {}),
+                      ...(commit.committedAt ? { committedAt: normalizeIsoTime(commit.committedAt) } : {})
+                    }))
+                  })
             }
           })
     };
@@ -207,6 +217,14 @@ function validateGitSnapshot(git: GitSnapshotMetadata): void {
   if (!isFullCommitSha(git.commit.treeSha)) throw new Error("git.commit.treeSha must be a full Git SHA");
   if (git.commit.parentShas.some((sha) => !isFullCommitSha(sha))) {
     throw new Error("git.commit.parentShas must contain full Git SHAs");
+  }
+  for (const commit of git.history ?? []) {
+    if (!isFullCommitSha(commit.sha) || !isFullCommitSha(commit.treeSha)) {
+      throw new Error("git.history commit and tree SHAs must be full Git SHAs");
+    }
+    if (commit.parentShas.some((sha) => !isFullCommitSha(sha))) {
+      throw new Error("git.history parentShas must contain full Git SHAs");
+    }
   }
   for (const change of git.changes) {
     if (!change.path || change.path.startsWith("/") || change.path.includes("\u0000")) {

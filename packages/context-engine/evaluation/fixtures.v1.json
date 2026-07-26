@@ -30,6 +30,13 @@
       "language": "markdown",
       "repeatParagraphs": 220,
       "body": "# Incident runbook\n\nIf context publication stalls, inspect the required projector barrier and outbox age. Never bypass repository authorization."
+    },
+    {
+      "path": "secrets/private-plan.md",
+      "blobSha": "6666666666666666666666666666666666666666",
+      "language": "markdown",
+      "aclFingerprint": "evaluation-private-acl",
+      "body": "# Private launch plan\n\nThe private launch codename is Nebula."
     }
   ],
   "observations": [
@@ -62,7 +69,28 @@
       "observedAt": "2026-07-26T10:00:00.000Z",
       "metadata": {
         "provider": "github",
-        "kind": "issue"
+        "kind": "issue",
+        "claimSubject": "issue:77:state",
+        "claimValue": "closed"
+      }
+    },
+    {
+      "sourceType": "issue",
+      "sourceId": "github:issue:77:stale",
+      "title": "Issue #77: stale provider replica",
+      "payload": {
+        "number": 77,
+        "state": "open",
+        "title": "projector backlog incident",
+        "body": "A stale provider replica still reports the incident as open."
+      },
+      "observedAt": "2026-07-26T09:00:00.000Z",
+      "metadata": {
+        "provider": "github",
+        "kind": "issue",
+        "number": 77,
+        "claimSubject": "issue:77:state",
+        "claimValue": "open"
       }
     }
   ],
@@ -99,6 +127,14 @@
       "expectedSourceIds": ["2222222222222222222222222222222222222222"]
     },
     {
+      "id": "derived-knowledge",
+      "category": "knowledge",
+      "taskKind": "overview",
+      "question": "What knowledge was derived about the context service?",
+      "expectedSourceIds": ["2222222222222222222222222222222222222222"],
+      "requiredSourceKind": "knowledge"
+    },
+    {
       "id": "change-pr",
       "category": "change",
       "taskKind": "change",
@@ -128,6 +164,32 @@
       "taskKind": "overview",
       "question": "How should a stalled context publication be investigated?",
       "expectedSourceIds": ["5555555555555555555555555555555555555555"]
+    },
+    {
+      "id": "temporal-window",
+      "category": "temporal",
+      "taskKind": "change",
+      "question": "What repository activity happened after 10:30?",
+      "timeWindow": { "from": "2026-07-26T10:30:00.000Z" },
+      "expectedSourceIds": ["github:pull_request:42"],
+      "forbiddenSourceIds": ["github:issue:77", "github:issue:77:stale"]
+    },
+    {
+      "id": "conflicting-status",
+      "category": "conflict",
+      "taskKind": "status",
+      "question": "What state is issue #77 in?",
+      "targets": { "issues": ["77"] },
+      "expectedSourceIds": ["github:issue:77", "github:issue:77:stale"],
+      "expectedConflictCount": 1
+    },
+    {
+      "id": "private-acl",
+      "category": "acl-negative",
+      "taskKind": "lookup",
+      "question": "What is the private launch codename?",
+      "forbiddenSourceIds": ["6666666666666666666666666666666666666666"],
+      "expectedSourceIds": []
     }
   ]
 }

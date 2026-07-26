@@ -1,14 +1,15 @@
 # Deployment
 
-Cloud Build validates and deploys backend images to `jina-v2/us-central1`. Dashboard and
-admin deploy through the Om Labs Vercel projects `jina-dashboard` and `jina-admin`; both
-track `omxyz/jina`, use `apps/dashboard` or `apps/admin` as their root, and deploy
-production from `main`.
+Cloud Build validates, builds, and deploys one coordinated release to
+`jina-v2/us-central1`. API, worker, dashboard, and admin images are built from the same
+exact source revision, receive the same unique Cloud Build release identity, and are
+deployed to Cloud Run before production acceptance runs.
 
 ## Resources
 
 - Artifact Registry: `us-central1-docker.pkg.dev/jina-v2/jina`
-- Cloud Run services: `jina-api`, `jina-context-worker`, `jina-task-worker`
+- Cloud Run services: `jina-api`, `jina-context-worker`, `jina-task-worker`,
+  `jina-dashboard`, `jina-admin`
 - Cloud Run jobs: `jina-context-migrate`, `jina-acceptance`
 - Cloud SQL: `jina-463721:us-east1:jina-db`, database `jina`
 - Runtime service account: `jina-runtime@jina-v2.iam.gserviceaccount.com`
@@ -16,7 +17,7 @@ production from `main`.
   `jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com`
 - Pull-request validator: `jina-cloud-build-ci@jina-v2.iam.gserviceaccount.com`
 
-No Google service-account key is stored in GitHub or Vercel.
+No Google service-account key is stored in GitHub or the web applications.
 
 ## Runtime credentials and identity
 
@@ -27,6 +28,10 @@ The API mounts:
 - `jina-internal-api-token` as `INTERNAL_API_TOKEN`;
 - `jina-context-api-token` as `CONTEXT_API_TOKEN`.
 
+The migration job separately mounts `jina-db-password` and connects as the schema-owning
+`jina_app` login. API and workers mount `jina-shared-db-password` and connect as the
+non-owning `jina_v2_app` runtime login. Do not swap or reuse these credentials.
+
 `INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic.
 `CONTEXT_API_TOKEN` is deliberately narrower: it authorizes `/context/*`, `/mcp`, and
 `/internal/context/access/sync`. It never removes the principal requirement.
@@ -35,14 +40,14 @@ Context HTTP and MCP reads require `x-jina-principal-id`. Shared-database client
 send `x-jina-tenant-id`, and the API verifies the tenant/principal binding. Browser MCP
 origins, when present, must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
 
-Dashboard/admin values are server-side Vercel environment variables:
+Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
-`JINA_WEB_AUTH_PASSWORD`, and the configured tenant/allowlist. Both web apps bind API
-calls with `JINA_WEB_PRINCIPAL_ID`; the admin may instead derive
-`tenant:<JINA_TENANT_ID>` when a tenant ID is configured. One of those two principal
-bindings is required when the admin has `INTERNAL_API_TOKEN`. Never use a `NEXT_PUBLIC_`
-prefix for a credential. Preview deployments intentionally have no production API
-secret.
+`JINA_WEB_AUTH_PASSWORD`, `JINA_TENANT_ID`, and `JINA_WEB_PRINCIPAL_ID`. The coordinated
+deployment binds both apps to the acceptance tenant/principal and mounts
+`jina-dashboard-password` plus `jina-internal-api-token`. The admin may instead derive
+`tenant:<JINA_TENANT_ID>` when only a tenant ID is configured. One principal binding is
+required whenever the app has `INTERNAL_API_TOKEN`. Never use a `NEXT_PUBLIC_` prefix for
+a credential.
 
 ## Worker configuration
 
@@ -51,6 +56,7 @@ The context service runs three one-concurrency instances with continuous CPU and
 ```text
 WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context
 CONTEXT_GITHUB_HISTORY_LIMIT=500
+CONTEXT_GIT_HISTORY_LIMIT=5000
 CONTEXT_MAX_FILE_BYTES=5242880
 CONTEXT_MAX_SNAPSHOT_BYTES=25165824
 CONTEXT_CODEX_PROVIDER=openrouter
@@ -72,9 +78,17 @@ Local processes may use commas.
 ### Exact-commit and failure behavior
 
 A build accepts an optional full `commitSha`; push-triggered builds carry the event head
-SHA. The worker clones, verifies, and checks out that exact commit. It paginates bounded
-GitHub history, preserves the complete manifest when binary or oversized file bodies are
-omitted, and fails closed when source completeness or ref identity cannot be established.
+SHA. The worker performs a full blob-filtered clone (no shallow depth), verifies, and
+checks out that exact commit. It persists up to `CONTEXT_GIT_HISTORY_LIMIT` commits and
+parents and paginates PR/issue observations up to `CONTEXT_GITHUB_HISTORY_LIMIT`. It
+preserves every manifest entry when binary or oversized file bodies are omitted.
+
+The checkpoint is `complete` only when Git history reaches its root, every optional
+GitHub source reaches a final page, and no body is omitted. Reaching a configured bound,
+receiving an optional GitHub 403/404, or omitting a body produces `partial`, with exact
+counts/reasons/paths recorded in the observation frontier. Unverified commit identity or
+an invalid tree still fails closed. Partial generations are usable, but queries disclose
+`source-completeness:partial` in coverage.
 
 `ingest-evidence` and baseline `index-context` are required. `derive-knowledge` is
 optional for aggregate availability, uses one bounded repair, and can publish an enriched
@@ -103,20 +117,25 @@ pnpm --filter @jina/admin build
 Database integration tests receive an ephemeral PostgreSQL 16 service through
 `TEST_DATABASE_URL`.
 
-Build immutable API and worker images with a commit SHA:
+The supported production path is `cloudbuild.yaml`, which builds all four images, deploys
+all five services, and runs migration plus acceptance in one build. Start it from a clean
+checkout of the audited SHA:
 
 ```sh
 release_sha="$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
 gcloud builds submit \
   --project=jina-v2 \
   --region=us-central1 \
-  --config=cloudbuild.images.yaml \
-  --substitutions="_IMAGE_TAG=${release_sha}" \
+  --config=cloudbuild.yaml \
   .
 ```
 
-Do not deploy a mutable `latest` tag for a release. The tag must identify the audited
-source commit.
+Record both `release_sha` and the returned Cloud Build ID. The build uses its unique ID
+for the deployed API, worker, dashboard, and admin image tags, so every service resolves
+to the exact artifact produced from that audited source. `latest` is also pushed for API
+and worker convenience, but the deploy script does not select it. Do not use the
+API/worker-only split build files for this coordinated context-engine cutover.
 
 ## Pre-deployment backup
 
@@ -141,31 +160,25 @@ deployment.
 
 ## Deploy
 
-Deploy the images carrying the same audited SHA:
+The coordinated `cloudbuild.yaml` invocation above calls
+`scripts/cloud-build-deploy.sh`, which:
 
-```sh
-gcloud builds submit \
-  --project=jina-v2 \
-  --region=us-central1 \
-  --config=cloudbuild.deploy.yaml \
-  --substitutions="_IMAGE_TAG=${release_sha}" \
-  .
-```
-
-`scripts/cloud-build-deploy.sh` then:
-
-1. deploys and executes `jina-context-migrate`, including capability-role installation;
+1. deploys and executes `jina-context-migrate` with the migration-owner credential,
+   including capability-role installation and runtime-login grants;
 2. deploys `jina-api` with schema management disabled and checks `/health`;
 3. deploys `jina-context-worker` and verifies the exact three topics;
 4. removes the retired worker service after the replacement is healthy;
 5. deploys `jina-task-worker` and verifies its topics;
-6. deploys and executes `jina-acceptance`;
-7. fails the Cloud Build if migration, health, topic, or acceptance checks fail.
+6. deploys `jina-dashboard` and `jina-admin` using the exact images built in this release;
+7. deploys and executes `jina-acceptance`;
+8. fails the Cloud Build if migration, health, topic, or acceptance checks fail.
 
 The migration installs `jina_context` and its capability roles from scratch with
-`--install-roles`. The migration login therefore needs `CREATEROLE`; runtime services
-still start with schema management disabled. The migration does not copy or translate
-prior semantic indexes. Active repositories must be reingested.
+`--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, marks that login `NOINHERIT`,
+and grants membership in the focused NOLOGIN roles. The migration login therefore needs
+schema ownership and `CREATEROLE`; runtime services start with schema management disabled
+and activate a capability per transaction with `SET LOCAL ROLE`. The migration does not
+copy or translate prior semantic indexes. Active repositories must be reingested.
 
 ## Production acceptance
 
@@ -194,18 +207,56 @@ knowledge availability, `23` for HTTP/MCP answer or citation failures, `24` for 
 and `25` for transport or unexpected failures. Inspect the job execution logs before
 retrying with a new request key.
 
+## Outbox recovery and rebuild
+
+Outbox consumers own independent delivery rows and leases. If metrics show a backlog,
+an internal operator can drain up to 100 pending checkpoints per call:
+
+```sh
+curl -X POST "${JINA_API_URL}/internal/context/outbox/drain" \
+  -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
+  -H "X-Jina-Principal-Id: tenant:<uuid>" \
+  -H "X-Jina-Tenant-Id: <uuid>" \
+  -H "Content-Type: application/json" \
+  --data '{"limit":20}'
+```
+
+The endpoint selects checkpoint IDs represented by pending evidence, knowledge, ACL, or
+retention deliveries and re-runs idempotent `index-context`. Each projector claims and
+acknowledges only its own unexpired delivery lease for the exact
+tenant/repository/ref/commit scope. The response reports processed checkpoint IDs and the
+remaining per-consumer backlog.
+
+A tenant administrator can force a successor generation from the latest checkpoint:
+
+```sh
+curl -X POST "${JINA_API_URL}/context/rebuild" \
+  -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
+  -H "X-Jina-Principal-Id: tenant:<uuid>" \
+  -H "X-Jina-Tenant-Id: <uuid>" \
+  -H "Content-Type: application/json" \
+  --data '{"repository":"owner/repository","ref":"main"}'
+```
+
+Neither operation mutates canonical evidence or shares a global processed flag. If a
+delivery lease is lost, its acknowledgement fails and the delivery remains retryable.
+
 ## Migrations and roles
 
 For a local or administrative database:
 
 ```sh
 DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate
-DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate -- --install-roles
+CONTEXT_RUNTIME_DB_USER=jina_runtime \
+  DATABASE_URL=postgresql://migration-owner:... \
+  pnpm --filter @jina/db migrate -- --install-roles
 ```
 
 Role installation requires `CREATEROLE`. Production runs
 `migrate.js,--install-roles` as a separate job; the API starts with
-`JINA_DB_MANAGE_SCHEMA=false`. Runtime logins must not own or alter the schema. See
+`JINA_DB_MANAGE_SCHEMA=false`. The runtime login must be pre-created, must not own or alter
+the schema, and is deliberately `NOINHERIT`. Adapters use `transactionAs`/`queryAs` to
+execute `SET LOCAL ROLE` before accessing context tables. See
 [DATA_MODELS.md](DATA_MODELS.md) for the capability-role list.
 
 Install the pgvector extension/schema only when an approved embedding provider is ready

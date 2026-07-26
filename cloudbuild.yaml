@@ -42,6 +42,24 @@ steps:
       - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
       - .
 
+  - id: build-dashboard
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    args:
+      - build
+      - --file=apps/dashboard/Dockerfile
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
+      - .
+
+  - id: build-admin
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    args:
+      - build
+      - --file=apps/admin/Dockerfile
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID
+      - .
+
   - id: push-api
     name: gcr.io/cloud-builders/docker
     waitFor: [build-api]
@@ -62,9 +80,19 @@ steps:
         docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
         docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
 
+  - id: push-dashboard
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-dashboard]
+    args: [push, us-central1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID]
+
+  - id: push-admin
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-admin]
+    args: [push, us-central1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID]
+
   - id: deploy-backend
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
-    waitFor: [push-api, push-worker]
+    waitFor: [push-api, push-worker, push-dashboard, push-admin]
     entrypoint: bash
     args: [scripts/cloud-build-deploy.sh]
     env:
@@ -76,6 +104,8 @@ steps:
       - JINA_DB_NAME=${_JINA_DB_NAME}
       - JINA_DB_USER=${_JINA_DB_USER}
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
+      - JINA_MIGRATION_DB_USER=${_JINA_MIGRATION_DB_USER}
+      - JINA_MIGRATION_DB_PASS_SECRET=${_JINA_MIGRATION_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
       - JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
@@ -87,12 +117,15 @@ steps:
 
 substitutions:
   # Identity/control-plane and context schemas share the production database;
-  # tenant isolation is enforced by jina_context roles and RLS.
+  # tenant isolation is enforced by bound principals, tenant-scoped SQL, and
+  # NOINHERIT capability roles. RLS additionally fences consumer-owned queues.
   _CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db
   _JINA_TENANCY_MODE: shared-db
   _JINA_DB_NAME: jina
   _JINA_DB_USER: jina_v2_app
   _JINA_DB_PASS_SECRET: jina-shared-db-password:latest
+  _JINA_MIGRATION_DB_USER: jina_app
+  _JINA_MIGRATION_DB_PASS_SECRET: jina-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
   _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold

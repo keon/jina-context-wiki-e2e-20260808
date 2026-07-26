@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type {
   ContextDocument,
   ContextFragment,
@@ -7,6 +8,7 @@ import type {
   GenerationProjection,
   HierarchyNode,
   IndexGeneration,
+  ProjectorStatus,
   ProjectionStore,
   RefManifestEntry,
   StructuralRelation
@@ -47,7 +49,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         throw new Error(`Required projector ${consumer} is not ready`);
       }
     }
-    return this.database.transaction(async (client) => {
+    return this.database.transactionAs("jina_context_admin", async (client) => {
       await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
       const existing = await loadGenerationRow(client, generation.id);
       if (existing) {
@@ -55,6 +57,18 @@ export class PostgresProjectionRepository implements ProjectionStore {
           throw new Error(`Generation identity collision for ${generation.id}`);
         }
         if (existing.status === "published") {
+          for (const consumer of contextProjectionConsumersFor(generation)) {
+            await acknowledgeScopedDeliveries(client, {
+              generationId: generation.id,
+              checkpointId: generation.checkpointId,
+              consumer,
+              tenantId: generation.tenantId,
+              repository: generation.repository,
+              ref: generation.ref,
+              commitSha: generation.commitSha,
+              processedAt: publishedAt
+            });
+          }
           await assertContextWriteFence(
             client,
             generation.tenantId,
@@ -100,43 +114,16 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ContextProjectionConsumer,
         string
       ][]) {
-        const status = generation.projectorStatuses[consumer];
         await client.query(
           `insert into jina_context.generation_projectors
             (generation_id,consumer,required,version,status,output_fingerprint,
              processed_through,started_at,completed_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$8)`,
+           values ($1,$2,$3,$4,'pending',null,null,null,null)`,
           [
             generation.id,
             consumer,
             requiredContextConsumers.includes(consumer as (typeof requiredContextConsumers)[number]),
-            version,
-            status,
-            status === "ready" ? generation.fingerprint : null,
-            evidence.created_at,
-            generation.createdAt
-          ]
-        );
-        await client.query(
-          `insert into jina_context.projection_checkpoints
-            (tenant_id,repository,ref_name,consumer,projector_version,processed_through,
-             output_fingerprint,updated_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8)
-           on conflict (tenant_id,repository,ref_name,consumer) do update
-           set projector_version=excluded.projector_version,
-               processed_through=excluded.processed_through,
-               output_fingerprint=excluded.output_fingerprint,
-               lease_id=null,lease_owner=null,lease_expires_at=null,
-               updated_at=excluded.updated_at`,
-          [
-            generation.tenantId,
-            generation.repository,
-            generation.ref,
-            consumer,
-            version,
-            evidence.created_at,
-            status === "ready" ? generation.fingerprint : null,
-            generation.createdAt
+            version
           ]
         );
       }
@@ -150,6 +137,32 @@ export class PostgresProjectionRepository implements ProjectionStore {
       await projectIdentities(client, generation);
       await projectAcl(client, generation);
 
+      for (const consumer of Object.keys(generation.projectorVersions) as ContextProjectionConsumer[]) {
+        await completeScopedProjector(client, {
+          generation,
+          consumer,
+          status: generation.projectorStatuses[consumer],
+          processedThrough: evidence.created_at,
+          completedAt: publishedAt
+        });
+      }
+      const incomplete = await client.query<{ consumer: ContextProjectionConsumer; status: ProjectorStatus }>(
+        `select consumer,status
+         from jina_context.generation_projectors
+         where generation_id=$1 and (
+           (required and status <> 'ready')
+           or status in ('pending','running')
+         )
+         order by consumer`,
+        [generation.id]
+      );
+      if (incomplete.rows.length > 0) {
+        throw new Error(
+          `Generation ${generation.id} did not pass its projector barrier: ${incomplete.rows
+            .map((row) => `${row.consumer}=${row.status}`)
+            .join(", ")}`
+        );
+      }
       await client.query(
         `update jina_context.index_generations
          set status='invalidated',invalidated_at=$4
@@ -161,31 +174,6 @@ export class PostgresProjectionRepository implements ProjectionStore {
         `update jina_context.index_generations
          set status='published',published_at=$2 where id=$1 and status='building'`,
         [generation.id, publishedAt]
-      );
-      await client.query(
-        `update jina_context.outbox delivery
-         set processed_at=$2,lease_id=null,lease_owner=null,lease_expires_at=null,
-             last_error=case when projector.status='failed' then 'projector failed for generation ' || $1 else null end
-         from jina_context.generation_projectors projector
-         where projector.generation_id=$1 and projector.consumer=delivery.consumer
-           and delivery.tenant_id=$3 and delivery.repository=$4 and delivery.processed_at is null
-           and (
-             delivery.aggregate_type in ('evidence','access','retention')
-             or (
-               delivery.aggregate_type='knowledge'
-               and exists (
-                 select 1
-                 from jina_context.knowledge_document_revisions revision
-                 where revision.tenant_id=delivery.tenant_id
-                   and revision.repository=delivery.repository
-                   and revision.id=delivery.aggregate_id
-                   and revision.ref_name=$5
-                   and revision.commit_sha=$6
-               )
-             )
-           )
-           and delivery.occurred_at <= $2`,
-        [generation.id, publishedAt, generation.tenantId, generation.repository, generation.ref, generation.commitSha]
       );
       const generationEventId = `event_generation_${contextDigest({
         id: generation.id,
@@ -203,12 +191,17 @@ export class PostgresProjectionRepository implements ProjectionStore {
         consumers: ["retention"],
         occurredAt: publishedAt
       });
-      await client.query(
-        `update jina_context.outbox
-         set processed_at=$2
-         where event_id=$1 and consumer='retention' and processed_at is null`,
-        [generationEventId, publishedAt]
-      );
+      await acknowledgeScopedDeliveries(client, {
+        generationId: generation.id,
+        checkpointId: generation.checkpointId,
+        consumer: "retention",
+        tenantId: generation.tenantId,
+        repository: generation.repository,
+        ref: generation.ref,
+        commitSha: generation.commitSha,
+        processedAt: publishedAt,
+        eventId: generationEventId
+      });
       await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
       return generation;
     });
@@ -216,14 +209,37 @@ export class PostgresProjectionRepository implements ProjectionStore {
 
   async getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
     await this.database.initialize();
-    const generation = await loadGenerationRow(this.database.pool, generationId);
+    const generation = (
+      await this.database.queryAs<GenerationRow>(
+        "jina_context_admin",
+        "select * from jina_context.index_generations where id=$1",
+        [generationId]
+      )
+    ).rows[0];
     if (!generation || generation.status !== "published") return undefined;
     return this.hydrate(generation);
   }
 
+  async getAuthorizedGeneration(
+    generationId: string,
+    allowedAclFingerprints: ReadonlySet<string>
+  ): Promise<GenerationProjection | undefined> {
+    await this.database.initialize();
+    const generation = (
+      await this.database.queryAs<GenerationRow>(
+        "jina_context_admin",
+        "select * from jina_context.index_generations where id=$1",
+        [generationId]
+      )
+    ).rows[0];
+    if (!generation || generation.status !== "published") return undefined;
+    return this.hydrate(generation, [...allowedAclFingerprints]);
+  }
+
   async latestPublished(tenantId: string, repository: string, ref: string): Promise<GenerationProjection | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<GenerationRow>(
+    const result = await this.database.queryAs<GenerationRow>(
+      "jina_context_admin",
       `select * from jina_context.index_generations
        where tenant_id=$1 and repository=$2 and ref_name=$3 and status='published'
        order by published_at desc,id desc limit 1`,
@@ -234,7 +250,8 @@ export class PostgresProjectionRepository implements ProjectionStore {
 
   async listGenerations(tenantId: string, repository: string): Promise<IndexGeneration[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<GenerationRow>(
+    const result = await this.database.queryAs<GenerationRow>(
+      "jina_context_admin",
       `select * from jina_context.index_generations
        where tenant_id=$1 and repository=$2 and status <> 'invalidated'
        order by created_at desc,id desc`,
@@ -242,55 +259,297 @@ export class PostgresProjectionRepository implements ProjectionStore {
     );
     const generations: IndexGeneration[] = [];
     for (const row of result.rows) {
-      generations.push(generationFromRow(row, await projectorStatuses(this.database.pool, row.id)));
+      generations.push(generationFromRow(row, await this.projectorStatuses(row.id)));
     }
     return generations;
   }
 
-  private async hydrate(row: GenerationRow): Promise<GenerationProjection> {
+  private async hydrate(row: GenerationRow, allowedAclFingerprints?: readonly string[]): Promise<GenerationProjection> {
+    const acl = allowedAclFingerprints === undefined ? null : [...allowedAclFingerprints];
     const [statuses, manifest, currentKnowledge, documents, fragments, exactIndex, hierarchyNodes, relations] =
       await Promise.all([
-        projectorStatuses(this.database.pool, row.id),
-        this.database.pool.query<ManifestDbRow>(
-          "select * from jina_context.ref_manifest where generation_id=$1 order by path",
-          [row.id]
+        this.projectorStatuses(row.id),
+        this.database.queryAs<ManifestDbRow>(
+          "jina_context_admin",
+          `select distinct manifest.*
+           from jina_context.ref_manifest manifest
+           join jina_context.context_documents document
+             on document.generation_id=manifest.generation_id
+            and document.metadata->>'path'=manifest.path
+           where manifest.generation_id=$1
+             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
+           order by manifest.path`,
+          [row.id, acl]
         ),
-        this.database.pool.query<CurrentKnowledgeDbRow>(
-          "select * from jina_context.current_knowledge_revisions where generation_id=$1 order by logical_id",
-          [row.id]
+        this.database.queryAs<CurrentKnowledgeDbRow>(
+          "jina_context_admin",
+          `select distinct current.*
+           from jina_context.current_knowledge_revisions current
+           join jina_context.context_documents document
+             on document.generation_id=current.generation_id
+            and document.source_revision_id=current.revision_id
+           where current.generation_id=$1
+             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
+           order by current.logical_id`,
+          [row.id, acl]
         ),
-        this.database.pool.query<DocumentDbRow>(
-          "select * from jina_context.context_documents where generation_id=$1 order by id",
-          [row.id]
+        this.database.queryAs<DocumentDbRow>(
+          "jina_context_admin",
+          `select document.*
+           from jina_context.context_documents document
+           where document.generation_id=$1
+             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
+           order by document.id`,
+          [row.id, acl]
         ),
-        this.database.pool.query<FragmentDbRow>(
-          "select * from jina_context.context_fragments where generation_id=$1 order by document_id,ordinal",
-          [row.id]
+        this.database.queryAs<FragmentDbRow>(
+          "jina_context_admin",
+          `select fragment.*
+           from jina_context.context_fragments fragment
+           join jina_context.context_documents document on document.id=fragment.document_id
+           where fragment.generation_id=$1
+             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
+           order by fragment.document_id,fragment.ordinal`,
+          [row.id, acl]
         ),
-        this.database.pool.query<ExactIndexDbRow>(
-          "select * from jina_context.exact_index where generation_id=$1 order by term,document_id,field",
-          [row.id]
+        this.database.queryAs<ExactIndexDbRow>(
+          "jina_context_admin",
+          `select exact.*
+           from jina_context.exact_index exact
+           join jina_context.context_documents document on document.id=exact.document_id
+           where exact.generation_id=$1
+             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
+           order by exact.term,exact.document_id,exact.field`,
+          [row.id, acl]
         ),
-        this.database.pool.query<HierarchyDbRow>(
-          "select * from jina_context.hierarchy_nodes where generation_id=$1 order by document_id,preorder_start",
-          [row.id]
+        this.database.queryAs<HierarchyDbRow>(
+          "jina_context_admin",
+          `select hierarchy.*
+           from jina_context.hierarchy_nodes hierarchy
+           join jina_context.context_documents document on document.id=hierarchy.document_id
+           where hierarchy.generation_id=$1
+             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
+           order by hierarchy.document_id,hierarchy.preorder_start`,
+          [row.id, acl]
         ),
-        this.database.pool.query<RelationDbRow>(
+        this.database.queryAs<RelationDbRow>(
+          "jina_context_admin",
           "select * from jina_context.structural_relations where generation_id=$1 order by id",
           [row.id]
         )
       ]);
+    const hydratedDocuments = documents.rows.map(documentFromRow);
+    const allowedAnchors = new Set(
+      hydratedDocuments.flatMap((document) =>
+        document.anchors.map((anchor) => `${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
+      )
+    );
+    const hydratedRelations = relations.rows
+      .map(relationFromRow)
+      .filter(
+        (relation) =>
+          allowedAclFingerprints === undefined ||
+          relation.anchors.every((anchor) =>
+            allowedAnchors.has(`${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
+          )
+      );
     return {
       generation: generationFromRow(row, statuses),
       manifest: manifest.rows.map(manifestFromRow),
       currentKnowledge: currentKnowledge.rows.map(currentKnowledgeFromRow),
-      documents: documents.rows.map(documentFromRow),
+      documents: hydratedDocuments,
       fragments: fragments.rows.map(fragmentFromRow),
       exactIndex: exactIndex.rows.map(exactIndexFromRow),
       hierarchyNodes: hierarchyNodes.rows.map(hierarchyFromRow),
-      structuralRelations: relations.rows.map(relationFromRow)
+      structuralRelations: hydratedRelations
     };
   }
+
+  private async projectorStatuses(generationId: string): Promise<IndexGeneration["projectorStatuses"]> {
+    const result = await this.database.queryAs<{ consumer: ContextProjectionConsumer; status: ProjectorStatus }>(
+      "jina_context_admin",
+      "select consumer,status from jina_context.generation_projectors where generation_id=$1",
+      [generationId]
+    );
+    return Object.fromEntries(
+      result.rows.map((row) => [row.consumer, row.status])
+    ) as IndexGeneration["projectorStatuses"];
+  }
+}
+
+function contextProjectionConsumersFor(generation: IndexGeneration): ContextProjectionConsumer[] {
+  return (Object.keys(generation.projectorStatuses) as ContextProjectionConsumer[]).filter(
+    (consumer) => generation.projectorStatuses[consumer] !== "failed"
+  );
+}
+
+async function completeScopedProjector(
+  client: PoolClient,
+  input: {
+    generation: IndexGeneration;
+    consumer: ContextProjectionConsumer;
+    status: ProjectorStatus;
+    processedThrough: Date;
+    completedAt: string;
+  }
+): Promise<void> {
+  const leaseId = randomUUID();
+  const leaseOwner = `projector:${input.generation.id}:${input.consumer}`;
+  const claimed = await client.query(
+    `update jina_context.generation_projectors
+     set status='running',lease_id=$3,lease_owner=$4,
+         lease_expires_at=$5::timestamptz + interval '5 minutes',
+         started_at=coalesce(started_at,$5),completed_at=null,failure=null
+     where generation_id=$1 and consumer=$2 and status='pending'`,
+    [input.generation.id, input.consumer, leaseId, leaseOwner, input.completedAt]
+  );
+  if (claimed.rowCount !== 1) {
+    throw new Error(`Projector ${input.consumer} could not claim generation ${input.generation.id}`);
+  }
+  if (input.status !== "failed") {
+    await acknowledgeScopedDeliveries(client, {
+      generationId: input.generation.id,
+      checkpointId: input.generation.checkpointId,
+      consumer: input.consumer,
+      tenantId: input.generation.tenantId,
+      repository: input.generation.repository,
+      ref: input.generation.ref,
+      commitSha: input.generation.commitSha,
+      processedAt: input.completedAt
+    });
+  }
+  const completed = await client.query(
+    `update jina_context.generation_projectors
+     set status=$4,output_fingerprint=$5,processed_through=$6,completed_at=$7,
+         failure=$8::jsonb,lease_id=null,lease_owner=null,lease_expires_at=null
+     where generation_id=$1 and consumer=$2 and lease_id=$3
+       and status='running' and lease_expires_at > $7`,
+    [
+      input.generation.id,
+      input.consumer,
+      leaseId,
+      input.status,
+      input.status === "ready" ? input.generation.fingerprint : null,
+      input.processedThrough,
+      input.completedAt,
+      input.status === "failed" ? JSON.stringify({ reason: "projector reported failed" }) : null
+    ]
+  );
+  if (completed.rowCount !== 1) {
+    throw new Error(`Projector ${input.consumer} lost its generation lease for ${input.generation.id}`);
+  }
+  await client.query(
+    `insert into jina_context.projection_checkpoints
+      (tenant_id,repository,ref_name,consumer,projector_version,processed_through,
+       output_fingerprint,updated_at)
+     select $1,$2,$3,consumer,version,$5,$6,$7
+     from jina_context.generation_projectors
+     where generation_id=$4 and consumer=$8 and status <> 'failed'
+     on conflict (tenant_id,repository,ref_name,consumer) do update
+     set projector_version=excluded.projector_version,
+         processed_through=excluded.processed_through,
+         output_fingerprint=excluded.output_fingerprint,
+         lease_id=null,lease_owner=null,lease_expires_at=null,
+         updated_at=excluded.updated_at`,
+    [
+      input.generation.tenantId,
+      input.generation.repository,
+      input.generation.ref,
+      input.generation.id,
+      input.processedThrough,
+      input.status === "ready" ? input.generation.fingerprint : null,
+      input.completedAt,
+      input.consumer
+    ]
+  );
+}
+
+async function acknowledgeScopedDeliveries(
+  client: PoolClient,
+  input: {
+    generationId: string;
+    checkpointId: string;
+    consumer: ContextProjectionConsumer;
+    tenantId: string;
+    repository: string;
+    ref: string;
+    commitSha: string;
+    processedAt: string;
+    eventId?: string;
+  }
+): Promise<void> {
+  const leaseId = randomUUID();
+  const leaseOwner = `generation:${input.generationId}:${input.consumer}`;
+  const claimed = await client.query<{ delivery_id: string }>(
+    `update jina_context.outbox delivery
+     set lease_id=$1,lease_owner=$2,lease_expires_at=$3::timestamptz + interval '5 minutes',
+         attempt=delivery.attempt+1,last_error=null
+     where delivery.consumer=$4 and delivery.tenant_id=$5 and delivery.repository=$6
+       and delivery.processed_at is null and delivery.available_at <= $3
+       and (delivery.lease_expires_at is null or delivery.lease_expires_at <= $3)
+       and ($10::text is null or delivery.event_id=$10)
+       and (
+         $4='retention'
+         or
+         delivery.aggregate_id=$7
+         or (
+           delivery.aggregate_type='evidence'
+           and delivery.payload->>'ref'=$8
+           and delivery.payload->>'commitSha'=$9
+         )
+         or (
+           delivery.aggregate_type='knowledge'
+           and exists (
+             select 1
+             from jina_context.knowledge_document_revisions revision
+             where revision.tenant_id=delivery.tenant_id
+               and revision.repository=delivery.repository
+               and revision.id=delivery.aggregate_id
+               and revision.ref_name=$8
+               and revision.commit_sha=$9
+           )
+         )
+         or delivery.aggregate_type in ('access','retention')
+       )
+     returning delivery.delivery_id`,
+    [
+      leaseId,
+      leaseOwner,
+      input.processedAt,
+      input.consumer,
+      input.tenantId,
+      input.repository,
+      input.checkpointId,
+      input.ref,
+      input.commitSha,
+      input.eventId ?? null
+    ]
+  );
+  for (const row of claimed.rows) {
+    const acknowledged = await client.query(
+      `update jina_context.outbox
+       set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
+       where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
+      [row.delivery_id, leaseId, input.processedAt]
+    );
+    if (acknowledged.rowCount !== 1) {
+      throw new Error(`Lost ${input.consumer} outbox lease for ${row.delivery_id}`);
+    }
+  }
+}
+
+function authorizedDocumentSql(alias: string): string {
+  return `not exists (
+    select 1
+    from jsonb_array_elements_text(
+      case
+        when jsonb_typeof(${alias}.metadata->'requiredAclFingerprints')='array'
+          then ${alias}.metadata->'requiredAclFingerprints'
+        else jsonb_build_array(${alias}.effective_acl_fingerprint)
+      end
+    ) required(value)
+    where not (required.value = any($2::text[]))
+  )`;
 }
 
 async function insertManifest(

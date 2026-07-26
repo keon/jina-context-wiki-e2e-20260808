@@ -34,9 +34,17 @@ The context engine is normalized under `jina_context`.
 
 Evidence records share an `EvidenceAnchor`: tenant, repository, source type and ID,
 content digest, and optional commit, path/range, JSON pointer, and observation time.
-Checkpoints bind one complete evidence selection to an exact repository/ref/commit and
-fingerprint. Git objects and content-addressed blobs remain reusable across checkpoints;
-the checkpoint membership tables preserve what was valid for that build.
+Checkpoints bind one evidence selection to an exact repository/ref/commit and
+fingerprint. `source_completeness` is explicitly `complete` or `partial`; the
+`observation_frontier` records the bounded Git history, GitHub pagination outcome, and
+omitted bodies that led to that value. Git objects and content-addressed blobs remain
+reusable across checkpoints; the checkpoint membership tables preserve what was valid
+for that build.
+
+Evidence records store base immutable bodies. Citation line ranges and JSON pointers are
+selectors over those bodies rather than separate record identities. Resolution validates
+the source identity and digest, then extracts exactly the requested inclusive lines or
+JSON value. Mixed line/JSON selectors and out-of-bounds selectors do not resolve.
 
 ### Knowledge revisions
 
@@ -68,8 +76,11 @@ published without model output, and successful derivation can publish an enriche
 successor.
 
 Consumers use independent outbox deliveries and checkpoints. A slow optional consumer
-cannot acknowledge required projection work. Rebuilds write a new generation and never
-expose partial rows through query selection.
+cannot acknowledge required projection work. Every delivery lease is consumer-owned, and
+acknowledgement requires that exact unexpired lease. Projection publication acknowledges
+only deliveries matching its tenant, repository, ref, commit, checkpoint/event, and
+consumer. Rebuilds and the internal drain endpoint replay pending checkpoints into new
+idempotent generations and never expose partial rows through query selection.
 
 ## Database invariants
 
@@ -77,8 +88,11 @@ expose partial rows through query selection.
 - Immutable evidence, revision, and citation tables deny runtime `UPDATE` and `DELETE`.
 - Full Git SHAs and source-specific evidence anchors are validated.
 - Line ranges require a path and valid positive bounds.
-- Knowledge citations terminate at evidence, never another generated revision.
-- ACL projection is generation-scoped and applied before candidate creation.
+- Knowledge citations terminate at evidence, never another generated revision. Citation
+  claims must occur verbatim after whitespace/case normalization in the exact selected
+  evidence excerpt.
+- ACL projection is generation-scoped. Principal permissions resolve to exact repository
+  ACL fingerprints, and SQL filters projection rows before candidate creation.
 - Erasure filters are durable and checked during ingestion and rebuild.
 - Exact, lexical, hierarchy, embedding, and relation projections are disposable.
 - Query telemetry stores bounded metadata and citation checks, not unrestricted source
@@ -94,5 +108,9 @@ The schema defines focused NOLOGIN roles:
 `jina_context_identity`, `jina_context_acl`, `jina_context_retention`,
 `jina_context_query`, and `jina_context_admin`.
 
-Application logins must not own the schema. The migration principal owns schema changes;
-runtime roles receive only the reads and writes needed for their plane or projection.
+Application logins must not own the schema. The migration principal owns schema changes
+and installs/grants the capability roles. The runtime login is `NOINHERIT`, so role
+membership supplies no ambient table access. Every adapter operation begins a transaction,
+executes `SET LOCAL ROLE <capability>`, and then performs only the reads/writes granted to
+that capability. Production runs migration and runtime services with separate database
+credentials.

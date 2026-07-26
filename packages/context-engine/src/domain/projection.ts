@@ -134,6 +134,7 @@ export interface StructuralRelation {
 }
 
 export interface GenerationCapabilities {
+  sourceCompleteness: "complete" | "partial";
   derivedKnowledge: "available" | "partial" | "unavailable";
   dense: "available" | "disabled" | "failed";
   hierarchy: "available" | "disabled" | "failed";

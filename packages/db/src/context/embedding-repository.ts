@@ -28,7 +28,7 @@ export class PostgresContextEmbeddingRepository implements DenseSearchPort {
   constructor(private readonly database: ContextDatabase) {}
 
   async store(input: StoreGenerationEmbeddingsInput): Promise<void> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_dense", async (client) => {
       for (const embedding of input.embeddings) {
         validateEmbedding(embedding);
         const inserted = await client.query(
@@ -87,11 +87,12 @@ export class PostgresContextEmbeddingRepository implements DenseSearchPort {
       throw new Error("Dense query vector must contain finite values");
     }
     await this.database.initialize();
-    const result = await this.database.pool.query<{
+    const result = await this.database.queryAs<{
       fragment_id: string;
       document_id: string;
       embedding: number[];
     }>(
+      "jina_context_dense",
       `select embedding.fragment_id,fragment.document_id,embedding.embedding
        from jina_context.context_embeddings embedding
        join jina_context.context_fragments fragment

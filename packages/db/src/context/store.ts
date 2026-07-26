@@ -18,7 +18,8 @@ import {
   type QueryMetrics,
   type QueryRunTelemetry,
   type RefManifestEntry,
-  type StructuralFact
+  type StructuralFact,
+  repositoryAclFingerprint
 } from "@jina/context-engine";
 import type { PostgresContextDatabaseConfig } from "./database.js";
 import { ContextDatabase, contextDigest, contextStableId } from "./database.js";
@@ -110,6 +111,12 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
     return this.projection.getGeneration(generationId);
   }
+  getAuthorizedGeneration(
+    generationId: string,
+    allowedAclFingerprints: ReadonlySet<string>
+  ): Promise<GenerationProjection | undefined> {
+    return this.projection.getAuthorizedGeneration(generationId, allowedAclFingerprints);
+  }
   latestPublished(tenantId: string, repository: string, ref: string): Promise<GenerationProjection | undefined> {
     return this.projection.latestPublished(tenantId, repository, ref);
   }
@@ -119,9 +126,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
     const desired = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
-    await this.database.transaction(async (client) => {
-      const known = await client.query<{ repository: string; permission: string | null }>(
-        `select repository.repository,current.permission
+    await this.database.transactionAs("jina_context_admin", async (client) => {
+      const known = await client.query<{
+        repository: string;
+        permission: string | null;
+        acl_fingerprint: string | null;
+      }>(
+        `select repository.repository,current.permission,current.acl_fingerprint
          from jina_context.repositories repository
          left join jina_context.current_repository_acl current
            on current.tenant_id=repository.tenant_id
@@ -140,12 +151,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
              on conflict do nothing`,
             [tenantId, repository, now]
           );
-          known.rows.push({ repository, permission: null });
+          known.rows.push({ repository, permission: null, acl_fingerprint: null });
         }
       }
       for (const row of known.rows) {
         const permission = desired.has(row.repository) ? "read" : "denied";
-        if (row.permission === permission) continue;
+        const aclFingerprint = repositoryAclFingerprint(tenantId, row.repository);
+        if (row.permission === permission && row.acl_fingerprint === aclFingerprint) continue;
         const payload = { principalId, repository: row.repository, permission };
         const digest = contextDigest(payload);
         const observationId = contextStableId("observation", { tenantId, ...payload, digest });
@@ -163,7 +175,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
              source_observation_id,observed_at)
            values ($1,$2,$3,$4,$5,$6,$7,$8)
            on conflict (tenant_id,repository,id) do nothing`,
-          [aclId, tenantId, row.repository, principalId, permission, digest, observationId, now]
+          [aclId, tenantId, row.repository, principalId, permission, aclFingerprint, observationId, now]
         );
         await enqueueContextEvent(client, {
           id: contextStableId("event", { aclId }),
@@ -183,7 +195,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{ repository: string }>(
+    const result = await this.database.queryAs<{ repository: string }>(
+      "jina_context_admin",
       `select repository
        from jina_context.current_repository_acl
        where tenant_id=$1 and principal_id=$2 and permission in ('read','write','admin')
@@ -193,9 +206,41 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     return result.rows.map((row) => row.repository);
   }
 
+  async aclFingerprintsForPrincipal(tenantId: string, principalId: string, repository: string): Promise<string[]> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<{ acl_fingerprint: string }>(
+      "jina_context_admin",
+      `select distinct acl_fingerprint
+       from jina_context.current_repository_acl
+       where tenant_id=$1 and repository=$2 and principal_id=$3
+         and permission in ('read','write','admin')
+       order by acl_fingerprint`,
+      [tenantId, repository, principalId]
+    );
+    return result.rows.map((row) => row.acl_fingerprint);
+  }
+
+  async repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<{
+      principal_id: string;
+      permission: string;
+      acl_fingerprint: string;
+    }>(
+      "jina_context_admin",
+      `select principal_id,permission,acl_fingerprint
+       from jina_context.current_repository_acl
+       where tenant_id=$1 and repository=$2
+       order by principal_id`,
+      [tenantId, repository]
+    );
+    return contextDigest(result.rows);
+  }
+
   async listRepositories(tenantId: string): Promise<string[]> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{ repository: string }>(
+    const result = await this.database.queryAs<{ repository: string }>(
+      "jina_context_admin",
       "select repository from jina_context.repositories where tenant_id=$1 order by repository",
       [tenantId]
     );
@@ -204,11 +249,12 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async projectionBacklog(tenantId: string): Promise<ProjectionBacklog> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{
+    const result = await this.database.queryAs<{
       consumer: keyof ProjectionBacklog;
       count: string;
       oldest: Date | null;
     }>(
+      "jina_context_admin",
       `select consumer,count(*)::text as count,min(available_at) as oldest
        from jina_context.outbox
        where tenant_id=$1 and processed_at is null
@@ -241,6 +287,53 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     ) as ProjectionBacklog;
   }
 
+  async pendingProjectionCheckpoints(tenantId: string, limit: number): Promise<string[]> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<{ checkpoint_id: string }>(
+      "jina_context_admin",
+      `with pending_scope as (
+         select distinct checkpoint.id as checkpoint_id,delivery.available_at
+         from jina_context.outbox delivery
+         join jina_context.evidence_checkpoints checkpoint
+           on checkpoint.id=delivery.payload->>'checkpointId'
+          and checkpoint.tenant_id=delivery.tenant_id
+          and checkpoint.repository=delivery.repository
+         where delivery.tenant_id=$1 and delivery.processed_at is null
+         union
+         select distinct checkpoint.id as checkpoint_id,delivery.available_at
+         from jina_context.outbox delivery
+         join jina_context.knowledge_document_revisions revision
+           on revision.id=delivery.aggregate_id
+          and revision.tenant_id=delivery.tenant_id
+          and revision.repository=delivery.repository
+         join jina_context.evidence_checkpoints checkpoint
+           on checkpoint.tenant_id=revision.tenant_id
+          and checkpoint.repository=revision.repository
+          and checkpoint.ref_name=revision.ref_name
+          and checkpoint.commit_sha=revision.commit_sha
+         where delivery.tenant_id=$1 and delivery.processed_at is null
+           and delivery.aggregate_type='knowledge'
+         union
+         select distinct on (checkpoint.repository,checkpoint.ref_name)
+           checkpoint.id as checkpoint_id,delivery.available_at
+         from jina_context.outbox delivery
+         join jina_context.evidence_checkpoints checkpoint
+           on checkpoint.tenant_id=delivery.tenant_id
+          and checkpoint.repository=delivery.repository
+         where delivery.tenant_id=$1 and delivery.processed_at is null
+           and delivery.aggregate_type in ('access','retention')
+         order by checkpoint.repository,checkpoint.ref_name,checkpoint.created_at desc
+       )
+       select checkpoint_id
+       from pending_scope
+       group by checkpoint_id
+       order by min(available_at),checkpoint_id
+       limit $2`,
+      [tenantId, Math.max(1, Math.min(limit, 100))]
+    );
+    return result.rows.map((row) => row.checkpoint_id);
+  }
+
   recordQueryRun(run: QueryRunTelemetry): Promise<void> {
     return this.query.recordQueryRun(run);
   }
@@ -253,7 +346,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     if (!input.sourceId.trim() || !input.actorId.trim() || !input.reason.trim()) {
       throw new Error("Evidence erasure requires sourceId, actorId, and reason");
     }
-    return this.database.transaction(async (client) => {
+    return this.database.transactionAs("jina_context_admin", async (client) => {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `context-erasure:${input.tenantId}:${input.repository}`
       ]);
@@ -327,7 +420,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   async migrateTenantAliases(fromTenantId: string, toTenantId: string): Promise<void> {
     if (fromTenantId === toTenantId) return;
     await this.database.initialize();
-    const principals = await this.database.pool.query<{ principal_id: string; repository: string }>(
+    const principals = await this.database.queryAs<{ principal_id: string; repository: string }>(
+      "jina_context_admin",
       `select principal_id,repository from jina_context.current_repository_acl
        where tenant_id=$1 and permission in ('read','write','admin')`,
       [fromTenantId]
@@ -347,7 +441,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   async health(): Promise<{ ok: boolean; adapter: string }> {
     try {
       await this.database.initialize();
-      await this.database.pool.query("select 1");
+      await this.database.queryAs("jina_context_admin", "select 1");
       return { ok: true, adapter: "postgres" };
     } catch {
       return { ok: false, adapter: "postgres" };

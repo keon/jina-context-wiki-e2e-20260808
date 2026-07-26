@@ -7,6 +7,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import {
   MemoryContextEngineStore,
   MemoryContextPipelineCoordinator,
+  repositoryAclFingerprint,
   type ContextPipelineCoordinator
 } from "@jina/context-engine";
 import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.js";
@@ -116,7 +117,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
             { kind: "add", path: "src/query.ts", newBlobSha: "c".repeat(40) }
           ]
         },
-        aclFingerprint: "repository-readers",
+        aclFingerprint: repositoryAclFingerprint(tenantId, repository),
         observationFrontier: `${commitSha}:fixture`,
         createdAt: "2026-07-26T12:00:00.000Z",
         sourceComplete: true
@@ -241,6 +242,14 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   });
   assert.equal(detail.response.status, 200);
   assert.equal(record(detail.body.document).bodyMarkdown, "The context engine indexes immutable repository evidence.");
+  const nonAdminPrincipal = "user:repository-reader@example.com";
+  await store.replaceRepositoryAccess(tenantId, nonAdminPrincipal, [repository]);
+  const forbiddenReview = await api(`/context/knowledge/${encodeURIComponent(string(document.id))}/review`, {
+    method: "POST",
+    headers: { ...contextHeaders(), "x-jina-principal-id": nonAdminPrincipal },
+    body: JSON.stringify({ action: "accept", reason: "reader must not mutate review state" })
+  });
+  assert.equal(forbiddenReview.response.status, 403);
 
   const structure = await api(`/context/structure?repository=${encodeURIComponent(repository)}&ref=main`, {
     headers: contextHeaders()

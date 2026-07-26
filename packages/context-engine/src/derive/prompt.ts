@@ -19,8 +19,9 @@ export function buildKnowledgePrompt(bundle: FocusBundle, repairErrors: string[]
   return [
     "Produce repository knowledge documents as strict JSON.",
     "Use only the supplied evidence. Never create relation records or inferred canonical entities.",
+    "Every citation.claim must be a verbatim excerpt from its selected evidence range or JSON value.",
     "Every material body paragraph must contain the exact text of at least one citation.claim.",
-    "Citations must identify a supplied source and the exact range used.",
+    "Citations must identify a supplied source and an exact, valid range or JSON pointer.",
     `Repository: ${bundle.checkpoint.repository}`,
     `Ref: ${bundle.checkpoint.ref}`,
     `Commit: ${bundle.checkpoint.commitSha}`,

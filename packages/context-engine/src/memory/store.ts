@@ -1,12 +1,14 @@
-import type {
-  EvidenceAnchor,
-  EvidenceCheckpoint,
-  EvidenceRecord,
-  EvidenceSnapshot,
-  RefManifestEntry,
-  StructuralFact
+import {
+  evidenceExcerpt,
+  type EvidenceAnchor,
+  type EvidenceCheckpoint,
+  type EvidenceRecord,
+  type EvidenceSnapshot,
+  type RefManifestEntry,
+  type StructuralFact
 } from "../domain/evidence.js";
 import { validateEvidenceRecord } from "../domain/evidence.js";
+import { fingerprint, repositoryAclFingerprint } from "../domain/fingerprint.js";
 import type {
   DerivationRun,
   KnowledgeDocumentRevision,
@@ -32,29 +34,6 @@ function scopeKey(tenantId: string, repository: string, ref: string): string {
 
 function copy<T>(value: T): T {
   return structuredClone(value);
-}
-
-function hasJsonPointer(body: string, pointer: string): boolean {
-  if (pointer === "") return true;
-  if (!pointer.startsWith("/")) return false;
-  let value: unknown;
-  try {
-    value = JSON.parse(body) as unknown;
-  } catch {
-    return false;
-  }
-  for (const encoded of pointer.slice(1).split("/")) {
-    const key = encoded.replace(/~1/g, "/").replace(/~0/g, "~");
-    if (Array.isArray(value)) {
-      if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length) return false;
-      value = value[Number(key)];
-    } else if (value !== null && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key)) {
-      value = (value as Record<string, unknown>)[key];
-    } else {
-      return false;
-    }
-  }
-  return true;
 }
 
 export class MemoryContextEngineStore implements FencedContextEngineStore {
@@ -135,10 +114,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
         (anchor.pathOrUrl === undefined || candidate.anchor.pathOrUrl === anchor.pathOrUrl)
     );
     if (record === undefined) return undefined;
-    const lineCount = record.body.split(/\r?\n/).length;
-    if (anchor.startLine !== undefined && anchor.startLine > lineCount) return undefined;
-    if (anchor.endLine !== undefined && anchor.endLine > lineCount) return undefined;
-    if (anchor.jsonPointer !== undefined && !hasJsonPointer(record.body, anchor.jsonPointer)) return undefined;
+    if (evidenceExcerpt(record, anchor) === undefined) return undefined;
     return copy(record);
   }
 
@@ -322,6 +298,44 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return value === undefined ? undefined : copy(value);
   }
 
+  async getAuthorizedGeneration(
+    generationId: string,
+    allowedAclFingerprints: ReadonlySet<string>
+  ): Promise<GenerationProjection | undefined> {
+    const projection = await this.getGeneration(generationId);
+    if (!projection) return undefined;
+    const documents = projection.documents.filter((document) => {
+      const required = Array.isArray(document.metadata.requiredAclFingerprints)
+        ? document.metadata.requiredAclFingerprints.filter((value): value is string => typeof value === "string")
+        : [document.effectiveAclFingerprint];
+      return required.every((value) => allowedAclFingerprints.has(value));
+    });
+    const documentIds = new Set(documents.map((document) => document.id));
+    const allowedAnchorIds = new Set(
+      documents.flatMap((document) =>
+        document.anchors.map((anchor) => `${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
+      )
+    );
+    return {
+      ...projection,
+      manifest: projection.manifest.filter((entry) =>
+        documents.some((document) => document.metadata.path === entry.path)
+      ),
+      currentKnowledge: projection.currentKnowledge.filter((selection) =>
+        documents.some((document) => document.sourceRevisionId === selection.revisionId)
+      ),
+      documents,
+      fragments: projection.fragments.filter((fragment) => documentIds.has(fragment.documentId)),
+      exactIndex: projection.exactIndex.filter((entry) => documentIds.has(entry.documentId)),
+      hierarchyNodes: projection.hierarchyNodes.filter((node) => documentIds.has(node.documentId)),
+      structuralRelations: projection.structuralRelations.filter((relation) =>
+        relation.anchors.every((anchor) =>
+          allowedAnchorIds.has(`${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
+        )
+      )
+    };
+  }
+
   async latestPublished(tenantId: string, repository: string, ref: string): Promise<GenerationProjection | undefined> {
     const id = this.#latestGenerations.get(scopeKey(tenantId, repository, ref));
     return id === undefined ? undefined : this.getGeneration(id);
@@ -347,6 +361,24 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return [...(this.#repositoryAccess.get(`${tenantId}\u0000${principalId}`) ?? new Set())].sort();
   }
 
+  async aclFingerprintsForPrincipal(tenantId: string, principalId: string, repository: string): Promise<string[]> {
+    const repositories = this.#repositoryAccess.get(`${tenantId}\u0000${principalId}`) ?? new Set();
+    return repositories.has(repository.toLowerCase()) ? [repositoryAclFingerprint(tenantId, repository)] : [];
+  }
+
+  async repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string> {
+    const entries: { principalId: string; aclFingerprint: string }[] = [];
+    for (const [key, repositories] of this.#repositoryAccess) {
+      const separator = key.indexOf("\u0000");
+      if (key.slice(0, separator) !== tenantId || !repositories.has(repository.toLowerCase())) continue;
+      entries.push({
+        principalId: key.slice(separator + 1),
+        aclFingerprint: repositoryAclFingerprint(tenantId, repository)
+      });
+    }
+    return fingerprint(entries.sort((left, right) => left.principalId.localeCompare(right.principalId)));
+  }
+
   async listRepositories(tenantId: string): Promise<string[]> {
     const repositories = new Set<string>();
     for (const checkpoint of this.#checkpoints.values()) {
@@ -359,6 +391,10 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return Object.fromEntries(
       contextProjectionConsumers.map((consumer) => [consumer, { count: 0 }])
     ) as ProjectionBacklog;
+  }
+
+  async pendingProjectionCheckpoints(_tenantId: string, _limit: number): Promise<string[]> {
+    return [];
   }
 
   async recordQueryRun(run: QueryRunTelemetry): Promise<void> {

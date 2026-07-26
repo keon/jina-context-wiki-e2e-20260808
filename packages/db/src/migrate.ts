@@ -1,6 +1,6 @@
 import { Pool, type PoolConfig } from "pg";
 import { applySchema } from "./apply-schema.js";
-import { CONTEXT_ROLES_SQL } from "./context/roles.js";
+import { CONTEXT_ROLES, CONTEXT_ROLES_SQL } from "./context/roles.js";
 import { CONTEXT_PGVECTOR_SCHEMA_SQL, CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 
 const connectionString = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
@@ -23,9 +23,20 @@ try {
   }
   if (process.argv.includes("--install-roles")) {
     await applySchema(pool, "jina_context.roles", CONTEXT_ROLES_SQL);
+    const runtimeUser = requiredRuntimeRoleName(process.env.CONTEXT_RUNTIME_DB_USER);
+    await pool.query(`alter role "${runtimeUser}" noinherit`);
+    await pool.query(`grant ${CONTEXT_ROLES.join(",")} to "${runtimeUser}"`);
   }
 } finally {
   await pool.end();
+}
+
+function requiredRuntimeRoleName(value: string | undefined): string {
+  if (!value) throw new Error("CONTEXT_RUNTIME_DB_USER is required with --install-roles");
+  if (!/^[a-zA-Z_][a-zA-Z0-9_-]{0,62}$/.test(value)) {
+    throw new Error("CONTEXT_RUNTIME_DB_USER is not a safe PostgreSQL role name");
+  }
+  return value;
 }
 
 function requiredEnv(name: string, value = process.env[name]): string {

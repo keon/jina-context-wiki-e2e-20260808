@@ -53,9 +53,10 @@ sequenceDiagram
 
     W->>API: POST /internal/worker/claim (run-ingest-evidence)
     API-->>W: task, lease, attempt, write-fence token
-    W->>Git: Mint installation token; clone/fetch repository and bounded provider history
+    W->>Git: Mint installation token; full blob-filtered clone and paginated provider history
     W->>Git: Resolve and checkout exact commit SHA
-    W->>W: Enumerate full manifest; omit unsafe bodies, not entries
+    W->>W: Persist bounded commit/parent history; enumerate full manifest
+    W->>W: Record Git/GitHub frontiers and omitted bodies as complete or partial
     W->>API: POST /internal/context/ingest (lease + evidence input)
     API->>API: Validate topic, lease, attempt, and fence
     API->>CE: IngestEvidenceService.ingest
@@ -66,8 +67,11 @@ sequenceDiagram
     W->>API: Complete board stage with checkpoint metadata
 ```
 
-Partial trees, unverified commit identity, and exceeded completeness bounds fail closed.
-Retries converge by immutable object and input fingerprints. A stale lease cannot commit.
+Partial trees and unverified commit identity fail closed. A reached Git/GitHub bound,
+unavailable optional provider source, or omitted body is committed truthfully as a
+`partial` checkpoint with a machine-readable frontier; query coverage then reports that
+partial state. Retries converge by immutable object and input fingerprints. A stale lease
+cannot commit.
 
 ## Baseline and enriched generations
 
@@ -91,7 +95,8 @@ sequenceDiagram
         KW->>DX: Run knowledge-document generator at pinned checkout
         DX-->>KW: Untrusted JSON document output
         KW->>API: POST /internal/context/derive/commit (fence + raw output)
-        API->>DB: Validate logical IDs and terminal source citations
+        API->>DB: Resolve exact range/JSON excerpts and validate terminal source citations
+        API->>DB: Require each normalized claim verbatim in its selected evidence excerpt
         alt valid
             DB->>DB: Append derivation run, revisions, evidence, events
             DB->>DB: Publish enriched successor generation
@@ -105,6 +110,11 @@ The baseline contains raw evidence as indexable context documents. Derived knowl
 also projected as indexable documents, but its answer citations expand through immutable
 revision evidence to original blobs, observations, commits, pull requests, or issues.
 
+Each projector claims its own durable outbox delivery and lease. Publication acknowledges
+only deliveries for that consumer and exact tenant/repository/ref/commit checkpoint.
+`POST /internal/context/outbox/drain` finds pending checkpoints and replays this idempotent
+index path; it is not a metrics-only no-op.
+
 ## HTTP query
 
 ```mermaid
@@ -115,9 +125,9 @@ sequenceDiagram
     participant QE as Query engine
 
     C->>API: POST /context/query (context token, bound principal, repository/ref/question)
-    API->>DB: Resolve principal repository access
-    DB-->>API: Authorized repository scope
-    API->>DB: Select latest published ACL-valid generation
+    API->>DB: Resolve principal repository access and ACL fingerprints
+    DB-->>API: Authorized repository and exact fingerprint set
+    API->>DB: SQL-filter one published generation by those fingerprints
     API->>QE: Plan task-specific routes
     par deterministic routes
         QE->>DB: Exact/structured/structural retrieval
@@ -126,16 +136,18 @@ sequenceDiagram
     and long-form routes
         QE->>DB: Hierarchy and bounded long-context retrieval
     end
-    DB-->>QE: Candidates with original evidence anchors
+    DB-->>QE: Only authorized rows; candidates with original evidence anchors
     QE->>QE: Deduplicate, fuse, detect conflicts, assess coverage
     QE->>QE: Assemble evidence pack, synthesize, verify citations
     QE->>DB: Persist bounded query telemetry
     API-->>C: Answer, generation/ref/commit, citations, conflicts, coverage, trace ID
 ```
 
-ACL filtering occurs before candidate creation. Dense retrieval joins only when a
-generation advertises an evaluated/available embedding capability; it is disabled in the
-current release.
+SQL filtering occurs while hydrating documents, fragments, exact entries, hierarchy,
+manifest, and current knowledge, before candidate creation. Structural relations survive
+only when every anchor belongs to the authorized document set. Dense retrieval joins only
+when a generation advertises an evaluated/available embedding capability; it is disabled
+in the current release.
 
 ## Stateless MCP query
 
@@ -161,12 +173,13 @@ MCP callers cannot select SQL, retrievers, generation internals, or mutation too
 
 ```mermaid
 sequenceDiagram
-    participant O as Authorized operator
+    participant O as Tenant administrator
     participant API as jina-api
     participant DB as jina_context
 
     O->>API: POST /context/knowledge/:revisionId/review
-    API->>DB: Verify tenant and repository access
+    API->>API: Require tenant-administrator identity
+    API->>DB: Verify revision tenant and repository scope
     API->>DB: Append reviewed/rejected/invalidated event
     API->>DB: Rebuild from latest matching evidence checkpoint
     DB-->>API: Successor generation ID when applicable
@@ -174,7 +187,8 @@ sequenceDiagram
 ```
 
 The revision body and citations never change. Current selection is recomputed from the
-append-only event history.
+append-only event history. A repository reader who is not a tenant administrator cannot
+append review state.
 
 ## Erasure and rebuild
 
@@ -200,15 +214,17 @@ knowledge citations, or query-visible documents.
 ```mermaid
 sequenceDiagram
     participant CB as Cloud Build
-    participant M as Migration job
+    participant M as Migration owner job
     participant CR as Cloud Run
     participant A as Acceptance job
 
     CB->>M: Deploy/execute jina-context-migrate using audited image SHA
+    M->>M: Install roles; make runtime login NOINHERIT and grant memberships
     M-->>CB: jina_context ready
     CB->>CR: Deploy API and verify /health
     CB->>CR: Deploy context worker and verify exact topics
     CB->>CR: Deploy task worker and verify exact topics
+    CB->>CR: Deploy dashboard and admin from the same release build
     CB->>A: Execute production fixture build
     A->>CR: ACL sync, build, generation/doc/query checks
     A->>CR: Real MCP SDK tools/list and query_context
@@ -217,3 +233,5 @@ sequenceDiagram
 ```
 
 The operator creates and records the restorable Cloud SQL backup before this sequence.
+Every context database transaction in the runtime explicitly activates its declared
+capability with `SET LOCAL ROLE`.

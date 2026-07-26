@@ -150,7 +150,7 @@ create table if not exists jina_context.evidence_checkpoints (
   ref_name text not null,
   commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40,64}$'),
   parser_version text not null,
-  source_completeness text not null check (source_completeness='complete'),
+  source_completeness text not null check (source_completeness in ('complete','partial')),
   observation_frontier text not null,
   evidence_fingerprint text not null check (evidence_fingerprint ~ '^[0-9a-f]{64}$'),
   manifest_fingerprint text not null check (manifest_fingerprint ~ '^[0-9a-f]{64}$'),

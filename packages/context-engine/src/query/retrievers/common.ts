@@ -17,7 +17,6 @@ export interface ContextRetriever {
 }
 
 export function aclAllows(document: ContextDocument, allowed: ReadonlySet<string>): boolean {
-  if (allowed.has("*")) return true;
   const required = Array.isArray(document.metadata.requiredAclFingerprints)
     ? document.metadata.requiredAclFingerprints.filter((value): value is string => typeof value === "string")
     : [document.effectiveAclFingerprint];

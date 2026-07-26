@@ -69,7 +69,7 @@ export interface EvidenceCheckpoint {
   ref: string;
   commitSha: string;
   parserVersion: string;
-  sourceCompleteness: "complete";
+  sourceCompleteness: "complete" | "partial";
   observationFrontier: string;
   evidenceFingerprint: string;
   manifestFingerprint: string;
@@ -97,6 +97,7 @@ export interface GitChange {
 export interface GitSnapshotMetadata {
   commit: GitCommitMetadata;
   changes: GitChange[];
+  history?: (GitCommitMetadata & { sha: string })[];
 }
 
 export interface EvidenceSnapshot {
@@ -158,4 +159,66 @@ export function validateEvidenceRecord(record: EvidenceRecord): void {
   if (record.anchor.endLine !== undefined && record.anchor.endLine > lines) {
     throw new Error("Evidence line range exceeds source content");
   }
+}
+
+/**
+ * Resolves an exact excerpt from an immutable evidence body. Ranges and JSON
+ * pointers select content from the base record; they are not stored identities.
+ */
+export function evidenceExcerpt(
+  record: EvidenceRecord,
+  selector: Pick<EvidenceAnchor, "startLine" | "endLine" | "jsonPointer">
+): string | undefined {
+  const hasStart = selector.startLine !== undefined;
+  const hasEnd = selector.endLine !== undefined;
+  if (selector.jsonPointer !== undefined && (hasStart || hasEnd)) return undefined;
+  if (hasStart !== hasEnd) return undefined;
+  if (hasStart && hasEnd) {
+    const lines = record.body.split(/\r?\n/);
+    if (
+      !Number.isInteger(selector.startLine) ||
+      !Number.isInteger(selector.endLine) ||
+      selector.startLine! < 1 ||
+      selector.endLine! < selector.startLine! ||
+      selector.endLine! > lines.length
+    ) {
+      return undefined;
+    }
+    return lines.slice(selector.startLine! - 1, selector.endLine).join("\n");
+  }
+  if (selector.jsonPointer !== undefined) {
+    const selected = resolveJsonPointer(record.body, selector.jsonPointer);
+    if (!selected.found) return undefined;
+    return typeof selected.value === "string" ? selected.value : JSON.stringify(selected.value);
+  }
+  return record.body;
+}
+
+function resolveJsonPointer(body: string, pointer: string): { found: boolean; value?: unknown } {
+  if (pointer === "") {
+    try {
+      return { found: true, value: JSON.parse(body) as unknown };
+    } catch {
+      return { found: false };
+    }
+  }
+  if (!pointer.startsWith("/")) return { found: false };
+  let value: unknown;
+  try {
+    value = JSON.parse(body) as unknown;
+  } catch {
+    return { found: false };
+  }
+  for (const encoded of pointer.slice(1).split("/")) {
+    const key = encoded.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Array.isArray(value)) {
+      if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length) return { found: false };
+      value = value[Number(key)];
+    } else if (value !== null && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key)) {
+      value = (value as Record<string, unknown>)[key];
+    } else {
+      return { found: false };
+    }
+  }
+  return { found: true, value };
 }

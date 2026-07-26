@@ -58,13 +58,18 @@ export class IndexContextService {
     const evidence = await this.store.listEvidence(checkpointId);
     const manifest = await this.store.listManifest(checkpointId);
     const structuralFacts = await this.store.listStructuralFacts(checkpointId);
+    const repositoryAccessFingerprint = await this.store.repositoryAccessFingerprint(
+      checkpoint.tenantId,
+      checkpoint.repository
+    );
     const generationId = stableId("ig", {
       checkpointId,
       projectorVersions,
       revisionIds: eligibleRevisions.map((revision) => revision.id).sort(),
       evidenceIds: evidence.map((record) => record.id).sort(),
       manifest: manifest.map((entry) => [entry.path, entry.blobSha]).sort(),
-      structuralFactIds: structuralFacts.map((fact) => fact.id).sort()
+      structuralFactIds: structuralFacts.map((fact) => fact.id).sort(),
+      repositoryAccessFingerprint
     });
     const manifestOutput = new ManifestProjector().project({
       generationId,
@@ -177,7 +182,8 @@ export class IndexContextService {
       hierarchyNodes,
       structuralRelations,
       projectorVersions,
-      projectorStatuses
+      projectorStatuses,
+      repositoryAccessFingerprint
     };
     const generationFingerprint = fingerprint({
       checkpointId,
@@ -223,6 +229,7 @@ export class IndexContextService {
       projectorVersions,
       projectorStatuses,
       capabilities: {
+        sourceCompleteness: checkpoint.sourceCompleteness,
         derivedKnowledge:
           eligibleRevisions.length === 0
             ? "unavailable"

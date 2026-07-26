@@ -25,7 +25,7 @@ export class PostgresGenerationCoordinator {
   constructor(private readonly database: ContextDatabase) {}
 
   async create(generation: Omit<IndexGeneration, "status" | "publishedAt">): Promise<IndexGeneration> {
-    await this.database.transaction(async (client) => {
+    await this.database.transactionAs("jina_context_coordinator", async (client) => {
       const checkpoint = await client.query<{ acl_fingerprint: string; created_at: Date }>(
         `select acl_fingerprint,created_at from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5`,
@@ -85,7 +85,7 @@ export class PostgresGenerationCoordinator {
     readonly now: string;
     readonly leaseExpiresAt: string;
   }): Promise<GenerationProjectorClaim | undefined> {
-    return this.database.transaction(async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", async (client) => {
       const leaseId = randomUUID();
       const result = await client.query<{
         generation_id: string;
@@ -131,7 +131,8 @@ export class PostgresGenerationCoordinator {
     readonly leaseExpiresAt: string;
   }): Promise<boolean> {
     await this.database.initialize();
-    const result = await this.database.pool.query(
+    const result = await this.database.queryAs(
+      "jina_context_coordinator",
       `update jina_context.generation_projectors
        set lease_expires_at=$5
        where generation_id=$1 and consumer=$2 and lease_id=$3
@@ -151,7 +152,7 @@ export class PostgresGenerationCoordinator {
     readonly completedAt: string;
     readonly failure?: Readonly<Record<string, unknown>>;
   }): Promise<boolean> {
-    return this.database.transaction(async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", async (client) => {
       const updated = await client.query(
         `update jina_context.generation_projectors
          set status=$4,output_fingerprint=$5,processed_through=$6,completed_at=$7,
@@ -205,7 +206,7 @@ export class PostgresGenerationCoordinator {
   }
 
   async publish(generationId: string, publishedAt: string): Promise<IndexGeneration> {
-    return this.database.transaction(async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", async (client) => {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [generationId]);
       const incomplete = await client.query<{ consumer: ContextProjectionConsumer; status: string; required: boolean }>(
         `select consumer,status,required from jina_context.generation_projectors
@@ -255,7 +256,8 @@ export class PostgresGenerationCoordinator {
 
   async fail(generationId: string, failure: Readonly<Record<string, unknown>>, failedAt: string): Promise<boolean> {
     await this.database.initialize();
-    const result = await this.database.pool.query(
+    const result = await this.database.queryAs(
+      "jina_context_coordinator",
       `update jina_context.index_generations
        set status='failed',failure=$2::jsonb
        where id=$1 and status='building'`,
@@ -271,7 +273,7 @@ export class PostgresGenerationCoordinator {
     readonly consumer: ContextProjectionConsumer;
   }): Promise<ProjectionCheckpoint | undefined> {
     await this.database.initialize();
-    const result = await this.database.pool.query<{
+    const result = await this.database.queryAs<{
       tenant_id: string;
       repository: string;
       consumer: ContextProjectionConsumer;
@@ -281,6 +283,7 @@ export class PostgresGenerationCoordinator {
       lease_expires_at: Date | null;
       updated_at: Date;
     }>(
+      "jina_context_coordinator",
       `select * from jina_context.projection_checkpoints
        where tenant_id=$1 and repository=$2 and ref_name=$3 and consumer=$4`,
       [input.tenantId, input.repository, input.ref, input.consumer]

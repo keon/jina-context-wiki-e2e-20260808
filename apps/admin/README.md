@@ -18,8 +18,9 @@ implemented server-side authentication paths:
 - HTTP Basic credentials matching server-only `JINA_WEB_AUTH_USERNAME` and
   `JINA_WEB_AUTH_PASSWORD`.
 
-The Basic-auth path is intended for Vercel. The code does not infer the hosting platform,
-so operators must configure only the authentication path appropriate to that deployment.
+The coordinated Cloud Run deployment configures the Basic-auth path. The code does not
+infer the hosting platform, so operators must configure only the authentication path
+appropriate to their deployment.
 
 - When `INTERNAL_API_TOKEN` is unset for local development/CI, inbound checks are relaxed;
   this mode must not be internet-reachable.
@@ -50,11 +51,12 @@ Environment:
   `JINA_WEB_PRINCIPAL_ID` is absent, the client binds as `tenant:<JINA_TENANT_ID>`.
   Fixed/local deployments may omit it only when `JINA_WEB_PRINCIPAL_ID` is set.
 - `JINA_ADMIN_ALLOWED_EMAILS` — optional comma-separated IAP allowlist.
-- `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — Vercel HTTP credentials.
+- `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — server-side HTTP credentials.
 
 When `JINA_WEB_PRINCIPAL_ID` is a user principal, that principal must also be configured
 as a tenant administrator by the API. The admin client fails before making a request when
 `INTERNAL_API_TOKEN` is configured without either principal-binding variable.
 
 The admin uses `/context/generations`, `/context/documents`, and `/context/metrics`.
-Metrics access is tenant-administrator only.
+Metrics access is tenant-administrator only. Knowledge review is also tenant-admin-only;
+repository read access by itself cannot append a review event.
