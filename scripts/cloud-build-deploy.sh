@@ -30,8 +30,14 @@ api_memory="${JINA_API_MEMORY:-512Mi}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
 context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
+context_cutover_legacy_backup_id="${JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID:-}"
 legacy_cutover_tenant_ids="${JINA_LEGACY_CUTOVER_TENANT_IDS:-}"
+legacy_graph_cloud_sql_instance="${JINA_LEGACY_GRAPH_CLOUD_SQL_INSTANCE:-}"
+legacy_graph_db_name="${JINA_LEGACY_GRAPH_DB_NAME:-}"
+legacy_graph_db_user="${JINA_LEGACY_GRAPH_DB_USER:-}"
+legacy_graph_db_pass_secret="${JINA_LEGACY_GRAPH_DB_PASS_SECRET:-}"
 release_sha="${JINA_RELEASE_SHA:-}"
+build_commit_sha="${JINA_BUILD_COMMIT_SHA:-}"
 
 validate_positive_integer() {
   local name="$1"
@@ -80,6 +86,46 @@ if [[ "${context_cutover}" != "true" && "${context_cutover}" != "false" ]]; then
   echo "JINA_CONTEXT_CUTOVER must be true or false" >&2
   exit 2
 fi
+
+legacy_api_env_value() {
+  local environment_name="$1"
+  LEGACY_API_DESCRIPTION="${legacy_api_description}" LEGACY_API_ENV_NAME="${environment_name}" python3 -c '
+import json
+import os
+
+description = json.loads(os.environ["LEGACY_API_DESCRIPTION"])
+name = os.environ["LEGACY_API_ENV_NAME"]
+for container in description.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    for entry in container.get("env", []):
+        if entry.get("name") == name:
+            print(entry.get("value", ""))
+            raise SystemExit(0)
+raise SystemExit(1)
+'
+}
+
+legacy_api_env_secret_spec() {
+  local environment_name="$1"
+  LEGACY_API_DESCRIPTION="${legacy_api_description}" LEGACY_API_ENV_NAME="${environment_name}" python3 -c '
+import json
+import os
+
+description = json.loads(os.environ["LEGACY_API_DESCRIPTION"])
+name = os.environ["LEGACY_API_ENV_NAME"]
+for container in description.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    for entry in container.get("env", []):
+        if entry.get("name") != name:
+            continue
+        reference = entry.get("valueFrom", {}).get("secretKeyRef", {})
+        secret_name = reference.get("name")
+        version = reference.get("key")
+        if not secret_name or not version:
+            raise SystemExit(1)
+        print(f"{secret_name}:{version}")
+        raise SystemExit(0)
+raise SystemExit(1)
+'
+}
 
 api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest"
@@ -233,6 +279,7 @@ if gcloud run services describe "${legacy_worker}" \
 fi
 api_present="false"
 legacy_api_present="false"
+legacy_api_description=""
 if gcloud run services describe jina-api \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" >/dev/null 2>&1; then
@@ -244,6 +291,10 @@ if gcloud run services describe jina-api \
   if [[ ";${api_environment_names};" == *";GRAPH_API_TOKEN;"* ||
         ";${api_environment_names};" == *";GRAPH_DB_NAME;"* ]]; then
     legacy_api_present="true"
+    legacy_api_description="$(gcloud run services describe jina-api \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --format=json)"
   fi
 fi
 if [[ "${context_cutover}" == "false" &&
@@ -256,17 +307,65 @@ if [[ "${context_cutover}" == "true" ]]; then
     echo "A context-engine API already exists; rerun as a normal release with JINA_CONTEXT_CUTOVER=false" >&2
     exit 2
   fi
-  if [[ ! "${context_cutover_backup_id}" =~ ^[0-9]+$ ]]; then
+  if [[ ! "${context_cutover_backup_id}" =~ ^[1-9][0-9]*$ ]]; then
     echo "JINA_CONTEXT_CUTOVER_BACKUP_ID must identify the verified pre-cutover backup" >&2
+    exit 2
+  fi
+  if [[ ! "${context_cutover_legacy_backup_id}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID must identify the verified legacy graph backup" >&2
     exit 2
   fi
   if [[ ! "${release_sha}" =~ ^[0-9a-f]{40}$ ]]; then
     echo "JINA_RELEASE_SHA must be the exact 40-character source SHA for a destructive cutover" >&2
     exit 2
   fi
-  if [[ -z "${legacy_cutover_tenant_ids//[[:space:],]/}" ]]; then
+  if [[ "${build_commit_sha}" != "${release_sha}" ]]; then
+    echo "JINA_RELEASE_SHA must equal the connected-repository Cloud Build COMMIT_SHA" >&2
+    exit 2
+  fi
+  resolved_source_sha="$(gcloud builds describe "${CLOUD_BUILD_ID}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --format='value(sourceProvenance.resolvedGitSource.revision)')"
+  if [[ "${resolved_source_sha}" != "${release_sha}" ]]; then
+    echo "JINA_RELEASE_SHA must equal Cloud Build's resolved repository source revision" >&2
+    exit 2
+  fi
+  validate_cloud_sql_instance "JINA_LEGACY_GRAPH_CLOUD_SQL_INSTANCE" "${legacy_graph_cloud_sql_instance}"
+  if [[ ! "${legacy_graph_db_name}" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ||
+        ! "${legacy_graph_db_user}" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]; then
+    echo "Legacy graph database name and user must be explicit safe identifiers" >&2
+    exit 2
+  fi
+  if [[ -z "${legacy_graph_db_pass_secret}" || "${legacy_graph_db_pass_secret}" == "unset" ||
+        "${legacy_graph_db_pass_secret}" == *","* || "${legacy_graph_db_pass_secret}" == *"~"* ]]; then
+    echo "JINA_LEGACY_GRAPH_DB_PASS_SECRET must be a Cloud Run secret spec" >&2
+    exit 2
+  fi
+  require_secret "${legacy_graph_db_pass_secret}"
+  IFS='|' read -r -a cutover_tenants <<<"${legacy_cutover_tenant_ids}"
+  if (( ${#cutover_tenants[@]} == 0 )); then
     echo "JINA_LEGACY_CUTOVER_TENANT_IDS must contain the complete active-tenant inventory" >&2
     exit 2
+  fi
+  for tenant_id in "${cutover_tenants[@]}"; do
+    if [[ ! "${tenant_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
+      echo "JINA_LEGACY_CUTOVER_TENANT_IDS must be a pipe-delimited list of canonical UUIDs" >&2
+      exit 2
+    fi
+  done
+  if [[ "${legacy_api_present}" == "true" ]]; then
+    deployed_legacy_graph_socket="$(legacy_api_env_value GRAPH_INSTANCE_UNIX_SOCKET)"
+    deployed_legacy_graph_db_name="$(legacy_api_env_value GRAPH_DB_NAME)"
+    deployed_legacy_graph_db_user="$(legacy_api_env_value GRAPH_DB_USER)"
+    deployed_legacy_graph_db_pass_secret="$(legacy_api_env_secret_spec GRAPH_DB_PASS)"
+    if [[ "${deployed_legacy_graph_socket}" != "/cloudsql/${legacy_graph_cloud_sql_instance}" ||
+          "${deployed_legacy_graph_db_name}" != "${legacy_graph_db_name}" ||
+          "${deployed_legacy_graph_db_user}" != "${legacy_graph_db_user}" ||
+          "${deployed_legacy_graph_db_pass_secret}" != "${legacy_graph_db_pass_secret}" ]]; then
+      echo "Declared legacy graph database does not match the deployed legacy API" >&2
+      exit 2
+    fi
   fi
   database_project="${cloud_sql_instance%%:*}"
   database_instance="${cloud_sql_instance##*:}"
@@ -278,11 +377,22 @@ if [[ "${context_cutover}" == "true" ]]; then
     echo "Pre-cutover backup ${context_cutover_backup_id} is not successful: ${backup_status:-missing}" >&2
     exit 2
   fi
+  legacy_database_project="${legacy_graph_cloud_sql_instance%%:*}"
+  legacy_database_instance="${legacy_graph_cloud_sql_instance##*:}"
+  legacy_backup_status="$(gcloud sql backups describe "${context_cutover_legacy_backup_id}" \
+    --project="${legacy_database_project}" \
+    --instance="${legacy_database_instance}" \
+    --format='value(status)')"
+  if [[ "${legacy_backup_status}" != "SUCCESSFUL" ]]; then
+    echo "Legacy graph backup ${context_cutover_legacy_backup_id} is not successful: ${legacy_backup_status:-missing}" >&2
+    exit 2
+  fi
 
   cat <<CUTOVER
 Starting destructive context cutover
 Release SHA: ${release_sha}
-Verified backup: ${database_project}/${database_instance}/${context_cutover_backup_id}
+Verified primary backup: ${database_project}/${database_instance}/${context_cutover_backup_id}
+Verified legacy graph backup: ${legacy_database_project}/${legacy_database_instance}/${context_cutover_legacy_backup_id}
 CUTOVER
 
   # Stop every intake surface and then claims before auditing the durable queue. The
@@ -319,10 +429,10 @@ CUTOVER
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --image="${api_image}" \
-    --service-account="${runtime_service_account}" \
-    --set-cloudsql-instances="${cloud_sql_instance}" \
-    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
-    --set-secrets="DB_PASS=${db_pass_secret}" \
+    --service-account="${migration_service_account}" \
+    --set-cloudsql-instances="${cloud_sql_instance},${legacy_graph_cloud_sql_instance}" \
+    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}~LEGACY_GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${legacy_graph_cloud_sql_instance}~LEGACY_GRAPH_DB_NAME=${legacy_graph_db_name}~LEGACY_GRAPH_DB_USER=${legacy_graph_db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
+    --set-secrets="DB_PASS=${migration_db_pass_secret},LEGACY_GRAPH_DB_PASS=${legacy_graph_db_pass_secret}" \
     --args=dist/cutover-preflight.js \
     --tasks=1 \
     --max-retries=0 \

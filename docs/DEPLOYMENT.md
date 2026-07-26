@@ -199,8 +199,9 @@ API/worker-only split build files for this coordinated context-engine cutover.
 
 ## Pre-deployment backup
 
-The deploy script does not create the production backup. The release operator must do so
-before the clean cutover:
+The deploy script does not create production backups. The release operator must back up
+both the identity/runtime database and the separate retired graph database before the
+clean cutover:
 
 ```sh
 gcloud sql backups create \
@@ -212,36 +213,66 @@ gcloud sql backups list \
   --project=jina-463721 \
   --instance=jina-db \
   --limit=5
+
+gcloud sql backups create \
+  --project=jina-v2 \
+  --instance=jina-postgres \
+  --description="before retired graph shutdown ${release_sha}"
+
+gcloud sql backups list \
+  --project=jina-v2 \
+  --instance=jina-postgres \
+  --limit=5
 ```
 
-Record the backup ID, release SHA, repository/ref inventory, expected ACL principals, and
-timestamp in the release evidence. Verify the backup reaches a successful state before
-deployment.
+Record both backup IDs, release SHA, repository/ref inventory, expected ACL principals,
+and timestamp in the release evidence. Verify both backups reach a successful state
+before deployment.
 
-The first destructive release must submit the verified backup ID, exact source SHA, and
-the complete active-tenant inventory:
+The first destructive release must run from the connected repository so Cloud Build
+provides an authoritative `COMMIT_SHA`. Create a manual-only release trigger once:
 
 ```sh
-gcloud builds submit \
+gcloud builds triggers create github \
+  --name=jina-context-release \
   --project=jina-v2 \
   --region=us-central1 \
-  --config=cloudbuild.yaml \
-  --substitutions="^~^_JINA_CONTEXT_CUTOVER=true~_JINA_CONTEXT_CUTOVER_BACKUP_ID=${backup_id}~_JINA_LEGACY_CUTOVER_TENANT_IDS=${tenant_ids_pipe_delimited}~_JINA_RELEASE_SHA=${release_sha}" \
-  .
+  --repository=projects/jina-v2/locations/us-central1/connections/jina-github/repositories/jina \
+  --branch-pattern='^__manual_context_release__$' \
+  --build-config=cloudbuild.yaml \
+  --service-account=projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com
+```
+
+Run that trigger at the exact pushed SHA with both verified backup IDs, the complete
+active-tenant inventory, and the retired graph database identity:
+
+```sh
+gcloud builds triggers run jina-context-release \
+  --project=jina-v2 \
+  --region=us-central1 \
+  --sha="${release_sha}" \
+  --substitutions="^~^_JINA_CONTEXT_CUTOVER=true~_JINA_CONTEXT_CUTOVER_BACKUP_ID=${primary_backup_id}~_JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID=${legacy_graph_backup_id}~_JINA_LEGACY_CUTOVER_TENANT_IDS=${tenant_ids_pipe_delimited}~_JINA_LEGACY_GRAPH_CLOUD_SQL_INSTANCE=jina-v2:us-central1:jina-postgres~_JINA_LEGACY_GRAPH_DB_NAME=jina~_JINA_LEGACY_GRAPH_DB_USER=jina_app~_JINA_LEGACY_GRAPH_DB_PASS_SECRET=jina-db-password:latest~_JINA_RELEASE_SHA=${release_sha}"
 ```
 
 When either retired service exists, normal deployment fails closed. Destructive mode
-always requires and revalidates all four values, including on a retry after the old
-services were already removed. It verifies the Cloud SQL backup is `SUCCESSFUL`, deletes
-the old graph worker and old API, and verifies both services are absent. With all
-legacy claims and intake durably fenced, `jina-context-cutover-preflight` reads the
-persisted board directly through the runtime database role. It checks nonterminal legacy
-tasks and every nondispatched legacy outbox row globally, while the pipe-delimited active
-tenant inventory makes archived counts auditable by tenant. The preflight permits
-archived terminal graph tasks but rejects any pending, waiting, running, or leased graph
-work and fails closed on malformed legacy outbox status. Only then does migration start. Deleting the old API closes both explicit
-graph-build and webhook intake during the incompatible schema boundary, and auditing
-afterward avoids a preflight-to-shutdown race. Subsequent context-engine releases leave
+always requires and revalidates the source-bound SHA, both backups, both database
+identities, and tenant inventory, including on a retry after the old services were
+already removed. Before first shutdown it requires the declared graph connection and
+secret to match the deployed legacy API. It verifies both Cloud SQL backups are
+`SUCCESSFUL`, deletes the old graph worker and old API, and verifies both services are
+absent.
+
+With all legacy claims and intake durably fenced,
+`jina-context-cutover-preflight` runs as the non-serving `jina-migration` identity. It
+reads `jina_runtime.api_state` from the primary database and directly audits
+`jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox` in the
+separate retired graph database. It fails if an expected relation is missing, a workflow
+or task is nonterminal, any lease metadata remains, any projection outbox row is
+unprocessed, or the declared inventory differs from the authoritative active shared
+tenants. Cloud Build also compares the submitted release SHA with its resolved repository
+source provenance. Only then does migration start. Deleting the old API closes both explicit graph-build and webhook
+intake during the incompatible schema boundary, and auditing afterward avoids a
+preflight-to-shutdown race. Subsequent context-engine releases leave
 `_JINA_CONTEXT_CUTOVER=false`; destructive mode also refuses to run when a context-engine
 API already exists.
 
@@ -254,9 +285,10 @@ full reingestion, and every inventory row must end with a published baseline gen
 The coordinated `cloudbuild.yaml` invocation above calls
 `scripts/cloud-build-deploy.sh`, which:
 
-1. on the first destructive release, verifies the backup and active-tenant inventory,
-   removes the old worker and API, then rejects nonterminal durable graph work before
-   migration;
+1. on the first destructive release, binds the release SHA to Cloud Build source,
+   verifies both backups and the authoritative tenant/database inventory, removes the old
+   worker and API, then rejects nonterminal or leased SQL graph work and unprocessed graph
+   outbox rows before migration;
 2. deploys and executes `jina-context-migrate` as the dedicated `jina-migration` Google
    service account with the migration-owner credential, including capability-role
    installation and runtime-login grants;
@@ -351,7 +383,7 @@ retrying with a new request key.
 
 Release evidence also records the build ID, stage IDs, repository/ref/commit,
 `refSequence`, generation ID and projection-input fingerprint, document/citation counts,
-duration, outbox depth, backup ID, immutable image/source SHA, deployed service accounts,
+duration, outbox depth, both backup IDs, immutable image/source SHA, deployed service accounts,
 and owner-secret IAM inspection.
 
 ## Outbox recovery and rebuild

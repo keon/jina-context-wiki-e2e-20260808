@@ -1529,7 +1529,8 @@ This is the only supported migration path:
 1. Complete all hard evaluation and operational gates in a production-shaped staging
    environment.
 2. Record the repository/ref inventory and expected ACL principals.
-3. Take a restorable database snapshot and export old graph metadata for audit only.
+3. Take restorable snapshots of both the primary runtime database and the separate
+   retired graph database; export old graph metadata for audit only.
 4. Stop old context workers and disable context build intake.
 5. Wait for in-flight old writes to terminate; do not translate or replay their messages.
 6. Archive and delete pending, leased, or blocked graph workflow tasks and outbox messages.
@@ -1547,15 +1548,21 @@ This is the only supported migration path:
     query fixtures.
 13. Enable derivation, then optional dense and PageIndex consumers only if their earlier
     gates passed.
-14. Delete `jina_context_graph` after the snapshot retention window.
+14. Delete the retired graph database and its `jina_context_graph` schema only after both
+    snapshots pass the retention window.
 15. Remove the old package and every runtime reference in the same release branch.
 
-The production deployment enforces steps 3–7: it verifies the recorded backup status,
-deletes the legacy worker and API, verifies the incompatible services are absent, then
-runs a direct persisted-board audit that rejects every nonterminal legacy task before
-executing the migration. Auditing after the write path is fenced avoids a
-preflight-to-shutdown race. Terminal legacy task metadata remains archived in the
-pre-cutover snapshot and is excluded from the new runtime board.
+The production deployment enforces steps 3–7: it binds the release SHA to the connected
+repository `COMMIT_SHA`, verifies both recorded backup statuses, deletes the legacy
+worker and API, and verifies the incompatible services are absent. The owner-only
+preflight then reads the primary API snapshot and directly audits the authoritative
+`jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox` relations in
+the separate retired graph database. It rejects nonterminal workflows or tasks, residual
+leases, unprocessed graph outbox rows, missing relations, and tenants omitted from the
+declared inventory; the inventory must exactly match active shared identity tenants
+before executing migration. Auditing after the write path is fenced
+avoids a preflight-to-shutdown race. Terminal legacy metadata remains archived in the
+pre-cutover snapshots and is excluded from the new runtime board.
 
 There is no live compatibility rollback. Emergency rollback means redeploying the complete
 old release and restoring its database snapshot, not pointing old code at the new schema.

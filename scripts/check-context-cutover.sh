@@ -10,6 +10,7 @@ if rg --line-number --ignore-case \
   --glob '!README.md' \
   --glob '!.env.example' \
   --glob '!scripts/check-context-cutover.sh' \
+  --glob '!packages/db/src/legacy-context-cutover.ts' \
   "${prohibited}" apps packages scripts; then
   echo "Legacy context runtime vocabulary remains in production source." >&2
   exit 1

@@ -1,4 +1,5 @@
 export * from "./postgres-json-state-store.js";
+export * from "./legacy-context-cutover.js";
 export * from "./postgres-shared-identity-store.js";
 export * from "./context/database.js";
 export * from "./context/embedding-repository.js";

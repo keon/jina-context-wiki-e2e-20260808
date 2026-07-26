@@ -1,4 +1,4 @@
-import { PostgresJsonStateStore } from "@jina/db";
+import { PostgresJsonStateStore, PostgresLegacyContextCutoverAuditor, PostgresSharedIdentityStore } from "@jina/db";
 import { isTerminalTaskStatus, type TaskStatus } from "@jina/board";
 
 const LEGACY_TASK_MARKERS = ["context_graph", "context-graph"];
@@ -7,6 +7,26 @@ export interface LegacyContextTaskAudit {
   readonly tenantId: string;
   readonly legacyTaskCount: number;
   readonly terminalTaskCount: number;
+}
+
+export function assertExactTenantInventory(
+  declaredTenantIds: readonly string[],
+  authoritativeTenantIds: readonly string[]
+): void {
+  const declared = [...new Set(declaredTenantIds)].sort();
+  const authoritative = [...new Set(authoritativeTenantIds)].sort();
+  if (
+    declared.length === authoritative.length &&
+    declared.every((tenantId, index) => tenantId === authoritative[index])
+  )
+    return;
+  const authoritativeSet = new Set(authoritative);
+  const declaredSet = new Set(declared);
+  const missing = authoritative.filter((tenantId) => !declaredSet.has(tenantId));
+  const unexpected = declared.filter((tenantId) => !authoritativeSet.has(tenantId));
+  throw new Error(
+    `legacy cutover tenant inventory does not match active shared tenants; missing=${missing.join(",") || "none"}; unexpected=${unexpected.join(",") || "none"}`
+  );
 }
 
 export function auditLegacyContextSnapshot(snapshot: unknown, tenantIds: readonly string[]): LegacyContextTaskAudit[] {
@@ -18,6 +38,17 @@ export function auditLegacyContextSnapshot(snapshot: unknown, tenantIds: readonl
     const type = optionalString(task.type);
     return type !== undefined && LEGACY_TASK_MARKERS.some((marker) => type.includes(marker));
   });
+  const inventorySet = new Set(inventory);
+  const uninventoried = [
+    ...new Set(
+      legacyTasks
+        .map((task) => optionalString(record(task.metadata).tenantId))
+        .filter((tenantId): tenantId is string => tenantId !== undefined && !inventorySet.has(tenantId))
+    )
+  ].sort();
+  if (uninventoried.length > 0) {
+    throw new Error(`legacy cutover tenant inventory is incomplete: ${uninventoried.join(", ")}`);
+  }
   const active = legacyTasks.filter((task) => !isTerminalStatus(task.status));
   if (active.length > 0) {
     const ids = active.map((task) => {
@@ -57,7 +88,8 @@ export function auditLegacyContextSnapshot(snapshot: unknown, tenantIds: readonl
 }
 
 async function main(): Promise<void> {
-  const store = new PostgresJsonStateStore<unknown>({
+  const tenantIds = parseTenantInventory(requiredEnvironment("JINA_LEGACY_CUTOVER_TENANT_IDS"));
+  const stateStore = new PostgresJsonStateStore<unknown>({
     host: requiredEnvironment("INSTANCE_UNIX_SOCKET"),
     database: requiredEnvironment("DB_NAME"),
     user: requiredEnvironment("DB_USER"),
@@ -66,13 +98,29 @@ async function main(): Promise<void> {
     manageSchema: false,
     max: 1
   });
+  const identityStore = new PostgresSharedIdentityStore({
+    host: requiredEnvironment("INSTANCE_UNIX_SOCKET"),
+    database: requiredEnvironment("DB_NAME"),
+    user: requiredEnvironment("DB_USER"),
+    password: requiredEnvironment("DB_PASS"),
+    applicationName: "jina-context-cutover-identity",
+    max: 1
+  });
+  const graphAuditor = new PostgresLegacyContextCutoverAuditor({
+    host: requiredEnvironment("LEGACY_GRAPH_INSTANCE_UNIX_SOCKET"),
+    database: requiredEnvironment("LEGACY_GRAPH_DB_NAME"),
+    user: requiredEnvironment("LEGACY_GRAPH_DB_USER"),
+    password: requiredEnvironment("LEGACY_GRAPH_DB_PASS"),
+    max: 1
+  });
   try {
-    const snapshot = await store.load();
-    const tenantIds = requiredEnvironment("JINA_LEGACY_CUTOVER_TENANT_IDS").split(/[|,]/);
-    const audits = auditLegacyContextSnapshot(snapshot, tenantIds);
-    console.log(JSON.stringify({ status: "quiesced", audits }));
+    assertExactTenantInventory(tenantIds, await identityStore.listTenantIds());
+    const snapshot = await stateStore.load();
+    const stateAudits = auditLegacyContextSnapshot(snapshot, tenantIds);
+    const graphAudits = await graphAuditor.audit(tenantIds);
+    console.log(JSON.stringify({ status: "quiesced", stateAudits, graphAudits }));
   } finally {
-    await store.close();
+    await Promise.all([stateStore.close(), identityStore.close(), graphAuditor.close()]);
   }
 }
 
@@ -80,12 +128,32 @@ function nestedBoard(snapshot: unknown): {
   tasks: Record<string, unknown>[];
   outbox: Record<string, unknown>[];
 } {
-  if (snapshot === undefined) return { tasks: [], outbox: [] };
+  if (snapshot === undefined) throw new Error("persisted API snapshot is missing");
   const intakeState = record(record(snapshot).intakeState);
   const board = record(intakeState.board);
   if (!Array.isArray(board.tasks)) throw new Error("persisted board snapshot has malformed tasks");
   if (!Array.isArray(board.outbox)) throw new Error("persisted board snapshot has malformed outbox");
   return { tasks: board.tasks.map(record), outbox: board.outbox.map(record) };
+}
+
+function parseTenantInventory(value: string): string[] {
+  const tenantIds = [
+    ...new Set(
+      value
+        .split("|")
+        .map((tenantId) => tenantId.trim())
+        .filter(Boolean)
+    )
+  ].sort();
+  if (
+    tenantIds.length === 0 ||
+    tenantIds.some(
+      (tenantId) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(tenantId)
+    )
+  ) {
+    throw new Error("JINA_LEGACY_CUTOVER_TENANT_IDS must be a pipe-delimited list of canonical UUIDs");
+  }
+  return tenantIds;
 }
 
 function requiredEnvironment(name: string): string {

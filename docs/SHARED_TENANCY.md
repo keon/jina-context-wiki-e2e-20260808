@@ -151,7 +151,8 @@ heads and recorded at exact commits.
 
 1. Build and validate release images against disposable PostgreSQL.
 2. Record active repository/ref inventory and expected principal access.
-3. Create a restorable Cloud SQL backup and record its operation/backup ID.
+3. Create restorable Cloud SQL backups for both the primary runtime database and the
+   separate retired graph database; record both backup IDs.
 4. Have the coordinated destructive deploy stop prior context workers and disable old
    API intake; do not create a manual preflight-to-shutdown gap.
 5. After the write path is absent, audit the durable board and outbox. Archive terminal
@@ -167,17 +168,19 @@ heads and recorded at exact commits.
 10. Audit per-ref build/checkpoint sequences, commits, manifests, projection-input
     fingerprints, ACLs, required projector status, outbox depth, citations, and exact
     queries. Run the production acceptance job and retain race-test output.
-11. Retain the restorable backup for the normal recovery window before deleting any
-    archived prior schema.
+11. Retain both restorable backups for the normal recovery window before deleting the
+    archived graph database or prior schema.
 
-The coordinated deploy makes steps 4–5 executable. With the destructive-cutover
-substitutions set, `jina-context-cutover-preflight` reads the old board for every tenant
-in the recorded inventory and fails on any nonterminal graph task. The deploy first
-deletes the retired worker and old API, verifies both are absent, and then runs that audit
-directly against the persisted board. This order fences claims and intake before the
-audit, eliminating a preflight-to-shutdown race. The old API deletion is the
-intake-disable boundary; no incompatible API remains available while the new schema is
-installed.
+The coordinated deploy makes steps 4–5 executable. It binds the release to the connected
+repository commit and verifies both backups. The deploy first deletes the retired worker
+and old API and verifies both are absent. Its owner-only preflight then reads the primary
+API snapshot and directly audits the separate retired graph database's
+`jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox` tables. It
+fails on nonterminal tasks or workflows, residual leases, unprocessed outbox rows,
+missing relations, or a declared inventory that differs from the authoritative active
+shared tenant set. This order fences claims and intake before the audit, eliminating a
+preflight-to-shutdown race. The old API deletion is the intake-disable boundary; no
+incompatible API remains available while the new schema is installed.
 
 The API may run with `JINA_DB_MANAGE_SCHEMA=true` only in disposable/local environments.
 Production runs a separate migration job, then starts the API with schema management
@@ -187,7 +190,7 @@ cannot access `jina-db-password`.
 
 ## Backup and rollback
 
-Create and inspect the backup before cutover:
+Create and inspect both backups before cutover:
 
 ```sh
 gcloud sql backups create \
@@ -196,15 +199,23 @@ gcloud sql backups create \
   --description="before context-engine cutover"
 
 gcloud sql backups list --project=jina-463721 --instance=jina-db
+
+gcloud sql backups create \
+  --project=jina-v2 \
+  --instance=jina-postgres \
+  --description="before retired graph shutdown"
+
+gcloud sql backups list --project=jina-v2 --instance=jina-postgres
 ```
 
 There is no mixed-version or compatibility rollback. Emergency rollback is:
 
 1. stop all new context writers;
 2. redeploy the complete previously known-good API and worker release;
-3. restore its matching database backup into an isolated recovery target;
+3. restore its matching primary and graph database backups into isolated recovery
+   targets;
 4. validate tenant identities and ACLs before directing traffic;
 5. reconcile writes accepted after the backup before trying another cutover.
 
 Do not run down-migrations or point old code at `jina_context`. Do not delete the recovery
-backup during the rollback window.
+backups during the rollback window.

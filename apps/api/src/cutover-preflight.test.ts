@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { auditLegacyContextSnapshot } from "./cutover-preflight.js";
+import { assertExactTenantInventory, auditLegacyContextSnapshot } from "./cutover-preflight.js";
 
 test("legacy cutover audit accepts archived terminal work for every inventoried tenant", () => {
   const audits = auditLegacyContextSnapshot(
@@ -64,6 +64,28 @@ test("legacy cutover audit rejects malformed legacy outbox status", () => {
         ["tenant-a"]
       ),
     /cg_done\/outbox_malformed/
+  );
+});
+
+test("legacy cutover audit rejects an incomplete tenant inventory", () => {
+  assert.throws(
+    () =>
+      auditLegacyContextSnapshot(snapshot([task("tenant-b", "context_graph_project", "done", "cg_done")]), [
+        "tenant-a"
+      ]),
+    /inventory is incomplete: tenant-b/
+  );
+});
+
+test("legacy cutover audit rejects a missing persisted API snapshot", () => {
+  assert.throws(() => auditLegacyContextSnapshot(undefined, ["tenant-a"]), /persisted API snapshot is missing/);
+});
+
+test("legacy cutover audit requires an exact authoritative active-tenant inventory", () => {
+  assert.doesNotThrow(() => assertExactTenantInventory(["tenant-b", "tenant-a"], ["tenant-a", "tenant-b"]));
+  assert.throws(
+    () => assertExactTenantInventory(["tenant-a", "tenant-extra"], ["tenant-a", "tenant-b"]),
+    /missing=tenant-b; unexpected=tenant-extra/
   );
 });
 
