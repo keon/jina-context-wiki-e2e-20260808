@@ -11,7 +11,8 @@ import {
   fingerprint,
   repositoryAclFingerprint,
   stableId,
-  type EvidenceSnapshot
+  type EvidenceSnapshot,
+  type StructuralFact
 } from "@jina/context-engine";
 import { Pool } from "pg";
 import { ContextDatabase } from "./context/database.js";
@@ -248,20 +249,52 @@ test(
       aclFingerprint,
       createdAt
     });
-    const structuralFacts = Array.from({ length: 501 }, (_, ordinal) => ({
-      id: stableId("sf", { repository, commitSha, ordinal }),
-      tenantId,
-      repository,
-      ref,
-      commitSha,
-      kind: "references" as const,
-      from: "src/context.ts#deployContext",
-      to: `src/context.ts#target-${ordinal}`,
-      anchors: [{ ...record.anchor, startLine: 1, endLine: 1 }],
-      derivationName: "fixture-parser",
-      derivationVersion: "fixture-parser-v1",
-      metadata: { ordinal }
-    }));
+    const structuralFacts: StructuralFact[] = [
+      ...Array.from({ length: 501 }, (_, ordinal) => ({
+        id: stableId("sf", { repository, commitSha, ordinal }),
+        tenantId,
+        repository,
+        ref,
+        commitSha,
+        kind: "references" as const,
+        from: "src/context.ts#deployContext",
+        to: `src/context.ts#target-${ordinal}`,
+        anchors: [{ ...record.anchor, startLine: 1, endLine: 1 }],
+        derivationName: "fixture-parser",
+        derivationVersion: "fixture-parser-v1",
+        metadata: { ordinal }
+      })),
+      {
+        id: stableId("sf", { repository, commitSha, kind: "defines" }),
+        tenantId,
+        repository,
+        ref,
+        commitSha,
+        kind: "defines",
+        from: "src/context.ts",
+        to: "src/context.ts#deployContext",
+        anchors: [{ ...record.anchor, startLine: 1, endLine: 1 }],
+        derivationName: "fixture-parser",
+        derivationVersion: "fixture-parser-v1",
+        metadata: {
+          symbol: { name: "deployContext", kind: "function", startLine: 1, endLine: 1 }
+        }
+      },
+      {
+        id: stableId("sf", { repository, commitSha, kind: "imports" }),
+        tenantId,
+        repository,
+        ref,
+        commitSha,
+        kind: "imports",
+        from: "src/context.ts",
+        to: "./runtime.js",
+        anchors: [{ ...record.anchor, startLine: 1, endLine: 1 }],
+        derivationName: "fixture-parser",
+        derivationVersion: "fixture-parser-v1",
+        metadata: { importedNames: ["startRuntime", "stopRuntime"] }
+      }
+    ];
     const snapshot: EvidenceSnapshot = {
       checkpoint: {
         id: stableId("ec", { tenantId, repository, commitSha }),
@@ -303,7 +336,16 @@ test(
           committedAt: createdAt,
           message: "Add context deployment fixture"
         },
-        changes: [{ kind: "add", path: "src/context.ts", newBlobSha: blobSha }]
+        changes: [{ kind: "add", path: "src/context.ts", newBlobSha: blobSha }],
+        history: Array.from({ length: 500 }, (_, ordinal) => ({
+          sha: ordinal.toString(16).padStart(40, "0"),
+          treeSha: "e".repeat(40),
+          parentShas: ["f".repeat(40)],
+          author: "Integration Test <test@example.com>",
+          authoredAt: createdAt,
+          committedAt: createdAt,
+          message: `Historical context fixture ${ordinal}`
+        }))
       }
     };
     await store.commitSnapshot(snapshot, ingestClaim.fence);
@@ -313,7 +355,46 @@ test(
        where checkpoint_id=$1`,
       [snapshot.checkpoint.id]
     );
-    assert.equal(persistedStructuralFacts.rows[0]?.count, "501");
+    assert.equal(persistedStructuralFacts.rows[0]?.count, "503");
+    const batchedGitRows = await database.pool.query<{
+      observations: string;
+      commits: string;
+      parents: string;
+      tree_entries: string;
+      analyses: string;
+      symbols: string;
+      imports: string;
+      changes: string;
+    }>(
+      `select
+         (select count(*)::text from jina_context.observations
+          where tenant_id=$1 and repository=$2 and source='git') observations,
+         (select count(*)::text from jina_context.commits
+          where tenant_id=$1 and repository=$2) commits,
+         (select count(*)::text from jina_context.commit_parents
+          where tenant_id=$1 and repository=$2) parents,
+         (select count(*)::text from jina_context.tree_entries
+          where tenant_id=$1 and repository=$2) tree_entries,
+         (select count(*)::text from jina_context.blob_analyses
+          where tenant_id=$1 and repository=$2) analyses,
+         (select count(*)::text from jina_context.symbols
+          where tenant_id=$1 and repository=$2) symbols,
+         (select count(*)::text from jina_context.imports
+          where tenant_id=$1 and repository=$2) imports,
+         (select count(*)::text from jina_context.commit_changes
+          where tenant_id=$1 and repository=$2) changes`,
+      [tenantId, repository]
+    );
+    assert.deepEqual(batchedGitRows.rows[0], {
+      observations: "501",
+      commits: "501",
+      parents: "501",
+      tree_entries: "1",
+      analyses: "1",
+      symbols: "1",
+      imports: "2",
+      changes: "1"
+    });
     const repeatedFailureCacheKey = fingerprint("repeated-failed-derivation");
     for (const attempt of [1, 2]) {
       await store.recordFailedRun({

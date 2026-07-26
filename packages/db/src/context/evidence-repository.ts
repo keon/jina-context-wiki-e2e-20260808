@@ -227,9 +227,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         ]);
         await lockProjectionInput(client, snapshot.checkpoint.tenantId, snapshot.checkpoint.repository);
         await ensureRepository(client, snapshot.checkpoint);
-        for (const record of snapshot.records) await insertEvidenceRecord(client, record);
-        for (const entry of snapshot.manifest)
-          await ensureManifestBlob(client, entry, snapshot.records, snapshot.checkpoint.createdAt);
+        await insertEvidenceRecords(client, snapshot.records);
+        await ensureManifestBlobs(client, snapshot.manifest, snapshot.records, snapshot.checkpoint.createdAt);
         await insertStructuralFacts(client, snapshot.structuralFacts, snapshot.checkpoint.createdAt);
         if (snapshot.git) await persistGitSnapshot(client, snapshot);
 
@@ -522,139 +521,194 @@ async function insertObservation(client: PoolClient, input: ProviderObservation)
   );
 }
 
-async function insertEvidenceRecord(client: PoolClient, record: EvidenceRecord): Promise<void> {
-  const anchor = record.anchor;
-  await client.query(
-    `insert into jina_context.evidence_records
-      (id,tenant_id,repository,ref_name,source_type,source_id,content_digest,commit_sha,
-       path_or_url,start_line,end_line,json_pointer,observed_at,title,body,metadata,
-       authority_class,acl_fingerprint,created_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17,$18,$19)
-     on conflict (tenant_id,repository,id) do nothing`,
-    [
-      record.id,
-      anchor.tenantId,
-      anchor.repository,
-      record.ref,
-      anchor.sourceType,
-      anchor.sourceId,
-      anchor.contentDigest,
-      anchor.commitSha ?? null,
-      anchor.pathOrUrl ?? null,
-      anchor.startLine ?? null,
-      anchor.endLine ?? null,
-      anchor.jsonPointer ?? null,
-      anchor.observedAt ?? null,
-      record.title,
-      record.body,
-      JSON.stringify(record.metadata),
-      record.authorityClass,
-      record.aclFingerprint,
-      record.createdAt
-    ]
-  );
-  const stored = await client.query(
-    `select 1 from jina_context.evidence_records
-     where tenant_id=$1 and repository=$2 and id=$3 and ref_name=$4
-       and source_type=$5 and source_id=$6 and content_digest=$7
-       and commit_sha is not distinct from $8
-       and path_or_url is not distinct from $9
-       and start_line is not distinct from $10
-       and end_line is not distinct from $11
-       and json_pointer is not distinct from $12
-       and title=$13 and body=$14 and acl_fingerprint=$15`,
-    [
-      anchor.tenantId,
-      anchor.repository,
-      record.id,
-      record.ref,
-      anchor.sourceType,
-      anchor.sourceId,
-      anchor.contentDigest,
-      anchor.commitSha ?? null,
-      anchor.pathOrUrl ?? null,
-      anchor.startLine ?? null,
-      anchor.endLine ?? null,
-      anchor.jsonPointer ?? null,
-      record.title,
-      record.body,
-      record.aclFingerprint
-    ]
-  );
-  if (stored.rowCount !== 1) throw new Error(`Evidence record identity collision for ${record.id}`);
+async function insertEvidenceRecords(client: PoolClient, records: readonly EvidenceRecord[]): Promise<void> {
+  for (const chunk of snapshotChunks(records)) {
+    const rows = chunk.map((record) => ({
+      id: record.id,
+      tenant_id: record.anchor.tenantId,
+      repository: record.anchor.repository,
+      ref_name: record.ref,
+      source_type: record.anchor.sourceType,
+      source_id: record.anchor.sourceId,
+      content_digest: record.anchor.contentDigest,
+      commit_sha: record.anchor.commitSha ?? null,
+      path_or_url: record.anchor.pathOrUrl ?? null,
+      start_line: record.anchor.startLine ?? null,
+      end_line: record.anchor.endLine ?? null,
+      json_pointer: record.anchor.jsonPointer ?? null,
+      observed_at: record.anchor.observedAt ?? null,
+      title: record.title,
+      body: record.body,
+      metadata: record.metadata,
+      authority_class: record.authorityClass,
+      acl_fingerprint: record.aclFingerprint,
+      created_at: record.createdAt
+    }));
+    const recordset = `
+      select *
+      from jsonb_to_recordset($1::jsonb) as input(
+        id text,tenant_id text,repository text,ref_name text,source_type text,source_id text,
+        content_digest text,commit_sha text,path_or_url text,start_line integer,end_line integer,
+        json_pointer text,observed_at timestamptz,title text,body text,metadata jsonb,
+        authority_class text,acl_fingerprint text,created_at timestamptz
+      )`;
+    await client.query(
+      `with input as (${recordset})
+       insert into jina_context.evidence_records
+        (id,tenant_id,repository,ref_name,source_type,source_id,content_digest,commit_sha,
+         path_or_url,start_line,end_line,json_pointer,observed_at,title,body,metadata,
+         authority_class,acl_fingerprint,created_at)
+       select id,tenant_id,repository,ref_name,source_type,source_id,content_digest,commit_sha,
+              path_or_url,start_line,end_line,json_pointer,observed_at,title,body,metadata,
+              authority_class,acl_fingerprint,created_at
+       from input
+       on conflict (tenant_id,repository,id) do nothing`,
+      [JSON.stringify(rows)]
+    );
+    const collisions = await client.query<{ id: string }>(
+      `with input as (${recordset})
+       select input.id
+       from input
+       left join jina_context.evidence_records stored
+         on stored.tenant_id=input.tenant_id
+        and stored.repository=input.repository
+        and stored.id=input.id
+        and stored.ref_name=input.ref_name
+        and stored.source_type=input.source_type
+        and stored.source_id=input.source_id
+        and stored.content_digest=input.content_digest
+        and stored.commit_sha is not distinct from input.commit_sha
+        and stored.path_or_url is not distinct from input.path_or_url
+        and stored.start_line is not distinct from input.start_line
+        and stored.end_line is not distinct from input.end_line
+        and stored.json_pointer is not distinct from input.json_pointer
+        and stored.title=input.title
+        and stored.body=input.body
+        and stored.acl_fingerprint=input.acl_fingerprint
+       where stored.id is null
+       limit 1`,
+      [JSON.stringify(rows)]
+    );
+    if (collisions.rows[0]) {
+      throw new Error(`Evidence record identity collision for ${collisions.rows[0].id}`);
+    }
+  }
 }
 
-async function ensureManifestBlob(
+async function ensureManifestBlobs(
   client: PoolClient,
-  entry: RefManifestEntry,
+  manifest: readonly RefManifestEntry[],
   evidence: readonly EvidenceRecord[],
   recordedAt: string
 ): Promise<void> {
-  if (!entry.contentAvailable) return;
-  const source = evidence.find(
-    (record) =>
-      record.anchor.sourceType === "blob" &&
-      record.anchor.sourceId === entry.blobSha &&
-      record.anchor.contentDigest === entry.contentDigest
+  const byIdentity = new Map(
+    evidence
+      .filter((record) => record.anchor.sourceType === "blob")
+      .map((record) => [`${record.anchor.sourceId}\u001f${record.anchor.contentDigest}`, record])
   );
-  await client.query(
-    `insert into jina_context.blobs
-      (tenant_id,repository,blob_sha,content_digest,byte_size,media_type,encoding,content,recorded_at)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     on conflict (tenant_id,repository,blob_sha) do nothing`,
-    [
-      entry.tenantId,
-      entry.repository,
-      entry.blobSha,
-      entry.contentDigest,
-      source ? Buffer.byteLength(source.body, "utf8") : 0,
-      source?.metadata.mediaType ?? (entry.contentAvailable ? "text/plain" : "application/octet-stream"),
-      source ? "utf-8" : null,
-      source?.body ?? null,
-      recordedAt
-    ]
-  );
-  const stored = await client.query(
-    `select 1 from jina_context.blobs
-     where tenant_id=$1 and repository=$2 and blob_sha=$3 and content_digest=$4`,
-    [entry.tenantId, entry.repository, entry.blobSha, entry.contentDigest]
-  );
-  if (stored.rowCount !== 1) throw new Error(`Blob identity collision for ${entry.blobSha}`);
+  const rows = manifest
+    .filter((entry) => entry.contentAvailable)
+    .map((entry) => {
+      const source = byIdentity.get(`${entry.blobSha}\u001f${entry.contentDigest}`);
+      return {
+        tenant_id: entry.tenantId,
+        repository: entry.repository,
+        blob_sha: entry.blobSha,
+        content_digest: entry.contentDigest,
+        byte_size: source ? Buffer.byteLength(source.body, "utf8") : 0,
+        media_type: source?.metadata.mediaType ?? "text/plain",
+        encoding: source ? "utf-8" : null,
+        content: source?.body ?? null,
+        recorded_at: recordedAt
+      };
+    });
+  for (const chunk of snapshotChunks(rows)) {
+    const recordset = `
+      select *
+      from jsonb_to_recordset($1::jsonb) as input(
+        tenant_id text,repository text,blob_sha text,content_digest text,byte_size bigint,
+        media_type text,encoding text,content text,recorded_at timestamptz
+      )`;
+    await client.query(
+      `with input as (${recordset})
+       insert into jina_context.blobs
+        (tenant_id,repository,blob_sha,content_digest,byte_size,media_type,encoding,content,recorded_at)
+       select tenant_id,repository,blob_sha,content_digest,byte_size,media_type,encoding,content,recorded_at
+       from input
+       on conflict (tenant_id,repository,blob_sha) do nothing`,
+      [JSON.stringify(chunk)]
+    );
+    const collisions = await client.query<{ blob_sha: string }>(
+      `with input as (${recordset})
+       select input.blob_sha
+       from input
+       left join jina_context.blobs stored
+         on stored.tenant_id=input.tenant_id
+        and stored.repository=input.repository
+        and stored.blob_sha=input.blob_sha
+        and stored.content_digest=input.content_digest
+       where stored.blob_sha is null
+       limit 1`,
+      [JSON.stringify(chunk)]
+    );
+    if (collisions.rows[0]) {
+      throw new Error(`Blob identity collision for ${collisions.rows[0].blob_sha}`);
+    }
+  }
 }
 
 async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot): Promise<void> {
   const git = snapshot.git;
   if (!git) return;
   const { checkpoint, manifest, structuralFacts } = snapshot;
-  const observationPayload = {
-    commitSha: checkpoint.commitSha,
-    ref: checkpoint.ref,
-    ...git.commit
-  };
-  const observationDigest = contextDigest(observationPayload);
-  const observationId = contextStableId("observation", {
-    tenantId: checkpoint.tenantId,
-    repository: checkpoint.repository,
-    source: "git",
-    commitSha: checkpoint.commitSha,
-    observationDigest
+  const commits = [
+    {
+      sha: checkpoint.commitSha,
+      metadata: git.commit,
+      payload: { commitSha: checkpoint.commitSha, ref: checkpoint.ref, ...git.commit }
+    },
+    ...(git.history ?? [])
+      .filter((historical) => historical.sha !== checkpoint.commitSha)
+      .map((historical) => ({
+        sha: historical.sha,
+        metadata: historical,
+        payload: { commitSha: historical.sha, ...historical }
+      }))
+  ].map((commit) => {
+    const observationDigest = contextDigest(commit.payload);
+    return {
+      ...commit,
+      observationDigest,
+      observationId: contextStableId("observation", {
+        tenantId: checkpoint.tenantId,
+        repository: checkpoint.repository,
+        source: "git",
+        commitSha: commit.sha,
+        observationDigest
+      })
+    };
   });
-  await client.query(
+  await insertSnapshotRows(
+    client,
+    commits.map((commit) => ({
+      id: commit.observationId,
+      tenant_id: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      external_id: commit.sha,
+      occurred_at: commit.metadata.committedAt ?? checkpoint.createdAt,
+      recorded_at: checkpoint.createdAt,
+      payload: commit.payload,
+      content_digest: commit.observationDigest
+    })),
+    `id text,tenant_id text,repository text,external_id text,occurred_at timestamptz,
+     recorded_at timestamptz,payload jsonb,content_digest text`,
     `insert into jina_context.observations
       (id,tenant_id,repository,source,source_type,external_id,occurred_at,recorded_at,payload,content_digest)
-     values ($1,$2,$3,'git','git_object',$4,$5,$6,$7::jsonb,$8)
-     on conflict (tenant_id,repository,id) do nothing`,
-    [
-      observationId,
-      checkpoint.tenantId,
-      checkpoint.repository,
-      checkpoint.commitSha,
-      git.commit.committedAt ?? checkpoint.createdAt,
-      checkpoint.createdAt,
-      JSON.stringify(observationPayload),
-      observationDigest
-    ]
+     select id,tenant_id,repository,'git','git_object',external_id,occurred_at,recorded_at,payload,content_digest
+     from input
+     on conflict (tenant_id,repository,id) do nothing`
   );
+  const observationId = commits[0]!.observationId;
   await client.query(
     `insert into jina_context.trees
       (tenant_id,repository,tree_sha,entry_count,content_digest,recorded_at)
@@ -669,84 +723,46 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
       checkpoint.createdAt
     ]
   );
-  await client.query(
+  await insertSnapshotRows(
+    client,
+    commits.map((commit) => ({
+      tenant_id: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      sha: commit.sha,
+      tree_sha: commit.metadata.treeSha,
+      author_external_id: commit.metadata.author ?? null,
+      authored_at: commit.metadata.authoredAt ?? null,
+      committed_at: commit.metadata.committedAt ?? null,
+      message: commit.metadata.message,
+      source_observation_id: commit.observationId
+    })),
+    `tenant_id text,repository text,sha text,tree_sha text,author_external_id text,
+     authored_at timestamptz,committed_at timestamptz,message text,source_observation_id text`,
     `insert into jina_context.commits
       (tenant_id,repository,sha,tree_sha,author_external_id,authored_at,committed_at,message,source_observation_id)
-     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-     on conflict (tenant_id,repository,sha) do nothing`,
-    [
-      checkpoint.tenantId,
-      checkpoint.repository,
-      checkpoint.commitSha,
-      git.commit.treeSha,
-      git.commit.author ?? null,
-      git.commit.authoredAt ?? null,
-      git.commit.committedAt ?? null,
-      git.commit.message,
-      observationId
-    ]
+     select tenant_id,repository,sha,tree_sha,author_external_id,authored_at,committed_at,message,
+            source_observation_id
+     from input
+     on conflict (tenant_id,repository,sha) do nothing`
   );
-  for (const [ordinal, parentSha] of git.commit.parentShas.entries()) {
-    await client.query(
-      `insert into jina_context.commit_parents
-        (tenant_id,repository,commit_sha,ordinal,parent_sha)
-       values ($1,$2,$3,$4,$5) on conflict do nothing`,
-      [checkpoint.tenantId, checkpoint.repository, checkpoint.commitSha, ordinal, parentSha]
-    );
-  }
-  for (const historical of git.history ?? []) {
-    if (historical.sha === checkpoint.commitSha) continue;
-    const historicalPayload = { commitSha: historical.sha, ...historical };
-    const historicalDigest = contextDigest(historicalPayload);
-    const historicalObservationId = contextStableId("observation", {
-      tenantId: checkpoint.tenantId,
-      repository: checkpoint.repository,
-      source: "git",
-      commitSha: historical.sha,
-      observationDigest: historicalDigest
-    });
-    await client.query(
-      `insert into jina_context.observations
-        (id,tenant_id,repository,source,source_type,external_id,occurred_at,recorded_at,payload,content_digest)
-       values ($1,$2,$3,'git','git_object',$4,$5,$6,$7::jsonb,$8)
-       on conflict (tenant_id,repository,id) do nothing`,
-      [
-        historicalObservationId,
-        checkpoint.tenantId,
-        checkpoint.repository,
-        historical.sha,
-        historical.committedAt ?? checkpoint.createdAt,
-        checkpoint.createdAt,
-        JSON.stringify(historicalPayload),
-        historicalDigest
-      ]
-    );
-    await client.query(
-      `insert into jina_context.commits
-        (tenant_id,repository,sha,tree_sha,author_external_id,authored_at,committed_at,message,source_observation_id)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
-       on conflict (tenant_id,repository,sha) do nothing`,
-      [
-        checkpoint.tenantId,
-        checkpoint.repository,
-        historical.sha,
-        historical.treeSha,
-        historical.author ?? null,
-        historical.authoredAt ?? null,
-        historical.committedAt ?? null,
-        historical.message,
-        historicalObservationId
-      ]
-    );
-    for (const [ordinal, parentSha] of historical.parentShas.entries()) {
-      await client.query(
-        `insert into jina_context.commit_parents
-          (tenant_id,repository,commit_sha,ordinal,parent_sha)
-         values ($1,$2,$3,$4,$5) on conflict do nothing`,
-        [checkpoint.tenantId, checkpoint.repository, historical.sha, ordinal, parentSha]
-      );
-    }
-  }
+  await insertSnapshotRows(
+    client,
+    commits.flatMap((commit) =>
+      commit.metadata.parentShas.map((parentSha, ordinal) => ({
+        tenant_id: checkpoint.tenantId,
+        repository: checkpoint.repository,
+        commit_sha: commit.sha,
+        ordinal,
+        parent_sha: parentSha
+      }))
+    ),
+    `tenant_id text,repository text,commit_sha text,ordinal integer,parent_sha text`,
+    `insert into jina_context.commit_parents
+      (tenant_id,repository,commit_sha,ordinal,parent_sha)
+     select tenant_id,repository,commit_sha,ordinal,parent_sha
+     from input
+     on conflict do nothing`
+  );
   const refId = contextStableId("ref", {
     tenantId: checkpoint.tenantId,
     repository: checkpoint.repository,
@@ -771,133 +787,216 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
       checkpoint.createdAt
     ]
   );
+  await insertSnapshotRows(
+    client,
+    manifest.map((entry) => ({
+      tenant_id: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      tree_sha: git.commit.treeSha,
+      path: entry.path,
+      blob_sha: entry.blobSha,
+      mode: entry.executable ? "100755" : "100644"
+    })),
+    `tenant_id text,repository text,tree_sha text,path text,blob_sha text,mode text`,
+    `insert into jina_context.tree_entries
+      (tenant_id,repository,tree_sha,path,blob_sha,mode)
+     select tenant_id,repository,tree_sha,path,blob_sha,mode
+     from input
+     on conflict do nothing`
+  );
+  const factsByBlob = new Map<string, StructuralFact[]>();
+  for (const fact of structuralFacts) {
+    for (const sourceId of new Set(fact.anchors.map((anchor) => anchor.sourceId))) {
+      const facts = factsByBlob.get(sourceId);
+      if (facts) facts.push(fact);
+      else factsByBlob.set(sourceId, [fact]);
+    }
+  }
+  const sourceByBlobPath = new Map(
+    snapshot.records
+      .filter((record) => record.anchor.sourceType === "blob")
+      .map((record) => [`${record.anchor.sourceId}\u001f${record.anchor.pathOrUrl ?? ""}`, record])
+  );
+  const analysisRows = new Map<
+    string,
+    {
+      tenant_id: string;
+      repository: string;
+      blob_sha: string;
+      parser_version: string;
+      language: string | null;
+      status: "complete" | "unsupported";
+      diagnostics: readonly unknown[];
+      output_digest: string;
+      created_at: string;
+    }
+  >();
   for (const entry of manifest) {
-    await client.query(
-      `insert into jina_context.tree_entries
-        (tenant_id,repository,tree_sha,path,blob_sha,mode)
-       values ($1,$2,$3,$4,$5,$6) on conflict do nothing`,
-      [
-        checkpoint.tenantId,
-        checkpoint.repository,
-        git.commit.treeSha,
-        entry.path,
-        entry.blobSha,
-        entry.executable ? "100755" : "100644"
-      ]
-    );
     if (!entry.contentAvailable) continue;
-    const facts = structuralFacts.filter((fact) => fact.anchors.some((anchor) => anchor.sourceId === entry.blobSha));
-    const sourceRecord = snapshot.records.find(
-      (record) =>
-        record.anchor.sourceType === "blob" &&
-        record.anchor.sourceId === entry.blobSha &&
-        record.anchor.pathOrUrl === entry.path
-    );
+    const facts = factsByBlob.get(entry.blobSha) ?? [];
+    const sourceRecord = sourceByBlobPath.get(`${entry.blobSha}\u001f${entry.path}`);
     const supported =
       entry.language !== undefined && entry.language !== "text" && sourceRecord?.metadata.contentOmitted !== true;
-    await client.query(
-      `insert into jina_context.blob_analyses
-        (tenant_id,repository,blob_sha,parser_name,parser_version,language,status,diagnostics,output_digest,created_at)
-       values ($1,$2,$3,'deterministic-source-parser',$4,$5,$6,'[]'::jsonb,$7,$8)
-       on conflict do nothing`,
-      [
-        checkpoint.tenantId,
-        checkpoint.repository,
-        entry.blobSha,
-        checkpoint.parserVersion,
-        entry.language ?? null,
-        supported ? "complete" : "unsupported",
-        contextDigest(facts),
-        checkpoint.createdAt
-      ]
-    );
-    await persistParsedFacts(client, checkpoint, entry, facts);
+    analysisRows.set(entry.blobSha, {
+      tenant_id: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      blob_sha: entry.blobSha,
+      parser_version: checkpoint.parserVersion,
+      language: entry.language ?? null,
+      status: supported ? "complete" : "unsupported",
+      diagnostics: [],
+      output_digest: contextDigest(facts),
+      created_at: checkpoint.createdAt
+    });
   }
-  for (const [ordinal, change] of git.changes.entries()) {
-    await client.query(
-      `insert into jina_context.commit_changes
-        (tenant_id,repository,commit_sha,ordinal,change_kind,path,old_path,old_blob_sha,new_blob_sha)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict do nothing`,
-      [
-        checkpoint.tenantId,
-        checkpoint.repository,
-        checkpoint.commitSha,
-        ordinal,
-        change.kind,
-        change.path,
-        change.oldPath ?? null,
-        change.oldBlobSha ?? null,
-        change.newBlobSha ?? null
-      ]
-    );
-  }
+  await insertSnapshotRows(
+    client,
+    [...analysisRows.values()],
+    `tenant_id text,repository text,blob_sha text,parser_version text,language text,status text,
+     diagnostics jsonb,output_digest text,created_at timestamptz`,
+    `insert into jina_context.blob_analyses
+      (tenant_id,repository,blob_sha,parser_name,parser_version,language,status,diagnostics,output_digest,created_at)
+     select tenant_id,repository,blob_sha,'deterministic-source-parser',parser_version,language,status,
+            diagnostics,output_digest,created_at
+     from input
+     on conflict do nothing`
+  );
+  await persistParsedFacts(
+    client,
+    checkpoint,
+    manifest.filter((entry) => entry.contentAvailable),
+    factsByBlob
+  );
+  await insertSnapshotRows(
+    client,
+    git.changes.map((change, ordinal) => ({
+      tenant_id: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      commit_sha: checkpoint.commitSha,
+      ordinal,
+      change_kind: change.kind,
+      path: change.path,
+      old_path: change.oldPath ?? null,
+      old_blob_sha: change.oldBlobSha ?? null,
+      new_blob_sha: change.newBlobSha ?? null
+    })),
+    `tenant_id text,repository text,commit_sha text,ordinal integer,change_kind text,path text,
+     old_path text,old_blob_sha text,new_blob_sha text`,
+    `insert into jina_context.commit_changes
+      (tenant_id,repository,commit_sha,ordinal,change_kind,path,old_path,old_blob_sha,new_blob_sha)
+     select tenant_id,repository,commit_sha,ordinal,change_kind,path,old_path,old_blob_sha,new_blob_sha
+     from input
+     on conflict do nothing`
+  );
 }
 
 async function persistParsedFacts(
   client: PoolClient,
   checkpoint: EvidenceCheckpoint,
-  entry: RefManifestEntry,
-  facts: readonly StructuralFact[]
+  entries: readonly RefManifestEntry[],
+  factsByBlob: ReadonlyMap<string, readonly StructuralFact[]>
 ): Promise<void> {
-  for (const fact of facts) {
-    if (fact.kind === "defines") {
-      const symbol =
-        fact.metadata.symbol && typeof fact.metadata.symbol === "object" && !Array.isArray(fact.metadata.symbol)
-          ? (fact.metadata.symbol as Record<string, unknown>)
-          : undefined;
-      const name = typeof symbol?.name === "string" ? symbol.name : fact.to.split("#").at(-1);
-      const kind = typeof symbol?.kind === "string" ? symbol.kind : "symbol";
-      const startLine = typeof symbol?.startLine === "number" ? symbol.startLine : fact.anchors[0]?.startLine;
-      const endLine = typeof symbol?.endLine === "number" ? symbol.endLine : fact.anchors[0]?.endLine;
-      if (!name || !startLine || !endLine) continue;
-      await client.query(
-        `insert into jina_context.symbols
-          (id,tenant_id,repository,blob_sha,parser_name,parser_version,moniker,name,kind,
-           start_line,end_line,metadata)
-         values ($1,$2,$3,$4,'deterministic-source-parser',$5,$6,$7,$8,$9,$10,$11::jsonb)
-         on conflict do nothing`,
-        [
-          contextStableId("symbol", { factId: fact.id }),
-          checkpoint.tenantId,
-          checkpoint.repository,
-          entry.blobSha,
-          checkpoint.parserVersion,
-          fact.to,
+  const symbolRows: Record<string, unknown>[] = [];
+  const importRows: Record<string, unknown>[] = [];
+  const seenSymbols = new Set<string>();
+  const seenImports = new Set<string>();
+  for (const entry of entries) {
+    for (const fact of factsByBlob.get(entry.blobSha) ?? []) {
+      if (fact.kind === "defines") {
+        const symbol =
+          fact.metadata.symbol && typeof fact.metadata.symbol === "object" && !Array.isArray(fact.metadata.symbol)
+            ? (fact.metadata.symbol as Record<string, unknown>)
+            : undefined;
+        const name = typeof symbol?.name === "string" ? symbol.name : fact.to.split("#").at(-1);
+        const kind = typeof symbol?.kind === "string" ? symbol.kind : "symbol";
+        const startLine = typeof symbol?.startLine === "number" ? symbol.startLine : fact.anchors[0]?.startLine;
+        const endLine = typeof symbol?.endLine === "number" ? symbol.endLine : fact.anchors[0]?.endLine;
+        if (!name || !startLine || !endLine) continue;
+        const id = contextStableId("symbol", { factId: fact.id });
+        if (seenSymbols.has(id)) continue;
+        seenSymbols.add(id);
+        symbolRows.push({
+          id,
+          tenant_id: checkpoint.tenantId,
+          repository: checkpoint.repository,
+          blob_sha: entry.blobSha,
+          parser_version: checkpoint.parserVersion,
+          moniker: fact.to,
           name,
           kind,
-          startLine,
-          endLine,
-          JSON.stringify(fact.metadata)
-        ]
-      );
-    } else if (fact.kind === "imports") {
-      const names = Array.isArray(fact.metadata.importedNames)
-        ? fact.metadata.importedNames.filter((value): value is string => typeof value === "string")
-        : [];
-      const values = names.length ? names : [undefined];
-      for (const [ordinal, importedName] of values.entries()) {
-        const line = fact.anchors[0]?.startLine;
-        if (!line) continue;
-        await client.query(
-          `insert into jina_context.imports
-            (id,tenant_id,repository,blob_sha,parser_name,parser_version,specifier,
-             imported_name,start_line,end_line,metadata)
-           values ($1,$2,$3,$4,'deterministic-source-parser',$5,$6,$7,$8,$8,$9::jsonb)
-           on conflict do nothing`,
-          [
-            contextStableId("import", { factId: fact.id, ordinal }),
-            checkpoint.tenantId,
-            checkpoint.repository,
-            entry.blobSha,
-            checkpoint.parserVersion,
-            fact.to,
-            importedName ?? null,
-            line,
-            JSON.stringify(fact.metadata)
-          ]
-        );
+          start_line: startLine,
+          end_line: endLine,
+          metadata: fact.metadata
+        });
+      } else if (fact.kind === "imports") {
+        const names = Array.isArray(fact.metadata.importedNames)
+          ? fact.metadata.importedNames.filter((value): value is string => typeof value === "string")
+          : [];
+        const values = names.length ? names : [undefined];
+        for (const [ordinal, importedName] of values.entries()) {
+          const line = fact.anchors[0]?.startLine;
+          if (!line) continue;
+          const id = contextStableId("import", { factId: fact.id, ordinal });
+          if (seenImports.has(id)) continue;
+          seenImports.add(id);
+          importRows.push({
+            id,
+            tenant_id: checkpoint.tenantId,
+            repository: checkpoint.repository,
+            blob_sha: entry.blobSha,
+            parser_version: checkpoint.parserVersion,
+            specifier: fact.to,
+            imported_name: importedName ?? null,
+            start_line: line,
+            end_line: line,
+            metadata: fact.metadata
+          });
+        }
       }
     }
+  }
+  await insertSnapshotRows(
+    client,
+    symbolRows,
+    `id text,tenant_id text,repository text,blob_sha text,parser_version text,moniker text,
+     name text,kind text,start_line integer,end_line integer,metadata jsonb`,
+    `insert into jina_context.symbols
+      (id,tenant_id,repository,blob_sha,parser_name,parser_version,moniker,name,kind,
+       start_line,end_line,metadata)
+     select id,tenant_id,repository,blob_sha,'deterministic-source-parser',parser_version,moniker,name,
+            kind,start_line,end_line,metadata
+     from input
+     on conflict do nothing`
+  );
+  await insertSnapshotRows(
+    client,
+    importRows,
+    `id text,tenant_id text,repository text,blob_sha text,parser_version text,specifier text,
+     imported_name text,start_line integer,end_line integer,metadata jsonb`,
+    `insert into jina_context.imports
+      (id,tenant_id,repository,blob_sha,parser_name,parser_version,specifier,
+       imported_name,start_line,end_line,metadata)
+     select id,tenant_id,repository,blob_sha,'deterministic-source-parser',parser_version,specifier,
+            imported_name,start_line,end_line,metadata
+     from input
+     on conflict do nothing`
+  );
+}
+
+async function insertSnapshotRows<T>(
+  client: PoolClient,
+  rows: readonly T[],
+  recordDefinition: string,
+  insertStatement: string
+): Promise<void> {
+  for (const chunk of snapshotChunks(rows)) {
+    await client.query(
+      `with input as (
+         select * from jsonb_to_recordset($1::jsonb) as input(${recordDefinition})
+       )
+       ${insertStatement}`,
+      [JSON.stringify(chunk)]
+    );
   }
 }
 
