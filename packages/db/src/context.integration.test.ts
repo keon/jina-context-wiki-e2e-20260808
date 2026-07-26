@@ -1346,6 +1346,38 @@ test(
     );
     assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
 
+    const numericSequenceRepository = "acme/numeric-checkpoint-order";
+    let numericSequenceCheckpointId = "";
+    for (let sequence = 1; sequence <= 10; sequence += 1) {
+      const sequenceCommitSha = sequence.toString(16).padStart(40, "0");
+      const sequenceBuild = await coordinator.createBuild({
+        tenantId,
+        repository: numericSequenceRepository,
+        ref,
+        commitSha: sequenceCommitSha,
+        requestKey: `numeric-checkpoint-order-${sequence}`,
+        createdAt: at(12_900 + sequence * 10)
+      });
+      const sequenceCheckpoint = await new IngestEvidenceService(store).ingest({
+        tenantId,
+        repository: numericSequenceRepository,
+        ref,
+        refSequence: sequenceBuild.refSequence,
+        commitSha: sequenceCommitSha,
+        files: [],
+        observations: [],
+        aclFingerprint: repositoryAclFingerprint(tenantId, numericSequenceRepository),
+        observationFrontier: `numeric-checkpoint-order-${sequence}`,
+        createdAt: at(12_900 + sequence * 10 + 1),
+        sourceComplete: true
+      });
+      numericSequenceCheckpointId = sequenceCheckpoint.id;
+    }
+    assert.equal(
+      (await new IndexContextService(store).index(numericSequenceCheckpointId, at(13_100))).commitSha,
+      "a".padStart(40, "0")
+    );
+
     const raceTenantId = `${tenantId}-acl-race`;
     const raceRepository = "acme/acl-race";
     const raceAclFingerprint = repositoryAclFingerprint(raceTenantId, raceRepository);
@@ -1514,10 +1546,10 @@ test(
     assert.equal(
       (
         await database.pool.query<{ ref_sequence: string }>(
-          `select ref_sequence::text ref_sequence
-           from jina_context.refs
-           where tenant_id=$1 and repository=$2 and ref_name=$3 and commit_sha=$4
-           order by ref_sequence desc limit 1`,
+          `select ref.ref_sequence::text ref_sequence
+           from jina_context.refs ref
+           where ref.tenant_id=$1 and ref.repository=$2 and ref.ref_name=$3 and ref.commit_sha=$4
+           order by ref.ref_sequence desc limit 1`,
           [tenantId, repository, ref, commitSha]
         )
       ).rows[0]?.ref_sequence,

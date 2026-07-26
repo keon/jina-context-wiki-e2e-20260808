@@ -9,24 +9,7 @@ const repository = "example/repository";
 const ref = "main";
 const checkpointId = "ec_current";
 
-test("checkpoint publication preflight refreshes a bounded stale read", async () => {
-  let transactions = 0;
-  const database = fakeDatabase((client) => {
-    transactions += 1;
-    return installCheckpointQueries(client, transactions < 3 ? "ec_previous" : checkpointId);
-  });
-
-  await new PostgresGenerationCoordinator(database, [0, 0]).assertCurrentCheckpoint(
-    tenantId,
-    repository,
-    ref,
-    checkpointId
-  );
-
-  assert.equal(transactions, 3);
-});
-
-test("checkpoint publication preflight still fails a persistently superseded write", async () => {
+test("checkpoint publication preflight fails a superseded write without retrying", async () => {
   let transactions = 0;
   const database = fakeDatabase((client) => {
     transactions += 1;
@@ -34,10 +17,10 @@ test("checkpoint publication preflight still fails a persistently superseded wri
   });
 
   await assert.rejects(
-    new PostgresGenerationCoordinator(database, [0]).assertCurrentCheckpoint(tenantId, repository, ref, checkpointId),
+    new PostgresGenerationCoordinator(database).assertCurrentCheckpoint(tenantId, repository, ref, checkpointId),
     /observed latest ec_newer at sequence 1/
   );
-  assert.equal(transactions, 2);
+  assert.equal(transactions, 1);
 });
 
 function fakeDatabase(install: (client: Pick<PoolClient, "query">) => void): ContextDatabase {

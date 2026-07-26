@@ -25,15 +25,8 @@ export interface GenerationProjectorClaim {
   readonly version: string;
 }
 
-const CHECKPOINT_VISIBILITY_RETRY_DELAYS_MS = [250, 750, 2_000, 4_000] as const;
-
-class SupersededCheckpointError extends Error {}
-
 export class PostgresGenerationCoordinator {
-  constructor(
-    private readonly database: ContextDatabase,
-    private readonly checkpointVisibilityRetryDelaysMs: readonly number[] = CHECKPOINT_VISIBILITY_RETRY_DELAYS_MS
-  ) {}
+  constructor(private readonly database: ContextDatabase) {}
 
   async assertCurrentCheckpoint(
     tenantId: string,
@@ -41,25 +34,12 @@ export class PostgresGenerationCoordinator {
     ref: string,
     checkpointId: string
   ): Promise<void> {
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        await this.database.transactionAs("jina_context_coordinator", { tenantIds: [tenantId] }, async (client) => {
-          await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-            generationRefLock(tenantId, repository, ref)
-          ]);
-          await assertLatestCheckpoint(client, tenantId, repository, ref, checkpointId);
-        });
-        return;
-      } catch (error) {
-        const delayMs = this.checkpointVisibilityRetryDelaysMs[attempt];
-        if (!(error instanceof SupersededCheckpointError) || delayMs === undefined) throw error;
-        // A committed ingest can briefly be invisible to another Cloud SQL
-        // session. Reopen the transaction so read-committed visibility is
-        // refreshed. A genuinely superseded checkpoint can never become latest
-        // again and still fails after this bounded publication preflight.
-        await delay(delayMs);
-      }
-    }
+    await this.database.transactionAs("jina_context_coordinator", { tenantIds: [tenantId] }, async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        generationRefLock(tenantId, repository, ref)
+      ]);
+      await assertLatestCheckpoint(client, tenantId, repository, ref, checkpointId);
+    });
   }
 
   async create(generation: Omit<IndexGeneration, "status" | "publishedAt">): Promise<IndexGeneration> {
@@ -410,40 +390,19 @@ async function assertLatestCheckpoint(
   ref: string,
   checkpointId: string
 ): Promise<void> {
-  const latest = await client.query<{
-    id: string;
-    ref_sequence: string;
-    row_xmin: string;
-    tenant_scope: string | null;
-    transaction_isolation: string;
-    transaction_read_only: string;
-    transaction_snapshot: string;
-    backend_pid: number;
-    in_recovery: boolean;
-  }>(
-    `select id,ref_sequence::text,xmin::text row_xmin,
-            current_setting('jina.tenant_id',true) tenant_scope,
-            current_setting('transaction_isolation') transaction_isolation,
-            current_setting('transaction_read_only') transaction_read_only,
-            txid_current_snapshot()::text transaction_snapshot,
-            pg_backend_pid() backend_pid,
-            pg_is_in_recovery() in_recovery
-     from jina_context.evidence_checkpoints
-     where tenant_id=$1 and repository=$2 and ref_name=$3
-     order by ref_sequence desc,id desc
+  const latest = await client.query<{ id: string; ref_sequence: string }>(
+    `select checkpoint.id,checkpoint.ref_sequence::text ref_sequence
+     from jina_context.evidence_checkpoints checkpoint
+     where checkpoint.tenant_id=$1 and checkpoint.repository=$2 and checkpoint.ref_name=$3
+     order by checkpoint.ref_sequence desc,checkpoint.id desc
      limit 1`,
     [tenantId, repository, ref]
   );
   if (latest.rows[0]?.id !== checkpointId) {
     const observed = latest.rows[0];
-    throw new SupersededCheckpointError(
+    throw new Error(
       `Checkpoint ${checkpointId} is superseded for ${repository}@${ref} ` +
-        `(observed latest ${observed?.id ?? "none"} at sequence ${observed?.ref_sequence ?? "none"}; ` +
-        `row xmin ${observed?.row_xmin ?? "none"}; tenant scope ${observed?.tenant_scope ?? "none"}; ` +
-        `isolation ${observed?.transaction_isolation ?? "unknown"}; ` +
-        `read only ${observed?.transaction_read_only ?? "unknown"}; ` +
-        `snapshot ${observed?.transaction_snapshot ?? "unknown"}; ` +
-        `backend ${observed?.backend_pid ?? "unknown"}; recovery ${observed?.in_recovery ?? "unknown"})`
+        `(observed latest ${observed?.id ?? "none"} at sequence ${observed?.ref_sequence ?? "none"})`
     );
   }
   const admitted = await client.query<{ ref_sequence: string }>(
@@ -459,15 +418,11 @@ async function assertLatestCheckpoint(
     !Number.isSafeInteger(admittedSequence) ||
     checkpointSequence < admittedSequence
   ) {
-    throw new SupersededCheckpointError(
+    throw new Error(
       `Checkpoint ${checkpointId} is superseded for ${repository}@${ref} ` +
         `(checkpoint sequence ${latest.rows[0].ref_sequence}, admitted sequence ${admitted.rows[0]!.ref_sequence})`
     );
   }
-}
-
-function delay(milliseconds: number): Promise<void> {
-  return milliseconds <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function degradedCapabilities(generation: Pick<IndexGeneration, "capabilities">): string[] {
