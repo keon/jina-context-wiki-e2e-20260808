@@ -77,10 +77,12 @@ successor.
 
 Consumers use independent outbox deliveries and checkpoints. A slow optional consumer
 cannot acknowledge required projection work. Every delivery lease is consumer-owned, and
-acknowledgement requires that exact unexpired lease. Projection publication acknowledges
-only deliveries matching its tenant, repository, ref, commit, checkpoint/event, and
-consumer. Rebuilds and the internal drain endpoint replay pending checkpoints into new
-idempotent generations and never expose partial rows through query selection.
+each projector transaction activates only that consumer's capability role. Acknowledgement
+requires the exact unexpired lease. Scoped deliveries match tenant, repository, ref,
+commit, checkpoint/event, and consumer. Repository-global ACL/retention events use an
+all-current-refs barrier; obsolete scoped deliveries are completed only after a newer
+checkpoint is published. Rebuilds and the internal drain endpoint replay current
+checkpoints into new idempotent generations and never expose partial rows.
 
 ## Database invariants
 
@@ -88,11 +90,15 @@ idempotent generations and never expose partial rows through query selection.
 - Immutable evidence, revision, and citation tables deny runtime `UPDATE` and `DELETE`.
 - Full Git SHAs and source-specific evidence anchors are validated.
 - Line ranges require a path and valid positive bounds.
+- Line ranges and JSON pointers are selectors over the immutable base evidence body, not
+  alternate evidence-row identities; PostgreSQL validates the selector before storing it.
 - Knowledge citations terminate at evidence, never another generated revision. Citation
   claims must occur verbatim after whitespace/case normalization in the exact selected
   evidence excerpt.
 - ACL projection is generation-scoped. Principal permissions resolve to exact repository
   ACL fingerprints, and SQL filters projection rows before candidate creation.
+- Every ACL transition has a monotonic observation version. Revoke/regrant cycles therefore
+  produce new immutable events and new generation identities rather than reusing old IDs.
 - Erasure filters are durable and checked during ingestion and rebuild.
 - Exact, lexical, hierarchy, embedding, and relation projections are disposable.
 - Query telemetry stores bounded metadata and citation checks, not unrestricted source

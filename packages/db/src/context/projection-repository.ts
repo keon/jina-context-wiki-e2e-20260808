@@ -13,10 +13,12 @@ import type {
   RefManifestEntry,
   StructuralRelation
 } from "@jina/context-engine";
+import { contextProjectionConsumers } from "@jina/context-engine";
 import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, contextDigest, dateString } from "./database.js";
-import { requiredContextConsumers } from "./generation-coordinator.js";
+import type { ContextDatabaseRole } from "./roles.js";
+import { PostgresGenerationCoordinator, requiredContextConsumers } from "./generation-coordinator.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
@@ -49,162 +51,56 @@ export class PostgresProjectionRepository implements ProjectionStore {
         throw new Error(`Required projector ${consumer} is not ready`);
       }
     }
-    return this.database.transactionAs("jina_context_admin", async (client) => {
-      await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
-      const existing = await loadGenerationRow(client, generation.id);
-      if (existing) {
-        if (existing.required_fingerprint !== generation.fingerprint) {
-          throw new Error(`Generation identity collision for ${generation.id}`);
-        }
-        if (existing.status === "published") {
-          for (const consumer of contextProjectionConsumersFor(generation)) {
-            await acknowledgeScopedDeliveries(client, {
-              generationId: generation.id,
-              checkpointId: generation.checkpointId,
-              consumer,
-              tenantId: generation.tenantId,
-              repository: generation.repository,
-              ref: generation.ref,
-              commitSha: generation.commitSha,
-              processedAt: publishedAt
-            });
-          }
-          await assertContextWriteFence(
-            client,
-            generation.tenantId,
-            ["run-index-context", "run-derive-knowledge"],
-            fence
-          );
-          return generationFromRow(existing, await projectorStatuses(client, generation.id));
-        }
-        throw new Error(`Generation ${generation.id} exists in ${existing.status} state`);
-      }
-      const checkpoint = await client.query<{ acl_fingerprint: string; created_at: Date }>(
-        `select acl_fingerprint,created_at
+    const coordinator = new PostgresGenerationCoordinator(this.database);
+    await coordinator.assertCurrentCheckpoint(
+      generation.tenantId,
+      generation.repository,
+      generation.ref,
+      generation.checkpointId
+    );
+    const existing = (
+      await this.database.queryAs<GenerationRow>(
+        "jina_context_coordinator",
+        "select * from jina_context.index_generations where id=$1",
+        [generation.id]
+      )
+    ).rows[0];
+    if (existing?.required_fingerprint !== undefined && existing.required_fingerprint !== generation.fingerprint) {
+      throw new Error(`Generation identity collision for ${generation.id}`);
+    }
+    if (existing?.status === "published") {
+      const existingPublishedAt = existing.published_at ? dateString(existing.published_at) : publishedAt;
+      const generationEventId = generationPublishedEventId(generation);
+      await enqueueGenerationPublishedEvent(this.database, generation, existingPublishedAt, generationEventId);
+      await acknowledgePostPublicationDeliveries(this.database, generation, existingPublishedAt, generationEventId);
+      return generationFromRow(existing, await this.projectorStatuses(generation.id));
+    }
+    if (existing && existing.status !== "building") {
+      throw new Error(`Generation ${generation.id} exists in ${existing.status} state`);
+    }
+
+    if (!existing) {
+      await coordinator.create(buildingGeneration(generation));
+    }
+    const checkpoint = (
+      await this.database.queryAs<{ created_at: Date }>(
+        "jina_context_coordinator",
+        `select created_at
          from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5`,
         [generation.checkpointId, generation.tenantId, generation.repository, generation.ref, generation.commitSha]
-      );
-      const evidence = checkpoint.rows[0];
-      if (!evidence) throw new Error("Projection scope does not match its evidence checkpoint");
-      await client.query(
-        `insert into jina_context.index_generations
-          (id,tenant_id,repository,ref_name,commit_sha,checkpoint_id,kind,status,
-           barrier_occurred_at,projector_versions,capabilities,required_fingerprint,
-           acl_fingerprint,degraded_capabilities,created_at)
-         values ($1,$2,$3,$4,$5,$6,$7,'building',$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14)`,
-        [
-          generation.id,
-          generation.tenantId,
-          generation.repository,
-          generation.ref,
-          generation.commitSha,
-          generation.checkpointId,
-          generation.capabilities.derivedKnowledge === "available" ? "enriched" : "baseline",
-          evidence.created_at,
-          JSON.stringify(generation.projectorVersions),
-          JSON.stringify(generation.capabilities),
-          generation.fingerprint,
-          evidence.acl_fingerprint,
-          degradedCapabilities(generation),
-          generation.createdAt
-        ]
-      );
-      for (const [consumer, version] of Object.entries(generation.projectorVersions) as [
-        ContextProjectionConsumer,
-        string
-      ][]) {
-        await client.query(
-          `insert into jina_context.generation_projectors
-            (generation_id,consumer,required,version,status,output_fingerprint,
-             processed_through,started_at,completed_at)
-           values ($1,$2,$3,$4,'pending',null,null,null,null)`,
-          [
-            generation.id,
-            consumer,
-            requiredContextConsumers.includes(consumer as (typeof requiredContextConsumers)[number]),
-            version
-          ]
-        );
-      }
-      await insertManifest(client, projection.manifest, generation.id);
-      await insertCurrentKnowledge(client, projection.currentKnowledge);
-      await insertDocuments(client, projection.documents);
-      await insertFragments(client, projection.fragments, projection.documents);
-      await insertExactIndex(client, projection.exactIndex);
-      await insertHierarchy(client, projection.hierarchyNodes, projection.documents);
-      await insertRelations(client, projection.structuralRelations, generation.projectorVersions.structural);
-      await projectIdentities(client, generation);
-      await projectAcl(client, generation);
+      )
+    ).rows[0];
+    if (!checkpoint) throw new Error("Projection scope does not match its evidence checkpoint");
 
-      for (const consumer of Object.keys(generation.projectorVersions) as ContextProjectionConsumer[]) {
-        await completeScopedProjector(client, {
-          generation,
-          consumer,
-          status: generation.projectorStatuses[consumer],
-          processedThrough: evidence.created_at,
-          completedAt: publishedAt
-        });
-      }
-      const incomplete = await client.query<{ consumer: ContextProjectionConsumer; status: ProjectorStatus }>(
-        `select consumer,status
-         from jina_context.generation_projectors
-         where generation_id=$1 and (
-           (required and status <> 'ready')
-           or status in ('pending','running')
-         )
-         order by consumer`,
-        [generation.id]
-      );
-      if (incomplete.rows.length > 0) {
-        throw new Error(
-          `Generation ${generation.id} did not pass its projector barrier: ${incomplete.rows
-            .map((row) => `${row.consumer}=${row.status}`)
-            .join(", ")}`
-        );
-      }
-      await client.query(
-        `update jina_context.index_generations
-         set status='invalidated',invalidated_at=$4
-         where tenant_id=$1 and repository=$2 and ref_name=$3
-           and status='published' and id <> $5`,
-        [generation.tenantId, generation.repository, generation.ref, publishedAt, generation.id]
-      );
-      await client.query(
-        `update jina_context.index_generations
-         set status='published',published_at=$2 where id=$1 and status='building'`,
-        [generation.id, publishedAt]
-      );
-      const generationEventId = `event_generation_${contextDigest({
-        id: generation.id,
-        fingerprint: generation.fingerprint
-      }).slice(0, 24)}`;
-      await enqueueContextEvent(client, {
-        id: generationEventId,
-        sequence: 1,
-        tenantId: generation.tenantId,
-        repository: generation.repository,
-        aggregateType: "retention",
-        aggregateId: generation.id,
-        eventType: "generation.published",
-        payload: { generationId: generation.id, ref: generation.ref, commitSha: generation.commitSha },
-        consumers: ["retention"],
-        occurredAt: publishedAt
-      });
-      await acknowledgeScopedDeliveries(client, {
-        generationId: generation.id,
-        checkpointId: generation.checkpointId,
-        consumer: "retention",
-        tenantId: generation.tenantId,
-        repository: generation.repository,
-        ref: generation.ref,
-        commitSha: generation.commitSha,
-        processedAt: publishedAt,
-        eventId: generationEventId
-      });
-      await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
-      return generation;
-    });
+    for (const consumer of contextProjectionConsumers) {
+      await runScopedProjector(this.database, projection, consumer, checkpoint.created_at, fence);
+    }
+    const published = await coordinator.publish(generation.id, publishedAt, fence);
+    const generationEventId = generationPublishedEventId(generation);
+    await enqueueGenerationPublishedEvent(this.database, generation, publishedAt, generationEventId);
+    await acknowledgePostPublicationDeliveries(this.database, generation, publishedAt, generationEventId);
+    return published;
   }
 
   async getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
@@ -377,91 +273,190 @@ export class PostgresProjectionRepository implements ProjectionStore {
   }
 }
 
-function contextProjectionConsumersFor(generation: IndexGeneration): ContextProjectionConsumer[] {
-  return (Object.keys(generation.projectorStatuses) as ContextProjectionConsumer[]).filter(
-    (consumer) => generation.projectorStatuses[consumer] !== "failed"
+const projectorRoles: Record<ContextProjectionConsumer, ContextDatabaseRole> = {
+  manifest: "jina_context_manifest",
+  "knowledge-current": "jina_context_knowledge_current",
+  lexical: "jina_context_lexical",
+  dense: "jina_context_dense",
+  hierarchy: "jina_context_hierarchy",
+  structural: "jina_context_structural",
+  identity: "jina_context_identity",
+  acl: "jina_context_acl",
+  retention: "jina_context_retention"
+};
+
+function buildingGeneration(generation: IndexGeneration): Omit<IndexGeneration, "status" | "publishedAt"> {
+  return {
+    id: generation.id,
+    tenantId: generation.tenantId,
+    repository: generation.repository,
+    ref: generation.ref,
+    commitSha: generation.commitSha,
+    checkpointId: generation.checkpointId,
+    projectorVersions: generation.projectorVersions,
+    projectorStatuses: generation.projectorStatuses,
+    capabilities: generation.capabilities,
+    fingerprint: generation.fingerprint,
+    createdAt: generation.createdAt
+  };
+}
+
+function generationPublishedEventId(generation: IndexGeneration): string {
+  return `event_generation_${contextDigest({
+    id: generation.id,
+    fingerprint: generation.fingerprint
+  }).slice(0, 24)}`;
+}
+
+async function enqueueGenerationPublishedEvent(
+  database: ContextDatabase,
+  generation: IndexGeneration,
+  publishedAt: string,
+  eventId: string
+): Promise<void> {
+  await database.transactionAs("jina_context_admin", (client) =>
+    enqueueContextEvent(client, {
+      id: eventId,
+      sequence: 1,
+      tenantId: generation.tenantId,
+      repository: generation.repository,
+      aggregateType: "retention",
+      aggregateId: generation.id,
+      eventType: "generation.published",
+      payload: { generationId: generation.id, ref: generation.ref, commitSha: generation.commitSha },
+      consumers: ["retention"],
+      occurredAt: publishedAt
+    })
   );
 }
 
-async function completeScopedProjector(
-  client: PoolClient,
-  input: {
-    generation: IndexGeneration;
-    consumer: ContextProjectionConsumer;
-    status: ProjectorStatus;
-    processedThrough: Date;
-    completedAt: string;
-  }
+async function runScopedProjector(
+  database: ContextDatabase,
+  projection: GenerationProjection,
+  consumer: ContextProjectionConsumer,
+  processedThrough: Date,
+  fence?: ContextWriteFence
 ): Promise<void> {
-  const leaseId = randomUUID();
-  const leaseOwner = `projector:${input.generation.id}:${input.consumer}`;
-  const claimed = await client.query(
-    `update jina_context.generation_projectors
-     set status='running',lease_id=$3,lease_owner=$4,
-         lease_expires_at=$5::timestamptz + interval '5 minutes',
-         started_at=coalesce(started_at,$5),completed_at=null,failure=null
-     where generation_id=$1 and consumer=$2 and status='pending'`,
-    [input.generation.id, input.consumer, leaseId, leaseOwner, input.completedAt]
-  );
-  if (claimed.rowCount !== 1) {
-    throw new Error(`Projector ${input.consumer} could not claim generation ${input.generation.id}`);
+  const generation = projection.generation;
+  const completedAt = generation.publishedAt;
+  if (!completedAt) throw new Error(`Generation ${generation.id} has no completion time`);
+  const status = generation.projectorStatuses[consumer];
+  await database.transactionAs(projectorRoles[consumer], async (client) => {
+    await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
+    const leaseId = randomUUID();
+    const claimed = await client.query(
+      `update jina_context.generation_projectors
+       set status='running',lease_id=$3,lease_owner=$4,
+           lease_expires_at=$5::timestamptz + interval '5 minutes',
+           started_at=coalesce(started_at,$5),completed_at=null,failure=null
+       where generation_id=$1 and consumer=$2 and (
+         status in ('pending','failed')
+         or (status='running' and lease_expires_at <= $5)
+       )`,
+      [generation.id, consumer, leaseId, `projector:${generation.id}:${consumer}`, completedAt]
+    );
+    if (claimed.rowCount !== 1) {
+      const current = await client.query<{ status: string }>(
+        "select status from jina_context.generation_projectors where generation_id=$1 and consumer=$2",
+        [generation.id, consumer]
+      );
+      if (current.rows[0]?.status === status) return;
+      throw new Error(`Projector ${consumer} could not claim generation ${generation.id}`);
+    }
+    if (status !== "failed") {
+      await projectConsumerOutput(client, projection, consumer);
+      await acknowledgeScopedDeliveries(client, {
+        generationId: generation.id,
+        checkpointId: generation.checkpointId,
+        consumer,
+        tenantId: generation.tenantId,
+        repository: generation.repository,
+        ref: generation.ref,
+        commitSha: generation.commitSha,
+        processedAt: completedAt
+      });
+    }
+    const completed = await client.query(
+      `update jina_context.generation_projectors
+       set status=$4,output_fingerprint=$5,processed_through=$6,completed_at=$7,
+           failure=$8::jsonb,lease_id=null,lease_owner=null,lease_expires_at=null
+       where generation_id=$1 and consumer=$2 and lease_id=$3
+         and status='running' and lease_expires_at > $7`,
+      [
+        generation.id,
+        consumer,
+        leaseId,
+        status,
+        status === "ready" ? generation.fingerprint : null,
+        processedThrough,
+        completedAt,
+        status === "failed" ? JSON.stringify({ reason: "projector reported failed" }) : null
+      ]
+    );
+    if (completed.rowCount !== 1) {
+      throw new Error(`Projector ${consumer} lost its generation lease for ${generation.id}`);
+    }
+    if (status !== "failed") {
+      await client.query(
+        `insert into jina_context.projection_checkpoints
+          (tenant_id,repository,ref_name,consumer,projector_version,processed_through,
+           output_fingerprint,updated_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)
+         on conflict (tenant_id,repository,ref_name,consumer) do update
+         set projector_version=excluded.projector_version,
+             processed_through=excluded.processed_through,
+             output_fingerprint=excluded.output_fingerprint,
+             lease_id=null,lease_owner=null,lease_expires_at=null,
+             updated_at=excluded.updated_at`,
+        [
+          generation.tenantId,
+          generation.repository,
+          generation.ref,
+          consumer,
+          generation.projectorVersions[consumer],
+          processedThrough,
+          status === "ready" ? generation.fingerprint : null,
+          completedAt
+        ]
+      );
+    }
+    await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
+  });
+}
+
+async function projectConsumerOutput(
+  client: PoolClient,
+  projection: GenerationProjection,
+  consumer: ContextProjectionConsumer
+): Promise<void> {
+  switch (consumer) {
+    case "manifest":
+      await insertManifest(client, projection.manifest, projection.generation.id);
+      return;
+    case "knowledge-current":
+      await insertCurrentKnowledge(client, projection.currentKnowledge);
+      return;
+    case "lexical":
+      await insertDocuments(client, projection.documents);
+      await insertFragments(client, projection.fragments, projection.documents);
+      await insertExactIndex(client, projection.exactIndex);
+      return;
+    case "hierarchy":
+      await insertHierarchy(client, projection.hierarchyNodes, projection.documents);
+      return;
+    case "structural":
+      await insertRelations(client, projection.structuralRelations, projection.generation.projectorVersions.structural);
+      return;
+    case "identity":
+      await projectIdentities(client, projection.generation);
+      return;
+    case "acl":
+      await projectAcl(client, projection.generation);
+      return;
+    case "dense":
+    case "retention":
+      return;
   }
-  if (input.status !== "failed") {
-    await acknowledgeScopedDeliveries(client, {
-      generationId: input.generation.id,
-      checkpointId: input.generation.checkpointId,
-      consumer: input.consumer,
-      tenantId: input.generation.tenantId,
-      repository: input.generation.repository,
-      ref: input.generation.ref,
-      commitSha: input.generation.commitSha,
-      processedAt: input.completedAt
-    });
-  }
-  const completed = await client.query(
-    `update jina_context.generation_projectors
-     set status=$4,output_fingerprint=$5,processed_through=$6,completed_at=$7,
-         failure=$8::jsonb,lease_id=null,lease_owner=null,lease_expires_at=null
-     where generation_id=$1 and consumer=$2 and lease_id=$3
-       and status='running' and lease_expires_at > $7`,
-    [
-      input.generation.id,
-      input.consumer,
-      leaseId,
-      input.status,
-      input.status === "ready" ? input.generation.fingerprint : null,
-      input.processedThrough,
-      input.completedAt,
-      input.status === "failed" ? JSON.stringify({ reason: "projector reported failed" }) : null
-    ]
-  );
-  if (completed.rowCount !== 1) {
-    throw new Error(`Projector ${input.consumer} lost its generation lease for ${input.generation.id}`);
-  }
-  await client.query(
-    `insert into jina_context.projection_checkpoints
-      (tenant_id,repository,ref_name,consumer,projector_version,processed_through,
-       output_fingerprint,updated_at)
-     select $1,$2,$3,consumer,version,$5,$6,$7
-     from jina_context.generation_projectors
-     where generation_id=$4 and consumer=$8 and status <> 'failed'
-     on conflict (tenant_id,repository,ref_name,consumer) do update
-     set projector_version=excluded.projector_version,
-         processed_through=excluded.processed_through,
-         output_fingerprint=excluded.output_fingerprint,
-         lease_id=null,lease_owner=null,lease_expires_at=null,
-         updated_at=excluded.updated_at`,
-    [
-      input.generation.tenantId,
-      input.generation.repository,
-      input.generation.ref,
-      input.generation.id,
-      input.processedThrough,
-      input.status === "ready" ? input.generation.fingerprint : null,
-      input.completedAt,
-      input.consumer
-    ]
-  );
 }
 
 async function acknowledgeScopedDeliveries(
@@ -487,29 +482,30 @@ async function acknowledgeScopedDeliveries(
      where delivery.consumer=$4 and delivery.tenant_id=$5 and delivery.repository=$6
        and delivery.processed_at is null and delivery.available_at <= $3
        and (delivery.lease_expires_at is null or delivery.lease_expires_at <= $3)
-       and ($10::text is null or delivery.event_id=$10)
        and (
-         $4='retention'
-         or
-         delivery.aggregate_id=$7
+         ($10::text is not null and delivery.event_id=$10)
          or (
-           delivery.aggregate_type='evidence'
-           and delivery.payload->>'ref'=$8
-           and delivery.payload->>'commitSha'=$9
-         )
-         or (
-           delivery.aggregate_type='knowledge'
-           and exists (
-             select 1
-             from jina_context.knowledge_document_revisions revision
-             where revision.tenant_id=delivery.tenant_id
-               and revision.repository=delivery.repository
-               and revision.id=delivery.aggregate_id
-               and revision.ref_name=$8
-               and revision.commit_sha=$9
+           $10::text is null and (
+             delivery.aggregate_id=$7
+             or (
+               delivery.aggregate_type='evidence'
+               and delivery.payload->>'ref'=$8
+               and delivery.payload->>'commitSha'=$9
+             )
+             or (
+               delivery.aggregate_type='knowledge'
+               and exists (
+                 select 1
+                 from jina_context.knowledge_document_revisions revision
+                 where revision.tenant_id=delivery.tenant_id
+                   and revision.repository=delivery.repository
+                   and revision.id=delivery.aggregate_id
+                   and revision.ref_name=$8
+                   and revision.commit_sha=$9
+               )
+             )
            )
          )
-         or delivery.aggregate_type in ('access','retention')
        )
      returning delivery.delivery_id`,
     [
@@ -534,6 +530,203 @@ async function acknowledgeScopedDeliveries(
     );
     if (acknowledged.rowCount !== 1) {
       throw new Error(`Lost ${input.consumer} outbox lease for ${row.delivery_id}`);
+    }
+  }
+}
+
+async function acknowledgePostPublicationDeliveries(
+  database: ContextDatabase,
+  generation: IndexGeneration,
+  processedAt: string,
+  generationEventId?: string
+): Promise<void> {
+  if (generationEventId) {
+    await database.transactionAs("jina_context_retention", (client) =>
+      acknowledgeScopedDeliveries(client, {
+        generationId: generation.id,
+        checkpointId: generation.checkpointId,
+        consumer: "retention",
+        tenantId: generation.tenantId,
+        repository: generation.repository,
+        ref: generation.ref,
+        commitSha: generation.commitSha,
+        processedAt,
+        eventId: generationEventId
+      })
+    );
+  }
+  for (const consumer of contextProjectionConsumers) {
+    if (generation.projectorStatuses[consumer] === "failed") continue;
+    await database.transactionAs(projectorRoles[consumer], async (client) => {
+      await acknowledgeSupersededScopedDeliveries(client, { generation, consumer, processedAt });
+      await acknowledgeRepositoryGlobalDeliveries(client, { generation, consumer, processedAt });
+    });
+  }
+}
+
+async function acknowledgeSupersededScopedDeliveries(
+  client: PoolClient,
+  input: {
+    generation: IndexGeneration;
+    consumer: ContextProjectionConsumer;
+    processedAt: string;
+  }
+): Promise<void> {
+  const leaseId = randomUUID();
+  const claimed = await client.query<{ delivery_id: string }>(
+    `update jina_context.outbox delivery
+     set lease_id=$1,lease_owner=$2,lease_expires_at=$3::timestamptz + interval '5 minutes',
+         attempt=delivery.attempt+1,last_error=null
+     where delivery.consumer=$4 and delivery.tenant_id=$5 and delivery.repository=$6
+       and delivery.processed_at is null and delivery.available_at <= $3
+       and (delivery.lease_expires_at is null or delivery.lease_expires_at <= $3)
+       and (
+         exists (
+           select 1
+           from jina_context.evidence_checkpoints current_checkpoint
+           join jina_context.evidence_checkpoints event_checkpoint
+             on event_checkpoint.tenant_id=current_checkpoint.tenant_id
+            and event_checkpoint.repository=current_checkpoint.repository
+            and event_checkpoint.ref_name=current_checkpoint.ref_name
+           where current_checkpoint.id=$7
+             and event_checkpoint.id <> current_checkpoint.id
+             and event_checkpoint.created_at <= current_checkpoint.created_at
+             and (
+               event_checkpoint.id=delivery.aggregate_id
+               or event_checkpoint.id=delivery.payload->>'checkpointId'
+             )
+         )
+         or (
+           delivery.aggregate_type='knowledge'
+           and exists (
+             select 1
+             from jina_context.knowledge_document_revisions revision
+             where revision.tenant_id=delivery.tenant_id
+               and revision.repository=delivery.repository
+               and revision.id=delivery.aggregate_id
+               and revision.ref_name=$8
+               and revision.commit_sha <> $9
+           )
+         )
+       )
+     returning delivery.delivery_id`,
+    [
+      leaseId,
+      `generation:${input.generation.id}:${input.consumer}:superseded`,
+      input.processedAt,
+      input.consumer,
+      input.generation.tenantId,
+      input.generation.repository,
+      input.generation.checkpointId,
+      input.generation.ref,
+      input.generation.commitSha
+    ]
+  );
+  await acknowledgeClaimedRows(client, claimed.rows, leaseId, input.processedAt, input.consumer);
+}
+
+async function acknowledgeRepositoryGlobalDeliveries(
+  client: PoolClient,
+  input: {
+    generation: IndexGeneration;
+    consumer: ContextProjectionConsumer;
+    processedAt: string;
+  }
+): Promise<void> {
+  const leaseId = randomUUID();
+  const claimed = await client.query<{ delivery_id: string }>(
+    `update jina_context.outbox delivery
+     set lease_id=$1,lease_owner=$2,lease_expires_at=$3::timestamptz + interval '5 minutes',
+         attempt=delivery.attempt+1,last_error=null
+     where delivery.consumer=$4 and delivery.tenant_id=$5 and delivery.repository=$6
+       and delivery.processed_at is null and delivery.available_at <= $3
+       and (delivery.lease_expires_at is null or delivery.lease_expires_at <= $3)
+       and delivery.event_type in (
+         'access.replaced','access.observed','evidence.observed','evidence.erased'
+       )
+       and exists (
+         select 1 from jina_context.evidence_checkpoints any_checkpoint
+         where any_checkpoint.tenant_id=delivery.tenant_id
+           and any_checkpoint.repository=delivery.repository
+       )
+       and not exists (
+         select 1
+         from (
+           select distinct on (checkpoint.ref_name)
+             checkpoint.id,checkpoint.ref_name
+           from jina_context.evidence_checkpoints checkpoint
+           where checkpoint.tenant_id=delivery.tenant_id
+             and checkpoint.repository=delivery.repository
+           order by checkpoint.ref_name,checkpoint.created_at desc,checkpoint.id desc
+         ) latest
+         where not exists (
+           select 1
+           from jina_context.index_generations published
+           where published.tenant_id=delivery.tenant_id
+             and published.repository=delivery.repository
+             and published.ref_name=latest.ref_name
+             and published.checkpoint_id=latest.id
+             and published.status='published'
+             and (
+               (
+                 delivery.aggregate_type='access'
+                 and not exists (
+                   select 1
+                   from (
+                     select distinct on (acl.principal_id)
+                       acl.principal_id,acl.permission,acl.acl_fingerprint,acl.source_observation_id
+                     from jina_context.repository_acl_observations acl
+                     where acl.tenant_id=delivery.tenant_id
+                       and acl.repository=delivery.repository
+                     order by acl.principal_id,acl.observed_at desc,acl.id desc
+                   ) current_acl
+                   where not exists (
+                     select 1
+                     from jina_context.repository_acl_projection projected_acl
+                     where projected_acl.generation_id=published.id
+                       and projected_acl.principal_id=current_acl.principal_id
+                       and projected_acl.permission=current_acl.permission
+                       and projected_acl.acl_fingerprint=current_acl.acl_fingerprint
+                       and projected_acl.source_observation_id=current_acl.source_observation_id
+                   )
+                 )
+               )
+               or (
+                 delivery.aggregate_type <> 'access'
+                 and published.published_at >= delivery.occurred_at
+               )
+             )
+         )
+       )
+     returning delivery.delivery_id`,
+    [
+      leaseId,
+      `generation:${input.generation.id}:${input.consumer}:repository-global`,
+      input.processedAt,
+      input.consumer,
+      input.generation.tenantId,
+      input.generation.repository
+    ]
+  );
+  await acknowledgeClaimedRows(client, claimed.rows, leaseId, input.processedAt, input.consumer);
+}
+
+async function acknowledgeClaimedRows(
+  client: PoolClient,
+  rows: readonly { delivery_id: string }[],
+  leaseId: string,
+  processedAt: string,
+  consumer: ContextProjectionConsumer
+): Promise<void> {
+  for (const row of rows) {
+    const acknowledged = await client.query(
+      `update jina_context.outbox
+       set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
+       where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
+      [row.delivery_id, leaseId, processedAt]
+    );
+    if (acknowledged.rowCount !== 1) {
+      throw new Error(`Lost ${consumer} outbox lease for ${row.delivery_id}`);
     }
   }
 }
@@ -783,29 +976,6 @@ async function projectAcl(client: PoolClient, generation: IndexGeneration): Prom
   );
 }
 
-async function loadGenerationRow(
-  queryable: { query: PoolClient["query"] },
-  generationId: string
-): Promise<GenerationRow | undefined> {
-  const result = await queryable.query<GenerationRow>("select * from jina_context.index_generations where id=$1", [
-    generationId
-  ]);
-  return result.rows[0];
-}
-
-async function projectorStatuses(
-  queryable: { query: PoolClient["query"] },
-  generationId: string
-): Promise<IndexGeneration["projectorStatuses"]> {
-  const result = await queryable.query<{
-    consumer: ContextProjectionConsumer;
-    status: IndexGeneration["projectorStatuses"][ContextProjectionConsumer];
-  }>("select consumer,status from jina_context.generation_projectors where generation_id=$1", [generationId]);
-  return Object.fromEntries(
-    result.rows.map((row) => [row.consumer, row.status])
-  ) as IndexGeneration["projectorStatuses"];
-}
-
 function generationFromRow(row: GenerationRow, statuses: IndexGeneration["projectorStatuses"]): IndexGeneration {
   return {
     id: row.id,
@@ -822,12 +992,6 @@ function generationFromRow(row: GenerationRow, statuses: IndexGeneration["projec
     createdAt: dateString(row.created_at),
     ...(row.published_at ? { publishedAt: dateString(row.published_at) } : {})
   };
-}
-
-function degradedCapabilities(generation: IndexGeneration): string[] {
-  return Object.entries(generation.capabilities)
-    .filter(([, value]) => value !== "available")
-    .map(([name]) => name);
 }
 
 interface ManifestDbRow {

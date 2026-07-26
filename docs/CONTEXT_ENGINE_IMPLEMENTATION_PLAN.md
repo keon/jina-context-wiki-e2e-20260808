@@ -686,6 +686,8 @@ Implement each projection as an independent, versioned outbox consumer.
 1. Create a target `IndexGeneration` for tenant, repository, ref, commit, and projector
    version set.
 2. Required consumers process to the generation barrier using fenced leases.
+   Each consumer activates its own capability role and commits its projection and lease
+   completion independently.
 3. Optional consumers report `ready`, `disabled`, `skipped`, or `failed`.
 4. Publish the generation atomically only when manifest, lexical, structural, identity,
    ACL, and retention state are coherent.
@@ -703,6 +705,10 @@ Do not expose partially published rows through query views.
 - checkpoints are owned per consumer, never shared through one global processed bit;
 - every delivery claim has a consumer-specific lease; acknowledgement must match that
   unexpired lease plus tenant, repository, ref, commit, checkpoint/event, and consumer;
+- repository-global ACL/erasure deliveries complete only after every current ref projects
+  the newest ACL observation versions or retention event;
+- one ref-scoped lock and newest-checkpoint check reject stale publication, while older
+  scoped deliveries are explicitly completed as superseded only after the successor is live;
 - changing one projector version rebuilds only its outputs and any dependent projectors;
 - erasure invalidates every affected generation and is prioritized ahead of ordinary
   indexing;

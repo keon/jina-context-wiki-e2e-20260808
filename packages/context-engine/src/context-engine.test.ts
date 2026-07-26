@@ -1004,6 +1004,14 @@ test("outbox deliveries are independent per consumer and advance owned checkpoin
 test("repository access replacement, tenant access migration, health, and close are explicit", async () => {
   const store = new MemoryContextEngineStore();
   await store.replaceRepositoryAccess("old", "alice", ["acme/repo"]);
+  const firstGrant = await store.repositoryAccessFingerprint("old", "acme/repo");
+  await store.replaceRepositoryAccess("old", "alice", ["acme/repo"]);
+  assert.equal(await store.repositoryAccessFingerprint("old", "acme/repo"), firstGrant);
+  await store.replaceRepositoryAccess("old", "alice", []);
+  const revoked = await store.repositoryAccessFingerprint("old", "acme/repo");
+  assert.notEqual(revoked, firstGrant);
+  await store.replaceRepositoryAccess("old", "alice", ["acme/repo"]);
+  assert.notEqual(await store.repositoryAccessFingerprint("old", "acme/repo"), firstGrant);
   await store.migrateTenantAliases("old", "new");
   assert.deepEqual(await store.repositoriesForPrincipal("old", "alice"), []);
   assert.deepEqual(await store.repositoriesForPrincipal("new", "alice"), ["acme/repo"]);

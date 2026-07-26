@@ -212,6 +212,9 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   async commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
     await this.database.transactionAs("jina_context_ingest", async (client) => {
       await assertContextWriteFence(client, snapshot.checkpoint.tenantId, "run-ingest-evidence", fence);
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `context-generation-ref:${snapshot.checkpoint.tenantId}:${snapshot.checkpoint.repository}:${snapshot.checkpoint.ref}`
+      ]);
       await ensureRepository(client, snapshot.checkpoint);
       for (const record of snapshot.records) await insertEvidenceRecord(client, record);
       for (const entry of snapshot.manifest)

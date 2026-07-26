@@ -208,7 +208,7 @@ for secret_spec in \
   "jina-github-clone-token:latest"; do
   require_secret "${secret_spec}"
 done
-require_secret "jina-dashboard-password:latest"
+require_secret "jina-web-auth-password:latest"
 
 # Apply owner-only DDL before any new runtime revision starts. Runtime services
 # intentionally run with JINA_DB_MANAGE_SCHEMA=false and must never discover a
@@ -315,7 +315,7 @@ verify_worker_health \
   "run-review|run-research|run-publish|run-cleanup"
 
 web_env_vars="^~^JINA_API_URL=${api_url}~JINA_TENANT_ID=${acceptance_tenant_id}~JINA_WEB_PRINCIPAL_ID=${acceptance_principal_id}~JINA_WEB_AUTH_USERNAME=omlabs"
-web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WEB_AUTH_PASSWORD=jina-dashboard-password:latest"
+web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WEB_AUTH_PASSWORD=jina-web-auth-password:latest"
 
 gcloud run deploy jina-dashboard \
   --project="${GCP_PROJECT_ID}" \

@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   IndexContextService,
+  IngestEvidenceService,
+  QueryContextService,
   createKnowledgeCitation,
   createKnowledgeRevision,
   createEvidenceRecord,
   fingerprint,
+  repositoryAclFingerprint,
   stableId,
   type EvidenceSnapshot
 } from "@jina/context-engine";
@@ -46,7 +49,7 @@ test(
     const ref = "main";
     const commitSha = "a".repeat(40);
     const blobSha = "b".repeat(40);
-    const aclFingerprint = fingerprint("fixture-reader-acl");
+    const aclFingerprint = repositoryAclFingerprint(tenantId, repository);
     const epoch = Date.now();
     const at = (offsetMs: number) => new Date(epoch + offsetMs).toISOString();
     const createdAt = at(0);
@@ -258,6 +261,10 @@ test(
     const generation = await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_000), indexClaim.fence);
     assert.equal(generation.status, "published");
     assert.equal(
+      (await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_500), indexClaim.fence)).id,
+      generation.id
+    );
+    assert.equal(
       await coordinator.complete({
         tenantId,
         stageId: indexClaim.stage.id,
@@ -290,6 +297,87 @@ test(
       true
     );
 
+    const releaseCommitSha = "e".repeat(40);
+    const releaseCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId,
+      repository,
+      ref: "release",
+      commitSha: releaseCommitSha,
+      files: [
+        {
+          path: "src/context.ts",
+          blobSha,
+          body: source,
+          language: "typescript"
+        }
+      ],
+      observations: [],
+      aclFingerprint,
+      observationFrontier: at(6_100),
+      createdAt: at(6_100),
+      sourceComplete: true
+    });
+    const releaseGenerationBeforeRegrant = await new IndexContextService(store).index(releaseCheckpoint.id, at(6_200));
+    const queryRunsBeforeRevocation = await database.pool.query<{ count: string }>(
+      "select count(*)::text count from jina_context.query_runs where tenant_id=$1",
+      [tenantId]
+    );
+    await store.replaceRepositoryAccess(tenantId, "reader-1", []);
+    await assert.rejects(
+      new QueryContextService(store).query({
+        tenantId,
+        repository,
+        principalId: "reader-1",
+        question: "Where is deployContext?"
+      }),
+      /access/i
+    );
+    const queryRunsAfterRevocation = await database.pool.query<{ count: string }>(
+      "select count(*)::text count from jina_context.query_runs where tenant_id=$1",
+      [tenantId]
+    );
+    assert.equal(queryRunsAfterRevocation.rows[0]?.count, queryRunsBeforeRevocation.rows[0]?.count);
+    await store.replaceRepositoryAccess(tenantId, "reader-1", [repository]);
+    const mainGenerationAfterRegrant = await new IndexContextService(store).index(snapshot.checkpoint.id, at(6_300));
+    assert.notEqual(mainGenerationAfterRegrant.id, generation.id);
+    const partialAccessProjection = await store.projectionBacklog(tenantId);
+    assert.ok(partialAccessProjection.acl.count > 0);
+    assert.ok(partialAccessProjection.retention.count > 0);
+    const releaseGenerationAfterRegrant = await new IndexContextService(store).index(releaseCheckpoint.id, at(6_400));
+    assert.notEqual(releaseGenerationAfterRegrant.id, releaseGenerationBeforeRegrant.id);
+    const completedAccessProjection = await store.projectionBacklog(tenantId);
+    assert.equal(completedAccessProjection.acl.count, 0);
+    assert.equal(completedAccessProjection.retention.count, 0);
+
+    const providerBody = JSON.stringify({ repository: { defaultBranch: "main" } });
+    const providerRecord = createEvidenceRecord({
+      anchor: {
+        tenantId,
+        repository,
+        sourceType: "observation",
+        sourceId: "provider-repository-fixture",
+        contentDigest: fingerprint(providerBody),
+        observedAt: createdAt
+      },
+      ref,
+      title: "Repository metadata",
+      body: providerBody,
+      metadata: { provider: "github" },
+      authorityClass: "provider_state",
+      aclFingerprint,
+      createdAt
+    });
+    const providerSnapshot: EvidenceSnapshot = {
+      ...snapshot,
+      checkpoint: {
+        ...snapshot.checkpoint,
+        id: stableId("ec", { tenantId, repository, commitSha, provider: true }),
+        evidenceFingerprint: fingerprint([record.id, providerRecord.id]),
+        createdAt: at(6_500)
+      },
+      records: [record, providerRecord]
+    };
+    await store.commitSnapshot(providerSnapshot);
     const revision = createKnowledgeRevision({
       logicalId: `component:${repository}:deployment`,
       tenantId,
@@ -307,7 +395,7 @@ test(
         pullRequests: [],
         issues: []
       },
-      evidenceFingerprint: snapshot.checkpoint.evidenceFingerprint,
+      evidenceFingerprint: providerSnapshot.checkpoint.evidenceFingerprint,
       generatorName: "fixture",
       generatorVersion: "fixture-v1",
       model: "fixture",
@@ -318,16 +406,20 @@ test(
     const citation = createKnowledgeCitation(
       revision.id,
       0,
-      "deployContext is the deployment entry point",
-      record.anchor
+      "export function deployContext(): string { return 'ready'; }",
+      { ...record.anchor, startLine: 1, endLine: 1 }
     );
+    const providerCitation = createKnowledgeCitation(revision.id, 1, "main", {
+      ...providerRecord.anchor,
+      jsonPointer: "/repository/defaultBranch"
+    });
     await store.commitKnowledge({
       run: {
-        id: stableId("dr", { checkpointId: snapshot.checkpoint.id, revisionId: revision.id }),
+        id: stableId("dr", { checkpointId: providerSnapshot.checkpoint.id, revisionId: revision.id }),
         tenantId,
         repository,
-        checkpointId: snapshot.checkpoint.id,
-        cacheKey: fingerprint({ checkpointId: snapshot.checkpoint.id, revisionId: revision.id }),
+        checkpointId: providerSnapshot.checkpoint.id,
+        cacheKey: fingerprint({ checkpointId: providerSnapshot.checkpoint.id, revisionId: revision.id }),
         focusFingerprint: fingerprint(["src/context.ts"]),
         generatorName: "fixture",
         generatorVersion: "fixture-v1",
@@ -341,10 +433,10 @@ test(
         createdAt: at(7_000)
       },
       revisions: [revision],
-      citations: [citation]
+      citations: [citation, providerCitation]
     });
-    assert.deepEqual(await store.listCitations(revision.id), [citation]);
-    const enrichedGeneration = await new IndexContextService(store).index(snapshot.checkpoint.id, at(8_000));
+    assert.deepEqual(await store.listCitations(revision.id), [citation, providerCitation]);
+    const enrichedGeneration = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, at(8_000));
     assert.notEqual(enrichedGeneration.id, generation.id);
     assert.equal(enrichedGeneration.capabilities.derivedKnowledge, "available");
 
@@ -434,9 +526,11 @@ test(
     });
     assert.ok(erased.erasedGenerationCount >= 1);
     assert.equal(await store.getRevision(revision.id), undefined);
-    assert.deepEqual(await store.listCitations(revision.id), []);
-    const rebuiltAfterErasure = await new IndexContextService(store).index(snapshot.checkpoint.id, at(11_000));
+    assert.deepEqual(await store.listCitations(revision.id), [providerCitation]);
+    const rebuiltAfterErasure = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, at(11_000));
     assert.notEqual(rebuiltAfterErasure.id, enrichedGeneration.id);
+    const releaseAfterErasure = await new IndexContextService(store).index(releaseCheckpoint.id, at(11_100));
+    assert.notEqual(releaseAfterErasure.id, releaseGenerationAfterRegrant.id);
     const postErasureCandidates = await query.lexicalSearch({
       tenantId,
       repository,
@@ -479,6 +573,32 @@ test(
       [rebuiltAfterErasure.id, tenantId, repository, ref]
     );
     assert.equal(Number(recordedProjectorCheckpoints.rows[0]?.count), projectorBarrier.rows.length);
+    const successorCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId,
+      repository,
+      ref,
+      commitSha: "9".repeat(40),
+      files: [
+        {
+          path: "src/context-v2.ts",
+          blobSha: "8".repeat(40),
+          body: "export const contextVersion = 2;\n",
+          language: "typescript"
+        }
+      ],
+      observations: [],
+      aclFingerprint,
+      observationFrontier: at(12_000),
+      createdAt: at(12_000),
+      sourceComplete: true
+    });
+    await assert.rejects(
+      new IndexContextService(store).index(providerSnapshot.checkpoint.id, at(12_100)),
+      /superseded/
+    );
+    const successorGeneration = await new IndexContextService(store).index(successorCheckpoint.id, at(12_200));
+    assert.equal((await store.latestPublished(tenantId, repository, ref))?.generation.id, successorGeneration.id);
+    assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
 
     const buildAfter = await coordinator.get(build.id);
     assert.equal(buildAfter?.status, "degraded");
@@ -559,7 +679,7 @@ test(
     });
     const runtimeStore = new PostgresContextEngineStore(runtimeDatabase);
     assert.ok((await runtimeStore.listRepositories(tenantId)).includes(repository));
-    assert.equal((await runtimeStore.getGeneration(rebuiltAfterErasure.id))?.generation.id, rebuiltAfterErasure.id);
+    assert.equal((await runtimeStore.getGeneration(successorGeneration.id))?.generation.id, successorGeneration.id);
     await runtimeStore.close();
     await database.pool.query(`revoke ${CONTEXT_ROLES.join(",")} from ${runtimeRole}`);
     await database.pool.query(`drop role ${runtimeRole}`);

@@ -127,6 +127,9 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
     const desired = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
     await this.database.transactionAs("jina_context_admin", async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `repository-access:${tenantId}:${principalId}`
+      ]);
       const known = await client.query<{
         repository: string;
         permission: string | null;
@@ -158,24 +161,45 @@ export class PostgresContextEngineStore implements ContextEngineStore {
         const permission = desired.has(row.repository) ? "read" : "denied";
         const aclFingerprint = repositoryAclFingerprint(tenantId, row.repository);
         if (row.permission === permission && row.acl_fingerprint === aclFingerprint) continue;
-        const payload = { principalId, repository: row.repository, permission };
+        const version = await client.query<{ observed_at: Date; sequence: string }>(
+          `select
+             greatest(
+               clock_timestamp(),
+               coalesce(max(observed_at) + interval '1 microsecond',clock_timestamp())
+             ) observed_at,
+             (count(*) + 1)::text sequence
+           from jina_context.repository_acl_observations
+           where tenant_id=$1 and repository=$2 and principal_id=$3`,
+          [tenantId, row.repository, principalId]
+        );
+        const observedAt = version.rows[0]!.observed_at.toISOString();
+        const sequence = Number(version.rows[0]!.sequence);
+        const payload = { principalId, repository: row.repository, permission, sequence };
         const digest = contextDigest(payload);
-        const observationId = contextStableId("observation", { tenantId, ...payload, digest });
+        const observationId = contextStableId("observation", { tenantId, ...payload, observedAt, digest });
         await client.query(
           `insert into jina_context.observations
             (id,tenant_id,repository,source,source_type,external_id,recorded_at,payload,content_digest)
            values ($1,$2,$3,'access','human_input',$4,$5,$6::jsonb,$7)
            on conflict (tenant_id,repository,id) do nothing`,
-          [observationId, tenantId, row.repository, `${principalId}:${digest}`, now, JSON.stringify(payload), digest]
+          [
+            observationId,
+            tenantId,
+            row.repository,
+            `${principalId}:${sequence}:${digest}`,
+            observedAt,
+            JSON.stringify(payload),
+            digest
+          ]
         );
-        const aclId = contextStableId("acl", { observationId, principalId });
+        const aclId = contextStableId("acl", { observationId, principalId, sequence });
         await client.query(
           `insert into jina_context.repository_acl_observations
             (id,tenant_id,repository,principal_id,permission,acl_fingerprint,
              source_observation_id,observed_at)
            values ($1,$2,$3,$4,$5,$6,$7,$8)
            on conflict (tenant_id,repository,id) do nothing`,
-          [aclId, tenantId, row.repository, principalId, permission, aclFingerprint, observationId, now]
+          [aclId, tenantId, row.repository, principalId, permission, aclFingerprint, observationId, observedAt]
         );
         await enqueueContextEvent(client, {
           id: contextStableId("event", { aclId }),
@@ -185,9 +209,9 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           aggregateType: "access",
           aggregateId: aclId,
           eventType: "access.replaced",
-          payload: { aclObservationId: aclId, principalId },
+          payload: { aclObservationId: aclId, principalId, sequence },
           consumers: ["acl", "retention"],
-          occurredAt: now
+          occurredAt: observedAt
         });
       }
     });
@@ -223,18 +247,29 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   async repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string> {
     await this.database.initialize();
     const result = await this.database.queryAs<{
+      id: string;
       principal_id: string;
       permission: string;
       acl_fingerprint: string;
+      observed_at: Date;
     }>(
       "jina_context_admin",
-      `select principal_id,permission,acl_fingerprint
-       from jina_context.current_repository_acl
+      `select distinct on (principal_id)
+         id,principal_id,permission,acl_fingerprint,observed_at
+       from jina_context.repository_acl_observations
        where tenant_id=$1 and repository=$2
-       order by principal_id`,
+       order by principal_id,observed_at desc,id desc`,
       [tenantId, repository]
     );
-    return contextDigest(result.rows);
+    return contextDigest(
+      result.rows.map((row) => ({
+        id: row.id,
+        principalId: row.principal_id,
+        permission: row.permission,
+        aclFingerprint: row.acl_fingerprint,
+        observedAt: row.observed_at.toISOString()
+      }))
+    );
   }
 
   async listRepositories(tenantId: string): Promise<string[]> {
@@ -299,6 +334,15 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           and checkpoint.tenant_id=delivery.tenant_id
           and checkpoint.repository=delivery.repository
          where delivery.tenant_id=$1 and delivery.processed_at is null
+           and checkpoint.id=(
+             select latest.id
+             from jina_context.evidence_checkpoints latest
+             where latest.tenant_id=checkpoint.tenant_id
+               and latest.repository=checkpoint.repository
+               and latest.ref_name=checkpoint.ref_name
+             order by latest.created_at desc,latest.id desc
+             limit 1
+           )
          union
          select distinct checkpoint.id as checkpoint_id,delivery.available_at
          from jina_context.outbox delivery
@@ -313,6 +357,15 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           and checkpoint.commit_sha=revision.commit_sha
          where delivery.tenant_id=$1 and delivery.processed_at is null
            and delivery.aggregate_type='knowledge'
+           and checkpoint.id=(
+             select latest.id
+             from jina_context.evidence_checkpoints latest
+             where latest.tenant_id=checkpoint.tenant_id
+               and latest.repository=checkpoint.repository
+               and latest.ref_name=checkpoint.ref_name
+             order by latest.created_at desc,latest.id desc
+             limit 1
+           )
          union
          select distinct on (checkpoint.repository,checkpoint.ref_name)
            checkpoint.id as checkpoint_id,delivery.available_at

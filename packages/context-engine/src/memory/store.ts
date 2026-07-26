@@ -49,6 +49,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   readonly #projections = new Map<string, GenerationProjection>();
   readonly #latestGenerations = new Map<string, string>();
   readonly #repositoryAccess = new Map<string, Set<string>>();
+  readonly #repositoryAccessVersions = new Map<string, number>();
   readonly #erasures = new Set<string>();
   readonly #queryRuns: QueryRunTelemetry[] = [];
   #closed = false;
@@ -351,10 +352,15 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
     this.#assertOpen();
-    this.#repositoryAccess.set(
-      `${tenantId}\u0000${principalId}`,
-      new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean))
-    );
+    const principalKey = `${tenantId}\u0000${principalId}`;
+    const previous = this.#repositoryAccess.get(principalKey) ?? new Set<string>();
+    const next = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
+    for (const repository of new Set([...previous, ...next])) {
+      if (previous.has(repository) === next.has(repository)) continue;
+      const repositoryKey = `${tenantId}\u0000${repository}`;
+      this.#repositoryAccessVersions.set(repositoryKey, (this.#repositoryAccessVersions.get(repositoryKey) ?? 0) + 1);
+    }
+    this.#repositoryAccess.set(principalKey, next);
   }
 
   async repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]> {
@@ -376,7 +382,10 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
         aclFingerprint: repositoryAclFingerprint(tenantId, repository)
       });
     }
-    return fingerprint(entries.sort((left, right) => left.principalId.localeCompare(right.principalId)));
+    return fingerprint({
+      version: this.#repositoryAccessVersions.get(`${tenantId}\u0000${repository.toLowerCase()}`) ?? 0,
+      entries: entries.sort((left, right) => left.principalId.localeCompare(right.principalId))
+    });
   }
 
   async listRepositories(tenantId: string): Promise<string[]> {

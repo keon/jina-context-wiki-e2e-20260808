@@ -109,12 +109,14 @@ never combine refs, ACL states, or partially built projectors. Indexes rebuild f
 canonical evidence and immutable knowledge.
 
 Canonical writes create one durable outbox delivery per named projection consumer.
-Consumers claim independently with consumer-specific lease IDs; acknowledgements require
-the current, unexpired delivery lease and are scoped to tenant, repository, ref, commit,
-checkpoint, and consumer. One consumer therefore cannot acknowledge another consumer's
-work or a different ref. `POST /internal/context/outbox/drain` finds checkpoints with
-pending deliveries and actually re-runs idempotent `index-context` publication. Rebuilds
-select the latest checkpoint and produce a successor generation through the same path.
+Each consumer runs in its own capability-role transaction, claims independently with a
+consumer-specific lease ID, writes only its projection, and completes its own checkpoint.
+Acknowledgements require the current, unexpired delivery lease and exact scoped event.
+Repository-global ACL/erasure events remain pending until every current ref has rebuilt;
+older ref/commit deliveries are acknowledged only as proven superseded work. A ref-scoped
+advisory lock and newest-checkpoint barrier prevent an older build from replacing a newer
+generation. `POST /internal/context/outbox/drain` selects only current checkpoints and
+actually re-runs the same idempotent `index-context` path.
 
 The hierarchy is owned by Jina. A deterministic adapter is the active fallback. PageIndex
 is represented by an optional adapter behind the same hierarchy port, but no PageIndex

@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import type { ContextProjectionConsumer, IndexGeneration, ProjectionCheckpoint } from "@jina/context-engine";
+import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, dateString } from "./database.js";
+import { assertContextWriteFence } from "./write-fence.js";
 
 export const requiredContextConsumers = [
   "manifest",
@@ -24,8 +26,25 @@ export interface GenerationProjectorClaim {
 export class PostgresGenerationCoordinator {
   constructor(private readonly database: ContextDatabase) {}
 
+  async assertCurrentCheckpoint(
+    tenantId: string,
+    repository: string,
+    ref: string,
+    checkpointId: string
+  ): Promise<void> {
+    await this.database.transactionAs("jina_context_coordinator", async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        generationRefLock(tenantId, repository, ref)
+      ]);
+      await assertLatestCheckpoint(client, tenantId, repository, ref, checkpointId);
+    });
+  }
+
   async create(generation: Omit<IndexGeneration, "status" | "publishedAt">): Promise<IndexGeneration> {
     await this.database.transactionAs("jina_context_coordinator", async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        generationRefLock(generation.tenantId, generation.repository, generation.ref)
+      ]);
       const checkpoint = await client.query<{ acl_fingerprint: string; created_at: Date }>(
         `select acl_fingerprint,created_at from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5`,
@@ -33,6 +52,13 @@ export class PostgresGenerationCoordinator {
       );
       const evidence = checkpoint.rows[0];
       if (!evidence) throw new Error("Generation checkpoint does not match its requested scope");
+      await assertLatestCheckpoint(
+        client,
+        generation.tenantId,
+        generation.repository,
+        generation.ref,
+        generation.checkpointId
+      );
       await client.query(
         `insert into jina_context.index_generations
           (id,tenant_id,repository,ref_name,commit_sha,checkpoint_id,kind,status,
@@ -205,9 +231,26 @@ export class PostgresGenerationCoordinator {
     });
   }
 
-  async publish(generationId: string, publishedAt: string): Promise<IndexGeneration> {
+  async publish(generationId: string, publishedAt: string, fence?: ContextWriteFence): Promise<IndexGeneration> {
     return this.database.transactionAs("jina_context_coordinator", async (client) => {
-      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [generationId]);
+      const target = await client.query<{
+        tenant_id: string;
+        repository: string;
+        ref_name: string;
+        commit_sha: string;
+        checkpoint_id: string;
+      }>(
+        `select tenant_id,repository,ref_name,commit_sha,checkpoint_id
+         from jina_context.index_generations where id=$1 and status='building'`,
+        [generationId]
+      );
+      const scope = target.rows[0];
+      if (!scope) throw new Error(`Generation ${generationId} is not building`);
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        generationRefLock(scope.tenant_id, scope.repository, scope.ref_name)
+      ]);
+      await assertContextWriteFence(client, scope.tenant_id, ["run-index-context", "run-derive-knowledge"], fence);
+      await assertLatestCheckpoint(client, scope.tenant_id, scope.repository, scope.ref_name, scope.checkpoint_id);
       const incomplete = await client.query<{ consumer: ContextProjectionConsumer; status: string; required: boolean }>(
         `select consumer,status,required from jina_context.generation_projectors
          where generation_id=$1 and (
@@ -223,18 +266,6 @@ export class PostgresGenerationCoordinator {
             .join(", ")}`
         );
       }
-      const target = await client.query<{
-        tenant_id: string;
-        repository: string;
-        ref_name: string;
-        commit_sha: string;
-      }>(
-        `select tenant_id,repository,ref_name,commit_sha
-         from jina_context.index_generations where id=$1 and status='building' for update`,
-        [generationId]
-      );
-      const scope = target.rows[0];
-      if (!scope) throw new Error(`Generation ${generationId} is not building`);
       await client.query(
         `update jina_context.index_generations
          set status='invalidated',invalidated_at=$4
@@ -250,6 +281,7 @@ export class PostgresGenerationCoordinator {
       );
       const generation = await loadGeneration(client, generationId);
       if (!generation) throw new Error(`Generation ${generationId} disappeared during publication`);
+      await assertContextWriteFence(client, scope.tenant_id, ["run-index-context", "run-derive-knowledge"], fence);
       return generation;
     });
   }
@@ -300,6 +332,30 @@ export class PostgresGenerationCoordinator {
       ...(row.lease_expires_at ? { leaseExpiresAt: dateString(row.lease_expires_at) } : {}),
       updatedAt: dateString(row.updated_at)
     };
+  }
+}
+
+function generationRefLock(tenantId: string, repository: string, ref: string): string {
+  return `context-generation-ref:${tenantId}:${repository}:${ref}`;
+}
+
+async function assertLatestCheckpoint(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  ref: string,
+  checkpointId: string
+): Promise<void> {
+  const latest = await client.query<{ id: string }>(
+    `select id
+     from jina_context.evidence_checkpoints
+     where tenant_id=$1 and repository=$2 and ref_name=$3
+     order by created_at desc,id desc
+     limit 1`,
+    [tenantId, repository, ref]
+  );
+  if (latest.rows[0]?.id !== checkpointId) {
+    throw new Error(`Checkpoint ${checkpointId} is superseded for ${repository}@${ref}`);
   }
 }
 

@@ -44,7 +44,7 @@ Dashboard/admin values are server-side Cloud Run environment variables and secre
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
 `JINA_WEB_AUTH_PASSWORD`, `JINA_TENANT_ID`, and `JINA_WEB_PRINCIPAL_ID`. The coordinated
 deployment binds both apps to the acceptance tenant/principal and mounts
-`jina-dashboard-password` plus `jina-internal-api-token`. The admin may instead derive
+`jina-web-auth-password` plus `jina-internal-api-token`. The admin may instead derive
 `tenant:<JINA_TENANT_ID>` when only a tenant ID is configured. One principal binding is
 required whenever the app has `INTERNAL_API_TOKEN`. Never use a `NEXT_PUBLIC_` prefix for
 a credential.

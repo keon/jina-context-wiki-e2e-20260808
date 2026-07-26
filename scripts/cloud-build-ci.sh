@@ -12,7 +12,7 @@ pnpm test
 pnpm evaluate:context
 pnpm audit --prod --audit-level=high
 
-# Vercel owns these deployments, but Cloud Build still verifies that both
-# production Next.js bundles compile before a change can reach main.
+# Cloud Build deploys these exact-SHA Cloud Run bundles with the backend and
+# verifies them independently before it builds the container images.
 pnpm --filter @jina/dashboard build
 pnpm --filter @jina/admin build

@@ -6,8 +6,10 @@ import type {
   KnowledgeEvidenceCitation,
   KnowledgeRevisionEvent,
   KnowledgeStore,
-  ContextWriteFence
+  ContextWriteFence,
+  EvidenceRecord
 } from "@jina/context-engine";
+import { evidenceExcerpt } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, contextStableId, dateString } from "./database.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
@@ -578,8 +580,23 @@ async function assertCitationInCheckpoint(
   citation: KnowledgeEvidenceCitation
 ): Promise<void> {
   const anchor = citation.anchor;
-  const result = await client.query(
-    `select 1
+  const result = await client.query<{
+    id: string;
+    ref_name: string;
+    source_type: EvidenceRecord["anchor"]["sourceType"];
+    source_id: string;
+    content_digest: string;
+    commit_sha: string | null;
+    path_or_url: string | null;
+    observed_at: Date | null;
+    title: string;
+    body: string;
+    metadata: Record<string, unknown>;
+    authority_class: EvidenceRecord["authorityClass"];
+    acl_fingerprint: string;
+    created_at: Date;
+  }>(
+    `select evidence.*
      from jina_context.evidence_checkpoint_records selection
      join jina_context.evidence_records evidence
        on evidence.tenant_id=selection.tenant_id
@@ -591,9 +608,6 @@ async function assertCitationInCheckpoint(
        and evidence.content_digest=$6
        and evidence.commit_sha is not distinct from $7
        and evidence.path_or_url is not distinct from $8
-       and evidence.start_line is not distinct from $9
-       and evidence.end_line is not distinct from $10
-       and evidence.json_pointer is not distinct from $11
      limit 1`,
     [
       checkpointId,
@@ -603,14 +617,36 @@ async function assertCitationInCheckpoint(
       anchor.sourceId,
       anchor.contentDigest,
       anchor.commitSha ?? null,
-      anchor.pathOrUrl ?? null,
-      anchor.startLine ?? null,
-      anchor.endLine ?? null,
-      anchor.jsonPointer ?? null
+      anchor.pathOrUrl ?? null
     ]
   );
-  if (result.rowCount !== 1) {
+  const row = result.rows[0];
+  if (!row) {
     throw new Error(`Citation ${citation.id} does not resolve inside evidence checkpoint ${checkpointId}`);
+  }
+  const record: EvidenceRecord = {
+    id: row.id,
+    anchor: {
+      tenantId: anchor.tenantId,
+      repository: anchor.repository,
+      sourceType: row.source_type,
+      sourceId: row.source_id,
+      contentDigest: row.content_digest,
+      ...(row.commit_sha ? { commitSha: row.commit_sha } : {}),
+      ...(row.path_or_url ? { pathOrUrl: row.path_or_url } : {}),
+      ...(row.observed_at ? { observedAt: row.observed_at.toISOString() } : {})
+    },
+    ref: row.ref_name,
+    title: row.title,
+    body: row.body,
+    metadata: row.metadata,
+    authorityClass: row.authority_class,
+    aclFingerprint: row.acl_fingerprint,
+    createdAt: row.created_at.toISOString()
+  };
+  const excerpt = evidenceExcerpt(record, anchor);
+  if (excerpt === undefined) {
+    throw new Error(`Citation ${citation.id} has an invalid evidence selector`);
   }
 }
 
