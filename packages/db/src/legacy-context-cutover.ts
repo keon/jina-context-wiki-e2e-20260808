@@ -86,6 +86,12 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
            archive_owner
          );
        end if;
+       if archive_owner <> migration_owner then
+         -- ALTER TABLE transfers an identity sequence to the new table owner.
+         -- Membership lets this migration safely encounter that sequence later
+         -- in the same pg_class scan without leaving the owner role inheritable.
+         execute format('grant %I to %I', archive_owner, migration_owner);
+       end if;
 
        if runtime_user <> migration_owner then
          execute format('grant %I to %I', runtime_user, migration_owner);
@@ -99,6 +105,20 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
          join pg_namespace n on n.oid=c.relnamespace
          where n.nspname='jina_context_graph'
            and c.relkind in ('r','p','v','m','S','f')
+           -- Identity sequences are internal table objects. ALTER TABLE OWNER
+           -- moves them with their parent, and PostgreSQL rejects a separate
+           -- ALTER SEQUENCE OWNER even when the target owner is identical.
+           and not (
+             c.relkind='S'
+             and exists (
+               select 1
+               from pg_depend d
+               where d.classid='pg_class'::regclass
+                 and d.objid=c.oid
+                 and d.refclassid='pg_class'::regclass
+                 and d.deptype='i'
+             )
+           )
        loop
          execute format(
            case object.relkind
@@ -137,6 +157,9 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
        execute format('revoke all on all sequences in schema jina_context_graph from %I', runtime_user);
        execute format('revoke execute on all functions in schema jina_context_graph from %I', runtime_user);
        execute format('revoke %I from %I', archive_owner, runtime_user);
+       if archive_owner <> migration_owner then
+         execute format('revoke %I from %I', archive_owner, migration_owner);
+       end if;
      end
      $archive$`
   );

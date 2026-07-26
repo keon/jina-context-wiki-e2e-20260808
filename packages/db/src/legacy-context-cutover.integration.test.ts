@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { Pool } from "pg";
-import { PostgresLegacyContextCutoverAuditor } from "./legacy-context-cutover.js";
+import { hardenContextRuntimeRole, PostgresLegacyContextCutoverAuditor } from "./legacy-context-cutover.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -99,3 +99,80 @@ test(
     }
   }
 );
+
+test("legacy schema hardening archives runtime-owned identity sequences", { skip: !databaseUrl }, async () => {
+  const bootstrap = new Pool({ connectionString: databaseUrl });
+  const runtimeRole = "jina_context_cutover_test_runtime";
+  try {
+    await bootstrap.query("drop schema if exists jina_context_graph cascade");
+    await bootstrap.query("drop role if exists jina_legacy_archive");
+    await bootstrap.query(`drop role if exists ${runtimeRole}`);
+    await bootstrap.query(
+      `create role ${runtimeRole}
+         login inherit createdb createrole bypassrls replication`
+    );
+    await bootstrap.query(`create schema jina_context_graph authorization ${runtimeRole}`);
+    await bootstrap.query(`set role ${runtimeRole}`);
+    await bootstrap.query(
+      `create table jina_context_graph.retrieval_metrics (
+         id bigint generated always as identity primary key,
+         query text not null
+       )`
+    );
+    await bootstrap.query("reset role");
+
+    await hardenContextRuntimeRole(bootstrap, runtimeRole);
+
+    const owners = await bootstrap.query<{ relkind: string; owner: string }>(
+      `select c.relkind,pg_get_userbyid(c.relowner) as owner
+       from pg_class c
+       join pg_namespace n on n.oid=c.relnamespace
+       where n.nspname='jina_context_graph'
+         and c.relname in ('retrieval_metrics','retrieval_metrics_id_seq')
+       order by c.relkind`
+    );
+    assert.deepEqual(owners.rows, [
+      { relkind: "S", owner: "jina_legacy_archive" },
+      { relkind: "r", owner: "jina_legacy_archive" }
+    ]);
+
+    const runtime = await bootstrap.query<{
+      rolbypassrls: boolean;
+      rolcreatedb: boolean;
+      rolcreaterole: boolean;
+      rolinherit: boolean;
+      rolreplication: boolean;
+    }>(
+      `select rolbypassrls,rolcreatedb,rolcreaterole,rolinherit,rolreplication
+       from pg_roles
+       where rolname=$1`,
+      [runtimeRole]
+    );
+    assert.deepEqual(runtime.rows, [
+      {
+        rolbypassrls: false,
+        rolcreatedb: false,
+        rolcreaterole: false,
+        rolinherit: false,
+        rolreplication: false
+      }
+    ]);
+    const migrationMembership = await bootstrap.query<{ is_member: boolean }>(
+      `select exists (
+         select 1
+         from pg_auth_members membership
+         join pg_roles granted_role on granted_role.oid=membership.roleid
+         join pg_roles member_role on member_role.oid=membership.member
+         where granted_role.rolname='jina_legacy_archive'
+           and member_role.rolname=current_user
+       ) as is_member`
+    );
+    assert.equal(migrationMembership.rows[0]?.is_member, false);
+  } finally {
+    await bootstrap.query("reset role");
+    await bootstrap.query("drop schema if exists jina_context_graph cascade");
+    await bootstrap.query("drop role if exists jina_legacy_archive");
+    await bootstrap.query(`drop role if exists ${runtimeRole}`);
+    await bootstrap.end();
+  }
+});
