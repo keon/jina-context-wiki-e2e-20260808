@@ -96,7 +96,7 @@ split_image_output="$(
       bash scripts/cloud-build-deploy.sh
     ' 2>&1 || true
 )"
-if [[ "${split_image_output}" != *"must deploy images built by the current coordinated Cloud Build"* ]]; then
+if [[ "${split_image_output}" != *"must deploy images built by one explicit coordinated Cloud Build"* ]]; then
   echo "Destructive cutover accepted an image tag from another build." >&2
   exit 1
 fi

@@ -3,6 +3,7 @@ import test from "node:test";
 import { blockedContextTaskIds, productionAcceptanceExitCode, runProductionContextAcceptance } from "./acceptance.js";
 
 test("production acceptance has stable coarse failure categories", () => {
+  assert.equal(productionAcceptanceExitCode(new Error("worker health verification failed")), 19);
   assert.equal(productionAcceptanceExitCode(new Error("production context stage index-context failed")), 20);
   assert.equal(productionAcceptanceExitCode(new Error("no published generation")), 21);
   assert.equal(productionAcceptanceExitCode(new Error("knowledge document catalog is empty")), 22);
@@ -51,6 +52,28 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     const url = new URL(String(input));
     requested.push(`${init?.method ?? "GET"} ${url.pathname}`);
     requestedAuthorization.push(new Headers(init?.headers).get("authorization") ?? "");
+    if (url.hostname === "context-worker.example.test" && url.pathname === "/health") {
+      return json({
+        ok: true,
+        workerId: "context-worker",
+        topics: ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"],
+        active: false,
+        lastApiSuccessAt: new Date().toISOString(),
+        consecutiveApiFailures: 0,
+        metrics: {}
+      });
+    }
+    if (url.hostname === "task-worker.example.test" && url.pathname === "/health") {
+      return json({
+        ok: true,
+        workerId: "task-worker",
+        topics: ["run-review", "run-research", "run-publish", "run-cleanup"],
+        active: false,
+        lastApiSuccessAt: new Date().toISOString(),
+        consecutiveApiFailures: 0,
+        metrics: {}
+      });
+    }
     if (url.pathname === "/internal/context/access/sync") {
       accessSyncRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return json({ repositoryCount: 1 });
@@ -124,6 +147,18 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     ref: "main",
     githubInstallationId: 140435029,
     pollIntervalMs: 0,
+    workerHealthChecks: [
+      {
+        url: "https://context-worker.example.test",
+        authorization: "Bearer context-worker-identity",
+        expectedTopics: ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"]
+      },
+      {
+        url: "https://task-worker.example.test",
+        authorization: "Bearer task-worker-identity",
+        expectedTopics: ["run-review", "run-research", "run-publish", "run-cleanup"]
+      }
+    ],
     fetchImpl,
     verifyMcp: async ({ commitSha }) => {
       assert.equal(commitSha, "a".repeat(40));
@@ -140,6 +175,8 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
   assert.equal(buildRequest?.githubInstallationId, 140435029);
   assert.deepEqual(accessSyncRequest, { repositories: ["omlabs/repo"], mode: "merge" });
   assert.deepEqual(requested, [
+    "GET /health",
+    "GET /health",
     "POST /internal/context/access/sync",
     "POST /context/build",
     "GET /board",
@@ -151,6 +188,8 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     "GET /context-graph"
   ]);
   assert.deepEqual(requestedAuthorization, [
+    "Bearer context-worker-identity",
+    "Bearer task-worker-identity",
     "Bearer internal",
     "Bearer internal",
     "Bearer internal",

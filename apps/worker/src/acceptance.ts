@@ -3,6 +3,23 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
 const CONTEXT_STAGE_TYPES = new Set(["ingest-evidence", "derive-knowledge", "index-context"]);
+const WORKER_HEALTH_KEYS = new Set([
+  "ok",
+  "workerId",
+  "topics",
+  "active",
+  "lastApiSuccessAt",
+  "lastApiErrorAt",
+  "consecutiveApiFailures",
+  "lastWork",
+  "metrics"
+]);
+
+export interface ProductionWorkerHealthCheck {
+  readonly url: string;
+  readonly authorization: string;
+  readonly expectedTopics: readonly string[];
+}
 
 export interface ProductionContextAcceptanceConfig {
   readonly apiUrl: string;
@@ -17,6 +34,8 @@ export interface ProductionContextAcceptanceConfig {
   readonly requestKey?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
+  readonly workerHealthChecks?: readonly ProductionWorkerHealthCheck[];
+  readonly workerHealthTimeoutMs?: number;
   readonly fetchImpl?: typeof fetch;
   readonly verifyMcp?: (input: {
     apiUrl: string;
@@ -75,6 +94,10 @@ export async function runProductionContextAcceptance(
     authorization: `Bearer ${config.internalToken}`,
     "content-type": "application/json"
   };
+
+  for (const worker of config.workerHealthChecks ?? []) {
+    await verifyWorkerHealth(fetchImpl, worker, config.workerHealthTimeoutMs ?? 120_000);
+  }
 
   await apiJson(fetchImpl, `${apiUrl}/internal/context/access/sync`, {
     method: "POST",
@@ -205,12 +228,51 @@ export function blockedContextTaskIds(tasks: readonly unknown[], repository: str
 
 export function productionAcceptanceExitCode(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
+  if (/worker health|worker topics|worker payload/.test(message)) return 19;
   if (/stage .* failed|build .* failed|timed out|blocked stages/.test(message)) return 20;
   if (/published generation|certified generation|commitSha/.test(message)) return 21;
   if (/document catalog|derived knowledge/.test(message)) return 22;
   if (/citation|empty answer|MCP/.test(message)) return 23;
   if (message.includes("backlog")) return 24;
   return 25;
+}
+
+async function verifyWorkerHealth(
+  fetchImpl: typeof fetch,
+  check: ProductionWorkerHealthCheck,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastFailure: string | undefined;
+  do {
+    try {
+      const response = await fetchImpl(`${check.url.replace(/\/$/, "")}/health`, {
+        headers: { authorization: check.authorization }
+      });
+      const value = record(JSON.parse(await response.text()));
+      const unexpectedKeys = Object.keys(value).filter((key) => !WORKER_HEALTH_KEYS.has(key));
+      if (unexpectedKeys.length > 0) {
+        throw new Error(`worker payload exposed unexpected fields: ${unexpectedKeys.sort().join(", ")}`);
+      }
+      if (!response.ok || value.ok !== true) {
+        throw new Error(`worker health returned ${response.status} with ok=${String(value.ok)}`);
+      }
+      const topics = requiredArray(value.topics, "worker topics").map((topic) => requiredString(topic, "worker topic"));
+      if (
+        topics.length !== check.expectedTopics.length ||
+        topics.some((topic, index) => topic !== check.expectedTopics[index])
+      ) {
+        throw new Error(
+          `worker topics were ${JSON.stringify(topics)}, expected ${JSON.stringify(check.expectedTopics)}`
+        );
+      }
+      return;
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+    await delay(2_000);
+  } while (Date.now() < deadline);
+  throw new Error(`worker health verification failed: ${lastFailure ?? "no response"}`);
 }
 
 async function verifyProductionMcp(input: {
@@ -344,6 +406,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function main(): Promise<void> {
   const githubInstallationId = optionalPositiveInteger(process.env.ACCEPTANCE_GITHUB_INSTALLATION_ID);
+  const workerHealthChecks = await configuredWorkerHealthChecks();
   const summary = await runProductionContextAcceptance({
     apiUrl: requiredEnv("JINA_API_URL"),
     internalToken: requiredEnv("INTERNAL_API_TOKEN"),
@@ -355,9 +418,41 @@ async function main(): Promise<void> {
     ...(process.env.ACCEPTANCE_REF ? { ref: process.env.ACCEPTANCE_REF } : {}),
     ...(githubInstallationId ? { githubInstallationId } : {}),
     ...(process.env.ACCEPTANCE_REQUEST_KEY ? { requestKey: process.env.ACCEPTANCE_REQUEST_KEY } : {}),
-    ...(process.env.ACCEPTANCE_TIMEOUT_MS ? { timeoutMs: Number(process.env.ACCEPTANCE_TIMEOUT_MS) } : {})
+    ...(process.env.ACCEPTANCE_TIMEOUT_MS ? { timeoutMs: Number(process.env.ACCEPTANCE_TIMEOUT_MS) } : {}),
+    workerHealthChecks
   });
   console.log(JSON.stringify({ event: "production.context.acceptance_succeeded", ...summary }));
+}
+
+async function configuredWorkerHealthChecks(): Promise<ProductionWorkerHealthCheck[]> {
+  const contextWorkerUrl = requiredEnv("ACCEPTANCE_CONTEXT_WORKER_URL");
+  const taskWorkerUrl = requiredEnv("ACCEPTANCE_TASK_WORKER_URL");
+  return Promise.all([
+    authenticatedWorkerHealthCheck(contextWorkerUrl, [
+      "run-ingest-evidence",
+      "run-derive-knowledge",
+      "run-index-context"
+    ]),
+    authenticatedWorkerHealthCheck(taskWorkerUrl, ["run-review", "run-research", "run-publish", "run-cleanup"])
+  ]);
+}
+
+async function authenticatedWorkerHealthCheck(
+  url: string,
+  expectedTopics: readonly string[]
+): Promise<ProductionWorkerHealthCheck> {
+  const audience = url.replace(/\/$/, "");
+  const metadataUrl = new URL(
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
+  );
+  metadataUrl.searchParams.set("audience", audience);
+  metadataUrl.searchParams.set("format", "full");
+  const response = await fetch(metadataUrl, { headers: { "Metadata-Flavor": "Google" } });
+  const token = (await response.text()).trim();
+  if (!response.ok || token.split(".").length !== 3) {
+    throw new Error(`worker health identity token request failed with ${response.status}`);
+  }
+  return { url: audience, authorization: `Bearer ${token}`, expectedTopics };
 }
 
 function requiredEnv(name: string): string {

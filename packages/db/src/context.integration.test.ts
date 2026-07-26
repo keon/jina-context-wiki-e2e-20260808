@@ -1611,6 +1611,24 @@ test(
         "select distinct consumer from jina_context.outbox order by consumer"
       );
       assert.deepEqual(visibleConsumers.rows, [{ consumer: "manifest" }]);
+      await roleClient.query("reset role");
+      await roleClient.query("set role jina_context_query");
+      await roleClient.query("select set_config('jina.tenant_id',$1,false)", ["tenant-with-no-context-access"]);
+      const isolatedDependentRows = await roleClient.query<{
+        exact_count: string;
+        candidate_count: string;
+        citation_count: string;
+      }>(
+        `select
+           (select count(*)::text from jina_context.exact_index) exact_count,
+           (select count(*)::text from jina_context.retrieval_candidates) candidate_count,
+           (select count(*)::text from jina_context.answer_citations) citation_count`
+      );
+      assert.deepEqual(isolatedDependentRows.rows[0], {
+        exact_count: "0",
+        candidate_count: "0",
+        citation_count: "0"
+      });
     } finally {
       await roleClient.query("reset role").catch(() => undefined);
       roleClient.release();

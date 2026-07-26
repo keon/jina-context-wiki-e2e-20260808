@@ -393,6 +393,60 @@ create policy context_projection_checkpoints_${role} on jina_context.projection_
   with check (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)});`
 ).join("\n")}
 
+alter table jina_context.exact_index enable row level security;
+drop policy if exists context_exact_index_tenant_scope on jina_context.exact_index;
+create policy context_exact_index_tenant_scope on jina_context.exact_index
+  using (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=exact_index.generation_id
+        and ${tenantScopeSql("generation.tenant_id")}
+    )
+  )
+  with check (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=exact_index.generation_id
+        and ${tenantScopeSql("generation.tenant_id")}
+    )
+  );
+
+alter table jina_context.retrieval_candidates enable row level security;
+drop policy if exists context_retrieval_candidates_tenant_scope on jina_context.retrieval_candidates;
+create policy context_retrieval_candidates_tenant_scope on jina_context.retrieval_candidates
+  using (
+    exists (
+      select 1 from jina_context.query_runs run
+      where run.id=retrieval_candidates.query_run_id
+        and ${tenantScopeSql("run.tenant_id")}
+    )
+  )
+  with check (
+    exists (
+      select 1 from jina_context.query_runs run
+      where run.id=retrieval_candidates.query_run_id
+        and ${tenantScopeSql("run.tenant_id")}
+    )
+  );
+
+alter table jina_context.answer_citations enable row level security;
+drop policy if exists context_answer_citations_tenant_scope on jina_context.answer_citations;
+create policy context_answer_citations_tenant_scope on jina_context.answer_citations
+  using (
+    exists (
+      select 1 from jina_context.query_runs run
+      where run.id=answer_citations.query_run_id
+        and ${tenantScopeSql("run.tenant_id")}
+    )
+  )
+  with check (
+    exists (
+      select 1 from jina_context.query_runs run
+      where run.id=answer_citations.query_run_id
+        and ${tenantScopeSql("run.tenant_id")}
+    )
+  );
+
 ${tenantScopedTables
   .map(
     (table) => `

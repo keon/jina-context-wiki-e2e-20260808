@@ -49,6 +49,15 @@ cutover_primary_db_pass_secret="jina-primary-cutover-auditor-db-password:latest"
 cutover_legacy_graph_db_user="jina_cutover_auditor"
 cutover_legacy_graph_db_pass_secret="jina-legacy-cutover-auditor-db-password:latest"
 
+if [[ "${image_tag}" == "latest" || "${image_tag}" == "unset" ]]; then
+  echo "Deployment must deploy images built by one explicit coordinated Cloud Build" >&2
+  exit 2
+fi
+if [[ ! "${image_tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
+  echo "IMAGE_TAG is not a valid immutable Artifact Registry tag" >&2
+  exit 2
+fi
+
 validate_positive_integer() {
   local name="$1"
   local value="$2"
@@ -296,6 +305,15 @@ for service_account in \
   gcloud iam service-accounts describe "${service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 done
 gcloud iam service-accounts describe "${migration_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
+
+for image in "${api_image}" "${worker_image}" "${dashboard_image}" "${admin_image}"; do
+  if ! gcloud artifacts docker images describe "${image}" \
+    --project="${GCP_PROJECT_ID}" \
+    --format='value(image_summary.digest)' >/dev/null; then
+    echo "Coordinated release image does not exist: ${image}" >&2
+    exit 2
+  fi
+done
 
 service_snapshot_contains() {
   local snapshot="$1"
@@ -636,6 +654,15 @@ task_worker_url="$(gcloud run services describe jina-task-worker \
   --region="${GCP_REGION}" \
   --format='value(status.url)')"
 
+for worker_service in "jina-context-worker" "jina-task-worker"; do
+  gcloud run services add-iam-policy-binding "${worker_service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --member="serviceAccount:${acceptance_service_account}" \
+    --role="roles/run.invoker" \
+    --quiet >/dev/null
+done
+
 web_env_vars="^~^JINA_API_URL=${api_url}~JINA_TENANT_ID=${acceptance_tenant_id}~JINA_WEB_PRINCIPAL_ID=${acceptance_principal_id}~JINA_WEB_AUTH_USERNAME=omlabs"
 web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WEB_AUTH_PASSWORD=jina-web-auth-password:latest"
 
@@ -673,7 +700,7 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${acceptance_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \

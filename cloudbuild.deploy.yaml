@@ -28,7 +28,9 @@ steps:
     timeout: 4200s
 
 substitutions:
-  _IMAGE_TAG: latest
+  # Required at invocation: the immutable coordinated Cloud Build ID whose
+  # api, worker, dashboard, and admin images will be deployed together.
+  _IMAGE_TAG: unset
   # Identity/control-plane and context schemas share the production database;
   # tenant isolation is enforced by jina_context roles and RLS.
   _CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db
