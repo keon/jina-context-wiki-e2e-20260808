@@ -79,6 +79,7 @@ export interface ContextPipelineCoordinator {
     error?: string;
   }): Promise<boolean>;
   validateWriteFence(input: { tenantId: string; fence: ContextWriteFence; now: string }): Promise<boolean>;
+  latestRefSequence(tenantId: string, repository: string, ref: string): Promise<number>;
   get(buildId: string): Promise<ContextBuild | undefined>;
   list(tenantId: string): Promise<ContextBuild[]>;
 }
@@ -279,9 +280,17 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     stage.metadata = { ...stage.metadata, ...input.metadata };
     delete stage.fence;
     if (stage.type === contextTaskTypes.ingestEvidence && input.outcome === "succeeded") {
-      for (const dependent of build.stages.filter((candidate) => candidate.status === "blocked")) {
-        dependent.status = "queued";
-        dependent.metadata = { ...dependent.metadata, ...input.metadata };
+      const baseline = build.stages.find((candidate) => candidate.type === contextTaskTypes.indexContext);
+      if (baseline?.status === "blocked") {
+        baseline.status = "queued";
+        baseline.metadata = { ...baseline.metadata, ...stage.metadata };
+      }
+    }
+    if (stage.type === contextTaskTypes.indexContext && input.outcome === "succeeded") {
+      const derivation = build.stages.find((candidate) => candidate.type === contextTaskTypes.deriveKnowledge);
+      if (derivation?.status === "blocked") {
+        derivation.status = "queued";
+        derivation.metadata = { ...derivation.metadata, ...stage.metadata };
       }
     }
     this.#updateBuildStatus(build, now);
@@ -300,6 +309,18 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
       active.token === input.fence.token &&
       active.attempt === input.fence.attempt &&
       active.leaseExpiresAt > normalizeIsoTime(input.now)
+    );
+  }
+
+  async latestRefSequence(tenantId: string, repository: string, ref: string): Promise<number> {
+    return Math.max(
+      0,
+      ...[...this.#builds.values()]
+        .filter(
+          (build) =>
+            build.tenantId === tenantId && build.repository === normalizeRepository(repository) && build.ref === ref
+        )
+        .map((build) => build.refSequence)
     );
   }
 

@@ -28,16 +28,95 @@ function materialParagraphs(markdown: string): string[] {
     .filter((value) => value !== "" && !/^[-*]\s*$/.test(value));
 }
 
-function claimSupportsParagraph(claim: string, paragraph: string): boolean {
-  const normalizedClaim = claim.toLowerCase().replace(/\s+/g, " ").trim();
-  const normalizedParagraph = paragraph.toLowerCase().replace(/\s+/g, " ").trim();
-  return normalizedClaim.length >= 12 && normalizedParagraph.includes(normalizedClaim);
+function claimsCoverParagraph(claims: readonly string[], paragraph: string): boolean {
+  let remaining = paragraph.toLowerCase().replace(/\s+/g, " ").trim();
+  const normalizedClaims = claims
+    .map((claim) => claim.toLowerCase().replace(/\s+/g, " ").trim())
+    .filter((claim) => claim.length >= 12)
+    .sort((left, right) => right.length - left.length);
+  for (const claim of normalizedClaims) {
+    remaining = remaining.split(claim).join(" ");
+  }
+  return remaining.replace(/[\s`*_~#[\](){}<>:;,.!?'"|/+\\=-]/g, "") === "";
 }
 
 function evidenceSupportsClaim(claim: string, excerpt: string): boolean {
   const normalizedClaim = claim.toLowerCase().replace(/\s+/g, " ").trim();
   const normalizedExcerpt = excerpt.toLowerCase().replace(/\s+/g, " ").trim();
   return normalizedClaim.length >= 8 && normalizedExcerpt.includes(normalizedClaim);
+}
+
+function textSupportedByClaims(value: string, claims: readonly string[]): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
+  return (
+    normalized.length >= 3 && claims.some((claim) => claim.toLowerCase().replace(/\s+/g, " ").includes(normalized))
+  );
+}
+
+function textSupportedByResolvedEvidence(
+  value: string,
+  resolved: readonly { claim: string; excerpt: string; record: EvidenceRecord }[]
+): boolean {
+  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
+  if (normalized.length < 2) return false;
+  return resolved.some(({ claim, excerpt, record }) =>
+    [claim, excerpt, record.anchor.pathOrUrl ?? "", record.anchor.sourceId]
+      .map((candidate) => candidate.toLowerCase().replace(/\s+/g, " "))
+      .some((candidate) => candidate.includes(normalized))
+  );
+}
+
+function structuredSummaryStrings(summary: Record<string, unknown>): string[] {
+  const values: string[] = [];
+  const visit = (value: unknown): void => {
+    if (typeof value === "string") values.push(value);
+    else if (Array.isArray(value)) value.forEach(visit);
+    else if (value !== null && typeof value === "object") Object.values(value).forEach(visit);
+  };
+  visit(summary);
+  return values;
+}
+
+function logicalIdGroundingError(
+  document: KnowledgeGenerationOutput["documents"][number],
+  repository: string,
+  commitSha: string,
+  resolved: readonly { claim: string; excerpt: string; record: EvidenceRecord }[]
+): string | undefined {
+  const logicalId = document.logicalId.toLowerCase();
+  const normalizedRepository = repository.toLowerCase();
+  if (document.kind === "architecture") {
+    return logicalId === `repository:${normalizedRepository}:architecture`
+      ? undefined
+      : "repository identity does not match the checkpoint";
+  }
+  if (document.kind === "change_summary") {
+    return logicalId === `change:${normalizedRepository}:${commitSha.toLowerCase()}`
+      ? undefined
+      : "commit identity does not match the checkpoint";
+  }
+  if (document.kind === "issue_explanation") {
+    const issue = /^issue:[a-z0-9_.-]+:([a-z0-9_.-]+\/[a-z0-9_.-]+)#([1-9][0-9]*)$/.exec(logicalId);
+    if (!issue || issue[1] !== normalizedRepository) return "repository identity does not match the checkpoint";
+    const issueNumber = issue[2]!;
+    const issueNumberPattern = new RegExp(`(^|[^0-9])${issueNumber}([^0-9]|$)`);
+    const supported = resolved.some(
+      ({ claim, excerpt, record }) =>
+        record.anchor.sourceType === "issue" &&
+        [claim, excerpt, record.anchor.sourceId, record.anchor.pathOrUrl ?? "", JSON.stringify(record.metadata)]
+          .map((candidate) => candidate.toLowerCase())
+          .some((candidate) => issueNumberPattern.test(candidate))
+    );
+    return supported ? undefined : "issue identity is not supported by resolved issue evidence";
+  }
+  const prefix = document.kind === "incident" ? "incident:" : `${document.kind}:${normalizedRepository}:`;
+  if (!logicalId.startsWith(prefix)) return "repository identity does not match the checkpoint";
+  const suffix = logicalId.slice(prefix.length);
+  const segments = suffix.split(/[/:#@._-]+/).filter(Boolean);
+  if (segments.length === 0 || segments.some((segment) => !textSupportedByResolvedEvidence(segment, resolved))) {
+    return "identity suffix is not fully supported by resolved evidence";
+  }
+  return undefined;
 }
 
 export class KnowledgeOutputValidator {
@@ -54,6 +133,9 @@ export class KnowledgeOutputValidator {
   }): Promise<ValidatedKnowledge> {
     const checkpoint = await this.evidenceStore.getCheckpoint(input.checkpointId);
     if (checkpoint === undefined) throw new KnowledgeValidationError(["Unknown evidence checkpoint"]);
+    const manifestPaths = new Set(
+      (await this.evidenceStore.listManifest(input.checkpointId)).map((entry) => entry.path)
+    );
     const diagnostics: string[] = [];
     const revisions: KnowledgeDocumentRevision[] = [];
     const citations: KnowledgeEvidenceCitation[] = [];
@@ -72,7 +154,7 @@ export class KnowledgeOutputValidator {
         if (path.startsWith("/") || path.includes(".."))
           diagnostics.push(`documents[${documentIndex}] has invalid scope path`);
       }
-      const resolved: { claim: string; anchor: EvidenceAnchor; record: EvidenceRecord }[] = [];
+      const resolved: { claim: string; excerpt: string; anchor: EvidenceAnchor; record: EvidenceRecord }[] = [];
       for (const [citationIndex, citation] of document.citations.entries()) {
         const record = await this.evidenceStore.resolveAnchor(input.checkpointId, {
           tenantId: checkpoint.tenantId,
@@ -101,6 +183,7 @@ export class KnowledgeOutputValidator {
           }
           resolved.push({
             claim: citation.claim,
+            excerpt,
             record,
             anchor: {
               ...record.anchor,
@@ -115,8 +198,38 @@ export class KnowledgeOutputValidator {
         }
       }
       if (resolved.length !== document.citations.length) continue;
+      const claims = resolved.map((citation) => citation.claim);
+      if (!textSupportedByClaims(document.title, claims)) {
+        diagnostics.push(`documents[${documentIndex}].title is not supported by a citation claim`);
+      }
+      if (!textSupportedByClaims(document.summary, claims)) {
+        diagnostics.push(`documents[${documentIndex}].summary is not supported by a citation claim`);
+      }
+      for (const value of structuredSummaryStrings(document.structuredSummary)) {
+        if (!textSupportedByClaims(value, claims)) {
+          diagnostics.push(`documents[${documentIndex}].structuredSummary contains unsupported text`);
+          break;
+        }
+      }
+      for (const path of document.scope.paths) {
+        if (!manifestPaths.has(path)) {
+          diagnostics.push(`documents[${documentIndex}].scope.paths contains a path outside the checkpoint`);
+        } else if (!textSupportedByResolvedEvidence(path, resolved)) {
+          diagnostics.push(`documents[${documentIndex}].scope.paths contains a path not supported by cited evidence`);
+        }
+      }
+      for (const value of [...document.scope.symbols, ...document.scope.pullRequests, ...document.scope.issues]) {
+        if (!textSupportedByResolvedEvidence(value, resolved)) {
+          diagnostics.push(`documents[${documentIndex}].scope contains unsupported text`);
+          break;
+        }
+      }
+      const logicalIdError = logicalIdGroundingError(document, checkpoint.repository, checkpoint.commitSha, resolved);
+      if (logicalIdError) {
+        diagnostics.push(`documents[${documentIndex}].logicalId ${logicalIdError}`);
+      }
       for (const paragraph of materialParagraphs(document.bodyMarkdown)) {
-        if (!resolved.some((citation) => claimSupportsParagraph(citation.claim, paragraph))) {
+        if (!claimsCoverParagraph(claims, paragraph)) {
           diagnostics.push(`documents[${documentIndex}] contains an unsupported paragraph: ${paragraph.slice(0, 80)}`);
         }
       }

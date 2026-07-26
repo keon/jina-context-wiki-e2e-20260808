@@ -48,7 +48,8 @@ const queryContextResultSchema = {
     z.object({
       subject: z.string(),
       description: z.string(),
-      citationIds: z.array(z.string())
+      citationIds: z.array(z.string()),
+      resolution: z.enum(["unresolved", "authority_preferred", "newer_source_preferred"])
     })
   ),
   ambiguities: z.array(z.string()),

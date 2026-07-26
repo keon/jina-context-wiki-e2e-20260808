@@ -46,6 +46,12 @@ Cloud SQL Client and secret accessor on `jina-db-password` only. Remove
 `jina-runtime@jina-v2.iam.gserviceaccount.com` from that secret's IAM policy and do not
 grant either identity project-wide Secret Manager access.
 
+These are intentionally cross-project grants: the Google identities are created in
+`jina-v2`, while `roles/cloudsql.client` is bound on `jina-463721`, the project that owns
+the database instance. The password secret is owned by `jina-v2`, so its direct IAM
+binding remains in `jina-v2`. Both grants are required for migration; neither substitutes
+for the other.
+
 ```sh
 gcloud projects add-iam-policy-binding jina-463721 \
   --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
@@ -62,6 +68,10 @@ gcloud secrets remove-iam-policy-binding jina-db-password \
   --role='roles/secretmanager.secretAccessor'
 
 gcloud secrets get-iam-policy jina-db-password --project=jina-v2
+gcloud projects get-iam-policy jina-463721 \
+  --flatten='bindings[].members' \
+  --filter='bindings.role=roles/cloudsql.client AND bindings.members:serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
+  --format='table(bindings.role,bindings.members)'
 ```
 
 The build deployer needs permission to act as both service accounts, but that does not
@@ -136,7 +146,8 @@ denied direct access.
 ## Context-engine cutover
 
 The context engine is a clean replacement. No old index data is copied into
-`jina_context`; active repositories are reingested at exact commits.
+`jina_context`; active repositories are reingested from authoritative current remote
+heads and recorded at exact commits.
 
 1. Build and validate release images against disposable PostgreSQL.
 2. Record active repository/ref inventory and expected principal access.
@@ -149,8 +160,8 @@ The context engine is a clean replacement. No old index data is copied into
 7. Deploy API, `jina-context-worker`, task worker, dashboard, admin, and MCP-compatible
    API from the same exact source/build identity as one coordinated Cloud Run release.
 8. Trigger `build-context` for every active repository/ref.
-9. Require exact-commit baseline generations before enabling callers, then allow
-   knowledge derivation to publish enriched successors.
+9. Require authoritative-head baseline generations recorded at exact commits before
+   enabling callers, then allow knowledge derivation to publish enriched successors.
 10. Audit per-ref build/checkpoint sequences, commits, manifests, projection-input
     fingerprints, ACLs, required projector status, outbox depth, citations, and exact
     queries. Run the production acceptance job and retain race-test output.

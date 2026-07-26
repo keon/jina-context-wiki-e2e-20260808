@@ -128,12 +128,16 @@ const logicalIdPatterns: Record<KnowledgeDocumentKind, RegExp> = {
 
 export function validateLogicalId(kind: KnowledgeDocumentKind, logicalId: string, repository: string): void {
   const normalized = logicalId.trim().toLowerCase();
+  const normalizedRepository = normalizeRepository(repository);
   if (!logicalIdPatterns[kind].test(normalized)) throw new Error(`Invalid ${kind} logicalId`);
-  if (
-    kind !== "incident" &&
-    kind !== "issue_explanation" &&
-    !normalized.includes(`:${normalizeRepository(repository)}:`)
-  ) {
+  if (kind === "architecture" && normalized !== `repository:${normalizedRepository}:architecture`) {
+    throw new Error("Architecture logical ID does not match repository");
+  }
+  if (kind === "issue_explanation") {
+    const issue = /^issue:[a-z0-9_.-]+:([a-z0-9_.-]+\/[a-z0-9_.-]+)#[1-9][0-9]*$/.exec(normalized);
+    if (issue?.[1] !== normalizedRepository) throw new Error("Issue logical ID does not match repository");
+  }
+  if (kind !== "incident" && kind !== "issue_explanation" && !normalized.includes(`:${normalizedRepository}:`)) {
     throw new Error("Logical ID does not match repository");
   }
 }
@@ -147,13 +151,15 @@ export function createKnowledgeRevision(
   }
   if (input.confidence < 0 || input.confidence > 1) throw new Error("Knowledge confidence must be between 0 and 1");
   const bodyDigest = fingerprint(input.bodyMarkdown);
+  const logicalId = input.logicalId.trim().toLowerCase();
   return {
     ...input,
+    logicalId,
     repository: normalizeRepository(input.repository),
     createdAt: normalizeIsoTime(input.createdAt),
     bodyDigest,
     id: stableId("kr", {
-      logicalId: input.logicalId,
+      logicalId,
       evidenceFingerprint: input.evidenceFingerprint,
       generatorVersion: input.generatorVersion,
       bodyDigest

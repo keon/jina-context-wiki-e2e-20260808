@@ -21,6 +21,7 @@ import {
   type StructuralFact,
   repositoryAclFingerprint
 } from "@jina/context-engine";
+import type { PoolClient } from "pg";
 import type { PostgresContextDatabaseConfig } from "./database.js";
 import { ContextDatabase, contextDigest, contextStableId } from "./database.js";
 import { currentRepositoryAccessFingerprint, lockRepositoryAccess, repositoryAccessLockKey } from "./access.js";
@@ -107,8 +108,19 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   listRevisionEvents(revisionId: string): Promise<KnowledgeRevisionEvent[]> {
     return this.knowledge.listRevisionEvents(revisionId);
   }
-  listCurrentEligibleRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
-    return this.knowledge.listCurrentEligibleRevisions(tenantId, repository);
+  listCheckpointRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]> {
+    return this.knowledge.listCheckpointRevisions(tenantId, repository, checkpointId);
+  }
+  listCurrentEligibleRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]> {
+    return this.knowledge.listCurrentEligibleRevisions(tenantId, repository, checkpointId);
   }
 
   publish(projection: GenerationProjection, fence?: ContextWriteFence): Promise<IndexGeneration> {
@@ -117,11 +129,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
     return this.projection.getGeneration(generationId);
   }
-  getAuthorizedGeneration(
-    generationId: string,
-    allowedAclFingerprints: ReadonlySet<string>
-  ): Promise<GenerationProjection | undefined> {
-    return this.projection.getAuthorizedGeneration(generationId, allowedAclFingerprints);
+  getAuthorizedGeneration(generationId: string, principalId: string): Promise<GenerationProjection | undefined> {
+    return this.projection.getAuthorizedGeneration(generationId, principalId);
   }
   latestPublished(tenantId: string, repository: string, ref: string): Promise<GenerationProjection | undefined> {
     return this.projection.latestPublished(tenantId, repository, ref);
@@ -136,101 +145,131 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `repository-access:${tenantId}:${principalId}`
       ]);
-      const now = new Date().toISOString();
-      const registered = await client.query<{ repository: string }>(
-        "select repository from jina_context.repositories where tenant_id=$1",
-        [tenantId]
-      );
-      for (const repository of desired) {
-        if (!registered.rows.some((row) => row.repository === repository)) {
-          await client.query(
-            `insert into jina_context.repositories
-              (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
-             values ($1,$2,'unknown',$2,'main','{}'::jsonb,$3,$3)
-             on conflict do nothing`,
-            [tenantId, repository, now]
-          );
-          registered.rows.push({ repository });
-        }
-      }
-      const repositoryNames = [...new Set(registered.rows.map((row) => row.repository))].sort();
-      for (const repository of repositoryNames) {
-        await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-          repositoryAccessLockKey(tenantId, repository)
-        ]);
-      }
-      const known = await client.query<{
-        repository: string;
-        permission: string | null;
-        acl_fingerprint: string | null;
-      }>(
-        `select repository.repository,current.permission,current.acl_fingerprint
-         from jina_context.repositories repository
-         left join jina_context.current_repository_acl current
-           on current.tenant_id=repository.tenant_id
-          and current.repository=repository.repository
-          and current.principal_id=$2
-         where repository.tenant_id=$1`,
+      await this.#setRepositoryAccess(client, tenantId, principalId, desired);
+    });
+  }
+
+  async mergeRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
+    const requested = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
+    await this.database.transactionAs("jina_context_admin", async (client) => {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `repository-access:${tenantId}:${principalId}`
+      ]);
+      const current = await client.query<{ repository: string }>(
+        `select repository
+         from jina_context.current_repository_acl
+         where tenant_id=$1 and principal_id=$2 and permission in ('read','write','admin')`,
         [tenantId, principalId]
       );
-      for (const row of known.rows) {
-        const permission = desired.has(row.repository) ? "read" : "denied";
-        const aclFingerprint = repositoryAclFingerprint(tenantId, row.repository);
-        if (row.permission === permission && row.acl_fingerprint === aclFingerprint) continue;
-        const version = await client.query<{ observed_at: Date; sequence: string }>(
-          `select
-             greatest(
-               clock_timestamp(),
-               coalesce(max(observed_at) + interval '1 microsecond',clock_timestamp())
-             ) observed_at,
-             (count(*) + 1)::text sequence
-           from jina_context.repository_acl_observations
-           where tenant_id=$1 and repository=$2 and principal_id=$3`,
-          [tenantId, row.repository, principalId]
-        );
-        const observedAt = version.rows[0]!.observed_at.toISOString();
-        const sequence = Number(version.rows[0]!.sequence);
-        const payload = { principalId, repository: row.repository, permission, sequence };
-        const digest = contextDigest(payload);
-        const observationId = contextStableId("observation", { tenantId, ...payload, observedAt, digest });
-        await client.query(
-          `insert into jina_context.observations
-            (id,tenant_id,repository,source,source_type,external_id,recorded_at,payload,content_digest)
-           values ($1,$2,$3,'access','human_input',$4,$5,$6::jsonb,$7)
-           on conflict (tenant_id,repository,id) do nothing`,
-          [
-            observationId,
-            tenantId,
-            row.repository,
-            `${principalId}:${sequence}:${digest}`,
-            observedAt,
-            JSON.stringify(payload),
-            digest
-          ]
-        );
-        const aclId = contextStableId("acl", { observationId, principalId, sequence });
-        await client.query(
-          `insert into jina_context.repository_acl_observations
-            (id,tenant_id,repository,principal_id,permission,acl_fingerprint,
-             source_observation_id,observed_at)
-           values ($1,$2,$3,$4,$5,$6,$7,$8)
-           on conflict (tenant_id,repository,id) do nothing`,
-          [aclId, tenantId, row.repository, principalId, permission, aclFingerprint, observationId, observedAt]
-        );
-        await enqueueContextEvent(client, {
-          id: contextStableId("event", { aclId }),
-          sequence: 1,
-          tenantId,
-          repository: row.repository,
-          aggregateType: "access",
-          aggregateId: aclId,
-          eventType: "access.replaced",
-          payload: { aclObservationId: aclId, principalId, sequence },
-          consumers: ["acl", "retention"],
-          occurredAt: observedAt
-        });
-      }
+      await this.#setRepositoryAccess(
+        client,
+        tenantId,
+        principalId,
+        new Set([...current.rows.map((row) => row.repository), ...requested])
+      );
     });
+  }
+
+  async #setRepositoryAccess(
+    client: PoolClient,
+    tenantId: string,
+    principalId: string,
+    desired: ReadonlySet<string>
+  ): Promise<void> {
+    const now = new Date().toISOString();
+    const registered = await client.query<{ repository: string }>(
+      "select repository from jina_context.repositories where tenant_id=$1",
+      [tenantId]
+    );
+    for (const repository of desired) {
+      if (!registered.rows.some((row) => row.repository === repository)) {
+        await client.query(
+          `insert into jina_context.repositories
+            (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
+           values ($1,$2,'unknown',$2,'main','{}'::jsonb,$3,$3)
+           on conflict do nothing`,
+          [tenantId, repository, now]
+        );
+        registered.rows.push({ repository });
+      }
+    }
+    const repositoryNames = [...new Set(registered.rows.map((row) => row.repository))].sort();
+    for (const repository of repositoryNames) {
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        repositoryAccessLockKey(tenantId, repository)
+      ]);
+    }
+    const known = await client.query<{
+      repository: string;
+      permission: string | null;
+      acl_fingerprint: string | null;
+    }>(
+      `select repository.repository,current.permission,current.acl_fingerprint
+       from jina_context.repositories repository
+       left join jina_context.current_repository_acl current
+         on current.tenant_id=repository.tenant_id
+        and current.repository=repository.repository
+        and current.principal_id=$2
+       where repository.tenant_id=$1`,
+      [tenantId, principalId]
+    );
+    for (const row of known.rows) {
+      const permission = desired.has(row.repository) ? "read" : "denied";
+      const aclFingerprint = repositoryAclFingerprint(tenantId, row.repository);
+      if (row.permission === permission && row.acl_fingerprint === aclFingerprint) continue;
+      const version = await client.query<{ observed_at: Date; sequence: string }>(
+        `select
+           greatest(
+             clock_timestamp(),
+             coalesce(max(observed_at) + interval '1 microsecond',clock_timestamp())
+           ) observed_at,
+           (count(*) + 1)::text sequence
+         from jina_context.repository_acl_observations
+         where tenant_id=$1 and repository=$2 and principal_id=$3`,
+        [tenantId, row.repository, principalId]
+      );
+      const observedAt = version.rows[0]!.observed_at.toISOString();
+      const sequence = Number(version.rows[0]!.sequence);
+      const payload = { principalId, repository: row.repository, permission, sequence };
+      const digest = contextDigest(payload);
+      const observationId = contextStableId("observation", { tenantId, ...payload, observedAt, digest });
+      await client.query(
+        `insert into jina_context.observations
+          (id,tenant_id,repository,source,source_type,external_id,recorded_at,payload,content_digest)
+         values ($1,$2,$3,'access','human_input',$4,$5,$6::jsonb,$7)
+         on conflict (tenant_id,repository,id) do nothing`,
+        [
+          observationId,
+          tenantId,
+          row.repository,
+          `${principalId}:${sequence}:${digest}`,
+          observedAt,
+          JSON.stringify(payload),
+          digest
+        ]
+      );
+      const aclId = contextStableId("acl", { observationId, principalId, sequence });
+      await client.query(
+        `insert into jina_context.repository_acl_observations
+          (id,tenant_id,repository,principal_id,permission,acl_fingerprint,
+           source_observation_id,observed_at)
+         values ($1,$2,$3,$4,$5,$6,$7,$8)
+         on conflict (tenant_id,repository,id) do nothing`,
+        [aclId, tenantId, row.repository, principalId, permission, aclFingerprint, observationId, observedAt]
+      );
+      await enqueueContextEvent(client, {
+        id: contextStableId("event", { aclId }),
+        sequence: 1,
+        tenantId,
+        repository: row.repository,
+        aggregateType: "access",
+        aggregateId: aclId,
+        eventType: "access.replaced",
+        payload: { aclObservationId: aclId, principalId, sequence },
+        consumers: ["acl", "retention"],
+        occurredAt: observedAt
+      });
+    }
   }
 
   async repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]> {
@@ -265,6 +304,31 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       await lockRepositoryAccess(client, tenantId, repository);
       return currentRepositoryAccessFingerprint(client, tenantId, repository);
     });
+  }
+
+  async latestAdmittedRefSequence(tenantId: string, repository: string, ref: string): Promise<number> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<{ ref_sequence: string }>(
+      "jina_context_coordinator",
+      `select greatest(
+         coalesce((
+           select max(ref_sequence)
+           from jina_context.pipeline_builds
+           where tenant_id=$1 and repository=$2 and ref_name=$3
+         ),0),
+         coalesce((
+           select max(ref_sequence)
+           from jina_context.evidence_checkpoints
+           where tenant_id=$1 and repository=$2 and ref_name=$3
+         ),0)
+       )::text ref_sequence`,
+      [tenantId, repository, ref]
+    );
+    const sequence = Number(result.rows[0]!.ref_sequence);
+    if (!Number.isSafeInteger(sequence) || sequence < 0) {
+      throw new Error(`Ref sequence exceeds the supported range for ${repository}@${ref}`);
+    }
+    return sequence;
   }
 
   async projectionInputFingerprint(tenantId: string, repository: string): Promise<string> {
@@ -326,9 +390,77 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async pendingProjectionCheckpoints(tenantId: string, limit: number): Promise<string[]> {
     await this.database.initialize();
-    const result = await this.database.queryAs<{ checkpoint_id: string }>(
-      "jina_context_admin",
-      `with pending_scope as (
+    return this.database.transactionAs("jina_context_admin", async (client) => {
+      await client.query(
+        `update jina_context.outbox delivery
+         set processed_at=clock_timestamp(),lease_id=null,lease_owner=null,lease_expires_at=null,
+             last_error='superseded by a newer admitted ref sequence'
+         where delivery.tenant_id=$1 and delivery.processed_at is null
+           and (
+             (
+               delivery.aggregate_type='evidence'
+               and exists (
+                 select 1
+                 from jina_context.evidence_checkpoints checkpoint
+                 where checkpoint.tenant_id=delivery.tenant_id
+                   and checkpoint.repository=delivery.repository
+                   and checkpoint.id=coalesce(delivery.payload->>'checkpointId',delivery.aggregate_id)
+                   and checkpoint.ref_sequence < greatest(
+                     coalesce((
+                       select max(build.ref_sequence)
+                       from jina_context.pipeline_builds build
+                       where build.tenant_id=checkpoint.tenant_id
+                         and build.repository=checkpoint.repository
+                         and build.ref_name=checkpoint.ref_name
+                     ),0),
+                     coalesce((
+                       select max(committed.ref_sequence)
+                       from jina_context.evidence_checkpoints committed
+                       where committed.tenant_id=checkpoint.tenant_id
+                         and committed.repository=checkpoint.repository
+                         and committed.ref_name=checkpoint.ref_name
+                     ),0)
+                   )
+               )
+             )
+             or (
+               delivery.aggregate_type='knowledge'
+               and exists (
+                 select 1
+                 from jina_context.knowledge_document_revisions revision
+                 where revision.tenant_id=delivery.tenant_id
+                   and revision.repository=delivery.repository
+                   and revision.id=delivery.aggregate_id
+                   and coalesce((
+                     select max(source_checkpoint.ref_sequence)
+                     from jina_context.evidence_checkpoints source_checkpoint
+                     where source_checkpoint.tenant_id=revision.tenant_id
+                       and source_checkpoint.repository=revision.repository
+                       and source_checkpoint.ref_name=revision.ref_name
+                       and source_checkpoint.commit_sha=revision.commit_sha
+                   ),0) < greatest(
+                     coalesce((
+                       select max(build.ref_sequence)
+                       from jina_context.pipeline_builds build
+                       where build.tenant_id=revision.tenant_id
+                         and build.repository=revision.repository
+                         and build.ref_name=revision.ref_name
+                     ),0),
+                     coalesce((
+                       select max(committed.ref_sequence)
+                       from jina_context.evidence_checkpoints committed
+                       where committed.tenant_id=revision.tenant_id
+                         and committed.repository=revision.repository
+                         and committed.ref_name=revision.ref_name
+                     ),0)
+                   )
+               )
+             )
+           )`,
+        [tenantId]
+      );
+      const result = await client.query<{ checkpoint_id: string }>(
+        `with pending_scope as (
          select distinct checkpoint.id as checkpoint_id,delivery.available_at
          from jina_context.outbox delivery
          join jina_context.evidence_checkpoints checkpoint
@@ -369,24 +501,32 @@ export class PostgresContextEngineStore implements ContextEngineStore {
              limit 1
            )
          union
-         select distinct on (checkpoint.repository,checkpoint.ref_name)
-           checkpoint.id as checkpoint_id,delivery.available_at
+         select distinct checkpoint.id as checkpoint_id,delivery.available_at
          from jina_context.outbox delivery
          join jina_context.evidence_checkpoints checkpoint
            on checkpoint.tenant_id=delivery.tenant_id
           and checkpoint.repository=delivery.repository
          where delivery.tenant_id=$1 and delivery.processed_at is null
            and delivery.aggregate_type in ('access','retention')
-         order by checkpoint.repository,checkpoint.ref_name,checkpoint.ref_sequence desc
+           and checkpoint.id=(
+             select latest.id
+             from jina_context.evidence_checkpoints latest
+             where latest.tenant_id=checkpoint.tenant_id
+               and latest.repository=checkpoint.repository
+               and latest.ref_name=checkpoint.ref_name
+             order by latest.ref_sequence desc,latest.id desc
+             limit 1
+           )
        )
        select checkpoint_id
        from pending_scope
        group by checkpoint_id
        order by min(available_at),checkpoint_id
        limit $2`,
-      [tenantId, Math.max(1, Math.min(limit, 100))]
-    );
-    return result.rows.map((row) => row.checkpoint_id);
+        [tenantId, Math.max(1, Math.min(limit, 100))]
+      );
+      return result.rows.map((row) => row.checkpoint_id);
+    });
   }
 
   recordQueryRun(run: QueryRunTelemetry): Promise<void> {
@@ -497,8 +637,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       byPrincipal.set(row.principal_id, values);
     }
     for (const [principalId, repositories] of byPrincipal) {
-      const current = await this.repositoriesForPrincipal(toTenantId, principalId);
-      await this.replaceRepositoryAccess(toTenantId, principalId, [...new Set([...current, ...repositories])]);
+      await this.mergeRepositoryAccess(toTenantId, principalId, repositories);
     }
   }
 

@@ -382,8 +382,8 @@ async function assertLatestCheckpoint(
   ref: string,
   checkpointId: string
 ): Promise<void> {
-  const latest = await client.query<{ id: string }>(
-    `select id
+  const latest = await client.query<{ id: string; ref_sequence: string }>(
+    `select id,ref_sequence::text
      from jina_context.evidence_checkpoints
      where tenant_id=$1 and repository=$2 and ref_name=$3
      order by ref_sequence desc,id desc
@@ -391,6 +391,21 @@ async function assertLatestCheckpoint(
     [tenantId, repository, ref]
   );
   if (latest.rows[0]?.id !== checkpointId) {
+    throw new Error(`Checkpoint ${checkpointId} is superseded for ${repository}@${ref}`);
+  }
+  const admitted = await client.query<{ ref_sequence: string }>(
+    `select coalesce(max(ref_sequence),0)::text ref_sequence
+     from jina_context.pipeline_builds
+     where tenant_id=$1 and repository=$2 and ref_name=$3`,
+    [tenantId, repository, ref]
+  );
+  const checkpointSequence = Number(latest.rows[0].ref_sequence);
+  const admittedSequence = Number(admitted.rows[0]!.ref_sequence);
+  if (
+    !Number.isSafeInteger(checkpointSequence) ||
+    !Number.isSafeInteger(admittedSequence) ||
+    checkpointSequence < admittedSequence
+  ) {
     throw new Error(`Checkpoint ${checkpointId} is superseded for ${repository}@${ref}`);
   }
 }

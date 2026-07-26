@@ -13,6 +13,7 @@ import {
   PageIndexHierarchyAdapter,
   QueryContextService,
   StaticScopeAuthorizer,
+  StoreScopeAuthorizer,
   assembleEvidencePack,
   contextQueueTopics,
   contextTaskTypeDefinitions,
@@ -22,6 +23,7 @@ import {
   detectSourceConflicts,
   fingerprint,
   fuseRetrievalCandidates,
+  knowledgeGenerationJsonSchema,
   parseGeneratedKnowledgeDocuments,
   planContextQuery,
   repositoryAclFingerprint,
@@ -40,9 +42,15 @@ const repository = "acme/repo";
 const commitSha = "a".repeat(40);
 const blobSha = "b".repeat(40);
 const createdAt = "2026-07-26T12:00:00.000Z";
-const source = ["# Billing", "", "export function handlePayment(total: number) {", "  return total > 0;", "}"].join(
-  "\n"
-);
+const source = [
+  "# Billing",
+  "",
+  "export function handlePayment(total: number) {",
+  "  return total > 0;",
+  "}",
+  "",
+  "export const distantOnlySymbol = true;"
+].join("\n");
 
 async function ingestFixture(
   store: MemoryContextEngineStore,
@@ -86,6 +94,51 @@ async function ingestFixture(
   });
 }
 
+async function ingestSameCommitProviderState(
+  store: MemoryContextEngineStore,
+  refSequence: number,
+  issueState: string,
+  observationFrontier: string,
+  observedAt: string
+) {
+  return new IngestEvidenceService(store).ingest({
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence,
+    commitSha,
+    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
+    observationFrontier,
+    sourceComplete: true,
+    createdAt: observedAt,
+    files: [
+      {
+        path: "README.md",
+        blobSha: "c".repeat(40),
+        body: "# Repository\n\nThe billing module accepts payments.",
+        language: "markdown"
+      },
+      {
+        path: "src/billing.ts",
+        blobSha,
+        body: source,
+        language: "typescript"
+      }
+    ],
+    observations: [
+      {
+        sourceType: "issue",
+        sourceId: "issue-42",
+        title: "Issue #42",
+        payload: { number: 42, state: issueState, title: "Retry payments" },
+        pathOrUrl: "https://example.test/acme/repo/issues/42",
+        observedAt,
+        metadata: { claimSubject: "issue:42:state", claimValue: issueState }
+      }
+    ]
+  });
+}
+
 function validOutput(): KnowledgeGenerationOutput {
   const claim = "export function handlePayment(total: number) { return total > 0; }";
   return {
@@ -93,10 +146,10 @@ function validOutput(): KnowledgeGenerationOutput {
       {
         logicalId: "component:acme/repo:billing",
         kind: "component",
-        title: "Billing component",
-        summary: "Payment handling",
-        bodyMarkdown: `${claim} The implementation is source-cited.`,
-        structuredSummary: { entrypoint: "handlePayment" },
+        title: claim,
+        summary: claim,
+        bodyMarkdown: claim,
+        structuredSummary: { facts: [claim], claimSubject: "handlePayment", claimValue: claim },
         scope: {
           paths: ["src/billing.ts"],
           symbols: ["handlePayment"],
@@ -118,10 +171,10 @@ function validOutput(): KnowledgeGenerationOutput {
       {
         logicalId: "issue:github:acme/repo#42",
         kind: "issue_explanation",
-        title: "Issue 42 status",
-        summary: "Current issue state",
+        title: "open for retry",
+        summary: "open for retry",
         bodyMarkdown: "open for retry",
-        structuredSummary: { state: "open for retry" },
+        structuredSummary: { facts: ["open for retry"], claimSubject: "open for retry", claimValue: "open for retry" },
         scope: {
           paths: [],
           symbols: [],
@@ -251,8 +304,51 @@ test("provider JSON pointers resolve against immutable raw observations", async 
 
 test("generated document parsing rejects relation-shaped and malformed output", () => {
   assert.deepEqual(parseGeneratedKnowledgeDocuments(validOutput()), validOutput());
+  const mixedCase = structuredClone(validOutput());
+  mixedCase.documents[0]!.logicalId = "Component:Acme/Repo:Billing";
+  assert.equal(parseGeneratedKnowledgeDocuments(mixedCase).documents[0]?.logicalId, "component:acme/repo:billing");
   assert.throws(() => parseGeneratedKnowledgeDocuments({ documents: [], nodes: [] }), /nodes is prohibited/);
   assert.throws(() => parseGeneratedKnowledgeDocuments({ documents: [{ kind: "component" }] }), /citations|logicalId/);
+  const documentSchema = knowledgeGenerationJsonSchema.properties.documents.items;
+  assert.deepEqual(documentSchema.required, [
+    "logicalId",
+    "kind",
+    "title",
+    "summary",
+    "bodyMarkdown",
+    "structuredSummary",
+    "scope",
+    "confidence",
+    "citations"
+  ]);
+  assert.ok("properties" in documentSchema);
+  assert.ok("properties" in documentSchema.properties.structuredSummary);
+  assert.ok("properties" in documentSchema.properties.scope);
+  assert.ok("properties" in documentSchema.properties.citations.items);
+});
+
+test("knowledge revision identity is canonical across logical-id casing", () => {
+  const base = {
+    tenantId,
+    repository,
+    kind: "component" as const,
+    title: "Billing",
+    bodyMarkdown: "Billing",
+    summary: "Billing",
+    structuredSummary: {},
+    scope: { ref: "main", commitSha, paths: [], symbols: [], pullRequests: [], issues: [] },
+    evidenceFingerprint: fingerprint("billing"),
+    generatorName: "test",
+    generatorVersion: "1",
+    model: "test",
+    promptVersion: "1",
+    confidence: 1,
+    createdAt
+  };
+  const lowercase = createKnowledgeRevision({ ...base, logicalId: "component:acme/repo:billing" });
+  const mixedCase = createKnowledgeRevision({ ...base, logicalId: "Component:Acme/Repo:Billing" });
+  assert.equal(mixedCase.logicalId, lowercase.logicalId);
+  assert.equal(mixedCase.id, lowercase.id);
 });
 
 test("derivation repairs once, validates source ranges, and caches immutable input", async () => {
@@ -313,6 +409,64 @@ test("unsupported material paragraphs are rejected", async () => {
       }),
     /unsupported paragraph/
   );
+
+  const mixed = validOutput();
+  mixed.documents[0]!.bodyMarkdown += " It also transfers all secrets to an unknown third party.";
+  await assert.rejects(
+    () =>
+      new KnowledgeOutputValidator(store).validate({
+        output: mixed,
+        checkpointId: checkpoint.id,
+        generatorName: "test",
+        generatorVersion: "1",
+        model: "test",
+        promptVersion: "1",
+        createdAt
+      }),
+    /unsupported paragraph/
+  );
+});
+
+test("logical identities are fully bound to checkpoint and cited evidence identities", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const validate = (output: KnowledgeGenerationOutput) =>
+    new KnowledgeOutputValidator(store).validate({
+      output,
+      checkpointId: checkpoint.id,
+      generatorName: "test",
+      generatorVersion: "1",
+      model: "test",
+      promptVersion: "1",
+      createdAt
+    });
+
+  const hallucinatedComponent = structuredClone(validOutput());
+  hallucinatedComponent.documents[0]!.logicalId = "component:acme/repo:hallucinated-prefix:billing";
+  await assert.rejects(() => validate(hallucinatedComponent), /identity suffix is not fully supported/);
+
+  const wrongChange = structuredClone(validOutput());
+  wrongChange.documents[0]!.kind = "change_summary";
+  wrongChange.documents[0]!.logicalId = `change:acme/repo:${"f".repeat(40)}`;
+  await assert.rejects(() => validate(wrongChange), /commit identity does not match/);
+
+  const wrongIssue = structuredClone(validOutput());
+  wrongIssue.documents[1]!.logicalId = "issue:github:acme/repo#99";
+  wrongIssue.documents[1]!.scope.issues = [];
+  await assert.rejects(() => validate(wrongIssue), /issue identity is not supported/);
+
+  const hallucinatedIncident = structuredClone(validOutput());
+  hallucinatedIncident.documents[0]!.kind = "incident";
+  hallucinatedIncident.documents[0]!.logicalId = "incident:hallucinated-scope:billing";
+  await assert.rejects(() => validate(hallucinatedIncident), /identity suffix is not fully supported/);
+
+  const uncitedDistantSymbol = structuredClone(validOutput());
+  uncitedDistantSymbol.documents[0]!.scope.symbols = ["distantOnlySymbol"];
+  await assert.rejects(() => validate(uncitedDistantSymbol), /scope contains unsupported text/);
+
+  const unrelatedManifestPath = structuredClone(validOutput());
+  unrelatedManifestPath.documents[0]!.scope.paths = ["README.md"];
+  await assert.rejects(() => validate(unrelatedManifestPath), /path not supported by cited evidence/);
 });
 
 test("citation claims must be verbatim in the exact cited evidence selection", async () => {
@@ -397,7 +551,7 @@ test("high-risk knowledge is excluded until an append-only review event exists",
     revisions: [revision],
     citations: [citation]
   });
-  assert.deepEqual(await store.listCurrentEligibleRevisions(tenantId, repository), []);
+  assert.deepEqual(await store.listCurrentEligibleRevisions(tenantId, repository, checkpoint.id), []);
   await store.appendRevisionEvent({
     id: "review-1",
     revisionId: revision.id,
@@ -408,7 +562,7 @@ test("high-risk knowledge is excluded until an append-only review event exists",
     createdAt
   });
   assert.deepEqual(
-    (await store.listCurrentEligibleRevisions(tenantId, repository)).map((value) => value.id),
+    (await store.listCurrentEligibleRevisions(tenantId, repository, checkpoint.id)).map((value) => value.id),
     [revision.id]
   );
   await assert.rejects(
@@ -449,6 +603,193 @@ test("baseline and enriched indexes publish atomically and rebuild idempotently"
   assert.ok(projection?.hierarchyNodes.length);
 });
 
+test("eligible knowledge is selected within ref and commit before logical-id recency", async () => {
+  const store = new MemoryContextEngineStore();
+  const mainCheckpoint = await ingestFixture(store);
+  const mainRecord = (await store.listEvidence(mainCheckpoint.id)).find(
+    (record) => record.anchor.sourceId === blobSha
+  )!;
+  const devCommitSha = "d".repeat(40);
+  const devBlobSha = "e".repeat(40);
+  const devCheckpoint = await new IngestEvidenceService(store).ingest({
+    tenantId,
+    repository,
+    ref: "dev",
+    refSequence: 1,
+    commitSha: devCommitSha,
+    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
+    observationFrontier: "github:dev",
+    sourceComplete: true,
+    createdAt: "2026-07-26T12:03:00.000Z",
+    files: [
+      {
+        path: "src/billing.ts",
+        blobSha: devBlobSha,
+        body: "export function handlePayment() { return 'dev'; }",
+        language: "typescript"
+      }
+    ],
+    observations: []
+  });
+  const devRecord = (await store.listEvidence(devCheckpoint.id))[0]!;
+  const mainRevision = createKnowledgeRevision({
+    logicalId: "component:acme/repo:billing",
+    tenantId,
+    repository,
+    kind: "component",
+    title: "main billing",
+    bodyMarkdown: "main billing",
+    summary: "main billing",
+    structuredSummary: {},
+    scope: { ref: "main", commitSha, paths: ["src/billing.ts"], symbols: [], pullRequests: [], issues: [] },
+    evidenceFingerprint: fingerprint(mainRecord.anchor),
+    generatorName: "test",
+    generatorVersion: "1",
+    model: "test",
+    promptVersion: "1",
+    confidence: 1,
+    createdAt: "2026-07-26T12:01:00.000Z"
+  });
+  const { id: _mainRevisionId, bodyDigest: _mainBodyDigest, ...revisionBase } = mainRevision;
+  const devRevision = createKnowledgeRevision({
+    ...revisionBase,
+    title: "dev billing",
+    bodyMarkdown: "dev billing",
+    summary: "dev billing",
+    scope: {
+      ref: "dev",
+      commitSha: devCommitSha,
+      paths: ["src/billing.ts"],
+      symbols: [],
+      pullRequests: [],
+      issues: []
+    },
+    evidenceFingerprint: fingerprint(devRecord.anchor),
+    createdAt: "2026-07-26T12:04:00.000Z"
+  });
+  for (const [runId, checkpointId, revision, record] of [
+    ["run-main-scope", mainCheckpoint.id, mainRevision, mainRecord],
+    ["run-dev-scope", devCheckpoint.id, devRevision, devRecord]
+  ] as const) {
+    await store.commitKnowledge({
+      run: {
+        id: runId,
+        tenantId,
+        repository,
+        checkpointId,
+        cacheKey: runId,
+        focusFingerprint: runId,
+        generatorName: "test",
+        generatorVersion: "1",
+        model: "test",
+        promptVersion: "1",
+        schemaVersion: "1",
+        rawOutputs: [],
+        status: "succeeded",
+        diagnostics: [],
+        revisionIds: [revision.id],
+        createdAt: revision.createdAt
+      },
+      revisions: [revision],
+      citations: [createKnowledgeCitation(revision.id, 0, revision.bodyMarkdown, record.anchor)]
+    });
+  }
+  assert.deepEqual(
+    (await store.listCurrentEligibleRevisions(tenantId, repository, mainCheckpoint.id)).map((item) => item.id),
+    [mainRevision.id]
+  );
+  assert.deepEqual(
+    (await store.listCurrentEligibleRevisions(tenantId, repository, devCheckpoint.id)).map((item) => item.id),
+    [devRevision.id]
+  );
+  assert.equal(
+    (await new IndexContextService(store).index(mainCheckpoint.id, "2026-07-26T12:05:00.000Z")).capabilities
+      .derivedKnowledge,
+    "available"
+  );
+  assert.equal(
+    (await new IndexContextService(store).index(devCheckpoint.id, "2026-07-26T12:05:00.000Z")).capabilities
+      .derivedKnowledge,
+    "available"
+  );
+});
+
+test("knowledge reuse requires every citation digest to exist in the current checkpoint", async () => {
+  const store = new MemoryContextEngineStore();
+  const first = await ingestSameCommitProviderState(store, 1, "open for retry", "github:100", createdAt);
+  const firstGenerator = new SequenceGenerator([validOutput()]);
+  const firstRun = await new DeriveKnowledgeService(
+    new EvidenceFocusSelector(store),
+    firstGenerator,
+    store,
+    new KnowledgeOutputValidator(store)
+  ).derive(first.id, "2026-07-26T12:01:00.000Z");
+  assert.equal(firstRun.status, "succeeded");
+  assert.equal(firstGenerator.calls, 1);
+
+  const changed = await ingestSameCommitProviderState(
+    store,
+    2,
+    "closed after retry",
+    "github:101",
+    "2026-07-26T12:02:00.000Z"
+  );
+  const beforeRederive = await new IndexContextService(store).index(changed.id, "2026-07-26T12:03:00.000Z");
+  const beforeProjection = await store.getGeneration(beforeRederive.id);
+  assert.ok(beforeProjection?.currentKnowledge.some((selection) => selection.logicalId.includes("component:")));
+  assert.ok(!beforeProjection?.currentKnowledge.some((selection) => selection.logicalId.includes("issue:")));
+
+  const changedOutput = structuredClone(validOutput());
+  const issueDocument = changedOutput.documents[1]!;
+  issueDocument.title = "closed after retry";
+  issueDocument.summary = "closed after retry";
+  issueDocument.bodyMarkdown = "closed after retry";
+  issueDocument.structuredSummary = {
+    facts: ["closed after retry"],
+    claimSubject: "closed after retry",
+    claimValue: "closed after retry"
+  };
+  issueDocument.citations[0]!.claim = "closed after retry";
+  changedOutput.documents = [issueDocument];
+  const changedGenerator = new SequenceGenerator([changedOutput]);
+  const changedRun = await new DeriveKnowledgeService(
+    new EvidenceFocusSelector(store),
+    changedGenerator,
+    store,
+    new KnowledgeOutputValidator(store)
+  ).derive(changed.id, "2026-07-26T12:04:00.000Z");
+  assert.equal(changedRun.status, "succeeded", changedRun.diagnostics.join("; "));
+  const enriched = await new IndexContextService(store).index(changed.id, "2026-07-26T12:05:00.000Z");
+  assert.ok(
+    (await store.getGeneration(enriched.id))?.currentKnowledge.some(
+      (selection) => selection.logicalId === "issue:github:acme/repo#42"
+    )
+  );
+
+  const identical = await ingestSameCommitProviderState(
+    store,
+    3,
+    "closed after retry",
+    "github:102",
+    "2026-07-26T12:02:00.000Z"
+  );
+  assert.equal(identical.evidenceFingerprint, changed.evidenceFingerprint);
+  const cacheOnlyGenerator = new SequenceGenerator([]);
+  const cached = await new DeriveKnowledgeService(
+    new EvidenceFocusSelector(store),
+    cacheOnlyGenerator,
+    store,
+    new KnowledgeOutputValidator(store)
+  ).derive(identical.id, "2026-07-26T12:06:00.000Z");
+  assert.equal(cached.id, changedRun.id);
+  assert.equal(cacheOnlyGenerator.calls, 0);
+  assert.equal(
+    (await new IndexContextService(store).index(identical.id, "2026-07-26T12:07:00.000Z")).capabilities
+      .derivedKnowledge,
+    "available"
+  );
+});
+
 test("query routes exact and structural work and return original evidence anchors", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
@@ -475,7 +816,7 @@ test("query routes exact and structural work and return original evidence anchor
     repository,
     ref: "main",
     taskKind: "overview",
-    question: "Give an overview of the billing component"
+    question: "Give an overview of handlePayment"
   });
   const knowledgeCitation = overview.citations.find((citation) => citation.sourceKind === "knowledge");
   assert.ok(knowledgeCitation);
@@ -486,8 +827,8 @@ test("query routes exact and structural work and return original evidence anchor
     principalId: "alice",
     repository,
     ref: "main",
-    taskKind: "status",
-    question: "What is the current state of issue 42?",
+    taskKind: "intent",
+    question: "Why is issue 42 open for retry?",
     targets: { issues: ["42"] }
   });
   const pointerCitation = issueStatus.citations.find((citation) =>
@@ -496,6 +837,71 @@ test("query routes exact and structural work and return original evidence anchor
   assert.ok(pointerCitation);
   assert.equal(pointerCitation.excerpt, "Source: https://example.test/acme/repo/issues/42\nopen for retry");
   assert.doesNotMatch(pointerCitation.excerpt, /Retry payments|number/);
+});
+
+test("query defaults to main even when another ref was published more recently", async () => {
+  const store = new MemoryContextEngineStore();
+  const mainCheckpoint = await ingestFixture(store);
+  await new IndexContextService(store).index(mainCheckpoint.id, "2026-07-26T12:01:00.000Z");
+  const devCommitSha = "d".repeat(40);
+  const devCheckpoint = await new IngestEvidenceService(store).ingest({
+    tenantId,
+    repository,
+    ref: "dev",
+    refSequence: 1,
+    commitSha: devCommitSha,
+    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
+    observationFrontier: "github:dev-query",
+    sourceComplete: true,
+    createdAt: "2026-07-26T12:02:00.000Z",
+    files: [
+      {
+        path: "README.md",
+        blobSha: "d".repeat(40),
+        body: "Development branch",
+        language: "markdown"
+      }
+    ],
+    observations: []
+  });
+  await new IndexContextService(store).index(devCheckpoint.id, "2026-07-26T12:03:00.000Z");
+  await store.replaceRepositoryAccess(tenantId, "alice", [repository]);
+  const response = await new QueryContextService(store).query({
+    tenantId,
+    principalId: "alice",
+    repository,
+    question: "repository"
+  });
+  assert.equal(response.generation.ref, "main");
+  assert.equal(response.generation.commitSha, commitSha);
+});
+
+test("query revalidates repository access after evidence assembly and before returning", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  await new IndexContextService(store).index(checkpoint.id, createdAt);
+  await store.replaceRepositoryAccess(tenantId, "alice", [repository]);
+  class RevokingAuthorizer extends StoreScopeAuthorizer {
+    calls = 0;
+
+    override async authorize(input: Parameters<StoreScopeAuthorizer["authorize"]>[0]) {
+      this.calls += 1;
+      if (this.calls === 2) {
+        await store.replaceRepositoryAccess(tenantId, "alice", []);
+      }
+      return super.authorize(input);
+    }
+  }
+  await assert.rejects(
+    () =>
+      new QueryContextService(store, new RevokingAuthorizer(store)).query({
+        tenantId,
+        principalId: "alice",
+        repository,
+        question: "repository"
+      }),
+    /access changed|does not have repository access/i
+  );
 });
 
 test("explicit file targets exclude provider records that merely mention the path", async () => {
@@ -907,14 +1313,24 @@ test("workflow names are clean and baseline indexing remains independent of deri
     }),
     true
   );
-  const index = await coordinator.claim({
-    tenantId,
-    workerId: "worker",
-    topics: [contextQueueTopics.indexContext],
-    now: "2026-07-26T12:00:03.000Z",
-    leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-  });
+  const [index, prematureDerive] = await Promise.all([
+    coordinator.claim({
+      tenantId,
+      workerId: "index-worker",
+      topics: [contextQueueTopics.indexContext],
+      now: "2026-07-26T12:00:03.000Z",
+      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
+    }),
+    coordinator.claim({
+      tenantId,
+      workerId: "derive-worker",
+      topics: [contextQueueTopics.deriveKnowledge],
+      now: "2026-07-26T12:00:03.000Z",
+      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
+    })
+  ]);
   assert.ok(index);
+  assert.equal(prematureDerive, undefined);
   await coordinator.complete({
     tenantId,
     stageId: index.stage.id,
@@ -963,20 +1379,8 @@ test("per-ref build sequence prevents delayed older pushes from becoming current
   assert.equal(older.refSequence, 1);
   assert.equal(newer.refSequence, 2);
 
-  const store = new MemoryContextEngineStore();
-  const newerCheckpoint = await new IngestEvidenceService(store).ingest({
-    tenantId,
-    repository,
-    ref: "main",
-    refSequence: newer.refSequence,
-    commitSha: "2".repeat(40),
-    aclFingerprint: "acl",
-    observationFrontier: "newer",
-    sourceComplete: true,
-    createdAt: "2026-07-26T12:00:02.000Z",
-    files: []
-  });
-  const newerFrontier = await store.projectionInputFingerprint(tenantId, repository);
+  const store = new MemoryContextEngineStore(coordinator);
+  const initialFrontier = await store.projectionInputFingerprint(tenantId, repository);
   const delayedOlderCheckpoint = await new IngestEvidenceService(store).ingest({
     tenantId,
     repository,
@@ -986,17 +1390,57 @@ test("per-ref build sequence prevents delayed older pushes from becoming current
     aclFingerprint: "acl",
     observationFrontier: "older-delayed",
     sourceComplete: true,
-    createdAt: "2026-07-26T12:00:03.000Z",
+    createdAt: "2026-07-26T12:00:02.000Z",
     files: []
   });
-  assert.equal(await store.projectionInputFingerprint(tenantId, repository), newerFrontier);
-  assert.equal((await store.latestCheckpoint(tenantId, repository, "main"))?.id, newerCheckpoint.id);
+  assert.equal(await store.projectionInputFingerprint(tenantId, repository), initialFrontier);
+  assert.equal(await store.latestCheckpoint(tenantId, repository, "main"), undefined);
   await assert.rejects(
-    new IndexContextService(store).index(delayedOlderCheckpoint.id, "2026-07-26T12:00:04.000Z"),
+    new IndexContextService(store).index(delayedOlderCheckpoint.id, "2026-07-26T12:00:03.000Z"),
     /superseded/
   );
+  await assert.rejects(
+    store.commitKnowledge({
+      run: {
+        id: "stale-derive-run",
+        tenantId,
+        repository,
+        checkpointId: delayedOlderCheckpoint.id,
+        cacheKey: "stale-derive-cache",
+        focusFingerprint: "stale",
+        generatorName: "test",
+        generatorVersion: "1",
+        model: "test",
+        promptVersion: "1",
+        schemaVersion: "1",
+        rawOutputs: [],
+        status: "succeeded",
+        diagnostics: [],
+        revisionIds: [],
+        createdAt: "2026-07-26T12:00:03.000Z"
+      },
+      revisions: [],
+      citations: []
+    }),
+    /superseded/
+  );
+  assert.equal(await store.projectionInputFingerprint(tenantId, repository), initialFrontier);
+
+  const newerCheckpoint = await new IngestEvidenceService(store).ingest({
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: newer.refSequence,
+    commitSha: "2".repeat(40),
+    aclFingerprint: "acl",
+    observationFrontier: "newer",
+    sourceComplete: true,
+    createdAt: "2026-07-26T12:00:04.000Z",
+    files: []
+  });
+  assert.equal((await store.latestCheckpoint(tenantId, repository, "main"))?.id, newerCheckpoint.id);
   assert.equal(
-    (await new IndexContextService(store).index(newerCheckpoint.id, "2026-07-26T12:00:05.000Z")).commitSha,
+    (await new IndexContextService(store).index(newerCheckpoint.id, "2026-07-26T12:00:06.000Z")).commitSha,
     "2".repeat(40)
   );
 });

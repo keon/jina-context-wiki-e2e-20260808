@@ -119,10 +119,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     return this.hydrate(generation);
   }
 
-  async getAuthorizedGeneration(
-    generationId: string,
-    allowedAclFingerprints: ReadonlySet<string>
-  ): Promise<GenerationProjection | undefined> {
+  async getAuthorizedGeneration(generationId: string, principalId: string): Promise<GenerationProjection | undefined> {
     await this.database.initialize();
     const generation = (
       await this.database.queryAs<GenerationRow>(
@@ -132,7 +129,13 @@ export class PostgresProjectionRepository implements ProjectionStore {
       )
     ).rows[0];
     if (!generation || generation.status !== "published") return undefined;
-    return this.hydrate(generation, [...allowedAclFingerprints]);
+    const before = await this.currentPrincipalAclFingerprints(generation, principalId);
+    if (before.length === 0) return undefined;
+    const projection = await this.hydrate(generation, before);
+    const after = await this.currentPrincipalAclFingerprints(generation, principalId);
+    return before.length === after.length && before.every((value, index) => value === after[index])
+      ? projection
+      : undefined;
   }
 
   async latestPublished(tenantId: string, repository: string, ref: string): Promise<GenerationProjection | undefined> {
@@ -273,6 +276,22 @@ export class PostgresProjectionRepository implements ProjectionStore {
     return Object.fromEntries(
       result.rows.map((row) => [row.consumer, row.status])
     ) as IndexGeneration["projectorStatuses"];
+  }
+
+  private async currentPrincipalAclFingerprints(
+    generation: Pick<GenerationRow, "tenant_id" | "repository">,
+    principalId: string
+  ): Promise<string[]> {
+    const result = await this.database.queryAs<{ acl_fingerprint: string }>(
+      "jina_context_admin",
+      `select distinct acl_fingerprint
+       from jina_context.current_repository_acl
+       where tenant_id=$1 and repository=$2 and principal_id=$3
+         and permission in ('read','write','admin')
+       order by acl_fingerprint`,
+      [generation.tenant_id, generation.repository, principalId]
+    );
+    return result.rows.map((row) => row.acl_fingerprint);
   }
 }
 

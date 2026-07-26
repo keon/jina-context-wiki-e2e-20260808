@@ -91,6 +91,8 @@ case "${tenancy_mode}" in
     exit 2
     ;;
 esac
+context_query_principal_id="user:context-query@jina.internal"
+api_env_vars+="~JINA_CONTEXT_TENANT_ID=${acceptance_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=${context_query_principal_id}"
 
 retry_health() {
   local url="$1"
@@ -354,7 +356,7 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${runtime_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \

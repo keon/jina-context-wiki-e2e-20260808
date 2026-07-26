@@ -29,8 +29,9 @@ Optional capability decisions remain deliberately closed:
 required-source-kind failures on the checked-in v1 fixture. Its PostgreSQL mode also
 requires access revocation to take effect immediately. The hard exactness, citation, ACL,
 conflict, and source-kind gates pass, and recall exceeds the initial `0.90` target.
-Production completion additionally requires the snapshot, exact-commit reingestion, ACL
-audit, drained required outboxes, and real HTTP/MCP acceptance described below.
+Production completion additionally requires the snapshot, authoritative-head reingestion
+recorded at exact commits, ACL audit, drained required outboxes, and real HTTP/MCP
+acceptance described below.
 
 The final implementation hardening also completed:
 
@@ -44,7 +45,12 @@ The final implementation hardening also completed:
 - separate migration-owner/runtime credentials, `NOINHERIT` runtime membership, and
   explicit `SET LOCAL ROLE` capability activation;
 - monotonic build-time `refSequence` allocation so delayed lower-sequence work cannot
-  become current;
+  advance current evidence, commit knowledge, become current, or publish;
+- explicit remote-head fetch and event-SHA equality fencing so a delayed push cannot
+  index a historical commit as the current branch;
+- exact ref-and-commit scoping for current knowledge selection;
+- a query-only context bearer fixed to one configured tenant/principal, distinct
+  administrator/query acceptance identities, and final ACL-fingerprint reauthorization;
 - immutable projection-input frontiers sampled before/after materialization and locked,
   revalidated publication that races safely with erasure and knowledge state changes;
 - a dedicated `jina-migration` Google service account with owner-secret access isolated
@@ -60,16 +66,17 @@ Replace the graph-first ContextGraph runtime with a hybrid repository context en
 ingest-evidence
   -> immutable provider and repository evidence
   -> deterministic code structure
-
-derive-knowledge
-  -> immutable, versioned, cited knowledge-document revisions
-
-index-context
+  -> index-context required baseline
   -> exact and lexical indexes
-  -> current knowledge catalog
   -> optional dense index
   -> PageIndex-style hierarchy
   -> deterministic structural relations
+  -> query-context becomes available
+
+only after the baseline succeeds:
+  -> derive-knowledge
+  -> immutable, versioned, cited knowledge-document revisions
+  -> index-context enriched successor
 
 query-context
   -> route by information need
@@ -149,14 +156,13 @@ The following are non-negotiable implementation constraints:
 
 ## Workflow semantics
 
-The three task names are durable product stages, but the runtime is a resilient DAG rather
-than a fragile serial pipeline:
+The three task names are durable product stages and their runtime queue order is strict:
 
 ```mermaid
 flowchart LR
   A["build-context"] --> B["ingest-evidence"]
-  B --> C["derive-knowledge"]
   B --> D["index-context: baseline generation"]
+  D --> C["derive-knowledge"]
   C --> E["knowledge revision events"]
   E --> F["index consumers: enriched generation"]
   D --> G["query-context"]
@@ -164,10 +170,14 @@ flowchart LR
 ```
 
 - `ingest-evidence` is required.
-- `index-context` is required and can publish a deterministic, raw-evidence generation
-  after ingestion without waiting for a model.
-- `derive-knowledge` is a soft dependency of the aggregate build. Its completion emits
-  events that incrementally publish an enriched generation.
+- `index-context` is required and is the only stage queued after successful ingestion. It
+  publishes a deterministic raw-evidence baseline without waiting for a model.
+- `derive-knowledge` remains blocked until baseline `index-context` succeeds. It is then
+  the only next queued stage; successful commit emits knowledge events and publishes the
+  enriched successor generation.
+- The coordinator never queues baseline indexing and derivation as siblings. This
+  prevents separate workers from changing the projection-input frontier while the
+  baseline is materializing.
 - A failed derivation is visible on the build, but it does not invalidate the baseline
   index or block exact and structural queries.
 - A query response reports the selected generation and whether derived knowledge, dense
@@ -176,10 +186,11 @@ flowchart LR
   admission-time sequence, not worker finish time, chooses the current checkpoint; a
   lower-sequence push that completes late is retained but cannot publish.
 
-The aggregate task is successful when required ingestion and baseline indexing complete.
-It is `degraded` when optional knowledge derivation or an optional projector fails, and
-`failed` when canonical ingestion, ACL projection, manifest projection, or required exact
-indexing fails.
+The baseline becomes queryable when required ingestion and baseline indexing complete.
+The aggregate terminates after optional derivation succeeds or fails; it is `degraded`
+when optional knowledge derivation or an optional projector fails, and `failed` when
+canonical ingestion, ACL projection, manifest projection, or required exact indexing
+fails.
 
 ## Target domain model
 
@@ -290,7 +301,8 @@ metadata. They do not create canonical entities.
 Define these rebuildable records:
 
 - `RefManifestEntry`: the exact path-to-blob selection for a ref and commit;
-- `CurrentKnowledgeRevision`: the selected valid/review-eligible revision per logical ID;
+- `CurrentKnowledgeRevision`: the selected valid/review-eligible revision per logical ID
+  whose every citation is present in the exact generation checkpoint;
 - `ContextDocument`: a normalized searchable document for code, provider evidence, or
   derived knowledge;
 - `ContextFragment`: an anchor-preserving retrieval unit;
@@ -414,6 +426,9 @@ Required constraints:
 - line ranges require a path, positive values, and `end_line >= start_line`;
 - a revision cannot cite another revision as its terminal evidence;
 - all referenced evidence must share the revision tenant and allowed repository scope;
+- a revision enters a generation only when every citation's source identity and digest is
+  selected by that exact evidence checkpoint, even when another checkpoint has the same
+  ref and commit;
 - no `UPDATE` or `DELETE` grant on immutable evidence, revision, or citation tables for
   runtime roles;
 - append-only event sequence uniqueness per aggregate;
@@ -498,7 +513,7 @@ roles, marks the separate runtime login `NOINHERIT`, and grants membership. Memb
 not ambient access: every runtime transaction explicitly uses `SET LOCAL ROLE` for the
 required capability.
 
-## Stage 1: `ingest-evidence`
+## Evidence plane: `ingest-evidence` (runtime step 1)
 
 ### Input
 
@@ -507,7 +522,7 @@ tenant
 repository/provider identity
 requested ref
 admission-time per-ref sequence
-resolved full commit SHA
+optional expected remote-head SHA
 trigger observation
 optional GitHub App installation ID
 lease/write fence
@@ -517,9 +532,10 @@ bounded history policy
 
 ### Responsibilities
 
-1. Resolve the ref and record the immutable provider observation.
-2. Use a full blob-filtered clone, then walk and persist the commit DAG up to the
-   configured history boundary.
+1. Use a full blob-filtered clone, explicitly fetch the requested branch, resolve its
+   authoritative remote-tracking head, and require it to equal any expected event SHA.
+2. Check out the fetched full SHA detached, record the immutable provider observation,
+   then walk and persist the commit DAG up to the configured history boundary.
 3. Store commits, parents, trees, blobs, and first-parent changes idempotently.
 4. Reuse blob analysis by content digest and parser version.
 5. Parse source into deterministic symbols, imports, definitions, references, calls, and
@@ -533,7 +549,7 @@ bounded history policy
     `complete`/`partial` source completeness, machine-readable Git/GitHub/body-omission
     frontier, and evidence fingerprint.
 11. Append an immutable projection-input event in the same locked transaction as the
-    checkpoint.
+    checkpoint only when its sequence is not behind the latest admitted build.
 
 ### Idempotency
 
@@ -546,7 +562,7 @@ bounded history policy
 
 ### Failure behavior
 
-- Fail closed on partial trees and unverified ref/commit identity.
+- Fail closed on partial trees, a moved remote ref, and unverified ref/commit identity.
 - When a configured Git/GitHub bound is reached, an optional provider source is
   unavailable, or a body is intentionally omitted, persist a truthful `partial`
   checkpoint and surface that state in query coverage; never label it complete.
@@ -565,7 +581,7 @@ bounded history policy
 - erasure replay does not recreate filtered rows;
 - no table named `graph`, `node`, `edge`, or `assertion` is written.
 
-## Stage 2: `derive-knowledge`
+## Knowledge plane: `derive-knowledge` (runtime step 3, after baseline)
 
 ### Input selection
 
@@ -580,6 +596,13 @@ a bounded focus bundle from:
 
 The selector, ordering, truncation decisions, and omitted counts are recorded. The model
 cannot widen repository, ref, tenant, or provider scope.
+
+The untrusted Codex invocation ignores user configuration and disables shell, shell
+snapshot, unified execution, multi-agent, apps, plugins, remote plugins, hooks, browser,
+in-app browser, computer use, image generation, code-mode host, workspace dependencies,
+skill MCP dependency installation, and web-search surfaces. It receives the evidence as
+data and may only emit the schema-constrained JSON result; it cannot fetch more context or
+execute repository instructions.
 
 ### Model output
 
@@ -624,17 +647,23 @@ operations.
 
 Before storing a revision:
 
-1. validate the JSON schema and bounded kind vocabulary;
-2. resolve the logical ID to an allowed stable subject or reject it;
-3. check every cited source against the checkpoint;
-4. verify code path, blob, digest, and exact inclusive line range;
-5. verify provider source ID, raw observation digest, and exact JSON pointer;
-6. require every material paragraph or structured claim to have supporting evidence;
-7. reject mixed line/JSON selectors, out-of-bounds selectors, and citations whose
+1. lock the ref scope and reject a checkpoint behind either the latest admitted build or
+   latest evidence sequence;
+2. validate the JSON schema and bounded kind vocabulary;
+3. canonicalize the logical ID to lowercase, bind repository/commit segments to the
+   checkpoint, and require every remaining model-controlled identity segment to be
+   supported by the exact selected citation excerpt or intrinsic cited-source identity;
+4. check every cited source against the checkpoint;
+5. verify code path, blob, digest, and exact inclusive line range;
+6. verify provider source ID, raw observation digest, and exact JSON pointer;
+7. require every material paragraph or structured claim to have supporting evidence;
+8. reject mixed line/JSON selectors, out-of-bounds selectors, and citations whose
    normalized claim does not occur verbatim in the exact selected excerpt;
-8. reject cross-tenant, unauthorized, stale-ref, missing, or truncated evidence;
-9. compute the ordered evidence fingerprint and body digest on the host;
-10. persist raw output, validation diagnostics, revisions, citations, and outbox events
+9. require scope paths both to exist in the manifest and to be supported by those exact
+   cited excerpts/source identities; reject unrelated record text as grounding;
+10. reject cross-tenant, unauthorized, stale-ref, missing, or truncated evidence;
+11. compute the ordered evidence fingerprint and body digest on the host;
+12. persist raw output, validation diagnostics, revisions, citations, and outbox events
     atomically.
 
 One repair attempt may use only the original bundle plus explicit validation errors. A
@@ -646,8 +675,9 @@ second invalid result records a failed derivation run and writes no revision.
   `knowledge_revision_events`.
 - A reviewed revision remains byte-for-byte stable.
 - A new revision can declare the prior revision it supersedes through an event.
-- Current selection is a projector decision based on scope, evidence validity, review
-  policy, recency, and supersession—not a mutable `current` flag.
+- Current selection is a projector decision based on exact-checkpoint citation
+  membership, evidence validity, review policy, recency, and supersession—not a mutable
+  `current` flag.
 - High-risk `incident`, `ownership`, and causal content can require review before query
   eligibility. Other kinds may be eligible as clearly labeled generated knowledge.
 - Answers cite original evidence and disclose unreviewed generated interpretation when it
@@ -671,6 +701,10 @@ commit SHA
 
 An identical successful run returns existing revision identities. An identical failed run
 may be retried only under an explicit retry policy or a changed generator component.
+Equivalent same-commit checkpoints may safely reuse a successful run only when their
+selector/focus and complete evidence fingerprints produce the same immutable cache key.
+Indexing independently requires every reused revision citation's source identity and
+digest to exist in the exact target checkpoint.
 
 ### Acceptance gate
 
@@ -682,7 +716,7 @@ may be retried only under an explicit retry policy or a changed generator compon
 - model failure leaves the baseline exact/structural index queryable;
 - no semantic relation is materialized solely because the model proposed it.
 
-## Stage 3: `index-context`
+## Projection plane: `index-context` (baseline step 2 and enriched successor)
 
 Implement each projection as an independent, versioned outbox consumer.
 
@@ -716,6 +750,13 @@ Implement each projection as an independent, versioned outbox consumer.
    publication acquire the shared projection-input lock and revalidate that fingerprint
    plus the latest per-ref checkpoint sequence. Any mismatch fails for retry.
 6. Queries select the latest published generation matching the requested ref/commit.
+   Knowledge eligibility additionally requires every stored citation's source identity
+   and `contentDigest` to exist in that exact evidence checkpoint; ref+commit equality is
+   insufficient. Compute `derivedKnowledge` only from that checkpoint-valid logical-ID
+   set: use `available` when the set is nonempty and every checkpoint-valid logical ID has
+   an eligible current revision, `partial` when at least one but not all do, and
+   `unavailable` when none do. Ignore repository history and same-commit revisions whose
+   provider citation evidence changed.
 7. Knowledge events may create a successor enriched generation after the baseline build
    has completed.
 8. Old generations are retained only for the configured debugging/rollback window and are
@@ -732,7 +773,8 @@ Do not expose partially published rows through query views.
 - repository-global ACL/erasure deliveries complete only after every current ref projects
   the newest ACL observation versions or retention event;
 - one ref-scoped lock and newest-checkpoint check reject stale publication, while older
-  scoped deliveries are explicitly completed as superseded only after the successor is live;
+  evidence/knowledge deliveries are terminally completed as superseded as soon as a
+  higher ref sequence is admitted or committed, even if that newer ingest never succeeds;
 - evidence, knowledge-run, knowledge-event, and erasure writes advance an immutable
   repository projection-input frontier under the same lock used at publication;
 - changing one projector version rebuilds only its outputs and any dependent projectors;
@@ -804,7 +846,7 @@ without affecting the public query contract.
 ### 1. Resolve scope
 
 - authenticate the principal;
-- resolve tenant, repository, ref, and exact commit;
+- resolve tenant, repository, ref, and exact commit, defaulting an omitted ref to `main`;
 - select one published index generation;
 - compute permitted repositories and source scopes before dispatch;
 - reject ambiguous or unauthorized scope without retrieving candidates.
@@ -892,6 +934,10 @@ source anchors.
 If verification fails, perform at most one constrained repair. If it fails again, return
 retrieved evidence and an explicit synthesis failure rather than an unsupported answer.
 
+Before returning either successful or fallback synthesis, reauthorize the principal and
+require the exact current repository ACL-fingerprint set to equal the set used for
+retrieval. A concurrent grant/revoke changes the set and drops the response.
+
 ### Caching
 
 Allowed:
@@ -933,10 +979,19 @@ POST /context/erasure
 Requirements:
 
 - validate the typed clean-cutover request/response contract without compatibility aliases;
-- require a bound principal on every public context route in production;
+- accept `CONTEXT_API_TOKEN` only on `POST /context/query` and `POST /mcp`, and
+  server-side bind it to exactly one configured
+  `JINA_CONTEXT_TENANT_ID`/`JINA_CONTEXT_PRINCIPAL_ID`;
+- reject tenant/principal headers that attempt to override that context-bearer binding;
+- require the internal credential and a bound principal on all other context routes in
+  production;
 - let trusted builds carry a positive GitHub App installation ID without persisting its
   short-lived access token;
 - return ref, commit, generation, degraded capabilities, and trace ID;
+- cap public `/context/query` and `/mcp` request bodies at 128 KiB;
+- for each raw `targets` category, accept at most 100 array entries before
+  deduplication, trim values, discard empty strings, deduplicate accepted values, and
+  reject non-empty entries longer than 1,000 characters;
 - paginate documents and generations with opaque cursors;
 - keep administrative rebuild/review operations separate from the query endpoint;
 - require tenant-administrator identity for review, rebuild, metrics, and erasure;
@@ -963,6 +1018,13 @@ run-ingest-evidence
 run-derive-knowledge
 run-index-context
 ```
+
+Access synchronization requires the internal credential. Its default `replace` mode sets
+the principal's complete repository list; `merge` unions submitted repositories with the
+existing list and is used by acceptance so adding the fixture cannot remove unrelated
+access. Both operations acquire the same tenant/principal advisory lock inside the store;
+merge reads the current ACL and writes the union in that transaction rather than
+performing an API-level read/modify/write.
 
 ### MCP
 
@@ -1162,6 +1224,10 @@ reconstruction, idempotency, lease fencing, ACL isolation, and erasure replay al
 
 ### Phase 3 — Implement knowledge-document derivation
 
+This is source-code construction order, not runtime scheduling. The shipped coordinator
+keeps derivation blocked until the Phase 4 baseline index path has completed for the
+checkpoint.
+
 Deliver:
 
 - bounded focus selector;
@@ -1310,6 +1376,8 @@ identity or event semantics must also include retry, reordering, and rebuild tes
 - outbox consumer and generation state machines.
 - monotonic per-ref build/checkpoint sequencing under reordered completion;
 - projection-input frontier mutation during materialization and final publication;
+- strict ingest/baseline/derive queue ordering across workers;
+- HTTP/MCP 128 KiB body rejection and raw-target count/length amplification limits;
 
 ### PostgreSQL integration tests
 
@@ -1346,10 +1414,14 @@ For a fixture repository:
 8. introduce a conflicting source and verify disclosure;
 9. move the ref and verify temporal isolation;
 10. finish a lower-sequence build after a newer build and verify it cannot publish;
-11. revoke access and verify the source disappears from retrieval, traces, and synthesis;
-12. erase evidence during materialization and verify publication aborts and no rebuild
+11. attempt to commit evidence and knowledge from that lower-sequence checkpoint and
+    verify the evidence remains historical while neither operation advances current or
+    indexable state;
+12. revoke access during query synthesis and verify final reauthorization releases no
+    source, trace, or answer;
+13. erase evidence during materialization and verify publication aborts and no rebuild
     resurrects it;
-13. append each terminal knowledge event and verify the affected ref remains unavailable
+14. append each terminal knowledge event and verify the affected ref remains unavailable
     until a frontier-consistent rebuild.
 
 ### Required quality gates
@@ -1426,7 +1498,14 @@ generation, query trace, and answer.
 - Treat repository files, issues, PRs, documents, and model output as untrusted content.
 - Apply prompt-injection boundaries and never let retrieved text alter system policy,
   tool scope, repository scope, or citation rules.
-- Resolve ACLs before every retriever and recheck citations before response emission.
+- Resolve ACLs before every retriever, reauthorize the exact fingerprint set after
+  synthesis, and recheck citations before response emission.
+- Keep the context bearer query-only and fixed to one tenant/principal; use a distinct
+  internal-token administrator for build, review, metrics, erasure, and synchronization.
+- Run untrusted knowledge generation without shell/snapshot, unified execution,
+  multi-agent, apps/plugins, hooks, browser/in-app browser, computer use, image
+  generation, code-mode host, workspace dependency, skill MCP dependency-install, or web
+  search features.
 - Derive an effective ACL for a knowledge revision from the most restrictive cited
   evidence; do not broaden access through summarization.
 - Include tenant, repository, ref, generation, ACL fingerprint, and principal scope in
@@ -1528,6 +1607,8 @@ The successor is done when:
 
 - the three stages run under only `ingest-evidence`, `derive-knowledge`, and
   `index-context`;
+- runtime scheduling is strictly `ingest-evidence` → baseline `index-context` → optional
+  `derive-knowledge` with enriched publication, with only the next stage queued;
 - canonical evidence and knowledge revisions are immutable and independently auditable;
 - every eligible knowledge revision has validated terminal evidence;
 - every knowledge citation selects a valid exact excerpt and contains a verbatim grounded

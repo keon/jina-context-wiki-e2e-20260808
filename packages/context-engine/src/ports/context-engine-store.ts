@@ -43,9 +43,11 @@ export interface QueryMetrics {
 
 export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, ProjectionStore {
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
+  mergeRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]>;
   aclFingerprintsForPrincipal(tenantId: string, principalId: string, repository: string): Promise<string[]>;
   repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string>;
+  latestAdmittedRefSequence(tenantId: string, repository: string, ref: string): Promise<number>;
   projectionInputFingerprint(tenantId: string, repository: string): Promise<string>;
   listRepositories(tenantId: string): Promise<string[]>;
   projectionBacklog(tenantId: string): Promise<ProjectionBacklog>;

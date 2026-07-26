@@ -103,6 +103,10 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
     await this.database.transactionAs("jina_context_derive", async (client) => {
       await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, input.run.checkpointId);
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `context-generation-ref:${checkpoint.tenant_id}:${checkpoint.repository}:${checkpoint.ref_name}`
+      ]);
+      await assertCheckpointCurrent(client, input.run.checkpointId, checkpoint);
       await lockProjectionInput(client, checkpoint.tenant_id, checkpoint.repository);
       await insertDerivationRun(client, input.run, checkpoint);
       for (const revision of input.revisions) {
@@ -408,18 +412,103 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
     return result.rows.map(eventFromRow);
   }
 
-  async listCurrentEligibleRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
+  async listCheckpointRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]> {
     await this.database.initialize();
     const result = await this.database.queryAs<RevisionRow>(
       "jina_context_derive",
-      `select distinct on (revision.logical_id)
-         revision.*,document.kind
-       from jina_context.knowledge_document_revisions revision
+      `with current_checkpoint as (
+         select *
+         from jina_context.evidence_checkpoints
+         where id=$3 and tenant_id=$1 and repository=$2
+       )
+       select revision.*,document.kind
+       from current_checkpoint current
+       join jina_context.knowledge_document_revisions revision
+         on revision.tenant_id=current.tenant_id
+        and revision.repository=current.repository
+        and revision.ref_name=current.ref_name
+        and revision.commit_sha=current.commit_sha
        join jina_context.knowledge_documents document
          on document.tenant_id=revision.tenant_id
         and document.repository=revision.repository
         and document.logical_id=revision.logical_id
-       where revision.tenant_id=$1 and revision.repository=$2
+       where not exists (
+         select 1
+         from jina_context.knowledge_revision_evidence citation
+         where citation.tenant_id=revision.tenant_id
+           and citation.repository=revision.repository
+           and citation.revision_id=revision.id
+           and not exists (
+             select 1
+             from jina_context.evidence_checkpoint_records selection
+             join jina_context.evidence_records evidence
+               on evidence.tenant_id=selection.tenant_id
+              and evidence.repository=selection.repository
+              and evidence.id=selection.evidence_id
+             where selection.checkpoint_id=current.id
+               and evidence.source_type=citation.source_type
+               and evidence.source_id=citation.source_id
+               and evidence.content_digest=citation.content_digest
+               and evidence.commit_sha is not distinct from citation.commit_sha
+               and evidence.path_or_url is not distinct from citation.path_or_url
+           )
+       )
+       order by revision.created_at,revision.id`,
+      [tenantId, repository, checkpointId]
+    );
+    return result.rows.map(revisionFromRow);
+  }
+
+  async listCurrentEligibleRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<RevisionRow>(
+      "jina_context_derive",
+      `with current_checkpoint as (
+         select *
+         from jina_context.evidence_checkpoints
+         where id=$3 and tenant_id=$1 and repository=$2
+       )
+       select distinct on (revision.logical_id)
+         revision.*,document.kind
+       from current_checkpoint current
+       join jina_context.knowledge_document_revisions revision
+         on revision.tenant_id=current.tenant_id
+        and revision.repository=current.repository
+        and revision.ref_name=current.ref_name
+        and revision.commit_sha=current.commit_sha
+       join jina_context.knowledge_documents document
+         on document.tenant_id=revision.tenant_id
+        and document.repository=revision.repository
+        and document.logical_id=revision.logical_id
+       where not exists (
+           select 1
+           from jina_context.knowledge_revision_evidence citation
+           where citation.tenant_id=revision.tenant_id
+             and citation.repository=revision.repository
+             and citation.revision_id=revision.id
+             and not exists (
+               select 1
+               from jina_context.evidence_checkpoint_records selection
+               join jina_context.evidence_records evidence
+                 on evidence.tenant_id=selection.tenant_id
+                and evidence.repository=selection.repository
+                and evidence.id=selection.evidence_id
+               where selection.checkpoint_id=current.id
+                 and evidence.source_type=citation.source_type
+                 and evidence.source_id=citation.source_id
+                 and evidence.content_digest=citation.content_digest
+                 and evidence.commit_sha is not distinct from citation.commit_sha
+                 and evidence.path_or_url is not distinct from citation.path_or_url
+             )
+         )
          and not exists (
            select 1 from jina_context.knowledge_revision_events event
            where event.tenant_id=revision.tenant_id
@@ -453,9 +542,9 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
                and review.revision_id=revision.id
                and review.event_type in ('reviewed','approved')
            )
-         )
+       )
        order by revision.logical_id,revision.created_at desc,revision.id desc`,
-      [tenantId, repository]
+      [tenantId, repository, checkpointId]
     );
     return result.rows.map(revisionFromRow);
   }
@@ -523,6 +612,7 @@ async function requireCheckpoint(
   tenant_id: string;
   repository: string;
   ref_name: string;
+  ref_sequence: string;
   commit_sha: string;
   evidence_fingerprint: string;
   created_at: Date;
@@ -531,6 +621,7 @@ async function requireCheckpoint(
     tenant_id: string;
     repository: string;
     ref_name: string;
+    ref_sequence: string;
     commit_sha: string;
     evidence_fingerprint: string;
     created_at: Date;
@@ -538,6 +629,37 @@ async function requireCheckpoint(
   const row = result.rows[0];
   if (!row) throw new Error(`Unknown evidence checkpoint ${checkpointId}`);
   return row;
+}
+
+async function assertCheckpointCurrent(
+  client: PoolClient,
+  checkpointId: string,
+  checkpoint: Awaited<ReturnType<typeof requireCheckpoint>>
+): Promise<void> {
+  const result = await client.query<{ ref_sequence: string }>(
+    `select greatest(
+       coalesce((
+         select max(ref_sequence)
+         from jina_context.pipeline_builds
+         where tenant_id=$1 and repository=$2 and ref_name=$3
+       ),0),
+       coalesce((
+         select max(ref_sequence)
+         from jina_context.evidence_checkpoints
+         where tenant_id=$1 and repository=$2 and ref_name=$3
+       ),0)
+     )::text ref_sequence`,
+    [checkpoint.tenant_id, checkpoint.repository, checkpoint.ref_name]
+  );
+  const checkpointSequence = Number(checkpoint.ref_sequence);
+  const latestSequence = Number(result.rows[0]!.ref_sequence);
+  if (
+    !Number.isSafeInteger(checkpointSequence) ||
+    !Number.isSafeInteger(latestSequence) ||
+    checkpointSequence < latestSequence
+  ) {
+    throw new Error(`Checkpoint ${checkpointId} is superseded for ${checkpoint.repository}@${checkpoint.ref_name}`);
+  }
 }
 
 async function insertDerivationRun(

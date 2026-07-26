@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { findExistingCodex, isTransientKnowledgeGenerationFailure } from "./knowledge-document-executor.js";
+import {
+  findExistingCodex,
+  isTransientKnowledgeGenerationFailure,
+  UNTRUSTED_KNOWLEDGE_CODEX_ARGS
+} from "./knowledge-document-executor.js";
 
 test("knowledge generation retry classification is bounded to transient failures", () => {
   assert.equal(isTransientKnowledgeGenerationFailure("HTTP 503 from sandbox gateway"), true);
@@ -27,4 +31,29 @@ test("snapshot reuse accepts only an absolute working Codex path", async () => {
     }
   });
   assert.equal(missing, undefined);
+});
+
+test("untrusted evidence generation disables every agentic tool surface", () => {
+  assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes("--ignore-user-config"));
+  assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes("--strict-config"));
+  for (const feature of [
+    "shell_tool",
+    "shell_snapshot",
+    "multi_agent",
+    "apps",
+    "browser_use",
+    "computer_use",
+    "image_generation",
+    "unified_exec",
+    "plugins",
+    "remote_plugin",
+    "hooks",
+    "in_app_browser",
+    "code_mode_host",
+    "workspace_dependencies",
+    "skill_mcp_dependency_install"
+  ]) {
+    assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes(`--disable ${feature}` as never));
+  }
+  assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes('-c web_search="disabled"'));
 });

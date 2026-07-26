@@ -111,12 +111,7 @@ export class QueryContextService {
       ref
     });
     if (!authorization.allowed) throw new Error(authorization.reason ?? "Repository access denied");
-    const projection = await this.#latestForRepository(
-      request.tenantId,
-      repository,
-      request.ref === undefined ? undefined : ref,
-      authorization.allowedAclFingerprints
-    );
+    const projection = await this.#latestForRepository(request.tenantId, repository, ref, request.principalId);
     if (projection === undefined) throw new Error("No published context generation for the requested scope");
     const plan = planContextQuery({ ...request, repository, ref: projection.generation.ref });
     if (
@@ -213,7 +208,7 @@ export class QueryContextService {
         }
       }
     }
-    return {
+    const response: QueryContextResponse = {
       answer: synthesis.answer,
       generation: {
         id: projection.generation.id,
@@ -236,19 +231,28 @@ export class QueryContextService {
       },
       traceId: newId("trace")
     };
+    const finalAuthorization = await this.authorizer.authorize({
+      tenantId: request.tenantId,
+      principalId: request.principalId,
+      repository,
+      ref
+    });
+    if (
+      !finalAuthorization.allowed ||
+      !sameFingerprints(authorization.allowedAclFingerprints, finalAuthorization.allowedAclFingerprints)
+    ) {
+      throw new Error(finalAuthorization.reason ?? "Repository access changed while querying");
+    }
+    return response;
   }
 
-  async #latestForRepository(
-    tenantId: string,
-    repository: string,
-    ref: string | undefined,
-    allowedAclFingerprints: ReadonlySet<string>
-  ) {
+  async #latestForRepository(tenantId: string, repository: string, ref: string, principalId: string) {
     const generations = await this.store.listGenerations(tenantId, repository);
-    const latest = generations.find(
-      (generation) => generation.status === "published" && (ref === undefined || generation.ref === ref)
-    );
-    return latest === undefined ? undefined : this.store.getAuthorizedGeneration(latest.id, allowedAclFingerprints);
+    const latest = generations.find((generation) => generation.status === "published" && generation.ref === ref);
+    if (latest === undefined) return undefined;
+    return this.authorizer instanceof StoreScopeAuthorizer
+      ? this.store.getAuthorizedGeneration(latest.id, principalId)
+      : this.store.getGeneration(latest.id);
   }
 
   async #hydrateOriginalEvidence(checkpointId: string, fused: FusedCandidate[]): Promise<FusedCandidate[]> {
@@ -310,4 +314,8 @@ export class QueryContextService {
       missing: ["verified synthesis"]
     };
   }
+}
+
+function sameFingerprints(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
 }

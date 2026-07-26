@@ -62,6 +62,9 @@ import { handleGitHubWebhook } from "./routes/github-webhooks.js";
 import { buildTaskTypeCatalog, type TaskTypeTriggerRule } from "./task-type-catalog.js";
 
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
+const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
+const MAX_CONTEXT_TARGETS_PER_KIND = 100;
+const MAX_CONTEXT_TARGET_LENGTH = 1_000;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
@@ -85,6 +88,8 @@ export interface ApiServerConfig {
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
   readonly contextApiToken?: string;
+  readonly contextApiTenantId?: string;
+  readonly contextApiPrincipalId?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   readonly mcpAllowedOrigins?: readonly string[];
 }
@@ -365,7 +370,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         json(response, 403, { error: "forbidden" });
         return;
       }
-      const body = request.method === "POST" ? parseJsonValue(await readRawBody(request)) : undefined;
+      const body =
+        request.method === "POST"
+          ? parseJsonValue(await readRawBody(request, MAX_CONTEXT_QUERY_REQUEST_BYTES))
+          : undefined;
       await handleContextMcpRequest(
         request,
         response,
@@ -377,7 +385,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             question: query.question,
             ...(query.ref ? { ref: query.ref } : {}),
             ...(query.taskKind ? { taskKind: query.taskKind } : {}),
-            ...(query.targets ? { targets: copyTargets(query.targets) } : {}),
+            ...(query.targets
+              ? {
+                  targets: parseTargets({
+                    paths: query.targets.paths,
+                    symbols: query.targets.symbols,
+                    pullRequests: query.targets.pullRequests,
+                    issues: query.targets.issues
+                  })
+                }
+              : {}),
             ...(query.timeWindow ? { timeWindow: query.timeWindow } : {})
           }),
         body
@@ -388,6 +405,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       requireBoundPrincipal(principal, config);
     }
     if (request.method === "POST" && url.pathname === "/context/build") {
+      requireTenantAdmin(principal);
       const body = parseJsonObject(await readRawBody(request));
       const repository = requiredRepositoryName(body.repository, "repository");
       await requireRepositoryAccess(principal, repository);
@@ -409,7 +427,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/context/query") {
-      const body = parseJsonObject(await readRawBody(request));
+      const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_QUERY_REQUEST_BYTES));
       const requestValue = parseQueryContextRequest(body, principal);
       json(response, 200, await queryContext(principal, requestValue));
       return;
@@ -445,16 +463,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         throw notFound("context generation not found");
       }
       if (!isTenantAdmin(principal)) {
-        projection = await contextStore.getAuthorizedGeneration(
-          generationId,
-          new Set(
-            await contextStore.aclFingerprintsForPrincipal(
-              principal.tenantId,
-              principal.principalId,
-              projection.generation.repository
-            )
-          )
-        );
+        projection = await contextStore.getAuthorizedGeneration(generationId, principal.principalId);
         if (!projection) throw notFound("context generation not found");
       }
       json(response, 200, {
@@ -542,12 +551,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ? undefined
           : isTenantAdmin(principal)
             ? await contextStore.getGeneration(latest.id)
-            : await contextStore.getAuthorizedGeneration(
-                latest.id,
-                new Set(
-                  await contextStore.aclFingerprintsForPrincipal(principal.tenantId, principal.principalId, repository)
-                )
-              );
+            : await contextStore.getAuthorizedGeneration(latest.id, principal.principalId);
       if (!projection) throw notFound("published context generation not found");
       const path = url.searchParams.get("path")?.toLowerCase();
       const symbol = url.searchParams.get("symbol")?.toLowerCase();
@@ -879,22 +883,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     response: ServerResponse,
     principal: Principal
   ): Promise<void> {
-    if (
-      !config.contextApiToken ||
-      firstHeader(request.headers.authorization) !== `Bearer ${config.contextApiToken}` ||
-      !principal.forwarded
-    ) {
-      throw new ApiError(401, "unauthorized", "context credential and bound principal required");
+    if (!hasInternalApiCredential(request, config) || !principal.forwarded) {
+      throw new ApiError(401, "unauthorized", "internal credential and bound principal required");
     }
     const body = parseJsonObject(await readRawBody(request));
     if (!Array.isArray(body.repositories) || body.repositories.length > 5_000) {
       throw invalidRequest("repositories must be an array with at most 5000 entries");
     }
-    const repositories = [
+    const requested = [
       ...new Set(body.repositories.map((repository) => requiredRepositoryName(repository, "repository")))
     ].sort();
-    await contextStore.replaceRepositoryAccess(principal.tenantId, principal.principalId, repositories);
-    json(response, 200, { principalId: principal.principalId, repositoryCount: repositories.length });
+    const mode = optionalString(body.mode) ?? "replace";
+    if (mode !== "replace" && mode !== "merge") throw invalidRequest("mode must be replace or merge");
+    if (mode === "merge") {
+      await contextStore.mergeRepositoryAccess(principal.tenantId, principal.principalId, requested);
+    } else {
+      await contextStore.replaceRepositoryAccess(principal.tenantId, principal.principalId, requested);
+    }
+    const repositories = await contextStore.repositoriesForPrincipal(principal.tenantId, principal.principalId);
+    json(response, 200, { principalId: principal.principalId, repositoryCount: repositories.length, mode });
   }
 
   async function queryContext(principal: Principal, requestValue: QueryContextRequest) {
@@ -989,14 +996,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   async function allowedKnowledgeRevisionIds(principal: Principal, repository: string): Promise<Set<string>> {
-    const aclFingerprints = new Set(
-      await contextStore.aclFingerprintsForPrincipal(principal.tenantId, principal.principalId, repository)
-    );
     const generations = await contextStore.listGenerations(principal.tenantId, repository);
     const allowed = new Set<string>();
     for (const generation of generations) {
       if (generation.status !== "published") continue;
-      const projection = await contextStore.getAuthorizedGeneration(generation.id, aclFingerprints);
+      const projection = await contextStore.getAuthorizedGeneration(generation.id, principal.principalId);
       for (const document of projection?.documents ?? []) {
         if (document.sourceRevisionId) allowed.add(document.sourceRevisionId);
       }
@@ -1006,7 +1010,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   function isTenantAdmin(principal: Principal): boolean {
     return (
-      principal.principalId.startsWith("svc:") ||
+      (Boolean(config.enableDevEndpoints) && principal.principalId.startsWith("svc:")) ||
       principal.principalId === `tenant:${principal.tenantId}` ||
       (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
     );
@@ -1335,6 +1339,22 @@ function authenticatedPrincipal(
     config.contextApiToken && authorization === `Bearer ${config.contextApiToken}` && isContextCredentialRoute(pathname)
   );
   if (!internal && !context) return undefined;
+  if (context && !internal) {
+    const tenantId = contextCredentialTenantId(config.contextApiTenantId, config);
+    const principalId = normalizedForwardedPrincipal(config.contextApiPrincipalId);
+    if (!tenantId || !principalId) return undefined;
+    const requestedTenantHeader = firstHeader(request.headers["x-jina-tenant-id"]);
+    const requestedPrincipalHeader = firstHeader(request.headers["x-jina-principal-id"]);
+    const requestedTenantId = contextCredentialTenantId(requestedTenantHeader, config);
+    const requestedPrincipalId = normalizedForwardedPrincipal(requestedPrincipalHeader);
+    if (
+      (requestedTenantHeader !== undefined && requestedTenantId !== tenantId) ||
+      (requestedPrincipalHeader !== undefined && requestedPrincipalId !== principalId)
+    ) {
+      return undefined;
+    }
+    return { tenantId, principalId, forwarded: true };
+  }
   const requestedTenantId = normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]));
   const tenantId = config.sharedIdentityResolver
     ? (requestedTenantId ?? (internal && pathname === "/internal/worker/claim" ? "*" : undefined))
@@ -1360,7 +1380,13 @@ function hasInternalApiCredential(request: IncomingMessage, config: ApiServerCon
 }
 
 function isContextCredentialRoute(pathname: string): boolean {
-  return pathname === "/mcp" || pathname.startsWith("/context/") || pathname === "/internal/context/access/sync";
+  return pathname === "/mcp" || pathname === "/context/query";
+}
+
+function contextCredentialTenantId(value: string | undefined, config: ApiServerConfig): string | undefined {
+  if (config.sharedIdentityResolver) return normalizedTenantId(value);
+  const normalized = value?.trim();
+  return normalized !== "" && normalized === config.tenantId ? normalized : undefined;
 }
 
 function contextTriggers(): TaskTypeTriggerRule[] {
@@ -1396,29 +1422,15 @@ function parseQueryContextRequest(body: Record<string, unknown>, principal: Prin
 }
 
 function parseTargets(value: Record<string, unknown>): NonNullable<QueryContextRequest["targets"]> {
-  const paths = optionalStringArray(value.paths, "targets.paths");
-  const symbols = optionalStringArray(value.symbols, "targets.symbols");
-  const pullRequests = optionalStringArray(value.pullRequests, "targets.pullRequests");
-  const issues = optionalStringArray(value.issues, "targets.issues");
+  const paths = boundedStringArray(value.paths, "targets.paths");
+  const symbols = boundedStringArray(value.symbols, "targets.symbols");
+  const pullRequests = boundedStringArray(value.pullRequests, "targets.pullRequests");
+  const issues = boundedStringArray(value.issues, "targets.issues");
   return {
     ...(paths ? { paths } : {}),
     ...(symbols ? { symbols } : {}),
     ...(pullRequests ? { pullRequests } : {}),
     ...(issues ? { issues } : {})
-  };
-}
-
-function copyTargets(value: {
-  readonly paths?: readonly string[];
-  readonly symbols?: readonly string[];
-  readonly pullRequests?: readonly string[];
-  readonly issues?: readonly string[];
-}): NonNullable<QueryContextRequest["targets"]> {
-  return {
-    ...(value.paths ? { paths: [...value.paths] } : {}),
-    ...(value.symbols ? { symbols: [...value.symbols] } : {}),
-    ...(value.pullRequests ? { pullRequests: [...value.pullRequests] } : {}),
-    ...(value.issues ? { issues: [...value.issues] } : {})
   };
 }
 
@@ -1877,6 +1889,19 @@ function optionalStringArray(value: unknown, field: string): string[] {
     throw invalidRequest(`${field} must be an array of strings`);
   }
   return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function boundedStringArray(value: unknown, field: string): string[] {
+  const values = optionalStringArray(value, field);
+  if (values.length > MAX_CONTEXT_TARGETS_PER_KIND) {
+    throw invalidRequest(`${field} must contain at most ${MAX_CONTEXT_TARGETS_PER_KIND} items`);
+  }
+  for (const item of values) {
+    if (item.length > MAX_CONTEXT_TARGET_LENGTH) {
+      throw invalidRequest(`${field} items must not exceed ${MAX_CONTEXT_TARGET_LENGTH} characters`);
+    }
+  }
+  return [...new Set(values)];
 }
 
 function requiredRepositoryName(value: unknown, field: string): string {

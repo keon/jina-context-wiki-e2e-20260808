@@ -10,6 +10,7 @@ export interface ProductionContextAcceptanceConfig {
   readonly contextToken: string;
   readonly tenantId?: string;
   readonly principalId: string;
+  readonly adminPrincipalId: string;
   readonly repository?: string;
   readonly ref?: string;
   readonly githubInstallationId?: number;
@@ -51,30 +52,39 @@ export async function runProductionContextAcceptance(
   const pollIntervalMs = config.pollIntervalMs ?? 10_000;
   const fetchImpl = config.fetchImpl ?? fetch;
   const log = config.log ?? console.log;
-  const identityHeaders = {
+  const queryIdentityHeaders = {
     "x-jina-principal-id": config.principalId,
     ...(config.tenantId ? { "x-jina-tenant-id": config.tenantId } : {})
   };
+  const adminIdentityHeaders = {
+    "x-jina-principal-id": config.adminPrincipalId,
+    ...(config.tenantId ? { "x-jina-tenant-id": config.tenantId } : {})
+  };
   const contextHeaders = {
-    ...identityHeaders,
+    ...queryIdentityHeaders,
     authorization: `Bearer ${config.contextToken}`,
     "content-type": "application/json"
   };
+  const accessSyncHeaders = {
+    ...queryIdentityHeaders,
+    authorization: `Bearer ${config.internalToken}`,
+    "content-type": "application/json"
+  };
   const internalHeaders = {
-    ...identityHeaders,
+    ...adminIdentityHeaders,
     authorization: `Bearer ${config.internalToken}`,
     "content-type": "application/json"
   };
 
   await apiJson(fetchImpl, `${apiUrl}/internal/context/access/sync`, {
     method: "POST",
-    headers: contextHeaders,
-    body: JSON.stringify({ repositories: [repository] })
+    headers: accessSyncHeaders,
+    body: JSON.stringify({ repositories: [repository], mode: "merge" })
   });
 
   const created = await apiJson(fetchImpl, `${apiUrl}/context/build`, {
     method: "POST",
-    headers: contextHeaders,
+    headers: internalHeaders,
     body: JSON.stringify({
       repository,
       ref,
@@ -115,21 +125,21 @@ export async function runProductionContextAcceptance(
   const generationsPayload = await apiJson(
     fetchImpl,
     `${apiUrl}/context/generations?repository=${encodeURIComponent(repository)}`,
-    { headers: contextHeaders }
+    { headers: internalHeaders }
   );
   const generations = requiredArray(generationsPayload.generations, "generations").filter(isRecord);
   const latest = generations.find((generation) => generation.ref === ref && generation.status === "published");
   if (!latest) throw new Error("production context has no published generation for the accepted ref");
   const generationId = requiredString(latest.id, "generation.id");
   const commitSha = requiredGitSha(latest.commitSha, "generation.commitSha");
-  if (record(latest.capabilities).derivedKnowledge !== "available") {
+  if (latest.derivedKnowledge !== "available") {
     throw new Error("production enriched generation is missing derived knowledge");
   }
 
   const documentsPayload = await apiJson(
     fetchImpl,
     `${apiUrl}/context/documents?repository=${encodeURIComponent(repository)}`,
-    { headers: contextHeaders }
+    { headers: internalHeaders }
   );
   const documents = requiredArray(documentsPayload.documents, "documents").filter(isRecord);
   if (documents.length === 0) throw new Error("production knowledge document catalog is empty");
@@ -157,7 +167,7 @@ export async function runProductionContextAcceptance(
     ? await config.verifyMcp({ apiUrl, headers: contextHeaders, repository, ref, commitSha })
     : await verifyProductionMcp({ apiUrl, headers: contextHeaders, repository, ref, commitSha });
 
-  const metrics = await apiJson(fetchImpl, `${apiUrl}/context/metrics`, { headers: contextHeaders });
+  const metrics = await apiJson(fetchImpl, `${apiUrl}/context/metrics`, { headers: internalHeaders });
   const depths = record(metrics.outboxDepthByConsumer);
   const pending = Object.entries(depths).filter(([, value]) => Number(value) > 0);
   if (pending.length) throw new Error(`production context backlog is not empty: ${JSON.stringify(pending)}`);
@@ -340,6 +350,7 @@ async function main(): Promise<void> {
     contextToken: requiredEnv("CONTEXT_API_TOKEN"),
     ...(process.env.ACCEPTANCE_TENANT_ID ? { tenantId: process.env.ACCEPTANCE_TENANT_ID } : {}),
     principalId: requiredEnv("ACCEPTANCE_PRINCIPAL_ID"),
+    adminPrincipalId: requiredEnv("ACCEPTANCE_ADMIN_PRINCIPAL_ID"),
     ...(process.env.ACCEPTANCE_REPOSITORY ? { repository: process.env.ACCEPTANCE_REPOSITORY } : {}),
     ...(process.env.ACCEPTANCE_REF ? { ref: process.env.ACCEPTANCE_REF } : {}),
     ...(githubInstallationId ? { githubInstallationId } : {}),

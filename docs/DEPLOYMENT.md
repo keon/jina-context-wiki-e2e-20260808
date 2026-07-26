@@ -36,13 +36,23 @@ login. The runtime Google service account must not have Secret Manager access to
 `jina-db-password`; the migration Google service account must not be assigned to any
 network-facing service. Do not swap or reuse these identities or credentials.
 
-`INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic.
-`CONTEXT_API_TOKEN` is deliberately narrower: it authorizes `/context/*`, `/mcp`, and
-`/internal/context/access/sync`. It never removes the principal requirement.
+`INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic. It is also the
+only service credential accepted by `POST /internal/context/access/sync`.
+`CONTEXT_API_TOKEN` is deliberately narrower: it is accepted only by
+`POST /context/query` and `POST /mcp`.
 
-Context HTTP and MCP reads require `x-jina-principal-id`. Shared-database clients also
-send `x-jina-tenant-id`, and the API verifies the tenant/principal binding. Browser MCP
-origins, when present, must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
+Every production API revision with a context credential must also set
+`JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID`. Those values
+server-side bind the bearer to one query identity; tenant/principal headers may be omitted
+or repeat the configured values but cannot select different ones. Internal-token callers
+send `x-jina-principal-id`; shared-database callers also send `x-jina-tenant-id`. Browser
+MCP origins, when present, must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
+
+Public `POST /context/query` and `POST /mcp` bodies are capped at 128 KiB. Every raw
+target category accepts at most 100 array entries before deduplication. Values are
+trimmed, empty strings dropped, accepted values deduplicated, and each non-empty value is
+limited to 1,000 characters. A request containing 101 duplicates is intentionally
+rejected as amplification rather than reduced below the raw-entry limit.
 
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
@@ -79,13 +89,17 @@ manual-build fallback. The task worker has one instance and handles
 Cloud Run CLI treats commas as environment separators, so deployed topic lists use pipes.
 Local processes may use commas.
 
-### Exact-commit and failure behavior
+### Authoritative remote head and failure behavior
 
 A build accepts an optional full `commitSha`; push-triggered builds carry the event head
-SHA. The worker performs a full blob-filtered clone (no shallow depth), verifies, and
-checks out that exact commit. It persists up to `CONTEXT_GIT_HISTORY_LIMIT` commits and
-parents and paginates PR/issue observations up to `CONTEXT_GITHUB_HISTORY_LIMIT`. It
-preserves every manifest entry when binary or oversized file bodies are omitted.
+SHA. The worker performs a full blob-filtered clone (no shallow depth), explicitly fetches
+the branch to `refs/remotes/origin/<ref>`, resolves the fetched remote head, and checks it
+out detached. The optional SHA is an expected-head fence, not permission to index a
+historical commit as current: a mismatch means the ref moved and fails ingestion. A
+manual build without `commitSha` selects the fetched head. The worker persists up to
+`CONTEXT_GIT_HISTORY_LIMIT` commits and parents and paginates PR/issue observations up to
+`CONTEXT_GITHUB_HISTORY_LIMIT`. It preserves every manifest entry when binary or
+oversized file bodies are omitted.
 
 The checkpoint is `complete` only when Git history reaches its root, every optional
 GitHub source reaches a final page, and no body is omitted. Reaching a configured bound,
@@ -95,15 +109,27 @@ an invalid tree still fails closed. Partial generations are usable, but queries 
 `source-completeness:partial` in coverage.
 
 At request admission, the API allocates a monotonic `refSequence` for the exact
-tenant/repository/ref and records it on the build and ingest stage. The checkpoint retains
-that sequence. If an earlier accepted push finishes after a later accepted push, the
-earlier checkpoint remains stored for audit but cannot become current or publish a
-generation over the higher sequence. Request-key redelivery reuses the existing build and
-sequence.
+tenant/repository/ref under the same advisory lock used by ref-sensitive canonical
+writes, and records it on the build and ingest stage. The checkpoint retains that
+sequence. If an earlier accepted push finishes after a later accepted push, the earlier
+checkpoint remains stored for audit but cannot advance the projection-input frontier,
+commit derived knowledge, become current, or publish a generation over the higher
+admitted sequence. Request-key redelivery reuses the existing build and sequence.
 
-`ingest-evidence` and baseline `index-context` are required. `derive-knowledge` is
-optional for aggregate availability, uses one bounded repair, and can publish an enriched
-successor. Worker writes are fenced by the current board lease.
+`ingest-evidence` and baseline `index-context` are required. The coordinator queues only
+ingestion, then baseline indexing, then optional `derive-knowledge`; baseline completion
+is the gate that queues derivation. This prevents distinct workers from racing knowledge
+projection-input changes against baseline materialization. Derivation uses one bounded
+repair and can publish an enriched successor. Codex derivation ignores user configuration and disables shell, shell
+snapshots, unified execution, multi-agent, apps, plugins, remote plugins, hooks,
+browser/in-app browser, computer use, image generation, the code-mode host, workspace
+dependencies, skill MCP dependency installation, and web search; exact claim grounding
+and scope validation occur host-side against the exact selected citation excerpts and
+intrinsic source identities. Only revisions whose every citation identity/digest is
+present in the exact generation checkpoint are selectable; matching ref+commit history is
+not enough. Equivalent-evidence derivation cache reuse remains safe because indexing
+performs that checkpoint-membership check. Worker writes are fenced by the current board
+lease.
 
 Dense retrieval is disabled until its evaluation and approved embedding-provider gates
 pass. The deterministic hierarchy adapter is active; PageIndex remains an optional,
@@ -223,6 +249,14 @@ The owner-secret policy must grant the migration identity and must not grant the
 identity, broad project members, or `allUsers`/`allAuthenticatedUsers`. Failing any of
 these checks blocks deployment.
 
+Cloud SQL is in the separate `jina-463721` project. Both the runtime and migration Google
+service accounts therefore require `roles/cloudsql.client` in that database-owning
+project, while the deployer requires `roles/cloudsql.viewer` there to inspect the
+instance. The migration owner's password secret remains in `jina-v2` and grants direct
+secret access only to `jina-migration`. Project-level Cloud SQL IAM does not imply secret
+access, and secret access does not imply Cloud SQL connectivity. The exact commands and
+database-role boundary are in [SHARED_TENANCY.md](SHARED_TENANCY.md).
+
 ## Production acceptance
 
 The 55-minute `jina-acceptance` job receives both service credentials from Secret Manager
@@ -231,18 +265,39 @@ override it, the job uses the existing external fixture
 `omxyz/jina-context-graph-e2e@main`; that repository name is historical and is not a
 runtime compatibility surface. Production also sets
 `ACCEPTANCE_GITHUB_INSTALLATION_ID=140435029`, causing the build to exercise GitHub App
-token minting instead of the fallback clone token. The job:
+token minting instead of the fallback clone token. The deploy script also sets
+`ACCEPTANCE_PRINCIPAL_ID` to the same non-admin identity bound by
+`JINA_CONTEXT_PRINCIPAL_ID`, and sets a distinct tenant administrator in
+`ACCEPTANCE_ADMIN_PRINCIPAL_ID`. The job:
 
-1. replaces the fixture principal's repository ACL;
-2. starts `POST /context/build` with the configured GitHub installation ID;
-3. waits for all three named stages and rejects failed/blocked work;
+```text
+API: JINA_CONTEXT_TENANT_ID=<acceptance tenant>
+API: JINA_CONTEXT_PRINCIPAL_ID=user:context-query@jina.internal
+job: ACCEPTANCE_TENANT_ID=<same tenant>
+job: ACCEPTANCE_PRINCIPAL_ID=user:context-query@jina.internal
+job: ACCEPTANCE_ADMIN_PRINCIPAL_ID=<configured tenant administrator>
+job: ACCEPTANCE_GITHUB_INSTALLATION_ID=<fixture installation>
+job: ACCEPTANCE_REQUEST_KEY=deploy-<Cloud Build ID>
+job: ACCEPTANCE_TIMEOUT_MS=3000000
+```
+
+`ACCEPTANCE_PRINCIPAL_ID` must not be a tenant administrator. The administrator may use
+the internal credential but must not be substituted for the context-bearer identity; this
+ensures production acceptance exercises ordinary query authorization.
+
+1. uses the internal credential and `mode:"merge"` to add the fixture repository to the
+   query principal's ACL without replacing unrelated repositories;
+2. uses the distinct administrator to start `POST /context/build` with the configured
+   GitHub installation ID;
+3. waits through the strict three-stage order, where baseline indexing gates derivation,
+   and rejects failed/blocked work;
 4. requires a published enriched generation at one full commit SHA;
-5. requires a nonempty knowledge-document catalog;
-6. calls `/context/query` and verifies original evidence anchors match the repository and
-   commit;
-7. connects with the real MCP SDK, asserts `query_context` is the only tool, calls it, and
-   verifies the same commit and original citations;
-8. requires zero context outbox backlog;
+5. uses the administrator to require a nonempty knowledge-document catalog;
+6. uses only the bound non-admin context bearer to call `/context/query` and verifies
+   original evidence anchors match the repository and commit;
+7. uses the same bound non-admin bearer with the real MCP SDK, asserts `query_context` is
+   the only tool, calls it, and verifies the same commit and original citations;
+8. uses the administrator to require zero context outbox backlog;
 9. verifies the retired public route returns 404.
 
 The job exits `20` for workflow failures, `21` for generation/commit failures, `22` for
@@ -274,6 +329,13 @@ retention deliveries and re-runs idempotent `index-context`. Each projector clai
 acknowledges only its own unexpired delivery lease for the exact
 tenant/repository/ref/commit scope. The response reports processed checkpoint IDs and the
 remaining per-consumer backlog.
+
+Before selecting checkpoints, the store terminally completes pending evidence and
+knowledge deliveries whose source sequence is below a newer admitted or committed
+sequence for the same ref. They are recorded with
+`superseded by a newer admitted ref sequence` and no longer count toward backlog. This
+does not wait for the newer build to finish ingestion or publish, so a failed newer build
+cannot strand obsolete older deliveries.
 
 A tenant administrator can force a successor generation from the latest checkpoint:
 

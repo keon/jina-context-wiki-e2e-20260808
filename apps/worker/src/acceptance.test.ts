@@ -46,11 +46,15 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
   const requested: string[] = [];
   const requestedAuthorization: string[] = [];
   let buildRequest: Record<string, unknown> | undefined;
+  let accessSyncRequest: Record<string, unknown> | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     requested.push(`${init?.method ?? "GET"} ${url.pathname}`);
     requestedAuthorization.push(new Headers(init?.headers).get("authorization") ?? "");
-    if (url.pathname === "/internal/context/access/sync") return json({ repositoryCount: 1 });
+    if (url.pathname === "/internal/context/access/sync") {
+      accessSyncRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ repositoryCount: 1 });
+    }
     if (url.pathname === "/context/build") {
       buildRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
       return json({ build: { id: "cb_acceptance" } }, 202);
@@ -79,7 +83,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
             ref: "main",
             status: "published",
             commitSha: "a".repeat(40),
-            capabilities: { derivedKnowledge: "available" }
+            derivedKnowledge: "available"
           }
         ]
       });
@@ -115,6 +119,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     internalToken: "internal",
     contextToken: "context",
     principalId: "user:reader@example.com",
+    adminPrincipalId: "user:admin@example.com",
     repository: "omlabs/repo",
     ref: "main",
     githubInstallationId: 140435029,
@@ -133,6 +138,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
   assert.equal(summary.citationCount, 1);
   assert.equal(summary.mcpCitationCount, 2);
   assert.equal(buildRequest?.githubInstallationId, 140435029);
+  assert.deepEqual(accessSyncRequest, { repositories: ["omlabs/repo"], mode: "merge" });
   assert.deepEqual(requested, [
     "POST /internal/context/access/sync",
     "POST /context/build",
@@ -145,14 +151,14 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     "GET /context-graph"
   ]);
   assert.deepEqual(requestedAuthorization, [
-    "Bearer context",
-    "Bearer context",
+    "Bearer internal",
+    "Bearer internal",
+    "Bearer internal",
+    "Bearer internal",
     "Bearer internal",
     "Bearer internal",
     "Bearer context",
-    "Bearer context",
-    "Bearer context",
-    "Bearer context",
+    "Bearer internal",
     "Bearer internal"
   ]);
 });

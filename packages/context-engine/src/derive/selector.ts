@@ -74,6 +74,14 @@ export class EvidenceFocusSelector {
       truncatedEvidenceIds,
       selectorVersion: FOCUS_SELECTOR_VERSION
     };
-    return { ...value, fingerprint: fingerprint(value) };
+    return {
+      ...value,
+      fingerprint: fingerprint({
+        items,
+        omittedCount: value.omittedCount,
+        truncatedEvidenceIds,
+        selectorVersion: FOCUS_SELECTOR_VERSION
+      })
+    };
   }
 }

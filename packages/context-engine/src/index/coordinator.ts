@@ -50,19 +50,31 @@ export class IndexContextService {
   async index(checkpointId: string, createdAt: string, fence?: ContextWriteFence): Promise<IndexGeneration> {
     const checkpoint = await this.store.getCheckpoint(checkpointId);
     if (checkpoint === undefined) throw new Error("Unknown evidence checkpoint");
+    if (
+      checkpoint.refSequence <
+      (await this.store.latestAdmittedRefSequence(checkpoint.tenantId, checkpoint.repository, checkpoint.ref))
+    ) {
+      throw new Error(`Checkpoint ${checkpoint.id} is superseded for ${checkpoint.repository}@${checkpoint.ref}`);
+    }
     const projectionInputFingerprint = await this.store.projectionInputFingerprint(
       checkpoint.tenantId,
       checkpoint.repository
     );
     const projectedAt = normalizeIsoTime(createdAt);
     const projectorVersions = versions();
-    const eligibleRevisions = (
-      await this.store.listCurrentEligibleRevisions(checkpoint.tenantId, checkpoint.repository)
-    ).filter((revision) => revision.scope.ref === checkpoint.ref && revision.scope.commitSha === checkpoint.commitSha);
+    const eligibleRevisions = await this.store.listCurrentEligibleRevisions(
+      checkpoint.tenantId,
+      checkpoint.repository,
+      checkpointId
+    );
     const evidence = await this.store.listEvidence(checkpointId);
     const manifest = await this.store.listManifest(checkpointId);
     const structuralFacts = await this.store.listStructuralFacts(checkpointId);
-    const allRevisions = await this.store.listRevisions(checkpoint.tenantId, checkpoint.repository);
+    const scopedLogicalIds = new Set(
+      (await this.store.listCheckpointRevisions(checkpoint.tenantId, checkpoint.repository, checkpointId)).map(
+        (revision) => revision.logicalId
+      )
+    );
     const repositoryAccessFingerprint = await this.store.repositoryAccessFingerprint(
       checkpoint.tenantId,
       checkpoint.repository
@@ -125,7 +137,9 @@ export class IndexContextService {
           ...(citation.anchor.endLine === undefined ? {} : { endLine: citation.anchor.endLine }),
           ...(citation.anchor.jsonPointer === undefined ? {} : { jsonPointer: citation.anchor.jsonPointer })
         });
-        if (record !== undefined) aclMap.set(citation.id, record.aclFingerprint);
+        if (record?.anchor.contentDigest === citation.anchor.contentDigest) {
+          aclMap.set(citation.id, record.aclFingerprint);
+        }
       }
     }
     const knowledge = new CurrentKnowledgeProjector().project({
@@ -253,7 +267,7 @@ export class IndexContextService {
         derivedKnowledge:
           eligibleRevisions.length === 0
             ? "unavailable"
-            : eligibleRevisions.length === allRevisions.length
+            : new Set(eligibleRevisions.map((revision) => revision.logicalId)).size === scopedLogicalIds.size
               ? "available"
               : "partial",
         dense: "disabled",

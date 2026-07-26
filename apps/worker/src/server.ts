@@ -23,6 +23,7 @@ import type {
 } from "@jina/context-engine";
 import { repositoryAclFingerprint } from "@jina/context-engine";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
+import { assertExpectedRemoteHead } from "./git-ref.js";
 
 const execFileAsync = promisify(execFile);
 const CONTEXT_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"] as const;
@@ -427,6 +428,10 @@ async function checkoutRepository(
   const directory = await mkdtemp(join(tmpdir(), "jina-context-"));
   const environment = gitEnvironment();
   try {
+    await execFileAsync("git", ["check-ref-format", "--branch", ref], {
+      env: environment,
+      maxBuffer: 1024
+    });
     await execFileAsync(
       "git",
       [
@@ -440,21 +445,18 @@ async function checkoutRepository(
       ],
       { env: environment, maxBuffer: 10 * 1024 * 1024 }
     );
-    if (expectedCommitSha) {
-      requiredGitSha(expectedCommitSha, "expected commit SHA");
-      await execFileAsync("git", ["fetch", "origin", expectedCommitSha], {
-        cwd: directory,
-        env: environment,
-        maxBuffer: 10 * 1024 * 1024
-      }).catch(async () => {
-        await execFileAsync("git", ["fetch", "origin", "+refs/heads/*:refs/remotes/origin/*"], {
-          cwd: directory,
-          env: environment,
-          maxBuffer: 10 * 1024 * 1024
-        });
-      });
-    }
-    await execFileAsync("git", ["checkout", "--detach", expectedCommitSha ?? `origin/${ref}`], {
+    await execFileAsync("git", ["fetch", "origin", `+refs/heads/${ref}:refs/remotes/origin/${ref}`], {
+      cwd: directory,
+      env: environment,
+      maxBuffer: 10 * 1024 * 1024
+    });
+    const { stdout: remoteHead } = await execFileAsync("git", ["rev-parse", `refs/remotes/origin/${ref}`], {
+      cwd: directory,
+      env: environment,
+      maxBuffer: 1024
+    });
+    const targetCommitSha = assertExpectedRemoteHead(repository, ref, remoteHead, expectedCommitSha);
+    await execFileAsync("git", ["checkout", "--detach", targetCommitSha], {
       cwd: directory,
       env: environment,
       maxBuffer: 10 * 1024 * 1024
@@ -465,8 +467,8 @@ async function checkoutRepository(
       maxBuffer: 1024
     });
     const commitSha = requiredGitSha(stdout.trim(), "checked out commit SHA");
-    if (expectedCommitSha && commitSha !== expectedCommitSha.toLowerCase()) {
-      throw new Error(`checked out commit ${commitSha} does not match expected ${expectedCommitSha}`);
+    if (commitSha !== targetCommitSha) {
+      throw new Error(`checked out commit ${commitSha} does not match fetched ref head ${targetCommitSha}`);
     }
     return { directory, commitSha };
   } catch (error) {

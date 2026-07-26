@@ -22,5 +22,14 @@ export interface KnowledgeStore {
   listCitations(revisionId: string): Promise<KnowledgeEvidenceCitation[]>;
   appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent>;
   listRevisionEvents(revisionId: string): Promise<KnowledgeRevisionEvent[]>;
-  listCurrentEligibleRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]>;
+  listCheckpointRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]>;
+  listCurrentEligibleRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]>;
 }

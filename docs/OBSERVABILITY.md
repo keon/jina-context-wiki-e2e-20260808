@@ -95,8 +95,8 @@ citation tables are bounded operational records and must follow retention policy
 
 A production context dashboard should show:
 
-- stage throughput/failure and p95 duration by `ingest-evidence`, `derive-knowledge`, and
-  `index-context`;
+- stage throughput/failure and p95 duration by `ingest-evidence`, baseline
+  `index-context`, and `derive-knowledge`/enriched publication;
 - lease loss and API polling failures;
 - repository/ref ingestion freshness and latest published generation age;
 - complete/partial checkpoint rate plus Git history count/root status, GitHub pagination
@@ -118,7 +118,7 @@ Page immediately when:
 - an ACL or erasure projector is behind a query-serving generation;
 - citation verification failure count becomes nonzero outside a short diagnostic window;
 - a required projector cannot publish or no generation exists for a current ref;
-- exact-commit acceptance or MCP citation verification fails.
+- authoritative-head/commit acceptance or MCP citation verification fails.
 
 Alert at an operational threshold when:
 
@@ -165,9 +165,10 @@ The acceptance job output is a release gate, not a substitute for ongoing SLO mo
 pnpm dev 2>&1 | jq -R 'fromjson? // .'
 curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   "${JINA_API_URL}/internal/observability"
-curl -H "Authorization: Bearer ${CONTEXT_API_TOKEN}" \
+curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   -H "X-Jina-Principal-Id: user:operator@example.com" \
   "${JINA_API_URL}/context/metrics"
 ```
 
-The context metrics caller must be configured as a tenant administrator.
+The context metrics caller must use the internal credential and be configured as a tenant
+administrator. The fixed context query bearer is intentionally rejected by this route.

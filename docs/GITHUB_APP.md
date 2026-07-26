@@ -7,17 +7,19 @@ verifies the unmodified body with `X-Hub-Signature-256`, requires
 
 ## Current behavior
 
-| Event           | Action                  | Board result                                                                                                                            |
-| --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| Push            | non-deleted branch head | Creates `build-context` with `ingest-evidence`, `derive-knowledge`, and `index-context`; carries the event head SHA and installation ID |
-| Pull request    | `opened`                | Creates the review aggregate, review pass, and internal publication task                                                                |
-| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                |
-| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                  |
-| Everything else | any                     | Acknowledged and ignored                                                                                                                |
+| Event           | Action                  | Board result                                                                                                                                                            |
+| --------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Push            | non-deleted branch head | Creates `build-context` with strict `ingest-evidence` → baseline `index-context` → optional `derive-knowledge` ordering; carries the event head SHA and installation ID |
+| Pull request    | `opened`                | Creates the review aggregate, review pass, and internal publication task                                                                                                |
+| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                                                |
+| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                                                  |
+| Everything else | any                     | Acknowledged and ignored                                                                                                                                                |
 
 An unchanged latest head deduplicates redelivery. A real ref transition supersedes active
-older context work, including a force-push back to a previously seen SHA. Issue triage has
-no automatic runner and remains in `triage` until a user acts.
+older context work, including a force-push back to a previously seen SHA. At ingestion,
+the event head is also compared with a freshly fetched authoritative remote branch head;
+a moved ref rejects the stale delivery instead of indexing its historical commit as
+current. Issue triage has no automatic runner and remains in `triage` until a user acts.
 
 ## Configure the server
 
@@ -66,11 +68,12 @@ GITHUB_APP_PRIVATE_KEY=<PEM private key; literal \n escapes are accepted>
 When `ingest-evidence` starts, the worker exchanges a short-lived App JWT for an
 installation access token. It uses that token for both the exact Git checkout and bounded
 GitHub REST pagination, keeps it only in the active lease, and never stores it in task or
-context data. Git uses a full blob-filtered clone rather than a shallow clone. The worker
-persists bounded commit/parent history and paginates PR/issue sources; reaching a
-configured limit or receiving an optional-source 403/404 records a `partial` checkpoint
-and exact omission reason. If an installation ID is present and token minting fails,
-ingestion fails closed.
+context data. Git uses a full blob-filtered clone rather than a shallow clone, explicitly
+fetches the branch to its remote-tracking ref, requires the fetched head to equal any
+event-supplied SHA, and checks out that fetched head detached. The worker persists bounded
+commit/parent history and paginates PR/issue sources; reaching a configured limit or
+receiving an optional-source 403/404 records a `partial` checkpoint and exact omission
+reason. If an installation ID is present and token minting fails, ingestion fails closed.
 
 Trusted manual callers may include a positive `githubInstallationId` in
 `POST /context/build`. A build with no installation ID falls back to
@@ -84,22 +87,30 @@ and [webhook configuration](https://docs.github.com/en/apps/creating-github-apps
 ## Repository access synchronization
 
 Context retrieval is independent of webhook installation visibility. A trusted server
-uses `CONTEXT_API_TOKEN` plus a bound principal to replace that principal's complete
-repository set:
+uses `INTERNAL_API_TOKEN` plus an explicitly bound principal to synchronize that
+principal's repository set:
 
 ```sh
 curl -X POST "${JINA_API_URL}/internal/context/access/sync" \
-  -H "Authorization: Bearer ${CONTEXT_API_TOKEN}" \
+  -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   -H "X-Jina-Principal-Id: tenant:<uuid>" \
   -H "X-Jina-Tenant-Id: <uuid>" \
   -H "Content-Type: application/json" \
-  --data '{"repositories":["owner/repository"]}'
+  --data '{"repositories":["owner/repository"],"mode":"merge"}'
 ```
 
-Sending an empty list revokes all context access for that principal. Each granted
-repository resolves to its deterministic repository ACL fingerprint, which is later used
-to filter projection rows in PostgreSQL before retrieval. The credential is server-only
-and does not grant board or worker access.
+`mode:"merge"` unions the submitted repositories with the principal's existing set and is
+used by production acceptance so the fixture grant cannot erase unrelated access.
+The union is a store-level transaction: PostgreSQL acquires the same
+tenant/principal advisory lock used by replacement, reads the current grants, and writes
+the union before releasing the lock. Concurrent merge/replace requests therefore
+serialize instead of racing between an API read and write: concurrent merges retain both
+grant sets, while a serialized replacement can still intentionally revoke omitted
+repositories.
+`mode:"replace"` is the default and replaces the complete set; an empty replacement
+revokes all context access for that principal. Each granted repository resolves to its
+deterministic repository ACL fingerprint, which is later used to filter projection rows
+in PostgreSQL before retrieval. The context query bearer cannot call this route.
 
 ## Verify delivery
 
@@ -113,8 +124,9 @@ curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
 
 For a push, verify that the root and all three context stages refer to the expected
 repository/ref, that the ingest stage carries the expected GitHub installation ID, and
-that ingestion records the event's full head SHA. A published generation returned by
-`/context/generations` must use that same commit.
+that ingestion records the event's full head SHA only if it still matches the fetched
+remote head. A published generation returned by `/context/generations` must use that same
+commit.
 
 GitHub's App settings show delivery response status and support redelivery.
 

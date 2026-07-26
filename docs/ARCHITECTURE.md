@@ -12,8 +12,8 @@ The release runs as five Cloud Run services against one shared PostgreSQL databa
 - `jina-api` verifies GitHub webhooks, serves board and context APIs, serves stateless MCP,
   and owns worker lease/completion transactions.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
-- `jina-context-worker` handles `ingest-evidence`, `derive-knowledge`, and
-  `index-context`.
+- `jina-context-worker` handles `ingest-evidence`, baseline `index-context`, and optional
+  `derive-knowledge`/enriched publication in that strict queue order.
 - `jina-dashboard` serves the operator board and repository context workspace.
 - `jina-admin` serves tenant-wide context health and administrative views behind
   server-side authentication.
@@ -40,22 +40,28 @@ Signed branch pushes and `POST /context/build` create `build-context` with three
 
 ```text
 ingest-evidence
-  ├─> index-context       required baseline
-  └─> derive-knowledge   optional enrichment
+  └─> index-context baseline (required)
+        └─> derive-knowledge + enriched index publish (optional)
 ```
 
 `index-context` can publish a raw-evidence generation as soon as ingestion completes.
-Successful derivation publishes a successor enriched generation. The aggregate succeeds
-when ingestion and baseline indexing succeed; derivation failure degrades rather than
-invalidates the usable baseline.
+Only after that baseline completes does the coordinator queue `derive-knowledge`; a
+successful derivation publishes its successor enriched generation within the derive
+stage. At most the next stage is queued, so separate workers cannot race baseline
+materialization against knowledge commits and their projection-input events. The
+baseline is usable when ingestion and baseline indexing succeed; the aggregate terminates
+after optional derivation and becomes degraded, rather than losing that baseline, if
+derivation fails.
 
 Build admission assigns a monotonically increasing `refSequence` under a
-tenant/repository/ref lock. That sequence is fixed when the build request is accepted and
-travels through the ingest task into the evidence checkpoint; wall-clock timestamps and
-worker completion order never choose the current checkpoint. If an earlier accepted push
-finishes ingestion after a later accepted push, its lower sequence remains historical and
-`index-context` rejects it as superseded. Redelivery of the same request key returns the
-existing build and does not allocate another sequence.
+tenant/repository/ref advisory lock shared with checkpoint, knowledge, and generation
+publication fences. That sequence is fixed when the build request is accepted and travels
+through the ingest task into the evidence checkpoint; wall-clock timestamps and worker
+completion order never choose the current checkpoint. If an earlier accepted push
+finishes ingestion after a later accepted push, its lower sequence remains historical,
+cannot advance the canonical projection-input frontier, and cannot commit knowledge or
+publish a generation. Redelivery of the same request key returns the existing build and
+does not allocate another sequence.
 
 The board remains representation-neutral. It knows task state, dependency readiness,
 supersession, leases, and terminal propagation, but does not import context-domain types.
@@ -64,14 +70,18 @@ supersession, leases, and terminal propagation, but does not import context-doma
 
 ### Evidence
 
-`ingest-evidence` resolves the requested ref to a full commit SHA, performs a full
-blob-filtered (non-shallow) clone, and checks out that exact commit. It stores immutable
-provider observations, the exact tree, content-addressed blobs, bounded commit/parent
-history, first-parent changes, deterministic parser analyses, symbols, imports,
-structural facts, identities, and ACL observations. Webhook builds carry their GitHub App
-installation ID; the worker mints a short-lived installation token and keeps it only for
-the active lease's Git and REST work. Oversized or binary content may be omitted from
-stored body text, but its manifest identity remains.
+`ingest-evidence` performs a full blob-filtered (non-shallow) clone, explicitly fetches
+the requested branch to `refs/remotes/origin/<ref>`, resolves that authoritative remote
+head to a full SHA, and checks it out detached. For webhook builds, the event SHA is an
+expected-head fence: if it differs from the fetched remote head, ingestion rejects the
+stale build instead of indexing a historical commit as the current ref. Manual builds
+without `commitSha` use the fetched head. Ingestion stores immutable provider
+observations, the exact tree, content-addressed blobs, bounded commit/parent history,
+first-parent changes, deterministic parser analyses, symbols, imports, structural facts,
+identities, and ACL observations. Webhook builds carry their GitHub App installation ID;
+the worker mints a short-lived installation token and keeps it only for the active lease's
+Git and REST work. Oversized or binary content may be omitted from stored body text, but
+its manifest identity remains.
 
 Each checkpoint records `sourceCompleteness` as `complete` or `partial`. Its observation
 frontier records the observed Git commit count and oldest commit, whether the configured
@@ -96,6 +106,28 @@ JSON selectors. The normalized citation claim must occur verbatim in the exact s
 excerpt; support from a nearby line or different JSON field is rejected. Invalid output
 receives at most one constrained repair.
 
+Logical IDs are trimmed and persisted in canonical lowercase before they contribute to
+revision identity. Their repository and change-commit segments must equal the checkpoint;
+issue identities must resolve to cited issue evidence, and every remaining
+model-controlled suffix segment must occur in the exact selected citation excerpt or the
+intrinsic cited-source identity (source ID or path). Scope fields use the same rule; a
+path's presence in the checkpoint manifest is necessary but not sufficient. Unrelated
+text elsewhere in the evidence record cannot ground identity or scope. A syntactically
+valid but hallucinated identity cannot create or collide with a durable logical subject.
+
+The Daytona Codex invocation treats the evidence bundle as untrusted data, ignores user
+configuration, uses strict configuration, and disables shell, shell snapshots, unified
+execution, multi-agent, apps, plugins, remote plugins, hooks, browser use, the in-app
+browser, computer use, image generation, the code-mode host, workspace dependencies,
+skill MCP dependency installation, and web search. It receives no repository credential
+and can only write the schema-constrained JSON result; all grounding and identity
+validation remain host-side.
+
+Successful derivation cache reuse requires the same commit, selector/focus fingerprint,
+complete checkpoint evidence fingerprint, generator/model, prompt, and schema versions.
+Equivalent evidence can therefore reuse an immutable run safely; projection still
+validates every reused revision's citations against the exact target checkpoint.
+
 Review, rejection, invalidation, supersession, and redaction are append-only events.
 Derived interpretation never becomes terminal evidence; answer citations expand to the
 original source anchors.
@@ -114,20 +146,35 @@ original source anchors.
 
 A generation is published only as one coherent tenant/repository/ref/commit view. Queries
 never combine refs, ACL states, or partially built projectors. Indexes rebuild from
-canonical evidence and immutable knowledge.
+canonical evidence and immutable knowledge. Current knowledge selection is explicitly
+scoped to the exact evidence checkpoint: every stored citation must find the same source
+identity and `contentDigest` in that checkpoint (with matching commit/path identity where
+present). This permits safe reuse of unchanged cited facts across equivalent same-commit
+checkpoints, but excludes stale PR/issue-derived facts when mutable provider evidence
+changes. A revision for another branch, older commit, or same commit with nonmatching
+provider evidence cannot enter the generation.
+
+The `derivedKnowledge` capability uses that same scope. It is `available` only when at
+least one exact-checkpoint citation-valid revision is eligible and every logical ID
+present for that checkpoint has an eligible current revision, `partial` when only some
+do, and `unavailable` when none do. Ref+commit equality or repository history alone never
+upgrades the capability.
 
 Canonical writes create one durable outbox delivery per named projection consumer.
 Each consumer runs in its own capability-role transaction, claims independently with a
 consumer-specific lease ID, writes only its projection, and completes its own checkpoint.
 Acknowledgements require the current, unexpired delivery lease and exact scoped event.
 Repository-global ACL/erasure events remain pending until every current ref has rebuilt;
-older ref/commit deliveries are acknowledged only as proven superseded work. A ref-scoped
-advisory lock and newest-checkpoint barrier prevent an older build from replacing a newer
-generation. The repository access fingerprint is part of both generation identity and
-generation output fingerprint. ACL mutation, ACL projection, and final publication share a
-repository access lock and revalidate that fingerprint, so a revoke during indexing forces
-a retry instead of publishing mixed ACL state. Query authorization also checks the current
-ACL observation rather than trusting a historical generation projection.
+pending evidence and knowledge deliveries below the newest admitted or committed
+`refSequence` are terminally completed as superseded. This decision depends on admission
+order, not successful successor ingestion or publication, so backlog converges even if
+the newer build later fails. A ref-scoped advisory lock and newest-checkpoint barrier
+prevent an older build from replacing a newer generation. The repository access
+fingerprint is part of both generation identity and generation output fingerprint. ACL
+mutation, ACL projection, and final publication share a repository access lock and
+revalidate that fingerprint, so a revoke during indexing forces a retry instead of
+publishing mixed ACL state. Query authorization also checks the current ACL observation
+rather than trusting a historical generation projection.
 `POST /internal/context/outbox/drain` selects only current checkpoints and actually re-runs
 the same idempotent `index-context` path.
 
@@ -164,7 +211,7 @@ privileged meaning.
 
 `POST /context/query` and MCP `query_context` use one storage-neutral contract:
 
-1. authenticate the credential and bound principal;
+1. authenticate the credential and bound principal, defaulting an omitted ref to `main`;
 2. resolve the principal's repository ACL fingerprints, requested ref, and one published
    generation;
 3. plan exact, structured, structural, lexical, knowledge, temporal, hierarchy, and/or
@@ -173,7 +220,9 @@ privileged meaning.
    deterministically;
 5. surface conflicts and coverage gaps;
 6. assemble an evidence pack from original source spans;
-7. synthesize and verify every returned citation.
+7. synthesize and verify every returned citation;
+8. reauthorize the principal and require the same current ACL-fingerprint set immediately
+   before releasing the response.
 
 Exact and structured candidates cannot be displaced by weaker semantic matches. A
 response always reports the generation/ref/commit, original-evidence citations,
@@ -209,6 +258,13 @@ GitHub App.
 read-only tool: `query_context`. Storage primitives and retriever controls are not public
 MCP tools.
 
+Public `POST /context/query` and `POST /mcp` bodies are limited to 128 KiB. Each raw
+target category (`paths`, `symbols`, `pullRequests`, or `issues`) accepts at most 100
+array entries. Entries are trimmed, empty strings are discarded, accepted values are
+deduplicated, and every non-empty entry is limited to 1,000 characters. The raw-entry
+limit is applied before deduplication, so duplicate flooding cannot bypass amplification
+protection.
+
 ## Persistence and idempotency
 
 The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in
@@ -224,17 +280,29 @@ while a moved ref produces a new isolated generation.
 ## Authentication and security
 
 Health, task definitions, and signed webhook intake are public. `INTERNAL_API_TOKEN`
-authorizes board, worker, and administration traffic. `CONTEXT_API_TOKEN` is a narrower
-server-side credential for `/context/*`, `/mcp`, and exact ACL synchronization.
+authorizes board, worker, administration, and
+`POST /internal/context/access/sync`. `CONTEXT_API_TOKEN` is a narrower server-side
+credential accepted only by `POST /context/query` and `POST /mcp`.
 
-Context reads also require `x-jina-principal-id`; shared tenancy additionally carries the
-resolved tenant. Current ACL observations resolve that principal to exact repository ACL
-fingerprints. PostgreSQL applies those fingerprints while hydrating documents, fragments,
-exact terms, hierarchy nodes, manifests, and current knowledge, before retrievers can
-create candidates; structural relations are retained only when all anchors belong to the
-authorized document set. Citations are checked again before they leave the API. Tenant
-administrators can view metrics, review knowledge, and issue rebuild/erasure commands.
-Browser MCP origins must match `JINA_MCP_ALLOWED_ORIGINS`.
+In production the context credential is usable only when
+`JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID` server-side bind it to one
+identity.
+Tenant/principal headers may repeat that identity but cannot override it; a mismatch is
+unauthorized. Internal callers must carry a normalized, forwarded principal and, in
+shared tenancy, a tenant. Current ACL observations resolve that principal to exact
+repository ACL fingerprints. PostgreSQL applies those fingerprints while hydrating
+documents, fragments, exact terms, hierarchy nodes, manifests, and current knowledge,
+before retrievers can create candidates; structural relations are retained only when all
+anchors belong to the authorized document set. The principal and exact fingerprint set
+are re-read after hydration/synthesis, and citations are checked again before they leave
+the API. Tenant administrators can view metrics, review knowledge, and issue
+rebuild/erasure commands. Browser MCP origins must match `JINA_MCP_ALLOWED_ORIGINS`.
+
+Repository access synchronization is also serialized at the store boundary. Both
+`replace` and `merge` acquire one tenant/principal advisory lock; `merge` reads the
+current grants and applies their union with the request in that transaction. API-level
+read/modify/write races cannot discard one of two concurrent merges; a serialized
+replacement still has its documented complete-set semantics.
 
 The schema-owning migration login is separate from the application login. The migration
 installs focused NOLOGIN capability roles, marks the runtime login `NOINHERIT`, and grants

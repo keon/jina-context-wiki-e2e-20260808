@@ -9,6 +9,26 @@ const CODEX_LOCAL_BIN = `${WORK_DIR}/node_modules/.bin/codex`;
 const SCHEMA_PATH = `${WORK_DIR}/knowledge-document-schema.json`;
 const RESULT_PATH = `${WORK_DIR}/knowledge-document-result.json`;
 const PROMPT_PATH = `${WORK_DIR}/prompt.txt`;
+export const UNTRUSTED_KNOWLEDGE_CODEX_ARGS = [
+  "--ignore-user-config",
+  "--strict-config",
+  "--disable shell_tool",
+  "--disable shell_snapshot",
+  "--disable multi_agent",
+  "--disable apps",
+  "--disable browser_use",
+  "--disable computer_use",
+  "--disable image_generation",
+  "--disable unified_exec",
+  "--disable plugins",
+  "--disable remote_plugin",
+  "--disable hooks",
+  "--disable in_app_browser",
+  "--disable code_mode_host",
+  "--disable workspace_dependencies",
+  "--disable skill_mcp_dependency_install",
+  '-c web_search="disabled"'
+] as const;
 
 /**
  * Executes one bounded knowledge-document generation in an ephemeral Daytona
@@ -84,6 +104,7 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         "exec",
         "--json",
         "--ephemeral",
+        ...UNTRUSTED_KNOWLEDGE_CODEX_ARGS,
         "--sandbox workspace-write",
         `-C ${shellQuote(WORK_DIR)}`,
         `--output-schema ${shellQuote(SCHEMA_PATH)}`,

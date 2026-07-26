@@ -3,7 +3,7 @@
 These are the implemented context-engine and board flows. All context identities include
 tenant and repository scope even where the diagrams abbreviate them.
 
-## Signed push to exact-commit build
+## Signed push to authoritative-head build
 
 ```mermaid
 sequenceDiagram
@@ -23,23 +23,26 @@ sequenceDiagram
 ```
 
 An unchanged head deduplicates. A moved ref supersedes active older work. The worker later
-verifies that the checked-out commit is exactly the requested full SHA.
+fetches the authoritative remote branch head and requires it to equal the event SHA; a
+stale delivery fails rather than becoming the current ref generation.
 
-## Context stage DAG
+## Strict context stage sequence
 
 ```mermaid
 flowchart LR
     B["build-context"] --> I["ingest-evidence (required)"]
     I --> X["index-context baseline (required)"]
-    I --> K["derive-knowledge (optional)"]
+    X --> K["derive-knowledge (optional)"]
     K --> E["index-context enriched successor"]
     X --> Q["query_context available"]
     E --> Q
 ```
 
-The board aggregate can serve a baseline generation without model output. Production
-acceptance waits for all three stages and requires the enriched successor so it exercises
-the complete release path.
+The coordinator queues only the next stage: ingestion first, baseline indexing second,
+and optional derivation only after the baseline succeeds. This prevents independent
+workers from racing baseline projection inputs with a knowledge commit. The board can
+serve the baseline without model output. Production acceptance waits for all three stages
+and requires the enriched successor so it exercises the complete release path.
 
 ## Ingest immutable evidence
 
@@ -54,7 +57,8 @@ sequenceDiagram
     W->>API: POST /internal/worker/claim (run-ingest-evidence)
     API-->>W: task, lease, attempt, write-fence token
     W->>Git: Mint installation token; full blob-filtered clone and paginated provider history
-    W->>Git: Resolve and checkout exact commit SHA
+    W->>Git: Fetch refs/heads/ref to refs/remotes/origin/ref
+    W->>Git: Require event SHA == fetched head; detached checkout
     W->>W: Persist bounded commit/parent history; enumerate full manifest
     W->>W: Record Git/GitHub frontiers and omitted bodies as complete or partial
     W->>API: POST /internal/context/ingest (lease + evidence input)
@@ -67,11 +71,12 @@ sequenceDiagram
     W->>API: Complete board stage with checkpoint metadata
 ```
 
-Partial trees and unverified commit identity fail closed. A reached Git/GitHub bound,
+Partial trees, a moved remote ref, and unverified commit identity fail closed. A reached Git/GitHub bound,
 unavailable optional provider source, or omitted body is committed truthfully as a
 `partial` checkpoint with a machine-readable frontier; query coverage then reports that
-partial state. Retries converge by immutable object and input fingerprints. A stale lease
-cannot commit.
+partial state. Retries converge by immutable object and input fingerprints. The
+checkpoint advances the projection frontier only if its `refSequence` is at least the
+latest admitted sequence. A stale lease cannot commit.
 
 ## Baseline and enriched generations
 
@@ -83,32 +88,35 @@ sequenceDiagram
     participant DX as Daytona executor
     participant DB as jina_context
 
-    par Required baseline
-        IW->>API: POST /internal/context/index (checkpoint + fence)
-        API->>DB: Build manifest, documents/fragments, exact/lexical, structure, hierarchy, ACL
-        DB->>DB: Check required projector barrier
-        DB-->>API: Atomically published baseline generation
-    and Optional knowledge
-        KW->>API: POST /internal/context/derive/prepare
-        API->>DB: Select bounded immutable evidence bundle
-        API-->>KW: Prompt and evidence bundle
-        KW->>DX: Run knowledge-document generator at pinned checkout
-        DX-->>KW: Untrusted JSON document output
-        KW->>API: POST /internal/context/derive/commit (fence + raw output)
-        API->>DB: Resolve exact range/JSON excerpts and validate terminal source citations
-        API->>DB: Require each normalized claim verbatim in its selected evidence excerpt
-        alt valid
-            DB->>DB: Append derivation run, revisions, evidence, events
-            DB->>DB: Publish enriched successor generation
-        else invalid
-            API-->>KW: Diagnostics for one bounded repair
-        end
+    IW->>API: POST /internal/context/index (checkpoint + fence)
+    API->>DB: Build manifest, documents/fragments, exact/lexical, structure, hierarchy, ACL
+    DB->>DB: Check required projector barrier
+    DB-->>API: Atomically published baseline generation
+    Note over API,KW: Baseline completion queues optional derivation
+    KW->>API: POST /internal/context/derive/prepare
+    API->>DB: Select bounded immutable evidence bundle
+    API-->>KW: Prompt and evidence bundle
+    KW->>DX: Run schema-only knowledge generator with all agentic tools disabled
+    DX-->>KW: Untrusted JSON document output
+    KW->>API: POST /internal/context/derive/commit (fence + raw output)
+    API->>DB: Resolve exact range/JSON excerpts and validate terminal source citations
+    API->>DB: Require each normalized claim verbatim in its selected evidence excerpt
+    alt valid
+        DB->>DB: Under ref lock, reject if checkpoint is behind admitted/current sequence
+        DB->>DB: Append derivation run, revisions, evidence, events
+        DB->>DB: Publish enriched successor generation
+    else invalid
+        API-->>KW: Diagnostics for one bounded repair
     end
 ```
 
 The baseline contains raw evidence as indexable context documents. Derived knowledge is
 also projected as indexable documents, but its answer citations expand through immutable
 revision evidence to original blobs, observations, commits, pull requests, or issues.
+Only revisions whose every stored citation source identity and `contentDigest` exists in
+the exact evidence checkpoint can enter either generation; ref+commit equality alone is
+insufficient. Equivalent same-commit checkpoints safely reuse unchanged cited facts, but
+changed mutable provider evidence excludes stale PR/issue-derived facts.
 
 Each projector claims its own durable outbox delivery and lease. Publication acknowledges
 only deliveries for that consumer and exact tenant/repository/ref/commit checkpoint.
@@ -124,7 +132,8 @@ sequenceDiagram
     participant DB as jina_context
     participant QE as Query engine
 
-    C->>API: POST /context/query (context token, bound principal, repository/ref/question)
+    C->>API: POST /context/query (fixed-bound context token, repository/ref/question)
+    API->>API: Default omitted ref to main
     API->>DB: Resolve principal repository access and ACL fingerprints
     DB-->>API: Authorized repository and exact fingerprint set
     API->>DB: SQL-filter one published generation by those fingerprints
@@ -140,6 +149,7 @@ sequenceDiagram
     QE->>QE: Deduplicate, fuse, detect conflicts, assess coverage
     QE->>QE: Assemble evidence pack, synthesize, verify citations
     QE->>DB: Persist bounded query telemetry
+    API->>DB: Reauthorize principal and exact ACL-fingerprint set
     API-->>C: Answer, generation/ref/commit, citations, conflicts, coverage, trace ID
 ```
 
@@ -147,7 +157,8 @@ SQL filtering occurs while hydrating documents, fragments, exact entries, hierar
 manifest, and current knowledge, before candidate creation. Structural relations survive
 only when every anchor belongs to the authorized document set. Dense retrieval joins only
 when a generation advertises an evaluated/available embedding capability; it is disabled
-in the current release.
+in the current release. If the final authorization differs from the initial fingerprint
+set, the API drops the response.
 
 ## Stateless MCP query
 
@@ -157,7 +168,7 @@ sequenceDiagram
     participant API as jina-context MCP server
     participant QE as Query engine
 
-    MC->>API: POST /mcp initialize (context token + bound principal)
+    MC->>API: POST /mcp initialize (context token fixed to configured tenant/principal)
     API-->>MC: Stateless Streamable HTTP response
     MC->>API: tools/list
     API-->>MC: query_context only
@@ -168,6 +179,9 @@ sequenceDiagram
 ```
 
 MCP callers cannot select SQL, retrievers, generation internals, or mutation tools.
+Both public query transports reject bodies over 128 KiB. Each raw target category accepts
+at most 100 entries before deduplication; values are trimmed, empty strings discarded,
+accepted values deduplicated, and non-empty values limited to 1,000 characters.
 
 ## Knowledge review
 
@@ -226,8 +240,9 @@ sequenceDiagram
     CB->>CR: Deploy task worker and verify exact topics
     CB->>CR: Deploy dashboard and admin from the same release build
     CB->>A: Execute production fixture build
-    A->>CR: ACL sync, build, generation/doc/query checks
-    A->>CR: Real MCP SDK tools/list and query_context
+    A->>CR: Internal-token ACL merge for non-admin query principal
+    A->>CR: Admin-principal build, generation, document, and backlog checks
+    A->>CR: Bound non-admin HTTP query and real MCP SDK query_context
     A->>CR: Verify citations, commit, backlog, and removed route
     A-->>CB: Pass/fail summary
 ```

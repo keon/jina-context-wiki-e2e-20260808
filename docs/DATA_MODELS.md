@@ -15,9 +15,16 @@ The snapshot contains tasks, dependencies, task events, and durable deliveries. 
 mutation is tenant-scoped and protected by a cross-instance transaction lock. Completion
 requires the current renewable lease.
 
+A context build starts with only `ingest-evidence` queued; baseline `index-context` and
+`derive-knowledge` are blocked. Successful ingestion queues only baseline indexing, and
+successful baseline publication then queues optional derivation/enriched publication.
+The store never exposes both projection-input-producing stages as simultaneously
+claimable work.
+
 `pipeline_builds.ref_sequence` is allocated monotonically under a
-tenant/repository/ref advisory lock at build request time. The ingest stage and resulting
-checkpoint retain that immutable sequence. Current-ref selection orders by
+tenant/repository/ref advisory lock at build request time. Canonical ref-sensitive
+evidence, knowledge, and generation transitions use the same lock key. The ingest stage
+and resulting checkpoint retain that immutable sequence. Current-ref selection orders by
 `ref_sequence`, not request timestamps, checkpoint creation time, or worker completion
 time.
 
@@ -59,8 +66,17 @@ JSON value. Mixed line/JSON selectors and out-of-bounds selectors do not resolve
 architecture, component, decision, change, incident, ownership record, or runbook.
 `knowledge_document_revisions` stores immutable generated or human-authored bodies and
 metadata. `knowledge_revision_evidence` is the ordered set of original source anchors.
+Logical IDs are canonical lowercase and participate in stable revision identity only
+after grounding: repository and change-commit portions come from the checkpoint, while
+model-controlled subject and issue segments must be supported by resolved cited evidence.
+The revision's ref/commit scope is always copied from that checkpoint.
 State changes are append-only `knowledge_revision_events`; there is no mutable current
 flag on the revision. The current selection is a disposable generation projection.
+Selection requires every stored citation to match a record selected by the exact target
+checkpoint on source type/ID and `content_digest`, plus commit/path identity when present.
+Ref/commit equality alone is insufficient. Unchanged citation identities and digests may
+reuse a revision across equivalent same-commit checkpoints; changed mutable provider
+observations exclude stale PR/issue-derived revisions.
 Terminal events (`rejected`, `superseded`, `invalidated`, `redacted`, or `expired`)
 invalidate published generations for the revision's ref immediately.
 
@@ -84,6 +100,13 @@ Required projectors must be coherent before publication; optional projectors dec
 published without model output, and successful derivation can publish an enriched
 successor.
 
+The generation's `derivedKnowledge` capability state is computed from the exact
+checkpoint's citation-valid revision set. `available` means at least one eligible
+revision and complete eligible coverage of the logical IDs present for that checkpoint;
+`partial` means only some checkpoint-valid logical IDs remain eligible; `unavailable`
+means none do. Ref+commit-matching revisions with absent or changed citation evidence do
+not affect this flag.
+
 `projection_input_events` is the immutable repository-wide frontier for materialization
 inputs. It assigns a monotonic sequence to evidence checkpoint commits, successful
 knowledge runs, knowledge revision events, and erasures. `index_generations` persists the
@@ -97,15 +120,22 @@ cannot acknowledge required projection work. Every delivery lease is consumer-ow
 each projector transaction activates only that consumer's capability role. Acknowledgement
 requires the exact unexpired lease. Scoped deliveries match tenant, repository, ref,
 commit, checkpoint/event, and consumer. Repository-global ACL/retention events use an
-all-current-refs barrier; obsolete scoped deliveries are completed only after a newer
-checkpoint is published. Rebuilds and the internal drain endpoint replay current
+all-current-refs barrier. Pending evidence and knowledge deliveries whose source
+checkpoint is below the newest admitted or committed sequence for that ref are marked
+processed with a terminal superseded reason, without waiting for a newer checkpoint or
+generation to publish. Rebuilds and the internal drain endpoint replay only current
 checkpoints into new idempotent generations and never expose partial rows.
 
 ## Database invariants
 
 - Repository-owned identities and foreign keys include tenant and repository scope.
 - A build/checkpoint with a lower `ref_sequence` cannot become current or publish over a
-  higher sequence, regardless of completion timestamps.
+  higher admitted sequence, regardless of completion timestamps. Such a checkpoint does
+  not advance the projection-input frontier, and knowledge commit rechecks the maximum
+  admitted/checkpoint sequence under the ref lock.
+- Pending evidence/knowledge outbox rows below that maximum sequence terminally
+  supersede. A failed newer ingest cannot leave obsolete older work counted forever in
+  backlog or selected for drain.
 - Projection input events are immutable and uniquely sequenced per repository. A
   generation cannot publish when evidence, knowledge state, or erasure state changed
   after its initial frontier sample.
@@ -116,15 +146,26 @@ checkpoints into new idempotent generations and never expose partial rows.
   alternate evidence-row identities; PostgreSQL validates the selector before storing it.
 - Knowledge citations terminate at evidence, never another generated revision. Citation
   claims must occur verbatim after whitespace/case normalization in the exact selected
-  evidence excerpt.
+  evidence excerpt. Identity and scope grounding can use only that excerpt and intrinsic
+  source identity; unrelated record text and manifest membership alone cannot support it.
+- Knowledge projection requires every citation's source identity and digest to be a
+  member of the exact generation checkpoint. Equivalent-evidence cache reuse is safe
+  because this membership is rechecked at indexing; mutable provider changes remove stale
+  derived facts.
 - ACL projection is generation-scoped. Principal permissions resolve to exact repository
   ACL fingerprints, and SQL filters projection rows before candidate creation. The
   repository access snapshot fingerprint is persisted with the generation, included in
   generation identity/output fingerprints, and rechecked under the repository access lock
   at ACL projection and publication. Query authorization consults current ACL state so a
-  revoked principal cannot use an older published ACL projection.
+  revoked principal cannot use an older published ACL projection. Authorized hydration
+  reads the principal's current fingerprint set before and after loading, and query
+  response emission performs a final authorization/fingerprint equality check.
 - Every ACL transition has a monotonic observation version. Revoke/regrant cycles therefore
   produce new immutable events and new generation identities rather than reusing old IDs.
+- Repository ACL replacement and merge synchronize under the same tenant/principal
+  advisory lock. Merge reads the current ACL and applies the union in one store
+  transaction, so concurrent merges cannot lose either grant set. Replacement remains an
+  intentional complete-set operation and applies in the lock's serial order.
 - Documents derived from multiple sources require every source ACL fingerprint in lexical,
   hierarchy, and optional dense retrieval; wildcard fingerprints never bypass that rule.
 - Erasure filters are durable and checked during ingestion and rebuild.

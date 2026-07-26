@@ -4,6 +4,7 @@ import {
   IndexContextService,
   IngestEvidenceService,
   QueryContextService,
+  StoreScopeAuthorizer,
   createKnowledgeCitation,
   createKnowledgeRevision,
   createEvidenceRecord,
@@ -261,14 +262,24 @@ test(
 
     await assert.rejects(store.commitSnapshot(snapshot, ingestClaim.fence), /write fence is stale or invalid/);
 
-    const indexClaim = await coordinator.claim({
-      tenantId,
-      workerId: "integration-index",
-      topics: ["run-derive-knowledge", "run-index-context"],
-      now: at(2_000),
-      leaseExpiresAt: at(600_000)
-    });
+    const [indexClaim, prematureDeriveClaim] = await Promise.all([
+      coordinator.claim({
+        tenantId,
+        workerId: "integration-index",
+        topics: ["run-derive-knowledge", "run-index-context"],
+        now: at(2_000),
+        leaseExpiresAt: at(600_000)
+      }),
+      coordinator.claim({
+        tenantId,
+        workerId: "integration-derive",
+        topics: ["run-derive-knowledge", "run-index-context"],
+        now: at(2_000),
+        leaseExpiresAt: at(600_000)
+      })
+    ]);
     assert.ok(indexClaim);
+    assert.equal(prematureDeriveClaim, undefined);
     assert.equal(indexClaim.stage.topic, "run-index-context");
     const generation = await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_000), indexClaim.fence);
     assert.equal(generation.status, "published");
@@ -470,14 +481,10 @@ test(
     assert.ok(candidates.some((candidate) => candidate.text.includes("deployContext")));
     assert.ok(candidates.some((candidate) => candidate.sourceKind === "knowledge"));
     const enrichedProjection = await store.getGeneration(enrichedGeneration.id);
-    const authorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, new Set([aclFingerprint]));
-    const unauthorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, new Set());
+    const authorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, "reader-1");
+    const unauthorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, "reader-without-access");
     assert.equal(authorizedProjection?.documents.length, enrichedProjection?.documents.length);
-    assert.deepEqual(unauthorizedProjection?.documents, []);
-    assert.deepEqual(unauthorizedProjection?.fragments, []);
-    assert.deepEqual(unauthorizedProjection?.exactIndex, []);
-    assert.deepEqual(unauthorizedProjection?.hierarchyNodes, []);
-    assert.deepEqual(unauthorizedProjection?.structuralRelations, []);
+    assert.equal(unauthorizedProjection, undefined);
     const fragment = enrichedProjection?.fragments[0];
     assert.ok(fragment);
     await embeddings.store({
@@ -681,6 +688,169 @@ test(
     );
     assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
 
+    const providerStateRepository = "acme/provider-state-race";
+    const providerStateCommit = "c".repeat(40);
+    const ingestProviderState = (refSequence: number, state: string, observedAt: string) =>
+      new IngestEvidenceService(store).ingest({
+        tenantId,
+        repository: providerStateRepository,
+        ref,
+        refSequence,
+        commitSha: providerStateCommit,
+        files: [],
+        observations: [
+          {
+            sourceType: "issue",
+            sourceId: "issue-7",
+            title: "Issue #7",
+            payload: { number: 7, state },
+            pathOrUrl: `https://example.test/${providerStateRepository}/issues/7`,
+            observedAt,
+            metadata: { number: 7, state }
+          }
+        ],
+        aclFingerprint: repositoryAclFingerprint(tenantId, providerStateRepository),
+        observationFrontier: `provider-state:${refSequence}`,
+        createdAt: at(12_200 + refSequence),
+        sourceComplete: true
+      });
+    const openProviderState = await ingestProviderState(1, "open", at(12_201));
+    const openIssueRecord = (await store.listEvidence(openProviderState.id))[0]!;
+    const providerStateRevision = createKnowledgeRevision({
+      logicalId: `component:${providerStateRepository}:issue-7`,
+      tenantId,
+      repository: providerStateRepository,
+      kind: "component",
+      title: "Issue 7 state",
+      bodyMarkdown: "Issue 7 is open.",
+      summary: "Issue 7 is open.",
+      structuredSummary: { state: "open" },
+      scope: {
+        ref,
+        commitSha: providerStateCommit,
+        paths: [],
+        symbols: [],
+        pullRequests: [],
+        issues: ["7"]
+      },
+      evidenceFingerprint: fingerprint(openIssueRecord.anchor),
+      generatorName: "fixture",
+      generatorVersion: "fixture-v1",
+      model: "fixture",
+      promptVersion: "fixture-v1",
+      confidence: 1,
+      createdAt: at(12_204)
+    });
+    const providerStateCitation = createKnowledgeCitation(providerStateRevision.id, 0, "open", {
+      ...openIssueRecord.anchor,
+      jsonPointer: "/state"
+    });
+    await store.commitKnowledge({
+      run: {
+        id: "provider-state-run",
+        tenantId,
+        repository: providerStateRepository,
+        checkpointId: openProviderState.id,
+        cacheKey: fingerprint("provider-state-cache"),
+        focusFingerprint: fingerprint("provider-state-focus"),
+        generatorName: "fixture",
+        generatorVersion: "fixture-v1",
+        model: "fixture",
+        promptVersion: "fixture-v1",
+        schemaVersion: "fixture-v1",
+        rawOutputs: [],
+        status: "succeeded",
+        diagnostics: [],
+        revisionIds: [providerStateRevision.id],
+        createdAt: at(12_204)
+      },
+      revisions: [providerStateRevision],
+      citations: [providerStateCitation]
+    });
+    assert.deepEqual(
+      (await store.listCheckpointRevisions(tenantId, providerStateRepository, openProviderState.id)).map(
+        (revision) => revision.id
+      ),
+      [providerStateRevision.id]
+    );
+    const closedProviderState = await ingestProviderState(2, "closed", at(12_205));
+    assert.deepEqual(
+      await store.listCheckpointRevisions(tenantId, providerStateRepository, closedProviderState.id),
+      []
+    );
+    assert.equal(
+      (await new IndexContextService(store).index(closedProviderState.id, at(12_206))).capabilities.derivedKnowledge,
+      "unavailable"
+    );
+    const identicalProviderState = await ingestProviderState(3, "open", at(12_201));
+    assert.equal(identicalProviderState.evidenceFingerprint, openProviderState.evidenceFingerprint);
+    assert.deepEqual(
+      (await store.listCheckpointRevisions(tenantId, providerStateRepository, identicalProviderState.id)).map(
+        (revision) => revision.id
+      ),
+      [providerStateRevision.id]
+    );
+    assert.equal(
+      (await new IndexContextService(store).index(identicalProviderState.id, at(12_207))).capabilities.derivedKnowledge,
+      "available"
+    );
+
+    const supersededBacklogRepository = "acme/superseded-backlog";
+    const supersededBacklogBuild = await coordinator.createBuild({
+      tenantId,
+      repository: supersededBacklogRepository,
+      ref,
+      commitSha: "a".repeat(40),
+      requestKey: "superseded-backlog-older",
+      createdAt: at(12_210)
+    });
+    const supersededBacklogCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId,
+      repository: supersededBacklogRepository,
+      ref,
+      refSequence: supersededBacklogBuild.refSequence,
+      commitSha: "a".repeat(40),
+      files: [],
+      observations: [],
+      aclFingerprint: repositoryAclFingerprint(tenantId, supersededBacklogRepository),
+      observationFrontier: "superseded-backlog-older",
+      createdAt: at(12_220),
+      sourceComplete: true
+    });
+    assert.ok(
+      Number(
+        (
+          await database.pool.query<{ count: string }>(
+            `select count(*)::text count from jina_context.outbox
+             where tenant_id=$1 and repository=$2 and processed_at is null`,
+            [tenantId, supersededBacklogRepository]
+          )
+        ).rows[0]?.count
+      ) > 0
+    );
+    await coordinator.createBuild({
+      tenantId,
+      repository: supersededBacklogRepository,
+      ref,
+      commitSha: "b".repeat(40),
+      requestKey: "superseded-backlog-newer",
+      createdAt: at(12_230)
+    });
+    assert.ok(!(await store.pendingProjectionCheckpoints(tenantId, 100)).includes(supersededBacklogCheckpoint.id));
+    const supersededDeliveries = await database.pool.query<{ pending: string; superseded: string }>(
+      `select
+         count(*) filter (where processed_at is null)::text pending,
+         count(*) filter (
+           where processed_at is not null
+             and last_error='superseded by a newer admitted ref sequence'
+         )::text superseded
+       from jina_context.outbox
+       where tenant_id=$1 and repository=$2`,
+      [tenantId, supersededBacklogRepository]
+    );
+    assert.equal(Number(supersededDeliveries.rows[0]?.pending), 0);
+    assert.ok(Number(supersededDeliveries.rows[0]?.superseded) > 0);
+
     const refRaceRepository = "acme/ref-race";
     const olderBuild = await coordinator.createBuild({
       tenantId,
@@ -700,20 +870,7 @@ test(
     });
     assert.equal(olderBuild.refSequence, 1);
     assert.equal(newerBuild.refSequence, 2);
-    const newerRefCheckpoint = await new IngestEvidenceService(store).ingest({
-      tenantId,
-      repository: refRaceRepository,
-      ref,
-      refSequence: newerBuild.refSequence,
-      commitSha: "2".repeat(40),
-      files: [],
-      observations: [],
-      aclFingerprint: repositoryAclFingerprint(tenantId, refRaceRepository),
-      observationFrontier: "newer",
-      createdAt: at(12_500),
-      sourceComplete: true
-    });
-    const newerRefFrontier = await store.projectionInputFingerprint(tenantId, refRaceRepository);
+    const initialRefFrontier = await store.projectionInputFingerprint(tenantId, refRaceRepository);
     const delayedOlderRefCheckpoint = await new IngestEvidenceService(store).ingest({
       tenantId,
       repository: refRaceRepository,
@@ -724,14 +881,65 @@ test(
       observations: [],
       aclFingerprint: repositoryAclFingerprint(tenantId, refRaceRepository),
       observationFrontier: "older-delayed",
-      createdAt: at(12_600),
+      createdAt: at(12_500),
       sourceComplete: true
     });
-    assert.equal(await store.projectionInputFingerprint(tenantId, refRaceRepository), newerRefFrontier);
-    assert.equal((await store.latestCheckpoint(tenantId, refRaceRepository, ref))?.id, newerRefCheckpoint.id);
-    await assert.rejects(new IndexContextService(store).index(delayedOlderRefCheckpoint.id, at(12_700)), /superseded/);
+    assert.equal(await store.projectionInputFingerprint(tenantId, refRaceRepository), initialRefFrontier);
+    await assert.rejects(new IndexContextService(store).index(delayedOlderRefCheckpoint.id, at(12_600)), /superseded/);
+    await assert.rejects(
+      store.commitKnowledge({
+        run: {
+          id: "stale-pg-derive-run",
+          tenantId,
+          repository: refRaceRepository,
+          checkpointId: delayedOlderRefCheckpoint.id,
+          cacheKey: "stale-pg-derive-cache",
+          focusFingerprint: "stale",
+          generatorName: "test",
+          generatorVersion: "1",
+          model: "test",
+          promptVersion: "1",
+          schemaVersion: "1",
+          rawOutputs: [],
+          status: "succeeded",
+          diagnostics: [],
+          revisionIds: [],
+          createdAt: at(12_600)
+        },
+        revisions: [],
+        citations: []
+      }),
+      /superseded/
+    );
     assert.equal(
-      (await new IndexContextService(store).index(newerRefCheckpoint.id, at(12_800))).commitSha,
+      Number(
+        (
+          await database.pool.query<{ count: string }>(
+            `select count(*)::text count from jina_context.outbox
+             where tenant_id=$1 and repository=$2 and processed_at is null`,
+            [tenantId, refRaceRepository]
+          )
+        ).rows[0]?.count
+      ),
+      0
+    );
+
+    const newerRefCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId,
+      repository: refRaceRepository,
+      ref,
+      refSequence: newerBuild.refSequence,
+      commitSha: "2".repeat(40),
+      files: [],
+      observations: [],
+      aclFingerprint: repositoryAclFingerprint(tenantId, refRaceRepository),
+      observationFrontier: "newer",
+      createdAt: at(12_700),
+      sourceComplete: true
+    });
+    assert.equal((await store.latestCheckpoint(tenantId, refRaceRepository, ref))?.id, newerRefCheckpoint.id);
+    assert.equal(
+      (await new IndexContextService(store).index(newerRefCheckpoint.id, at(12_900))).commitSha,
       "2".repeat(40)
     );
     assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
@@ -739,6 +947,14 @@ test(
     const raceTenantId = `${tenantId}-acl-race`;
     const raceRepository = "acme/acl-race";
     const raceAclFingerprint = repositoryAclFingerprint(raceTenantId, raceRepository);
+    await Promise.all([
+      store.mergeRepositoryAccess(raceTenantId, "merge-reader", [raceRepository]),
+      store.mergeRepositoryAccess(raceTenantId, "merge-reader", ["acme/merge-second"])
+    ]);
+    assert.deepEqual(await store.repositoriesForPrincipal(raceTenantId, "merge-reader"), [
+      raceRepository,
+      "acme/merge-second"
+    ]);
     await store.replaceRepositoryAccess(raceTenantId, "race-reader", [raceRepository]);
     const raceCheckpoint = await new IngestEvidenceService(store).ingest({
       tenantId: raceTenantId,
@@ -799,6 +1015,28 @@ test(
       raceGeneration.repositoryAccessFingerprint,
       await store.repositoryAccessFingerprint(raceTenantId, raceRepository)
     );
+    class PostgresRevokingAuthorizer extends StoreScopeAuthorizer {
+      calls = 0;
+
+      override async authorize(input: Parameters<StoreScopeAuthorizer["authorize"]>[0]) {
+        this.calls += 1;
+        if (this.calls === 2) {
+          await store.replaceRepositoryAccess(raceTenantId, "race-reader", []);
+        }
+        return super.authorize(input);
+      }
+    }
+    await assert.rejects(
+      () =>
+        new QueryContextService(store, new PostgresRevokingAuthorizer(store)).query({
+          tenantId: raceTenantId,
+          repository: raceRepository,
+          principalId: "race-reader",
+          question: "ACL publication race fixture"
+        }),
+      /access changed|does not have repository access/i
+    );
+    await store.replaceRepositoryAccess(raceTenantId, "race-reader", [raceRepository]);
 
     const inputRaceTenantId = `${tenantId}-input-race`;
     const inputRaceRepository = "acme/input-race";

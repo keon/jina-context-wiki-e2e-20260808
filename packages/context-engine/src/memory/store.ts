@@ -8,7 +8,7 @@ import {
   type StructuralFact
 } from "../domain/evidence.js";
 import { validateEvidenceRecord } from "../domain/evidence.js";
-import { fingerprint, repositoryAclFingerprint, stableId } from "../domain/fingerprint.js";
+import { fingerprint, normalizeRepository, repositoryAclFingerprint, stableId } from "../domain/fingerprint.js";
 import type {
   DerivationRun,
   KnowledgeDocumentRevision,
@@ -56,7 +56,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   #closed = false;
 
   constructor(
-    private readonly fenceValidator?: Pick<ContextPipelineCoordinator, "validateWriteFence">,
+    private readonly fenceValidator?: Pick<ContextPipelineCoordinator, "latestRefSequence" | "validateWriteFence">,
     private readonly now: () => string = () => new Date().toISOString()
   ) {}
 
@@ -82,7 +82,14 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     const key = scopeKey(snapshot.checkpoint.tenantId, snapshot.checkpoint.repository, snapshot.checkpoint.ref);
     const latestId = this.#latestCheckpoints.get(key);
     const latest = latestId === undefined ? undefined : this.#checkpoints.get(latestId);
-    const becameLatest = latest === undefined || snapshot.checkpoint.refSequence > latest.refSequence;
+    const latestAdmittedSequence = await this.latestAdmittedRefSequence(
+      snapshot.checkpoint.tenantId,
+      snapshot.checkpoint.repository,
+      snapshot.checkpoint.ref
+    );
+    const becameLatest =
+      snapshot.checkpoint.refSequence >= latestAdmittedSequence &&
+      (latest === undefined || snapshot.checkpoint.refSequence > latest.refSequence);
     if (becameLatest) {
       this.#latestCheckpoints.set(key, snapshot.checkpoint.id);
       this.#advanceProjectionInput(
@@ -152,6 +159,16 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
 
   async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
     await this.#assertFence(input.run.tenantId, fence);
+    const checkpoint = await this.getCheckpoint(input.run.checkpointId);
+    if (!checkpoint) throw new Error(`Unknown evidence checkpoint ${input.run.checkpointId}`);
+    const latestCheckpoint = await this.latestCheckpoint(checkpoint.tenantId, checkpoint.repository, checkpoint.ref);
+    if (
+      latestCheckpoint?.id !== checkpoint.id ||
+      checkpoint.refSequence <
+        (await this.latestAdmittedRefSequence(checkpoint.tenantId, checkpoint.repository, checkpoint.ref))
+    ) {
+      throw new Error(`Checkpoint ${checkpoint.id} is superseded for ${checkpoint.repository}@${checkpoint.ref}`);
+    }
     const existing = this.#successfulRuns.get(input.run.cacheKey);
     if (existing !== undefined) return copy(this.#runs.get(existing)!);
     if (input.run.status !== "succeeded") throw new Error("commitKnowledge requires a successful run");
@@ -260,8 +277,41 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return copy(this.#events.get(revisionId) ?? []);
   }
 
-  async listCurrentEligibleRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
-    const revisions = await this.listRevisions(tenantId, repository);
+  async listCheckpointRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]> {
+    const checkpoint = this.#checkpoints.get(checkpointId);
+    if (
+      checkpoint === undefined ||
+      checkpoint.tenantId !== tenantId ||
+      checkpoint.repository !== normalizeRepository(repository)
+    ) {
+      return [];
+    }
+    const records = this.#snapshots.get(checkpointId)?.records ?? [];
+    return (await this.listRevisions(tenantId, repository)).filter((revision) => {
+      if (revision.scope.ref !== checkpoint.ref || revision.scope.commitSha !== checkpoint.commitSha) return false;
+      return (this.#citations.get(revision.id) ?? []).every((citation) =>
+        records.some(
+          (record) =>
+            record.anchor.sourceType === citation.anchor.sourceType &&
+            record.anchor.sourceId === citation.anchor.sourceId &&
+            record.anchor.contentDigest === citation.anchor.contentDigest &&
+            record.anchor.commitSha === citation.anchor.commitSha &&
+            record.anchor.pathOrUrl === citation.anchor.pathOrUrl
+        )
+      );
+    });
+  }
+
+  async listCurrentEligibleRevisions(
+    tenantId: string,
+    repository: string,
+    checkpointId: string
+  ): Promise<KnowledgeDocumentRevision[]> {
+    const revisions = await this.listCheckpointRevisions(tenantId, repository, checkpointId);
     const eligible = revisions.filter((revision) => {
       const events = this.#events.get(revision.id) ?? [];
       if (
@@ -321,7 +371,11 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       );
     }
     const latestCheckpoint = await this.latestCheckpoint(generation.tenantId, generation.repository, generation.ref);
-    if (latestCheckpoint?.id !== generation.checkpointId) {
+    if (
+      latestCheckpoint?.id !== generation.checkpointId ||
+      latestCheckpoint.refSequence <
+        (await this.latestAdmittedRefSequence(generation.tenantId, generation.repository, generation.ref))
+    ) {
       throw new Error(
         `Checkpoint ${generation.checkpointId} is superseded for ${generation.repository}@${generation.ref}`
       );
@@ -353,12 +407,17 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return value === undefined ? undefined : copy(value);
   }
 
-  async getAuthorizedGeneration(
-    generationId: string,
-    allowedAclFingerprints: ReadonlySet<string>
-  ): Promise<GenerationProjection | undefined> {
+  async getAuthorizedGeneration(generationId: string, principalId: string): Promise<GenerationProjection | undefined> {
     const projection = await this.getGeneration(generationId);
     if (!projection) return undefined;
+    const allowedAclFingerprints = new Set(
+      await this.aclFingerprintsForPrincipal(
+        projection.generation.tenantId,
+        principalId,
+        projection.generation.repository
+      )
+    );
+    if (allowedAclFingerprints.size === 0) return undefined;
     const documents = projection.documents.filter((document) => {
       const required = Array.isArray(document.metadata.requiredAclFingerprints)
         ? document.metadata.requiredAclFingerprints.filter((value): value is string => typeof value === "string")
@@ -406,9 +465,22 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
     this.#assertOpen();
+    this.#setRepositoryAccess(tenantId, principalId, repositories);
+  }
+
+  async mergeRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
+    this.#assertOpen();
+    const principalKey = `${tenantId}\u0000${principalId}`;
+    this.#setRepositoryAccess(tenantId, principalId, [
+      ...(this.#repositoryAccess.get(principalKey) ?? new Set<string>()),
+      ...repositories
+    ]);
+  }
+
+  #setRepositoryAccess(tenantId: string, principalId: string, repositories: Iterable<string>): void {
     const principalKey = `${tenantId}\u0000${principalId}`;
     const previous = this.#repositoryAccess.get(principalKey) ?? new Set<string>();
-    const next = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
+    const next = new Set([...repositories].map((repository) => repository.trim().toLowerCase()).filter(Boolean));
     for (const repository of new Set([...previous, ...next])) {
       if (previous.has(repository) === next.has(repository)) continue;
       const repositoryKey = `${tenantId}\u0000${repository}`;
@@ -450,6 +522,20 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       sequence: frontier?.sequence ?? 0,
       eventId: frontier?.eventId ?? null
     });
+  }
+
+  async latestAdmittedRefSequence(tenantId: string, repository: string, ref: string): Promise<number> {
+    const admitted =
+      (await this.fenceValidator?.latestRefSequence(tenantId, normalizeRepository(repository), ref)) ?? 0;
+    const committed = [...this.#checkpoints.values()]
+      .filter(
+        (checkpoint) =>
+          checkpoint.tenantId === tenantId &&
+          checkpoint.repository === normalizeRepository(repository) &&
+          checkpoint.ref === ref
+      )
+      .reduce((latest, checkpoint) => Math.max(latest, checkpoint.refSequence), 0);
+    return Math.max(admitted, committed);
   }
 
   async listRepositories(tenantId: string): Promise<string[]> {

@@ -315,7 +315,17 @@ export class PostgresEvidenceRepository implements EvidenceStore {
          order by ref_sequence desc,id desc limit 1`,
         [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
       );
-      if (latest.rows[0]?.id === checkpoint.id) {
+      const admitted = await client.query<{ ref_sequence: string }>(
+        `select coalesce(max(ref_sequence),0)::text ref_sequence
+         from jina_context.pipeline_builds
+         where tenant_id=$1 and repository=$2 and ref_name=$3`,
+        [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
+      );
+      const latestAdmittedSequence = Number(admitted.rows[0]!.ref_sequence);
+      if (!Number.isSafeInteger(latestAdmittedSequence) || latestAdmittedSequence < 0) {
+        throw new Error(`Ref sequence exceeds the supported range for ${checkpoint.repository}@${checkpoint.ref}`);
+      }
+      if (latest.rows[0]?.id === checkpoint.id && checkpoint.refSequence >= latestAdmittedSequence) {
         await appendProjectionInputEvent(client, {
           tenantId: checkpoint.tenantId,
           repository: checkpoint.repository,

@@ -36,8 +36,13 @@ All citations returned in this run resolve back through the active evidence chec
 with matching source identity and content digest. Citation-selector and claim-grounding
 tests separately prove that line ranges/JSON pointers resolve exact excerpts and that a
 derived citation's normalized claim must occur verbatim in the selected excerpt rather
-than a nearby source location. Production acceptance separately verifies HTTP and MCP
-anchors at a real repository commit.
+than a nearby source location. Identity/scope tests likewise allow only that selected
+excerpt and intrinsic source ID/path—not unrelated record text or manifest membership
+alone. Same-commit checkpoint tests prove unchanged citation identity/digest can safely
+reuse cached knowledge while a changed mutable provider observation excludes stale
+PR/issue-derived revisions and lowers exact-checkpoint `derivedKnowledge` coverage.
+Production acceptance separately verifies HTTP and MCP anchors at a real repository
+commit.
 
 ## Ablation results
 
@@ -162,13 +167,17 @@ When changing the fixture schema:
 The fixture evaluator is necessary but insufficient. Each deployment also executes the
 `jina-acceptance` Cloud Run job against a real repository. It must:
 
-- synchronize an exact repository ACL for the bound principal;
-- run `build-context` through `ingest-evidence`, `derive-knowledge`, and `index-context`;
+- use the internal credential and `mode:"merge"` to add the fixture without replacing the
+  bound non-admin query principal's existing repositories;
+- use a distinct tenant administrator to run `build-context` through strict
+  `ingest-evidence`, baseline `index-context`, then optional `derive-knowledge`/enriched
+  publication ordering;
 - select a published enriched generation at one exact full commit SHA;
 - return a nonempty knowledge-document catalog;
-- query the HTTP API and verify original evidence anchors;
-- connect with the MCP SDK, confirm `query_context` is the only tool, call it, and verify
-  the same commit and original anchors;
+- query the HTTP API with the fixed-bound non-admin context bearer and verify original
+  evidence anchors;
+- connect with the MCP SDK using that same bearer, confirm `query_context` is the only
+  tool, call it, and verify the same commit and original anchors;
 - report no pending context outbox work;
 - confirm the retired public path is not served.
 

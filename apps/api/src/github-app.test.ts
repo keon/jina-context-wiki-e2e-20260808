@@ -24,7 +24,7 @@ const readme = [
   "",
   "The context engine indexes immutable repository evidence.",
   "",
-  "Use queryContext to retrieve cited answers."
+  "The context engine uses queryContext to retrieve cited answers."
 ].join("\n");
 
 const coordinator = new MemoryContextPipelineCoordinator();
@@ -162,10 +162,14 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
           {
             logicalId: `repository:${repository}:architecture`,
             kind: "architecture",
-            title: "Repository context architecture",
-            summary: "Evidence is indexed before it is queried.",
+            title: "The context engine indexes immutable repository evidence.",
+            summary: "The context engine indexes immutable repository evidence.",
             bodyMarkdown: "The context engine indexes immutable repository evidence.",
-            structuredSummary: { approach: "evidence-first" },
+            structuredSummary: {
+              facts: ["The context engine indexes immutable repository evidence."],
+              claimSubject: "context engine",
+              claimValue: "immutable repository evidence"
+            },
             scope: {
               paths: ["README.md"],
               symbols: [],
@@ -181,6 +185,35 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
                 pathOrUrl: "README.md",
                 startLine: 3,
                 endLine: 3
+              }
+            ]
+          },
+          {
+            logicalId: `component:${repository}:query-context`,
+            kind: "component",
+            title: "The context engine uses queryContext to retrieve cited answers.",
+            summary: "The context engine uses queryContext to retrieve cited answers.",
+            bodyMarkdown: "The context engine uses queryContext to retrieve cited answers.",
+            structuredSummary: {
+              facts: ["The context engine uses queryContext to retrieve cited answers."],
+              claimSubject: "context engine",
+              claimValue: "queryContext"
+            },
+            scope: {
+              paths: ["README.md"],
+              symbols: ["queryContext"],
+              pullRequests: [],
+              issues: []
+            },
+            confidence: 0.94,
+            citations: [
+              {
+                claim: "The context engine uses queryContext to retrieve cited answers.",
+                sourceType: "blob",
+                sourceId: blobSha,
+                pathOrUrl: "README.md",
+                startLine: 5,
+                endLine: 5
               }
             ]
           }
@@ -226,7 +259,10 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   assert.equal(generations.response.status, 200);
   assert.equal(generations.response.headers.get("x-jina-schema-version"), "context-api-v1");
   assert.equal(array(generations.body.generations).length, 1);
-  const generationId = string(record(array(generations.body.generations)[0]).id);
+  const generationSummary = record(array(generations.body.generations)[0]);
+  assert.equal(generationSummary.derivedKnowledge, "available");
+  assert.equal(generationSummary.capabilities, undefined);
+  const generationId = string(generationSummary.id);
   const generationDetail = await api(`/context/generations/${encodeURIComponent(generationId)}`, {
     headers: contextHeaders()
   });
@@ -277,7 +313,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   );
 });
 
-test("MCP exposes only query_context and returns the API generation with original evidence", async () => {
+test("MCP exposes only query_context and preserves complete structured conflicts", async () => {
   const client = new Client({ name: "jina-context-api-test", version: "1.0.0" });
   const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
     requestInit: { headers: contextHeaders() }
@@ -294,17 +330,54 @@ test("MCP exposes only query_context and returns the API generation with origina
       arguments: {
         repository,
         ref: "main",
-        question: "Where is queryContext defined?",
-        taskKind: "structure",
-        targets: { symbols: ["queryContext"] }
+        question: "What does the context engine do?",
+        taskKind: "overview"
       }
     });
     assert.equal(result.isError, undefined);
-    assert.match(JSON.stringify(result.structuredContent), /src\/query\.ts/);
     assert.match(JSON.stringify(result.structuredContent), new RegExp(commitSha));
+    const structured = record(result.structuredContent);
+    const conflict = record(array(structured.conflicts)[0]);
+    assert.equal(conflict.subject, "context engine");
+    assert.equal(conflict.resolution, "unresolved");
   } finally {
     await client.close();
   }
+});
+
+test("public context queries bound body and target amplification", async () => {
+  const tooManyTargets = await api("/context/query", {
+    method: "POST",
+    headers: contextHeaders(),
+    body: JSON.stringify({
+      repository,
+      question: "What is indexed?",
+      targets: { symbols: Array.from({ length: 101 }, (_, index) => `symbol-${index}`) }
+    })
+  });
+  assert.equal(tooManyTargets.response.status, 400);
+
+  const oversizedTarget = await api("/context/query", {
+    method: "POST",
+    headers: contextHeaders(),
+    body: JSON.stringify({
+      repository,
+      question: "What is indexed?",
+      targets: { paths: ["x".repeat(1_001)] }
+    })
+  });
+  assert.equal(oversizedTarget.response.status, 400);
+
+  const oversizedBody = await api("/context/query", {
+    method: "POST",
+    headers: contextHeaders(),
+    body: JSON.stringify({
+      repository,
+      question: "What is indexed?",
+      padding: "x".repeat(129 * 1024)
+    })
+  });
+  assert.equal(oversizedBody.response.status, 413);
 });
 
 test("evidence erasure invalidates generations, hides derived documents, and rebuilds without resurrection", async () => {
@@ -363,6 +436,12 @@ test("legacy graph routes and tool names are absent, ACL failures do not reveal 
     body: JSON.stringify({ repository, question: "What is indexed?" })
   });
   assert.equal(stranger.response.status, 404);
+  const forbiddenBuild = await api("/context/build", {
+    method: "POST",
+    headers: { ...contextHeaders(), "x-jina-principal-id": "user:stranger@example.com" },
+    body: JSON.stringify({ repository, ref: "main" })
+  });
+  assert.equal(forbiddenBuild.response.status, 403);
 
   const invalid = await api("/context/query", {
     method: "POST",
@@ -418,6 +497,76 @@ test("all public context routes require a bound principal in production", async 
     }
   } finally {
     await new Promise<void>((resolve, reject) => protectedServer.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("context bearer is query-only and server-side bound to its configured tenant and principal", async () => {
+  const boundCoordinator = new MemoryContextPipelineCoordinator();
+  const boundStore = new MemoryContextEngineStore(boundCoordinator);
+  const boundServer = createApiServer({
+    tenantId,
+    enableDevEndpoints: false,
+    internalApiToken: internalToken,
+    contextApiToken: contextToken,
+    contextApiTenantId: tenantId,
+    contextApiPrincipalId: principalId,
+    contextCoordinator: boundCoordinator,
+    contextStore: boundStore
+  });
+  await new Promise<void>((resolve) => boundServer.listen(0, "127.0.0.1", resolve));
+  const boundUrl = `http://127.0.0.1:${(boundServer.address() as AddressInfo).port}`;
+  try {
+    await boundStore.replaceRepositoryAccess(tenantId, principalId, [repository, "acme/other"]);
+    const merged = await fetch(`${boundUrl}/internal/context/access/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalToken}`,
+        "content-type": "application/json",
+        "x-jina-principal-id": principalId
+      },
+      body: JSON.stringify({ repositories: [repository], mode: "merge" })
+    });
+    assert.equal(merged.status, 200);
+    assert.deepEqual(await boundStore.repositoriesForPrincipal(tenantId, principalId), ["acme/other", repository]);
+    const accepted = await fetch(`${boundUrl}/context/query`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${contextToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ repository, question: "What is indexed?" })
+    });
+    assert.notEqual(accepted.status, 401);
+    const rejected = await fetch(`${boundUrl}/context/query`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${contextToken}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": "tenant-attacker",
+        "x-jina-principal-id": "tenant:tenant-attacker"
+      },
+      body: JSON.stringify({ repository, question: "What is indexed?" })
+    });
+    assert.equal(rejected.status, 401);
+    for (const [method, path] of [
+      ["POST", "/context/build"],
+      ["GET", "/context/generations"],
+      ["POST", "/context/rebuild"],
+      ["POST", "/context/erasure"],
+      ["POST", "/internal/context/access/sync"]
+    ] as const) {
+      const response = await fetch(`${boundUrl}${path}`, {
+        method,
+        headers: {
+          authorization: `Bearer ${contextToken}`,
+          "content-type": "application/json"
+        },
+        ...(method === "POST" ? { body: JSON.stringify({ repository, repositories: [repository] }) } : {})
+      });
+      assert.equal(response.status, 401, `${method} ${path}`);
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => boundServer.close((error) => (error ? reject(error) : resolve())));
   }
 });
 

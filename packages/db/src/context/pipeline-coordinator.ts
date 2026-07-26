@@ -69,6 +69,9 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     }
     return this.database.transactionAs("jina_context_coordinator", async (client) => {
       const id = stableId("cb", { tenantId: input.tenantId, requestKey: input.requestKey });
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `context-generation-ref:${input.tenantId}:${input.repository}:${input.ref}`
+      ]);
       await client.query(
         `insert into jina_context.repositories
           (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
@@ -76,9 +79,6 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
          on conflict (tenant_id,repository) do nothing`,
         [input.tenantId, input.repository, input.ref, input.createdAt]
       );
-      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-        `context-pipeline-ref:${input.tenantId}:${input.repository}:${input.ref}`
-      ]);
       const existing = await client.query<BuildRow>(
         "select * from jina_context.pipeline_builds where tenant_id=$1 and request_key=$2",
         [input.tenantId, input.requestKey]
@@ -287,14 +287,18 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     error?: string;
   }): Promise<boolean> {
     return this.database.transactionAs("jina_context_coordinator", async (client) => {
-      const result = await client.query<{ build_id: string; type: ContextPipelineStage["type"] }>(
+      const result = await client.query<{
+        build_id: string;
+        type: ContextPipelineStage["type"];
+        metadata: Record<string, unknown>;
+      }>(
         `update jina_context.pipeline_stages
          set status=$8,metadata=metadata || $9::jsonb,completed_at=$7,error=$10,
              lease_id=null,lease_owner=null,lease_expires_at=null,fence_token=null,updated_at=$7
          where tenant_id=$1 and id=$2 and build_id=$3 and attempt=$4
            and lease_id=$5 and fence_token=$6 and status='leased'
            and lease_expires_at=$11 and lease_expires_at > $7
-         returning build_id,type`,
+         returning build_id,type,metadata`,
         [
           input.tenantId,
           input.stageId,
@@ -315,8 +319,16 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
         await client.query(
           `update jina_context.pipeline_stages
            set status='queued',metadata=metadata || $3::jsonb,updated_at=$2
-           where build_id=$1 and status='blocked'`,
-          [stage.build_id, input.now, JSON.stringify(input.metadata ?? {})]
+           where build_id=$1 and type=$4 and status='blocked'`,
+          [stage.build_id, input.now, JSON.stringify(stage.metadata), contextTaskTypes.indexContext]
+        );
+      }
+      if (stage.type === contextTaskTypes.indexContext && input.outcome === "succeeded") {
+        await client.query(
+          `update jina_context.pipeline_stages
+           set status='queued',metadata=metadata || $3::jsonb,updated_at=$2
+           where build_id=$1 and type=$4 and status='blocked'`,
+          [stage.build_id, input.now, JSON.stringify(stage.metadata), contextTaskTypes.deriveKnowledge]
         );
       }
       await updateBuildStatus(client, stage.build_id, input.now);
@@ -347,6 +359,22 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
       ]
     );
     return result.rowCount === 1;
+  }
+
+  async latestRefSequence(tenantId: string, repository: string, ref: string): Promise<number> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<{ ref_sequence: string }>(
+      "jina_context_coordinator",
+      `select coalesce(max(ref_sequence),0)::text ref_sequence
+       from jina_context.pipeline_builds
+       where tenant_id=$1 and repository=$2 and ref_name=$3`,
+      [tenantId, repository, ref]
+    );
+    const sequence = Number(result.rows[0]!.ref_sequence);
+    if (!Number.isSafeInteger(sequence) || sequence < 0) {
+      throw new Error(`Ref sequence exceeds the supported range for ${repository}@${ref}`);
+    }
+    return sequence;
   }
 
   async get(buildId: string): Promise<ContextBuild | undefined> {
