@@ -511,9 +511,13 @@ create table if not exists jina_context.derivation_runs (
   completed_at timestamptz not null check (completed_at >= started_at),
   primary key (tenant_id,repository,id),
   foreign key (tenant_id,repository)
-    references jina_context.repositories(tenant_id,repository),
-  unique (tenant_id,repository,cache_key)
+    references jina_context.repositories(tenant_id,repository)
 );
+alter table jina_context.derivation_runs
+  drop constraint if exists derivation_runs_tenant_id_repository_cache_key_key;
+create unique index if not exists context_derivation_runs_successful_cache
+  on jina_context.derivation_runs (tenant_id,repository,cache_key)
+  where status='succeeded';
 
 create table if not exists jina_context.knowledge_documents (
   tenant_id text not null,

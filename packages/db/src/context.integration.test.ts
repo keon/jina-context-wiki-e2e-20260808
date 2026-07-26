@@ -293,6 +293,34 @@ test(
       }
     };
     await store.commitSnapshot(snapshot, ingestClaim.fence);
+    const repeatedFailureCacheKey = fingerprint("repeated-failed-derivation");
+    for (const attempt of [1, 2]) {
+      await store.recordFailedRun({
+        id: stableId("dr", { repeatedFailureCacheKey, attempt }),
+        tenantId,
+        repository,
+        checkpointId: snapshot.checkpoint.id,
+        cacheKey: repeatedFailureCacheKey,
+        focusFingerprint: fingerprint("repeated-failed-focus"),
+        generatorName: "fixture",
+        generatorVersion: "fixture-v1",
+        model: "fixture",
+        promptVersion: "fixture-v1",
+        schemaVersion: "fixture-v1",
+        rawOutputs: [{ attempt }],
+        status: "failed",
+        diagnostics: [`attempt ${attempt} failed validation`],
+        revisionIds: [],
+        createdAt: at(100 + attempt)
+      });
+    }
+    const repeatedFailures = await database.pool.query<{ count: string }>(
+      `select count(*)::text count
+       from jina_context.derivation_runs
+       where tenant_id=$1 and repository=$2 and cache_key=$3 and status='failed'`,
+      [tenantId, repository, repeatedFailureCacheKey]
+    );
+    assert.equal(repeatedFailures.rows[0]?.count, "2");
     assert.equal(
       await store.projectionInputFingerprint(tenantId, repository),
       fingerprint({

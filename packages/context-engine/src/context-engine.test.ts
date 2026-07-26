@@ -15,6 +15,7 @@ import {
   StaticScopeAuthorizer,
   StoreScopeAuthorizer,
   assembleEvidencePack,
+  buildKnowledgePrompt,
   contextQueueTopics,
   contextTaskTypeDefinitions,
   contextTaskTypes,
@@ -400,6 +401,11 @@ test("knowledge revision identity is canonical across logical-id casing", () => 
 test("derivation repairs once, validates source ranges, and caches immutable input", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
+  const prompt = buildKnowledgePrompt(await new EvidenceFocusSelector(store).select(checkpoint.id));
+  assert.match(prompt, /repository:acme\/repo:architecture/);
+  assert.match(prompt, /change:acme\/repo:a{40}/);
+  assert.match(prompt, /issue:<provider>:acme\/repo#<cited-number>/);
+  assert.match(prompt, /<kind>:acme\/repo:<evidence-backed-slug>/);
   const generator = new SequenceGenerator([{ documents: [{ invalid: true }] }, validOutput()]);
   const service = new DeriveKnowledgeService(
     new EvidenceFocusSelector(store),
