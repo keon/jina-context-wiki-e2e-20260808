@@ -204,7 +204,9 @@ export class KnowledgeOutputValidator {
       // invent replacement knowledge. Canonicalizing the presentation from
       // already-resolved verbatim claims keeps the raw model output auditable
       // while ensuring every published word remains source-grounded.
-      const repairedClaims = input.repairPresentationFields ? [...new Set(claims)] : undefined;
+      const repairedClaims = input.repairPresentationFields
+        ? [...new Set(claims.flatMap((claim) => materialParagraphs(claim)))]
+        : undefined;
       const title = repairedClaims?.[0] ?? document.title;
       const summary = repairedClaims?.[0] ?? document.summary;
       const bodyMarkdown = repairedClaims?.join("\n\n") ?? document.bodyMarkdown;
@@ -238,9 +240,13 @@ export class KnowledgeOutputValidator {
       if (logicalIdError) {
         diagnostics.push(`documents[${documentIndex}].logicalId ${logicalIdError}`);
       }
-      for (const paragraph of materialParagraphs(bodyMarkdown)) {
-        if (!claimsCoverParagraph(claims, paragraph)) {
-          diagnostics.push(`documents[${documentIndex}] contains an unsupported paragraph: ${paragraph.slice(0, 80)}`);
+      if (!input.repairPresentationFields) {
+        for (const paragraph of materialParagraphs(bodyMarkdown)) {
+          if (!claimsCoverParagraph(claims, paragraph)) {
+            diagnostics.push(
+              `documents[${documentIndex}] contains an unsupported paragraph: ${paragraph.slice(0, 80)}`
+            );
+          }
         }
       }
       if (diagnostics.some((value) => value.startsWith(`documents[${documentIndex}]`))) continue;

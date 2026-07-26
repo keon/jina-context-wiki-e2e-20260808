@@ -499,6 +499,50 @@ test("conservative repair rebuilds presentation from resolved claims without acc
   );
 });
 
+test("conservative repair canonicalizes multiline evidence claims into grounded paragraphs", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const output = validOutput();
+  const document = output.documents[0]!;
+  const multilineClaim = "# Repository\n\nThe billing module accepts payments.";
+  output.documents = [
+    {
+      ...document,
+      title: "Unsupported generated title",
+      summary: "Unsupported generated summary",
+      bodyMarkdown: "Unsupported generated body",
+      structuredSummary: { facts: ["Unsupported generated fact"] },
+      scope: { paths: ["README.md"], symbols: [], pullRequests: [], issues: [] },
+      citations: [
+        {
+          claim: multilineClaim,
+          sourceType: "blob",
+          sourceId: "c".repeat(40),
+          pathOrUrl: "README.md",
+          startLine: 1,
+          endLine: 3
+        }
+      ]
+    }
+  ];
+  const repaired = await new KnowledgeOutputValidator(store).validate({
+    output,
+    checkpointId: checkpoint.id,
+    generatorName: "test",
+    generatorVersion: "1",
+    model: "test",
+    promptVersion: "1",
+    createdAt,
+    repairPresentationFields: true
+  });
+  assert.equal(repaired.revisions[0]?.title, "Repository");
+  assert.equal(repaired.revisions[0]?.summary, "Repository");
+  assert.equal(repaired.revisions[0]?.bodyMarkdown, "Repository\n\nThe billing module accepts payments.");
+  assert.deepEqual(repaired.revisions[0]?.structuredSummary, {
+    facts: ["Repository", "The billing module accepts payments."]
+  });
+});
+
 test("unsupported material paragraphs are rejected", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
