@@ -23,7 +23,8 @@ test("parseAdminAllowlist splits, trims, and lowercases", () => {
 
 test("local/dev deployments without the internal token are permitted", () => {
   assert.deepEqual(evaluateAdminAccess({ authRequired: false, iapEmailHeader: null, allowlistRaw: null }), {
-    ok: true
+    ok: true,
+    actorId: "svc:admin-dev"
   });
 });
 
@@ -41,7 +42,7 @@ test("production permits requests with valid app-level HTTP authentication", () 
     webAuthUsername: "omlabs",
     webAuthPassword: "correct horse"
   });
-  assert.deepEqual(authenticated, { ok: true });
+  assert.deepEqual(authenticated, { ok: true, actorId: "admin:omlabs" });
 
   const invalidPassword = evaluateAdminAccess({
     authRequired: true,
@@ -64,7 +65,7 @@ test("production with a valid identity and no allowlist is permitted", () => {
     iapEmailHeader: "accounts.google.com:ops@example.com",
     allowlistRaw: null
   });
-  assert.deepEqual(decision, { ok: true, email: "ops@example.com" });
+  assert.deepEqual(decision, { ok: true, actorId: "user:ops@example.com", email: "ops@example.com" });
 });
 
 test("an identity outside the allowlist is rejected with 403", () => {
@@ -82,5 +83,5 @@ test("an identity inside the allowlist is permitted", () => {
     iapEmailHeader: "Admin@Example.com",
     allowlistRaw: "admin@example.com, ops@example.com"
   });
-  assert.deepEqual(decision, { ok: true, email: "admin@example.com" });
+  assert.deepEqual(decision, { ok: true, actorId: "user:admin@example.com", email: "admin@example.com" });
 });

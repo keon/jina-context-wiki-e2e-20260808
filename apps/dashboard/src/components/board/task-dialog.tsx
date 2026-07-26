@@ -1,44 +1,10 @@
 "use client";
 
 import { Fragment, useEffect, useRef } from "react";
+import { taskRelationships } from "../../lib/board.ts";
 import { eventLabel, formatTime, formatValue, humanize, shortId } from "../../lib/format.ts";
+import { isReviewTask, reviewMcpActivity } from "../../lib/review-mcp.ts";
 import type { BoardEvent, BoardState, BoardTask } from "../../lib/types.ts";
-
-interface TaskRelationship {
-  readonly direction: string;
-  readonly taskId: string;
-  readonly relationship: string;
-  readonly required?: boolean | undefined;
-}
-
-function taskRelationships(task: BoardTask, board: BoardState): readonly TaskRelationship[] {
-  const relationships: TaskRelationship[] = [];
-  if (task.parentTaskId) {
-    relationships.push({ direction: "Parent", taskId: task.parentTaskId, relationship: "parent" });
-  }
-  for (const child of board.tasks.filter((item) => item.parentTaskId === task.id)) {
-    relationships.push({ direction: "Child", taskId: child.id, relationship: "child" });
-  }
-  for (const dependency of board.dependencies) {
-    if (dependency.taskId === task.id) {
-      relationships.push({
-        direction: "Depends on",
-        taskId: dependency.dependsOnTaskId,
-        relationship: dependency.relationship,
-        required: dependency.required
-      });
-    }
-    if (dependency.dependsOnTaskId === task.id) {
-      relationships.push({
-        direction: "Required by",
-        taskId: dependency.taskId,
-        relationship: dependency.relationship,
-        required: dependency.required
-      });
-    }
-  }
-  return relationships;
-}
 
 function SummaryItem({
   label,
@@ -169,6 +135,56 @@ function ActivitySection({ task, events }: { readonly task: BoardTask; readonly 
   );
 }
 
+function ReviewMcpSection({
+  task,
+  board,
+  events
+}: {
+  readonly task: BoardTask;
+  readonly board: BoardState;
+  readonly events: readonly BoardEvent[];
+}) {
+  const activity = reviewMcpActivity(task, board, events);
+  return (
+    <section className="section review-mcp-section">
+      <h3>MCPs enabled for the run</h3>
+      {activity.enabledServers.length === 0 ? (
+        <p className="empty-detail">No MCP servers were recorded for this review run.</p>
+      ) : (
+        <div className="review-mcp-chips">
+          {activity.enabledServers.map((server) => (
+            <span className="review-mcp-chip" key={server}>
+              {server}
+            </span>
+          ))}
+        </div>
+      )}
+      <h3>MCP usage events</h3>
+      {activity.usageEvents.length === 0 ? (
+        <p className="empty-detail">No MCP tool calls were recorded for this review run.</p>
+      ) : (
+        <div className="timeline review-mcp-events">
+          {activity.usageEvents.map((event, index) => (
+            <article className="event" key={`${event.server}-${event.tool}-${event.at ?? index}`}>
+              <div className="event-top">
+                <span className="event-type">
+                  {event.server} · {event.tool}
+                </span>
+                {event.at ? <time className="event-time">{formatTime(event.at)}</time> : null}
+              </div>
+              {event.status || event.detail ? (
+                <p className="review-mcp-detail">
+                  {[event.status ? humanize(event.status) : undefined, event.detail].filter(Boolean).join(" · ")}
+                </p>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
 export function TaskDialog({
   task,
   board,
@@ -229,6 +245,7 @@ export function TaskDialog({
         {task ? (
           <>
             <Summary task={task} />
+            {isReviewTask(task) ? <ReviewMcpSection task={task} board={board} events={events} /> : null}
             <RelationshipSection task={task} board={board} onOpenTask={onOpenTask} />
             <MetadataSection task={task} />
             <ActivitySection task={task} events={events} />

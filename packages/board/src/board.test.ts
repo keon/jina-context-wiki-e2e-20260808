@@ -6,6 +6,7 @@ import {
   createEmptyBoardState,
   findTask,
   leaseNextOutboxMessage,
+  markOutboxDispatched,
   reduceBoard,
   renewOutboxLease,
   transitionBoardTask,
@@ -262,6 +263,10 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
     "2026-01-01T00:04:00.000Z"
   );
   assert.equal(renewed?.outbox[0]?.leaseExpiresAt, "2026-01-01T00:04:00.000Z");
+  const dispatched = markOutboxDispatched(claimed.state, claimed.message.id, "2026-01-01T00:02:45.000Z").outbox[0];
+  assert.equal(dispatched?.status, "dispatched");
+  assert.equal(dispatched?.dispatchedLeaseId, "new");
+  assert.equal(dispatched?.leaseId, undefined);
   assert.equal(
     renewOutboxLease(
       claimed.state,

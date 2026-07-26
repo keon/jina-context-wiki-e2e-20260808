@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filterBoardTasks, EMPTY_BOARD_FILTERS, partitionBoardTasks, uniqueValues } from "./board.ts";
-import type { BoardTask } from "./types.ts";
+import { filterBoardTasks, EMPTY_BOARD_FILTERS, partitionBoardTasks, taskRelationships } from "./board.ts";
+import type { BoardState, BoardTask } from "./types.ts";
 
 function task(overrides: Partial<BoardTask> & { readonly id: string }): BoardTask {
   return {
@@ -84,6 +84,20 @@ test("filterBoardTasks searches original workspace and PR author names", () => {
   );
 });
 
-test("uniqueValues sorts and deduplicates", () => {
-  assert.deepEqual(uniqueValues(["b", "a", "b", undefined, ""]), ["a", "b"]);
+test("taskRelationships returns parent, child, and both dependency directions", () => {
+  const selected = task({ id: "selected", parentTaskId: "parent" });
+  const board = {
+    tasks: [selected, task({ id: "parent" }), task({ id: "child", parentTaskId: "selected" }), task({ id: "other" })],
+    dependencies: [
+      { taskId: "selected", dependsOnTaskId: "other", relationship: "blocks", required: true },
+      { taskId: "other", dependsOnTaskId: "selected", relationship: "informs", required: false }
+    ],
+    publications: []
+  } as BoardState;
+  assert.deepEqual(taskRelationships(selected, board), [
+    { direction: "Parent", taskId: "parent", relationship: "parent" },
+    { direction: "Child", taskId: "child", relationship: "child" },
+    { direction: "Depends on", taskId: "other", relationship: "blocks", required: true },
+    { direction: "Required by", taskId: "other", relationship: "informs", required: false }
+  ]);
 });

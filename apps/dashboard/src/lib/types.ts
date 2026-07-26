@@ -21,7 +21,7 @@ export interface BoardTask {
   readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
-export interface BoardDependency {
+interface BoardDependency {
   readonly taskId: string;
   readonly dependsOnTaskId: string;
   readonly relationship: string;
@@ -74,7 +74,7 @@ export interface TaskTypeDefinition {
   readonly triggeredBy?: readonly TaskTypeTrigger[];
 }
 
-export type KnowledgeDocumentKind =
+type KnowledgeDocumentKind =
   | "architecture"
   | "component"
   | "feature"
@@ -140,7 +140,7 @@ export interface KnowledgeDocumentSummary {
   readonly createdAt: string;
 }
 
-export interface KnowledgeRevisionEvent {
+interface KnowledgeRevisionEvent {
   readonly id?: string;
   readonly action?: string;
   readonly type?: string;
@@ -176,7 +176,7 @@ export interface ContextDocumentResponse {
   readonly document: KnowledgeDocument;
 }
 
-export interface ContextConflict {
+interface ContextConflict {
   readonly subject: string;
   readonly description: string;
   readonly citationIds: readonly string[];

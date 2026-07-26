@@ -101,18 +101,6 @@ export async function listKnowledgeDocuments(repository?: string): Promise<reado
   return documents;
 }
 
-export async function getKnowledgeDocument(id: string): Promise<AdminContextDocument | undefined> {
-  try {
-    const body = (await apiGet(`/context/documents/${encodeURIComponent(id)}`)) as {
-      readonly document?: AdminContextDocument;
-    };
-    return body.document;
-  } catch (error) {
-    if (error instanceof JinaApiError && error.status === 404) return undefined;
-    throw error;
-  }
-}
-
 export async function getContextMetrics(): Promise<AdminContextMetrics> {
   return (await apiGet("/context/metrics")) as AdminContextMetrics;
 }

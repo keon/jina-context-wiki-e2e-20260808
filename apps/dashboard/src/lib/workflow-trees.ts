@@ -83,7 +83,7 @@ export function buildWorkflowTrees(definitions: readonly TaskTypeDefinition[]): 
     });
 }
 
-export function hasDependencyPath(
+function hasDependencyPath(
   from: string,
   target: string,
   edges: readonly WorkflowEdge[],

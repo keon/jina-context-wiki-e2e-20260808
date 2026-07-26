@@ -16,6 +16,29 @@ db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
+api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
+api_max_instances="${JINA_API_MAX_INSTANCES:-3}"
+api_concurrency="${JINA_API_CONCURRENCY:-20}"
+api_cpu="${JINA_API_CPU:-1}"
+api_memory="${JINA_API_MEMORY:-512Mi}"
+
+validate_positive_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[1-9][0-9]*$ ]]; then
+    echo "${name} must be a positive integer" >&2
+    exit 2
+  fi
+}
+
+validate_nonnegative_integer() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[0-9]+$ ]]; then
+    echo "${name} must be a non-negative integer" >&2
+    exit 2
+  fi
+}
 
 validate_cloud_sql_instance() {
   local name="$1"
@@ -27,6 +50,13 @@ validate_cloud_sql_instance() {
 }
 
 validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
+validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
+validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
+validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
+if (( api_min_instances > api_max_instances )); then
+  echo "JINA_API_MIN_INSTANCES must not exceed JINA_API_MAX_INSTANCES" >&2
+  exit 2
+fi
 if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
   echo "JINA_DB_PASS_SECRET must be a Cloud Run secret spec without commas or tildes" >&2
   exit 2
@@ -115,6 +145,61 @@ for attempt in range(1, 21):
 PY
 }
 
+require_secret() {
+  local secret_spec="$1"
+  local secret_name="${secret_spec%%:*}"
+  gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
+}
+
+route_latest_revision() {
+  local service="$1"
+  local revision
+  local ready
+  revision="$(gcloud run services describe "${service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --format='value(status.latestCreatedRevisionName)')"
+  if [[ -z "${revision}" ]]; then
+    echo "${service} did not report a latest created revision" >&2
+    exit 2
+  fi
+  for _attempt in $(seq 1 60); do
+    ready="$(gcloud run revisions describe "${revision}" \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --format='value(status.conditions[0].status)' 2>/dev/null || true)"
+    if [[ "${ready}" == "True" ]]; then
+      break
+    fi
+    sleep 2
+  done
+  if [[ "${ready}" != "True" ]]; then
+    echo "${service} revision ${revision} did not become ready" >&2
+    exit 2
+  fi
+  gcloud run services update-traffic "${service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --to-revisions="${revision}=100" \
+    --quiet >/dev/null
+  echo "Routed ${service} 100% to ${revision}"
+}
+
+for secret_spec in \
+  "${db_pass_secret}" \
+  "jina-github-webhook-secret:latest" \
+  "jina-internal-api-token:latest" \
+  "jina-context-api-token:latest" \
+  "jina-daytona-api-key:latest" \
+  "jina-openrouter-api-key:latest" \
+  "jina-openai-api-key:latest" \
+  "jina-github-clone-token:latest"; do
+  require_secret "${secret_spec}"
+done
+
+# Apply owner-only DDL before any new runtime revision starts. Runtime services
+# intentionally run with JINA_DB_MANAGE_SCHEMA=false and must never discover a
+# missing table under live traffic.
 gcloud run jobs deploy jina-context-migrate \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -141,14 +226,18 @@ gcloud run deploy jina-api \
   --allow-unauthenticated \
   --service-account="${runtime_service_account}" \
   --set-cloudsql-instances="${cloud_sql_instance}" \
-  --concurrency=20 \
+  --concurrency="${api_concurrency}" \
+  --cpu="${api_cpu}" \
+  --memory="${api_memory}" \
   --timeout=900 \
-  --min-instances=0 \
-  --max-instances=1 \
+  --liveness-probe="initialDelaySeconds=30,timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/health,httpGet.port=8080" \
+  --min-instances="${api_min_instances}" \
+  --max-instances="${api_max_instances}" \
   --set-env-vars="${api_env_vars}" \
   --set-secrets="${api_secrets}" \
   --quiet
 
+route_latest_revision "jina-api"
 api_url="$(gcloud run services describe jina-api \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -170,6 +259,7 @@ gcloud run deploy jina-context-worker \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
+route_latest_revision "jina-context-worker"
 context_worker_url="$(gcloud run services describe jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -202,6 +292,7 @@ gcloud run deploy jina-task-worker \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
+route_latest_revision "jina-task-worker"
 task_worker_url="$(gcloud run services describe jina-task-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -263,4 +354,7 @@ Task worker: ${task_worker_url}
 Image tag: ${image_tag}
 Cloud SQL: ${cloud_sql_instance}
 Tenancy mode: ${tenancy_mode}
+API instances: ${api_min_instances}-${api_max_instances}
+API concurrency: ${api_concurrency}
+API size: ${api_cpu} CPU / ${api_memory}
 SUMMARY

@@ -1,22 +1,23 @@
 // Inbound authentication policy for the admin console.
 //
-// The app renders tenant-wide repository context by calling the API as the
-// tenant-admin service principal, so the app itself is the security boundary:
+// The app renders cross-tenant context data through a dedicated API credential,
+// so the app itself is the security boundary:
 // it must never serve a request that did not arrive through the trusted
 // identity-aware proxy. This mirrors the dashboard, which enforces a valid
 // Google IAP identity whenever the internal API token is configured. Because
-// this console is strictly more privileged (every repository's context, not an
-// ACL-scoped subset), it additionally supports an explicit admin allowlist.
+// this console is strictly more privileged (every tenant's repository context,
+// not an ACL-scoped subset), it additionally supports an explicit admin
+// allowlist.
 //
 // These helpers are pure so the decision is unit-testable and identical
-// whether evaluated in middleware or a server component.
+// whether evaluated in the request proxy or a server component.
 
 export type AdminAccessDecision =
-  | { readonly ok: true; readonly email?: string }
+  | { readonly ok: true; readonly actorId: string; readonly email?: string }
   | { readonly ok: false; readonly status: 401 | 403; readonly error: string };
 
 export interface AdminAccessInput {
-  /** True when a production internal API token is configured (auth required). */
+  /** True when a production API credential is configured (auth required). */
   readonly authRequired: boolean;
   /** Raw value of the IAP-populated `x-goog-authenticated-user-email` header. */
   readonly iapEmailHeader: string | null | undefined;
@@ -56,7 +57,7 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-export function isValidBasicAuthorization(
+function isValidBasicAuthorization(
   header: string | null | undefined,
   expectedUsername: string | null | undefined,
   expectedPassword: string | null | undefined
@@ -78,15 +79,19 @@ export function isValidBasicAuthorization(
   }
 }
 
-/** Decides whether an inbound request may view tenant-wide repository context. */
+/** Decides whether an inbound request may view tenant-wide context. */
 export function evaluateAdminAccess(input: AdminAccessInput): AdminAccessDecision {
-  // Local and CI runs deploy without the internal token and are not internet
+  // Local and CI runs deploy without API credentials and are not internet
   // reachable; enforcing IAP there would break `pnpm dev`. This matches the
   // dashboard, which only demands an IAP identity once the token is present.
-  if (!input.authRequired) return { ok: true };
+  if (!input.authRequired) return { ok: true, actorId: "svc:admin-dev" };
 
   if (isValidBasicAuthorization(input.authorizationHeader, input.webAuthUsername, input.webAuthPassword)) {
-    return { ok: true };
+    const username = input.webAuthUsername?.trim().toLowerCase() ?? "web";
+    return {
+      ok: true,
+      actorId: /^[a-z0-9._@-]+$/.test(username) ? `admin:${username}` : "admin:web"
+    };
   }
 
   const email = normalizeIapEmail(input.iapEmailHeader);
@@ -99,5 +104,5 @@ export function evaluateAdminAccess(input: AdminAccessInput): AdminAccessDecisio
     return { ok: false, status: 403, error: "administrator access required" };
   }
 
-  return { ok: true, email };
+  return { ok: true, actorId: `user:${email}`, email };
 }

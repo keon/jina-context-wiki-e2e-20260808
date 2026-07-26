@@ -90,7 +90,7 @@ export interface ApiServerConfig {
   readonly mcpAllowedOrigins?: readonly string[];
 }
 
-export interface ResolvedRepositoryIdentity {
+interface ResolvedRepositoryIdentity {
   readonly tenantId: string;
   readonly githubAccountId: string;
   readonly githubAccountLogin: string;
@@ -100,7 +100,7 @@ export interface ResolvedRepositoryIdentity {
   readonly defaultBranch?: string;
 }
 
-export interface SharedIdentityResolver {
+interface SharedIdentityResolver {
   resolveRepository(input: {
     readonly githubRepositoryId?: number;
     readonly githubInstallationId?: number;

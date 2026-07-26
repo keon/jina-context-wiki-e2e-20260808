@@ -60,7 +60,7 @@ const queryContextResultSchema = {
   traceId: z.string()
 };
 
-export interface ContextMcpQuery {
+interface ContextMcpQuery {
   readonly repository: string;
   readonly question: string;
   readonly ref?: string;
