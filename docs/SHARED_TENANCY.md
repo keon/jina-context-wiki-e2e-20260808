@@ -152,8 +152,10 @@ heads and recorded at exact commits.
 1. Build and validate release images against disposable PostgreSQL.
 2. Record active repository/ref inventory and expected principal access.
 3. Create a restorable Cloud SQL backup and record its operation/backup ID.
-4. Stop prior context workers and disable new context intake.
-5. Wait for old writes to stop. Archive pending old workflow metadata for audit; do not
+4. Have the coordinated destructive deploy stop prior context workers and disable old
+   API intake; do not create a manual preflight-to-shutdown gap.
+5. After the write path is absent, audit the durable board and outbox. Archive terminal
+   old workflow metadata for audit; reject every nondispatched outbox entry and do not
    translate or replay it.
 6. Run the new schema/role migration with the separate owner credential and
    `CONTEXT_RUNTIME_DB_USER=jina_v2_app`.
@@ -167,6 +169,15 @@ heads and recorded at exact commits.
     queries. Run the production acceptance job and retain race-test output.
 11. Retain the restorable backup for the normal recovery window before deleting any
     archived prior schema.
+
+The coordinated deploy makes steps 4–5 executable. With the destructive-cutover
+substitutions set, `jina-context-cutover-preflight` reads the old board for every tenant
+in the recorded inventory and fails on any nonterminal graph task. The deploy first
+deletes the retired worker and old API, verifies both are absent, and then runs that audit
+directly against the persisted board. This order fences claims and intake before the
+audit, eliminating a preflight-to-shutdown race. The old API deletion is the
+intake-disable boundary; no incompatible API remains available while the new schema is
+installed.
 
 The API may run with `JINA_DB_MANAGE_SCHEMA=true` only in disposable/local environments.
 Production runs a separate migration job, then starts the API with schema management

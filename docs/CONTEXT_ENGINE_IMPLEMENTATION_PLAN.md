@@ -1550,6 +1550,13 @@ This is the only supported migration path:
 14. Delete `jina_context_graph` after the snapshot retention window.
 15. Remove the old package and every runtime reference in the same release branch.
 
+The production deployment enforces steps 3–7: it verifies the recorded backup status,
+deletes the legacy worker and API, verifies the incompatible services are absent, then
+runs a direct persisted-board audit that rejects every nonterminal legacy task before
+executing the migration. Auditing after the write path is fenced avoids a
+preflight-to-shutdown race. Terminal legacy task metadata remains archived in the
+pre-cutover snapshot and is excluded from the new runtime board.
+
 There is no live compatibility rollback. Emergency rollback means redeploying the complete
 old release and restoring its database snapshot, not pointing old code at the new schema.
 

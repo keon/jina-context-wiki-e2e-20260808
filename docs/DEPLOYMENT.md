@@ -62,6 +62,7 @@ rejected as amplification rather than reduced below the raw-entry limit.
 | `_JINA_API_CPU`               |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
 | `_JINA_API_MEMORY`            | `512Mi` | Increase if context assembly approaches the container limit.                      |
 | `_JINA_CONTEXT_WORKER_MEMORY` |   `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.         |
+| `_JINA_CONTEXT_CUTOVER`       | `false` | Set to `true` only for the first destructive graph-to-context release.            |
 
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
@@ -217,21 +218,55 @@ Record the backup ID, release SHA, repository/ref inventory, expected ACL princi
 timestamp in the release evidence. Verify the backup reaches a successful state before
 deployment.
 
+The first destructive release must submit the verified backup ID, exact source SHA, and
+the complete active-tenant inventory:
+
+```sh
+gcloud builds submit \
+  --project=jina-v2 \
+  --region=us-central1 \
+  --config=cloudbuild.yaml \
+  --substitutions="^~^_JINA_CONTEXT_CUTOVER=true~_JINA_CONTEXT_CUTOVER_BACKUP_ID=${backup_id}~_JINA_LEGACY_CUTOVER_TENANT_IDS=${tenant_ids_pipe_delimited}~_JINA_RELEASE_SHA=${release_sha}" \
+  .
+```
+
+When either retired service exists, normal deployment fails closed. Destructive mode
+always requires and revalidates all four values, including on a retry after the old
+services were already removed. It verifies the Cloud SQL backup is `SUCCESSFUL`, deletes
+the old graph worker and old API, and verifies both services are absent. With all
+legacy claims and intake durably fenced, `jina-context-cutover-preflight` reads the
+persisted board directly through the runtime database role. It checks nonterminal legacy
+tasks and every nondispatched legacy outbox row globally, while the pipe-delimited active
+tenant inventory makes archived counts auditable by tenant. The preflight permits
+archived terminal graph tasks but rejects any pending, waiting, running, or leased graph
+work and fails closed on malformed legacy outbox status. Only then does migration start. Deleting the old API closes both explicit
+graph-build and webhook intake during the incompatible schema boundary, and auditing
+afterward avoids a preflight-to-shutdown race. Subsequent context-engine releases leave
+`_JINA_CONTEXT_CUTOVER=false`; destructive mode also refuses to run when a context-engine
+API already exists.
+
+The tenant list does not infer repository/ref scope. The separately recorded
+repository/ref/install inventory remains the authority for the mandatory post-deploy
+full reingestion, and every inventory row must end with a published baseline generation.
+
 ## Deploy
 
 The coordinated `cloudbuild.yaml` invocation above calls
 `scripts/cloud-build-deploy.sh`, which:
 
-1. deploys and executes `jina-context-migrate` as the dedicated `jina-migration` Google
+1. on the first destructive release, verifies the backup and active-tenant inventory,
+   removes the old worker and API, then rejects nonterminal durable graph work before
+   migration;
+2. deploys and executes `jina-context-migrate` as the dedicated `jina-migration` Google
    service account with the migration-owner credential, including capability-role
    installation and runtime-login grants;
-2. deploys `jina-api` with schema management disabled and checks `/health`;
-3. deploys `jina-context-worker` and verifies the exact three topics;
-4. removes the retired worker service after the replacement is healthy;
+3. deploys `jina-api` with schema management disabled and checks `/health`;
+4. deploys `jina-context-worker` and verifies the exact three topics;
 5. deploys `jina-task-worker` and verifies its topics;
 6. deploys `jina-dashboard` and `jina-admin` using the exact images built in this release;
 7. deploys and executes `jina-acceptance`;
-8. fails the Cloud Build if migration, health, topic, or acceptance checks fail.
+8. fails the Cloud Build if preflight, migration, health, topic, or acceptance checks
+   fail.
 
 The migration installs `jina_context` and its capability roles from scratch with
 `--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, marks that login `NOINHERIT`,

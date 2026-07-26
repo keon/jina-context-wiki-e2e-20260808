@@ -28,6 +28,10 @@ api_concurrency="${JINA_API_CONCURRENCY:-20}"
 api_cpu="${JINA_API_CPU:-1}"
 api_memory="${JINA_API_MEMORY:-512Mi}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
+context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
+context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
+legacy_cutover_tenant_ids="${JINA_LEGACY_CUTOVER_TENANT_IDS:-}"
+release_sha="${JINA_RELEASE_SHA:-}"
 
 validate_positive_integer() {
   local name="$1"
@@ -70,6 +74,10 @@ fi
 if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ||
       "${migration_db_pass_secret}" == *","* || "${migration_db_pass_secret}" == *"~"* ]]; then
   echo "Database password secrets must be Cloud Run secret specs without commas or tildes" >&2
+  exit 2
+fi
+if [[ "${context_cutover}" != "true" && "${context_cutover}" != "false" ]]; then
+  echo "JINA_CONTEXT_CUTOVER must be true or false" >&2
   exit 2
 fi
 
@@ -216,6 +224,117 @@ require_secret "jina-web-auth-password:latest"
 gcloud iam service-accounts describe "${runtime_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 gcloud iam service-accounts describe "${migration_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 
+legacy_worker="jina-context-graph-worker"
+legacy_worker_present="false"
+if gcloud run services describe "${legacy_worker}" \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" >/dev/null 2>&1; then
+  legacy_worker_present="true"
+fi
+api_present="false"
+legacy_api_present="false"
+if gcloud run services describe jina-api \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" >/dev/null 2>&1; then
+  api_present="true"
+  api_environment_names="$(gcloud run services describe jina-api \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --format='value(spec.template.spec.containers[0].env.name)')"
+  if [[ ";${api_environment_names};" == *";GRAPH_API_TOKEN;"* ||
+        ";${api_environment_names};" == *";GRAPH_DB_NAME;"* ]]; then
+    legacy_api_present="true"
+  fi
+fi
+if [[ "${context_cutover}" == "false" &&
+      ("${legacy_worker_present}" == "true" || "${legacy_api_present}" == "true") ]]; then
+  echo "Legacy context runtime is present; destructive cutover evidence is required before migration" >&2
+  exit 2
+fi
+if [[ "${context_cutover}" == "true" ]]; then
+  if [[ "${api_present}" == "true" && "${legacy_api_present}" != "true" ]]; then
+    echo "A context-engine API already exists; rerun as a normal release with JINA_CONTEXT_CUTOVER=false" >&2
+    exit 2
+  fi
+  if [[ ! "${context_cutover_backup_id}" =~ ^[0-9]+$ ]]; then
+    echo "JINA_CONTEXT_CUTOVER_BACKUP_ID must identify the verified pre-cutover backup" >&2
+    exit 2
+  fi
+  if [[ ! "${release_sha}" =~ ^[0-9a-f]{40}$ ]]; then
+    echo "JINA_RELEASE_SHA must be the exact 40-character source SHA for a destructive cutover" >&2
+    exit 2
+  fi
+  if [[ -z "${legacy_cutover_tenant_ids//[[:space:],]/}" ]]; then
+    echo "JINA_LEGACY_CUTOVER_TENANT_IDS must contain the complete active-tenant inventory" >&2
+    exit 2
+  fi
+  database_project="${cloud_sql_instance%%:*}"
+  database_instance="${cloud_sql_instance##*:}"
+  backup_status="$(gcloud sql backups describe "${context_cutover_backup_id}" \
+    --project="${database_project}" \
+    --instance="${database_instance}" \
+    --format='value(status)')"
+  if [[ "${backup_status}" != "SUCCESSFUL" ]]; then
+    echo "Pre-cutover backup ${context_cutover_backup_id} is not successful: ${backup_status:-missing}" >&2
+    exit 2
+  fi
+
+  cat <<CUTOVER
+Starting destructive context cutover
+Release SHA: ${release_sha}
+Verified backup: ${database_project}/${database_instance}/${context_cutover_backup_id}
+CUTOVER
+
+  # Stop every intake surface and then claims before auditing the durable queue. The
+  # database audit runs only after the old write path is absent, so no task can
+  # cross a preflight-to-shutdown race.
+  if [[ "${legacy_api_present}" == "true" ]]; then
+    gcloud run services delete jina-api \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --quiet
+  fi
+  if [[ "${legacy_worker_present}" == "true" ]]; then
+    gcloud run services delete "${legacy_worker}" \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --quiet
+  fi
+  if gcloud run services describe "${legacy_worker}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" >/dev/null 2>&1; then
+    echo "Legacy context worker still exists after quiesce" >&2
+    exit 2
+  fi
+  if [[ "${legacy_api_present}" == "true" ]] &&
+    gcloud run services describe jina-api \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" >/dev/null 2>&1; then
+    echo "Legacy API still exists after quiesce" >&2
+    exit 2
+  fi
+  echo "Legacy context worker and API are absent; auditing the fenced durable queue"
+
+  gcloud run jobs deploy jina-context-cutover-preflight \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --image="${api_image}" \
+    --service-account="${runtime_service_account}" \
+    --set-cloudsql-instances="${cloud_sql_instance}" \
+    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
+    --set-secrets="DB_PASS=${db_pass_secret}" \
+    --args=dist/cutover-preflight.js \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=5m \
+    --quiet
+  gcloud run jobs execute jina-context-cutover-preflight \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --wait
+  echo "Fenced legacy queue has no active graph work; migration may start"
+fi
+
 # Apply owner-only DDL before any new runtime revision starts. Runtime services
 # intentionally run with JINA_DB_MANAGE_SCHEMA=false and use a different Google
 # identity that has no access to the migration-owner database secret.
@@ -287,15 +406,6 @@ context_worker_url="$(gcloud run services describe jina-context-worker \
 verify_worker_health \
   "${context_worker_url}" \
   "run-ingest-evidence|run-derive-knowledge|run-index-context"
-
-if gcloud run services describe jina-context-graph-worker \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" >/dev/null 2>&1; then
-  gcloud run services delete jina-context-graph-worker \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --quiet
-fi
 
 gcloud run deploy jina-task-worker \
   --project="${GCP_PROJECT_ID}" \
