@@ -732,7 +732,10 @@ test(
     assert.equal(completedAccessProjection.acl.count, 0);
     assert.equal(completedAccessProjection.retention.count, 0);
 
-    const providerBody = JSON.stringify({ repository: { defaultBranch: "main" } });
+    const providerBody = JSON.stringify({
+      repository: { defaultBranch: "main" },
+      oversizedExactToken: "x".repeat(3_000)
+    });
     const providerRecord = createEvidenceRecord({
       anchor: {
         tenantId,
@@ -975,6 +978,17 @@ test(
     assert.ok(candidates.some((candidate) => candidate.text.includes("deployContext")));
     assert.ok(candidates.some((candidate) => candidate.sourceKind === "knowledge"));
     const enrichedProjection = await store.getGeneration(enrichedGeneration.id);
+    assert.deepEqual(enrichedProjection?.exactIndex, []);
+    const exactIndexStats = await database.queryAs<{ count: string; max_characters: number }>(
+      "jina_context_admin",
+      { tenantIds: [tenantId] },
+      `select count(*)::text as count,max(char_length(term))::integer as max_characters
+       from jina_context.exact_index
+       where generation_id=$1`,
+      [enrichedGeneration.id]
+    );
+    assert.ok(Number(exactIndexStats.rows[0]?.count) > 0);
+    assert.ok((exactIndexStats.rows[0]?.max_characters ?? 0) <= 512);
     assert.equal(
       (await store.getScopedGeneration(tenantId, [repository], enrichedGeneration.id))?.generation.id,
       enrichedGeneration.id

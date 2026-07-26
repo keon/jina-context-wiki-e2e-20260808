@@ -13,7 +13,7 @@ import type { HierarchyIndexer } from "../ports/hierarchy.js";
 import { FallbackHierarchyIndexer, hierarchyEligibleDocuments, materializeHierarchyNodes } from "./hierarchy.js";
 import { CurrentKnowledgeProjector } from "./knowledge-current.js";
 import { LexicalProjector } from "./lexical.js";
-import { ExactProjector } from "./exact.js";
+import { EXACT_PROJECTOR_VERSION, ExactProjector } from "./exact.js";
 import { ManifestProjector } from "./manifest.js";
 import { StructuralProjector } from "./structural.js";
 import type { ContextWriteFence } from "../workflow/coordinator.js";
@@ -24,7 +24,7 @@ function versions(): Record<ContextProjectionConsumer, string> {
   return {
     manifest: "manifest-v1",
     "knowledge-current": "knowledge-current-v1",
-    lexical: "lexical-v1",
+    lexical: "lexical-v2",
     dense: "disabled-v1",
     hierarchy: "hierarchy-v1",
     structural: "structural-v1",
@@ -150,7 +150,18 @@ export class IndexContextService {
       aclFingerprints: aclMap
     });
     const documents = [...manifestOutput.documents, ...providerDocuments, ...knowledge.documents];
-    const exactIndex = new ExactProjector().project(documents);
+    const exactIndex = this.store.nativeExactIndex ? [] : new ExactProjector().project(documents);
+    const exactIndexInputFingerprint = fingerprint({
+      projectorVersion: EXACT_PROJECTOR_VERSION,
+      documents: documents
+        .map((document) => ({
+          id: document.id,
+          title: document.title,
+          sourceFingerprint: document.sourceFingerprint,
+          metadataFingerprint: fingerprint(document.metadata)
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id))
+    });
     const fragments = new LexicalProjector().project(documents);
     const structuralRelations = new StructuralProjector().project(generationId, structuralFacts);
     let hierarchyNodes: GenerationProjection["hierarchyNodes"] = [];
@@ -231,7 +242,10 @@ export class IndexContextService {
         tokenFingerprint: fragment.tokenFingerprint,
         anchors: fragment.anchors
       })),
-      exactIndex: projectionPayload.exactIndex,
+      exactIndex: {
+        projectorVersion: EXACT_PROJECTOR_VERSION,
+        inputFingerprint: exactIndexInputFingerprint
+      },
       hierarchyNodes: projectionPayload.hierarchyNodes.map((node) => ({
         title: node.title,
         summary: node.summary,

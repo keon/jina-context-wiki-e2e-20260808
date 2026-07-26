@@ -48,6 +48,7 @@ import { PostgresContextQueryRepository, type StoredRetrievalCandidate } from ".
  */
 export class PostgresContextEngineStore implements ContextEngineStore {
   readonly enforcesWriteFences = true as const;
+  readonly nativeExactIndex = true as const;
   readonly database: ContextDatabase;
   readonly evidence: PostgresEvidenceRepository;
   readonly knowledge: PostgresKnowledgeRepository;

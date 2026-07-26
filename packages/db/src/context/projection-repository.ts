@@ -13,7 +13,7 @@ import type {
   RefManifestEntry,
   StructuralRelation
 } from "@jina/context-engine";
-import { contextProjectionConsumers } from "@jina/context-engine";
+import { contextProjectionConsumers, EXACT_TERM_MAX_CHARACTERS } from "@jina/context-engine";
 import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
@@ -199,13 +199,12 @@ export class PostgresProjectionRepository implements ProjectionStore {
 
   private async hydrate(row: GenerationRow, allowedAclFingerprints?: readonly string[]): Promise<GenerationProjection> {
     const acl = allowedAclFingerprints === undefined ? null : [...allowedAclFingerprints];
-    const [statuses, manifest, currentKnowledge, documents, fragments, exactIndex, hierarchyNodes, relations] =
-      await Promise.all([
-        this.projectorStatuses(row.id),
-        this.database.queryAs<ManifestDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          `select distinct manifest.*
+    const [statuses, manifest, currentKnowledge, documents, fragments, hierarchyNodes, relations] = await Promise.all([
+      this.projectorStatuses(row.id),
+      this.database.queryAs<ManifestDbRow>(
+        "jina_context_admin",
+        { tenantIds: [row.tenant_id] },
+        `select distinct manifest.*
            from jina_context.ref_manifest manifest
            join jina_context.context_documents document
              on document.generation_id=manifest.generation_id
@@ -213,12 +212,12 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where manifest.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by manifest.path`,
-          [row.id, acl]
-        ),
-        this.database.queryAs<CurrentKnowledgeDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          `select distinct current.*
+        [row.id, acl]
+      ),
+      this.database.queryAs<CurrentKnowledgeDbRow>(
+        "jina_context_admin",
+        { tenantIds: [row.tenant_id] },
+        `select distinct current.*
            from jina_context.current_knowledge_revisions current
            join jina_context.context_documents document
              on document.generation_id=current.generation_id
@@ -226,58 +225,54 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where current.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by current.logical_id`,
-          [row.id, acl]
-        ),
-        this.database.queryAs<DocumentDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          `select document.*
+        [row.id, acl]
+      ),
+      this.database.queryAs<DocumentDbRow>(
+        "jina_context_admin",
+        { tenantIds: [row.tenant_id] },
+        `select document.id,document.generation_id,document.tenant_id,document.repository,
+                document.ref_name,document.commit_sha,document.source_kind,document.source_id,
+                document.source_revision_id,document.title,document.body,document.contextual_text,
+                document.metadata,document.authority_class,document.effective_acl_fingerprint,
+                document.source_fingerprint,document.source_anchors,document.projector_name,
+                document.projector_version,document.projected_at
            from jina_context.context_documents document
            where document.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by document.id`,
-          [row.id, acl]
-        ),
-        this.database.queryAs<FragmentDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          `select fragment.*
+        [row.id, acl]
+      ),
+      this.database.queryAs<FragmentDbRow>(
+        "jina_context_admin",
+        { tenantIds: [row.tenant_id] },
+        `select fragment.id,fragment.generation_id,fragment.document_id,fragment.ordinal,
+                fragment.source_text,fragment.contextual_text,fragment.source_anchors,
+                fragment.source_start,fragment.source_end,fragment.content_fingerprint
            from jina_context.context_fragments fragment
            join jina_context.context_documents document on document.id=fragment.document_id
            where fragment.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by fragment.document_id,fragment.ordinal`,
-          [row.id, acl]
-        ),
-        this.database.queryAs<ExactIndexDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          `select exact.*
-           from jina_context.exact_index exact
-           join jina_context.context_documents document on document.id=exact.document_id
-           where exact.generation_id=$1
-             and ($2::text[] is null or (${authorizedDocumentSql("document")}))
-           order by exact.term,exact.document_id,exact.field`,
-          [row.id, acl]
-        ),
-        this.database.queryAs<HierarchyDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          `select hierarchy.*
+        [row.id, acl]
+      ),
+      this.database.queryAs<HierarchyDbRow>(
+        "jina_context_admin",
+        { tenantIds: [row.tenant_id] },
+        `select hierarchy.*
            from jina_context.hierarchy_nodes hierarchy
            join jina_context.context_documents document on document.id=hierarchy.document_id
            where hierarchy.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by hierarchy.document_id,hierarchy.preorder_start`,
-          [row.id, acl]
-        ),
-        this.database.queryAs<RelationDbRow>(
-          "jina_context_admin",
-          { tenantIds: [row.tenant_id] },
-          "select * from jina_context.structural_relations where generation_id=$1 order by id",
-          [row.id]
-        )
-      ]);
+        [row.id, acl]
+      ),
+      this.database.queryAs<RelationDbRow>(
+        "jina_context_admin",
+        { tenantIds: [row.tenant_id] },
+        "select * from jina_context.structural_relations where generation_id=$1 order by id",
+        [row.id]
+      )
+    ]);
     const hydratedDocuments = documents.rows.map(documentFromRow);
     const allowedAnchors = new Set(
       hydratedDocuments.flatMap((document) =>
@@ -299,7 +294,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
       currentKnowledge: currentKnowledge.rows.map(currentKnowledgeFromRow),
       documents: hydratedDocuments,
       fragments: fragments.rows.map(fragmentFromRow),
-      exactIndex: exactIndex.rows.map(exactIndexFromRow),
+      exactIndex: [],
       hierarchyNodes: hierarchyNodes.rows.map(hierarchyFromRow),
       structuralRelations: hydratedRelations
     };
@@ -520,7 +515,11 @@ async function projectConsumerOutput(
     case "lexical":
       await insertDocuments(client, projection.documents);
       await insertFragments(client, projection.fragments, projection.documents);
-      await insertExactIndex(client, projection.exactIndex);
+      if (projection.exactIndex.length > 0) {
+        await insertExactIndex(client, projection.exactIndex);
+      } else {
+        await insertNativeExactIndex(client, projection.generation.id);
+      }
       return;
     case "hierarchy":
       await insertHierarchy(client, projection.hierarchyNodes, projection.documents);
@@ -989,6 +988,30 @@ async function insertExactIndex(client: PoolClient, entries: readonly ExactIndex
   }
 }
 
+async function insertNativeExactIndex(client: PoolClient, generationId: string): Promise<void> {
+  await client.query(
+    `insert into jina_context.exact_index (generation_id,term,document_id,field)
+     select document.generation_id,matched.term[1],document.id,fields.field_name
+     from jina_context.context_documents document
+     cross join lateral (
+       values
+         ('title'::text,document.title),
+         ('body'::text,document.body),
+         ('metadata'::text,document.metadata::text)
+     ) fields(field_name,field_value)
+     cross join lateral regexp_matches(
+       lower(normalize(fields.field_value,NFKC)),
+       '[a-z0-9_$./:@#-]+',
+       'g'
+     ) matched(term)
+     where document.generation_id=$1
+       and char_length(matched.term[1]) between 2 and $2
+     group by document.generation_id,matched.term[1],document.id,fields.field_name
+     on conflict do nothing`,
+    [generationId, EXACT_TERM_MAX_CHARACTERS]
+  );
+}
+
 async function insertHierarchy(
   client: PoolClient,
   nodes: readonly HierarchyNode[],
@@ -1263,21 +1286,6 @@ function fragmentFromRow(row: FragmentDbRow): ContextFragment {
     endOffset: row.source_end,
     anchors: row.source_anchors,
     tokenFingerprint: row.content_fingerprint
-  };
-}
-
-interface ExactIndexDbRow {
-  generation_id: string;
-  term: string;
-  document_id: string;
-  field: ExactIndexEntry["field"];
-}
-function exactIndexFromRow(row: ExactIndexDbRow): ExactIndexEntry {
-  return {
-    generationId: row.generation_id,
-    term: row.term,
-    documentId: row.document_id,
-    field: row.field
   };
 }
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   DeriveKnowledgeService,
@@ -17,6 +18,7 @@ import {
   assembleEvidencePack,
   buildKnowledgePrompt,
   buildKnowledgeRepairPrompt,
+  canonicalJson,
   contextQueueTopics,
   contextTaskTypeDefinitions,
   contextTaskTypes,
@@ -1823,4 +1825,9 @@ test("repository access replacement, tenant access migration, health, and close 
 test("stable IDs and fingerprints ignore object key order", () => {
   assert.equal(fingerprint({ b: 2, a: 1 }), fingerprint({ a: 1, b: 2 }));
   assert.equal(stableId("x", { b: 2, a: 1 }), stableId("x", { a: 1, b: 2 }));
+  const largeValue = Array.from({ length: 10_000 }, (_, index) => ({
+    index,
+    nested: { z: `value-${index}`, a: index % 7 }
+  }));
+  assert.equal(fingerprint(largeValue), createHash("sha256").update(canonicalJson(largeValue)).digest("hex"));
 });

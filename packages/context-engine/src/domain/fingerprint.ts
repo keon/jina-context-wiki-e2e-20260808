@@ -20,9 +20,48 @@ export function canonicalJson(value: unknown): string {
 }
 
 export function fingerprint(value: unknown): string {
-  return createHash("sha256")
-    .update(typeof value === "string" ? value : canonicalJson(value))
-    .digest("hex");
+  const hash = createHash("sha256");
+  if (typeof value === "string") {
+    hash.update(value);
+  } else {
+    writeCanonicalJson(hash, value);
+  }
+  return hash.digest("hex");
+}
+
+function writeCanonicalJson(sink: { update(value: string): unknown }, value: unknown, arrayItem = false): void {
+  if (Array.isArray(value)) {
+    sink.update("[");
+    for (let index = 0; index < value.length; index += 1) {
+      if (index > 0) sink.update(",");
+      writeCanonicalJson(sink, value[index], true);
+    }
+    sink.update("]");
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    sink.update("{");
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined && typeof item !== "function" && typeof item !== "symbol")
+      .sort(([left], [right]) => left.localeCompare(right));
+    for (const [index, [key, item]] of entries.entries()) {
+      if (index > 0) sink.update(",");
+      sink.update(JSON.stringify(key));
+      sink.update(":");
+      writeCanonicalJson(sink, item);
+    }
+    sink.update("}");
+    return;
+  }
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) {
+    if (arrayItem) {
+      sink.update("null");
+      return;
+    }
+    throw new TypeError("Value is not JSON serializable");
+  }
+  sink.update(serialized);
 }
 
 export function stableId(prefix: string, value: unknown): string {

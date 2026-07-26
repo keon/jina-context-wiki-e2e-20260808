@@ -140,9 +140,9 @@ substitutions:
   # work is single-flight per process and tenant-locked across instances.
   _JINA_API_MIN_INSTANCES: "1"
   _JINA_API_MAX_INSTANCES: "3"
-  _JINA_API_CONCURRENCY: "20"
+  _JINA_API_CONCURRENCY: "10"
   _JINA_API_CPU: "1"
-  _JINA_API_MEMORY: 512Mi
+  _JINA_API_MEMORY: 1Gi
   _JINA_CONTEXT_WORKER_MEMORY: 1Gi
   _JINA_CONTEXT_CUTOVER: "false"
   _JINA_CONTEXT_CUTOVER_BACKUP_ID: "0"
