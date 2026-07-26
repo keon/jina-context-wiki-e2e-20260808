@@ -11,7 +11,12 @@ api_image="${gar}/api:${image_tag}"
 worker_image="${gar}/worker:${image_tag}"
 dashboard_image="${gar}/dashboard:${image_tag}"
 admin_image="${gar}/admin:${image_tag}"
-runtime_service_account="jina-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+api_service_account="jina-api-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+context_worker_service_account="jina-context-worker@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+task_worker_service_account="jina-task-worker@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+dashboard_service_account="jina-dashboard@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+admin_service_account="jina-admin@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+acceptance_service_account="jina-acceptance@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 migration_service_account="jina-migration@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
 tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
@@ -175,48 +180,6 @@ for attempt in range(1, 21):
 PY
 }
 
-verify_worker_health() {
-  local url="$1"
-  local expected_topics="$2"
-  HEALTH_URL="${url}/health" EXPECTED_TOPICS="${expected_topics}" python3 - <<'PY'
-import json
-import os
-import time
-import urllib.request
-
-url = os.environ["HEALTH_URL"]
-expected = os.environ["EXPECTED_TOPICS"].split("|")
-allowed = {
-    "active",
-    "consecutiveApiFailures",
-    "lastApiError",
-    "lastApiErrorAt",
-    "lastApiSuccessAt",
-    "lastWork",
-    "metrics",
-    "ok",
-    "topics",
-    "workerId",
-}
-last_work_allowed = {"failureCategory", "finishedAt", "outcome", "topic"}
-for attempt in range(1, 21):
-    try:
-        with urllib.request.urlopen(url, timeout=10) as response:
-            health = json.load(response)
-        assert health.get("ok") is True
-        assert health.get("topics") == expected
-        assert set(health) <= allowed
-        last_work = health.get("lastWork")
-        assert last_work is None or set(last_work) <= last_work_allowed
-        print(json.dumps(health, separators=(",", ":")))
-        raise SystemExit(0)
-    except Exception as error:
-        if attempt == 20:
-            raise RuntimeError(f"worker health check failed after {attempt} attempts: {url}") from error
-        time.sleep(3)
-PY
-}
-
 require_secret() {
   local secret_spec="$1"
   local secret_name="${secret_spec%%:*}"
@@ -226,7 +189,11 @@ require_secret() {
 verify_cutover_backup() {
   local metadata="$1"
   local expected_description="$2"
-  BACKUP_METADATA="${metadata}" EXPECTED_DESCRIPTION="${expected_description}" python3 -c '
+  local require_freshness="$3"
+  BACKUP_METADATA="${metadata}" \
+    EXPECTED_DESCRIPTION="${expected_description}" \
+    REQUIRE_FRESHNESS="${require_freshness}" \
+    python3 -c '
 import datetime
 import json
 import os
@@ -241,9 +208,32 @@ if not end_time:
     raise SystemExit("backup has no completion time")
 completed = datetime.datetime.fromisoformat(end_time.replace("Z", "+00:00"))
 age = (datetime.datetime.now(datetime.timezone.utc) - completed).total_seconds()
-if age < -300 or age > 21600:
+if age < -300:
+    raise SystemExit("backup completion time is in the future")
+if os.environ["REQUIRE_FRESHNESS"] == "true" and age > 21600:
     raise SystemExit("backup completion must be within the last six hours")
 print(end_time)
+'
+}
+
+cutover_marker_fingerprint() {
+  CUTOVER_MARKER_INPUT="$1" python3 -c '
+import hashlib
+import os
+
+print(hashlib.sha256(os.environ["CUTOVER_MARKER_INPUT"].encode()).hexdigest()[:32])
+'
+}
+
+verify_cutover_marker() {
+  CUTOVER_MARKER_METADATA="$1" EXPECTED_CUTOVER_MARKER="$2" python3 -c '
+import json
+import os
+
+metadata = json.loads(os.environ["CUTOVER_MARKER_METADATA"])
+actual = metadata.get("metadata", {}).get("labels", {}).get("jina_cutover_marker")
+if actual != os.environ["EXPECTED_CUTOVER_MARKER"]:
+    raise SystemExit("cutover marker is absent or belongs to different release evidence")
 '
 }
 
@@ -296,7 +286,15 @@ for secret_spec in \
   require_secret "${secret_spec}"
 done
 require_secret "jina-web-auth-password:latest"
-gcloud iam service-accounts describe "${runtime_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
+for service_account in \
+  "${api_service_account}" \
+  "${context_worker_service_account}" \
+  "${task_worker_service_account}" \
+  "${dashboard_service_account}" \
+  "${admin_service_account}" \
+  "${acceptance_service_account}"; do
+  gcloud iam service-accounts describe "${service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
+done
 gcloud iam service-accounts describe "${migration_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 
 service_snapshot_contains() {
@@ -439,28 +437,65 @@ if [[ "${context_cutover}" == "true" ]]; then
   fi
   database_project="${cloud_sql_instance%%:*}"
   database_instance="${cloud_sql_instance##*:}"
+  legacy_database_project="${trusted_legacy_graph_cloud_sql_instance%%:*}"
+  legacy_database_instance="${trusted_legacy_graph_cloud_sql_instance##*:}"
+  cutover_marker="$(cutover_marker_fingerprint \
+    "${release_sha}|${cloud_sql_instance}|${context_cutover_backup_id}|${trusted_legacy_graph_cloud_sql_instance}|${context_cutover_legacy_backup_id}")"
+  backup_freshness_required="true"
+  if [[ "${legacy_api_present}" != "true" || "${legacy_worker_present}" != "true" ]]; then
+    backup_freshness_required="false"
+    if ! cutover_marker_metadata="$(gcloud run jobs describe jina-context-cutover-preflight \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --format=json)"; then
+      echo "Interrupted cutover has no authoritative durable resume marker" >&2
+      exit 2
+    fi
+    if ! verify_cutover_marker "${cutover_marker_metadata}" "${cutover_marker}"; then
+      echo "Interrupted cutover marker does not match the requested release and backups" >&2
+      exit 2
+    fi
+  fi
   primary_backup_metadata="$(gcloud sql backups describe "${context_cutover_backup_id}" \
     --project="${database_project}" \
     --instance="${database_instance}" \
     --format=json)"
   if ! primary_backup_completed_at="$(verify_cutover_backup \
     "${primary_backup_metadata}" \
-    "pre-context-engine-primary-${release_sha}")"; then
-    echo "Primary backup ${context_cutover_backup_id} is not fresh evidence for release ${release_sha}" >&2
+    "pre-context-engine-primary-${release_sha}" \
+    "${backup_freshness_required}")"; then
+    echo "Primary backup ${context_cutover_backup_id} is not valid evidence for release ${release_sha}" >&2
     exit 2
   fi
-  legacy_database_project="${trusted_legacy_graph_cloud_sql_instance%%:*}"
-  legacy_database_instance="${trusted_legacy_graph_cloud_sql_instance##*:}"
   legacy_backup_metadata="$(gcloud sql backups describe "${context_cutover_legacy_backup_id}" \
     --project="${legacy_database_project}" \
     --instance="${legacy_database_instance}" \
     --format=json)"
   if ! legacy_backup_completed_at="$(verify_cutover_backup \
     "${legacy_backup_metadata}" \
-    "pre-context-engine-legacy-graph-${release_sha}")"; then
-    echo "Legacy graph backup ${context_cutover_legacy_backup_id} is not fresh evidence for release ${release_sha}" >&2
+    "pre-context-engine-legacy-graph-${release_sha}" \
+    "${backup_freshness_required}")"; then
+    echo "Legacy graph backup ${context_cutover_legacy_backup_id} is not valid evidence for release ${release_sha}" >&2
     exit 2
   fi
+
+  # This non-serving job is also the durable resume marker. It is created
+  # before either legacy service is removed and is bound to the exact release,
+  # instances, and backup IDs through the verified label fingerprint.
+  gcloud run jobs deploy jina-context-cutover-preflight \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --image="${api_image}" \
+    --service-account="${migration_service_account}" \
+    --set-cloudsql-instances="${cloud_sql_instance},${trusted_legacy_graph_cloud_sql_instance}" \
+    --update-labels="jina_cutover_marker=${cutover_marker}" \
+    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${cutover_primary_db_user}~LEGACY_GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${trusted_legacy_graph_cloud_sql_instance}~LEGACY_GRAPH_DB_NAME=${trusted_legacy_graph_db_name}~LEGACY_GRAPH_DB_USER=${cutover_legacy_graph_db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
+    --set-secrets="DB_PASS=${cutover_primary_db_pass_secret},LEGACY_GRAPH_DB_PASS=${cutover_legacy_graph_db_pass_secret}" \
+    --args=dist/cutover-preflight.js \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=5m \
+    --quiet
 
   cat <<CUTOVER
 Starting destructive context cutover
@@ -469,6 +504,7 @@ Verified primary backup: ${database_project}/${database_instance}/${context_cuto
 Verified legacy graph backup: ${legacy_database_project}/${legacy_database_instance}/${context_cutover_legacy_backup_id}
 Primary backup completed: ${primary_backup_completed_at}
 Legacy graph backup completed: ${legacy_backup_completed_at}
+Backup freshness required: ${backup_freshness_required}
 CUTOVER
 
   # Stop every intake surface and then claims before auditing the durable queue. The
@@ -503,19 +539,6 @@ CUTOVER
   fi
   echo "Legacy context worker and API are absent; auditing the fenced durable queue"
 
-  gcloud run jobs deploy jina-context-cutover-preflight \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --image="${api_image}" \
-    --service-account="${migration_service_account}" \
-    --set-cloudsql-instances="${cloud_sql_instance},${trusted_legacy_graph_cloud_sql_instance}" \
-    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${cutover_primary_db_user}~LEGACY_GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${trusted_legacy_graph_cloud_sql_instance}~LEGACY_GRAPH_DB_NAME=${trusted_legacy_graph_db_name}~LEGACY_GRAPH_DB_USER=${cutover_legacy_graph_db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
-    --set-secrets="DB_PASS=${cutover_primary_db_pass_secret},LEGACY_GRAPH_DB_PASS=${cutover_legacy_graph_db_pass_secret}" \
-    --args=dist/cutover-preflight.js \
-    --tasks=1 \
-    --max-retries=0 \
-    --task-timeout=5m \
-    --quiet
   gcloud run jobs execute jina-context-cutover-preflight \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
@@ -550,7 +573,7 @@ gcloud run deploy jina-api \
   --region="${GCP_REGION}" \
   --image="${api_image}" \
   --allow-unauthenticated \
-  --service-account="${runtime_service_account}" \
+  --service-account="${api_service_account}" \
   --set-cloudsql-instances="${cloud_sql_instance}" \
   --concurrency="${api_concurrency}" \
   --cpu="${api_cpu}" \
@@ -574,8 +597,8 @@ gcloud run deploy jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
-  --allow-unauthenticated \
-  --service-account="${runtime_service_account}" \
+  --no-allow-unauthenticated \
+  --service-account="${context_worker_service_account}" \
   --concurrency=1 \
   --memory="${context_worker_memory}" \
   --timeout=300 \
@@ -591,16 +614,13 @@ context_worker_url="$(gcloud run services describe jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --format='value(status.url)')"
-verify_worker_health \
-  "${context_worker_url}" \
-  "run-ingest-evidence|run-derive-knowledge|run-index-context"
 
 gcloud run deploy jina-task-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
-  --allow-unauthenticated \
-  --service-account="${runtime_service_account}" \
+  --no-allow-unauthenticated \
+  --service-account="${task_worker_service_account}" \
   --concurrency=1 \
   --timeout=300 \
   --min-instances=1 \
@@ -615,9 +635,6 @@ task_worker_url="$(gcloud run services describe jina-task-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --format='value(status.url)')"
-verify_worker_health \
-  "${task_worker_url}" \
-  "run-review|run-research|run-publish|run-cleanup"
 
 web_env_vars="^~^JINA_API_URL=${api_url}~JINA_TENANT_ID=${acceptance_tenant_id}~JINA_WEB_PRINCIPAL_ID=${acceptance_principal_id}~JINA_WEB_AUTH_USERNAME=omlabs"
 web_secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WEB_AUTH_PASSWORD=jina-web-auth-password:latest"
@@ -626,7 +643,7 @@ gcloud run deploy jina-dashboard \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --image="${dashboard_image}" \
-  --service-account="${runtime_service_account}" \
+  --service-account="${dashboard_service_account}" \
   --set-env-vars="${web_env_vars}" \
   --set-secrets="${web_secrets}" \
   --quiet
@@ -641,7 +658,7 @@ gcloud run deploy jina-admin \
   --region="${GCP_REGION}" \
   --image="${admin_image}" \
   --allow-unauthenticated \
-  --service-account="${runtime_service_account}" \
+  --service-account="${admin_service_account}" \
   --set-env-vars="${web_env_vars}" \
   --set-secrets="${web_secrets}" \
   --quiet
@@ -655,7 +672,7 @@ gcloud run jobs deploy jina-acceptance \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
-  --service-account="${runtime_service_account}" \
+  --service-account="${acceptance_service_account}" \
   --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest" \
   --args=dist/acceptance.js \

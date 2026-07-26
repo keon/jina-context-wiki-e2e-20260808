@@ -28,7 +28,7 @@ export class PostgresContextEmbeddingRepository implements DenseSearchPort {
   constructor(private readonly database: ContextDatabase) {}
 
   async store(input: StoreGenerationEmbeddingsInput): Promise<void> {
-    await this.database.transactionAs("jina_context_dense", async (client) => {
+    await this.database.transactionAs("jina_context_dense", { tenantIds: [input.tenantId] }, async (client) => {
       for (const embedding of input.embeddings) {
         validateEmbedding(embedding);
         const inserted = await client.query(
@@ -93,6 +93,7 @@ export class PostgresContextEmbeddingRepository implements DenseSearchPort {
       embedding: number[];
     }>(
       "jina_context_dense",
+      { tenantIds: [input.tenantId] },
       `select embedding.fragment_id,fragment.document_id,embedding.embedding
        from jina_context.context_embeddings embedding
        join jina_context.context_fragments fragment

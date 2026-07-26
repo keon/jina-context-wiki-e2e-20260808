@@ -127,7 +127,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   constructor(private readonly database: ContextDatabase) {}
 
   async registerRepository(input: RepositoryRegistration, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transactionAs("jina_context_ingest", async (client) => {
+    await this.database.transactionAs("jina_context_ingest", { tenantIds: [input.tenantId] }, async (client) => {
       await assertContextWriteFence(client, input.tenantId, "run-ingest-evidence", fence);
       await client.query(
         `insert into jina_context.repositories
@@ -158,7 +158,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   }
 
   async appendObservation(observation: ProviderObservation, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transactionAs("jina_context_ingest", async (client) => {
+    await this.database.transactionAs("jina_context_ingest", { tenantIds: [observation.tenantId] }, async (client) => {
       await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
       await insertObservation(client, observation);
       await enqueueContextEvent(client, {
@@ -178,7 +178,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   }
 
   async appendRepositoryAcl(observation: RepositoryAclObservation, fence?: ContextWriteFence): Promise<void> {
-    await this.database.transactionAs("jina_context_ingest", async (client) => {
+    await this.database.transactionAs("jina_context_ingest", { tenantIds: [observation.tenantId] }, async (client) => {
       await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
       await lockRepositoryAccess(client, observation.tenantId, observation.repository);
       await client.query(
@@ -215,156 +215,161 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   }
 
   async commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
-    await this.database.transactionAs("jina_context_ingest", async (client) => {
-      await assertContextWriteFence(client, snapshot.checkpoint.tenantId, "run-ingest-evidence", fence);
-      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-        `context-generation-ref:${snapshot.checkpoint.tenantId}:${snapshot.checkpoint.repository}:${snapshot.checkpoint.ref}`
-      ]);
-      await lockProjectionInput(client, snapshot.checkpoint.tenantId, snapshot.checkpoint.repository);
-      await ensureRepository(client, snapshot.checkpoint);
-      for (const record of snapshot.records) await insertEvidenceRecord(client, record);
-      for (const entry of snapshot.manifest)
-        await ensureManifestBlob(client, entry, snapshot.records, snapshot.checkpoint.createdAt);
-      for (const fact of snapshot.structuralFacts)
-        await insertStructuralFact(client, fact, snapshot.checkpoint.createdAt);
-      if (snapshot.git) await persistGitSnapshot(client, snapshot);
+    await this.database.transactionAs(
+      "jina_context_ingest",
+      { tenantIds: [snapshot.checkpoint.tenantId] },
+      async (client) => {
+        await assertContextWriteFence(client, snapshot.checkpoint.tenantId, "run-ingest-evidence", fence);
+        await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+          `context-generation-ref:${snapshot.checkpoint.tenantId}:${snapshot.checkpoint.repository}:${snapshot.checkpoint.ref}`
+        ]);
+        await lockProjectionInput(client, snapshot.checkpoint.tenantId, snapshot.checkpoint.repository);
+        await ensureRepository(client, snapshot.checkpoint);
+        for (const record of snapshot.records) await insertEvidenceRecord(client, record);
+        for (const entry of snapshot.manifest)
+          await ensureManifestBlob(client, entry, snapshot.records, snapshot.checkpoint.createdAt);
+        for (const fact of snapshot.structuralFacts)
+          await insertStructuralFact(client, fact, snapshot.checkpoint.createdAt);
+        if (snapshot.git) await persistGitSnapshot(client, snapshot);
 
-      const checkpoint = snapshot.checkpoint;
-      await client.query(
-        `insert into jina_context.evidence_checkpoints
+        const checkpoint = snapshot.checkpoint;
+        await client.query(
+          `insert into jina_context.evidence_checkpoints
           (id,tenant_id,repository,ref_name,ref_sequence,commit_sha,parser_version,source_completeness,
            observation_frontier,evidence_fingerprint,manifest_fingerprint,acl_fingerprint,created_at)
          values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
          on conflict (id) do nothing`,
-        [
-          checkpoint.id,
-          checkpoint.tenantId,
-          checkpoint.repository,
-          checkpoint.ref,
-          checkpoint.refSequence,
-          checkpoint.commitSha,
-          checkpoint.parserVersion,
-          checkpoint.sourceCompleteness,
-          checkpoint.observationFrontier,
-          checkpoint.evidenceFingerprint,
-          checkpoint.manifestFingerprint,
-          checkpoint.aclFingerprint,
-          checkpoint.createdAt
-        ]
-      );
-      const storedCheckpoint = await client.query(
-        `select 1 from jina_context.evidence_checkpoints
+          [
+            checkpoint.id,
+            checkpoint.tenantId,
+            checkpoint.repository,
+            checkpoint.ref,
+            checkpoint.refSequence,
+            checkpoint.commitSha,
+            checkpoint.parserVersion,
+            checkpoint.sourceCompleteness,
+            checkpoint.observationFrontier,
+            checkpoint.evidenceFingerprint,
+            checkpoint.manifestFingerprint,
+            checkpoint.aclFingerprint,
+            checkpoint.createdAt
+          ]
+        );
+        const storedCheckpoint = await client.query(
+          `select 1 from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5
            and ref_sequence=$6 and parser_version=$7 and observation_frontier=$8
            and evidence_fingerprint=$9 and manifest_fingerprint=$10 and acl_fingerprint=$11`,
-        [
-          checkpoint.id,
-          checkpoint.tenantId,
-          checkpoint.repository,
-          checkpoint.ref,
-          checkpoint.commitSha,
-          checkpoint.refSequence,
-          checkpoint.parserVersion,
-          checkpoint.observationFrontier,
-          checkpoint.evidenceFingerprint,
-          checkpoint.manifestFingerprint,
-          checkpoint.aclFingerprint
-        ]
-      );
-      if (storedCheckpoint.rowCount !== 1) {
-        throw new Error(`Evidence checkpoint identity collision for ${checkpoint.id}`);
-      }
-      for (const [ordinal, record] of snapshot.records.entries()) {
-        await client.query(
-          `insert into jina_context.evidence_checkpoint_records
+          [
+            checkpoint.id,
+            checkpoint.tenantId,
+            checkpoint.repository,
+            checkpoint.ref,
+            checkpoint.commitSha,
+            checkpoint.refSequence,
+            checkpoint.parserVersion,
+            checkpoint.observationFrontier,
+            checkpoint.evidenceFingerprint,
+            checkpoint.manifestFingerprint,
+            checkpoint.aclFingerprint
+          ]
+        );
+        if (storedCheckpoint.rowCount !== 1) {
+          throw new Error(`Evidence checkpoint identity collision for ${checkpoint.id}`);
+        }
+        for (const [ordinal, record] of snapshot.records.entries()) {
+          await client.query(
+            `insert into jina_context.evidence_checkpoint_records
             (checkpoint_id,tenant_id,repository,evidence_id,ordinal)
            values ($1,$2,$3,$4,$5) on conflict do nothing`,
-          [checkpoint.id, checkpoint.tenantId, checkpoint.repository, record.id, ordinal]
-        );
-      }
-      for (const entry of snapshot.manifest) {
-        await client.query(
-          `insert into jina_context.evidence_checkpoint_manifest
+            [checkpoint.id, checkpoint.tenantId, checkpoint.repository, record.id, ordinal]
+          );
+        }
+        for (const entry of snapshot.manifest) {
+          await client.query(
+            `insert into jina_context.evidence_checkpoint_manifest
             (checkpoint_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,
              content_digest,content_available,language,executable)
            values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,
-          [
-            checkpoint.id,
-            entry.tenantId,
-            entry.repository,
-            entry.ref,
-            entry.commitSha,
-            entry.path,
-            entry.blobSha,
-            entry.contentDigest,
-            entry.contentAvailable,
-            entry.language ?? null,
-            entry.executable
-          ]
-        );
-      }
-      for (const [ordinal, fact] of snapshot.structuralFacts.entries()) {
-        await client.query(
-          `insert into jina_context.evidence_checkpoint_structural_facts
+            [
+              checkpoint.id,
+              entry.tenantId,
+              entry.repository,
+              entry.ref,
+              entry.commitSha,
+              entry.path,
+              entry.blobSha,
+              entry.contentDigest,
+              entry.contentAvailable,
+              entry.language ?? null,
+              entry.executable
+            ]
+          );
+        }
+        for (const [ordinal, fact] of snapshot.structuralFacts.entries()) {
+          await client.query(
+            `insert into jina_context.evidence_checkpoint_structural_facts
             (checkpoint_id,tenant_id,repository,structural_fact_id,ordinal)
            values ($1,$2,$3,$4,$5) on conflict do nothing`,
-          [checkpoint.id, fact.tenantId, fact.repository, fact.id, ordinal]
-        );
-      }
-      const latest = await client.query<{ id: string }>(
-        `select id from jina_context.evidence_checkpoints
+            [checkpoint.id, fact.tenantId, fact.repository, fact.id, ordinal]
+          );
+        }
+        const latest = await client.query<{ id: string }>(
+          `select id from jina_context.evidence_checkpoints
          where tenant_id=$1 and repository=$2 and ref_name=$3
          order by ref_sequence desc,id desc limit 1`,
-        [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
-      );
-      const admitted = await client.query<{ ref_sequence: string }>(
-        `select coalesce(max(ref_sequence),0)::text ref_sequence
+          [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
+        );
+        const admitted = await client.query<{ ref_sequence: string }>(
+          `select coalesce(max(ref_sequence),0)::text ref_sequence
          from jina_context.pipeline_builds
          where tenant_id=$1 and repository=$2 and ref_name=$3`,
-        [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
-      );
-      const latestAdmittedSequence = Number(admitted.rows[0]!.ref_sequence);
-      if (!Number.isSafeInteger(latestAdmittedSequence) || latestAdmittedSequence < 0) {
-        throw new Error(`Ref sequence exceeds the supported range for ${checkpoint.repository}@${checkpoint.ref}`);
+          [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
+        );
+        const latestAdmittedSequence = Number(admitted.rows[0]!.ref_sequence);
+        if (!Number.isSafeInteger(latestAdmittedSequence) || latestAdmittedSequence < 0) {
+          throw new Error(`Ref sequence exceeds the supported range for ${checkpoint.repository}@${checkpoint.ref}`);
+        }
+        if (latest.rows[0]?.id === checkpoint.id && checkpoint.refSequence >= latestAdmittedSequence) {
+          await appendProjectionInputEvent(client, {
+            tenantId: checkpoint.tenantId,
+            repository: checkpoint.repository,
+            id: `projection-input:evidence:${checkpoint.id}`,
+            eventType: "evidence.checkpoint.committed",
+            aggregateId: checkpoint.id,
+            occurredAt: checkpoint.createdAt
+          });
+          await enqueueContextEvent(client, {
+            id: contextStableId("event", { checkpoint: checkpoint.id }),
+            sequence: 1,
+            tenantId: checkpoint.tenantId,
+            repository: checkpoint.repository,
+            aggregateType: "evidence",
+            aggregateId: checkpoint.id,
+            eventType: "evidence.checkpoint.committed",
+            payload: {
+              checkpointId: checkpoint.id,
+              ref: checkpoint.ref,
+              commitSha: checkpoint.commitSha,
+              evidenceFingerprint: checkpoint.evidenceFingerprint,
+              manifestFingerprint: checkpoint.manifestFingerprint,
+              aclFingerprint: checkpoint.aclFingerprint
+            },
+            consumers: ["manifest", "lexical", "structural", "identity", "acl", "retention"],
+            occurredAt: checkpoint.createdAt
+          });
+        }
+        await assertContextWriteFence(client, checkpoint.tenantId, "run-ingest-evidence", fence);
       }
-      if (latest.rows[0]?.id === checkpoint.id && checkpoint.refSequence >= latestAdmittedSequence) {
-        await appendProjectionInputEvent(client, {
-          tenantId: checkpoint.tenantId,
-          repository: checkpoint.repository,
-          id: `projection-input:evidence:${checkpoint.id}`,
-          eventType: "evidence.checkpoint.committed",
-          aggregateId: checkpoint.id,
-          occurredAt: checkpoint.createdAt
-        });
-        await enqueueContextEvent(client, {
-          id: contextStableId("event", { checkpoint: checkpoint.id }),
-          sequence: 1,
-          tenantId: checkpoint.tenantId,
-          repository: checkpoint.repository,
-          aggregateType: "evidence",
-          aggregateId: checkpoint.id,
-          eventType: "evidence.checkpoint.committed",
-          payload: {
-            checkpointId: checkpoint.id,
-            ref: checkpoint.ref,
-            commitSha: checkpoint.commitSha,
-            evidenceFingerprint: checkpoint.evidenceFingerprint,
-            manifestFingerprint: checkpoint.manifestFingerprint,
-            aclFingerprint: checkpoint.aclFingerprint
-          },
-          consumers: ["manifest", "lexical", "structural", "identity", "acl", "retention"],
-          occurredAt: checkpoint.createdAt
-        });
-      }
-      await assertContextWriteFence(client, checkpoint.tenantId, "run-ingest-evidence", fence);
-    });
+    );
     return snapshot.checkpoint;
   }
 
   async getCheckpoint(checkpointId: string): Promise<EvidenceCheckpoint | undefined> {
     await this.database.initialize();
     const result = await this.database.queryAs<CheckpointRow>(
-      "jina_context_ingest",
+      "jina_context_admin",
+      { system: true },
       "select * from jina_context.evidence_checkpoints where id=$1",
       [checkpointId]
     );
@@ -375,6 +380,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
     await this.database.initialize();
     const result = await this.database.queryAs<CheckpointRow>(
       "jina_context_ingest",
+      { tenantIds: [tenantId] },
       `select * from jina_context.evidence_checkpoints
        where tenant_id=$1 and repository=$2 and ref_name=$3
        order by ref_sequence desc,id desc limit 1`,
@@ -386,7 +392,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   async listEvidence(checkpointId: string): Promise<EvidenceRecord[]> {
     await this.database.initialize();
     const result = await this.database.queryAs<EvidenceRow>(
-      "jina_context_ingest",
+      "jina_context_admin",
+      { system: true },
       `select evidence.*
        from jina_context.evidence_checkpoint_records selection
        join jina_context.evidence_records evidence
@@ -418,7 +425,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   ): Promise<EvidenceRecord | undefined> {
     await this.database.initialize();
     const result = await this.database.queryAs<EvidenceRow>(
-      "jina_context_ingest",
+      "jina_context_admin",
+      { system: true },
       `select evidence.*
        from jina_context.evidence_checkpoint_records selection
        join jina_context.evidence_records evidence
@@ -460,7 +468,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   async listManifest(checkpointId: string): Promise<RefManifestEntry[]> {
     await this.database.initialize();
     const result = await this.database.queryAs<ManifestRow>(
-      "jina_context_ingest",
+      "jina_context_admin",
+      { system: true },
       `select manifest.*
        from jina_context.evidence_checkpoint_manifest manifest
        where manifest.checkpoint_id=$1
@@ -485,7 +494,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   async listStructuralFacts(checkpointId: string): Promise<StructuralFact[]> {
     await this.database.initialize();
     const result = await this.database.queryAs<StructuralFactRow>(
-      "jina_context_ingest",
+      "jina_context_admin",
+      { system: true },
       `select fact.*
        from jina_context.evidence_checkpoint_structural_facts selection
        join jina_context.structural_facts fact
@@ -795,7 +805,6 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
     ]
   );
   for (const entry of manifest) {
-    if (!entry.contentAvailable) continue;
     await client.query(
       `insert into jina_context.tree_entries
         (tenant_id,repository,tree_sha,path,blob_sha,mode)
@@ -809,6 +818,7 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
         entry.executable ? "100755" : "100644"
       ]
     );
+    if (!entry.contentAvailable) continue;
     const facts = structuralFacts.filter((fact) => fact.anchors.some((anchor) => anchor.sourceId === entry.blobSha));
     const sourceRecord = snapshot.records.find(
       (record) =>

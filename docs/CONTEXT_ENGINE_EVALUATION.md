@@ -124,9 +124,11 @@ TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/jina_test \
 
 That mode drops only the `jina_context` schema in the named disposable database, then
 repeats the same fixture and gates through `PostgresContextEngineStore`. It exercises
-actual SQL ACL filtering, generation hydration, knowledge projection, and query
-telemetry/storage paths. Never point this evaluator at production or a shared development
-database.
+actual SQL ACL filtering, generation hydration, knowledge projection, dedicated indexed
+retrieval primitives, and query telemetry construction. Telemetry persistence is covered
+separately by the PostgreSQL integration test, which asserts query-run, candidate,
+citation-anchor, and per-route metric rows. Never point this evaluator at production or a
+shared development database.
 
 The evaluator exits nonzero if:
 

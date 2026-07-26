@@ -45,7 +45,7 @@ export class PostgresContextOutboxRepository {
   constructor(private readonly database: ContextDatabase) {}
 
   async enqueue(event: ContextOutboxEvent, availableAt = event.occurredAt): Promise<void> {
-    await this.database.transactionAs("jina_context_admin", (client) =>
+    await this.database.transactionAs("jina_context_admin", { tenantIds: [event.tenantId] }, (client) =>
       enqueueContextEvent(client, event, availableAt)
     );
   }
@@ -62,7 +62,8 @@ export class PostgresContextOutboxRepository {
     readonly limit?: number;
   }): Promise<readonly ContextOutboxDelivery[]> {
     const limit = Math.max(1, Math.min(input.limit ?? 50, 500));
-    return this.database.transactionAs("jina_context_admin", async (client) => {
+    const databaseScope = input.tenantId ? { tenantIds: [input.tenantId] } : { system: true as const };
+    return this.database.transactionAs("jina_context_admin", databaseScope, async (client) => {
       const result = await client.query<DeliveryRow>(
         `with claimable as (
            select delivery_id
@@ -125,6 +126,7 @@ export class PostgresContextOutboxRepository {
     await this.database.initialize();
     const result = await this.database.queryAs(
       "jina_context_admin",
+      { system: true },
       `update jina_context.outbox
        set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
        where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
@@ -143,6 +145,7 @@ export class PostgresContextOutboxRepository {
     await this.database.initialize();
     const result = await this.database.queryAs(
       "jina_context_admin",
+      { system: true },
       `update jina_context.outbox
        set available_at=$4,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=$5
        where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
@@ -156,8 +159,10 @@ export class PostgresContextOutboxRepository {
     scope?: { readonly tenantId?: string; readonly repository?: string }
   ): Promise<{ readonly count: number; readonly oldestAvailableAt?: string }> {
     await this.database.initialize();
+    const databaseScope = scope?.tenantId ? { tenantIds: [scope.tenantId] } : { system: true as const };
     const result = await this.database.queryAs<{ count: string; oldest: Date | null }>(
       "jina_context_admin",
+      databaseScope,
       `select count(*)::text as count,min(available_at) as oldest
        from jina_context.outbox
        where consumer=$1 and processed_at is null

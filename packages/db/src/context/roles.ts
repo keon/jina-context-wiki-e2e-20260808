@@ -29,6 +29,59 @@ const CONTEXT_CONSUMER_ROLES = [
 
 export type ContextDatabaseRole = (typeof CONTEXT_ROLES)[number];
 
+const tenantScopeSql = (column = "tenant_id", allowAdminSystemScope = true) =>
+  `(${column}=any(string_to_array(coalesce(current_setting('jina.tenant_id',true),''),chr(31)))${
+    allowAdminSystemScope
+      ? " or (current_user='jina_context_admin' and current_setting('jina.tenant_id',true)='*')"
+      : ""
+  })`;
+
+const tenantScopedTables = [
+  "repositories",
+  "pipeline_builds",
+  "pipeline_stages",
+  "observations",
+  "evidence_records",
+  "evidence_checkpoints",
+  "projection_input_events",
+  "evidence_checkpoint_records",
+  "evidence_checkpoint_manifest",
+  "refs",
+  "commits",
+  "commit_parents",
+  "trees",
+  "blobs",
+  "tree_entries",
+  "commit_changes",
+  "blob_analyses",
+  "symbols",
+  "imports",
+  "structural_facts",
+  "evidence_checkpoint_structural_facts",
+  "entities",
+  "identities",
+  "derivation_runs",
+  "knowledge_documents",
+  "knowledge_document_revisions",
+  "knowledge_revision_evidence",
+  "knowledge_revision_events",
+  "repository_acl_observations",
+  "erasure_filters",
+  "audit_events",
+  "index_generations",
+  "ref_manifest",
+  "current_knowledge_revisions",
+  "context_documents",
+  "context_fragments",
+  "context_embeddings",
+  "hierarchy_nodes",
+  "structural_relations",
+  "identity_projection",
+  "repository_acl_projection",
+  "query_runs",
+  "retrieval_metrics"
+] as const;
+
 /**
  * Grants are intentionally explicit. In particular, runtime roles receive no
  * UPDATE or DELETE privileges on canonical evidence or immutable knowledge.
@@ -255,39 +308,101 @@ alter table jina_context.projection_checkpoints enable row level security;
 drop policy if exists context_outbox_producer on jina_context.outbox;
 create policy context_outbox_producer on jina_context.outbox
   for insert to jina_context_ingest,jina_context_derive
-  with check (true);
+  with check (${tenantScopeSql("tenant_id", false)});
 drop policy if exists context_outbox_producer_read on jina_context.outbox;
 create policy context_outbox_producer_read on jina_context.outbox
   for select to jina_context_ingest,jina_context_derive
-  using (true);
+  using (${tenantScopeSql("tenant_id", false)});
 drop policy if exists context_outbox_admin on jina_context.outbox;
 create policy context_outbox_admin on jina_context.outbox
-  to jina_context_admin using (true) with check (true);
+  to jina_context_admin
+  using (${tenantScopeSql()}) with check (${tenantScopeSql()});
 drop policy if exists context_generation_projectors_admin on jina_context.generation_projectors;
 create policy context_generation_projectors_admin on jina_context.generation_projectors
-  to jina_context_admin using (true) with check (true);
+  to jina_context_admin
+  using (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id")}
+    )
+  )
+  with check (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id")}
+    )
+  );
 drop policy if exists context_generation_projectors_coordinator on jina_context.generation_projectors;
 create policy context_generation_projectors_coordinator on jina_context.generation_projectors
-  to jina_context_coordinator using (true) with check (true);
+  to jina_context_coordinator
+  using (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id", false)}
+    )
+  )
+  with check (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id", false)}
+    )
+  );
 drop policy if exists context_projection_checkpoints_admin on jina_context.projection_checkpoints;
 create policy context_projection_checkpoints_admin on jina_context.projection_checkpoints
-  to jina_context_admin using (true) with check (true);
+  to jina_context_admin
+  using (${tenantScopeSql()}) with check (${tenantScopeSql()});
 drop policy if exists context_projection_checkpoints_coordinator on jina_context.projection_checkpoints;
 create policy context_projection_checkpoints_coordinator on jina_context.projection_checkpoints
-  to jina_context_coordinator using (true) with check (true);
+  to jina_context_coordinator
+  using (${tenantScopeSql("tenant_id", false)}) with check (${tenantScopeSql("tenant_id", false)});
 
 ${CONTEXT_CONSUMER_ROLES.map(
   ([consumer, role]) => `
 drop policy if exists context_outbox_${role} on jina_context.outbox;
 create policy context_outbox_${role} on jina_context.outbox
-  to ${role} using (consumer='${consumer}') with check (consumer='${consumer}');
+  to ${role}
+  using (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)})
+  with check (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)});
 drop policy if exists context_generation_projectors_${role} on jina_context.generation_projectors;
 create policy context_generation_projectors_${role} on jina_context.generation_projectors
-  to ${role} using (consumer='${consumer}') with check (consumer='${consumer}');
+  to ${role}
+  using (
+    consumer='${consumer}'
+    and exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id", false)}
+    )
+  )
+  with check (
+    consumer='${consumer}'
+    and exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id", false)}
+    )
+  );
 drop policy if exists context_projection_checkpoints_${role} on jina_context.projection_checkpoints;
 create policy context_projection_checkpoints_${role} on jina_context.projection_checkpoints
-  to ${role} using (consumer='${consumer}') with check (consumer='${consumer}');`
+  to ${role}
+  using (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)})
+  with check (consumer='${consumer}' and ${tenantScopeSql("tenant_id", false)});`
 ).join("\n")}
+
+${tenantScopedTables
+  .map(
+    (table) => `
+alter table jina_context.${table} enable row level security;
+drop policy if exists context_tenant_scope on jina_context.${table};
+create policy context_tenant_scope on jina_context.${table}
+  using (${tenantScopeSql()})
+  with check (${tenantScopeSql()});`
+  )
+  .join("\n")}
 
 alter default privileges in schema jina_context revoke all on tables from public;
 alter default privileges in schema jina_context revoke all on sequences from public;

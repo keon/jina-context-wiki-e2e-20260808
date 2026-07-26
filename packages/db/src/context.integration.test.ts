@@ -70,17 +70,67 @@ test(
       aclFingerprint: repositoryAclFingerprint(omittedTenantId, omittedRepository),
       observationFrontier: "omitted:1",
       createdAt,
-      sourceComplete: false
+      sourceComplete: false,
+      git: {
+        commit: {
+          treeSha: "5".repeat(40),
+          parentShas: [],
+          message: "Partial binary snapshot"
+        },
+        changes: [
+          { kind: "add", path: "assets/one.bin", newBlobSha: "2".repeat(40) },
+          { kind: "add", path: "assets/two.bin", newBlobSha: "3".repeat(40) }
+        ]
+      }
     });
     assert.equal((await store.listEvidence(omittedCheckpoint.id)).length, 0);
     const omittedBlobs = await database.queryAs<{ count: string }>(
       "jina_context_admin",
+      { tenantIds: [omittedTenantId] },
       `select count(*)::text as count
        from jina_context.blobs
        where tenant_id=$1 and repository=$2`,
       [omittedTenantId, omittedRepository]
     );
     assert.equal(omittedBlobs.rows[0]?.count, "0");
+    const omittedTree = await database.queryAs<{
+      entry_count: number;
+      content_digest: string;
+    }>(
+      "jina_context_admin",
+      { tenantIds: [omittedTenantId] },
+      `select entry_count,content_digest
+       from jina_context.trees
+       where tenant_id=$1 and repository=$2 and tree_sha=$3`,
+      [omittedTenantId, omittedRepository, "5".repeat(40)]
+    );
+    const omittedTreeEntries = await database.queryAs<{
+      path: string;
+      blob_sha: string;
+      mode: string;
+    }>(
+      "jina_context_admin",
+      { tenantIds: [omittedTenantId] },
+      `select path,blob_sha,mode
+       from jina_context.tree_entries
+       where tenant_id=$1 and repository=$2 and tree_sha=$3
+       order by path`,
+      [omittedTenantId, omittedRepository, "5".repeat(40)]
+    );
+    const expectedOmittedTree = [
+      { path: "assets/one.bin", blobSha: "2".repeat(40), executable: false },
+      { path: "assets/two.bin", blobSha: "3".repeat(40), executable: false }
+    ];
+    assert.equal(omittedTree.rows[0]?.entry_count, omittedTreeEntries.rows.length);
+    assert.equal(omittedTree.rows[0]?.content_digest, fingerprint(expectedOmittedTree));
+    assert.deepEqual(
+      omittedTreeEntries.rows,
+      expectedOmittedTree.map((entry) => ({
+        path: entry.path,
+        blob_sha: entry.blobSha,
+        mode: "100644"
+      }))
+    );
     await omittedService.ingest({
       tenantId: omittedTenantId,
       repository: omittedRepository,
@@ -95,6 +145,7 @@ test(
     });
     const completedBlob = await database.queryAs<{ content_digest: string; content: string | null }>(
       "jina_context_admin",
+      { tenantIds: [omittedTenantId] },
       `select content_digest,content
        from jina_context.blobs
        where tenant_id=$1 and repository=$2 and blob_sha=$3`,
@@ -662,6 +713,7 @@ test(
       metrics: string;
     }>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       `select
          (select count(*)::text from jina_context.retrieval_candidates where query_run_id='trace_integration')
            as candidates,
@@ -1073,8 +1125,8 @@ test(
     const mutableDatabase = database as unknown as { transactionAs: ContextDatabase["transactionAs"] };
     const originalTransactionAs = database.transactionAs.bind(database);
     let revokeAfterAclProjection = true;
-    mutableDatabase.transactionAs = async (role, operation) => {
-      const result = await originalTransactionAs(role, operation);
+    mutableDatabase.transactionAs = async (role, scope, operation) => {
+      const result = await originalTransactionAs(role, scope, operation);
       if (role === "jina_context_acl" && revokeAfterAclProjection) {
         revokeAfterAclProjection = false;
         await store.replaceRepositoryAccess(raceTenantId, "race-reader", []);
@@ -1155,8 +1207,8 @@ test(
       sourceComplete: true
     });
     let eraseAfterRetentionProjection = true;
-    mutableDatabase.transactionAs = async (role, operation) => {
-      const result = await originalTransactionAs(role, operation);
+    mutableDatabase.transactionAs = async (role, scope, operation) => {
+      const result = await originalTransactionAs(role, scope, operation);
       if (role === "jina_context_retention" && eraseAfterRetentionProjection) {
         eraseAfterRetentionProjection = false;
         await store.eraseEvidence({
@@ -1265,6 +1317,7 @@ test(
     const roleClient = await database.pool.connect();
     try {
       await roleClient.query("set role jina_context_manifest");
+      await roleClient.query("select set_config('jina.tenant_id',$1,false)", [tenantId]);
       const visibleConsumers = await roleClient.query<{ consumer: string }>(
         "select distinct consumer from jina_context.outbox order by consumer"
       );
@@ -1296,6 +1349,19 @@ test(
     const runtimeStore = new PostgresContextEngineStore(runtimeDatabase);
     assert.ok((await runtimeStore.listRepositories(tenantId)).includes(repository));
     assert.equal((await runtimeStore.getGeneration(successorGeneration.id))?.generation.id, successorGeneration.id);
+    const scopedTenantRows = await runtimeDatabase.queryAs<{ tenant_id: string }>(
+      "jina_context_admin",
+      { tenantIds: [tenantId] },
+      "select distinct tenant_id from jina_context.evidence_checkpoints order by tenant_id"
+    );
+    assert.deepEqual(scopedTenantRows.rows, [{ tenant_id: tenantId }]);
+    const crossTenantRows = await runtimeDatabase.queryAs<{ count: string }>(
+      "jina_context_admin",
+      { tenantIds: [tenantId] },
+      "select count(*)::text count from jina_context.evidence_checkpoints where tenant_id=$1",
+      [omittedTenantId]
+    );
+    assert.equal(crossTenantRows.rows[0]?.count, "0");
     await runtimeStore.close();
     await database.pool.query(`revoke ${CONTEXT_ROLES.join(",")} from ${runtimeRole}`);
     await database.pool.query(`drop role ${runtimeRole}`);

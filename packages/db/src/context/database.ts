@@ -10,6 +10,23 @@ export interface PostgresContextDatabaseConfig extends PoolConfig {
   readonly manageRoles?: boolean;
 }
 
+export type ContextDatabaseScope = { readonly tenantIds: readonly string[] } | { readonly system: true };
+
+export const contextSystemScope: ContextDatabaseScope = { system: true };
+
+export function contextTenantScope(tenantId: string): ContextDatabaseScope {
+  if (!tenantId.trim()) throw new Error("Context database tenant scope must not be empty");
+  return { tenantIds: [tenantId] };
+}
+
+export function contextTenantsScope(tenantIds: readonly string[]): ContextDatabaseScope {
+  const normalized = [...new Set(tenantIds.map((tenantId) => tenantId.trim()))];
+  if (normalized.length === 0 || normalized.some((tenantId) => !tenantId || tenantId.includes("\u001f"))) {
+    throw new Error("Context database tenant scopes must be non-empty and must not contain control separators");
+  }
+  return { tenantIds: normalized };
+}
+
 export class ContextDatabase {
   readonly pool: Pool;
   private readonly manageSchema: boolean;
@@ -32,15 +49,22 @@ export class ContextDatabase {
   }
 
   async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
-    return this.transactionAs("jina_context_admin", operation);
+    return this.transactionAs("jina_context_admin", contextSystemScope, operation);
   }
 
-  async transactionAs<T>(role: ContextDatabaseRole, operation: (client: PoolClient) => Promise<T>): Promise<T> {
+  async transactionAs<T>(
+    role: ContextDatabaseRole,
+    scope: ContextDatabaseScope,
+    operation: (client: PoolClient) => Promise<T>
+  ): Promise<T> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
       await client.query(`set local role ${role}`);
+      await client.query("select set_config('jina.tenant_id',$1,true)", [
+        "tenantIds" in scope ? scope.tenantIds.join("\u001f") : "*"
+      ]);
       const result = await operation(client);
       await client.query("commit");
       return result;
@@ -54,10 +78,11 @@ export class ContextDatabase {
 
   async queryAs<T extends QueryResultRow = QueryResultRow>(
     role: ContextDatabaseRole,
+    scope: ContextDatabaseScope,
     text: string,
     values?: readonly unknown[]
   ) {
-    return this.transactionAs(role, (client) => client.query<T>(text, values ? [...values] : undefined));
+    return this.transactionAs(role, scope, (client) => client.query<T>(text, values ? [...values] : undefined));
   }
 
   async close(): Promise<void> {

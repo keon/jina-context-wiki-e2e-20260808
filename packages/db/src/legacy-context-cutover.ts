@@ -43,6 +43,106 @@ interface AuditCountRow {
 }
 
 /**
+ * One-shot migration hardening for the first context-engine cutover. It strips
+ * role-administration capabilities from the new runtime login and moves any
+ * objects left in the retired schema to a non-login archive owner.
+ */
+export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string): Promise<void> {
+  const escapedRuntimeUser = runtimeUser.replaceAll('"', '""');
+  const runtimeLiteral = runtimeUser.replaceAll("'", "''");
+  await pool.query(
+    `alter role "${escapedRuntimeUser}"
+       noinherit nocreatedb nocreaterole nobypassrls noreplication`
+  );
+  await pool.query(
+    `do $hardening$
+     declare runtime_user constant text := '${runtimeLiteral}';
+     begin
+       if exists (select 1 from pg_roles where rolname='cloudsqlsuperuser') then
+         execute format('revoke cloudsqlsuperuser from %I', runtime_user);
+       end if;
+     end
+     $hardening$`
+  );
+  await pool.query(
+    `do $archive$
+     declare
+       object record;
+       migration_owner text := current_user;
+       runtime_user constant text := '${runtimeLiteral}';
+       archive_owner constant text := 'jina_legacy_archive';
+     begin
+       if to_regnamespace('jina_context_graph') is null then
+         return;
+       end if;
+       if not exists (select 1 from pg_roles where rolname=archive_owner) then
+         execute format(
+           'create role %I nologin noinherit nocreatedb nocreaterole nobypassrls noreplication',
+           archive_owner
+         );
+       else
+         execute format(
+           'alter role %I nologin noinherit nocreatedb nocreaterole nobypassrls noreplication',
+           archive_owner
+         );
+       end if;
+
+       if runtime_user <> migration_owner then
+         execute format('grant %I to %I', runtime_user, migration_owner);
+         execute format('reassign owned by %I to %I', runtime_user, migration_owner);
+         execute format('revoke %I from %I', runtime_user, migration_owner);
+       end if;
+
+       for object in
+         select c.relname,c.relkind
+         from pg_class c
+         join pg_namespace n on n.oid=c.relnamespace
+         where n.nspname='jina_context_graph'
+           and c.relkind in ('r','p','v','m','S','f')
+       loop
+         execute format(
+           case object.relkind
+             when 'S' then 'alter sequence jina_context_graph.%I owner to %I'
+             when 'v' then 'alter view jina_context_graph.%I owner to %I'
+             when 'm' then 'alter materialized view jina_context_graph.%I owner to %I'
+             when 'f' then 'alter foreign table jina_context_graph.%I owner to %I'
+             else 'alter table jina_context_graph.%I owner to %I'
+           end,
+           object.relname,
+           archive_owner
+         );
+       end loop;
+       for object in
+         select p.oid::regprocedure as identity
+         from pg_proc p
+         join pg_namespace n on n.oid=p.pronamespace
+         where n.nspname='jina_context_graph'
+       loop
+         execute format('alter routine %s owner to %I', object.identity, archive_owner);
+       end loop;
+       for object in
+         select t.typname
+         from pg_type t
+         join pg_namespace n on n.oid=t.typnamespace
+         where n.nspname='jina_context_graph'
+           and t.typrelid=0
+           and t.typtype in ('d','e','r','m')
+       loop
+         execute format('alter type jina_context_graph.%I owner to %I', object.typname, archive_owner);
+       end loop;
+
+       execute format('alter schema jina_context_graph owner to %I', archive_owner);
+       execute format('revoke all on schema jina_context_graph from %I', runtime_user);
+       execute format('revoke all on all tables in schema jina_context_graph from %I', runtime_user);
+       execute format('revoke all on all sequences in schema jina_context_graph from %I', runtime_user);
+       execute format('revoke execute on all functions in schema jina_context_graph from %I', runtime_user);
+       execute format('revoke %I from %I', archive_owner, runtime_user);
+     end
+     $archive$`
+  );
+}
+
+/**
  * One-shot, read-only audit for the retired graph database. This deliberately
  * remains separate from the new context schema so the runtime identity never
  * needs access to archived graph tables.

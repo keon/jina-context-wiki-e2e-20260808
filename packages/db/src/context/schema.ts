@@ -302,10 +302,10 @@ create table if not exists jina_context.tree_entries (
   mode text not null,
   primary key (tenant_id,repository,tree_sha,path),
   foreign key (tenant_id,repository,tree_sha)
-    references jina_context.trees(tenant_id,repository,tree_sha),
-  foreign key (tenant_id,repository,blob_sha)
-    references jina_context.blobs(tenant_id,repository,blob_sha)
+    references jina_context.trees(tenant_id,repository,tree_sha)
 );
+alter table jina_context.tree_entries
+  drop constraint if exists tree_entries_tenant_id_repository_blob_sha_fkey;
 create index if not exists context_tree_entries_blob
   on jina_context.tree_entries (tenant_id,repository,blob_sha,tree_sha);
 
@@ -940,6 +940,9 @@ create table if not exists jina_context.hierarchy_nodes (
   adapter_name text not null,
   adapter_version text not null,
   node_fingerprint text not null check (node_fingerprint ~ '^[0-9a-f]{64}$'),
+  search_vector tsvector generated always as (
+    to_tsvector('simple',coalesce(title,'') || ' ' || coalesce(summary,''))
+  ) stored,
   primary key (generation_id,id),
   foreign key (generation_id,document_id)
     references jina_context.context_documents(generation_id,id) on delete cascade,
@@ -951,6 +954,12 @@ create index if not exists context_hierarchy_parent
   on jina_context.hierarchy_nodes (tenant_id,repository,generation_id,document_id,parent_id,ordinal);
 create index if not exists context_hierarchy_preorder
   on jina_context.hierarchy_nodes (generation_id,document_id,preorder_start,preorder_end);
+alter table jina_context.hierarchy_nodes
+  add column if not exists search_vector tsvector generated always as (
+    to_tsvector('simple',coalesce(title,'') || ' ' || coalesce(summary,''))
+  ) stored;
+create index if not exists context_hierarchy_search
+  on jina_context.hierarchy_nodes using gin (search_vector);
 
 create table if not exists jina_context.structural_relations (
   id text not null,

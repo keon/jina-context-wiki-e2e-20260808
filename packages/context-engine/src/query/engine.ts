@@ -145,9 +145,8 @@ export class QueryContextService {
       });
     }
     if (
-      projection &&
       ["overview", "intent"].includes(plan.taskKind) &&
-      projection.documents.some((document) => document.body.length >= 16_000) &&
+      (useIndexedRetrieval || projection?.documents.some((document) => document.body.length >= 16_000)) &&
       !plan.routes.some((route) => route.route === "long_context")
     ) {
       plan.routes.push({

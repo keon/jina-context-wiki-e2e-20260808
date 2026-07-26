@@ -34,7 +34,7 @@ export class PostgresGenerationCoordinator {
     ref: string,
     checkpointId: string
   ): Promise<void> {
-    await this.database.transactionAs("jina_context_coordinator", async (client) => {
+    await this.database.transactionAs("jina_context_coordinator", { tenantIds: [tenantId] }, async (client) => {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         generationRefLock(tenantId, repository, ref)
       ]);
@@ -43,81 +43,85 @@ export class PostgresGenerationCoordinator {
   }
 
   async create(generation: Omit<IndexGeneration, "status" | "publishedAt">): Promise<IndexGeneration> {
-    await this.database.transactionAs("jina_context_coordinator", async (client) => {
-      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
-        generationRefLock(generation.tenantId, generation.repository, generation.ref)
-      ]);
-      await lockRepositoryAccess(client, generation.tenantId, generation.repository);
-      await lockProjectionInput(client, generation.tenantId, generation.repository);
-      await assertRepositoryAccessFingerprint(
-        client,
-        generation.tenantId,
-        generation.repository,
-        generation.repositoryAccessFingerprint
-      );
-      await assertProjectionInputFingerprint(
-        client,
-        generation.tenantId,
-        generation.repository,
-        generation.projectionInputFingerprint
-      );
-      const checkpoint = await client.query<{ created_at: Date }>(
-        `select created_at from jina_context.evidence_checkpoints
+    await this.database.transactionAs(
+      "jina_context_coordinator",
+      { tenantIds: [generation.tenantId] },
+      async (client) => {
+        await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+          generationRefLock(generation.tenantId, generation.repository, generation.ref)
+        ]);
+        await lockRepositoryAccess(client, generation.tenantId, generation.repository);
+        await lockProjectionInput(client, generation.tenantId, generation.repository);
+        await assertRepositoryAccessFingerprint(
+          client,
+          generation.tenantId,
+          generation.repository,
+          generation.repositoryAccessFingerprint
+        );
+        await assertProjectionInputFingerprint(
+          client,
+          generation.tenantId,
+          generation.repository,
+          generation.projectionInputFingerprint
+        );
+        const checkpoint = await client.query<{ created_at: Date }>(
+          `select created_at from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5`,
-        [generation.checkpointId, generation.tenantId, generation.repository, generation.ref, generation.commitSha]
-      );
-      const evidence = checkpoint.rows[0];
-      if (!evidence) throw new Error("Generation checkpoint does not match its requested scope");
-      await assertLatestCheckpoint(
-        client,
-        generation.tenantId,
-        generation.repository,
-        generation.ref,
-        generation.checkpointId
-      );
-      await client.query(
-        `insert into jina_context.index_generations
+          [generation.checkpointId, generation.tenantId, generation.repository, generation.ref, generation.commitSha]
+        );
+        const evidence = checkpoint.rows[0];
+        if (!evidence) throw new Error("Generation checkpoint does not match its requested scope");
+        await assertLatestCheckpoint(
+          client,
+          generation.tenantId,
+          generation.repository,
+          generation.ref,
+          generation.checkpointId
+        );
+        await client.query(
+          `insert into jina_context.index_generations
           (id,tenant_id,repository,ref_name,commit_sha,checkpoint_id,kind,status,
            barrier_occurred_at,projector_versions,capabilities,required_fingerprint,
            acl_fingerprint,projection_input_fingerprint,degraded_capabilities,created_at)
          values ($1,$2,$3,$4,$5,$6,$7,'building',$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15)
          on conflict (id) do nothing`,
-        [
-          generation.id,
-          generation.tenantId,
-          generation.repository,
-          generation.ref,
-          generation.commitSha,
-          generation.checkpointId,
-          generation.capabilities.derivedKnowledge === "available" ? "enriched" : "baseline",
-          evidence.created_at,
-          JSON.stringify(generation.projectorVersions),
-          JSON.stringify(generation.capabilities),
-          generation.fingerprint,
-          generation.repositoryAccessFingerprint,
-          generation.projectionInputFingerprint,
-          degradedCapabilities(generation),
-          generation.createdAt
-        ]
-      );
-      for (const [consumer, version] of Object.entries(generation.projectorVersions) as [
-        ContextProjectionConsumer,
-        string
-      ][]) {
-        await client.query(
-          `insert into jina_context.generation_projectors
+          [
+            generation.id,
+            generation.tenantId,
+            generation.repository,
+            generation.ref,
+            generation.commitSha,
+            generation.checkpointId,
+            generation.capabilities.derivedKnowledge === "available" ? "enriched" : "baseline",
+            evidence.created_at,
+            JSON.stringify(generation.projectorVersions),
+            JSON.stringify(generation.capabilities),
+            generation.fingerprint,
+            generation.repositoryAccessFingerprint,
+            generation.projectionInputFingerprint,
+            degradedCapabilities(generation),
+            generation.createdAt
+          ]
+        );
+        for (const [consumer, version] of Object.entries(generation.projectorVersions) as [
+          ContextProjectionConsumer,
+          string
+        ][]) {
+          await client.query(
+            `insert into jina_context.generation_projectors
             (generation_id,consumer,required,version,status)
            values ($1,$2,$3,$4,'pending')
            on conflict (generation_id,consumer) do nothing`,
-          [
-            generation.id,
-            consumer,
-            requiredContextConsumers.includes(consumer as (typeof requiredContextConsumers)[number]),
-            version
-          ]
-        );
+            [
+              generation.id,
+              consumer,
+              requiredContextConsumers.includes(consumer as (typeof requiredContextConsumers)[number]),
+              version
+            ]
+          );
+        }
       }
-    });
+    );
     return { ...generation, status: "building" };
   }
 
@@ -128,7 +132,7 @@ export class PostgresGenerationCoordinator {
     readonly now: string;
     readonly leaseExpiresAt: string;
   }): Promise<GenerationProjectorClaim | undefined> {
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { system: true }, async (client) => {
       const leaseId = randomUUID();
       const result = await client.query<{
         generation_id: string;
@@ -175,7 +179,8 @@ export class PostgresGenerationCoordinator {
   }): Promise<boolean> {
     await this.database.initialize();
     const result = await this.database.queryAs(
-      "jina_context_coordinator",
+      "jina_context_admin",
+      { system: true },
       `update jina_context.generation_projectors
        set lease_expires_at=$5
        where generation_id=$1 and consumer=$2 and lease_id=$3
@@ -195,7 +200,7 @@ export class PostgresGenerationCoordinator {
     readonly completedAt: string;
     readonly failure?: Readonly<Record<string, unknown>>;
   }): Promise<boolean> {
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { system: true }, async (client) => {
       const updated = await client.query(
         `update jina_context.generation_projectors
          set status=$4,output_fingerprint=$5,processed_through=$6,completed_at=$7,
@@ -249,7 +254,7 @@ export class PostgresGenerationCoordinator {
   }
 
   async publish(generationId: string, publishedAt: string, fence?: ContextWriteFence): Promise<IndexGeneration> {
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { system: true }, async (client) => {
       const target = await client.query<{
         tenant_id: string;
         repository: string;
@@ -264,6 +269,7 @@ export class PostgresGenerationCoordinator {
       );
       const scope = target.rows[0];
       if (!scope) throw new Error(`Generation ${generationId} is not building`);
+      await client.query("select set_config('jina.tenant_id',$1,true)", [scope.tenant_id]);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         generationRefLock(scope.tenant_id, scope.repository, scope.ref_name)
       ]);
@@ -325,7 +331,8 @@ export class PostgresGenerationCoordinator {
   async fail(generationId: string, failure: Readonly<Record<string, unknown>>, failedAt: string): Promise<boolean> {
     await this.database.initialize();
     const result = await this.database.queryAs(
-      "jina_context_coordinator",
+      "jina_context_admin",
+      { system: true },
       `update jina_context.index_generations
        set status='failed',failure=$2::jsonb
        where id=$1 and status='building'`,
@@ -352,6 +359,7 @@ export class PostgresGenerationCoordinator {
       updated_at: Date;
     }>(
       "jina_context_coordinator",
+      { tenantIds: [input.tenantId] },
       `select * from jina_context.projection_checkpoints
        where tenant_id=$1 and repository=$2 and ref_name=$3 and consumer=$4`,
       [input.tenantId, input.repository, input.ref, input.consumer]

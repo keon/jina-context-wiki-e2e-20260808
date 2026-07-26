@@ -67,7 +67,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     ) {
       throw new Error("githubInstallationId must be a positive integer");
     }
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", { tenantIds: [input.tenantId] }, async (client) => {
       const id = stableId("cb", { tenantId: input.tenantId, requestKey: input.requestKey });
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `context-generation-ref:${input.tenantId}:${input.repository}:${input.ref}`
@@ -172,7 +172,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     if (tenantIds.length === 0) throw new Error("At least one tenant is required to claim work");
     if (input.topics.length === 0) return undefined;
     if (input.leaseExpiresAt <= input.now) throw new Error("Lease expiry must be in the future");
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", { tenantIds }, async (client) => {
       const leaseId = `lease_${randomUUID()}`;
       const fenceToken = `fence_${randomUUID()}`;
       const result = await client.query<StageRow & BuildRow>(
@@ -230,6 +230,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     await this.database.initialize();
     const result = await this.database.queryAs(
       "jina_context_coordinator",
+      { tenantIds: [input.tenantId] },
       `update jina_context.pipeline_stages
        set status='queued',metadata=metadata || jsonb_build_object('releaseReason',$5),
            lease_id=null,lease_owner=null,lease_expires_at=null,fence_token=null,updated_at=$4
@@ -257,6 +258,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
       fence_token: string;
     }>(
       "jina_context_coordinator",
+      { tenantIds: [input.tenantId] },
       `update jina_context.pipeline_stages
        set lease_expires_at=$5,updated_at=$4
        where tenant_id=$1 and id=$2 and lease_id=$3 and status='leased'
@@ -286,7 +288,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     metadata?: Record<string, unknown>;
     error?: string;
   }): Promise<boolean> {
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", { tenantIds: [input.tenantId] }, async (client) => {
       const result = await client.query<{
         build_id: string;
         type: ContextPipelineStage["type"];
@@ -340,6 +342,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     await this.database.initialize();
     const result = await this.database.queryAs(
       "jina_context_coordinator",
+      { tenantIds: [input.tenantId] },
       `select 1
        from jina_context.pipeline_stages stage
        join jina_context.pipeline_builds build on build.id=stage.build_id
@@ -365,6 +368,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     await this.database.initialize();
     const result = await this.database.queryAs<{ ref_sequence: string }>(
       "jina_context_coordinator",
+      { tenantIds: [tenantId] },
       `select coalesce(max(ref_sequence),0)::text ref_sequence
        from jina_context.pipeline_builds
        where tenant_id=$1 and repository=$2 and ref_name=$3`,
@@ -378,14 +382,14 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
   }
 
   async get(buildId: string): Promise<ContextBuild | undefined> {
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { system: true }, async (client) => {
       const result = await client.query<BuildRow>("select * from jina_context.pipeline_builds where id=$1", [buildId]);
       return result.rows[0] ? hydrateBuild(client, result.rows[0]) : undefined;
     });
   }
 
   async list(tenantId: string): Promise<ContextBuild[]> {
-    return this.database.transactionAs("jina_context_coordinator", async (client) => {
+    return this.database.transactionAs("jina_context_coordinator", { tenantIds: [tenantId] }, async (client) => {
       const result = await client.query<BuildRow>(
         `select * from jina_context.pipeline_builds
          where tenant_id=$1 order by created_at desc,id desc`,

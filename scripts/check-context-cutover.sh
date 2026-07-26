@@ -73,6 +73,86 @@ if [[ "${split_image_output}" != *"must deploy images built by the current coord
   exit 1
 fi
 
+run_stale_backup_case() {
+  local service_list="$1"
+  local marker_override="${2:-}"
+  local mock_cutover_marker
+  mock_cutover_marker="$(
+    python3 -c 'import hashlib; print(hashlib.sha256(("a"*40+"|jina-463721:us-east1:jina-db|1|jina-v2:us-central1:jina-postgres|2").encode()).hexdigest()[:32])'
+  )"
+  if [[ -n "${marker_override}" ]]; then
+    mock_cutover_marker="${marker_override}"
+  fi
+  MOCK_SERVICE_LIST="${service_list}" \
+    MOCK_CUTOVER_MARKER="${mock_cutover_marker}" \
+    GCP_PROJECT_ID=jina-v2 \
+    GCP_REGION=us-central1 \
+    CLOUD_BUILD_ID=mock-build \
+    IMAGE_TAG=mock-build \
+    CLOUD_SQL_INSTANCE=jina-463721:us-east1:jina-db \
+    JINA_CONTEXT_CUTOVER=true \
+    JINA_CONTEXT_CUTOVER_BACKUP_ID=1 \
+    JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID=2 \
+    JINA_LEGACY_CUTOVER_TENANT_IDS=eff0efc9-b103-494a-b7a3-1ae7f95c2d26 \
+    JINA_RELEASE_SHA="${mock_release_sha}" \
+    JINA_BUILD_COMMIT_SHA="${mock_release_sha}" \
+    bash -c '
+      gcloud() {
+        if [[ "$1 $2 $3" == "run services list" ]]; then
+          printf "%b" "$MOCK_SERVICE_LIST"
+          return 0
+        fi
+        if [[ "$1 $2 $3" == "run services describe" && "$4" == "jina-api" ]]; then
+          printf "%s\n" "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"env\":[{\"name\":\"GRAPH_API_TOKEN\",\"value\":\"set\"},{\"name\":\"GRAPH_INSTANCE_UNIX_SOCKET\",\"value\":\"/cloudsql/jina-v2:us-central1:jina-postgres\"},{\"name\":\"GRAPH_DB_NAME\",\"value\":\"jina\"},{\"name\":\"GRAPH_DB_USER\",\"value\":\"jina_app\"},{\"name\":\"GRAPH_DB_PASS\",\"valueFrom\":{\"secretKeyRef\":{\"name\":\"jina-db-password\",\"key\":\"latest\"}}}] }]}}}}"
+          return 0
+        fi
+        if [[ "$1 $2" == "builds describe" ]]; then
+          printf "%s\n" "$JINA_RELEASE_SHA"
+          return 0
+        fi
+        if [[ "$1 $2 $3" == "sql backups describe" ]]; then
+          if [[ "$4" == "1" ]]; then
+            printf "%s\n" "{\"status\":\"SUCCESSFUL\",\"description\":\"pre-context-engine-primary-${JINA_RELEASE_SHA}\",\"endTime\":\"2020-01-01T00:00:00Z\"}"
+          else
+            printf "%s\n" "{\"status\":\"SUCCESSFUL\",\"description\":\"pre-context-engine-legacy-graph-${JINA_RELEASE_SHA}\",\"endTime\":\"2020-01-01T00:00:00Z\"}"
+          fi
+          return 0
+        fi
+        if [[ "$1 $2 $3 $4" == "run jobs describe jina-context-cutover-preflight" ]]; then
+          printf "%s\n" "{\"metadata\":{\"labels\":{\"jina_cutover_marker\":\"${MOCK_CUTOVER_MARKER}\"}}}"
+          return 0
+        fi
+        if [[ "$1 $2 $3 $4" == "run jobs execute jina-context-cutover-preflight" ]]; then
+          return 17
+        fi
+        return 0
+      }
+      export -f gcloud
+      bash scripts/cloud-build-deploy.sh
+    ' 2>&1 || true
+}
+
+initial_stale_backup_output="$(
+  run_stale_backup_case $'jina-api\njina-context-graph-worker\n'
+)"
+if [[ "${initial_stale_backup_output}" != *"backup completion must be within the last six hours"* ]]; then
+  echo "Initial destructive cutover accepted stale backup evidence." >&2
+  exit 1
+fi
+
+resumed_stale_backup_output="$(run_stale_backup_case "")"
+if [[ "${resumed_stale_backup_output}" != *"Starting destructive context cutover"* ||
+      "${resumed_stale_backup_output}" != *"Backup freshness required: false"* ]]; then
+  echo "Interrupted destructive cutover could not resume with its original SHA-bound backups." >&2
+  exit 1
+fi
+
+unmarked_outage_output="$(run_stale_backup_case $'jina-context-graph-worker\n' "wrong-marker")"
+if [[ "${unmarked_outage_output}" != *"marker does not match the requested release and backups"* ]]; then
+  echo "A service outage without a matching durable marker was treated as a cutover retry." >&2
+  exit 1
+fi
+
 if rg --quiet '_JINA_CONTEXT_CUTOVER|_JINA_RELEASE_SHA|_JINA_LEGACY_CUTOVER' cloudbuild.deploy.yaml; then
   echo "Split-image deployment config exposes destructive cutover substitutions." >&2
   exit 1

@@ -218,7 +218,7 @@ clean cutover:
 gcloud sql backups create \
   --project=jina-463721 \
   --instance=jina-db \
-  --description="before context-engine ${release_sha}"
+  --description="pre-context-engine-primary-${release_sha}"
 
 gcloud sql backups list \
   --project=jina-463721 \
@@ -228,7 +228,7 @@ gcloud sql backups list \
 gcloud sql backups create \
   --project=jina-v2 \
   --instance=jina-postgres \
-  --description="before retired graph shutdown ${release_sha}"
+  --description="pre-context-engine-legacy-graph-${release_sha}"
 
 gcloud sql backups list \
   --project=jina-v2 \
@@ -238,7 +238,10 @@ gcloud sql backups list \
 
 Record both backup IDs, release SHA, repository/ref inventory, expected ACL principals,
 and timestamp in the release evidence. Verify both backups reach a successful state
-before deployment.
+before deployment. The first destructive attempt requires both backups to have completed
+within six hours. A retry after either legacy service has already been removed reuses the
+same successful backup IDs and exact SHA-bound descriptions; do not take a replacement
+"pre-cutover" backup from partially migrated state.
 
 The first destructive release must run from the connected repository so Cloud Build
 provides an authoritative `COMMIT_SHA`. Create a manual-only release trigger once:
@@ -485,10 +488,15 @@ fixed forward:
 
 1. stop context intake and all context workers;
 2. capture logs, failed task IDs, generation IDs, and the release SHA;
-3. redeploy the complete prior image set;
-4. restore the matching pre-cutover backup into an isolated recovery target;
-5. validate identity, ACL, board, and context reads before shifting traffic;
-6. reconcile any accepted writes before attempting cutover again.
+3. restore the matching primary and graph backups into separate isolated recovery
+   instances and validate their schemas, tenant inventory, ACLs, queue state, and
+   timestamps;
+4. deploy the complete prior image set as no-traffic recovery services configured only
+   for those isolated database targets;
+5. validate identity, ACL, board, graph reads, and worker no-claim behavior through the
+   recovery services;
+6. shift traffic and enable the recovered worker only after validation, then reconcile
+   any accepted writes before attempting cutover again.
 
 Never point old code at `jina_context`, run down-migrations, or delete the backup inside
 the recovery window.

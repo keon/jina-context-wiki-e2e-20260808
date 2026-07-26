@@ -2,6 +2,7 @@ import { Pool, type PoolConfig } from "pg";
 import { applySchema } from "./apply-schema.js";
 import { CONTEXT_ROLES, CONTEXT_ROLES_SQL } from "./context/roles.js";
 import { CONTEXT_PGVECTOR_SCHEMA_SQL, CONTEXT_SCHEMA_SQL } from "./context/schema.js";
+import { hardenContextRuntimeRole } from "./legacy-context-cutover.js";
 
 const connectionString = process.env.DATABASE_URL ?? process.env.TEST_DATABASE_URL;
 const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
@@ -24,7 +25,7 @@ try {
   if (process.argv.includes("--install-roles")) {
     await applySchema(pool, "jina_context.roles", CONTEXT_ROLES_SQL);
     const runtimeUser = requiredRuntimeRoleName(process.env.CONTEXT_RUNTIME_DB_USER);
-    await pool.query(`alter role "${runtimeUser}" noinherit`);
+    await hardenContextRuntimeRole(pool, runtimeUser);
     await pool.query(`grant ${CONTEXT_ROLES.join(",")} to "${runtimeUser}"`);
   }
 } finally {

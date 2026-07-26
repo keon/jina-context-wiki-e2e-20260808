@@ -154,6 +154,14 @@ const fullRetrievers = () => [
   new LongContextRetriever(),
   new HierarchyIndexRetriever()
 ];
+const indexedRouteExpectations = {
+  "exact-symbol": { route: "exact", explanation: "materialized exact-index term match" },
+  "structure-call": { route: "structural", explanation: "indexed structural relation" },
+  "architecture-overview": { route: "hierarchy", explanation: "indexed hierarchy-node match" },
+  "derived-knowledge": { route: "knowledge", explanation: "indexed knowledge retrieval" },
+  "long-document": { route: "long_context", explanation: "indexed full-document long-context match" },
+  "temporal-window": { route: "temporal", explanation: "indexed time-window retrieval" }
+};
 const variants = {
   lexical_only: { retrievers: [new LexicalRetriever()] },
   lexical_structural: { retrievers: [new LexicalRetriever(), new StructuralRetriever()] },
@@ -179,6 +187,7 @@ for (const [name, variant] of Object.entries(variants)) {
   let forbiddenCitationCount = 0;
   let conflictFailures = 0;
   let requiredSourceKindFailures = 0;
+  let indexedPrimitiveFailures = 0;
   const cases = [];
   for (const testCase of fixture.cases) {
     const service = new QueryContextService(
@@ -187,7 +196,7 @@ for (const [name, variant] of Object.entries(variants)) {
       undefined,
       variant.retrievers
     );
-    const response = await service.query({
+    const execution = await service.queryWithTrace({
       tenantId: fixture.tenantId,
       principalId: fixture.principalId,
       repository: fixture.repository,
@@ -197,6 +206,19 @@ for (const [name, variant] of Object.entries(variants)) {
       ...(testCase.targets ? { targets: testCase.targets } : {}),
       ...(testCase.timeWindow ? { timeWindow: testCase.timeWindow } : {})
     });
+    const response = execution.response;
+    const indexedExpectation = indexedRouteExpectations[testCase.id];
+    if (
+      variant.indexed &&
+      indexedExpectation &&
+      !execution.telemetry.candidates.some(
+        (candidate) =>
+          candidate.retriever === indexedExpectation.route &&
+          candidate.diagnostics.explanation === indexedExpectation.explanation
+      )
+    ) {
+      indexedPrimitiveFailures += 1;
+    }
     const sourceIds = new Set(
       response.citations.flatMap((citation) => citation.anchors.map((anchor) => anchor.sourceId))
     );
@@ -258,6 +280,7 @@ for (const [name, variant] of Object.entries(variants)) {
     aclLeakageCount: forbiddenCitationCount,
     conflictFailureCount: conflictFailures,
     requiredSourceKindFailureCount: requiredSourceKindFailures,
+    indexedPrimitiveFailureCount: indexedPrimitiveFailures,
     cases
   });
 }
@@ -309,7 +332,8 @@ const output = {
       evidenceRecallAt20: indexed.evidenceRecall,
       aclLeakageCount: indexed.aclLeakageCount,
       conflictFailureCount: indexed.conflictFailureCount,
-      requiredSourceKindFailureCount: indexed.requiredSourceKindFailureCount
+      requiredSourceKindFailureCount: indexed.requiredSourceKindFailureCount,
+      indexedPrimitiveFailureCount: indexed.indexedPrimitiveFailureCount
     }
   }
 };
@@ -329,6 +353,7 @@ if (
   indexed.aclLeakageCount !== 0 ||
   indexed.conflictFailureCount !== 0 ||
   indexed.requiredSourceKindFailureCount !== 0 ||
+  indexed.indexedPrimitiveFailureCount !== 0 ||
   !groundedKnowledgeCitation ||
   !revocationEnforced
 ) {

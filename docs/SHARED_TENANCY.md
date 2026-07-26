@@ -227,26 +227,31 @@ Create and inspect both backups before cutover:
 gcloud sql backups create \
   --project=jina-463721 \
   --instance=jina-db \
-  --description="before context-engine cutover"
+  --description="pre-context-engine-primary-${release_sha}"
 
 gcloud sql backups list --project=jina-463721 --instance=jina-db
 
 gcloud sql backups create \
   --project=jina-v2 \
   --instance=jina-postgres \
-  --description="before retired graph shutdown"
+  --description="pre-context-engine-legacy-graph-${release_sha}"
 
 gcloud sql backups list --project=jina-v2 --instance=jina-postgres
 ```
 
 There is no mixed-version or compatibility rollback. Emergency rollback is:
 
-1. stop all new context writers;
-2. redeploy the complete previously known-good API and worker release;
-3. restore its matching primary and graph database backups into isolated recovery
-   targets;
-4. validate tenant identities and ACLs before directing traffic;
-5. reconcile writes accepted after the backup before trying another cutover.
+1. stop all new context writers and keep the failed release isolated from traffic;
+2. restore the matching primary and graph backups into two new isolated recovery
+   instances; never restore over either current production database;
+3. validate the restored schemas, tenant inventory, ACLs, queue state, and backup
+   timestamps directly against those isolated targets;
+4. deploy the complete prior API and worker image set as no-traffic recovery services,
+   with their primary and graph database settings pinned to the isolated targets;
+5. run the prior release's health, tenant/ACL, graph-query, and worker no-claim checks
+   against those recovery services;
+6. only after validation, shift traffic to the recovered API and enable the recovered
+   worker, then reconcile writes accepted after the backup before another cutover.
 
 Do not run down-migrations or point old code at `jina_context`. Do not delete the recovery
 backups during the rollback window.

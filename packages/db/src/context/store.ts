@@ -196,7 +196,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           rawScore: 1,
           scoreSemantics: "indexed structural neighbor",
           exactMatch: true,
-          authorityClass: "source_code",
+          authorityClass: "deterministic_analysis",
           effectiveAclFingerprint: aclFingerprint,
           contentFingerprint: fingerprint({
             relationId: relation.id,
@@ -225,6 +225,24 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           )
         )
       ).flat();
+    } else if (input.route === "hierarchy") {
+      rows = await this.query.hierarchySearch({
+        tenantId: input.tenantId,
+        repository: input.repository,
+        principalId: input.principalId,
+        generationId: input.generation.id,
+        query: indexedQueryText(input.plan),
+        limit: input.limit
+      });
+    } else if (input.route === "long_context") {
+      rows = await this.query.longContextSearch({
+        tenantId: input.tenantId,
+        repository: input.repository,
+        principalId: input.principalId,
+        generationId: input.generation.id,
+        query: indexedQueryText(input.plan),
+        limit: input.limit
+      });
     } else if (input.route === "structured" && structuredTargets(input.plan).length === 0) {
       rows = await this.query.browse({
         tenantId: input.tenantId,
@@ -268,6 +286,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       rows.map((row) => {
         const sourceKind = indexedSourceKind(row.sourceKind);
         const rawScore = input.route === "exact" ? row.exactScore : Math.max(row.exactScore * 2, row.proseScore);
+        const retrieval = indexedRetrievalDescription(input.route);
         return {
           id: stableId("rc", { route: input.route, storedId: row.id }),
           retriever: input.route,
@@ -280,12 +299,12 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           contextualText: row.contextualText,
           anchors: [...row.anchors],
           rawScore,
-          scoreSemantics: input.route === "exact" ? "indexed exact lookup" : "PostgreSQL full-text rank",
+          scoreSemantics: retrieval.scoreSemantics,
           exactMatch: input.route === "exact",
           authorityClass: row.authorityClass,
           effectiveAclFingerprint: row.effectiveAclFingerprint,
           contentFingerprint: fingerprint({ sourceFingerprint: row.sourceFingerprint, excerpt: row.text }),
-          explanation: input.route === "exact" ? "indexed exact term match" : `indexed ${input.route} retrieval`,
+          explanation: retrieval.explanation,
           metadata: { ...row.metadata }
         };
       })
@@ -294,7 +313,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
     const desired = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
-    await this.database.transactionAs("jina_context_admin", async (client) => {
+    await this.database.transactionAs("jina_context_admin", { tenantIds: [tenantId] }, async (client) => {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `repository-access:${tenantId}:${principalId}`
       ]);
@@ -304,7 +323,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async mergeRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
     const requested = new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean));
-    await this.database.transactionAs("jina_context_admin", async (client) => {
+    await this.database.transactionAs("jina_context_admin", { tenantIds: [tenantId] }, async (client) => {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `repository-access:${tenantId}:${principalId}`
       ]);
@@ -429,6 +448,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     await this.database.initialize();
     const result = await this.database.queryAs<{ repository: string }>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       `select repository
        from jina_context.current_repository_acl
        where tenant_id=$1 and principal_id=$2 and permission in ('read','write','admin')
@@ -442,6 +462,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     await this.database.initialize();
     const result = await this.database.queryAs<{ acl_fingerprint: string }>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       `select distinct acl_fingerprint
        from jina_context.current_repository_acl
        where tenant_id=$1 and repository=$2 and principal_id=$3
@@ -453,7 +474,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   }
 
   async repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string> {
-    return this.database.transactionAs("jina_context_admin", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { tenantIds: [tenantId] }, async (client) => {
       await lockRepositoryAccess(client, tenantId, repository);
       return currentRepositoryAccessFingerprint(client, tenantId, repository);
     });
@@ -463,6 +484,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     await this.database.initialize();
     const result = await this.database.queryAs<{ ref_sequence: string }>(
       "jina_context_coordinator",
+      { tenantIds: [tenantId] },
       `select greatest(
          coalesce((
            select max(ref_sequence)
@@ -486,7 +508,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async projectionInputFingerprint(tenantId: string, repository: string): Promise<string> {
     await this.database.initialize();
-    return this.database.transactionAs("jina_context_coordinator", (client) =>
+    return this.database.transactionAs("jina_context_coordinator", { tenantIds: [tenantId] }, (client) =>
       currentProjectionInputFingerprint(client, tenantId, repository)
     );
   }
@@ -495,6 +517,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     await this.database.initialize();
     const result = await this.database.queryAs<{ repository: string }>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       "select repository from jina_context.repositories where tenant_id=$1 order by repository",
       [tenantId]
     );
@@ -509,6 +532,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       oldest: Date | null;
     }>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       `select consumer,count(*)::text as count,min(available_at) as oldest
        from jina_context.outbox
        where tenant_id=$1 and processed_at is null
@@ -543,7 +567,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
 
   async pendingProjectionCheckpoints(tenantId: string, limit: number): Promise<string[]> {
     await this.database.initialize();
-    return this.database.transactionAs("jina_context_admin", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { tenantIds: [tenantId] }, async (client) => {
       await client.query(
         `update jina_context.outbox delivery
          set processed_at=clock_timestamp(),lease_id=null,lease_owner=null,lease_expires_at=null,
@@ -694,7 +718,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     if (!input.sourceId.trim() || !input.actorId.trim() || !input.reason.trim()) {
       throw new Error("Evidence erasure requires sourceId, actorId, and reason");
     }
-    return this.database.transactionAs("jina_context_admin", async (client) => {
+    return this.database.transactionAs("jina_context_admin", { tenantIds: [input.tenantId] }, async (client) => {
       await lockProjectionInput(client, input.tenantId, input.repository);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `context-erasure:${input.tenantId}:${input.repository}`
@@ -779,6 +803,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     await this.database.initialize();
     const principals = await this.database.queryAs<{ principal_id: string; repository: string }>(
       "jina_context_admin",
+      { tenantIds: [fromTenantId] },
       `select principal_id,repository from jina_context.current_repository_acl
        where tenant_id=$1 and permission in ('read','write','admin')`,
       [fromTenantId]
@@ -797,7 +822,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   async health(): Promise<{ ok: boolean; adapter: string }> {
     try {
       await this.database.initialize();
-      await this.database.queryAs("jina_context_admin", "select 1");
+      await this.database.queryAs("jina_context_admin", { system: true }, "select 1");
       return { ok: true, adapter: "postgres" };
     } catch {
       return { ok: false, adapter: "postgres" };
@@ -846,6 +871,35 @@ function structuredTargets(plan: QueryPlan): string[] {
 function indexedSourceKind(value: string): RetrievalCandidate["sourceKind"] {
   if (value === "code" || value === "provider" || value === "knowledge" || value === "structure") return value;
   throw new Error(`Unsupported indexed source kind: ${value}`);
+}
+
+function indexedRetrievalDescription(route: QueryRoute): {
+  scoreSemantics: string;
+  explanation: string;
+} {
+  switch (route) {
+    case "exact":
+      return { scoreSemantics: "materialized exact-index match", explanation: "materialized exact-index term match" };
+    case "hierarchy":
+      return { scoreSemantics: "hierarchy-node full-text rank", explanation: "indexed hierarchy-node match" };
+    case "long_context":
+      return {
+        scoreSemantics: "full-document full-text rank",
+        explanation: "indexed full-document long-context match"
+      };
+    case "structured":
+      return { scoreSemantics: "canonical provider lookup", explanation: "indexed canonical provider retrieval" };
+    case "temporal":
+      return { scoreSemantics: "time-window source lookup", explanation: "indexed time-window retrieval" };
+    case "knowledge":
+      return { scoreSemantics: "knowledge fragment full-text rank", explanation: "indexed knowledge retrieval" };
+    case "lexical":
+      return { scoreSemantics: "fragment full-text rank", explanation: "indexed lexical-fragment retrieval" };
+    case "dense":
+      return { scoreSemantics: "dense similarity", explanation: "indexed dense retrieval" };
+    case "structural":
+      return { scoreSemantics: "structural neighbor match", explanation: "indexed structural neighbor" };
+  }
 }
 
 function uniqueById<T extends { readonly id: string }>(values: readonly T[]): T[] {

@@ -44,6 +44,7 @@ export class PostgresContextQueryRepository {
     await this.database.initialize();
     const result = await this.database.queryAs<{ permission: string; acl_fingerprint: string }>(
       "jina_context_query",
+      { tenantIds: [tenantId] },
       `select acl.permission,acl.acl_fingerprint
        from jina_context.current_repository_acl acl
        join jina_context.index_generations generation
@@ -68,6 +69,7 @@ export class PostgresContextQueryRepository {
     await this.database.initialize();
     const result = await this.database.queryAs<GenerationQueryRow>(
       "jina_context_query",
+      { tenantIds: [tenantId] },
       `select generation.*
        from jina_context.index_generations generation
        where generation.tenant_id=$1 and generation.repository=$2
@@ -86,9 +88,12 @@ export class PostgresContextQueryRepository {
     const statuses = await this.database.queryAs<{
       consumer: string;
       status: string;
-    }>("jina_context_query", "select consumer,status from jina_context.generation_projectors where generation_id=$1", [
-      row.id
-    ]);
+    }>(
+      "jina_context_query",
+      { tenantIds: [tenantId] },
+      "select consumer,status from jina_context.generation_projectors where generation_id=$1",
+      [row.id]
+    );
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -123,6 +128,7 @@ export class PostgresContextQueryRepository {
     const limit = Math.max(1, Math.min(input.limit, 200));
     const result = await this.database.queryAs<CandidateRow>(
       "jina_context_query",
+      { tenantIds: [input.tenantId] },
       `with authorized as materialized (
          select acl.acl_fingerprint
          from jina_context.current_repository_acl acl
@@ -180,27 +186,37 @@ export class PostgresContextQueryRepository {
     await this.database.initialize();
     const result = await this.database.queryAs<CandidateRow>(
       "jina_context_query",
-      `select document.id as document_id,fragment.id as fragment_id,
-              document.source_kind,document.source_id,document.source_revision_id,
-              document.title,fragment.source_text,fragment.contextual_text,
-              fragment.source_anchors,document.authority_class,document.source_fingerprint,
-              document.effective_acl_fingerprint,document.metadata,
-              case when lower(document.title)=lower($5) then 1.0 else 0.75 end as exact_score,
-              0::double precision as prose_score
-       from jina_context.published_context_documents document
-       join jina_context.published_context_fragments fragment
-         on fragment.generation_id=document.generation_id and fragment.document_id=document.id
-       join jina_context.current_repository_acl acl
-         on acl.tenant_id=document.tenant_id and acl.repository=document.repository
-        and acl.principal_id=$3 and acl.permission in ('read','write','admin')
-        and acl.acl_fingerprint=document.effective_acl_fingerprint
-       where document.tenant_id=$1 and document.repository=$2 and document.generation_id=$4
-         and (
-           lower(document.title)=lower($5)
-           or position(lower($5) in lower(document.title)) > 0
-           or position(lower($5) in lower(fragment.source_text)) > 0
-         )
-       order by exact_score desc,document.id,fragment.ordinal
+      { tenantIds: [input.tenantId] },
+      `select *
+       from (
+         select distinct on (document.id)
+                document.id as document_id,fragment.id as fragment_id,
+                document.source_kind,document.source_id,document.source_revision_id,
+                document.title,fragment.source_text,fragment.contextual_text,
+                fragment.source_anchors,document.authority_class,document.source_fingerprint,
+                document.effective_acl_fingerprint,document.metadata,
+                case exact.field when 'title' then 1.0 when 'metadata' then 0.9 else 0.8 end as exact_score,
+                0::double precision as prose_score
+         from jina_context.exact_index exact
+         join jina_context.published_context_documents document
+           on document.generation_id=exact.generation_id and document.id=exact.document_id
+         join lateral (
+           select candidate.*
+           from jina_context.published_context_fragments candidate
+           where candidate.generation_id=document.generation_id
+             and candidate.document_id=document.id
+           order by candidate.ordinal
+           limit 1
+         ) fragment on true
+         join jina_context.current_repository_acl acl
+           on acl.tenant_id=document.tenant_id and acl.repository=document.repository
+          and acl.principal_id=$3 and acl.permission in ('read','write','admin')
+          and acl.acl_fingerprint=document.effective_acl_fingerprint
+         where document.tenant_id=$1 and document.repository=$2
+           and exact.generation_id=$4 and exact.term=lower($5)
+         order by document.id,exact_score desc
+       ) candidate
+       order by exact_score desc,document_id
        limit $6`,
       [
         input.tenantId,
@@ -209,6 +225,115 @@ export class PostgresContextQueryRepository {
         input.generationId,
         input.term,
         Math.max(1, Math.min(input.limit, 200))
+      ]
+    );
+    return result.rows.map(candidateFromRow);
+  }
+
+  async hierarchySearch(input: {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly principalId: string;
+    readonly generationId: string;
+    readonly query: string;
+    readonly limit: number;
+  }): Promise<readonly StoredRetrievalCandidate[]> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<CandidateRow>(
+      "jina_context_query",
+      { tenantIds: [input.tenantId] },
+      `with query as (
+         select to_tsquery('simple',$5) value
+       )
+       select document.id as document_id,node.id as fragment_id,
+              document.source_kind,document.source_id,document.source_revision_id,
+              document.title,node.summary as source_text,
+              concat_ws(' ',document.contextual_text,node.title) as contextual_text,
+              node.source_anchors,document.authority_class,document.source_fingerprint,
+              document.effective_acl_fingerprint,
+              document.metadata || jsonb_build_object(
+                'hierarchyNodeId',node.id,
+                'hierarchyDepth',node.depth,
+                'hierarchyAdapter',node.adapter_name
+              ) as metadata,
+              0::double precision as exact_score,
+              ts_rank_cd(node.search_vector,query.value)::double precision as prose_score
+       from query
+       join jina_context.published_hierarchy_nodes node
+         on node.generation_id=$4 and node.search_vector @@ query.value
+       join jina_context.published_context_documents document
+         on document.generation_id=node.generation_id and document.id=node.document_id
+       join jina_context.current_repository_acl acl
+         on acl.tenant_id=document.tenant_id and acl.repository=document.repository
+        and acl.principal_id=$3 and acl.permission in ('read','write','admin')
+        and acl.acl_fingerprint=document.effective_acl_fingerprint
+       where document.tenant_id=$1 and document.repository=$2
+       order by prose_score desc,node.depth,node.preorder_start,node.id
+       limit $6`,
+      [
+        input.tenantId,
+        input.repository,
+        input.principalId,
+        input.generationId,
+        input.query,
+        Math.max(1, Math.min(input.limit, 200))
+      ]
+    );
+    return result.rows.map(candidateFromRow);
+  }
+
+  async longContextSearch(input: {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly principalId: string;
+    readonly generationId: string;
+    readonly query: string;
+    readonly limit: number;
+  }): Promise<readonly StoredRetrievalCandidate[]> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<CandidateRow>(
+      "jina_context_query",
+      { tenantIds: [input.tenantId] },
+      `with query as (
+         select to_tsquery('simple',$5) exact,
+                to_tsquery('english',$5) prose
+       )
+       select document.id as document_id,null::text as fragment_id,
+              document.source_kind,document.source_id,document.source_revision_id,
+              document.title,
+              ts_headline(
+                'english',
+                document.body,
+                query.prose,
+                'MaxFragments=3,MaxWords=120,MinWords=20,StartSel="",StopSel=""'
+              ) as source_text,
+              document.contextual_text,document.source_anchors,
+              document.authority_class,document.source_fingerprint,
+              document.effective_acl_fingerprint,document.metadata,
+              ts_rank_cd(document.exact_vector,query.exact)::double precision as exact_score,
+              ts_rank_cd(document.prose_vector,query.prose)::double precision as prose_score
+       from query
+       join jina_context.published_context_documents document
+         on document.generation_id=$4
+        and (document.exact_vector @@ query.exact or document.prose_vector @@ query.prose)
+       join jina_context.current_repository_acl acl
+         on acl.tenant_id=document.tenant_id and acl.repository=document.repository
+        and acl.principal_id=$3 and acl.permission in ('read','write','admin')
+        and acl.acl_fingerprint=document.effective_acl_fingerprint
+       where document.tenant_id=$1 and document.repository=$2
+         and length(document.body) >= 16000
+       order by greatest(
+         ts_rank_cd(document.exact_vector,query.exact)*2,
+         ts_rank_cd(document.prose_vector,query.prose)
+       ) desc,document.id
+       limit $6`,
+      [
+        input.tenantId,
+        input.repository,
+        input.principalId,
+        input.generationId,
+        input.query,
+        Math.max(1, Math.min(input.limit, 50))
       ]
     );
     return result.rows.map(candidateFromRow);
@@ -226,6 +351,7 @@ export class PostgresContextQueryRepository {
     await this.database.initialize();
     const result = await this.database.queryAs<CandidateRow>(
       "jina_context_query",
+      { tenantIds: [input.tenantId] },
       `select document.id as document_id,fragment.id as fragment_id,
               document.source_kind,document.source_id,document.source_revision_id,
               document.title,fragment.source_text,fragment.contextual_text,
@@ -301,6 +427,7 @@ export class PostgresContextQueryRepository {
       metadata: Record<string, unknown>;
     }>(
       "jina_context_query",
+      { tenantIds: [input.tenantId] },
       `with authorized as materialized (
          select acl.acl_fingerprint
          from jina_context.current_repository_acl acl
@@ -311,7 +438,12 @@ export class PostgresContextQueryRepository {
        from authorized
        join jina_context.published_structural_relations relation
          on relation.tenant_id=$1 and relation.repository=$2 and relation.generation_id=$4
-       where (relation.source_id=$5 or relation.target_id=$5)
+       where (
+           lower(relation.source_id)=lower($5)
+           or lower(relation.target_id)=lower($5)
+           or right(lower(relation.source_id),char_length($5)+1)='#' || lower($5)
+           or right(lower(relation.target_id),char_length($5)+1)='#' || lower($5)
+         )
          and ($6::text[] is null or relation.relation_kind=any($6))
          and not exists (
            select 1
@@ -352,6 +484,7 @@ export class PostgresContextQueryRepository {
     await this.database.initialize();
     await this.database.queryAs(
       "jina_context_query",
+      { tenantIds: [run.tenantId] },
       `insert into jina_context.query_runs
         (id,tenant_id,repository,principal_fingerprint,generation_id,request_fingerprint,
          task_kind,routes,coverage_status,degraded_capabilities,started_at)
@@ -372,6 +505,7 @@ export class PostgresContextQueryRepository {
 
   async completeQueryRun(input: {
     readonly id: string;
+    readonly tenantId: string;
     readonly coverageStatus: "complete" | "partial" | "insufficient";
     readonly degradedCapabilities: readonly string[];
     readonly completedAt: string;
@@ -381,6 +515,7 @@ export class PostgresContextQueryRepository {
     await this.database.initialize();
     const result = await this.database.queryAs(
       "jina_context_query",
+      { tenantIds: [input.tenantId] },
       `update jina_context.query_runs
        set coverage_status=$2,degraded_capabilities=$3,completed_at=$4,duration_ms=$5,failure_kind=$6
        where id=$1 and completed_at is null`,
@@ -397,7 +532,7 @@ export class PostgresContextQueryRepository {
   }
 
   async recordQueryRun(run: QueryRunTelemetry): Promise<void> {
-    await this.database.transactionAs("jina_context_query", async (client) => {
+    await this.database.transactionAs("jina_context_query", { tenantIds: [run.tenantId] }, async (client) => {
       const inserted = await client.query(
         `insert into jina_context.query_runs
           (id,tenant_id,repository,principal_fingerprint,generation_id,request_fingerprint,
@@ -502,6 +637,7 @@ export class PostgresContextQueryRepository {
       conflict_count: string;
     }>(
       "jina_context_query",
+      { tenantIds: [tenantId] },
       `select count(*)::text as count,
               percentile_disc(0.95) within group (order by duration_ms) as p95_ms,
               coalesce(sum(citation_failure_count),0)::text as citation_failure_count,

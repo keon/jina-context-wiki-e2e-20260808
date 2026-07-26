@@ -119,7 +119,7 @@ let active = false;
 let activeLease: LeaseExecutionState | undefined;
 let activeWork: ClaimedWork | undefined;
 let lastApiSuccessAt: string | undefined;
-let lastApiError: string | undefined;
+let hasApiError = false;
 let lastApiErrorAt: string | undefined;
 let consecutiveApiFailures = 0;
 let lastWork:
@@ -133,7 +133,7 @@ let lastWork:
 
 const server = createServer((request, response) => {
   if (request.url === "/health" || request.url === "/healthz") {
-    const ok = Boolean(lastApiSuccessAt) && !lastApiError;
+    const ok = Boolean(lastApiSuccessAt) && !hasApiError;
     response.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
     response.end(
       JSON.stringify({
@@ -142,7 +142,6 @@ const server = createServer((request, response) => {
         topics,
         active,
         lastApiSuccessAt,
-        lastApiError,
         lastApiErrorAt,
         consecutiveApiFailures,
         lastWork,
@@ -1093,13 +1092,13 @@ function loseLease(lease: LeaseExecutionState, error: unknown): void {
 function recordApiSuccess(clearError = true): void {
   lastApiSuccessAt = new Date().toISOString();
   if (!clearError) return;
-  lastApiError = undefined;
+  hasApiError = false;
   lastApiErrorAt = undefined;
   consecutiveApiFailures = 0;
 }
 
-function recordApiFailure(error: unknown): void {
-  lastApiError = errorMessage(error);
+function recordApiFailure(_error: unknown): void {
+  hasApiError = true;
   lastApiErrorAt = new Date().toISOString();
   consecutiveApiFailures += 1;
 }

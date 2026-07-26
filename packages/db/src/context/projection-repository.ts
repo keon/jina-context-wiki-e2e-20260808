@@ -64,6 +64,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     const existing = (
       await this.database.queryAs<GenerationRow>(
         "jina_context_coordinator",
+        { tenantIds: [generation.tenantId] },
         "select * from jina_context.index_generations where id=$1",
         [generation.id]
       )
@@ -88,6 +89,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     const checkpoint = (
       await this.database.queryAs<{ created_at: Date }>(
         "jina_context_coordinator",
+        { tenantIds: [generation.tenantId] },
         `select created_at
          from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5`,
@@ -111,6 +113,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     const generation = (
       await this.database.queryAs<GenerationRow>(
         "jina_context_admin",
+        { system: true },
         "select * from jina_context.index_generations where id=$1",
         [generationId]
       )
@@ -124,6 +127,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     const generation = (
       await this.database.queryAs<GenerationRow>(
         "jina_context_admin",
+        { system: true },
         "select * from jina_context.index_generations where id=$1",
         [generationId]
       )
@@ -142,6 +146,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     await this.database.initialize();
     const result = await this.database.queryAs<GenerationRow>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       `select * from jina_context.index_generations
        where tenant_id=$1 and repository=$2 and ref_name=$3 and status='published'
        order by published_at desc,id desc limit 1`,
@@ -154,6 +159,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
     await this.database.initialize();
     const result = await this.database.queryAs<GenerationRow>(
       "jina_context_admin",
+      { tenantIds: [tenantId] },
       `select * from jina_context.index_generations
        where tenant_id=$1 and repository=$2 and status <> 'invalidated'
        order by created_at desc,id desc`,
@@ -173,6 +179,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         this.projectorStatuses(row.id),
         this.database.queryAs<ManifestDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           `select distinct manifest.*
            from jina_context.ref_manifest manifest
            join jina_context.context_documents document
@@ -185,6 +192,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ),
         this.database.queryAs<CurrentKnowledgeDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           `select distinct current.*
            from jina_context.current_knowledge_revisions current
            join jina_context.context_documents document
@@ -197,6 +205,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ),
         this.database.queryAs<DocumentDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           `select document.*
            from jina_context.context_documents document
            where document.generation_id=$1
@@ -206,6 +215,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ),
         this.database.queryAs<FragmentDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           `select fragment.*
            from jina_context.context_fragments fragment
            join jina_context.context_documents document on document.id=fragment.document_id
@@ -216,6 +226,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ),
         this.database.queryAs<ExactIndexDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           `select exact.*
            from jina_context.exact_index exact
            join jina_context.context_documents document on document.id=exact.document_id
@@ -226,6 +237,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ),
         this.database.queryAs<HierarchyDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           `select hierarchy.*
            from jina_context.hierarchy_nodes hierarchy
            join jina_context.context_documents document on document.id=hierarchy.document_id
@@ -236,6 +248,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
         ),
         this.database.queryAs<RelationDbRow>(
           "jina_context_admin",
+          { tenantIds: [row.tenant_id] },
           "select * from jina_context.structural_relations where generation_id=$1 order by id",
           [row.id]
         )
@@ -270,6 +283,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
   private async projectorStatuses(generationId: string): Promise<IndexGeneration["projectorStatuses"]> {
     const result = await this.database.queryAs<{ consumer: ContextProjectionConsumer; status: ProjectorStatus }>(
       "jina_context_admin",
+      { system: true },
       "select consumer,status from jina_context.generation_projectors where generation_id=$1",
       [generationId]
     );
@@ -284,6 +298,7 @@ export class PostgresProjectionRepository implements ProjectionStore {
   ): Promise<string[]> {
     const result = await this.database.queryAs<{ acl_fingerprint: string }>(
       "jina_context_admin",
+      { tenantIds: [generation.tenant_id] },
       `select distinct acl_fingerprint
        from jina_context.current_repository_acl
        where tenant_id=$1 and repository=$2 and principal_id=$3
@@ -338,7 +353,7 @@ async function enqueueGenerationPublishedEvent(
   publishedAt: string,
   eventId: string
 ): Promise<void> {
-  await database.transactionAs("jina_context_admin", (client) =>
+  await database.transactionAs("jina_context_admin", { tenantIds: [generation.tenantId] }, (client) =>
     enqueueContextEvent(client, {
       id: eventId,
       sequence: 1,
@@ -365,7 +380,7 @@ async function runScopedProjector(
   const completedAt = generation.publishedAt;
   if (!completedAt) throw new Error(`Generation ${generation.id} has no completion time`);
   const status = generation.projectorStatuses[consumer];
-  await database.transactionAs(projectorRoles[consumer], async (client) => {
+  await database.transactionAs(projectorRoles[consumer], { tenantIds: [generation.tenantId] }, async (client) => {
     await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
     const leaseId = randomUUID();
     const claimed = await client.query(
@@ -582,7 +597,7 @@ async function acknowledgePostPublicationDeliveries(
   generationEventId?: string
 ): Promise<void> {
   if (generationEventId) {
-    await database.transactionAs("jina_context_retention", (client) =>
+    await database.transactionAs("jina_context_retention", { tenantIds: [generation.tenantId] }, (client) =>
       acknowledgeScopedDeliveries(client, {
         generationId: generation.id,
         checkpointId: generation.checkpointId,
@@ -598,7 +613,7 @@ async function acknowledgePostPublicationDeliveries(
   }
   for (const consumer of contextProjectionConsumers) {
     if (generation.projectorStatuses[consumer] === "failed") continue;
-    await database.transactionAs(projectorRoles[consumer], async (client) => {
+    await database.transactionAs(projectorRoles[consumer], { tenantIds: [generation.tenantId] }, async (client) => {
       await acknowledgeSupersededScopedDeliveries(client, { generation, consumer, processedAt });
       await acknowledgeRepositoryGlobalDeliveries(client, { generation, consumer, processedAt });
     });
