@@ -989,24 +989,34 @@ async function insertExactIndex(client: PoolClient, entries: readonly ExactIndex
 }
 
 async function insertNativeExactIndex(client: PoolClient, generationId: string): Promise<void> {
+  // The projector claim serializes this generation and the enclosing
+  // transaction inserts its documents, so the target is empty here. Deduping
+  // per document/field bounds aggregate spill; PK-order output reduces B-tree
+  // write amplification without changing token semantics.
   await client.query(
     `insert into jina_context.exact_index (generation_id,term,document_id,field)
-     select document.generation_id,matched.term[1],document.id,fields.field_name
+     select document.generation_id,
+            matched.term collate "default" as term,
+            document.id as document_id,
+            fields.field_name as field
      from jina_context.context_documents document
      cross join lateral (
        values
          ('title'::text,document.title),
          ('body'::text,document.body)
      ) fields(field_name,field_value)
-     cross join lateral regexp_matches(
-       lower(normalize(fields.field_value,NFKC) collate "C"),
-       '[a-z0-9_$./:@#-]+',
-       'g'
-     ) matched(term)
+     cross join lateral (
+       select token.term[1] as term
+       from regexp_matches(
+         lower(normalize(fields.field_value,NFKC) collate "C"),
+         '[a-z0-9_$./:@#-]+',
+         'g'
+       ) token(term)
+       where char_length(token.term[1]) between 2 and $2
+       group by document.id,fields.field_name,token.term[1]
+     ) matched
      where document.generation_id=$1
-       and char_length(matched.term[1]) between 2 and $2
-     group by document.generation_id,matched.term[1],document.id,fields.field_name
-     on conflict do nothing`,
+     order by term,document_id,field`,
     [generationId, EXACT_TERM_MAX_CHARACTERS]
   );
 }
