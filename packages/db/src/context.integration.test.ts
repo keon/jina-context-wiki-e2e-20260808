@@ -248,6 +248,20 @@ test(
       aclFingerprint,
       createdAt
     });
+    const structuralFacts = Array.from({ length: 501 }, (_, ordinal) => ({
+      id: stableId("sf", { repository, commitSha, ordinal }),
+      tenantId,
+      repository,
+      ref,
+      commitSha,
+      kind: "references" as const,
+      from: "src/context.ts#deployContext",
+      to: `src/context.ts#target-${ordinal}`,
+      anchors: [{ ...record.anchor, startLine: 1, endLine: 1 }],
+      derivationName: "fixture-parser",
+      derivationVersion: "fixture-parser-v1",
+      metadata: { ordinal }
+    }));
     const snapshot: EvidenceSnapshot = {
       checkpoint: {
         id: stableId("ec", { tenantId, repository, commitSha }),
@@ -279,7 +293,7 @@ test(
           executable: false
         }
       ],
-      structuralFacts: [],
+      structuralFacts,
       git: {
         commit: {
           treeSha: "c".repeat(40),
@@ -293,6 +307,13 @@ test(
       }
     };
     await store.commitSnapshot(snapshot, ingestClaim.fence);
+    const persistedStructuralFacts = await database.pool.query<{ count: string }>(
+      `select count(*)::text count
+       from jina_context.evidence_checkpoint_structural_facts
+       where checkpoint_id=$1`,
+      [snapshot.checkpoint.id]
+    );
+    assert.equal(persistedStructuralFacts.rows[0]?.count, "501");
     const repeatedFailureCacheKey = fingerprint("repeated-failed-derivation");
     for (const attempt of [1, 2]) {
       await store.recordFailedRun({

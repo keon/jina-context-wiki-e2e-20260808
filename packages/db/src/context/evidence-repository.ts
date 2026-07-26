@@ -16,6 +16,8 @@ import { enqueueContextEvent } from "./outbox-repository.js";
 import { appendProjectionInputEvent, lockProjectionInput } from "./projection-input.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
+const SNAPSHOT_INSERT_CHUNK_SIZE = 500;
+
 interface CheckpointRow {
   id: string;
   tenant_id: string;
@@ -228,8 +230,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         for (const record of snapshot.records) await insertEvidenceRecord(client, record);
         for (const entry of snapshot.manifest)
           await ensureManifestBlob(client, entry, snapshot.records, snapshot.checkpoint.createdAt);
-        for (const fact of snapshot.structuralFacts)
-          await insertStructuralFact(client, fact, snapshot.checkpoint.createdAt);
+        await insertStructuralFacts(client, snapshot.structuralFacts, snapshot.checkpoint.createdAt);
         if (snapshot.git) await persistGitSnapshot(client, snapshot);
 
         const checkpoint = snapshot.checkpoint;
@@ -277,43 +278,9 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         if (storedCheckpoint.rowCount !== 1) {
           throw new Error(`Evidence checkpoint identity collision for ${checkpoint.id}`);
         }
-        for (const [ordinal, record] of snapshot.records.entries()) {
-          await client.query(
-            `insert into jina_context.evidence_checkpoint_records
-            (checkpoint_id,tenant_id,repository,evidence_id,ordinal)
-           values ($1,$2,$3,$4,$5) on conflict do nothing`,
-            [checkpoint.id, checkpoint.tenantId, checkpoint.repository, record.id, ordinal]
-          );
-        }
-        for (const entry of snapshot.manifest) {
-          await client.query(
-            `insert into jina_context.evidence_checkpoint_manifest
-            (checkpoint_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,
-             content_digest,content_available,language,executable)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,
-            [
-              checkpoint.id,
-              entry.tenantId,
-              entry.repository,
-              entry.ref,
-              entry.commitSha,
-              entry.path,
-              entry.blobSha,
-              entry.contentDigest,
-              entry.contentAvailable,
-              entry.language ?? null,
-              entry.executable
-            ]
-          );
-        }
-        for (const [ordinal, fact] of snapshot.structuralFacts.entries()) {
-          await client.query(
-            `insert into jina_context.evidence_checkpoint_structural_facts
-            (checkpoint_id,tenant_id,repository,structural_fact_id,ordinal)
-           values ($1,$2,$3,$4,$5) on conflict do nothing`,
-            [checkpoint.id, fact.tenantId, fact.repository, fact.id, ordinal]
-          );
-        }
+        await insertCheckpointRecords(client, checkpoint, snapshot.records);
+        await insertCheckpointManifest(client, checkpoint, snapshot.manifest);
+        await insertCheckpointStructuralFacts(client, checkpoint, snapshot.structuralFacts);
         const latest = await client.query<{ id: string }>(
           `select id from jina_context.evidence_checkpoints
          where tenant_id=$1 and repository=$2 and ref_name=$3
@@ -934,41 +901,148 @@ async function persistParsedFacts(
   }
 }
 
-async function insertStructuralFact(client: PoolClient, fact: StructuralFact, createdAt: string): Promise<void> {
-  const first = fact.anchors[0];
-  await client.query(
-    `insert into jina_context.structural_facts
-      (id,tenant_id,repository,ref_name,relation_kind,source_kind,source_id,target_kind,target_id,
-       commit_sha,path,start_line,end_line,source_anchors,metadata,derivation_name,derivation_version,
-       fact_digest,created_at)
-     values ($1,$2,$3,$4,$5,'resource',$6,'resource',$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14,$15,$16,$17)
-     on conflict (tenant_id,repository,id) do nothing`,
-    [
-      fact.id,
-      fact.tenantId,
-      fact.repository,
-      fact.ref,
-      fact.kind,
-      fact.from,
-      fact.to,
-      fact.commitSha,
-      first?.pathOrUrl ?? null,
-      first?.startLine ?? null,
-      first?.endLine ?? null,
-      JSON.stringify(fact.anchors),
-      JSON.stringify(fact.metadata),
-      fact.derivationName,
-      fact.derivationVersion,
-      contextDigest(fact),
-      createdAt
-    ]
-  );
-  const stored = await client.query(
-    `select 1 from jina_context.structural_facts
-     where tenant_id=$1 and repository=$2 and id=$3 and fact_digest=$4`,
-    [fact.tenantId, fact.repository, fact.id, contextDigest(fact)]
-  );
-  if (stored.rowCount !== 1) throw new Error(`Structural fact identity collision for ${fact.id}`);
+async function insertStructuralFacts(
+  client: PoolClient,
+  facts: readonly StructuralFact[],
+  createdAt: string
+): Promise<void> {
+  for (const chunk of snapshotChunks(facts)) {
+    const rows = chunk.map((fact) => {
+      const first = fact.anchors[0];
+      return {
+        id: fact.id,
+        tenant_id: fact.tenantId,
+        repository: fact.repository,
+        ref_name: fact.ref,
+        relation_kind: fact.kind,
+        source_id: fact.from,
+        target_id: fact.to,
+        commit_sha: fact.commitSha,
+        path: first?.pathOrUrl ?? null,
+        start_line: first?.startLine ?? null,
+        end_line: first?.endLine ?? null,
+        source_anchors: fact.anchors,
+        metadata: fact.metadata,
+        derivation_name: fact.derivationName,
+        derivation_version: fact.derivationVersion,
+        fact_digest: contextDigest(fact),
+        created_at: createdAt
+      };
+    });
+    const recordset = `
+      select *
+      from jsonb_to_recordset($1::jsonb) as input(
+        id text,tenant_id text,repository text,ref_name text,relation_kind text,
+        source_id text,target_id text,commit_sha text,path text,start_line integer,end_line integer,
+        source_anchors jsonb,metadata jsonb,derivation_name text,derivation_version text,
+        fact_digest text,created_at timestamptz
+      )`;
+    await client.query(
+      `with input as (${recordset})
+       insert into jina_context.structural_facts
+        (id,tenant_id,repository,ref_name,relation_kind,source_kind,source_id,target_kind,target_id,
+         commit_sha,path,start_line,end_line,source_anchors,metadata,derivation_name,derivation_version,
+         fact_digest,created_at)
+       select id,tenant_id,repository,ref_name,relation_kind,'resource',source_id,'resource',target_id,
+              commit_sha,path,start_line,end_line,source_anchors,metadata,derivation_name,derivation_version,
+              fact_digest,created_at
+       from input
+       on conflict (tenant_id,repository,id) do nothing`,
+      [JSON.stringify(rows)]
+    );
+    const collisions = await client.query<{ id: string }>(
+      `with input as (${recordset})
+       select input.id
+       from input
+       left join jina_context.structural_facts stored
+         on stored.tenant_id=input.tenant_id
+        and stored.repository=input.repository
+        and stored.id=input.id
+        and stored.fact_digest=input.fact_digest
+       where stored.id is null
+       limit 1`,
+      [JSON.stringify(rows)]
+    );
+    if (collisions.rows[0]) {
+      throw new Error(`Structural fact identity collision for ${collisions.rows[0].id}`);
+    }
+  }
+}
+
+async function insertCheckpointRecords(
+  client: PoolClient,
+  checkpoint: EvidenceCheckpoint,
+  records: readonly EvidenceRecord[]
+): Promise<void> {
+  const selections = records.map((record, ordinal) => ({ evidence_id: record.id, ordinal }));
+  for (const chunk of snapshotChunks(selections)) {
+    await client.query(
+      `insert into jina_context.evidence_checkpoint_records
+        (checkpoint_id,tenant_id,repository,evidence_id,ordinal)
+       select $1,$2,$3,input.evidence_id,input.ordinal
+       from jsonb_to_recordset($4::jsonb) as input(evidence_id text,ordinal integer)
+       on conflict do nothing`,
+      [checkpoint.id, checkpoint.tenantId, checkpoint.repository, JSON.stringify(chunk)]
+    );
+  }
+}
+
+async function insertCheckpointManifest(
+  client: PoolClient,
+  checkpoint: EvidenceCheckpoint,
+  manifest: readonly RefManifestEntry[]
+): Promise<void> {
+  const selections = manifest.map((entry) => ({
+    ref_name: entry.ref,
+    commit_sha: entry.commitSha,
+    path: entry.path,
+    blob_sha: entry.blobSha,
+    content_digest: entry.contentDigest,
+    content_available: entry.contentAvailable,
+    language: entry.language ?? null,
+    executable: entry.executable
+  }));
+  for (const chunk of snapshotChunks(selections)) {
+    await client.query(
+      `insert into jina_context.evidence_checkpoint_manifest
+        (checkpoint_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,
+         content_digest,content_available,language,executable)
+       select $1,$2,$3,input.ref_name,input.commit_sha,input.path,input.blob_sha,
+              input.content_digest,input.content_available,input.language,input.executable
+       from jsonb_to_recordset($4::jsonb) as input(
+         ref_name text,commit_sha text,path text,blob_sha text,content_digest text,
+         content_available boolean,language text,executable boolean
+       )
+       on conflict do nothing`,
+      [checkpoint.id, checkpoint.tenantId, checkpoint.repository, JSON.stringify(chunk)]
+    );
+  }
+}
+
+async function insertCheckpointStructuralFacts(
+  client: PoolClient,
+  checkpoint: EvidenceCheckpoint,
+  facts: readonly StructuralFact[]
+): Promise<void> {
+  const selections = facts.map((fact, ordinal) => ({ structural_fact_id: fact.id, ordinal }));
+  for (const chunk of snapshotChunks(selections)) {
+    await client.query(
+      `insert into jina_context.evidence_checkpoint_structural_facts
+        (checkpoint_id,tenant_id,repository,structural_fact_id,ordinal)
+       select $1,$2,$3,input.structural_fact_id,input.ordinal
+       from jsonb_to_recordset($4::jsonb) as input(structural_fact_id text,ordinal integer)
+       on conflict do nothing`,
+      [checkpoint.id, checkpoint.tenantId, checkpoint.repository, JSON.stringify(chunk)]
+    );
+  }
+}
+
+function snapshotChunks<T>(values: readonly T[]): T[][] {
+  const chunks: T[][] = [];
+  for (let start = 0; start < values.length; start += SNAPSHOT_INSERT_CHUNK_SIZE) {
+    chunks.push(values.slice(start, start + SNAPSHOT_INSERT_CHUNK_SIZE));
+  }
+  return chunks;
 }
 
 function checkpointFromRow(row: CheckpointRow): EvidenceCheckpoint {
