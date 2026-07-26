@@ -92,6 +92,13 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
          -- in the same pg_class scan without leaving the owner role inheritable.
          execute format('grant %I to %I', archive_owner, migration_owner);
        end if;
+       -- PostgreSQL requires a routine's new owner to have CREATE in the
+       -- containing schema. The archive role becomes schema owner below, but
+       -- it needs these privileges while relations and routines are moving.
+       execute format(
+         'grant usage,create on schema jina_context_graph to %I',
+         archive_owner
+       );
 
        if runtime_user <> migration_owner then
          execute format('grant %I to %I', runtime_user, migration_owner);
