@@ -31,7 +31,7 @@ interface DerivationRow {
   raw_output: unknown[];
   status: DerivationRun["status"];
   validation_diagnostics: string[];
-  created_at: Date;
+  started_at: Date;
 }
 
 interface RevisionRow {
@@ -618,7 +618,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
       status: row.status,
       diagnostics: row.validation_diagnostics,
       revisionIds: revisions.rows.map((revision) => revision.id),
-      createdAt: dateString(row.created_at)
+      createdAt: dateString(row.started_at)
     };
   }
 }

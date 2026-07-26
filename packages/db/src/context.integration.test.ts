@@ -819,13 +819,17 @@ test(
       ...providerRecord.anchor,
       jsonPointer: "/repository/defaultBranch"
     });
+    const knowledgeCacheKey = fingerprint({
+      checkpointId: providerSnapshot.checkpoint.id,
+      revisionId: revision.id
+    });
     await store.commitKnowledge({
       run: {
         id: stableId("dr", { checkpointId: providerSnapshot.checkpoint.id, revisionId: revision.id }),
         tenantId,
         repository,
         checkpointId: providerSnapshot.checkpoint.id,
-        cacheKey: fingerprint({ checkpointId: providerSnapshot.checkpoint.id, revisionId: revision.id }),
+        cacheKey: knowledgeCacheKey,
         focusFingerprint: fingerprint(["src/context.ts"]),
         generatorName: "fixture",
         generatorVersion: "fixture-v1",
@@ -841,6 +845,9 @@ test(
       revisions: [revision],
       citations: [citation, providerCitation]
     });
+    const cachedKnowledgeRun = await store.findSuccessfulRun(knowledgeCacheKey);
+    assert.equal(cachedKnowledgeRun?.createdAt, knowledgeCreatedAt);
+    assert.deepEqual(cachedKnowledgeRun?.revisionIds, [revision.id]);
     const repeatedKnowledgeCreatedAt = nextLiveAt();
     const repeatedRevision = createKnowledgeRevision({
       ...revision,
