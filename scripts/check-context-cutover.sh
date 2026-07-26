@@ -3,15 +3,43 @@ set -euo pipefail
 
 readonly prohibited='@jina/context-graph|/context-graph|run-context-graph|context_graph_assert|context_graph_project|query_graph|jina_context_graph|CONTEXT_GRAPH_'
 
-if rg --line-number --ignore-case \
-  --glob '!**/*.test.ts' \
-  --glob '!**/dist/**' \
-  --glob '!docs/**' \
-  --glob '!README.md' \
-  --glob '!.env.example' \
-  --glob '!scripts/check-context-cutover.sh' \
-  --glob '!packages/db/src/legacy-context-cutover.ts' \
-  "${prohibited}" apps packages scripts; then
+set +e
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  legacy_matches="$(
+    git grep --line-number --ignore-case --extended-regexp "${prohibited}" -- \
+      apps packages scripts \
+      ':(exclude,glob)**/*.test.ts' \
+      ':(exclude,glob)**/dist/**' \
+      ':(exclude,glob)**/README.md' \
+      ':(exclude,glob)**/.env.example' \
+      ':(exclude)scripts/check-context-cutover.sh' \
+      ':(exclude)packages/db/src/legacy-context-cutover.ts'
+  )"
+  legacy_search_status=$?
+else
+  legacy_matches="$(
+    grep --recursive --line-number --ignore-case --extended-regexp \
+      --exclude='*.test.ts' \
+      --exclude='*.tsbuildinfo' \
+      --exclude='README.md' \
+      --exclude='.env.example' \
+      --exclude='check-context-cutover.sh' \
+      --exclude='legacy-context-cutover.ts' \
+      --exclude-dir='dist' \
+      --exclude-dir='.next' \
+      --exclude-dir='.turbo' \
+      --exclude-dir='node_modules' \
+      "${prohibited}" apps packages scripts
+  )"
+  legacy_search_status=$?
+fi
+set -e
+if ((legacy_search_status > 1)); then
+  echo "Unable to scan production source for legacy context runtime vocabulary." >&2
+  exit 1
+fi
+if [[ -n "${legacy_matches}" ]]; then
+  printf '%s\n' "${legacy_matches}"
   echo "Legacy context runtime vocabulary remains in production source." >&2
   exit 1
 fi
@@ -159,7 +187,7 @@ if ! grep -Fq -- '--labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh 
   exit 1
 fi
 
-if rg --quiet '_JINA_CONTEXT_CUTOVER|_JINA_RELEASE_SHA|_JINA_LEGACY_CUTOVER' cloudbuild.deploy.yaml; then
+if grep --quiet --extended-regexp '_JINA_CONTEXT_CUTOVER|_JINA_RELEASE_SHA|_JINA_LEGACY_CUTOVER' cloudbuild.deploy.yaml; then
   echo "Split-image deployment config exposes destructive cutover substitutions." >&2
   exit 1
 fi
