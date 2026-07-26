@@ -200,16 +200,22 @@ export class KnowledgeOutputValidator {
       }
       if (resolved.length !== document.citations.length) continue;
       const claims = resolved.map((citation) => citation.claim);
-      const repairedPresentation = input.repairPresentationFields ? claims[0] : undefined;
-      const title = repairedPresentation ?? document.title;
-      const summary = repairedPresentation ?? document.summary;
+      // A bounded repair may discard unsupported prose, but it must never
+      // invent replacement knowledge. Canonicalizing the presentation from
+      // already-resolved verbatim claims keeps the raw model output auditable
+      // while ensuring every published word remains source-grounded.
+      const repairedClaims = input.repairPresentationFields ? [...new Set(claims)] : undefined;
+      const title = repairedClaims?.[0] ?? document.title;
+      const summary = repairedClaims?.[0] ?? document.summary;
+      const bodyMarkdown = repairedClaims?.join("\n\n") ?? document.bodyMarkdown;
+      const structuredSummary = repairedClaims ? { facts: repairedClaims } : document.structuredSummary;
       if (!textSupportedByClaims(title, claims)) {
         diagnostics.push(`documents[${documentIndex}].title is not supported by a citation claim`);
       }
       if (!textSupportedByClaims(summary, claims)) {
         diagnostics.push(`documents[${documentIndex}].summary is not supported by a citation claim`);
       }
-      for (const value of structuredSummaryStrings(document.structuredSummary)) {
+      for (const value of structuredSummaryStrings(structuredSummary)) {
         if (!textSupportedByClaims(value, claims)) {
           diagnostics.push(`documents[${documentIndex}].structuredSummary contains unsupported text`);
           break;
@@ -232,7 +238,7 @@ export class KnowledgeOutputValidator {
       if (logicalIdError) {
         diagnostics.push(`documents[${documentIndex}].logicalId ${logicalIdError}`);
       }
-      for (const paragraph of materialParagraphs(document.bodyMarkdown)) {
+      for (const paragraph of materialParagraphs(bodyMarkdown)) {
         if (!claimsCoverParagraph(claims, paragraph)) {
           diagnostics.push(`documents[${documentIndex}] contains an unsupported paragraph: ${paragraph.slice(0, 80)}`);
         }
@@ -249,9 +255,9 @@ export class KnowledgeOutputValidator {
         repository: checkpoint.repository,
         kind: document.kind,
         title,
-        bodyMarkdown: document.bodyMarkdown,
+        bodyMarkdown,
         summary,
-        structuredSummary: document.structuredSummary,
+        structuredSummary,
         scope: {
           ref: checkpoint.ref,
           commitSha: checkpoint.commitSha,

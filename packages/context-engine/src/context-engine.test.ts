@@ -453,12 +453,14 @@ test("derivation fails closed after one repair and writes no revision", async ()
   assert.deepEqual(await store.listRevisions(tenantId, repository), []);
 });
 
-test("conservative repair grounds presentation fields without accepting unsupported material", async () => {
+test("conservative repair rebuilds presentation from resolved claims without accepting invalid citations", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
   const output = validOutput();
   output.documents[0]!.title = "Unsupported generated title";
   output.documents[0]!.summary = "Unsupported generated summary";
+  output.documents[0]!.bodyMarkdown += "\n\nUnsupported generated material.";
+  output.documents[0]!.structuredSummary = { facts: ["Unsupported generated fact"] };
   const validator = new KnowledgeOutputValidator(store);
   const input = {
     output,
@@ -474,9 +476,14 @@ test("conservative repair grounds presentation fields without accepting unsuppor
   const firstClaim = output.documents[0]!.citations[0]!.claim;
   assert.equal(repaired.revisions[0]?.title, firstClaim);
   assert.equal(repaired.revisions[0]?.summary, firstClaim);
+  assert.equal(repaired.revisions[0]?.bodyMarkdown, firstClaim);
+  assert.deepEqual(repaired.revisions[0]?.structuredSummary, { facts: [firstClaim] });
 
-  output.documents[0]!.bodyMarkdown += "\n\nUnsupported material remains invalid.";
-  await assert.rejects(() => validator.validate({ ...input, repairPresentationFields: true }), /unsupported paragraph/);
+  output.documents[0]!.citations[0]!.claim = "Unsupported citation claim";
+  await assert.rejects(
+    () => validator.validate({ ...input, repairPresentationFields: true }),
+    /claim is not present in the cited evidence/
+  );
 });
 
 test("unsupported material paragraphs are rejected", async () => {
