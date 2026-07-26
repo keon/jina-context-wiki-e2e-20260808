@@ -153,6 +153,12 @@ if [[ "${unmarked_outage_output}" != *"marker does not match the requested relea
   exit 1
 fi
 
+if ! rg --quiet -- '--labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh ||
+  rg --quiet -- '--update-labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh; then
+  echo "Cutover marker does not use the Cloud Run jobs deploy label flag." >&2
+  exit 1
+fi
+
 if rg --quiet '_JINA_CONTEXT_CUTOVER|_JINA_RELEASE_SHA|_JINA_LEGACY_CUTOVER' cloudbuild.deploy.yaml; then
   echo "Split-image deployment config exposes destructive cutover substitutions." >&2
   exit 1
