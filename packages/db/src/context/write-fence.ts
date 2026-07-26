@@ -22,6 +22,9 @@ export async function assertContextWriteFence(
   await client.query("set local role jina_context_coordinator");
   let result;
   try {
+    // Heartbeats may extend the expiry while preserving the same lease
+    // identity. Fence on attempt, lease ID, and token, then require the
+    // database's current expiry to remain live.
     result = await client.query(
       `select 1
        from jina_context.pipeline_stages stage
@@ -29,7 +32,6 @@ export async function assertContextWriteFence(
        where build.tenant_id=$1 and build.id=$2
          and stage.id=$3 and stage.topic=any($4::text[]) and stage.status='leased'
          and stage.attempt=$5 and stage.lease_id=$6 and stage.fence_token=$7
-         and stage.lease_expires_at=$8
          and stage.lease_expires_at > clock_timestamp()
        for share of stage`,
       [
@@ -39,8 +41,7 @@ export async function assertContextWriteFence(
         Array.isArray(expectedTopic) ? expectedTopic : [expectedTopic],
         fence.attempt,
         fence.leaseId,
-        fence.token,
-        fence.leaseExpiresAt
+        fence.token
       ]
     );
   } finally {

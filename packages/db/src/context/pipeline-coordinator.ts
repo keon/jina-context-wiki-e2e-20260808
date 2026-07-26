@@ -299,7 +299,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
              lease_id=null,lease_owner=null,lease_expires_at=null,fence_token=null,updated_at=$7
          where tenant_id=$1 and id=$2 and build_id=$3 and attempt=$4
            and lease_id=$5 and fence_token=$6 and status='leased'
-           and lease_expires_at=$11 and lease_expires_at > $7
+           and lease_expires_at > $7
          returning build_id,type,metadata`,
         [
           input.tenantId,
@@ -311,8 +311,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
           input.now,
           input.outcome,
           JSON.stringify(input.metadata ?? {}),
-          input.error ?? null,
-          input.fence.leaseExpiresAt
+          input.error ?? null
         ]
       );
       const stage = result.rows[0];
@@ -348,8 +347,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
        join jina_context.pipeline_builds build on build.id=stage.build_id
        where build.tenant_id=$1 and build.id=$2 and stage.id=$3
          and stage.status='leased' and stage.attempt=$4 and stage.lease_id=$5
-         and stage.fence_token=$6 and stage.lease_expires_at=$7
-         and stage.lease_expires_at > $8`,
+         and stage.fence_token=$6 and stage.lease_expires_at > $7`,
       [
         input.tenantId,
         input.fence.buildId,
@@ -357,7 +355,6 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
         input.fence.attempt,
         input.fence.leaseId,
         input.fence.token,
-        input.fence.leaseExpiresAt,
         input.now
       ]
     );

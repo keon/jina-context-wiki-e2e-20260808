@@ -595,6 +595,16 @@ test(
     assert.ok(indexClaim);
     assert.equal(prematureDeriveClaim, undefined);
     assert.equal(indexClaim.stage.topic, "run-index-context");
+    const renewedIndexFence = await coordinator.renew({
+      tenantId,
+      stageId: indexClaim.stage.id,
+      leaseId: indexClaim.fence.leaseId,
+      now: at(2_500),
+      leaseExpiresAt: at(900_000)
+    });
+    assert.ok(renewedIndexFence);
+    assert.equal(renewedIndexFence.token, indexClaim.fence.token);
+    assert.notEqual(renewedIndexFence.leaseExpiresAt, indexClaim.fence.leaseExpiresAt);
     const generation = await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_000), indexClaim.fence);
     assert.equal(generation.status, "published");
     const batchedProjectionRows = await database.pool.query<{
