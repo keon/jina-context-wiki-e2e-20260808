@@ -19,7 +19,7 @@ db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
 migration_db_user="${JINA_MIGRATION_DB_USER:-jina_app}"
-migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-db-password:latest}"
+migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-primary-owner-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
 acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-}"
 api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
@@ -32,12 +32,17 @@ context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
 context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
 context_cutover_legacy_backup_id="${JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID:-}"
 legacy_cutover_tenant_ids="${JINA_LEGACY_CUTOVER_TENANT_IDS:-}"
-legacy_graph_cloud_sql_instance="${JINA_LEGACY_GRAPH_CLOUD_SQL_INSTANCE:-}"
-legacy_graph_db_name="${JINA_LEGACY_GRAPH_DB_NAME:-}"
-legacy_graph_db_user="${JINA_LEGACY_GRAPH_DB_USER:-}"
-legacy_graph_db_pass_secret="${JINA_LEGACY_GRAPH_DB_PASS_SECRET:-}"
 release_sha="${JINA_RELEASE_SHA:-}"
 build_commit_sha="${JINA_BUILD_COMMIT_SHA:-}"
+trusted_primary_cloud_sql_instance="jina-463721:us-east1:jina-db"
+trusted_legacy_graph_cloud_sql_instance="jina-v2:us-central1:jina-postgres"
+trusted_legacy_graph_db_name="jina"
+trusted_legacy_graph_db_user="jina_app"
+trusted_legacy_graph_db_pass_secret="jina-db-password:latest"
+cutover_primary_db_user="jina_cutover_auditor"
+cutover_primary_db_pass_secret="jina-primary-cutover-auditor-db-password:latest"
+cutover_legacy_graph_db_user="jina_cutover_auditor"
+cutover_legacy_graph_db_pass_secret="jina-legacy-cutover-auditor-db-password:latest"
 
 validate_positive_integer() {
   local name="$1"
@@ -297,10 +302,15 @@ if gcloud run services describe jina-api \
       --format=json)"
   fi
 fi
-if [[ "${context_cutover}" == "false" &&
-      ("${legacy_worker_present}" == "true" || "${legacy_api_present}" == "true") ]]; then
-  echo "Legacy context runtime is present; destructive cutover evidence is required before migration" >&2
-  exit 2
+if [[ "${context_cutover}" == "false" ]]; then
+  if [[ "${legacy_worker_present}" == "true" || "${legacy_api_present}" == "true" ]]; then
+    echo "Legacy context runtime is present; destructive cutover evidence is required before migration" >&2
+    exit 2
+  fi
+  if [[ "${api_present}" != "true" ]]; then
+    echo "No context-engine API exists; an interrupted first cutover must resume in destructive mode" >&2
+    exit 2
+  fi
 fi
 if [[ "${context_cutover}" == "true" ]]; then
   if [[ "${api_present}" == "true" && "${legacy_api_present}" != "true" ]]; then
@@ -331,18 +341,20 @@ if [[ "${context_cutover}" == "true" ]]; then
     echo "JINA_RELEASE_SHA must equal Cloud Build's resolved repository source revision" >&2
     exit 2
   fi
-  validate_cloud_sql_instance "JINA_LEGACY_GRAPH_CLOUD_SQL_INSTANCE" "${legacy_graph_cloud_sql_instance}"
-  if [[ ! "${legacy_graph_db_name}" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ||
-        ! "${legacy_graph_db_user}" =~ ^[a-zA-Z_][a-zA-Z0-9_-]*$ ]]; then
-    echo "Legacy graph database name and user must be explicit safe identifiers" >&2
+  if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
+    echo "Destructive context cutover must deploy images built by the current coordinated Cloud Build" >&2
     exit 2
   fi
-  if [[ -z "${legacy_graph_db_pass_secret}" || "${legacy_graph_db_pass_secret}" == "unset" ||
-        "${legacy_graph_db_pass_secret}" == *","* || "${legacy_graph_db_pass_secret}" == *"~"* ]]; then
-    echo "JINA_LEGACY_GRAPH_DB_PASS_SECRET must be a Cloud Run secret spec" >&2
+  if [[ "${cloud_sql_instance}" != "${trusted_primary_cloud_sql_instance}" ||
+        "${db_name}" != "jina" ||
+        "${migration_db_user}" != "jina_app" ||
+        "${migration_db_pass_secret}" != "jina-primary-owner-db-password:latest" ]]; then
+    echo "Destructive cutover must use the trusted production primary database identity" >&2
     exit 2
   fi
-  require_secret "${legacy_graph_db_pass_secret}"
+  require_secret "${trusted_legacy_graph_db_pass_secret}"
+  require_secret "${cutover_primary_db_pass_secret}"
+  require_secret "${cutover_legacy_graph_db_pass_secret}"
   IFS='|' read -r -a cutover_tenants <<<"${legacy_cutover_tenant_ids}"
   if (( ${#cutover_tenants[@]} == 0 )); then
     echo "JINA_LEGACY_CUTOVER_TENANT_IDS must contain the complete active-tenant inventory" >&2
@@ -359,10 +371,10 @@ if [[ "${context_cutover}" == "true" ]]; then
     deployed_legacy_graph_db_name="$(legacy_api_env_value GRAPH_DB_NAME)"
     deployed_legacy_graph_db_user="$(legacy_api_env_value GRAPH_DB_USER)"
     deployed_legacy_graph_db_pass_secret="$(legacy_api_env_secret_spec GRAPH_DB_PASS)"
-    if [[ "${deployed_legacy_graph_socket}" != "/cloudsql/${legacy_graph_cloud_sql_instance}" ||
-          "${deployed_legacy_graph_db_name}" != "${legacy_graph_db_name}" ||
-          "${deployed_legacy_graph_db_user}" != "${legacy_graph_db_user}" ||
-          "${deployed_legacy_graph_db_pass_secret}" != "${legacy_graph_db_pass_secret}" ]]; then
+    if [[ "${deployed_legacy_graph_socket}" != "/cloudsql/${trusted_legacy_graph_cloud_sql_instance}" ||
+          "${deployed_legacy_graph_db_name}" != "${trusted_legacy_graph_db_name}" ||
+          "${deployed_legacy_graph_db_user}" != "${trusted_legacy_graph_db_user}" ||
+          "${deployed_legacy_graph_db_pass_secret}" != "${trusted_legacy_graph_db_pass_secret}" ]]; then
       echo "Declared legacy graph database does not match the deployed legacy API" >&2
       exit 2
     fi
@@ -377,8 +389,8 @@ if [[ "${context_cutover}" == "true" ]]; then
     echo "Pre-cutover backup ${context_cutover_backup_id} is not successful: ${backup_status:-missing}" >&2
     exit 2
   fi
-  legacy_database_project="${legacy_graph_cloud_sql_instance%%:*}"
-  legacy_database_instance="${legacy_graph_cloud_sql_instance##*:}"
+  legacy_database_project="${trusted_legacy_graph_cloud_sql_instance%%:*}"
+  legacy_database_instance="${trusted_legacy_graph_cloud_sql_instance##*:}"
   legacy_backup_status="$(gcloud sql backups describe "${context_cutover_legacy_backup_id}" \
     --project="${legacy_database_project}" \
     --instance="${legacy_database_instance}" \
@@ -430,9 +442,9 @@ CUTOVER
     --region="${GCP_REGION}" \
     --image="${api_image}" \
     --service-account="${migration_service_account}" \
-    --set-cloudsql-instances="${cloud_sql_instance},${legacy_graph_cloud_sql_instance}" \
-    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}~LEGACY_GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${legacy_graph_cloud_sql_instance}~LEGACY_GRAPH_DB_NAME=${legacy_graph_db_name}~LEGACY_GRAPH_DB_USER=${legacy_graph_db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
-    --set-secrets="DB_PASS=${migration_db_pass_secret},LEGACY_GRAPH_DB_PASS=${legacy_graph_db_pass_secret}" \
+    --set-cloudsql-instances="${cloud_sql_instance},${trusted_legacy_graph_cloud_sql_instance}" \
+    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${cutover_primary_db_user}~LEGACY_GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${trusted_legacy_graph_cloud_sql_instance}~LEGACY_GRAPH_DB_NAME=${trusted_legacy_graph_db_name}~LEGACY_GRAPH_DB_USER=${cutover_legacy_graph_db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
+    --set-secrets="DB_PASS=${cutover_primary_db_pass_secret},LEGACY_GRAPH_DB_PASS=${cutover_legacy_graph_db_pass_secret}" \
     --args=dist/cutover-preflight.js \
     --tasks=1 \
     --max-retries=0 \

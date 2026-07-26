@@ -1552,10 +1552,11 @@ This is the only supported migration path:
     snapshots pass the retention window.
 15. Remove the old package and every runtime reference in the same release branch.
 
-The production deployment enforces steps 3–7: it binds the release SHA to the connected
-repository `COMMIT_SHA`, verifies both recorded backup statuses, deletes the legacy
-worker and API, and verifies the incompatible services are absent. The owner-only
-preflight then reads the primary API snapshot and directly audits the authoritative
+The production deployment enforces steps 3–7: it binds the release SHA and current-build
+image tag to the connected repository `COMMIT_SHA`, verifies both recorded backup
+statuses, deletes the legacy worker and API, and verifies the incompatible services are
+absent. The non-serving migration Google identity runs preflight through dedicated
+SELECT-only database logins: it reads the primary API snapshot and directly audits the authoritative
 `jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox` relations in
 the separate retired graph database. It rejects nonterminal workflows or tasks, residual
 leases, unprocessed graph outbox rows, missing relations, and tenants omitted from the

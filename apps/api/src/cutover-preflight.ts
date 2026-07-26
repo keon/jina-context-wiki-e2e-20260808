@@ -96,7 +96,8 @@ async function main(): Promise<void> {
     password: requiredEnvironment("DB_PASS"),
     applicationName: "jina-context-cutover-preflight",
     manageSchema: false,
-    max: 1
+    max: 1,
+    ...optionalPort("DB_PORT")
   });
   const identityStore = new PostgresSharedIdentityStore({
     host: requiredEnvironment("INSTANCE_UNIX_SOCKET"),
@@ -104,14 +105,16 @@ async function main(): Promise<void> {
     user: requiredEnvironment("DB_USER"),
     password: requiredEnvironment("DB_PASS"),
     applicationName: "jina-context-cutover-identity",
-    max: 1
+    max: 1,
+    ...optionalPort("DB_PORT")
   });
   const graphAuditor = new PostgresLegacyContextCutoverAuditor({
     host: requiredEnvironment("LEGACY_GRAPH_INSTANCE_UNIX_SOCKET"),
     database: requiredEnvironment("LEGACY_GRAPH_DB_NAME"),
     user: requiredEnvironment("LEGACY_GRAPH_DB_USER"),
     password: requiredEnvironment("LEGACY_GRAPH_DB_PASS"),
-    max: 1
+    max: 1,
+    ...optionalPort("LEGACY_GRAPH_DB_PORT")
   });
   try {
     assertExactTenantInventory(tenantIds, await identityStore.listTenantIds());
@@ -160,6 +163,14 @@ function requiredEnvironment(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function optionalPort(name: string): { readonly port?: number } {
+  const value = process.env[name]?.trim();
+  if (!value) return {};
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`${name} must be a valid TCP port`);
+  return { port };
 }
 
 function optionalString(value: unknown): string | undefined {

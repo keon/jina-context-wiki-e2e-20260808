@@ -24,7 +24,7 @@ JINA_DB_NAME=jina
 JINA_DB_USER=jina_v2_app
 JINA_DB_PASS_SECRET=jina-shared-db-password:latest
 JINA_MIGRATION_DB_USER=jina_app
-JINA_MIGRATION_DB_PASS_SECRET=jina-db-password:latest
+JINA_MIGRATION_DB_PASS_SECRET=jina-primary-owner-db-password:latest
 ```
 
 `JINA_TENANT_ID` must be unset in shared mode. Local deployments can use
@@ -42,9 +42,12 @@ gcloud projects add-iam-policy-binding jina-463721 \
 
 The migration job uses the distinct
 `jina-migration@jina-v2.iam.gserviceaccount.com` service account. Grant that identity
-Cloud SQL Client and secret accessor on `jina-db-password` only. Remove
-`jina-runtime@jina-v2.iam.gserviceaccount.com` from that secret's IAM policy and do not
-grant either identity project-wide Secret Manager access.
+Cloud SQL Client in both database projects and direct secret accessor on
+`jina-primary-owner-db-password`, `jina-primary-cutover-auditor-db-password`, and
+`jina-legacy-cutover-auditor-db-password`. Remove
+`jina-runtime@jina-v2.iam.gserviceaccount.com` from those secrets' IAM policies and do
+not grant either identity project-wide Secret Manager access. `jina-db-password` is the
+retired graph owner's credential; it is not a valid primary-owner credential.
 
 These are intentionally cross-project grants: the Google identities are created in
 `jina-v2`, while `roles/cloudsql.client` is bound on `jina-463721`, the project that owns
@@ -57,17 +60,23 @@ gcloud projects add-iam-policy-binding jina-463721 \
   --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
   --role='roles/cloudsql.client'
 
-gcloud secrets add-iam-policy-binding jina-db-password \
-  --project=jina-v2 \
+gcloud projects add-iam-policy-binding jina-v2 \
   --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
-  --role='roles/secretmanager.secretAccessor'
+  --role='roles/cloudsql.client'
 
-gcloud secrets remove-iam-policy-binding jina-db-password \
-  --project=jina-v2 \
-  --member='serviceAccount:jina-runtime@jina-v2.iam.gserviceaccount.com' \
-  --role='roles/secretmanager.secretAccessor'
-
-gcloud secrets get-iam-policy jina-db-password --project=jina-v2
+for secret in \
+  jina-primary-owner-db-password \
+  jina-primary-cutover-auditor-db-password \
+  jina-legacy-cutover-auditor-db-password; do
+  gcloud secrets add-iam-policy-binding "${secret}" \
+    --project=jina-v2 \
+    --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
+    --role='roles/secretmanager.secretAccessor'
+  gcloud secrets remove-iam-policy-binding "${secret}" \
+    --project=jina-v2 \
+    --member='serviceAccount:jina-runtime@jina-v2.iam.gserviceaccount.com' \
+    --role='roles/secretmanager.secretAccessor'
+done
 gcloud projects get-iam-policy jina-463721 \
   --flatten='bindings[].members' \
   --filter='bindings.role=roles/cloudsql.client AND bindings.members:serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
@@ -76,13 +85,17 @@ gcloud projects get-iam-policy jina-463721 \
 
 The build deployer needs permission to act as both service accounts, but that does not
 authorize either workload identity to impersonate the other. Never attach
-`jina-migration` to API, worker, dashboard, admin, or acceptance. Never mount
-`jina-db-password` into a `jina-runtime` revision.
+`jina-migration` to API, worker, dashboard, admin, or acceptance. Never mount an owner or
+cutover-auditor secret into a `jina-runtime` revision.
 
 The deployer may need read-only instance metadata:
 
 ```sh
 gcloud projects add-iam-policy-binding jina-463721 \
+  --member='serviceAccount:jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com' \
+  --role='roles/cloudsql.viewer'
+
+gcloud projects add-iam-policy-binding jina-v2 \
   --member='serviceAccount:jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com' \
   --role='roles/cloudsql.viewer'
 ```
@@ -109,8 +122,10 @@ Run the boundary setup as a database administrator:
 ```sql
 create role jina_app login password 'migration-owner-password';
 create role jina_v2_app login noinherit password 'runtime-password';
+create role jina_cutover_auditor login noinherit password 'dedicated-audit-password';
 grant connect on database jina to jina_v2_app;
 grant connect on database jina to jina_app;
+grant connect on database jina to jina_cutover_auditor;
 
 create schema if not exists jina_runtime authorization jina_v2_app;
 create schema if not exists jina_board authorization jina_v2_app;
@@ -123,10 +138,22 @@ grant select on table
   public.installations,
   public.repositories
 to jina_v2_app;
+
+grant usage on schema public, jina_runtime to jina_cutover_auditor;
+grant select on table
+  public.tenants,
+  public.installations,
+  public.repositories,
+  jina_runtime.api_state
+to jina_cutover_auditor;
 ```
 
 Do not grant broad `SELECT ON ALL TABLES`, writes on `public`, or access to dashboard
 sessions and integration secrets. The identity adapter also uses read-only transactions.
+On the retired graph database, grant a separate same-named audit login only `USAGE` on
+`jina_board` and `jina_context_graph`, plus `SELECT` on
+`jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox`. Use a
+different password/secret from the primary audit login.
 
 Install context capability roles through the administrative migration job, not the API:
 
@@ -173,7 +200,7 @@ heads and recorded at exact commits.
 
 The coordinated deploy makes steps 4–5 executable. It binds the release to the connected
 repository commit and verifies both backups. The deploy first deletes the retired worker
-and old API and verifies both are absent. Its owner-only preflight then reads the primary
+and old API and verifies both are absent. Its non-serving, SELECT-only preflight then reads the primary
 API snapshot and directly audits the separate retired graph database's
 `jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox` tables. It
 fails on nonterminal tasks or workflows, residual leases, unprocessed outbox rows,
@@ -186,7 +213,7 @@ The API may run with `JINA_DB_MANAGE_SCHEMA=true` only in disposable/local envir
 Production runs a separate migration job, then starts the API with schema management
 disabled. Release approval additionally verifies that the migration job uses
 `jina-migration`, all network-facing services use `jina-runtime`, and the runtime identity
-cannot access `jina-db-password`.
+cannot access any migration-owner or cutover-auditor secret.
 
 ## Backup and rollback
 

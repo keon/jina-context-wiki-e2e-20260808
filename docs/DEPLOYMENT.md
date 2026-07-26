@@ -11,7 +11,9 @@ deployed to Cloud Run before production acceptance runs.
 - Cloud Run services: `jina-api`, `jina-context-worker`, `jina-task-worker`,
   `jina-dashboard`, `jina-admin`
 - Cloud Run jobs: `jina-context-migrate`, `jina-acceptance`
-- Cloud SQL: `jina-463721:us-east1:jina-db`, database `jina`
+- Primary Cloud SQL: `jina-463721:us-east1:jina-db`, database `jina`
+- Retired graph Cloud SQL (cutover audit/rollback only):
+  `jina-v2:us-central1:jina-postgres`, database `jina`
 - Runtime service account: `jina-runtime@jina-v2.iam.gserviceaccount.com`
 - Migration-only service account: `jina-migration@jina-v2.iam.gserviceaccount.com`
 - Build/deploy service account:
@@ -29,12 +31,19 @@ The API mounts:
 - `jina-internal-api-token` as `INTERNAL_API_TOKEN`;
 - `jina-context-api-token` as `CONTEXT_API_TOKEN`.
 
-The migration job runs as `jina-migration`, separately mounts `jina-db-password`, and
-connects as the schema-owning `jina_app` login. API and workers run as `jina-runtime`,
-mount `jina-shared-db-password`, and connect as the non-owning `jina_v2_app` runtime
-login. The runtime Google service account must not have Secret Manager access to
-`jina-db-password`; the migration Google service account must not be assigned to any
-network-facing service. Do not swap or reuse these identities or credentials.
+The migration job runs as `jina-migration`, mounts
+`jina-primary-owner-db-password`, and connects to the primary database as the
+schema-owning `jina_app` login. The one-shot preflight uses the same non-serving Google
+identity but mounts separate `jina-primary-cutover-auditor-db-password` and
+`jina-legacy-cutover-auditor-db-password` secrets. Both databases expose a
+`jina_cutover_auditor` login with only the exact `SELECT` grants required by preflight.
+The retired graph owner's `jina-db-password` is never used against the primary database.
+
+API and workers run as `jina-runtime`, mount `jina-shared-db-password`, and connect as
+the non-owning `jina_v2_app` runtime login. The runtime Google service account must not
+have Secret Manager access to any owner or cutover-auditor secret; the migration Google
+service account must not be assigned to a network-facing service. Do not swap or reuse
+these identities or credentials.
 
 `INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic. It is also the
 only service credential accepted by `POST /internal/context/access/sync`.
@@ -195,7 +204,9 @@ Record both `release_sha` and the returned Cloud Build ID. The build uses its un
 for the deployed API, worker, dashboard, and admin image tags, so every service resolves
 to the exact artifact produced from that audited source. `latest` is also pushed for API
 and worker convenience, but the deploy script does not select it. Do not use the
-API/worker-only split build files for this coordinated context-engine cutover.
+API/worker-only split build files for this coordinated context-engine cutover:
+`cloudbuild.deploy.yaml` hard-codes `JINA_CONTEXT_CUTOVER=false`, and destructive mode
+rejects any image tag other than the current full-build `$BUILD_ID`.
 
 ## Pre-deployment backup
 
@@ -243,36 +254,39 @@ gcloud builds triggers create github \
   --service-account=projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com
 ```
 
-Run that trigger at the exact pushed SHA with both verified backup IDs, the complete
-active-tenant inventory, and the retired graph database identity:
+Run that trigger at the exact pushed SHA with both verified backup IDs and the complete
+active-tenant inventory:
 
 ```sh
 gcloud builds triggers run jina-context-release \
   --project=jina-v2 \
   --region=us-central1 \
   --sha="${release_sha}" \
-  --substitutions="^~^_JINA_CONTEXT_CUTOVER=true~_JINA_CONTEXT_CUTOVER_BACKUP_ID=${primary_backup_id}~_JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID=${legacy_graph_backup_id}~_JINA_LEGACY_CUTOVER_TENANT_IDS=${tenant_ids_pipe_delimited}~_JINA_LEGACY_GRAPH_CLOUD_SQL_INSTANCE=jina-v2:us-central1:jina-postgres~_JINA_LEGACY_GRAPH_DB_NAME=jina~_JINA_LEGACY_GRAPH_DB_USER=jina_app~_JINA_LEGACY_GRAPH_DB_PASS_SECRET=jina-db-password:latest~_JINA_RELEASE_SHA=${release_sha}"
+  --substitutions="^~^_JINA_CONTEXT_CUTOVER=true~_JINA_CONTEXT_CUTOVER_BACKUP_ID=${primary_backup_id}~_JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID=${legacy_graph_backup_id}~_JINA_LEGACY_CUTOVER_TENANT_IDS=${tenant_ids_pipe_delimited}~_JINA_RELEASE_SHA=${release_sha}"
 ```
 
 When either retired service exists, normal deployment fails closed. Destructive mode
-always requires and revalidates the source-bound SHA, both backups, both database
-identities, and tenant inventory, including on a retry after the old services were
-already removed. Before first shutdown it requires the declared graph connection and
-secret to match the deployed legacy API. It verifies both Cloud SQL backups are
-`SUCCESSFUL`, deletes the old graph worker and old API, and verifies both services are
-absent.
+always requires and revalidates the source-bound SHA, current-build image tag, both
+backups, fixed trusted production database identities, and tenant inventory, including
+on a retry after the old services were already removed. Before first shutdown it also
+requires the trusted graph connection and owner-secret reference to match the deployed
+legacy API. It verifies both Cloud SQL backups are `SUCCESSFUL`, deletes the old graph
+worker and old API, and verifies both services are absent. If both APIs are absent, a
+normal deployment is rejected: an interrupted first cutover must resume in destructive
+mode until the new context-engine API exists.
 
 With all legacy claims and intake durably fenced,
 `jina-context-cutover-preflight` runs as the non-serving `jina-migration` identity. It
-reads `jina_runtime.api_state` from the primary database and directly audits
+uses dedicated SELECT-only database logins to read `jina_runtime.api_state` and the
+active shared-tenant identity tables from the primary database, then directly audits
 `jina_board.workflows`, `jina_board.tasks`, and `jina_context_graph.outbox` in the
 separate retired graph database. It fails if an expected relation is missing, a workflow
 or task is nonterminal, any lease metadata remains, any projection outbox row is
 unprocessed, or the declared inventory differs from the authoritative active shared
 tenants. Cloud Build also compares the submitted release SHA with its resolved repository
-source provenance. Only then does migration start. Deleting the old API closes both explicit graph-build and webhook
-intake during the incompatible schema boundary, and auditing afterward avoids a
-preflight-to-shutdown race. Subsequent context-engine releases leave
+source provenance. Only then does migration start. Deleting the old API closes both
+explicit graph-build and webhook intake during the incompatible schema boundary, and
+auditing afterward avoids a preflight-to-shutdown race. Subsequent context-engine releases leave
 `_JINA_CONTEXT_CUTOVER=false`; destructive mode also refuses to run when a context-engine
 API already exists.
 
@@ -310,7 +324,9 @@ copy or translate prior semantic indexes. Active repositories must be reingested
 Before approving a release, inspect IAM and the deployed identities:
 
 ```sh
-gcloud secrets get-iam-policy jina-db-password --project=jina-v2
+gcloud secrets get-iam-policy jina-primary-owner-db-password --project=jina-v2
+gcloud secrets get-iam-policy jina-primary-cutover-auditor-db-password --project=jina-v2
+gcloud secrets get-iam-policy jina-legacy-cutover-auditor-db-password --project=jina-v2
 gcloud run jobs describe jina-context-migrate \
   --project=jina-v2 --region=us-central1 \
   --format='value(spec.template.spec.template.spec.serviceAccountName)'
@@ -325,12 +341,13 @@ The owner-secret policy must grant the migration identity and must not grant the
 identity, broad project members, or `allUsers`/`allAuthenticatedUsers`. Failing any of
 these checks blocks deployment.
 
-Cloud SQL is in the separate `jina-463721` project. Both the runtime and migration Google
-service accounts therefore require `roles/cloudsql.client` in that database-owning
-project, while the deployer requires `roles/cloudsql.viewer` there to inspect the
-instance. The migration owner's password secret remains in `jina-v2` and grants direct
-secret access only to `jina-migration`. Project-level Cloud SQL IAM does not imply secret
-access, and secret access does not imply Cloud SQL connectivity. The exact commands and
+The primary Cloud SQL instance is in the separate `jina-463721` project, while the
+retired graph instance is in `jina-v2`. The migration Google service account requires
+`roles/cloudsql.client` in both projects. The deployer requires
+`roles/cloudsql.viewer` in both projects to verify both backup IDs. The migration-owner
+and cutover-auditor password secrets remain in `jina-v2` and grant direct secret access
+only to `jina-migration`. Project-level Cloud SQL IAM does not imply secret access, and
+secret access does not imply Cloud SQL connectivity. The exact commands and
 database-role boundary are in [SHARED_TENANCY.md](SHARED_TENANCY.md).
 
 ## Production acceptance
