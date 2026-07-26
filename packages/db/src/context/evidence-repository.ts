@@ -16,7 +16,8 @@ import { enqueueContextEvent } from "./outbox-repository.js";
 import { appendProjectionInputEvent, lockProjectionInput } from "./projection-input.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
-const SNAPSHOT_INSERT_CHUNK_SIZE = 500;
+const SNAPSHOT_INSERT_CHUNK_SIZE = 2_000;
+const SNAPSHOT_INSERT_CHUNK_BYTE_TARGET = 4 * 1024 * 1024;
 
 interface CheckpointRow {
   id: string;
@@ -1138,9 +1139,22 @@ async function insertCheckpointStructuralFacts(
 
 function snapshotChunks<T>(values: readonly T[]): T[][] {
   const chunks: T[][] = [];
-  for (let start = 0; start < values.length; start += SNAPSHOT_INSERT_CHUNK_SIZE) {
-    chunks.push(values.slice(start, start + SNAPSHOT_INSERT_CHUNK_SIZE));
+  let chunk: T[] = [];
+  let chunkBytes = 2;
+  for (const value of values) {
+    const valueBytes = Buffer.byteLength(JSON.stringify(value), "utf8") + (chunk.length === 0 ? 0 : 1);
+    if (
+      chunk.length > 0 &&
+      (chunk.length >= SNAPSHOT_INSERT_CHUNK_SIZE || chunkBytes + valueBytes > SNAPSHOT_INSERT_CHUNK_BYTE_TARGET)
+    ) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 2;
+    }
+    chunk.push(value);
+    chunkBytes += valueBytes;
   }
+  if (chunk.length > 0) chunks.push(chunk);
   return chunks;
 }
 

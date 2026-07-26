@@ -249,8 +249,41 @@ test(
       aclFingerprint,
       createdAt
     });
+    const projectionBatchFixtures = Array.from({ length: 2_000 }, (_, ordinal) => {
+      const path = `docs/readme-projection-${ordinal.toString().padStart(3, "0")}.md`;
+      const body =
+        ordinal === 0
+          ? [
+              ...Array.from({ length: 500 }, (_, heading) => `# Projection fixture ${heading}`),
+              "## Cross-batch hierarchy child"
+            ].join("\n")
+          : `# Projection fixture ${ordinal}\n`;
+      const fixtureBlobSha = (ordinal + 1).toString(16).padStart(40, "0");
+      return {
+        path,
+        blobSha: fixtureBlobSha,
+        record: createEvidenceRecord({
+          anchor: {
+            tenantId,
+            repository,
+            sourceType: "blob",
+            sourceId: fixtureBlobSha,
+            contentDigest: fingerprint(body),
+            commitSha,
+            pathOrUrl: path
+          },
+          ref,
+          title: path,
+          body,
+          metadata: { language: "markdown", mediaType: "text/markdown" },
+          authorityClass: "source_code",
+          aclFingerprint,
+          createdAt
+        })
+      };
+    });
     const structuralFacts: StructuralFact[] = [
-      ...Array.from({ length: 501 }, (_, ordinal) => ({
+      ...Array.from({ length: 2_001 }, (_, ordinal) => ({
         id: stableId("sf", { repository, commitSha, ordinal }),
         tenantId,
         repository,
@@ -306,12 +339,15 @@ test(
         parserVersion: "fixture-parser-v1",
         sourceCompleteness: "complete",
         observationFrontier: createdAt,
-        evidenceFingerprint: fingerprint([record.id]),
-        manifestFingerprint: fingerprint(["src/context.ts", blobSha]),
+        evidenceFingerprint: fingerprint([record.id, ...projectionBatchFixtures.map((fixture) => fixture.record.id)]),
+        manifestFingerprint: fingerprint([
+          ["src/context.ts", blobSha],
+          ...projectionBatchFixtures.map((fixture) => [fixture.path, fixture.blobSha])
+        ]),
         aclFingerprint,
         createdAt
       },
-      records: [record],
+      records: [record, ...projectionBatchFixtures.map((fixture) => fixture.record)],
       manifest: [
         {
           tenantId,
@@ -324,7 +360,19 @@ test(
           contentAvailable: true,
           language: "typescript",
           executable: false
-        }
+        },
+        ...projectionBatchFixtures.map((fixture) => ({
+          tenantId,
+          repository,
+          ref,
+          commitSha,
+          path: fixture.path,
+          blobSha: fixture.blobSha,
+          contentDigest: fixture.record.anchor.contentDigest,
+          contentAvailable: true,
+          language: "markdown",
+          executable: false
+        }))
       ],
       structuralFacts,
       git: {
@@ -355,7 +403,7 @@ test(
        where checkpoint_id=$1`,
       [snapshot.checkpoint.id]
     );
-    assert.equal(persistedStructuralFacts.rows[0]?.count, "503");
+    assert.equal(persistedStructuralFacts.rows[0]?.count, "2003");
     const batchedGitRows = await database.pool.query<{
       observations: string;
       commits: string;
@@ -389,12 +437,25 @@ test(
       observations: "501",
       commits: "501",
       parents: "501",
-      tree_entries: "1",
-      analyses: "1",
+      tree_entries: "2001",
+      analyses: "2001",
       symbols: "1",
       imports: "2",
       changes: "1"
     });
+    await database.pool.query(
+      `insert into jina_context.outbox
+        (delivery_id,event_id,tenant_id,repository,aggregate_type,aggregate_id,aggregate_sequence,
+         event_type,consumer,payload,occurred_at,available_at)
+       select
+         'delivery_projection_batch_' || ordinal,
+         'event_projection_batch_' || ordinal,
+         $1,$2,'evidence','projection-batch-' || ordinal,1,
+         'evidence.observed','structural',
+         jsonb_build_object('ref',$3::text,'commitSha',$4::text),$5,$5
+       from generate_series(0,500) ordinal`,
+      [tenantId, repository, ref, commitSha, createdAt]
+    );
     const repeatedFailureCacheKey = fingerprint("repeated-failed-derivation");
     for (const attempt of [1, 2]) {
       await store.recordFailedRun({
@@ -535,6 +596,40 @@ test(
     assert.equal(indexClaim.stage.topic, "run-index-context");
     const generation = await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_000), indexClaim.fence);
     assert.equal(generation.status, "published");
+    const batchedProjectionRows = await database.pool.query<{
+      manifest: string;
+      documents: string;
+      fragments: string;
+      hierarchy: string;
+      relations: string;
+      acknowledged: string;
+    }>(
+      `select
+         (select count(*)::text from jina_context.ref_manifest where generation_id=$1) manifest,
+         (select count(*)::text from jina_context.context_documents where generation_id=$1) documents,
+         (select count(*)::text from jina_context.context_fragments where generation_id=$1) fragments,
+         (select count(*)::text from jina_context.hierarchy_nodes where generation_id=$1) hierarchy,
+         (select count(*)::text from jina_context.structural_relations where generation_id=$1) relations,
+         (select count(*)::text from jina_context.outbox
+          where delivery_id like 'delivery_projection_batch_%' and processed_at is not null) acknowledged`,
+      [generation.id]
+    );
+    assert.equal(batchedProjectionRows.rows[0]?.manifest, "2001");
+    assert.equal(batchedProjectionRows.rows[0]?.documents, "2001");
+    assert.ok(Number(batchedProjectionRows.rows[0]?.fragments) > 500);
+    assert.equal(batchedProjectionRows.rows[0]?.hierarchy, "2500");
+    assert.equal(batchedProjectionRows.rows[0]?.relations, "2003");
+    assert.equal(batchedProjectionRows.rows[0]?.acknowledged, "501");
+    const crossBatchHierarchy = await database.pool.query<{ child_parent_id: string; parent_id: string }>(
+      `select child.parent_id child_parent_id,parent.id parent_id
+       from jina_context.hierarchy_nodes child
+       join jina_context.hierarchy_nodes parent
+         on parent.generation_id=child.generation_id and parent.id=child.parent_id
+       where child.generation_id=$1 and child.ordinal=500 and child.title='Cross-batch hierarchy child'`,
+      [generation.id]
+    );
+    assert.equal(crossBatchHierarchy.rows.length, 1);
+    assert.equal(crossBatchHierarchy.rows[0]?.child_parent_id, crossBatchHierarchy.rows[0]?.parent_id);
     assert.equal(
       (await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_500), indexClaim.fence)).id,
       generation.id
@@ -651,10 +746,10 @@ test(
         ...snapshot.checkpoint,
         id: stableId("ec", { tenantId, repository, commitSha, provider: true }),
         refSequence: 2,
-        evidenceFingerprint: fingerprint([record.id, providerRecord.id]),
+        evidenceFingerprint: fingerprint([...snapshot.records.map((entry) => entry.id), providerRecord.id]),
         createdAt: at(6_500)
       },
-      records: [record, providerRecord]
+      records: [...snapshot.records, providerRecord]
     };
     await store.commitSnapshot(providerSnapshot);
     const revision = createKnowledgeRevision({

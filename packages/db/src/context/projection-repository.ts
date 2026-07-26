@@ -23,6 +23,13 @@ import { PostgresGenerationCoordinator, requiredContextConsumers } from "./gener
 import { enqueueContextEvent } from "./outbox-repository.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
+// Body-bearing rows are intentionally smaller; metadata-only relations can amortize more round trips.
+// The byte target also bounds atypically large metadata/anchor payloads (except an indivisible single row).
+const PROJECTION_WRITE_CHUNK_SIZE = 500;
+const PROJECTION_BODY_WRITE_CHUNK_SIZE = 100;
+const PROJECTION_RELATION_WRITE_CHUNK_SIZE = 2_000;
+const PROJECTION_WRITE_CHUNK_BYTE_TARGET = 4 * 1024 * 1024;
+
 interface GenerationRow {
   id: string;
   tenant_id: string;
@@ -577,17 +584,7 @@ async function acknowledgeScopedDeliveries(
       input.eventId ?? null
     ]
   );
-  for (const row of claimed.rows) {
-    const acknowledged = await client.query(
-      `update jina_context.outbox
-       set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
-       where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
-      [row.delivery_id, leaseId, input.processedAt]
-    );
-    if (acknowledged.rowCount !== 1) {
-      throw new Error(`Lost ${input.consumer} outbox lease for ${row.delivery_id}`);
-    }
-  }
+  await acknowledgeClaimedRows(client, claimed.rows, leaseId, input.processedAt, input.consumer);
 }
 
 async function acknowledgePostPublicationDeliveries(
@@ -774,15 +771,19 @@ async function acknowledgeClaimedRows(
   processedAt: string,
   consumer: ContextProjectionConsumer
 ): Promise<void> {
-  for (const row of rows) {
+  for (const chunk of projectionChunks(rows)) {
     const acknowledged = await client.query(
       `update jina_context.outbox
        set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
-       where delivery_id=$1 and lease_id=$2 and processed_at is null and lease_expires_at > $3`,
-      [row.delivery_id, leaseId, processedAt]
+       where delivery_id = any($1::text[])
+         and lease_id=$2 and processed_at is null and lease_expires_at > $3
+       returning delivery_id`,
+      [chunk.map((row) => row.delivery_id), leaseId, processedAt]
     );
-    if (acknowledged.rowCount !== 1) {
-      throw new Error(`Lost ${consumer} outbox lease for ${row.delivery_id}`);
+    if (acknowledged.rowCount !== chunk.length) {
+      const acknowledgedIds = new Set((acknowledged.rows as { delivery_id: string }[]).map((row) => row.delivery_id));
+      const lost = chunk.find((row) => !acknowledgedIds.has(row.delivery_id));
+      throw new Error(`Lost ${consumer} outbox lease for ${lost?.delivery_id ?? "claimed delivery"}`);
     }
   }
 }
@@ -806,81 +807,104 @@ async function insertManifest(
   entries: readonly RefManifestEntry[],
   generationId: string
 ): Promise<void> {
-  for (const entry of entries) {
+  const rows = entries.map((entry) => ({
+    tenant_id: entry.tenantId,
+    repository: entry.repository,
+    ref_name: entry.ref,
+    commit_sha: entry.commitSha,
+    path: entry.path,
+    blob_sha: entry.blobSha,
+    mode: entry.executable ? "100755" : "100644",
+    source_fingerprint: entry.contentDigest,
+    content_available: entry.contentAvailable
+  }));
+  for (const chunk of projectionChunks(rows)) {
     await client.query(
       `insert into jina_context.ref_manifest
         (generation_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,mode,source_fingerprint,
          content_available)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
-      [
-        generationId,
-        entry.tenantId,
-        entry.repository,
-        entry.ref,
-        entry.commitSha,
-        entry.path,
-        entry.blobSha,
-        entry.executable ? "100755" : "100644",
-        entry.contentDigest,
-        entry.contentAvailable
-      ]
+       select $1,input.tenant_id,input.repository,input.ref_name,input.commit_sha,input.path,
+              input.blob_sha,input.mode,input.source_fingerprint,input.content_available
+       from jsonb_to_recordset($2::jsonb) as input(
+         tenant_id text,repository text,ref_name text,commit_sha text,path text,blob_sha text,
+         mode text,source_fingerprint text,content_available boolean
+       )`,
+      [generationId, JSON.stringify(chunk)]
     );
   }
 }
 
 async function insertCurrentKnowledge(client: PoolClient, entries: readonly CurrentKnowledgeRevision[]): Promise<void> {
-  for (const entry of entries) {
+  const rows = entries.map((entry) => ({
+    generation_id: entry.generationId,
+    tenant_id: entry.tenantId,
+    repository: entry.repository,
+    logical_id: entry.logicalId,
+    revision_id: entry.revisionId,
+    selection_reason: { reason: entry.selectionReason },
+    selection_fingerprint: contextDigest(entry)
+  }));
+  for (const chunk of projectionChunks(rows)) {
     await client.query(
       `insert into jina_context.current_knowledge_revisions
         (generation_id,tenant_id,repository,logical_id,revision_id,selection_reason,selection_fingerprint)
-       values ($1,$2,$3,$4,$5,$6::jsonb,$7)`,
-      [
-        entry.generationId,
-        entry.tenantId,
-        entry.repository,
-        entry.logicalId,
-        entry.revisionId,
-        JSON.stringify({ reason: entry.selectionReason }),
-        contextDigest(entry)
-      ]
+       select input.generation_id,input.tenant_id,input.repository,input.logical_id,input.revision_id,
+              input.selection_reason,input.selection_fingerprint
+       from jsonb_to_recordset($1::jsonb) as input(
+         generation_id text,tenant_id text,repository text,logical_id text,revision_id text,
+         selection_reason jsonb,selection_fingerprint text
+       )`,
+      [JSON.stringify(chunk)]
     );
   }
 }
 
 async function insertDocuments(client: PoolClient, documents: readonly ContextDocument[]): Promise<void> {
-  for (const document of documents) {
+  const rows = documents.map((document) => ({
+    id: document.id,
+    generation_id: document.generationId,
+    tenant_id: document.tenantId,
+    repository: document.repository,
+    ref_name: document.ref,
+    commit_sha: document.commitSha,
+    source_kind: document.sourceKind,
+    source_id: document.sourceId,
+    source_revision_id: document.sourceRevisionId ?? null,
+    title: document.title,
+    body: document.body,
+    contextual_text: document.contextualText,
+    metadata: {
+      ...document.metadata,
+      ...(document.knowledgeKind ? { knowledgeKind: document.knowledgeKind } : {})
+    },
+    authority_class: document.authorityClass,
+    effective_acl_fingerprint: document.effectiveAclFingerprint,
+    source_fingerprint: document.sourceFingerprint,
+    source_anchors: document.anchors,
+    projector_name: document.projectorName,
+    projector_version: document.projectorVersion,
+    projected_at: document.projectedAt
+  }));
+  for (const chunk of projectionChunks(rows, PROJECTION_BODY_WRITE_CHUNK_SIZE)) {
     await client.query(
       `insert into jina_context.context_documents
         (id,generation_id,tenant_id,repository,ref_name,commit_sha,source_kind,source_id,
          source_revision_id,title,body,contextual_text,metadata,authority_class,
          effective_acl_fingerprint,source_fingerprint,source_anchors,projector_name,
          projector_version,projected_at)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17::jsonb,$18,$19,$20)`,
-      [
-        document.id,
-        document.generationId,
-        document.tenantId,
-        document.repository,
-        document.ref,
-        document.commitSha,
-        document.sourceKind,
-        document.sourceId,
-        document.sourceRevisionId ?? null,
-        document.title,
-        document.body,
-        document.contextualText,
-        JSON.stringify({
-          ...document.metadata,
-          ...(document.knowledgeKind ? { knowledgeKind: document.knowledgeKind } : {})
-        }),
-        document.authorityClass,
-        document.effectiveAclFingerprint,
-        document.sourceFingerprint,
-        JSON.stringify(document.anchors),
-        document.projectorName,
-        document.projectorVersion,
-        document.projectedAt
-      ]
+       select input.id,input.generation_id,input.tenant_id,input.repository,input.ref_name,
+              input.commit_sha,input.source_kind,input.source_id,input.source_revision_id,input.title,
+              input.body,input.contextual_text,input.metadata,input.authority_class,
+              input.effective_acl_fingerprint,input.source_fingerprint,input.source_anchors,
+              input.projector_name,input.projector_version,input.projected_at
+       from jsonb_to_recordset($1::jsonb) as input(
+         id text,generation_id text,tenant_id text,repository text,ref_name text,commit_sha text,
+         source_kind text,source_id text,source_revision_id text,title text,body text,
+         contextual_text text,metadata jsonb,authority_class text,effective_acl_fingerprint text,
+         source_fingerprint text,source_anchors jsonb,projector_name text,projector_version text,
+         projected_at timestamptz
+       )`,
+      [JSON.stringify(chunk)]
     );
   }
 }
@@ -891,29 +915,41 @@ async function insertFragments(
   documents: readonly ContextDocument[]
 ): Promise<void> {
   const byId = new Map(documents.map((document) => [document.id, document]));
-  for (const fragment of fragments) {
+  const rows = fragments.map((fragment) => {
     const document = byId.get(fragment.documentId);
     if (!document) throw new Error(`Fragment ${fragment.id} references missing document ${fragment.documentId}`);
+    return {
+      id: fragment.id,
+      generation_id: fragment.generationId,
+      document_id: fragment.documentId,
+      tenant_id: document.tenantId,
+      repository: document.repository,
+      ordinal: fragment.ordinal,
+      source_text: fragment.sourceText,
+      contextual_text: fragment.contextualText,
+      source_anchors: fragment.anchors,
+      source_start: fragment.startOffset,
+      source_end: fragment.endOffset,
+      content_fingerprint: fragment.tokenFingerprint,
+      effective_acl_fingerprint: document.effectiveAclFingerprint
+    };
+  });
+  for (const chunk of projectionChunks(rows, PROJECTION_BODY_WRITE_CHUNK_SIZE)) {
     await client.query(
       `insert into jina_context.context_fragments
         (id,generation_id,document_id,tenant_id,repository,ordinal,source_text,contextual_text,
          source_anchors,source_start,source_end,content_fingerprint,effective_acl_fingerprint)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10,$11,$12,$13)`,
-      [
-        fragment.id,
-        fragment.generationId,
-        fragment.documentId,
-        document.tenantId,
-        document.repository,
-        fragment.ordinal,
-        fragment.sourceText,
-        fragment.contextualText,
-        JSON.stringify(fragment.anchors),
-        fragment.startOffset,
-        fragment.endOffset,
-        fragment.tokenFingerprint,
-        document.effectiveAclFingerprint
-      ]
+       select input.id,input.generation_id,input.document_id,input.tenant_id,input.repository,
+              input.ordinal,input.source_text,input.contextual_text,input.source_anchors,
+              input.source_start,input.source_end,input.content_fingerprint,
+              input.effective_acl_fingerprint
+       from jsonb_to_recordset($1::jsonb) as input(
+         id text,generation_id text,document_id text,tenant_id text,repository text,
+         ordinal integer,source_text text,contextual_text text,source_anchors jsonb,
+         source_start integer,source_end integer,content_fingerprint text,
+         effective_acl_fingerprint text
+       )`,
+      [JSON.stringify(chunk)]
     );
   }
 }
@@ -942,35 +978,47 @@ async function insertHierarchy(
 ): Promise<void> {
   const byId = new Map(documents.map((document) => [document.id, document]));
   await client.query("set constraints all deferred");
-  for (const [ordinal, node] of nodes.entries()) {
+  const rows = nodes.map((node, ordinal) => {
     const document = byId.get(node.documentId);
     if (!document) throw new Error(`Hierarchy node ${node.id} references missing document ${node.documentId}`);
+    return {
+      id: node.id,
+      generation_id: node.generationId,
+      document_id: node.documentId,
+      tenant_id: document.tenantId,
+      repository: document.repository,
+      parent_id: node.parentId ?? null,
+      ordinal,
+      depth: node.depth,
+      preorder_start: node.preorderStart,
+      preorder_end: node.preorderEnd,
+      title: node.title,
+      summary: node.summary,
+      source_anchors: node.anchors,
+      source_start: 0,
+      source_end: document.body.length,
+      adapter_name: node.adapterName,
+      adapter_version: node.adapterVersion,
+      node_fingerprint: contextDigest(node)
+    };
+  });
+  for (const chunk of projectionChunks(rows)) {
     await client.query(
       `insert into jina_context.hierarchy_nodes
         (id,generation_id,document_id,tenant_id,repository,parent_id,ordinal,depth,
          preorder_start,preorder_end,title,summary,source_anchors,source_start,source_end,
          adapter_name,adapter_version,node_fingerprint)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14,$15,$16,$17,$18)`,
-      [
-        node.id,
-        node.generationId,
-        node.documentId,
-        document.tenantId,
-        document.repository,
-        node.parentId ?? null,
-        ordinal,
-        node.depth,
-        node.preorderStart,
-        node.preorderEnd,
-        node.title,
-        node.summary,
-        JSON.stringify(node.anchors),
-        0,
-        document.body.length,
-        node.adapterName,
-        node.adapterVersion,
-        contextDigest(node)
-      ]
+       select input.id,input.generation_id,input.document_id,input.tenant_id,input.repository,
+              input.parent_id,input.ordinal,input.depth,input.preorder_start,input.preorder_end,
+              input.title,input.summary,input.source_anchors,input.source_start,input.source_end,
+              input.adapter_name,input.adapter_version,input.node_fingerprint
+       from jsonb_to_recordset($1::jsonb) as input(
+         id text,generation_id text,document_id text,tenant_id text,repository text,parent_id text,
+         ordinal integer,depth integer,preorder_start integer,preorder_end integer,title text,
+         summary text,source_anchors jsonb,source_start integer,source_end integer,
+         adapter_name text,adapter_version text,node_fingerprint text
+       )`,
+      [JSON.stringify(chunk)]
     );
   }
 }
@@ -980,30 +1028,56 @@ async function insertRelations(
   relations: readonly StructuralRelation[],
   projectorVersion: string
 ): Promise<void> {
-  for (const relation of relations) {
+  const rows = relations.map((relation) => ({
+    id: relation.id,
+    generation_id: relation.generationId,
+    tenant_id: relation.tenantId,
+    repository: relation.repository,
+    relation_kind: relation.kind,
+    ref_name: relation.ref,
+    commit_sha: relation.commitSha,
+    source_id: relation.from,
+    target_id: relation.to,
+    source_anchors: relation.anchors,
+    metadata: relation.metadata,
+    relation_fingerprint: contextDigest(relation),
+    projector_version: projectorVersion
+  }));
+  for (const chunk of projectionChunks(rows, PROJECTION_RELATION_WRITE_CHUNK_SIZE)) {
     await client.query(
       `insert into jina_context.structural_relations
         (id,generation_id,tenant_id,repository,relation_kind,ref_name,commit_sha,
          source_kind,source_id,target_kind,target_id,source_anchors,metadata,
          relation_fingerprint,projector_version)
-       values ($1,$2,$3,$4,$5,$6,$7,'resource',$8,'resource',$9,$10::jsonb,$11::jsonb,$12,$13)`,
-      [
-        relation.id,
-        relation.generationId,
-        relation.tenantId,
-        relation.repository,
-        relation.kind,
-        relation.ref,
-        relation.commitSha,
-        relation.from,
-        relation.to,
-        JSON.stringify(relation.anchors),
-        JSON.stringify(relation.metadata),
-        contextDigest(relation),
-        projectorVersion
-      ]
+       select input.id,input.generation_id,input.tenant_id,input.repository,input.relation_kind,
+              input.ref_name,input.commit_sha,'resource',input.source_id,'resource',input.target_id,
+              input.source_anchors,input.metadata,input.relation_fingerprint,input.projector_version
+       from jsonb_to_recordset($1::jsonb) as input(
+         id text,generation_id text,tenant_id text,repository text,relation_kind text,ref_name text,
+         commit_sha text,source_id text,target_id text,source_anchors jsonb,metadata jsonb,
+         relation_fingerprint text,projector_version text
+       )`,
+      [JSON.stringify(chunk)]
     );
   }
+}
+
+function projectionChunks<T>(values: readonly T[], maxRows = PROJECTION_WRITE_CHUNK_SIZE): T[][] {
+  const chunks: T[][] = [];
+  let chunk: T[] = [];
+  let chunkBytes = 2;
+  for (const value of values) {
+    const valueBytes = Buffer.byteLength(JSON.stringify(value), "utf8") + (chunk.length === 0 ? 0 : 1);
+    if (chunk.length > 0 && (chunk.length >= maxRows || chunkBytes + valueBytes > PROJECTION_WRITE_CHUNK_BYTE_TARGET)) {
+      chunks.push(chunk);
+      chunk = [];
+      chunkBytes = 2;
+    }
+    chunk.push(value);
+    chunkBytes += valueBytes;
+  }
+  if (chunk.length > 0) chunks.push(chunk);
+  return chunks;
 }
 
 async function projectIdentities(client: PoolClient, generation: IndexGeneration): Promise<void> {
