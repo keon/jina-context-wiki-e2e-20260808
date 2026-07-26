@@ -232,7 +232,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
       "jina_context_coordinator",
       { tenantIds: [input.tenantId] },
       `update jina_context.pipeline_stages
-       set status='queued',metadata=metadata || jsonb_build_object('releaseReason',$5),
+       set status='queued',metadata=metadata || jsonb_build_object('releaseReason',$5::text),
            lease_id=null,lease_owner=null,lease_expires_at=null,fence_token=null,updated_at=$4
        where tenant_id=$1 and id=$2 and lease_id=$3 and status='leased'`,
       [input.tenantId, input.stageId, input.leaseId, input.now, input.reason]

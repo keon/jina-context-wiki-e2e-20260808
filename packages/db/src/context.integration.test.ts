@@ -168,7 +168,7 @@ test(
     assert.equal(build.refSequence, 1);
     assert.ok(build.stages.every((stage) => stage.id.startsWith("cs_")));
 
-    const ingestClaim = await coordinator.claim({
+    let ingestClaim = await coordinator.claim({
       tenantId,
       workerId: "integration-ingest",
       topics: ["run-ingest-evidence"],
@@ -179,6 +179,25 @@ test(
     assert.equal(ingestClaim.stage.metadata.refSequence, 1);
     assert.equal(ingestClaim.stage.metadata.commitSha, commitSha);
     assert.equal(ingestClaim.stage.metadata.githubInstallationId, 140435029);
+    assert.equal(
+      await coordinator.release({
+        tenantId,
+        stageId: ingestClaim.stage.id,
+        leaseId: ingestClaim.fence.leaseId,
+        now: at(1),
+        reason: "integration release"
+      }),
+      true
+    );
+    ingestClaim = (await coordinator.claim({
+      tenantId,
+      workerId: "integration-ingest-retry",
+      topics: ["run-ingest-evidence"],
+      now: at(2),
+      leaseExpiresAt: at(600_000)
+    }))!;
+    assert.equal(ingestClaim.stage.attempt, 2);
+    assert.equal(ingestClaim.stage.metadata.releaseReason, "integration release");
 
     const aclPayload = { principalId: "reader-1", permission: "read" };
     const aclObservationId = stableId("observation", aclPayload);

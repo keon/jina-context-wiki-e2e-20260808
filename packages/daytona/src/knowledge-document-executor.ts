@@ -13,6 +13,7 @@ export const KNOWLEDGE_PROMPT_STDIN_REDIRECT = `< ${shellQuote(PROMPT_PATH)}`;
 export const UNTRUSTED_KNOWLEDGE_CODEX_ARGS = [
   "--ignore-user-config",
   "--strict-config",
+  "--skip-git-repo-check",
   "--disable shell_tool",
   "--disable shell_snapshot",
   "--disable multi_agent",

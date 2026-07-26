@@ -37,6 +37,7 @@ test("snapshot reuse accepts only an absolute working Codex path", async () => {
 test("untrusted evidence generation disables every agentic tool surface", () => {
   assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes("--ignore-user-config"));
   assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes("--strict-config"));
+  assert.ok(UNTRUSTED_KNOWLEDGE_CODEX_ARGS.includes("--skip-git-repo-check"));
   for (const feature of [
     "shell_tool",
     "shell_snapshot",
