@@ -31,6 +31,7 @@ interface DerivationRow {
   raw_output: unknown[];
   status: DerivationRun["status"];
   validation_diagnostics: string[];
+  revision_ids: string[];
   started_at: Date;
 }
 
@@ -594,14 +595,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
     return result.rows.map(revisionFromRow);
   }
 
-  private async hydrateRun(row: DerivationRow): Promise<DerivationRun> {
-    const revisions = await this.database.queryAs<{ id: string }>(
-      "jina_context_derive",
-      { tenantIds: [row.tenant_id] },
-      `select id from jina_context.knowledge_document_revisions
-       where tenant_id=$1 and repository=$2 and derivation_run_id=$3 order by created_at,id`,
-      [row.tenant_id, row.repository, row.id]
-    );
+  private hydrateRun(row: DerivationRow): DerivationRun {
     return {
       id: row.id,
       tenantId: row.tenant_id,
@@ -617,7 +611,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
       rawOutputs: row.raw_output,
       status: row.status,
       diagnostics: row.validation_diagnostics,
-      revisionIds: revisions.rows.map((revision) => revision.id),
+      revisionIds: row.revision_ids,
       createdAt: dateString(row.started_at)
     };
   }
@@ -720,8 +714,8 @@ async function insertDerivationRun(
     `insert into jina_context.derivation_runs
       (id,tenant_id,repository,ref_name,commit_sha,checkpoint_id,focus,focus_fingerprint,
        evidence_fingerprint,generator_name,generator_version,model,prompt_version,
-       schema_version,cache_key,status,raw_output,validation_diagnostics,started_at,completed_at)
-     values ($1,$2,$3,$4,$5,$6,'{}'::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb,$18,$18)
+       schema_version,cache_key,status,raw_output,validation_diagnostics,revision_ids,started_at,completed_at)
+     values ($1,$2,$3,$4,$5,$6,'{}'::jsonb,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,$17::jsonb,$18::text[],$19,$19)
      on conflict (tenant_id,repository,id) do nothing`,
     [
       run.id,
@@ -741,6 +735,7 @@ async function insertDerivationRun(
       run.status,
       JSON.stringify(run.rawOutputs),
       JSON.stringify(run.diagnostics),
+      run.revisionIds,
       run.createdAt
     ]
   );
@@ -749,7 +744,8 @@ async function insertDerivationRun(
      where tenant_id=$1 and repository=$2 and id=$3 and checkpoint_id=$4
        and cache_key=$5 and focus_fingerprint=$6 and evidence_fingerprint=$7
        and generator_name=$8 and generator_version=$9 and model=$10
-       and prompt_version=$11 and schema_version=$12 and status=$13`,
+       and prompt_version=$11 and schema_version=$12 and status=$13
+       and revision_ids=$14::text[]`,
     [
       run.tenantId,
       run.repository,
@@ -763,7 +759,8 @@ async function insertDerivationRun(
       run.model,
       run.promptVersion,
       run.schemaVersion,
-      run.status
+      run.status,
+      run.revisionIds
     ]
   );
   if (stored.rowCount !== 1) throw new Error(`Derivation run identity collision for ${run.id}`);

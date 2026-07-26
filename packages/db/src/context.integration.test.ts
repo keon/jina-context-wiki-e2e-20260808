@@ -890,6 +890,16 @@ test(
       revisions: [repeatedRevision],
       citations: [citation, repeatedProviderCitation]
     });
+    const cachedRepeatedRun = await store.findSuccessfulRun(repeatedRun.cacheKey);
+    assert.equal(cachedRepeatedRun?.createdAt, repeatedKnowledgeCreatedAt);
+    assert.deepEqual(cachedRepeatedRun?.revisionIds, [revision.id]);
+    const canonicalRevisionOwner = await database.pool.query<{ derivation_run_id: string }>(
+      `select derivation_run_id
+       from jina_context.knowledge_document_revisions
+       where tenant_id=$1 and repository=$2 and id=$3`,
+      [tenantId, repository, revision.id]
+    );
+    assert.notEqual(canonicalRevisionOwner.rows[0]?.derivation_run_id, repeatedRun.id);
     assert.equal((await store.getRevision(revision.id))?.createdAt, knowledgeCreatedAt);
     await assert.rejects(
       store.commitKnowledge({

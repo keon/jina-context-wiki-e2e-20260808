@@ -507,6 +507,7 @@ create table if not exists jina_context.derivation_runs (
   status text not null check (status in ('succeeded','rejected','failed')),
   raw_output jsonb,
   validation_diagnostics jsonb not null default '[]'::jsonb,
+  revision_ids text[] not null default '{}'::text[],
   started_at timestamptz not null,
   completed_at timestamptz not null check (completed_at >= started_at),
   primary key (tenant_id,repository,id),
@@ -515,6 +516,8 @@ create table if not exists jina_context.derivation_runs (
 );
 alter table jina_context.derivation_runs
   drop constraint if exists derivation_runs_tenant_id_repository_cache_key_key;
+alter table jina_context.derivation_runs
+  add column if not exists revision_ids text[] not null default '{}'::text[];
 create unique index if not exists context_derivation_runs_successful_cache
   on jina_context.derivation_runs (tenant_id,repository,cache_key)
   where status='succeeded';
@@ -570,6 +573,19 @@ create index if not exists context_knowledge_revisions_logical_created
 create index if not exists context_knowledge_revisions_commit_kind
   on jina_context.knowledge_document_revisions
   (tenant_id,repository,commit_sha,logical_id);
+
+update jina_context.derivation_runs run
+set revision_ids=linked.revision_ids
+from (
+  select tenant_id,repository,derivation_run_id,array_agg(id order by created_at,id) revision_ids
+  from jina_context.knowledge_document_revisions
+  where derivation_run_id is not null
+  group by tenant_id,repository,derivation_run_id
+) linked
+where run.tenant_id=linked.tenant_id
+  and run.repository=linked.repository
+  and run.id=linked.derivation_run_id
+  and cardinality(run.revision_ids)=0;
 
 create table if not exists jina_context.knowledge_revision_evidence (
   tenant_id text not null,
