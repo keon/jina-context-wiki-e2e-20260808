@@ -845,6 +845,40 @@ test(
       revisions: [revision],
       citations: [citation, providerCitation]
     });
+    const preMigrationTrigger = await database.pool.query<{ exists: boolean }>(
+      `select exists (
+         select 1
+         from pg_trigger
+         where tgrelid='jina_context.derivation_runs'::regclass
+           and tgname='reject_immutable_change'
+           and not tgisinternal
+       )`
+    );
+    assert.equal(preMigrationTrigger.rows[0]?.exists, true);
+    await database.pool.query("alter table jina_context.derivation_runs drop column revision_ids");
+    const migrationDatabase = new ContextDatabase({
+      connectionString: databaseUrl,
+      manageSchema: true,
+      manageRoles: false
+    });
+    await migrationDatabase.initialize();
+    await migrationDatabase.close();
+    const migratedRun = await database.pool.query<{ revision_ids: string[] }>(
+      `select revision_ids
+       from jina_context.derivation_runs
+       where tenant_id=$1 and repository=$2 and cache_key=$3`,
+      [tenantId, repository, knowledgeCacheKey]
+    );
+    assert.deepEqual(migratedRun.rows[0]?.revision_ids, [revision.id]);
+    await assert.rejects(
+      database.pool.query(
+        `update jina_context.derivation_runs
+         set revision_ids='{}'::text[]
+         where tenant_id=$1 and repository=$2 and cache_key=$3`,
+        [tenantId, repository, knowledgeCacheKey]
+      ),
+      /append-only/
+    );
     const cachedKnowledgeRun = await store.findSuccessfulRun(knowledgeCacheKey);
     assert.equal(cachedKnowledgeRun?.createdAt, knowledgeCreatedAt);
     assert.deepEqual(cachedKnowledgeRun?.revisionIds, [revision.id]);

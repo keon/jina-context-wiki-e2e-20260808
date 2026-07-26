@@ -574,6 +574,10 @@ create index if not exists context_knowledge_revisions_commit_kind
   on jina_context.knowledge_document_revisions
   (tenant_id,repository,commit_sha,logical_id);
 
+-- Existing deployments already protect canonical rows with this trigger. Remove
+-- it inside the schema transaction for the one-time association backfill; the
+-- trigger refresh at the end of this script restores append-only enforcement.
+drop trigger if exists reject_immutable_change on jina_context.derivation_runs;
 update jina_context.derivation_runs run
 set revision_ids=linked.revision_ids
 from (
