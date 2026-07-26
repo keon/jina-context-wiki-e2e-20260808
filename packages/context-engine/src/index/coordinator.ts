@@ -150,7 +150,7 @@ export class IndexContextService {
       aclFingerprints: aclMap
     });
     const documents = [...manifestOutput.documents, ...providerDocuments, ...knowledge.documents];
-    const exactIndex = this.store.nativeExactIndex ? [] : new ExactProjector().project(documents);
+    const exactIndex = new ExactProjector().project(documents, this.store.nativeExactIndex ? ["metadata"] : undefined);
     const exactIndexInputFingerprint = fingerprint({
       projectorVersion: EXACT_PROJECTOR_VERSION,
       documents: documents

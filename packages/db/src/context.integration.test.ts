@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  ExactProjector,
   IndexContextService,
   IngestEvidenceService,
   QueryContextService,
@@ -734,7 +735,8 @@ test(
 
     const providerBody = JSON.stringify({
       repository: { defaultBranch: "main" },
-      oversizedExactToken: "x".repeat(3_000)
+      oversizedExactToken: "x".repeat(3_000),
+      unicode: "İSTANBUL"
     });
     const providerRecord = createEvidenceRecord({
       anchor: {
@@ -746,9 +748,15 @@ test(
         observedAt: createdAt
       },
       ref,
-      title: "Repository metadata",
+      title: "İSTANBUL Repository metadata",
       body: providerBody,
-      metadata: { provider: "github" },
+      metadata: {
+        provider: "github",
+        numericExponent: 1e21,
+        punctuation: "apps/api/src/server.ts#deployContext",
+        boundary512: "y".repeat(512),
+        boundary513: "z".repeat(513)
+      },
       authorityClass: "provider_state",
       aclFingerprint,
       createdAt
@@ -989,6 +997,23 @@ test(
     );
     assert.ok(Number(exactIndexStats.rows[0]?.count) > 0);
     assert.ok((exactIndexStats.rows[0]?.max_characters ?? 0) <= 512);
+    const providerDocument = enrichedProjection?.documents.find((document) => document.sourceId === providerRecord.id);
+    assert.ok(providerDocument);
+    const storedProviderExact = await database.queryAs<{ term: string; field: "title" | "body" | "metadata" }>(
+      "jina_context_admin",
+      { tenantIds: [tenantId] },
+      `select term,field
+       from jina_context.exact_index
+       where generation_id=$1 and document_id=$2
+       order by term,field`,
+      [enrichedGeneration.id, providerDocument.id]
+    );
+    assert.deepEqual(
+      storedProviderExact.rows.sort(
+        (left, right) => left.term.localeCompare(right.term) || left.field.localeCompare(right.field)
+      ),
+      new ExactProjector().project([providerDocument]).map(({ term, field }) => ({ term, field }))
+    );
     assert.equal(
       (await store.getScopedGeneration(tenantId, [repository], enrichedGeneration.id))?.generation.id,
       enrichedGeneration.id

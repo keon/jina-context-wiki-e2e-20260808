@@ -258,7 +258,10 @@ export class PostgresProjectionRepository implements ProjectionStore {
       this.database.queryAs<HierarchyDbRow>(
         "jina_context_admin",
         { tenantIds: [row.tenant_id] },
-        `select hierarchy.*
+        `select hierarchy.id,hierarchy.generation_id,hierarchy.document_id,hierarchy.parent_id,
+                hierarchy.title,hierarchy.summary,hierarchy.depth,hierarchy.preorder_start,
+                hierarchy.preorder_end,hierarchy.source_anchors,hierarchy.adapter_name,
+                hierarchy.adapter_version
            from jina_context.hierarchy_nodes hierarchy
            join jina_context.context_documents document on document.id=hierarchy.document_id
            where hierarchy.generation_id=$1
@@ -515,11 +518,8 @@ async function projectConsumerOutput(
     case "lexical":
       await insertDocuments(client, projection.documents);
       await insertFragments(client, projection.fragments, projection.documents);
-      if (projection.exactIndex.length > 0) {
-        await insertExactIndex(client, projection.exactIndex);
-      } else {
-        await insertNativeExactIndex(client, projection.generation.id);
-      }
+      await insertNativeExactIndex(client, projection.generation.id);
+      await insertExactIndex(client, projection.exactIndex);
       return;
     case "hierarchy":
       await insertHierarchy(client, projection.hierarchyNodes, projection.documents);
@@ -996,11 +996,10 @@ async function insertNativeExactIndex(client: PoolClient, generationId: string):
      cross join lateral (
        values
          ('title'::text,document.title),
-         ('body'::text,document.body),
-         ('metadata'::text,document.metadata::text)
+         ('body'::text,document.body)
      ) fields(field_name,field_value)
      cross join lateral regexp_matches(
-       lower(normalize(fields.field_value,NFKC)),
+       lower(normalize(fields.field_value,NFKC) collate "C"),
        '[a-z0-9_$./:@#-]+',
        'g'
      ) matched(term)

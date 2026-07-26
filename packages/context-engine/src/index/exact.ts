@@ -4,6 +4,7 @@ import { tokenizeContext } from "./lexical.js";
 
 export const EXACT_PROJECTOR_VERSION = "exact-v2";
 export const EXACT_TERM_MAX_CHARACTERS = 512;
+const exactFields = ["title", "body", "metadata"] as const;
 
 function entriesFor(document: ContextDocument, field: ExactIndexEntry["field"], value: string): ExactIndexEntry[] {
   return [...new Set(tokenizeContext(value))]
@@ -17,13 +18,17 @@ function entriesFor(document: ContextDocument, field: ExactIndexEntry["field"], 
 }
 
 export class ExactProjector {
-  project(documents: ContextDocument[]): ExactIndexEntry[] {
+  project(documents: ContextDocument[], fields: readonly ExactIndexEntry["field"][] = exactFields): ExactIndexEntry[] {
     return documents
-      .flatMap((document) => [
-        ...entriesFor(document, "title", document.title),
-        ...entriesFor(document, "body", document.body),
-        ...entriesFor(document, "metadata", canonicalJson(document.metadata))
-      ])
+      .flatMap((document) =>
+        fields.flatMap((field) =>
+          entriesFor(
+            document,
+            field,
+            field === "title" ? document.title : field === "body" ? document.body : canonicalJson(document.metadata)
+          )
+        )
+      )
       .sort(
         (left, right) =>
           left.term.localeCompare(right.term) ||
