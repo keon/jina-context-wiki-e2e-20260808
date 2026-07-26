@@ -401,6 +401,17 @@ test("knowledge revision identity is canonical across logical-id casing", () => 
   const mixedCase = createKnowledgeRevision({ ...base, logicalId: "Component:Acme/Repo:Billing" });
   assert.equal(mixedCase.logicalId, lowercase.logicalId);
   assert.equal(mixedCase.id, lowercase.id);
+  for (const changed of [
+    { ...base, title: "Changed billing" },
+    { ...base, summary: "Changed billing" },
+    { ...base, structuredSummary: { changed: true } },
+    { ...base, scope: { ...base.scope, paths: ["src/billing.ts"] } },
+    { ...base, model: "different-model" },
+    { ...base, promptVersion: "2" },
+    { ...base, confidence: 0.5 }
+  ]) {
+    assert.notEqual(createKnowledgeRevision({ ...changed, logicalId: lowercase.logicalId }).id, lowercase.id);
+  }
 });
 
 test("derivation repairs once, validates source ranges, and caches immutable input", async () => {

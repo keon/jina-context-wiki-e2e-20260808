@@ -175,19 +175,27 @@ export function createKnowledgeRevision(
   if (input.confidence < 0 || input.confidence > 1) throw new Error("Knowledge confidence must be between 0 and 1");
   const bodyDigest = fingerprint(input.bodyMarkdown);
   const logicalId = input.logicalId.trim().toLowerCase();
-  return {
-    ...input,
+  const revision = {
     logicalId,
+    tenantId: input.tenantId,
     repository: normalizeRepository(input.repository),
-    createdAt: normalizeIsoTime(input.createdAt),
+    kind: input.kind,
+    title: input.title,
+    bodyMarkdown: input.bodyMarkdown,
+    summary: input.summary,
+    structuredSummary: input.structuredSummary,
+    scope: input.scope,
+    evidenceFingerprint: input.evidenceFingerprint,
     bodyDigest,
-    id: stableId("kr", {
-      logicalId,
-      evidenceFingerprint: input.evidenceFingerprint,
-      generatorVersion: input.generatorVersion,
-      bodyDigest
-    })
+    generatorName: input.generatorName,
+    generatorVersion: input.generatorVersion,
+    model: input.model,
+    promptVersion: input.promptVersion,
+    confidence: input.confidence,
+    createdAt: normalizeIsoTime(input.createdAt)
   };
+  const { createdAt: _createdAt, ...immutableRevision } = revision;
+  return { ...revision, id: stableId("kr", immutableRevision) };
 }
 
 export function createKnowledgeCitation(
