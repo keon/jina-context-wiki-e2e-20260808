@@ -730,6 +730,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const checkpointId = requiredString(body.checkpointId, "checkpointId");
       if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
       const rawOutput = body.rawOutput;
+      const repairPresentationFields = body.repairPresentationFields === true;
       const generator: KnowledgeDocumentGenerator = {
         name: "daytona-codex",
         version: "knowledge-documents-v1",
@@ -746,7 +747,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       // The remote worker owns the single repair attempt. Each commit request
       // validates exactly one untrusted model output and records that attempt.
-      const run = await service.derive(checkpointId, nowIso(), lease.fence, 1);
+      const run = await service.derive(checkpointId, nowIso(), lease.fence, 1, repairPresentationFields);
       const enrichedGeneration =
         run.status === "succeeded"
           ? await new IndexContextService(contextStore).index(checkpointId, nowIso(), lease.fence)

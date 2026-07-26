@@ -382,7 +382,14 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
       readonly revisionIds?: readonly string[];
       readonly runId: string;
       readonly enrichedGenerationId?: string;
-    }>("/internal/context/derive/commit", leaseBody(work, { checkpointId: prepared.checkpointId, rawOutput }));
+    }>(
+      "/internal/context/derive/commit",
+      leaseBody(work, {
+        checkpointId: prepared.checkpointId,
+        rawOutput,
+        repairPresentationFields: attempt > 0
+      })
+    );
     if (result.status === "succeeded") {
       return {
         effect: result.revisionIds?.length ? "changed" : "noop",

@@ -30,7 +30,8 @@ export class DeriveKnowledgeService {
     checkpointId: string,
     createdAt: string,
     fence?: ContextWriteFence,
-    maximumAttempts = 2
+    maximumAttempts = 2,
+    repairPresentationFields = false
   ): Promise<DerivationRun> {
     if (!Number.isSafeInteger(maximumAttempts) || maximumAttempts < 1 || maximumAttempts > 2) {
       throw new Error("Knowledge derivation supports one generation attempt and at most one repair");
@@ -69,7 +70,8 @@ export class DeriveKnowledgeService {
           generatorVersion: this.generator.version,
           model: this.generator.model,
           promptVersion: KNOWLEDGE_PROMPT_VERSION,
-          createdAt: normalizedCreatedAt
+          createdAt: normalizedCreatedAt,
+          repairPresentationFields: repairPresentationFields || attempt > 0
         });
         diagnostics = [];
         break;

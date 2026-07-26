@@ -130,6 +130,7 @@ export class KnowledgeOutputValidator {
     model: string;
     promptVersion: string;
     createdAt: string;
+    repairPresentationFields?: boolean;
   }): Promise<ValidatedKnowledge> {
     const checkpoint = await this.evidenceStore.getCheckpoint(input.checkpointId);
     if (checkpoint === undefined) throw new KnowledgeValidationError(["Unknown evidence checkpoint"]);
@@ -199,10 +200,13 @@ export class KnowledgeOutputValidator {
       }
       if (resolved.length !== document.citations.length) continue;
       const claims = resolved.map((citation) => citation.claim);
-      if (!textSupportedByClaims(document.title, claims)) {
+      const repairedPresentation = input.repairPresentationFields ? claims[0] : undefined;
+      const title = repairedPresentation ?? document.title;
+      const summary = repairedPresentation ?? document.summary;
+      if (!textSupportedByClaims(title, claims)) {
         diagnostics.push(`documents[${documentIndex}].title is not supported by a citation claim`);
       }
-      if (!textSupportedByClaims(document.summary, claims)) {
+      if (!textSupportedByClaims(summary, claims)) {
         diagnostics.push(`documents[${documentIndex}].summary is not supported by a citation claim`);
       }
       for (const value of structuredSummaryStrings(document.structuredSummary)) {
@@ -244,9 +248,9 @@ export class KnowledgeOutputValidator {
         tenantId: checkpoint.tenantId,
         repository: checkpoint.repository,
         kind: document.kind,
-        title: document.title,
+        title,
         bodyMarkdown: document.bodyMarkdown,
-        summary: document.summary,
+        summary,
         structuredSummary: document.structuredSummary,
         scope: {
           ref: checkpoint.ref,

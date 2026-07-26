@@ -453,6 +453,32 @@ test("derivation fails closed after one repair and writes no revision", async ()
   assert.deepEqual(await store.listRevisions(tenantId, repository), []);
 });
 
+test("conservative repair grounds presentation fields without accepting unsupported material", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const output = validOutput();
+  output.documents[0]!.title = "Unsupported generated title";
+  output.documents[0]!.summary = "Unsupported generated summary";
+  const validator = new KnowledgeOutputValidator(store);
+  const input = {
+    output,
+    checkpointId: checkpoint.id,
+    generatorName: "test",
+    generatorVersion: "1",
+    model: "test",
+    promptVersion: "1",
+    createdAt
+  };
+  await assert.rejects(() => validator.validate(input), /title is not supported|summary is not supported/);
+  const repaired = await validator.validate({ ...input, repairPresentationFields: true });
+  const firstClaim = output.documents[0]!.citations[0]!.claim;
+  assert.equal(repaired.revisions[0]?.title, firstClaim);
+  assert.equal(repaired.revisions[0]?.summary, firstClaim);
+
+  output.documents[0]!.bodyMarkdown += "\n\nUnsupported material remains invalid.";
+  await assert.rejects(() => validator.validate({ ...input, repairPresentationFields: true }), /unsupported paragraph/);
+});
+
 test("unsupported material paragraphs are rejected", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
