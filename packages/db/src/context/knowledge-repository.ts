@@ -293,6 +293,23 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
     return result.rows[0] ? revisionFromRow(result.rows[0]) : undefined;
   }
 
+  async getScopedRevision(
+    tenantId: string,
+    repositories: readonly string[],
+    revisionId: string
+  ): Promise<KnowledgeDocumentRevision | undefined> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<RevisionRow>(
+      "jina_context_admin",
+      { tenantIds: [tenantId] },
+      REVISION_SELECT +
+        ` where revision.id=$1 and revision.tenant_id=$2 and revision.repository=any($3::text[])
+          and ${revisionNotErasedSql("revision")}`,
+      [revisionId, tenantId, [...repositories]]
+    );
+    return result.rows[0] ? revisionFromRow(result.rows[0]) : undefined;
+  }
+
   async listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
     await this.database.initialize();
     const result = await this.database.queryAs<RevisionRow>(

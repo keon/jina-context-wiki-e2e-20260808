@@ -469,8 +469,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname.startsWith("/context/generations/")) {
       const generationId = routeId(url.pathname, "/context/generations/");
       if (!generationId) throw notFound("context generation not found");
-      let projection = await contextStore.getGeneration(generationId);
       const repositories = await permittedRepositories(principal);
+      let projection = await contextStore.getScopedGeneration(principal.tenantId, repositories, generationId);
       if (
         !projection ||
         projection.generation.tenantId !== principal.tenantId ||
@@ -529,8 +529,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname.startsWith("/context/documents/")) {
       const revisionId = routeId(url.pathname, "/context/documents/");
       if (!revisionId) throw notFound("knowledge document not found");
-      const revision = await contextStore.getRevision(revisionId);
       const repositories = await permittedRepositories(principal);
+      const revision = await contextStore.getScopedRevision(principal.tenantId, repositories, revisionId);
       const revisionAllowed =
         revision !== undefined &&
         (isTenantAdmin(principal) ||
@@ -593,7 +593,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       requireTenantAdmin(principal);
       const revisionId = routeId(url.pathname, "/context/knowledge/", "/review");
       if (!revisionId) throw notFound("knowledge revision not found");
-      const revision = await contextStore.getRevision(revisionId);
+      const repositories = await permittedRepositories(principal);
+      const revision = await contextStore.getScopedRevision(principal.tenantId, repositories, revisionId);
       if (!revision || revision.tenantId !== principal.tenantId) throw notFound("knowledge revision not found");
       await requireRepositoryAccess(principal, revision.repository);
       const body = parseJsonObject(await readRawBody(request));

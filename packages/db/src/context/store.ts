@@ -102,6 +102,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   getRevision(revisionId: string): Promise<KnowledgeDocumentRevision | undefined> {
     return this.knowledge.getRevision(revisionId);
   }
+  getScopedRevision(
+    tenantId: string,
+    repositories: readonly string[],
+    revisionId: string
+  ): Promise<KnowledgeDocumentRevision | undefined> {
+    return this.knowledge.getScopedRevision(tenantId, repositories, revisionId);
+  }
   listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
     return this.knowledge.listRevisions(tenantId, repository);
   }
@@ -134,6 +141,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   }
   getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
     return this.projection.getGeneration(generationId);
+  }
+  getScopedGeneration(
+    tenantId: string,
+    repositories: readonly string[],
+    generationId: string
+  ): Promise<GenerationProjection | undefined> {
+    return this.projection.getScopedGeneration(tenantId, repositories, generationId);
   }
   getAuthorizedGeneration(generationId: string, principalId: string): Promise<GenerationProjection | undefined> {
     return this.projection.getAuthorizedGeneration(generationId, principalId);

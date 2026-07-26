@@ -129,6 +129,24 @@ export class PostgresProjectionRepository implements ProjectionStore {
     return this.hydrate(generation);
   }
 
+  async getScopedGeneration(
+    tenantId: string,
+    repositories: readonly string[],
+    generationId: string
+  ): Promise<GenerationProjection | undefined> {
+    await this.database.initialize();
+    const generation = (
+      await this.database.queryAs<GenerationRow>(
+        "jina_context_admin",
+        { tenantIds: [tenantId] },
+        "select * from jina_context.index_generations where id=$1 and tenant_id=$2 and repository=any($3::text[])",
+        [generationId, tenantId, [...repositories]]
+      )
+    ).rows[0];
+    if (!generation || generation.status !== "published") return undefined;
+    return this.hydrate(generation);
+  }
+
   async getAuthorizedGeneration(generationId: string, principalId: string): Promise<GenerationProjection | undefined> {
     await this.database.initialize();
     const generation = (

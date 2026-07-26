@@ -47,6 +47,10 @@ fi
 normal_retry_output="$(
   GCP_PROJECT_ID=jina-v2 GCP_REGION=us-central1 CLOUD_BUILD_ID=mock-build bash -c '
     gcloud() {
+      if [[ "$1 $2 $3 $4" == "artifacts docker images describe" ]]; then
+        printf "%s@sha256:%064d\n" "${5%%:*}" 0
+        return 0
+      fi
       if [[ "$1 $2 $3" == "run services describe" ]]; then return 1; fi
       return 0
     }
@@ -62,6 +66,10 @@ fi
 service_discovery_output="$(
   GCP_PROJECT_ID=jina-v2 GCP_REGION=us-central1 CLOUD_BUILD_ID=mock-build bash -c '
     gcloud() {
+      if [[ "$1 $2 $3 $4" == "artifacts docker images describe" ]]; then
+        printf "%s@sha256:%064d\n" "${5%%:*}" 0
+        return 0
+      fi
       if [[ "$1 $2 $3" == "run services list" ]]; then return 1; fi
       return 0
     }
@@ -96,8 +104,30 @@ split_image_output="$(
       bash scripts/cloud-build-deploy.sh
     ' 2>&1 || true
 )"
-if [[ "${split_image_output}" != *"must deploy images built by one explicit coordinated Cloud Build"* ]]; then
+if [[ "${split_image_output}" != *"must deploy images built by the current coordinated Cloud Build"* ]]; then
   echo "Destructive cutover accepted an image tag from another build." >&2
+  exit 1
+fi
+
+mixed_image_output="$(
+  GCP_PROJECT_ID=jina-v2 GCP_REGION=us-central1 CLOUD_BUILD_ID=mock-build bash -c '
+    gcloud() {
+      if [[ "$1 $2 $3 $4" == "artifacts docker images describe" ]]; then
+        if [[ "$5" == *"/admin:"* ]]; then
+          printf "%s@sha256:%064d\n" "${5/\/admin:/\/api:}" 0
+        else
+          printf "%s@sha256:%064d\n" "${5%%:*}" 0
+        fi
+        return 0
+      fi
+      return 0
+    }
+    export -f gcloud
+    bash scripts/cloud-build-deploy.sh
+  ' 2>&1 || true
+)"
+if [[ "${mixed_image_output}" != *"Unable to pin coordinated release image digest"* ]]; then
+  echo "Deployment accepted an image digest from a different coordinated artifact." >&2
   exit 1
 fi
 
@@ -126,6 +156,10 @@ run_stale_backup_case() {
     JINA_BUILD_COMMIT_SHA="${mock_release_sha}" \
     bash -c '
       gcloud() {
+        if [[ "$1 $2 $3 $4" == "artifacts docker images describe" ]]; then
+          printf "%s@sha256:%064d\n" "${5%%:*}" 0
+          return 0
+        fi
         if [[ "$1 $2 $3" == "run services list" ]]; then
           printf "%b" "$MOCK_SERVICE_LIST"
           return 0
@@ -187,7 +221,7 @@ if ! grep -Fq -- '--labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh 
   exit 1
 fi
 
-if grep --quiet --extended-regexp '_JINA_CONTEXT_CUTOVER|_JINA_RELEASE_SHA|_JINA_LEGACY_CUTOVER' cloudbuild.deploy.yaml; then
-  echo "Split-image deployment config exposes destructive cutover substitutions." >&2
+if [[ -e cloudbuild.deploy.yaml ]]; then
+  echo "Obsolete split-image deployment config still exists." >&2
   exit 1
 fi

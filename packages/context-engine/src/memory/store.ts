@@ -230,6 +230,15 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return value === undefined || this.#isRevisionErased(revisionId) ? undefined : copy(value);
   }
 
+  async getScopedRevision(
+    tenantId: string,
+    repositories: readonly string[],
+    revisionId: string
+  ): Promise<KnowledgeDocumentRevision | undefined> {
+    const revision = await this.getRevision(revisionId);
+    return revision?.tenantId === tenantId && repositories.includes(revision.repository) ? revision : undefined;
+  }
+
   async listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
     return [...this.#revisions.values()]
       .filter(
@@ -405,6 +414,17 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   async getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
     const value = this.#projections.get(generationId);
     return value === undefined ? undefined : copy(value);
+  }
+
+  async getScopedGeneration(
+    tenantId: string,
+    repositories: readonly string[],
+    generationId: string
+  ): Promise<GenerationProjection | undefined> {
+    const projection = await this.getGeneration(generationId);
+    return projection?.generation.tenantId === tenantId && repositories.includes(projection.generation.repository)
+      ? projection
+      : undefined;
   }
 
   async getAuthorizedGeneration(generationId: string, principalId: string): Promise<GenerationProjection | undefined> {

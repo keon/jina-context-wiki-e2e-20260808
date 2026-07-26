@@ -49,8 +49,8 @@ cutover_primary_db_pass_secret="jina-primary-cutover-auditor-db-password:latest"
 cutover_legacy_graph_db_user="jina_cutover_auditor"
 cutover_legacy_graph_db_pass_secret="jina-legacy-cutover-auditor-db-password:latest"
 
-if [[ "${image_tag}" == "latest" || "${image_tag}" == "unset" ]]; then
-  echo "Deployment must deploy images built by one explicit coordinated Cloud Build" >&2
+if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
+  echo "Deployment must deploy images built by the current coordinated Cloud Build" >&2
   exit 2
 fi
 if [[ ! "${image_tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
@@ -195,6 +195,20 @@ require_secret() {
   gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
 }
 
+resolve_release_image() {
+  local tagged_image="$1"
+  local digest_image
+  digest_image="$(gcloud artifacts docker images describe "${tagged_image}" \
+    --project="${GCP_PROJECT_ID}" \
+    --format='value(image_summary.fully_qualified_digest)')"
+  if [[ "${digest_image%%@*}" != "${tagged_image%:*}" ||
+        ! "${digest_image#*@}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "Unable to pin coordinated release image digest: ${tagged_image}" >&2
+    exit 2
+  fi
+  printf '%s\n' "${digest_image}"
+}
+
 verify_cutover_backup() {
   local metadata="$1"
   local expected_description="$2"
@@ -306,14 +320,10 @@ for service_account in \
 done
 gcloud iam service-accounts describe "${migration_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 
-for image in "${api_image}" "${worker_image}" "${dashboard_image}" "${admin_image}"; do
-  if ! gcloud artifacts docker images describe "${image}" \
-    --project="${GCP_PROJECT_ID}" \
-    --format='value(image_summary.digest)' >/dev/null; then
-    echo "Coordinated release image does not exist: ${image}" >&2
-    exit 2
-  fi
-done
+api_image="$(resolve_release_image "${api_image}")"
+worker_image="$(resolve_release_image "${worker_image}")"
+dashboard_image="$(resolve_release_image "${dashboard_image}")"
+admin_image="$(resolve_release_image "${admin_image}")"
 
 service_snapshot_contains() {
   local snapshot="$1"

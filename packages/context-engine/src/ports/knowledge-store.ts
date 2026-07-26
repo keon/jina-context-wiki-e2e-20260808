@@ -18,6 +18,11 @@ export interface KnowledgeStore {
   recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void>;
   getRun(runId: string): Promise<DerivationRun | undefined>;
   getRevision(revisionId: string): Promise<KnowledgeDocumentRevision | undefined>;
+  getScopedRevision(
+    tenantId: string,
+    repositories: readonly string[],
+    revisionId: string
+  ): Promise<KnowledgeDocumentRevision | undefined>;
   listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]>;
   listCitations(revisionId: string): Promise<KnowledgeEvidenceCitation[]>;
   appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent>;

@@ -839,6 +839,15 @@ test(
     assert.ok(candidates.some((candidate) => candidate.text.includes("deployContext")));
     assert.ok(candidates.some((candidate) => candidate.sourceKind === "knowledge"));
     const enrichedProjection = await store.getGeneration(enrichedGeneration.id);
+    assert.equal(
+      (await store.getScopedGeneration(tenantId, [repository], enrichedGeneration.id))?.generation.id,
+      enrichedGeneration.id
+    );
+    assert.equal(await store.getScopedGeneration(omittedTenantId, [repository], enrichedGeneration.id), undefined);
+    assert.equal(await store.getScopedGeneration(tenantId, ["acme/not-authorized"], enrichedGeneration.id), undefined);
+    assert.equal((await store.getScopedRevision(tenantId, [repository], revision.id))?.id, revision.id);
+    assert.equal(await store.getScopedRevision(omittedTenantId, [repository], revision.id), undefined);
+    assert.equal(await store.getScopedRevision(tenantId, ["acme/not-authorized"], revision.id), undefined);
     const authorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, "reader-1");
     const unauthorizedProjection = await store.getAuthorizedGeneration(enrichedGeneration.id, "reader-without-access");
     assert.equal(authorizedProjection?.documents.length, enrichedProjection?.documents.length);
