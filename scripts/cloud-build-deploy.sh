@@ -223,6 +223,30 @@ require_secret() {
   gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
 }
 
+verify_cutover_backup() {
+  local metadata="$1"
+  local expected_description="$2"
+  BACKUP_METADATA="${metadata}" EXPECTED_DESCRIPTION="${expected_description}" python3 -c '
+import datetime
+import json
+import os
+
+metadata = json.loads(os.environ["BACKUP_METADATA"])
+if metadata.get("status") != "SUCCESSFUL":
+    raise SystemExit("backup status is not SUCCESSFUL")
+if metadata.get("description") != os.environ["EXPECTED_DESCRIPTION"]:
+    raise SystemExit("backup description is not bound to the exact release SHA")
+end_time = metadata.get("endTime")
+if not end_time:
+    raise SystemExit("backup has no completion time")
+completed = datetime.datetime.fromisoformat(end_time.replace("Z", "+00:00"))
+age = (datetime.datetime.now(datetime.timezone.utc) - completed).total_seconds()
+if age < -300 or age > 21600:
+    raise SystemExit("backup completion must be within the last six hours")
+print(end_time)
+'
+}
+
 route_latest_revision() {
   local service="$1"
   local revision
@@ -275,31 +299,65 @@ require_secret "jina-web-auth-password:latest"
 gcloud iam service-accounts describe "${runtime_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 gcloud iam service-accounts describe "${migration_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 
+service_snapshot_contains() {
+  local snapshot="$1"
+  local expected_name="$2"
+  local service_name
+  while IFS= read -r service_name; do
+    if [[ "${service_name}" == "${expected_name}" ]]; then
+      return 0
+    fi
+  done <<<"${snapshot}"
+  return 1
+}
+
+if ! service_list_snapshot="$(gcloud run services list \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --format='value(metadata.name)')"; then
+  echo "Unable to obtain an authoritative Cloud Run service inventory" >&2
+  exit 2
+fi
+
 legacy_worker="jina-context-graph-worker"
 legacy_worker_present="false"
-if gcloud run services describe "${legacy_worker}" \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" >/dev/null 2>&1; then
+if service_snapshot_contains "${service_list_snapshot}" "${legacy_worker}"; then
   legacy_worker_present="true"
+  if ! gcloud run services describe "${legacy_worker}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" >/dev/null; then
+    echo "Unable to verify the listed legacy context worker" >&2
+    exit 2
+  fi
 fi
 api_present="false"
 legacy_api_present="false"
 legacy_api_description=""
-if gcloud run services describe jina-api \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" >/dev/null 2>&1; then
+if service_snapshot_contains "${service_list_snapshot}" "jina-api"; then
   api_present="true"
-  api_environment_names="$(gcloud run services describe jina-api \
+  if ! legacy_api_description="$(gcloud run services describe jina-api \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
-    --format='value(spec.template.spec.containers[0].env.name)')"
+    --format=json)"; then
+    echo "Unable to verify the listed API service" >&2
+    exit 2
+  fi
+  api_environment_names="$(LEGACY_API_DESCRIPTION="${legacy_api_description}" python3 -c '
+import json
+import os
+
+description = json.loads(os.environ["LEGACY_API_DESCRIPTION"])
+names = []
+for container in description.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
+    for entry in container.get("env", []):
+        name = entry.get("name")
+        if name:
+            names.append(name)
+print(";".join(names))
+')"
   if [[ ";${api_environment_names};" == *";GRAPH_API_TOKEN;"* ||
         ";${api_environment_names};" == *";GRAPH_DB_NAME;"* ]]; then
     legacy_api_present="true"
-    legacy_api_description="$(gcloud run services describe jina-api \
-      --project="${GCP_PROJECT_ID}" \
-      --region="${GCP_REGION}" \
-      --format=json)"
   fi
 fi
 if [[ "${context_cutover}" == "false" ]]; then
@@ -381,22 +439,26 @@ if [[ "${context_cutover}" == "true" ]]; then
   fi
   database_project="${cloud_sql_instance%%:*}"
   database_instance="${cloud_sql_instance##*:}"
-  backup_status="$(gcloud sql backups describe "${context_cutover_backup_id}" \
+  primary_backup_metadata="$(gcloud sql backups describe "${context_cutover_backup_id}" \
     --project="${database_project}" \
     --instance="${database_instance}" \
-    --format='value(status)')"
-  if [[ "${backup_status}" != "SUCCESSFUL" ]]; then
-    echo "Pre-cutover backup ${context_cutover_backup_id} is not successful: ${backup_status:-missing}" >&2
+    --format=json)"
+  if ! primary_backup_completed_at="$(verify_cutover_backup \
+    "${primary_backup_metadata}" \
+    "pre-context-engine-primary-${release_sha}")"; then
+    echo "Primary backup ${context_cutover_backup_id} is not fresh evidence for release ${release_sha}" >&2
     exit 2
   fi
   legacy_database_project="${trusted_legacy_graph_cloud_sql_instance%%:*}"
   legacy_database_instance="${trusted_legacy_graph_cloud_sql_instance##*:}"
-  legacy_backup_status="$(gcloud sql backups describe "${context_cutover_legacy_backup_id}" \
+  legacy_backup_metadata="$(gcloud sql backups describe "${context_cutover_legacy_backup_id}" \
     --project="${legacy_database_project}" \
     --instance="${legacy_database_instance}" \
-    --format='value(status)')"
-  if [[ "${legacy_backup_status}" != "SUCCESSFUL" ]]; then
-    echo "Legacy graph backup ${context_cutover_legacy_backup_id} is not successful: ${legacy_backup_status:-missing}" >&2
+    --format=json)"
+  if ! legacy_backup_completed_at="$(verify_cutover_backup \
+    "${legacy_backup_metadata}" \
+    "pre-context-engine-legacy-graph-${release_sha}")"; then
+    echo "Legacy graph backup ${context_cutover_legacy_backup_id} is not fresh evidence for release ${release_sha}" >&2
     exit 2
   fi
 
@@ -405,6 +467,8 @@ Starting destructive context cutover
 Release SHA: ${release_sha}
 Verified primary backup: ${database_project}/${database_instance}/${context_cutover_backup_id}
 Verified legacy graph backup: ${legacy_database_project}/${legacy_database_instance}/${context_cutover_legacy_backup_id}
+Primary backup completed: ${primary_backup_completed_at}
+Legacy graph backup completed: ${legacy_backup_completed_at}
 CUTOVER
 
   # Stop every intake surface and then claims before auditing the durable queue. The
@@ -422,17 +486,19 @@ CUTOVER
       --region="${GCP_REGION}" \
       --quiet
   fi
-  if gcloud run services describe "${legacy_worker}" \
+  if ! post_quiesce_service_snapshot="$(gcloud run services list \
     --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" >/dev/null 2>&1; then
+    --region="${GCP_REGION}" \
+    --format='value(metadata.name)')"; then
+    echo "Unable to verify Cloud Run service absence after quiesce" >&2
+    exit 2
+  fi
+  if service_snapshot_contains "${post_quiesce_service_snapshot}" "${legacy_worker}"; then
     echo "Legacy context worker still exists after quiesce" >&2
     exit 2
   fi
-  if [[ "${legacy_api_present}" == "true" ]] &&
-    gcloud run services describe jina-api \
-      --project="${GCP_PROJECT_ID}" \
-      --region="${GCP_REGION}" >/dev/null 2>&1; then
-    echo "Legacy API still exists after quiesce" >&2
+  if service_snapshot_contains "${post_quiesce_service_snapshot}" "jina-api"; then
+    echo "API still exists after destructive quiesce" >&2
     exit 2
   fi
   echo "Legacy context worker and API are absent; auditing the fenced durable queue"
@@ -516,8 +582,8 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=25165824~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=true~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=25165824~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest" \
   --quiet
 
 route_latest_revision "jina-context-worker"

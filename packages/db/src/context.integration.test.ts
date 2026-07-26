@@ -54,6 +54,56 @@ test(
     const epoch = Date.now();
     const at = (offsetMs: number) => new Date(epoch + offsetMs).toISOString();
     const createdAt = at(0);
+    const omittedTenantId = "tenant-omitted-integration";
+    const omittedRepository = "acme/omitted-fixture";
+    const omittedService = new IngestEvidenceService(store);
+    const omittedCheckpoint = await omittedService.ingest({
+      tenantId: omittedTenantId,
+      repository: omittedRepository,
+      ref,
+      refSequence: 1,
+      commitSha: "1".repeat(40),
+      files: [
+        { path: "assets/one.bin", blobSha: "2".repeat(40), body: "", contentOmitted: true },
+        { path: "assets/two.bin", blobSha: "3".repeat(40), body: "", contentOmitted: true }
+      ],
+      aclFingerprint: repositoryAclFingerprint(omittedTenantId, omittedRepository),
+      observationFrontier: "omitted:1",
+      createdAt,
+      sourceComplete: false
+    });
+    assert.equal((await store.listEvidence(omittedCheckpoint.id)).length, 0);
+    const omittedBlobs = await database.queryAs<{ count: string }>(
+      "jina_context_admin",
+      `select count(*)::text as count
+       from jina_context.blobs
+       where tenant_id=$1 and repository=$2`,
+      [omittedTenantId, omittedRepository]
+    );
+    assert.equal(omittedBlobs.rows[0]?.count, "0");
+    await omittedService.ingest({
+      tenantId: omittedTenantId,
+      repository: omittedRepository,
+      ref,
+      refSequence: 2,
+      commitSha: "4".repeat(40),
+      files: [{ path: "assets/one.bin", blobSha: "2".repeat(40), body: "available source" }],
+      aclFingerprint: repositoryAclFingerprint(omittedTenantId, omittedRepository),
+      observationFrontier: "omitted:2",
+      createdAt: at(1),
+      sourceComplete: true
+    });
+    const completedBlob = await database.queryAs<{ content_digest: string; content: string | null }>(
+      "jina_context_admin",
+      `select content_digest,content
+       from jina_context.blobs
+       where tenant_id=$1 and repository=$2 and blob_sha=$3`,
+      [omittedTenantId, omittedRepository, "2".repeat(40)]
+    );
+    assert.deepEqual(completedBlob.rows[0], {
+      content_digest: fingerprint("available source"),
+      content: "available source"
+    });
     const build = await coordinator.createBuild({
       tenantId,
       repository,
@@ -153,6 +203,7 @@ test(
           path: "src/context.ts",
           blobSha,
           contentDigest: record.anchor.contentDigest,
+          contentAvailable: true,
           language: "typescript",
           executable: false
         }
@@ -569,7 +620,35 @@ test(
       conflictCount: 0,
       startedAt: at(9_000),
       completedAt: at(9_042),
-      durationMs: 42
+      durationMs: 42,
+      candidates: [
+        {
+          ordinal: 0,
+          candidateId: "candidate_integration",
+          retriever: "lexical",
+          sourceKind: "code",
+          sourceId: blobSha,
+          rawScore: 0.8,
+          fusedScore: 0.9,
+          selected: true,
+          diagnostics: { explanation: "integration fixture" }
+        }
+      ],
+      citations: [
+        {
+          ordinal: 0,
+          citationId: "citation_integration",
+          sourceKind: "code",
+          sourceId: blobSha,
+          sourceAnchor: { ...record.anchor },
+          contentDigest: record.anchor.contentDigest,
+          accessible: true,
+          digestValid: true,
+          supportsClaim: true,
+          diagnostics: {}
+        }
+      ],
+      routeMetrics: [{ route: "lexical", candidateCount: 1, durationMs: 7 }]
     });
     assert.deepEqual(await store.queryMetrics(tenantId), {
       count: 1,
@@ -577,6 +656,21 @@ test(
       citationFailureCount: 0,
       conflictCount: 0
     });
+    const persistedTrace = await database.queryAs<{
+      candidates: string;
+      citations: string;
+      metrics: string;
+    }>(
+      "jina_context_admin",
+      `select
+         (select count(*)::text from jina_context.retrieval_candidates where query_run_id='trace_integration')
+           as candidates,
+         (select count(*)::text from jina_context.answer_citations where query_run_id='trace_integration')
+           as citations,
+         (select count(*)::text from jina_context.retrieval_metrics where query_run_id='trace_integration')
+           as metrics`
+    );
+    assert.deepEqual(persistedTrace.rows[0], { candidates: "1", citations: "1", metrics: "2" });
 
     const erased = await store.eraseEvidence({
       tenantId,

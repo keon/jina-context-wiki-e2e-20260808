@@ -14,6 +14,8 @@ export interface StoredRetrievalCandidate {
   readonly anchors: readonly EvidenceAnchor[];
   readonly authorityClass: string;
   readonly sourceFingerprint: string;
+  readonly effectiveAclFingerprint: string;
+  readonly metadata: Readonly<Record<string, unknown>>;
   readonly exactScore: number;
   readonly proseScore: number;
 }
@@ -130,13 +132,14 @@ export class PostgresContextQueryRepository {
          where acl.tenant_id=$1 and acl.repository=$2 and acl.principal_id=$3
            and acl.permission in ('read','write','admin') and generation.status='published'
        ), query as (
-         select websearch_to_tsquery('simple',$5) exact,
-                websearch_to_tsquery('english',$5) prose
+         select to_tsquery('simple',$5) exact,
+                to_tsquery('english',$5) prose
        )
        select document.id as document_id,fragment.id as fragment_id,
               document.source_kind,document.source_id,document.source_revision_id,
               document.title,fragment.source_text,fragment.contextual_text,
               fragment.source_anchors,document.authority_class,document.source_fingerprint,
+              document.effective_acl_fingerprint,document.metadata,
               ts_rank_cd(fragment.exact_vector,query.exact) as exact_score,
               ts_rank_cd(fragment.prose_vector,query.prose) as prose_score
        from authorized
@@ -181,6 +184,7 @@ export class PostgresContextQueryRepository {
               document.source_kind,document.source_id,document.source_revision_id,
               document.title,fragment.source_text,fragment.contextual_text,
               fragment.source_anchors,document.authority_class,document.source_fingerprint,
+              document.effective_acl_fingerprint,document.metadata,
               case when lower(document.title)=lower($5) then 1.0 else 0.75 end as exact_score,
               0::double precision as prose_score
        from jina_context.published_context_documents document
@@ -204,6 +208,65 @@ export class PostgresContextQueryRepository {
         input.principalId,
         input.generationId,
         input.term,
+        Math.max(1, Math.min(input.limit, 200))
+      ]
+    );
+    return result.rows.map(candidateFromRow);
+  }
+
+  async browse(input: {
+    readonly tenantId: string;
+    readonly repository: string;
+    readonly principalId: string;
+    readonly generationId: string;
+    readonly limit: number;
+    readonly sourceKinds: readonly string[];
+    readonly timeWindow?: { readonly from?: string; readonly to?: string };
+  }): Promise<readonly StoredRetrievalCandidate[]> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<CandidateRow>(
+      "jina_context_query",
+      `select document.id as document_id,fragment.id as fragment_id,
+              document.source_kind,document.source_id,document.source_revision_id,
+              document.title,fragment.source_text,fragment.contextual_text,
+              fragment.source_anchors,document.authority_class,document.source_fingerprint,
+              document.effective_acl_fingerprint,document.metadata,
+              1::double precision as exact_score,
+              1::double precision as prose_score
+       from jina_context.published_context_documents document
+       join jina_context.published_context_fragments fragment
+         on fragment.generation_id=document.generation_id and fragment.document_id=document.id
+       join jina_context.current_repository_acl acl
+         on acl.tenant_id=document.tenant_id and acl.repository=document.repository
+        and acl.principal_id=$3 and acl.permission in ('read','write','admin')
+        and acl.acl_fingerprint=document.effective_acl_fingerprint
+       where document.tenant_id=$1 and document.repository=$2 and document.generation_id=$4
+         and document.source_kind=any($5)
+         and (
+           $6::text is null or exists (
+             select 1 from jsonb_array_elements(fragment.source_anchors) anchor
+             where anchor->>'observedAt' >= $6
+           )
+         )
+         and (
+           $7::text is null or exists (
+             select 1 from jsonb_array_elements(fragment.source_anchors) anchor
+             where anchor->>'observedAt' <= $7
+           )
+         )
+       order by (
+         select max(anchor->>'observedAt')
+         from jsonb_array_elements(fragment.source_anchors) anchor
+       ) desc nulls last,document.id,fragment.ordinal
+       limit $8`,
+      [
+        input.tenantId,
+        input.repository,
+        input.principalId,
+        input.generationId,
+        input.sourceKinds,
+        input.timeWindow?.from ?? null,
+        input.timeWindow?.to ?? null,
         Math.max(1, Math.min(input.limit, 200))
       ]
     );
@@ -238,16 +301,31 @@ export class PostgresContextQueryRepository {
       metadata: Record<string, unknown>;
     }>(
       "jina_context_query",
-      `select relation.*
-       from jina_context.published_structural_relations relation
-       where relation.tenant_id=$1 and relation.repository=$2 and relation.generation_id=$4
-         and (relation.source_id=$5 or relation.target_id=$5)
+      `with authorized as materialized (
+         select acl.acl_fingerprint
+         from jina_context.current_repository_acl acl
+         where acl.tenant_id=$1 and acl.repository=$2 and acl.principal_id=$3
+           and acl.permission in ('read','write','admin')
+       )
+       select relation.*
+       from authorized
+       join jina_context.published_structural_relations relation
+         on relation.tenant_id=$1 and relation.repository=$2 and relation.generation_id=$4
+       where (relation.source_id=$5 or relation.target_id=$5)
          and ($6::text[] is null or relation.relation_kind=any($6))
-         and exists (
-           select 1 from jina_context.current_repository_acl acl
-           where acl.tenant_id=relation.tenant_id and acl.repository=relation.repository
-             and acl.principal_id=$3
-             and acl.permission in ('read','write','admin')
+         and not exists (
+           select 1
+           from jsonb_array_elements(relation.source_anchors) relation_anchor
+           where not exists (
+             select 1
+             from jina_context.published_context_documents document
+             cross join lateral jsonb_array_elements(document.source_anchors) document_anchor
+             where document.generation_id=relation.generation_id
+               and document.effective_acl_fingerprint=authorized.acl_fingerprint
+               and document_anchor->>'sourceType'=relation_anchor->>'sourceType'
+               and document_anchor->>'sourceId'=relation_anchor->>'sourceId'
+               and document_anchor->>'contentDigest'=relation_anchor->>'contentDigest'
+           )
          )
        order by relation.relation_kind,relation.id limit $7`,
       [
@@ -319,33 +397,100 @@ export class PostgresContextQueryRepository {
   }
 
   async recordQueryRun(run: QueryRunTelemetry): Promise<void> {
-    await this.database.initialize();
-    await this.database.queryAs(
-      "jina_context_query",
-      `insert into jina_context.query_runs
-        (id,tenant_id,repository,principal_fingerprint,generation_id,request_fingerprint,
-         task_kind,routes,coverage_status,degraded_capabilities,started_at,completed_at,
-         duration_ms,citation_failure_count,conflict_count)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
-       on conflict (id) do nothing`,
-      [
-        run.id,
-        run.tenantId,
-        run.repository,
-        run.principalFingerprint,
-        run.generationId,
-        run.requestFingerprint,
-        run.taskKind ?? null,
-        run.routes,
-        run.coverageStatus,
-        run.degradedCapabilities,
-        run.startedAt,
-        run.completedAt,
-        run.durationMs,
-        run.citationFailureCount,
-        run.conflictCount
-      ]
-    );
+    await this.database.transactionAs("jina_context_query", async (client) => {
+      const inserted = await client.query(
+        `insert into jina_context.query_runs
+          (id,tenant_id,repository,principal_fingerprint,generation_id,request_fingerprint,
+           task_kind,routes,coverage_status,degraded_capabilities,started_at,completed_at,
+           duration_ms,citation_failure_count,conflict_count)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         on conflict (id) do nothing
+         returning id`,
+        [
+          run.id,
+          run.tenantId,
+          run.repository,
+          run.principalFingerprint,
+          run.generationId,
+          run.requestFingerprint,
+          run.taskKind ?? null,
+          run.routes,
+          run.coverageStatus,
+          run.degradedCapabilities,
+          run.startedAt,
+          run.completedAt,
+          run.durationMs,
+          run.citationFailureCount,
+          run.conflictCount
+        ]
+      );
+      if (inserted.rowCount !== 1) return;
+      for (const candidate of run.candidates) {
+        await client.query(
+          `insert into jina_context.retrieval_candidates
+            (query_run_id,ordinal,candidate_id,retriever,source_kind,source_id,source_revision_id,
+             raw_score,fused_score,selected,diagnostics)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)`,
+          [
+            run.id,
+            candidate.ordinal,
+            candidate.candidateId,
+            candidate.retriever,
+            candidate.sourceKind,
+            candidate.sourceId,
+            candidate.sourceRevisionId ?? null,
+            candidate.rawScore,
+            candidate.fusedScore ?? null,
+            candidate.selected,
+            JSON.stringify(candidate.diagnostics)
+          ]
+        );
+      }
+      for (const citation of run.citations) {
+        await client.query(
+          `insert into jina_context.answer_citations
+            (query_run_id,ordinal,citation_id,source_kind,source_id,source_revision_id,source_anchor,
+             content_digest,accessible,digest_valid,supports_claim,diagnostics)
+           values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12::jsonb)`,
+          [
+            run.id,
+            citation.ordinal,
+            citation.citationId,
+            citation.sourceKind,
+            citation.sourceId,
+            citation.sourceRevisionId ?? null,
+            JSON.stringify(citation.sourceAnchor),
+            citation.contentDigest,
+            citation.accessible,
+            citation.digestValid,
+            citation.supportsClaim ?? null,
+            JSON.stringify(citation.diagnostics)
+          ]
+        );
+      }
+      for (const [ordinal, metric] of run.routeMetrics.entries()) {
+        for (const [kind, value] of [
+          ["candidate_count", metric.candidateCount],
+          ["duration_ms", metric.durationMs]
+        ] as const) {
+          await client.query(
+            `insert into jina_context.retrieval_metrics
+              (id,tenant_id,repository,query_run_id,metric_name,metric_value,dimensions,recorded_at)
+             values ($1,$2,$3,$4,$5,$6,$7::jsonb,$8)`,
+            [
+              `metric_${run.id}_${ordinal}_${kind}`,
+              run.tenantId,
+              run.repository,
+              run.id,
+              `route.${kind}`,
+              value,
+              JSON.stringify({ route: metric.route }),
+              run.completedAt
+            ]
+          );
+        }
+      }
+    });
   }
 
   async metrics(tenantId: string): Promise<QueryMetrics> {
@@ -403,6 +548,8 @@ interface CandidateRow {
   source_anchors: EvidenceAnchor[];
   authority_class: string;
   source_fingerprint: string;
+  effective_acl_fingerprint: string;
+  metadata: Record<string, unknown>;
   exact_score: number;
   prose_score: number;
 }
@@ -421,6 +568,8 @@ function candidateFromRow(row: CandidateRow): StoredRetrievalCandidate {
     anchors: row.source_anchors,
     authorityClass: row.authority_class,
     sourceFingerprint: row.source_fingerprint,
+    effectiveAclFingerprint: row.effective_acl_fingerprint,
+    metadata: row.metadata,
     exactScore: Number(row.exact_score),
     proseScore: Number(row.prose_score)
   };

@@ -110,6 +110,7 @@ const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 15 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
+const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const knowledgeGenerator = topics.includes("run-derive-knowledge")
   ? new DaytonaCodexKnowledgeDocumentGenerator()
   : undefined;
@@ -310,6 +311,9 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
 
 async function runIngestEvidence(work: ClaimedWork<"run-ingest-evidence">): Promise<Record<string, unknown>> {
   const { tenantId, repository, ref, commitSha: expectedCommitSha, githubInstallationId } = work.task.metadata;
+  if (requireGithubInstallation && !githubInstallationId) {
+    throw new Error("provisioned GitHub installation is required for context ingestion");
+  }
   if (githubInstallationId) {
     const access = await createGitHubInstallationAccessToken(githubInstallationId);
     assertLeaseOwned();

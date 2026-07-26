@@ -97,6 +97,7 @@ async function main(): Promise<void> {
     applicationName: "jina-context-cutover-preflight",
     manageSchema: false,
     max: 1,
+    options: "-c default_transaction_read_only=on",
     ...optionalPort("DB_PORT")
   });
   const identityStore = new PostgresSharedIdentityStore({

@@ -209,12 +209,12 @@ function DocumentDetail({
           <p className="context-panel-empty">No validated source anchors were returned.</p>
         ) : (
           document.citations.map((citation) => {
-            const url = safeSourceUrl(citation);
+            const url = safeSourceUrl(citation.anchor);
             return (
               <div key={citation.id}>
-                <strong>{citationLocation(citation)}</strong>
+                <strong>{citationLocation(citation.anchor)}</strong>
                 <span>
-                  {humanize(citation.sourceType)} · digest {shortDigest(citation.contentDigest)}
+                  {humanize(citation.anchor.sourceType)} · digest {shortDigest(citation.anchor.contentDigest)}
                 </span>
                 {url ? (
                   <a href={url} target="_blank" rel="noopener noreferrer">

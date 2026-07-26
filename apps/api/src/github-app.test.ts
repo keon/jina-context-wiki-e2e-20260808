@@ -570,6 +570,93 @@ test("context bearer is query-only and server-side bound to its configured tenan
   }
 });
 
+test("shared-database builds bind repository and installation to the authoritative tenant identity", async () => {
+  const sharedTenant = "eff0efc9-b103-494a-b7a3-1ae7f95c2d26";
+  const otherTenant = "4976982e-e48f-423a-8520-5ea8c2883d62";
+  const provisionedRepository = "omxyz/jina";
+  const provisionedInstallationId = 140435029;
+  const sharedCoordinator = new MemoryContextPipelineCoordinator();
+  const sharedStore = new MemoryContextEngineStore(sharedCoordinator);
+  const sharedServer = createApiServer({
+    internalApiToken: internalToken,
+    contextCoordinator: sharedCoordinator,
+    contextStore: sharedStore,
+    sharedIdentityResolver: {
+      async resolveRepository(input) {
+        if (
+          input.tenantId !== sharedTenant ||
+          input.repository.toLowerCase() !== provisionedRepository ||
+          (input.githubInstallationId !== undefined && input.githubInstallationId !== provisionedInstallationId)
+        ) {
+          return undefined;
+        }
+        return {
+          tenantId: sharedTenant,
+          githubAccountId: "1",
+          githubAccountLogin: "omxyz",
+          githubAccountType: "Organization",
+          githubRepositoryId: "2",
+          githubInstallationId: String(provisionedInstallationId),
+          repository: "omxyz/jina",
+          defaultBranch: "main"
+        };
+      },
+      async listTenantIds() {
+        return [sharedTenant, otherTenant];
+      },
+      async ping() {},
+      async close() {}
+    }
+  });
+  await new Promise<void>((resolve) => sharedServer.listen(0, "127.0.0.1", resolve));
+  const sharedUrl = `http://127.0.0.1:${(sharedServer.address() as AddressInfo).port}`;
+  const headers = {
+    authorization: `Bearer ${internalToken}`,
+    "content-type": "application/json",
+    "x-jina-tenant-id": sharedTenant,
+    "x-jina-principal-id": `tenant:${sharedTenant}`
+  };
+  try {
+    const mismatchedInstallation = await fetch(`${sharedUrl}/context/build`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        repository: provisionedRepository,
+        githubInstallationId: 147869268,
+        requestKey: "mismatched-installation"
+      })
+    });
+    assert.equal(mismatchedInstallation.status, 404);
+
+    const crossTenantRepository = await fetch(`${sharedUrl}/context/build`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        repository: "Alliancexyz/alliance-network",
+        githubInstallationId: 147869268,
+        requestKey: "cross-tenant-repository"
+      })
+    });
+    assert.equal(crossTenantRepository.status, 404);
+
+    const accepted = await fetch(`${sharedUrl}/context/build`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ repository: "OmXYZ/Jina", requestKey: "provisioned-repository" })
+    });
+    assert.equal(accepted.status, 202);
+    const build = record(record(await accepted.json()).build);
+    assert.equal(build.repository, provisionedRepository);
+    assert.equal(build.ref, "main");
+    const ingest = array(build.stages)
+      .map(record)
+      .find((stage) => stage.type === "ingest-evidence");
+    assert.equal(record(ingest?.metadata).githubInstallationId, provisionedInstallationId);
+  } finally {
+    await new Promise<void>((resolve, reject) => sharedServer.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("shared-database workers claim across provisioned tenants without a tenant header", async () => {
   const sharedTenant = "eff0efc9-b103-494a-b7a3-1ae7f95c2d26";
   const sharedCoordinator = new MemoryContextPipelineCoordinator();

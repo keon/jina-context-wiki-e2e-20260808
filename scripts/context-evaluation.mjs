@@ -137,37 +137,39 @@ const groundedKnowledgeCitation =
   persistedKnowledgeExcerpt.includes(persistedKnowledgeCitation.claim);
 await new IndexContextService(store).index(checkpoint.id, fixture.createdAt);
 
+const projectionStore = new Proxy(store, {
+  get(target, property) {
+    if (property === "latestAuthorizedGeneration" || property === "retrieveIndexed") return undefined;
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  }
+});
+const fullRetrievers = () => [
+  new ExactRetriever(),
+  new StructuredRetriever(),
+  new StructuralRetriever(),
+  new LexicalRetriever(),
+  new KnowledgeRetriever(),
+  new TemporalRetriever(),
+  new LongContextRetriever(),
+  new HierarchyIndexRetriever()
+];
 const variants = {
-  lexical_only: [new LexicalRetriever()],
-  lexical_structural: [new LexicalRetriever(), new StructuralRetriever()],
-  lexical_dense: [new LexicalRetriever()],
-  lexical_hierarchy: [new LexicalRetriever(), new HierarchyIndexRetriever()],
-  lexical_knowledge: [new LexicalRetriever(), new KnowledgeRetriever()],
-  full_routed_hybrid: [
-    new ExactRetriever(),
-    new StructuredRetriever(),
-    new StructuralRetriever(),
-    new LexicalRetriever(),
-    new KnowledgeRetriever(),
-    new TemporalRetriever(),
-    new LongContextRetriever(),
-    new HierarchyIndexRetriever()
-  ],
-  full_without_reranking: [
-    new ExactRetriever(),
-    new StructuredRetriever(),
-    new StructuralRetriever(),
-    new LexicalRetriever(),
-    new KnowledgeRetriever(),
-    new TemporalRetriever(),
-    new LongContextRetriever(),
-    new HierarchyIndexRetriever()
-  ],
-  routed_long_context: [new LexicalRetriever(), new HierarchyIndexRetriever(), new LongContextRetriever()]
+  lexical_only: { retrievers: [new LexicalRetriever()] },
+  lexical_structural: { retrievers: [new LexicalRetriever(), new StructuralRetriever()] },
+  lexical_dense: { retrievers: [new LexicalRetriever()] },
+  lexical_hierarchy: { retrievers: [new LexicalRetriever(), new HierarchyIndexRetriever()] },
+  lexical_knowledge: { retrievers: [new LexicalRetriever(), new KnowledgeRetriever()] },
+  full_routed_hybrid: { retrievers: fullRetrievers() },
+  full_without_reranking: { retrievers: fullRetrievers() },
+  routed_long_context: {
+    retrievers: [new LexicalRetriever(), new HierarchyIndexRetriever(), new LongContextRetriever()]
+  },
+  indexed_runtime_hybrid: { retrievers: fullRetrievers(), indexed: true }
 };
 
 const reports = [];
-for (const [name, retrievers] of Object.entries(variants)) {
+for (const [name, variant] of Object.entries(variants)) {
   let expected = 0;
   let found = 0;
   let validCitations = 0;
@@ -179,7 +181,12 @@ for (const [name, retrievers] of Object.entries(variants)) {
   let requiredSourceKindFailures = 0;
   const cases = [];
   for (const testCase of fixture.cases) {
-    const service = new QueryContextService(store, undefined, undefined, retrievers);
+    const service = new QueryContextService(
+      variant.indexed ? store : projectionStore,
+      undefined,
+      undefined,
+      variant.retrievers
+    );
     const response = await service.query({
       tenantId: fixture.tenantId,
       principalId: fixture.principalId,
@@ -256,6 +263,7 @@ for (const [name, retrievers] of Object.entries(variants)) {
 }
 
 const full = reports.find((report) => report.variant === "full_routed_hybrid");
+const indexed = reports.find((report) => report.variant === "indexed_runtime_hybrid");
 await store.replaceRepositoryAccess(fixture.tenantId, fixture.principalId, []);
 const revocationEnforced = await new QueryContextService(store)
   .query({
@@ -294,7 +302,15 @@ const output = {
     conflictFailureCount: full.conflictFailureCount,
     requiredSourceKindFailureCount: full.requiredSourceKindFailureCount,
     groundedKnowledgeCitation,
-    revocationEnforced
+    revocationEnforced,
+    indexedRuntime: {
+      exactCompleteness: indexed.exactCompleteness,
+      citationIntegrity: indexed.citationIntegrity,
+      evidenceRecallAt20: indexed.evidenceRecall,
+      aclLeakageCount: indexed.aclLeakageCount,
+      conflictFailureCount: indexed.conflictFailureCount,
+      requiredSourceKindFailureCount: indexed.requiredSourceKindFailureCount
+    }
   }
 };
 
@@ -307,6 +323,12 @@ if (
   full.aclLeakageCount !== 0 ||
   full.conflictFailureCount !== 0 ||
   full.requiredSourceKindFailureCount !== 0 ||
+  indexed.exactCompleteness !== 1 ||
+  indexed.citationIntegrity !== 1 ||
+  indexed.evidenceRecall < 0.9 ||
+  indexed.aclLeakageCount !== 0 ||
+  indexed.conflictFailureCount !== 0 ||
+  indexed.requiredSourceKindFailureCount !== 0 ||
   !groundedKnowledgeCitation ||
   !revocationEnforced
 ) {

@@ -15,11 +15,17 @@ import {
   type KnowledgeEvidenceCitation,
   type KnowledgeRevisionEvent,
   type ProjectionBacklog,
+  type QueryPlan,
+  type QueryRoute,
+  type RetrievalCandidate,
   type QueryMetrics,
   type QueryRunTelemetry,
   type RefManifestEntry,
   type StructuralFact,
-  repositoryAclFingerprint
+  exactTerms,
+  fingerprint,
+  repositoryAclFingerprint,
+  stableId
 } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import type { PostgresContextDatabaseConfig } from "./database.js";
@@ -34,7 +40,7 @@ import {
   lockProjectionInput
 } from "./projection-input.js";
 import { PostgresProjectionRepository } from "./projection-repository.js";
-import { PostgresContextQueryRepository } from "./query-repository.js";
+import { PostgresContextQueryRepository, type StoredRetrievalCandidate } from "./query-repository.js";
 
 /**
  * Cohesive store façade for domain services. SQL remains split across the
@@ -137,6 +143,153 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   }
   listGenerations(tenantId: string, repository: string): Promise<IndexGeneration[]> {
     return this.projection.listGenerations(tenantId, repository);
+  }
+
+  latestAuthorizedGeneration(
+    tenantId: string,
+    repository: string,
+    ref: string,
+    principalId: string
+  ): Promise<IndexGeneration | undefined> {
+    return this.query.latestPublished(tenantId, repository, ref, principalId);
+  }
+
+  async retrieveIndexed(input: {
+    tenantId: string;
+    repository: string;
+    principalId: string;
+    generation: IndexGeneration;
+    plan: QueryPlan;
+    route: QueryRoute;
+    limit: number;
+    allowedAclFingerprints: ReadonlySet<string>;
+  }): Promise<RetrievalCandidate[]> {
+    if (input.route === "dense") return [];
+    if (input.route === "structural") {
+      const identifiers = exactTerms(input.plan);
+      const relations = (
+        await Promise.all(
+          identifiers.slice(0, 20).map((identifier) =>
+            this.query.structuralNeighbors({
+              tenantId: input.tenantId,
+              repository: input.repository,
+              principalId: input.principalId,
+              generationId: input.generation.id,
+              identifier,
+              limit: input.limit
+            })
+          )
+        )
+      ).flat();
+      const aclFingerprint =
+        [...input.allowedAclFingerprints].sort()[0] ?? input.generation.repositoryAccessFingerprint;
+      return uniqueById(
+        relations.map((relation) => ({
+          id: stableId("rc", { route: input.route, relationId: relation.id }),
+          retriever: input.route,
+          sourceKind: "structure" as const,
+          sourceId: relation.id,
+          title: `${relation.kind}: ${relation.from} → ${relation.to}`,
+          excerpt: `${relation.from} ${relation.kind} ${relation.to}`,
+          contextualText: JSON.stringify(relation.metadata),
+          anchors: [...relation.anchors],
+          rawScore: 1,
+          scoreSemantics: "indexed structural neighbor",
+          exactMatch: true,
+          authorityClass: "source_code",
+          effectiveAclFingerprint: aclFingerprint,
+          contentFingerprint: fingerprint({
+            relationId: relation.id,
+            anchors: relation.anchors
+          }),
+          explanation: "indexed structural relation",
+          metadata: relation.metadata
+        }))
+      ).slice(0, input.limit);
+    }
+
+    let rows: readonly StoredRetrievalCandidate[];
+    if (input.route === "exact") {
+      const terms = exactTerms(input.plan);
+      rows = (
+        await Promise.all(
+          terms.slice(0, 50).map((term) =>
+            this.query.exactLookup({
+              tenantId: input.tenantId,
+              repository: input.repository,
+              principalId: input.principalId,
+              generationId: input.generation.id,
+              term,
+              limit: input.limit
+            })
+          )
+        )
+      ).flat();
+    } else if (input.route === "structured" && structuredTargets(input.plan).length === 0) {
+      rows = await this.query.browse({
+        tenantId: input.tenantId,
+        repository: input.repository,
+        principalId: input.principalId,
+        generationId: input.generation.id,
+        limit: input.limit,
+        sourceKinds: ["provider"],
+        ...(input.plan.timeWindow ? { timeWindow: input.plan.timeWindow } : {})
+      });
+    } else if (input.route === "temporal" && input.plan.timeWindow) {
+      rows = await this.query.browse({
+        tenantId: input.tenantId,
+        repository: input.repository,
+        principalId: input.principalId,
+        generationId: input.generation.id,
+        limit: input.limit,
+        sourceKinds: ["provider", "knowledge"],
+        timeWindow: input.plan.timeWindow
+      });
+    } else {
+      const sourceKinds =
+        input.route === "knowledge"
+          ? ["knowledge"]
+          : input.route === "structured"
+            ? ["provider"]
+            : input.route === "temporal"
+              ? ["provider", "knowledge"]
+              : undefined;
+      rows = await this.query.lexicalSearch({
+        tenantId: input.tenantId,
+        repository: input.repository,
+        principalId: input.principalId,
+        generationId: input.generation.id,
+        query: indexedQueryText(input.plan),
+        limit: input.limit,
+        ...(sourceKinds ? { sourceKinds } : {})
+      });
+    }
+    return uniqueById(
+      rows.map((row) => {
+        const sourceKind = indexedSourceKind(row.sourceKind);
+        const rawScore = input.route === "exact" ? row.exactScore : Math.max(row.exactScore * 2, row.proseScore);
+        return {
+          id: stableId("rc", { route: input.route, storedId: row.id }),
+          retriever: input.route,
+          documentId: row.documentId,
+          sourceKind,
+          sourceId: row.sourceId,
+          ...(row.sourceRevisionId ? { sourceRevisionId: row.sourceRevisionId } : {}),
+          title: row.title,
+          excerpt: row.text,
+          contextualText: row.contextualText,
+          anchors: [...row.anchors],
+          rawScore,
+          scoreSemantics: input.route === "exact" ? "indexed exact lookup" : "PostgreSQL full-text rank",
+          exactMatch: input.route === "exact",
+          authorityClass: row.authorityClass,
+          effectiveAclFingerprint: row.effectiveAclFingerprint,
+          contentFingerprint: fingerprint({ sourceFingerprint: row.sourceFingerprint, excerpt: row.text }),
+          explanation: input.route === "exact" ? "indexed exact term match" : `indexed ${input.route} retrieval`,
+          metadata: { ...row.metadata }
+        };
+      })
+    ).slice(0, input.limit);
   }
 
   async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
@@ -654,4 +807,47 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   close(): Promise<void> {
     return this.database.close();
   }
+}
+
+function indexedQueryText(plan: QueryPlan): string {
+  const searchable = [
+    plan.normalizedQuestion,
+    ...(plan.targets.paths ?? []),
+    ...(plan.targets.symbols ?? []),
+    ...(plan.targets.pullRequests ?? []),
+    ...(plan.targets.issues ?? [])
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const lexemes = [
+    ...new Set(
+      [
+        ...searchable
+          .normalize("NFKC")
+          .toLowerCase()
+          .matchAll(/[a-z0-9_]+/g)
+      ].map((match) => match[0])
+    )
+  ];
+  // PostgreSQL websearch_to_tsquery combines ordinary terms with AND, while
+  // the deterministic retrieval contract ranks any meaningful token overlap.
+  // An OR tsquery preserves that contract and still uses the GIN vectors.
+  return lexemes.length > 0 ? lexemes.join(" | ") : "jina_no_query_terms";
+}
+
+function structuredTargets(plan: QueryPlan): string[] {
+  return [
+    ...(plan.targets.pullRequests ?? []),
+    ...(plan.targets.issues ?? []),
+    ...[...plan.normalizedQuestion.matchAll(/#[1-9][0-9]*/g)].map((match) => match[0])
+  ];
+}
+
+function indexedSourceKind(value: string): RetrievalCandidate["sourceKind"] {
+  if (value === "code" || value === "provider" || value === "knowledge" || value === "structure") return value;
+  throw new Error(`Unsupported indexed source kind: ${value}`);
+}
+
+function uniqueById<T extends { readonly id: string }>(values: readonly T[]): T[] {
+  return [...new Map(values.map((value) => [value.id, value] as const)).values()];
 }

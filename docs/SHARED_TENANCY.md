@@ -122,7 +122,11 @@ Run the boundary setup as a database administrator:
 ```sql
 create role jina_app login password 'migration-owner-password';
 create role jina_v2_app login noinherit password 'runtime-password';
-create role jina_cutover_auditor login noinherit password 'dedicated-audit-password';
+create role jina_cutover_auditor login noinherit nocreatedb nocreaterole password 'dedicated-audit-password';
+alter role jina_cutover_auditor set default_transaction_read_only = on;
+revoke cloudsqlsuperuser from jina_cutover_auditor;
+revoke create, temporary on database jina from public;
+revoke create on schema public from public;
 grant connect on database jina to jina_v2_app;
 grant connect on database jina to jina_app;
 grant connect on database jina to jina_cutover_auditor;

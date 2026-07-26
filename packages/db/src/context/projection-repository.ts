@@ -794,8 +794,9 @@ async function insertManifest(
   for (const entry of entries) {
     await client.query(
       `insert into jina_context.ref_manifest
-        (generation_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,mode,source_fingerprint)
-       values ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
+        (generation_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,mode,source_fingerprint,
+         content_available)
+       values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [
         generationId,
         entry.tenantId,
@@ -805,7 +806,8 @@ async function insertManifest(
         entry.path,
         entry.blobSha,
         entry.executable ? "100755" : "100644",
-        entry.contentDigest
+        entry.contentDigest,
+        entry.contentAvailable
       ]
     );
   }
@@ -1046,6 +1048,7 @@ interface ManifestDbRow {
   blob_sha: string;
   mode: string;
   source_fingerprint: string;
+  content_available: boolean;
 }
 function manifestFromRow(row: ManifestDbRow): RefManifestEntry {
   return {
@@ -1056,6 +1059,7 @@ function manifestFromRow(row: ManifestDbRow): RefManifestEntry {
     path: row.path,
     blobSha: row.blob_sha,
     contentDigest: row.source_fingerprint,
+    contentAvailable: row.content_available,
     executable: row.mode === "100755"
   };
 }

@@ -78,7 +78,10 @@ export class IngestEvidenceService {
         throw new Error(`Invalid repository path: ${file.path}`);
       }
       if (!isFullCommitSha(file.blobSha)) throw new Error(`blobSha must be a full Git SHA for ${file.path}`);
-      const contentDigest = fingerprint(file.body);
+      const contentAvailable = file.contentOmitted !== true;
+      const contentDigest = contentAvailable
+        ? fingerprint(file.body)
+        : fingerprint({ unavailableBlobSha: file.blobSha });
       const anchor = {
         tenantId: input.tenantId,
         repository,
@@ -88,22 +91,24 @@ export class IngestEvidenceService {
         commitSha: input.commitSha,
         pathOrUrl: file.path
       };
-      records.push(
-        createEvidenceRecord({
-          anchor,
-          ref: input.ref,
-          title: file.path,
-          body: file.body,
-          metadata: {
-            language: file.language ?? null,
-            blobSha: file.blobSha,
-            contentOmitted: file.contentOmitted ?? false
-          },
-          authorityClass: "source_code",
-          aclFingerprint: file.aclFingerprint ?? input.aclFingerprint,
-          createdAt
-        })
-      );
+      if (contentAvailable) {
+        records.push(
+          createEvidenceRecord({
+            anchor,
+            ref: input.ref,
+            title: file.path,
+            body: file.body,
+            metadata: {
+              language: file.language ?? null,
+              blobSha: file.blobSha,
+              contentOmitted: false
+            },
+            authorityClass: "source_code",
+            aclFingerprint: file.aclFingerprint ?? input.aclFingerprint,
+            createdAt
+          })
+        );
+      }
       manifest.push({
         tenantId: input.tenantId,
         repository,
@@ -112,10 +117,11 @@ export class IngestEvidenceService {
         path: file.path,
         blobSha: file.blobSha,
         contentDigest,
+        contentAvailable,
         ...(file.language === undefined ? {} : { language: file.language }),
         executable: file.executable ?? false
       });
-      if (!file.contentOmitted && this.#parser.supports(file.path, file.language)) {
+      if (contentAvailable && this.#parser.supports(file.path, file.language)) {
         structuralFacts.push(
           ...this.#parser.analyze({
             tenantId: input.tenantId,

@@ -87,7 +87,8 @@ type KnowledgeDocumentKind =
   | "glossary";
 
 export interface ContextCitation {
-  readonly id: string;
+  readonly id?: string;
+  readonly tenantId?: string;
   readonly sourceType: string;
   readonly sourceId: string;
   readonly repository: string;
@@ -95,6 +96,8 @@ export interface ContextCitation {
   readonly pathOrUrl?: string;
   readonly startLine?: number;
   readonly endLine?: number;
+  readonly jsonPointer?: string;
+  readonly observedAt?: string;
   readonly contentDigest?: string;
   readonly excerpt?: string;
   readonly url?: string;
@@ -161,10 +164,18 @@ export interface KnowledgeDocument extends KnowledgeDocumentSummary {
     readonly pullRequests?: readonly string[];
     readonly issues?: readonly string[];
   };
-  readonly citations: readonly ContextCitation[];
+  readonly citations: readonly KnowledgeCitation[];
   readonly events: readonly KnowledgeRevisionEvent[];
   readonly priorRevisionId?: string;
   readonly validation?: Readonly<Record<string, unknown>>;
+}
+
+interface KnowledgeCitation {
+  readonly id: string;
+  readonly revisionId: string;
+  readonly ordinal: number;
+  readonly claim: string;
+  readonly anchor: ContextCitation;
 }
 
 export interface ContextDocumentsResponse {
@@ -182,14 +193,6 @@ interface ContextConflict {
   readonly citationIds: readonly string[];
 }
 
-export interface ContextTraceStep {
-  readonly retriever: string;
-  readonly reason: string;
-  readonly status: string;
-  readonly candidateCount: number;
-  readonly durationMs: number;
-}
-
 export interface ContextQueryResponse {
   readonly answer: string;
   readonly generation: {
@@ -198,7 +201,7 @@ export interface ContextQueryResponse {
     readonly commitSha: string;
     readonly derivedKnowledge: "available" | "partial" | "unavailable";
   };
-  readonly citations: readonly ContextCitation[];
+  readonly citations: readonly QueryCitation[];
   readonly conflicts: readonly ContextConflict[];
   readonly ambiguities: readonly string[];
   readonly coverage: {
@@ -206,11 +209,18 @@ export interface ContextQueryResponse {
     readonly missing: readonly string[];
     readonly retrieversUsed: readonly string[];
   };
-  readonly trace: {
-    readonly id: string;
-    readonly plan: readonly ContextTraceStep[];
-    readonly durationMs: number;
-  };
+  readonly traceId: string;
+}
+
+export interface QueryCitation {
+  readonly id: string;
+  readonly title: string;
+  readonly excerpt: string;
+  readonly anchors: readonly ContextCitation[];
+  readonly authorityClass: string;
+  readonly sourceKind: "code" | "provider" | "knowledge";
+  readonly sourceId: string;
+  readonly sourceRevisionId?: string;
 }
 
 export interface ContextMetricsResponse {
@@ -232,9 +242,9 @@ export interface ContextMetricsResponse {
 
 export interface StructuralRelation {
   readonly kind: string;
-  readonly source: string;
-  readonly target: string;
-  readonly citations: readonly ContextCitation[];
+  readonly from: string;
+  readonly to: string;
+  readonly anchors: readonly ContextCitation[];
 }
 
 export interface ContextStructureResponse {

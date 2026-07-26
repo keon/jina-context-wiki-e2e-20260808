@@ -3,6 +3,8 @@ import type { KnowledgeStore } from "./knowledge-store.js";
 import type { ProjectionStore } from "./projection-store.js";
 import type { ContextProjectionConsumer } from "../domain/projection.js";
 import type { EvidenceSourceType } from "../domain/evidence.js";
+import type { IndexGeneration } from "../domain/projection.js";
+import type { QueryPlan, QueryRoute, RetrievalCandidate } from "../domain/query.js";
 
 export type ProjectionBacklog = Record<ContextProjectionConsumer, { count: number; oldestAvailableAt?: string }>;
 
@@ -32,6 +34,36 @@ export interface QueryRunTelemetry {
   startedAt: string;
   completedAt: string;
   durationMs: number;
+  candidates: {
+    ordinal: number;
+    candidateId: string;
+    retriever: string;
+    sourceKind: string;
+    sourceId: string;
+    sourceRevisionId?: string;
+    rawScore: number;
+    fusedScore?: number;
+    selected: boolean;
+    diagnostics: Record<string, unknown>;
+  }[];
+  citations: {
+    ordinal: number;
+    citationId: string;
+    sourceKind: string;
+    sourceId: string;
+    sourceRevisionId?: string;
+    sourceAnchor: Record<string, unknown>;
+    contentDigest: string;
+    accessible: boolean;
+    digestValid: boolean;
+    supportsClaim?: boolean;
+    diagnostics: Record<string, unknown>;
+  }[];
+  routeMetrics: {
+    route: string;
+    candidateCount: number;
+    durationMs: number;
+  }[];
 }
 
 export interface QueryMetrics {
@@ -52,6 +84,22 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
   listRepositories(tenantId: string): Promise<string[]>;
   projectionBacklog(tenantId: string): Promise<ProjectionBacklog>;
   pendingProjectionCheckpoints(tenantId: string, limit: number): Promise<string[]>;
+  latestAuthorizedGeneration?(
+    tenantId: string,
+    repository: string,
+    ref: string,
+    principalId: string
+  ): Promise<IndexGeneration | undefined>;
+  retrieveIndexed?(input: {
+    tenantId: string;
+    repository: string;
+    principalId: string;
+    generation: IndexGeneration;
+    plan: QueryPlan;
+    route: QueryRoute;
+    limit: number;
+    allowedAclFingerprints: ReadonlySet<string>;
+  }): Promise<RetrievalCandidate[]>;
   recordQueryRun(run: QueryRunTelemetry): Promise<void>;
   queryMetrics(tenantId: string): Promise<QueryMetrics>;
   eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }>;

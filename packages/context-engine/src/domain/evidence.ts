@@ -40,6 +40,7 @@ export interface RefManifestEntry {
   path: string;
   blobSha: string;
   contentDigest: string;
+  contentAvailable: boolean;
   language?: string;
   executable: boolean;
 }

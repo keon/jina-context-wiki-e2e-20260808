@@ -290,6 +290,12 @@ auditing afterward avoids a preflight-to-shutdown race. Subsequent context-engin
 `_JINA_CONTEXT_CUTOVER=false`; destructive mode also refuses to run when a context-engine
 API already exists.
 
+Both supplied backups must be `SUCCESSFUL`, must have completed within the prior six
+hours, and must use the exact descriptions
+`pre-context-engine-primary-${release_sha}` and
+`pre-context-engine-legacy-graph-${release_sha}`. A successful but stale or
+differently labeled backup is rejected.
+
 The tenant list does not infer repository/ref scope. The separately recorded
 repository/ref/install inventory remains the authority for the mandatory post-deploy
 full reingestion, and every inventory row must end with a published baseline generation.

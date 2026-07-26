@@ -207,10 +207,13 @@ create table if not exists jina_context.evidence_checkpoint_manifest (
   path text not null,
   blob_sha text not null,
   content_digest text not null check (content_digest ~ '^[0-9a-f]{64}$'),
+  content_available boolean not null default true,
   language text,
   executable boolean not null,
   primary key (checkpoint_id,path)
 );
+alter table jina_context.evidence_checkpoint_manifest
+  add column if not exists content_available boolean not null default true;
 
 create table if not exists jina_context.refs (
   id text not null,
@@ -788,12 +791,15 @@ create table if not exists jina_context.ref_manifest (
   blob_sha text not null,
   mode text not null,
   source_fingerprint text not null check (source_fingerprint ~ '^[0-9a-f]{64}$'),
+  content_available boolean not null default true,
   source_anchors jsonb not null default '[]'::jsonb,
   primary key (generation_id,path),
-  unique (generation_id,tenant_id,repository,ref_name,path),
-  foreign key (tenant_id,repository,blob_sha)
-    references jina_context.blobs(tenant_id,repository,blob_sha)
+  unique (generation_id,tenant_id,repository,ref_name,path)
 );
+alter table jina_context.ref_manifest
+  add column if not exists content_available boolean not null default true;
+alter table jina_context.ref_manifest
+  drop constraint if exists ref_manifest_tenant_id_repository_blob_sha_fkey;
 create index if not exists context_manifest_path
   on jina_context.ref_manifest (tenant_id,repository,ref_name,path,generation_id);
 
@@ -1055,9 +1061,10 @@ create table if not exists jina_context.answer_citations (
   digest_valid boolean not null,
   supports_claim boolean,
   diagnostics jsonb not null default '{}'::jsonb,
-  primary key (query_run_id,ordinal),
-  unique (query_run_id,citation_id)
+  primary key (query_run_id,ordinal)
 );
+alter table jina_context.answer_citations
+  drop constraint if exists answer_citations_query_run_id_citation_id_key;
 
 create table if not exists jina_context.retrieval_metrics (
   id text primary key,

@@ -62,6 +62,7 @@ interface ManifestRow {
   path: string;
   blob_sha: string;
   content_digest: string;
+  content_available: boolean;
   language: string | null;
   executable: boolean;
 }
@@ -285,8 +286,8 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         await client.query(
           `insert into jina_context.evidence_checkpoint_manifest
             (checkpoint_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,
-             content_digest,language,executable)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) on conflict do nothing`,
+             content_digest,content_available,language,executable)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) on conflict do nothing`,
           [
             checkpoint.id,
             entry.tenantId,
@@ -296,6 +297,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
             entry.path,
             entry.blobSha,
             entry.contentDigest,
+            entry.contentAvailable,
             entry.language ?? null,
             entry.executable
           ]
@@ -611,6 +613,7 @@ async function ensureManifestBlob(
   evidence: readonly EvidenceRecord[],
   recordedAt: string
 ): Promise<void> {
+  if (!entry.contentAvailable) return;
   const source = evidence.find(
     (record) =>
       record.anchor.sourceType === "blob" &&
@@ -620,7 +623,7 @@ async function ensureManifestBlob(
   await client.query(
     `insert into jina_context.blobs
       (tenant_id,repository,blob_sha,content_digest,byte_size,media_type,encoding,content,recorded_at)
-     values ($1,$2,$3,$4,$5,$6,'utf-8',$7,$8)
+     values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
      on conflict (tenant_id,repository,blob_sha) do nothing`,
     [
       entry.tenantId,
@@ -628,8 +631,9 @@ async function ensureManifestBlob(
       entry.blobSha,
       entry.contentDigest,
       source ? Buffer.byteLength(source.body, "utf8") : 0,
-      source?.metadata.mediaType ?? "text/plain",
-      source?.body ?? "",
+      source?.metadata.mediaType ?? (entry.contentAvailable ? "text/plain" : "application/octet-stream"),
+      source ? "utf-8" : null,
+      source?.body ?? null,
       recordedAt
     ]
   );
@@ -791,6 +795,7 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
     ]
   );
   for (const entry of manifest) {
+    if (!entry.contentAvailable) continue;
     await client.query(
       `insert into jina_context.tree_entries
         (tenant_id,repository,tree_sha,path,blob_sha,mode)
@@ -1013,6 +1018,7 @@ function manifestFromRow(row: ManifestRow): RefManifestEntry {
     path: row.path,
     blobSha: row.blob_sha,
     contentDigest: row.content_digest,
+    contentAvailable: row.content_available,
     ...(row.language ? { language: row.language } : {}),
     executable: row.executable
   };

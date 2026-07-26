@@ -101,7 +101,7 @@ PageIndex must remain disabled until an expanded long-document slice compares:
 
 The go/no-go decision must include recall, citation integrity, ACL isolation, node/span
 validation, indexing and query latency, cost, private-data egress, cancellation/timeout,
-and licensing. The current eight-case fixture is too small to make that decision.
+and licensing. The current 12-case fixture is too small to make that decision.
 
 ## Reproduce locally
 

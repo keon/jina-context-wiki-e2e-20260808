@@ -2,9 +2,9 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { citationLocation, safeSourceUrl, shortDigest } from "../../lib/context.ts";
+import { citationLocation, queryCitationAnchors, safeSourceUrl, shortDigest } from "../../lib/context.ts";
 import { humanize, shortId } from "../../lib/format.ts";
-import type { ContextCitation, ContextGeneration, ContextQueryResponse, ContextTraceStep } from "../../lib/types.ts";
+import type { ContextGeneration, ContextQueryResponse, QueryCitation } from "../../lib/types.ts";
 
 const TASK_KINDS = ["lookup", "structure", "change", "intent", "overview", "status"] as const;
 
@@ -172,28 +172,24 @@ function QueryResult({ result }: { readonly result: ContextQueryResponse }) {
       </article>
       <CitationPanel citations={result.citations} />
       <ConflictPanel conflicts={result.conflicts} citationsById={citationsById} />
-      <RetrievalTrace
-        steps={result.trace.plan}
-        traceId={result.trace.id}
-        durationMs={result.trace.durationMs}
-        retrieversUsed={result.coverage.retrieversUsed}
-      />
+      <RetrievalTrace traceId={result.traceId} retrieversUsed={result.coverage.retrieversUsed} />
     </div>
   );
 }
 
-function CitationPanel({ citations }: { readonly citations: readonly ContextCitation[] }) {
+function CitationPanel({ citations }: { readonly citations: readonly QueryCitation[] }) {
+  const anchors = queryCitationAnchors(citations);
   return (
     <section className="context-result-panel">
       <header>
         <h3>Citations</h3>
-        <span>{citations.length} source anchors</span>
+        <span>{anchors.length} source anchors</span>
       </header>
       <div className="context-citation-list">
-        {citations.length === 0 ? (
+        {anchors.length === 0 ? (
           <p className="context-panel-empty">No source anchors were returned.</p>
         ) : (
-          citations.map((citation, index) => {
+          anchors.map((citation, index) => {
             const url = safeSourceUrl(citation);
             return (
               <article className="context-citation" key={citation.id}>
@@ -202,7 +198,7 @@ function CitationPanel({ citations }: { readonly citations: readonly ContextCita
                   <div>
                     <strong>{citationLocation(citation)}</strong>
                     <span>
-                      {humanize(citation.sourceType)} · digest {shortDigest(citation.contentDigest)}
+                      {humanize(citation.sourceKind)} · digest {shortDigest(citation.contentDigest)}
                     </span>
                   </div>
                   {url ? (
@@ -236,7 +232,7 @@ function ConflictPanel({
   citationsById
 }: {
   readonly conflicts: ContextQueryResponse["conflicts"];
-  readonly citationsById: ReadonlyMap<string, ContextCitation>;
+  readonly citationsById: ReadonlyMap<string, QueryCitation>;
 }) {
   return (
     <section className="context-result-panel">
@@ -254,7 +250,9 @@ function ConflictPanel({
               <p>{conflict.description}</p>
               <div>
                 {conflict.citationIds.map((id) => (
-                  <span key={id}>{citationsById.has(id) ? citationLocation(citationsById.get(id)!) : id}</span>
+                  <span key={id}>
+                    {citationsById.get(id)?.anchors[0] ? citationLocation(citationsById.get(id)!.anchors[0]!) : id}
+                  </span>
                 ))}
               </div>
             </article>
@@ -266,47 +264,24 @@ function ConflictPanel({
 }
 
 function RetrievalTrace({
-  steps,
   traceId,
-  durationMs,
   retrieversUsed
 }: {
-  readonly steps: readonly ContextTraceStep[];
   readonly traceId: string;
-  readonly durationMs: number;
   readonly retrieversUsed: readonly string[];
 }) {
   return (
     <section className="context-result-panel context-trace">
       <header>
         <h3>Retrieval trace</h3>
-        <span>
-          {durationMs}ms · {shortId(traceId)}
-        </span>
+        <span>{shortId(traceId)}</span>
       </header>
       <div className="context-route-summary">
         {retrieversUsed.map((retriever) => (
           <span key={retriever}>{humanize(retriever)}</span>
         ))}
       </div>
-      {steps.length === 0 ? (
-        <p className="context-panel-empty">No route diagnostics were returned.</p>
-      ) : (
-        <ol className="context-trace-list">
-          {steps.map((step) => (
-            <li key={`${step.retriever}-${step.reason}`}>
-              <span className={`context-route-dot ${step.status}`} aria-hidden="true" />
-              <div>
-                <strong>{humanize(step.retriever)}</strong>
-                <p>{step.reason}</p>
-              </div>
-              <span>
-                {step.candidateCount} candidates · {step.durationMs}ms
-              </span>
-            </li>
-          ))}
-        </ol>
-      )}
+      {retrieversUsed.length === 0 ? <p className="context-panel-empty">No route diagnostics were returned.</p> : null}
     </section>
   );
 }

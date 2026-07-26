@@ -11,16 +11,10 @@ The app calls the Jina API only from server components in `lib/jina-api.ts` with
 server caller as the tenant administrator and therefore returns all repositories in that
 tenant rather than applying an end-user repository subset.
 
-The app itself is a security boundary. In production, a request must pass one of the
-implemented server-side authentication paths:
-
-- a valid Google IAP identity, optionally restricted by `JINA_ADMIN_ALLOWED_EMAILS`; or
-- HTTP Basic credentials matching server-only `JINA_WEB_AUTH_USERNAME` and
-  `JINA_WEB_AUTH_PASSWORD`.
-
-The coordinated Cloud Run deployment configures the Basic-auth path. The code does not
-infer the hosting platform, so operators must configure only the authentication path
-appropriate to their deployment.
+The app itself is a security boundary. In production, every request must provide HTTP
+Basic credentials matching the server-only `JINA_WEB_AUTH_USERNAME` and
+`JINA_WEB_AUTH_PASSWORD`. Caller-supplied identity headers are ignored. The coordinated
+Cloud Run deployment exposes the app only through this Basic-auth path.
 
 - When `INTERNAL_API_TOKEN` is unset for local development/CI, inbound checks are relaxed;
   this mode must not be internet-reachable.
@@ -50,7 +44,6 @@ Environment:
 - `JINA_TENANT_ID` — original tenant UUID forwarded to a shared-database API. When
   `JINA_WEB_PRINCIPAL_ID` is absent, the client binds as `tenant:<JINA_TENANT_ID>`.
   Fixed/local deployments may omit it only when `JINA_WEB_PRINCIPAL_ID` is set.
-- `JINA_ADMIN_ALLOWED_EMAILS` — optional comma-separated IAP allowlist.
 - `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — server-side HTTP credentials.
 
 When `JINA_WEB_PRINCIPAL_ID` is a user principal, that principal must also be configured

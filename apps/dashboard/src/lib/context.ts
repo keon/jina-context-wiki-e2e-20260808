@@ -3,6 +3,7 @@ import type {
   ContextGeneration,
   ContextProjector,
   KnowledgeDocumentSummary,
+  QueryCitation,
   StructuralRelation
 } from "./types.ts";
 
@@ -72,6 +73,19 @@ export function safeSourceUrl(citation: ContextCitation): string | undefined {
   }
 }
 
+export function queryCitationAnchors(
+  citations: readonly QueryCitation[]
+): readonly (ContextCitation & { readonly sourceKind: QueryCitation["sourceKind"] })[] {
+  return citations.flatMap((citation) =>
+    citation.anchors.map((anchor, anchorIndex) => ({
+      ...anchor,
+      id: `${citation.id}:${anchorIndex}`,
+      excerpt: citation.excerpt,
+      sourceKind: citation.sourceKind
+    }))
+  );
+}
+
 export function shortDigest(value: string | undefined): string {
   if (!value) return "not supplied";
   return value.length <= 18 ? value : `${value.slice(0, 10)}…${value.slice(-6)}`;
@@ -99,10 +113,10 @@ export function structureEntries(
     if (citation.pathOrUrl && !citation.pathOrUrl.includes("://")) paths.add(citation.pathOrUrl);
   }
   for (const relation of relations) {
-    for (const candidate of [relation.source, relation.target]) {
+    for (const candidate of [relation.from, relation.to]) {
       if (candidate.includes("/") && !candidate.includes("://")) paths.add(candidate);
     }
-    for (const citation of relation.citations) {
+    for (const citation of relation.anchors) {
       if (citation.pathOrUrl && !citation.pathOrUrl.includes("://")) paths.add(citation.pathOrUrl);
     }
   }
@@ -123,14 +137,14 @@ export function structureEntries(
     }
   }
   for (const relation of relations) {
-    const id = `relation:${relation.kind}:${relation.source}:${relation.target}`;
+    const id = `relation:${relation.kind}:${relation.from}:${relation.to}`;
     entries.set(id, {
       id,
       depth: 0,
-      label: relation.source,
-      path: relation.source,
+      label: relation.from,
+      path: relation.from,
       kind: "relation",
-      detail: `${relation.kind} → ${relation.target}`
+      detail: `${relation.kind} → ${relation.to}`
     });
   }
   return [...entries.values()].sort((left, right) => {

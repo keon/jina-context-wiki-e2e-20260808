@@ -277,6 +277,52 @@ test("ingestion is content-addressed, idempotent, and produces deterministic str
   assert.equal(partial.sourceCompleteness, "partial");
 });
 
+test("omitted blobs remain unavailable without aliasing empty content and can later be completed", async () => {
+  const store = new MemoryContextEngineStore();
+  const service = new IngestEvidenceService(store);
+  const partial = await service.ingest({
+    tenantId,
+    repository,
+    ref: "binary",
+    refSequence: 1,
+    commitSha,
+    aclFingerprint: "acl",
+    observationFrontier: "bounded:omitted",
+    sourceComplete: false,
+    createdAt,
+    files: [
+      { path: "assets/one.bin", blobSha: "1".repeat(40), body: "", contentOmitted: true },
+      { path: "assets/two.bin", blobSha: "2".repeat(40), body: "", contentOmitted: true }
+    ]
+  });
+  const omittedManifest = await store.listManifest(partial.id);
+  assert.equal((await store.listEvidence(partial.id)).length, 0);
+  assert.equal(omittedManifest.length, 2);
+  assert.ok(omittedManifest.every((entry) => !entry.contentAvailable));
+  assert.equal(new Set(omittedManifest.map((entry) => entry.contentDigest)).size, 2);
+
+  const completed = await service.ingest({
+    tenantId,
+    repository,
+    ref: "binary",
+    refSequence: 2,
+    commitSha: "d".repeat(40),
+    aclFingerprint: "acl",
+    observationFrontier: "bounded:complete",
+    sourceComplete: true,
+    createdAt: "2026-07-26T12:01:00.000Z",
+    files: [{ path: "assets/one.bin", blobSha: "1".repeat(40), body: "now available" }]
+  });
+  assert.equal((await store.listEvidence(completed.id)).length, 1);
+  assert.deepEqual(
+    (await store.listManifest(completed.id)).map((entry) => ({
+      contentAvailable: entry.contentAvailable,
+      contentDigest: entry.contentDigest
+    })),
+    [{ contentAvailable: true, contentDigest: fingerprint("now available") }]
+  );
+});
+
 test("provider JSON pointers resolve against immutable raw observations", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);

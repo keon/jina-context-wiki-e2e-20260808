@@ -100,6 +100,7 @@ interface ResolvedRepositoryIdentity {
   readonly githubAccountLogin: string;
   readonly githubAccountType: string;
   readonly githubRepositoryId?: string;
+  readonly githubInstallationId?: string;
   readonly repository: string;
   readonly defaultBranch?: string;
 }
@@ -108,6 +109,7 @@ interface SharedIdentityResolver {
   resolveRepository(input: {
     readonly githubRepositoryId?: number;
     readonly githubInstallationId?: number;
+    readonly tenantId?: string;
     readonly repository: string;
   }): Promise<ResolvedRepositoryIdentity | undefined>;
   listTenantIds(): Promise<readonly string[]>;
@@ -410,14 +412,28 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repository = requiredRepositoryName(body.repository, "repository");
       await requireRepositoryAccess(principal, repository);
       const commitSha = optionalString(body.commitSha);
-      const githubInstallationId =
+      const requestedGithubInstallationId =
         body.githubInstallationId === undefined
           ? undefined
           : requiredPositiveInteger(body.githubInstallationId, "githubInstallationId");
+      const identity = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.resolveRepository({
+            tenantId: principal.tenantId,
+            repository,
+            ...(requestedGithubInstallationId ? { githubInstallationId: requestedGithubInstallationId } : {})
+          })
+        : undefined;
+      if (config.sharedIdentityResolver && (!identity || identity.tenantId !== principal.tenantId)) {
+        throw notFound("repository context not found");
+      }
+      const githubInstallationId = identity?.githubInstallationId
+        ? requiredPositiveInteger(Number(identity.githubInstallationId), "resolved githubInstallationId")
+        : requestedGithubInstallationId;
+      if (config.sharedIdentityResolver && !githubInstallationId) throw notFound("repository context not found");
       const build = await contextCoordinator.createBuild({
         tenantId: principal.tenantId,
-        repository,
-        ref: optionalString(body.ref) ?? "main",
+        repository: identity?.repository ?? repository,
+        ref: optionalString(body.ref) ?? identity?.defaultBranch ?? "main",
         ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
         ...(githubInstallationId ? { githubInstallationId } : {}),
         requestKey: optionalString(body.requestKey) ?? randomUUID(),
@@ -909,7 +925,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!allowed.includes(requestValue.repository)) throw notFound("repository context not found");
     const startedAt = nowIso();
     const started = Date.now();
-    const result = await new QueryContextService(contextStore).query(requestValue);
+    const execution = await new QueryContextService(contextStore).queryWithTrace(requestValue);
+    const result = execution.response;
     const completedAt = nowIso();
     await contextStore.recordQueryRun({
       id: result.traceId,
@@ -926,7 +943,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       conflictCount: result.conflicts.length,
       startedAt,
       completedAt,
-      durationMs: Math.max(0, Date.now() - started)
+      durationMs: Math.max(0, Date.now() - started),
+      candidates: execution.telemetry.candidates,
+      citations: execution.telemetry.citations,
+      routeMetrics: execution.telemetry.routeMetrics
     });
     return result;
   }

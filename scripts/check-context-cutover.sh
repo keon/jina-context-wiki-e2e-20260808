@@ -31,6 +31,21 @@ if [[ "${normal_retry_output}" != *"interrupted first cutover must resume in des
   exit 1
 fi
 
+service_discovery_output="$(
+  GCP_PROJECT_ID=jina-v2 GCP_REGION=us-central1 CLOUD_BUILD_ID=mock-build bash -c '
+    gcloud() {
+      if [[ "$1 $2 $3" == "run services list" ]]; then return 1; fi
+      return 0
+    }
+    export -f gcloud
+    bash scripts/cloud-build-deploy.sh
+  ' 2>&1 || true
+)"
+if [[ "${service_discovery_output}" != *"Unable to obtain an authoritative Cloud Run service inventory"* ]]; then
+  echo "Cloud Run control-plane failure was treated as service absence." >&2
+  exit 1
+fi
+
 readonly mock_release_sha="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 split_image_output="$(
   GCP_PROJECT_ID=jina-v2 \

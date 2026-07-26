@@ -4,11 +4,12 @@ import type {
   QueryCitation,
   QueryContextRequest,
   QueryContextResponse,
+  QueryPlan,
   QueryRoute,
   RetrievalCandidate,
   SynthesisOutput
 } from "../domain/query.js";
-import type { ContextEngineStore } from "../ports/context-engine-store.js";
+import type { ContextEngineStore, QueryRunTelemetry } from "../ports/context-engine-store.js";
 import type { ContextSynthesizer, ScopeAuthorizer } from "../ports/synthesizer.js";
 import { verifySynthesisCitations } from "./citation-verifier.js";
 import { detectSourceConflicts } from "./conflicts.js";
@@ -102,6 +103,14 @@ export class QueryContextService {
   }
 
   async query(request: QueryContextRequest): Promise<QueryContextResponse> {
+    return (await this.queryWithTrace(request)).response;
+  }
+
+  async queryWithTrace(request: QueryContextRequest): Promise<{
+    response: QueryContextResponse;
+    telemetry: Pick<QueryRunTelemetry, "candidates" | "citations" | "routeMetrics">;
+    plan: QueryPlan;
+  }> {
     const repository = normalizeRepository(request.repository);
     const ref = request.ref ?? "main";
     const authorization = await this.authorizer.authorize({
@@ -111,11 +120,20 @@ export class QueryContextService {
       ref
     });
     if (!authorization.allowed) throw new Error(authorization.reason ?? "Repository access denied");
-    const projection = await this.#latestForRepository(request.tenantId, repository, ref, request.principalId);
-    if (projection === undefined) throw new Error("No published context generation for the requested scope");
-    const plan = planContextQuery({ ...request, repository, ref: projection.generation.ref });
+    const latestAuthorizedGeneration = this.store.latestAuthorizedGeneration?.bind(this.store);
+    const retrieveIndexed = this.store.retrieveIndexed?.bind(this.store);
+    const useIndexedRetrieval = Boolean(latestAuthorizedGeneration && retrieveIndexed);
+    const indexedGeneration = useIndexedRetrieval
+      ? await latestAuthorizedGeneration!(request.tenantId, repository, ref, request.principalId)
+      : undefined;
+    const projection = useIndexedRetrieval
+      ? undefined
+      : await this.#latestForRepository(request.tenantId, repository, ref, request.principalId);
+    const generation = indexedGeneration ?? projection?.generation;
+    if (generation === undefined) throw new Error("No published context generation for the requested scope");
+    const plan = planContextQuery({ ...request, repository, ref: generation.ref });
     if (
-      projection.generation.capabilities.dense === "available" &&
+      generation.capabilities.dense === "available" &&
       this.#retrievers.has("dense") &&
       !plan.routes.some((route) => route.route === "dense")
     ) {
@@ -127,6 +145,7 @@ export class QueryContextService {
       });
     }
     if (
+      projection &&
       ["overview", "intent"].includes(plan.taskKind) &&
       projection.documents.some((document) => document.body.length >= 16_000) &&
       !plan.routes.some((route) => route.route === "long_context")
@@ -138,24 +157,42 @@ export class QueryContextService {
         timeoutMs: 1_000
       });
     }
-    const lists = await Promise.all(
+    const routeExecutions = await Promise.all(
       plan.routes.map(async (route) => {
+        const started = Date.now();
+        if (useIndexedRetrieval) {
+          const candidates = await retrieveIndexed!({
+            tenantId: request.tenantId,
+            repository,
+            principalId: request.principalId,
+            generation,
+            plan,
+            route: route.route,
+            limit: route.limit,
+            allowedAclFingerprints: authorization.allowedAclFingerprints
+          });
+          return { route: route.route, candidates, durationMs: Math.max(0, Date.now() - started) };
+        }
         const retriever = this.#retrievers.get(route.route);
-        if (retriever === undefined) return [];
-        return retriever.retrieve({
-          projection,
+        if (retriever === undefined || !projection) {
+          return { route: route.route, candidates: [], durationMs: Math.max(0, Date.now() - started) };
+        }
+        const candidates = await retriever.retrieve({
+          projection: projection,
           plan,
           allowedAclFingerprints: authorization.allowedAclFingerprints,
           route: route.route,
           limit: route.limit
         });
+        return { route: route.route, candidates, durationMs: Math.max(0, Date.now() - started) };
       })
     );
+    const lists = routeExecutions.map((execution) => execution.candidates);
     const temporallyScoped = lists.map((candidates) =>
       candidates.filter((candidate) => this.#withinTimeWindow(candidate, plan.timeWindow))
     );
     const fused = await this.#hydrateOriginalEvidence(
-      projection.generation.checkpointId,
+      generation.checkpointId,
       fuseRetrievalCandidates(temporallyScoped)
     );
     const candidates = fused.map((item) => item.candidate);
@@ -194,7 +231,7 @@ export class QueryContextService {
     }));
     const used = [...new Set(candidates.map((candidate) => candidate.retriever))].sort();
     const missing = [...synthesis.missing];
-    if (projection.generation.capabilities.sourceCompleteness === "partial") {
+    if (generation.capabilities.sourceCompleteness === "partial") {
       missing.push("source-completeness:partial");
     }
     for (const [kind, targets] of Object.entries(plan.targets)) {
@@ -211,10 +248,10 @@ export class QueryContextService {
     const response: QueryContextResponse = {
       answer: synthesis.answer,
       generation: {
-        id: projection.generation.id,
-        ref: projection.generation.ref,
-        commitSha: projection.generation.commitSha,
-        derivedKnowledge: projection.generation.capabilities.derivedKnowledge
+        id: generation.id,
+        ref: generation.ref,
+        commitSha: generation.commitSha,
+        derivedKnowledge: generation.capabilities.derivedKnowledge
       },
       citations,
       conflicts: conflicts.map((conflict) => ({
@@ -243,7 +280,64 @@ export class QueryContextService {
     ) {
       throw new Error(finalAuthorization.reason ?? "Repository access changed while querying");
     }
-    return response;
+    const fusedScores = new Map(
+      fused.map((item) => [candidateIdentity(item.candidate), { score: item.score, selectedId: item.candidate.id }])
+    );
+    const candidateTelemetry = temporallyScoped
+      .flat()
+      .sort((left, right) => left.retriever.localeCompare(right.retriever) || left.id.localeCompare(right.id))
+      .map((candidate, ordinal) => {
+        const fusedResult = fusedScores.get(candidateIdentity(candidate));
+        return {
+          ordinal,
+          candidateId: candidate.id,
+          retriever: candidate.retriever,
+          sourceKind: candidate.sourceKind,
+          sourceId: candidate.sourceId,
+          ...(candidate.sourceRevisionId ? { sourceRevisionId: candidate.sourceRevisionId } : {}),
+          rawScore: candidate.rawScore,
+          ...(fusedResult ? { fusedScore: fusedResult.score } : {}),
+          selected: fusedResult !== undefined,
+          diagnostics: {
+            explanation: candidate.explanation,
+            scoreSemantics: candidate.scoreSemantics,
+            exactMatch: candidate.exactMatch,
+            selectedRepresentative: fusedResult?.selectedId
+          }
+        };
+      });
+    const supportingCitationIds = new Set(synthesis.claims.flatMap((claim) => claim.citationIds));
+    const citationTelemetry = citations.flatMap((citation) =>
+      citation.anchors.map((anchor) => ({
+        citation,
+        anchor
+      }))
+    );
+    return {
+      response,
+      plan,
+      telemetry: {
+        candidates: candidateTelemetry,
+        citations: citationTelemetry.map(({ citation, anchor }, ordinal) => ({
+          ordinal,
+          citationId: citation.id,
+          sourceKind: citation.sourceKind,
+          sourceId: citation.sourceId,
+          ...(citation.sourceRevisionId ? { sourceRevisionId: citation.sourceRevisionId } : {}),
+          sourceAnchor: { ...anchor },
+          contentDigest: anchor.contentDigest,
+          accessible: true,
+          digestValid: true,
+          supportsClaim: supportingCitationIds.has(citation.id),
+          diagnostics: {}
+        })),
+        routeMetrics: routeExecutions.map((execution) => ({
+          route: execution.route,
+          candidateCount: execution.candidates.length,
+          durationMs: execution.durationMs
+        }))
+      }
+    };
   }
 
   async #latestForRepository(tenantId: string, repository: string, ref: string, principalId: string) {
@@ -314,6 +408,10 @@ export class QueryContextService {
       missing: ["verified synthesis"]
     };
   }
+}
+
+function candidateIdentity(candidate: RetrievalCandidate): string {
+  return `${candidate.sourceId}\u0000${candidate.sourceRevisionId ?? ""}\u0000${candidate.contentFingerprint}`;
 }
 
 function sameFingerprints(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
