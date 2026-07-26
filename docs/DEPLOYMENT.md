@@ -54,6 +54,15 @@ trimmed, empty strings dropped, accepted values deduplicated, and each non-empty
 limited to 1,000 characters. A request containing 101 duplicates is intentionally
 rejected as amplification rather than reduced below the raw-entry limit.
 
+| Cloud Build substitution      | Default | Guidance                                                                          |
+| ----------------------------- | ------: | --------------------------------------------------------------------------------- |
+| `_JINA_API_MIN_INSTANCES`     |     `1` | Keep at least one warm for interactive reads.                                     |
+| `_JINA_API_MAX_INSTANCES`     |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.         |
+| `_JINA_API_CONCURRENCY`       |    `20` | Lowering this can reduce per-instance contention, but may require more instances. |
+| `_JINA_API_CPU`               |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
+| `_JINA_API_MEMORY`            | `512Mi` | Increase if context assembly approaches the container limit.                      |
+| `_JINA_CONTEXT_WORKER_MEMORY` |   `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.         |
+
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
 `JINA_WEB_AUTH_PASSWORD`, `JINA_TENANT_ID`, and `JINA_WEB_PRINCIPAL_ID`. The coordinated
