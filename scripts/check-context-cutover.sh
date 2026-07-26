@@ -153,8 +153,8 @@ if [[ "${unmarked_outage_output}" != *"marker does not match the requested relea
   exit 1
 fi
 
-if ! rg --quiet -- '--labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh ||
-  rg --quiet -- '--update-labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh; then
+if ! grep -Fq -- '--labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh ||
+  grep -Fq -- '--update-labels="jina_cutover_marker=' scripts/cloud-build-deploy.sh; then
   echo "Cutover marker does not use the Cloud Run jobs deploy label flag." >&2
   exit 1
 fi
