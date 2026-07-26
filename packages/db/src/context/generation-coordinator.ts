@@ -4,6 +4,7 @@ import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, dateString } from "./database.js";
+import { assertProjectionInputFingerprint, lockProjectionInput } from "./projection-input.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
 export const requiredContextConsumers = [
@@ -47,11 +48,18 @@ export class PostgresGenerationCoordinator {
         generationRefLock(generation.tenantId, generation.repository, generation.ref)
       ]);
       await lockRepositoryAccess(client, generation.tenantId, generation.repository);
+      await lockProjectionInput(client, generation.tenantId, generation.repository);
       await assertRepositoryAccessFingerprint(
         client,
         generation.tenantId,
         generation.repository,
         generation.repositoryAccessFingerprint
+      );
+      await assertProjectionInputFingerprint(
+        client,
+        generation.tenantId,
+        generation.repository,
+        generation.projectionInputFingerprint
       );
       const checkpoint = await client.query<{ created_at: Date }>(
         `select created_at from jina_context.evidence_checkpoints
@@ -71,8 +79,8 @@ export class PostgresGenerationCoordinator {
         `insert into jina_context.index_generations
           (id,tenant_id,repository,ref_name,commit_sha,checkpoint_id,kind,status,
            barrier_occurred_at,projector_versions,capabilities,required_fingerprint,
-           acl_fingerprint,degraded_capabilities,created_at)
-         values ($1,$2,$3,$4,$5,$6,$7,'building',$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14)
+           acl_fingerprint,projection_input_fingerprint,degraded_capabilities,created_at)
+         values ($1,$2,$3,$4,$5,$6,$7,'building',$8,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15)
          on conflict (id) do nothing`,
         [
           generation.id,
@@ -87,6 +95,7 @@ export class PostgresGenerationCoordinator {
           JSON.stringify(generation.capabilities),
           generation.fingerprint,
           generation.repositoryAccessFingerprint,
+          generation.projectionInputFingerprint,
           degradedCapabilities(generation),
           generation.createdAt
         ]
@@ -247,8 +256,9 @@ export class PostgresGenerationCoordinator {
         ref_name: string;
         commit_sha: string;
         checkpoint_id: string;
+        projection_input_fingerprint: string;
       }>(
-        `select tenant_id,repository,ref_name,commit_sha,checkpoint_id
+        `select tenant_id,repository,ref_name,commit_sha,checkpoint_id,projection_input_fingerprint
          from jina_context.index_generations where id=$1 and status='building'`,
         [generationId]
       );
@@ -258,6 +268,7 @@ export class PostgresGenerationCoordinator {
         generationRefLock(scope.tenant_id, scope.repository, scope.ref_name)
       ]);
       await lockRepositoryAccess(client, scope.tenant_id, scope.repository);
+      await lockProjectionInput(client, scope.tenant_id, scope.repository);
       await assertContextWriteFence(client, scope.tenant_id, ["run-index-context", "run-derive-knowledge"], fence);
       await assertLatestCheckpoint(client, scope.tenant_id, scope.repository, scope.ref_name, scope.checkpoint_id);
       const expectedAccess = await client.query<{ acl_fingerprint: string }>(
@@ -269,6 +280,12 @@ export class PostgresGenerationCoordinator {
         scope.tenant_id,
         scope.repository,
         expectedAccess.rows[0]!.acl_fingerprint
+      );
+      await assertProjectionInputFingerprint(
+        client,
+        scope.tenant_id,
+        scope.repository,
+        scope.projection_input_fingerprint
       );
       const incomplete = await client.query<{ consumer: ContextProjectionConsumer; status: string; required: boolean }>(
         `select consumer,status,required from jina_context.generation_projectors
@@ -369,7 +386,7 @@ async function assertLatestCheckpoint(
     `select id
      from jina_context.evidence_checkpoints
      where tenant_id=$1 and repository=$2 and ref_name=$3
-     order by created_at desc,id desc
+     order by ref_sequence desc,id desc
      limit 1`,
     [tenantId, repository, ref]
   );
@@ -397,6 +414,7 @@ export async function loadGeneration(client: PoolClient, generationId: string): 
     capabilities: IndexGeneration["capabilities"];
     required_fingerprint: string;
     acl_fingerprint: string;
+    projection_input_fingerprint: string;
     created_at: Date;
     published_at: Date | null;
   }>("select * from jina_context.index_generations where id=$1", [generationId]);
@@ -417,6 +435,7 @@ export async function loadGeneration(client: PoolClient, generationId: string): 
     tenantId: row.tenant_id,
     repository: row.repository,
     repositoryAccessFingerprint: row.acl_fingerprint,
+    projectionInputFingerprint: row.projection_input_fingerprint,
     ref: row.ref_name,
     commitSha: row.commit_sha,
     checkpointId: row.checkpoint_id,

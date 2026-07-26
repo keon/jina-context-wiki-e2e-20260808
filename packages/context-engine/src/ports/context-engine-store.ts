@@ -46,6 +46,7 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]>;
   aclFingerprintsForPrincipal(tenantId: string, principalId: string, repository: string): Promise<string[]>;
   repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string>;
+  projectionInputFingerprint(tenantId: string, repository: string): Promise<string>;
   listRepositories(tenantId: string): Promise<string[]>;
   projectionBacklog(tenantId: string): Promise<ProjectionBacklog>;
   pendingProjectionCheckpoints(tenantId: string, limit: number): Promise<string[]>;

@@ -27,6 +27,11 @@ import { currentRepositoryAccessFingerprint, lockRepositoryAccess, repositoryAcc
 import { PostgresEvidenceRepository } from "./evidence-repository.js";
 import { PostgresKnowledgeRepository } from "./knowledge-repository.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
+import {
+  appendProjectionInputEvent,
+  currentProjectionInputFingerprint,
+  lockProjectionInput
+} from "./projection-input.js";
 import { PostgresProjectionRepository } from "./projection-repository.js";
 import { PostgresContextQueryRepository } from "./query-repository.js";
 
@@ -262,6 +267,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     });
   }
 
+  async projectionInputFingerprint(tenantId: string, repository: string): Promise<string> {
+    await this.database.initialize();
+    return this.database.transactionAs("jina_context_coordinator", (client) =>
+      currentProjectionInputFingerprint(client, tenantId, repository)
+    );
+  }
+
   async listRepositories(tenantId: string): Promise<string[]> {
     await this.database.initialize();
     const result = await this.database.queryAs<{ repository: string }>(
@@ -330,7 +342,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
              where latest.tenant_id=checkpoint.tenant_id
                and latest.repository=checkpoint.repository
                and latest.ref_name=checkpoint.ref_name
-             order by latest.created_at desc,latest.id desc
+             order by latest.ref_sequence desc,latest.id desc
              limit 1
            )
          union
@@ -353,7 +365,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
              where latest.tenant_id=checkpoint.tenant_id
                and latest.repository=checkpoint.repository
                and latest.ref_name=checkpoint.ref_name
-             order by latest.created_at desc,latest.id desc
+             order by latest.ref_sequence desc,latest.id desc
              limit 1
            )
          union
@@ -365,7 +377,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           and checkpoint.repository=delivery.repository
          where delivery.tenant_id=$1 and delivery.processed_at is null
            and delivery.aggregate_type in ('access','retention')
-         order by checkpoint.repository,checkpoint.ref_name,checkpoint.created_at desc
+         order by checkpoint.repository,checkpoint.ref_name,checkpoint.ref_sequence desc
        )
        select checkpoint_id
        from pending_scope
@@ -390,6 +402,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       throw new Error("Evidence erasure requires sourceId, actorId, and reason");
     }
     return this.database.transactionAs("jina_context_admin", async (client) => {
+      await lockProjectionInput(client, input.tenantId, input.repository);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `context-erasure:${input.tenantId}:${input.repository}`
       ]);
@@ -438,6 +451,14 @@ export class PostgresContextEngineStore implements ContextEngineStore {
           input.createdAt
         ]
       );
+      await appendProjectionInputEvent(client, {
+        tenantId: input.tenantId,
+        repository: input.repository,
+        id: `projection-input:erasure:${id}`,
+        eventType: "evidence.erased",
+        aggregateId: id,
+        occurredAt: input.createdAt
+      });
       const invalidated = await client.query(
         `update jina_context.index_generations
          set status='invalidated',invalidated_at=$3

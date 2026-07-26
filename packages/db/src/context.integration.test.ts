@@ -63,6 +63,7 @@ test(
       createdAt
     });
     assert.match(build.id, /^cb_/);
+    assert.equal(build.refSequence, 1);
     assert.ok(build.stages.every((stage) => stage.id.startsWith("cs_")));
 
     const ingestClaim = await coordinator.claim({
@@ -73,6 +74,7 @@ test(
       leaseExpiresAt: at(600_000)
     });
     assert.ok(ingestClaim);
+    assert.equal(ingestClaim.stage.metadata.refSequence, 1);
     assert.equal(ingestClaim.stage.metadata.commitSha, commitSha);
     assert.equal(ingestClaim.stage.metadata.githubInstallationId, 140435029);
 
@@ -130,6 +132,7 @@ test(
         tenantId,
         repository,
         ref,
+        refSequence: 1,
         commitSha,
         parserVersion: "fixture-parser-v1",
         sourceCompleteness: "complete",
@@ -167,6 +170,15 @@ test(
       }
     };
     await store.commitSnapshot(snapshot, ingestClaim.fence);
+    assert.equal(
+      await store.projectionInputFingerprint(tenantId, repository),
+      fingerprint({
+        tenantId,
+        repository,
+        sequence: 1,
+        eventId: `projection-input:evidence:${snapshot.checkpoint.id}`
+      })
+    );
     assert.ok(
       await store.resolveAnchor(snapshot.checkpoint.id, {
         tenantId,
@@ -302,6 +314,7 @@ test(
       tenantId,
       repository,
       ref: "release",
+      refSequence: 1,
       commitSha: releaseCommitSha,
       files: [
         {
@@ -374,6 +387,7 @@ test(
       checkpoint: {
         ...snapshot.checkpoint,
         id: stableId("ec", { tenantId, repository, commitSha, provider: true }),
+        refSequence: 2,
         evidenceFingerprint: fingerprint([record.id, providerRecord.id]),
         createdAt: at(6_500)
       },
@@ -619,6 +633,7 @@ test(
       tenantId,
       repository,
       ref,
+      refSequence: 3,
       commitSha: "9".repeat(40),
       files: [
         {
@@ -632,7 +647,21 @@ test(
       aclFingerprint,
       observationFrontier: at(12_000),
       createdAt: at(12_000),
-      sourceComplete: true
+      sourceComplete: true,
+      git: {
+        commit: {
+          treeSha: "7".repeat(40),
+          parentShas: [commitSha],
+          message: "Advance context fixture"
+        },
+        changes: [
+          {
+            kind: "add",
+            path: "src/context-v2.ts",
+            newBlobSha: "8".repeat(40)
+          }
+        ]
+      }
     });
     await assert.rejects(
       new IndexContextService(store).index(providerSnapshot.checkpoint.id, at(12_100)),
@@ -640,6 +669,71 @@ test(
     );
     const successorGeneration = await new IndexContextService(store).index(successorCheckpoint.id, at(12_200));
     assert.equal((await store.latestPublished(tenantId, repository, ref))?.generation.id, successorGeneration.id);
+    assert.equal(
+      (
+        await database.pool.query<{ commit_sha: string }>(
+          `select commit_sha from jina_context.current_refs
+           where tenant_id=$1 and repository=$2 and ref_name=$3`,
+          [tenantId, repository, ref]
+        )
+      ).rows[0]?.commit_sha,
+      "9".repeat(40)
+    );
+    assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
+
+    const refRaceRepository = "acme/ref-race";
+    const olderBuild = await coordinator.createBuild({
+      tenantId,
+      repository: refRaceRepository,
+      ref,
+      commitSha: "1".repeat(40),
+      requestKey: "ref-race-older",
+      createdAt: at(12_300)
+    });
+    const newerBuild = await coordinator.createBuild({
+      tenantId,
+      repository: refRaceRepository,
+      ref,
+      commitSha: "2".repeat(40),
+      requestKey: "ref-race-newer",
+      createdAt: at(12_400)
+    });
+    assert.equal(olderBuild.refSequence, 1);
+    assert.equal(newerBuild.refSequence, 2);
+    const newerRefCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId,
+      repository: refRaceRepository,
+      ref,
+      refSequence: newerBuild.refSequence,
+      commitSha: "2".repeat(40),
+      files: [],
+      observations: [],
+      aclFingerprint: repositoryAclFingerprint(tenantId, refRaceRepository),
+      observationFrontier: "newer",
+      createdAt: at(12_500),
+      sourceComplete: true
+    });
+    const newerRefFrontier = await store.projectionInputFingerprint(tenantId, refRaceRepository);
+    const delayedOlderRefCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId,
+      repository: refRaceRepository,
+      ref,
+      refSequence: olderBuild.refSequence,
+      commitSha: "1".repeat(40),
+      files: [],
+      observations: [],
+      aclFingerprint: repositoryAclFingerprint(tenantId, refRaceRepository),
+      observationFrontier: "older-delayed",
+      createdAt: at(12_600),
+      sourceComplete: true
+    });
+    assert.equal(await store.projectionInputFingerprint(tenantId, refRaceRepository), newerRefFrontier);
+    assert.equal((await store.latestCheckpoint(tenantId, refRaceRepository, ref))?.id, newerRefCheckpoint.id);
+    await assert.rejects(new IndexContextService(store).index(delayedOlderRefCheckpoint.id, at(12_700)), /superseded/);
+    assert.equal(
+      (await new IndexContextService(store).index(newerRefCheckpoint.id, at(12_800))).commitSha,
+      "2".repeat(40)
+    );
     assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
 
     const raceTenantId = `${tenantId}-acl-race`;
@@ -650,6 +744,7 @@ test(
       tenantId: raceTenantId,
       repository: raceRepository,
       ref,
+      refSequence: 1,
       commitSha: "7".repeat(40),
       files: [
         {
@@ -704,7 +799,90 @@ test(
       raceGeneration.repositoryAccessFingerprint,
       await store.repositoryAccessFingerprint(raceTenantId, raceRepository)
     );
+
+    const inputRaceTenantId = `${tenantId}-input-race`;
+    const inputRaceRepository = "acme/input-race";
+    const inputRaceCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId: inputRaceTenantId,
+      repository: inputRaceRepository,
+      ref,
+      refSequence: 1,
+      commitSha: "5".repeat(40),
+      files: [
+        {
+          path: "README.md",
+          blobSha: "4".repeat(40),
+          body: "# Projection input race fixture\n",
+          language: "markdown"
+        }
+      ],
+      observations: [],
+      aclFingerprint: repositoryAclFingerprint(inputRaceTenantId, inputRaceRepository),
+      observationFrontier: at(15_100),
+      createdAt: at(15_100),
+      sourceComplete: true
+    });
+    let eraseAfterRetentionProjection = true;
+    mutableDatabase.transactionAs = async (role, operation) => {
+      const result = await originalTransactionAs(role, operation);
+      if (role === "jina_context_retention" && eraseAfterRetentionProjection) {
+        eraseAfterRetentionProjection = false;
+        await store.eraseEvidence({
+          tenantId: inputRaceTenantId,
+          repository: inputRaceRepository,
+          sourceType: "blob",
+          sourceId: "4".repeat(40),
+          actorId: "security-test",
+          reason: "deterministic publication race",
+          createdAt: at(15_200)
+        });
+      }
+      return result;
+    };
+    try {
+      await assert.rejects(
+        new IndexContextService(store).index(inputRaceCheckpoint.id, at(15_300)),
+        /Canonical projection inputs changed while indexing/
+      );
+    } finally {
+      mutableDatabase.transactionAs = originalTransactionAs;
+    }
+    assert.equal(eraseAfterRetentionProjection, false);
+    assert.equal(await store.latestPublished(inputRaceTenantId, inputRaceRepository, ref), undefined);
     assert.equal((await query.authorize(raceTenantId, raceRepository, "race-reader", raceGeneration.id)).allowed, true);
+
+    const relandedSnapshot: EvidenceSnapshot = {
+      ...snapshot,
+      checkpoint: {
+        ...snapshot.checkpoint,
+        id: stableId("ec", { tenantId, repository, commitSha, refSequence: 4 }),
+        refSequence: 4,
+        createdAt: at(15_400)
+      }
+    };
+    await store.commitSnapshot(relandedSnapshot);
+    assert.equal(
+      (
+        await database.pool.query<{ commit_sha: string }>(
+          `select commit_sha from jina_context.current_refs
+           where tenant_id=$1 and repository=$2 and ref_name=$3`,
+          [tenantId, repository, ref]
+        )
+      ).rows[0]?.commit_sha,
+      commitSha
+    );
+    assert.equal(
+      (
+        await database.pool.query<{ ref_sequence: string }>(
+          `select ref_sequence::text ref_sequence
+           from jina_context.refs
+           where tenant_id=$1 and repository=$2 and ref_name=$3 and commit_sha=$4
+           order by ref_sequence desc limit 1`,
+          [tenantId, repository, ref, commitSha]
+        )
+      ).rows[0]?.ref_sequence,
+      "4"
+    );
 
     const buildAfter = await coordinator.get(build.id);
     assert.equal(buildAfter?.status, "degraded");

@@ -33,6 +33,7 @@ export interface IngestEvidenceInput {
   tenantId: string;
   repository: string;
   ref: string;
+  refSequence: number;
   commitSha: string;
   files: IngestFile[];
   observations?: ProviderObservationInput[];
@@ -58,6 +59,9 @@ export class IngestEvidenceService {
   async ingest(input: IngestEvidenceInput, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
     if (!isFullCommitSha(input.commitSha)) throw new Error("commitSha must be a full Git SHA");
     if (input.ref.trim() === "") throw new Error("ref is required");
+    if (!Number.isSafeInteger(input.refSequence) || input.refSequence <= 0) {
+      throw new Error("refSequence must be a positive safe integer");
+    }
     if (input.aclFingerprint.trim() === "") throw new Error("aclFingerprint is required");
     const repository = normalizeRepository(input.repository);
     const createdAt = normalizeIsoTime(input.createdAt);
@@ -160,6 +164,7 @@ export class IngestEvidenceService {
         tenantId: input.tenantId,
         repository,
         ref: input.ref,
+        refSequence: input.refSequence,
         commitSha: input.commitSha,
         parserVersion: this.#parser.version,
         sourceCompleteness: input.sourceComplete ? "complete" : "partial",
@@ -171,6 +176,7 @@ export class IngestEvidenceService {
       tenantId: input.tenantId,
       repository,
       ref: input.ref,
+      refSequence: input.refSequence,
       commitSha: input.commitSha,
       parserVersion: this.#parser.version,
       sourceCompleteness: input.sourceComplete ? "complete" : "partial",

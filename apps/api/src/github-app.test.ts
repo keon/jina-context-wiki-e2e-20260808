@@ -66,6 +66,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   assert.equal(created.response.status, 202);
   const build = record(created.body.build);
   assert.equal(build.repository, repository);
+  assert.equal(build.refSequence, 1);
   assert.deepEqual(
     array(build.stages).map((stage) => record(stage).type),
     ["ingest-evidence", "derive-knowledge", "index-context"]
@@ -74,6 +75,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   const ingest = await claim(coordinator, "run-ingest-evidence");
   assert.equal(ingest.stage.metadata.commitSha, commitSha);
   assert.equal(ingest.stage.metadata.githubInstallationId, 140435029);
+  assert.equal(ingest.stage.metadata.refSequence, 1);
   const ingested = await api("/internal/context/ingest", {
     method: "POST",
     headers: internalHeaders(),
@@ -83,6 +85,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
         tenantId,
         repository,
         ref: "main",
+        refSequence: 1,
         commitSha,
         files: [
           { path: "README.md", blobSha, body: readme, language: "markdown" },

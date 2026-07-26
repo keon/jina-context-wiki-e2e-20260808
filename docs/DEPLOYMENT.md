@@ -13,6 +13,7 @@ deployed to Cloud Run before production acceptance runs.
 - Cloud Run jobs: `jina-context-migrate`, `jina-acceptance`
 - Cloud SQL: `jina-463721:us-east1:jina-db`, database `jina`
 - Runtime service account: `jina-runtime@jina-v2.iam.gserviceaccount.com`
+- Migration-only service account: `jina-migration@jina-v2.iam.gserviceaccount.com`
 - Build/deploy service account:
   `jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com`
 - Pull-request validator: `jina-cloud-build-ci@jina-v2.iam.gserviceaccount.com`
@@ -28,9 +29,12 @@ The API mounts:
 - `jina-internal-api-token` as `INTERNAL_API_TOKEN`;
 - `jina-context-api-token` as `CONTEXT_API_TOKEN`.
 
-The migration job separately mounts `jina-db-password` and connects as the schema-owning
-`jina_app` login. API and workers mount `jina-shared-db-password` and connect as the
-non-owning `jina_v2_app` runtime login. Do not swap or reuse these credentials.
+The migration job runs as `jina-migration`, separately mounts `jina-db-password`, and
+connects as the schema-owning `jina_app` login. API and workers run as `jina-runtime`,
+mount `jina-shared-db-password`, and connect as the non-owning `jina_v2_app` runtime
+login. The runtime Google service account must not have Secret Manager access to
+`jina-db-password`; the migration Google service account must not be assigned to any
+network-facing service. Do not swap or reuse these identities or credentials.
 
 `INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic.
 `CONTEXT_API_TOKEN` is deliberately narrower: it authorizes `/context/*`, `/mcp`, and
@@ -90,6 +94,13 @@ counts/reasons/paths recorded in the observation frontier. Unverified commit ide
 an invalid tree still fails closed. Partial generations are usable, but queries disclose
 `source-completeness:partial` in coverage.
 
+At request admission, the API allocates a monotonic `refSequence` for the exact
+tenant/repository/ref and records it on the build and ingest stage. The checkpoint retains
+that sequence. If an earlier accepted push finishes after a later accepted push, the
+earlier checkpoint remains stored for audit but cannot become current or publish a
+generation over the higher sequence. Request-key redelivery reuses the existing build and
+sequence.
+
 `ingest-evidence` and baseline `index-context` are required. `derive-knowledge` is
 optional for aggregate availability, uses one bounded repair, and can publish an enriched
 successor. Worker writes are fenced by the current board lease.
@@ -116,6 +127,19 @@ pnpm --filter @jina/admin build
 
 Database integration tests receive an ephemeral PostgreSQL 16 service through
 `TEST_DATABASE_URL`.
+
+The release race gate is mandatory and must not be skipped. `pnpm test` plus retained
+release evidence must cover, in both the memory contract and real PostgreSQL where
+applicable:
+
+- monotonic per-ref build allocation and delayed completion of a lower-sequence push;
+- rejection of a superseded checkpoint at generation creation/publication;
+- an erasure committed while projectors are materializing;
+- projection-input frontier changes before final publication;
+- invalidation/rebuild behavior for erasure and terminal knowledge revision events; and
+- repository-access mutation during ACL projection/publication.
+
+All cases must prove that no stale generation is published or remains query-visible.
 
 The supported production path is `cloudbuild.yaml`, which builds all four images, deploys
 all five services, and runs migration plus acceptance in one build. Start it from a clean
@@ -163,8 +187,9 @@ deployment.
 The coordinated `cloudbuild.yaml` invocation above calls
 `scripts/cloud-build-deploy.sh`, which:
 
-1. deploys and executes `jina-context-migrate` with the migration-owner credential,
-   including capability-role installation and runtime-login grants;
+1. deploys and executes `jina-context-migrate` as the dedicated `jina-migration` Google
+   service account with the migration-owner credential, including capability-role
+   installation and runtime-login grants;
 2. deploys `jina-api` with schema management disabled and checks `/health`;
 3. deploys `jina-context-worker` and verifies the exact three topics;
 4. removes the retired worker service after the replacement is healthy;
@@ -179,6 +204,24 @@ and grants membership in the focused NOLOGIN roles. The migration login therefor
 schema ownership and `CREATEROLE`; runtime services start with schema management disabled
 and activate a capability per transaction with `SET LOCAL ROLE`. The migration does not
 copy or translate prior semantic indexes. Active repositories must be reingested.
+
+Before approving a release, inspect IAM and the deployed identities:
+
+```sh
+gcloud secrets get-iam-policy jina-db-password --project=jina-v2
+gcloud run jobs describe jina-context-migrate \
+  --project=jina-v2 --region=us-central1 \
+  --format='value(spec.template.spec.template.spec.serviceAccountName)'
+gcloud run services list \
+  --project=jina-v2 --region=us-central1 \
+  --format='table(metadata.name,spec.template.spec.serviceAccountName)'
+```
+
+The migration job must report `jina-migration@jina-v2.iam.gserviceaccount.com`; every
+network-facing Jina service must report `jina-runtime@jina-v2.iam.gserviceaccount.com`.
+The owner-secret policy must grant the migration identity and must not grant the runtime
+identity, broad project members, or `allUsers`/`allAuthenticatedUsers`. Failing any of
+these checks blocks deployment.
 
 ## Production acceptance
 
@@ -206,6 +249,11 @@ The job exits `20` for workflow failures, `21` for generation/commit failures, `
 knowledge availability, `23` for HTTP/MCP answer or citation failures, `24` for backlog,
 and `25` for transport or unexpected failures. Inspect the job execution logs before
 retrying with a new request key.
+
+Release evidence also records the build ID, stage IDs, repository/ref/commit,
+`refSequence`, generation ID and projection-input fingerprint, document/citation counts,
+duration, outbox depth, backup ID, immutable image/source SHA, deployed service accounts,
+and owner-secret IAM inspection.
 
 ## Outbox recovery and rebuild
 

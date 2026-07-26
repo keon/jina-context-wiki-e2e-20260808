@@ -8,7 +8,7 @@ import {
   type StructuralFact
 } from "../domain/evidence.js";
 import { validateEvidenceRecord } from "../domain/evidence.js";
-import { fingerprint, repositoryAclFingerprint } from "../domain/fingerprint.js";
+import { fingerprint, repositoryAclFingerprint, stableId } from "../domain/fingerprint.js";
 import type {
   DerivationRun,
   KnowledgeDocumentRevision,
@@ -50,6 +50,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   readonly #latestGenerations = new Map<string, string>();
   readonly #repositoryAccess = new Map<string, Set<string>>();
   readonly #repositoryAccessVersions = new Map<string, number>();
+  readonly #projectionInputFrontiers = new Map<string, { sequence: number; eventId: string }>();
   readonly #erasures = new Set<string>();
   readonly #queryRuns: QueryRunTelemetry[] = [];
   #closed = false;
@@ -78,10 +79,18 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     if (recordIds.size !== snapshot.records.length) throw new Error("Duplicate evidence record");
     this.#checkpoints.set(snapshot.checkpoint.id, copy(snapshot.checkpoint));
     this.#snapshots.set(snapshot.checkpoint.id, copy(snapshot));
-    this.#latestCheckpoints.set(
-      scopeKey(snapshot.checkpoint.tenantId, snapshot.checkpoint.repository, snapshot.checkpoint.ref),
-      snapshot.checkpoint.id
-    );
+    const key = scopeKey(snapshot.checkpoint.tenantId, snapshot.checkpoint.repository, snapshot.checkpoint.ref);
+    const latestId = this.#latestCheckpoints.get(key);
+    const latest = latestId === undefined ? undefined : this.#checkpoints.get(latestId);
+    const becameLatest = latest === undefined || snapshot.checkpoint.refSequence > latest.refSequence;
+    if (becameLatest) {
+      this.#latestCheckpoints.set(key, snapshot.checkpoint.id);
+      this.#advanceProjectionInput(
+        snapshot.checkpoint.tenantId,
+        snapshot.checkpoint.repository,
+        `projection-input:evidence:${snapshot.checkpoint.id}`
+      );
+    }
     return copy(snapshot.checkpoint);
   }
 
@@ -180,6 +189,11 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       values.sort((left, right) => left.ordinal - right.ordinal);
       this.#citations.set(citation.revisionId, values);
     }
+    this.#advanceProjectionInput(
+      input.run.tenantId,
+      input.run.repository,
+      `projection-input:knowledge-run:${input.run.id}`
+    );
     return copy(input.run);
   }
 
@@ -221,6 +235,24 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     if (values.some((value) => value.id === event.id)) throw new Error("Duplicate revision event");
     values.push(copy(event));
     this.#events.set(event.revisionId, values);
+    const revision = this.#revisions.get(event.revisionId)!;
+    this.#advanceProjectionInput(
+      revision.tenantId,
+      revision.repository,
+      `projection-input:knowledge-event:${event.id}`
+    );
+    if (["rejected", "superseded", "invalidated", "redacted", "expired"].includes(event.type)) {
+      for (const [id, projection] of [...this.#projections]) {
+        if (
+          projection.generation.tenantId === revision.tenantId &&
+          projection.generation.repository === revision.repository &&
+          projection.generation.ref === revision.scope.ref
+        ) {
+          this.#projections.delete(id);
+        }
+      }
+      this.#latestGenerations.delete(scopeKey(revision.tenantId, revision.repository, revision.scope.ref));
+    }
     return copy(event);
   }
 
@@ -232,7 +264,9 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     const revisions = await this.listRevisions(tenantId, repository);
     const eligible = revisions.filter((revision) => {
       const events = this.#events.get(revision.id) ?? [];
-      if (events.some((event) => ["rejected", "invalidated", "redacted", "superseded"].includes(event.type))) {
+      if (
+        events.some((event) => ["rejected", "invalidated", "redacted", "superseded", "expired"].includes(event.type))
+      ) {
         return false;
       }
       if ((this.#citations.get(revision.id) ?? []).some((citation) => this.#isErased(citation.anchor))) {
@@ -277,6 +311,20 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       (await this.repositoryAccessFingerprint(generation.tenantId, generation.repository))
     ) {
       throw new Error(`Repository access changed while indexing ${generation.repository}; retry with a new generation`);
+    }
+    if (
+      generation.projectionInputFingerprint !==
+      (await this.projectionInputFingerprint(generation.tenantId, generation.repository))
+    ) {
+      throw new Error(
+        `Canonical projection inputs changed while indexing ${generation.repository}; retry with a new generation`
+      );
+    }
+    const latestCheckpoint = await this.latestCheckpoint(generation.tenantId, generation.repository, generation.ref);
+    if (latestCheckpoint?.id !== generation.checkpointId) {
+      throw new Error(
+        `Checkpoint ${generation.checkpointId} is superseded for ${generation.repository}@${generation.ref}`
+      );
     }
     const existing = this.#projections.get(generation.id);
     if (existing !== undefined) {
@@ -394,6 +442,16 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     });
   }
 
+  async projectionInputFingerprint(tenantId: string, repository: string): Promise<string> {
+    const frontier = this.#projectionInputFrontiers.get(`${tenantId}\u0000${repository.toLowerCase()}`);
+    return fingerprint({
+      tenantId,
+      repository,
+      sequence: frontier?.sequence ?? 0,
+      eventId: frontier?.eventId ?? null
+    });
+  }
+
   async listRepositories(tenantId: string): Promise<string[]> {
     const repositories = new Set<string>();
     for (const checkpoint of this.#checkpoints.values()) {
@@ -434,7 +492,18 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     if (!input.sourceId.trim() || !input.reason.trim() || !input.actorId.trim()) {
       throw new Error("Evidence erasure requires sourceId, actorId, and reason");
     }
-    this.#erasures.add(`${input.tenantId}\u0000${input.repository}\u0000${input.sourceType}\u0000${input.sourceId}`);
+    const erasureKey = `${input.tenantId}\u0000${input.repository}\u0000${input.sourceType}\u0000${input.sourceId}`;
+    const isNew = !this.#erasures.has(erasureKey);
+    this.#erasures.add(erasureKey);
+    if (isNew) {
+      const erasureId = stableId("erasure", {
+        tenantId: input.tenantId,
+        repository: input.repository,
+        sourceType: input.sourceType,
+        sourceId: input.sourceId
+      });
+      this.#advanceProjectionInput(input.tenantId, input.repository, `projection-input:erasure:${erasureId}`);
+    }
     let erasedGenerationCount = 0;
     for (const [id, projection] of [...this.#projections]) {
       if (projection.generation.tenantId === input.tenantId && projection.generation.repository === input.repository) {
@@ -491,5 +560,14 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
 
   #isRevisionErased(revisionId: string): boolean {
     return (this.#citations.get(revisionId) ?? []).some((citation) => this.#isErased(citation.anchor));
+  }
+
+  #advanceProjectionInput(tenantId: string, repository: string, eventId: string): void {
+    const key = `${tenantId}\u0000${repository.toLowerCase()}`;
+    const current = this.#projectionInputFrontiers.get(key);
+    this.#projectionInputFrontiers.set(key, {
+      sequence: (current?.sequence ?? 0) + 1,
+      eventId
+    });
   }
 }

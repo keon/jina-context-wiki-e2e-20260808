@@ -67,6 +67,7 @@ export interface EvidenceCheckpoint {
   tenantId: string;
   repository: string;
   ref: string;
+  refSequence: number;
   commitSha: string;
   parserVersion: string;
   sourceCompleteness: "complete" | "partial";

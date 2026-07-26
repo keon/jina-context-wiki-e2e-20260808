@@ -12,6 +12,7 @@ worker_image="${gar}/worker:${image_tag}"
 dashboard_image="${gar}/dashboard:${image_tag}"
 admin_image="${gar}/admin:${image_tag}"
 runtime_service_account="jina-runtime@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
+migration_service_account="jina-migration@${GCP_PROJECT_ID}.iam.gserviceaccount.com"
 cloud_sql_instance="${CLOUD_SQL_INSTANCE:-${GCP_PROJECT_ID}:${GCP_REGION}:jina-postgres}"
 tenancy_mode="${JINA_TENANCY_MODE:-fixed}"
 db_name="${JINA_DB_NAME:-jina}"
@@ -209,15 +210,17 @@ for secret_spec in \
   require_secret "${secret_spec}"
 done
 require_secret "jina-web-auth-password:latest"
+gcloud iam service-accounts describe "${runtime_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
+gcloud iam service-accounts describe "${migration_service_account}" --project="${GCP_PROJECT_ID}" >/dev/null
 
 # Apply owner-only DDL before any new runtime revision starts. Runtime services
-# intentionally run with JINA_DB_MANAGE_SCHEMA=false and must never discover a
-# missing table under live traffic.
+# intentionally run with JINA_DB_MANAGE_SCHEMA=false and use a different Google
+# identity that has no access to the migration-owner database secret.
 gcloud run jobs deploy jina-context-migrate \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --image="${api_image}" \
-  --service-account="${runtime_service_account}" \
+  --service-account="${migration_service_account}" \
   --set-cloudsql-instances="${cloud_sql_instance}" \
   --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${migration_db_user}~CONTEXT_RUNTIME_DB_USER=${db_user}" \
   --set-secrets="DB_PASS=${migration_db_pass_secret}" \

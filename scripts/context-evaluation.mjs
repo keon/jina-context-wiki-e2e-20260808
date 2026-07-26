@@ -57,6 +57,7 @@ const checkpoint = await new IngestEvidenceService(store).ingest({
   tenantId: fixture.tenantId,
   repository: fixture.repository,
   ref: fixture.ref,
+  refSequence: 1,
   commitSha: fixture.commitSha,
   files,
   observations: fixture.observations,

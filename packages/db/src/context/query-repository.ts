@@ -92,6 +92,7 @@ export class PostgresContextQueryRepository {
       tenantId: row.tenant_id,
       repository: row.repository,
       repositoryAccessFingerprint: row.acl_fingerprint,
+      projectionInputFingerprint: row.projection_input_fingerprint,
       ref: row.ref_name,
       commitSha: row.commit_sha,
       checkpointId: row.checkpoint_id,
@@ -385,6 +386,7 @@ interface GenerationQueryRow {
   capabilities: IndexGeneration["capabilities"];
   required_fingerprint: string;
   acl_fingerprint: string;
+  projection_input_fingerprint: string;
   created_at: Date;
   published_at: Date;
 }

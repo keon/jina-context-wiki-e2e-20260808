@@ -13,6 +13,7 @@ import { evidenceExcerpt } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, contextStableId, dateString } from "./database.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
+import { appendProjectionInputEvent, lockProjectionInput } from "./projection-input.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
 interface DerivationRow {
@@ -102,6 +103,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
     await this.database.transactionAs("jina_context_derive", async (client) => {
       await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, input.run.checkpointId);
+      await lockProjectionInput(client, checkpoint.tenant_id, checkpoint.repository);
       await insertDerivationRun(client, input.run, checkpoint);
       for (const revision of input.revisions) {
         if (
@@ -242,6 +244,14 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
           occurredAt: revision.createdAt
         });
       }
+      await appendProjectionInputEvent(client, {
+        tenantId: checkpoint.tenant_id,
+        repository: checkpoint.repository,
+        id: `projection-input:knowledge-run:${input.run.id}`,
+        eventType: "knowledge.run.committed",
+        aggregateId: input.run.id,
+        occurredAt: input.run.createdAt
+      });
       await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
     });
     return input.run;
@@ -314,14 +324,15 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
   }
 
   async appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent> {
-    await this.database.transactionAs("jina_context_derive", async (client) => {
-      const revision = await client.query<{ tenant_id: string; repository: string }>(
-        `select tenant_id,repository from jina_context.knowledge_document_revisions
+    await this.database.transactionAs("jina_context_admin", async (client) => {
+      const revision = await client.query<{ tenant_id: string; repository: string; ref_name: string }>(
+        `select tenant_id,repository,ref_name from jina_context.knowledge_document_revisions
          where id=$1`,
         [event.revisionId]
       );
       const scope = revision.rows[0];
       if (!scope) throw new Error(`Unknown knowledge revision ${event.revisionId}`);
+      await lockProjectionInput(client, scope.tenant_id, scope.repository);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `${scope.tenant_id}:${scope.repository}:${event.revisionId}`
       ]);
@@ -366,6 +377,22 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
         consumers: ["knowledge-current", "lexical", "dense", "hierarchy", "retention"],
         occurredAt: event.createdAt
       });
+      await appendProjectionInputEvent(client, {
+        tenantId: scope.tenant_id,
+        repository: scope.repository,
+        id: `projection-input:knowledge-event:${event.id}`,
+        eventType: "knowledge.revision.event",
+        aggregateId: event.id,
+        occurredAt: event.createdAt
+      });
+      if (["rejected", "superseded", "invalidated", "redacted", "expired"].includes(event.type)) {
+        await client.query(
+          `update jina_context.index_generations
+           set status='invalidated',invalidated_at=$4
+           where tenant_id=$1 and repository=$2 and ref_name=$3 and status='published'`,
+          [scope.tenant_id, scope.repository, scope.ref_name, event.createdAt]
+        );
+      }
     });
     return event;
   }

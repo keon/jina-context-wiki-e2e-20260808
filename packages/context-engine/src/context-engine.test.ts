@@ -52,6 +52,7 @@ async function ingestFixture(
     tenantId,
     repository,
     ref: "main",
+    refSequence: 1,
     commitSha,
     aclFingerprint,
     observationFrontier: "github:100",
@@ -193,6 +194,15 @@ test("ingestion is content-addressed, idempotent, and produces deterministic str
   const store = new MemoryContextEngineStore();
   const service = new IngestEvidenceService(store);
   const checkpoint = await ingestFixture(store);
+  assert.equal(
+    await store.projectionInputFingerprint(tenantId, repository),
+    fingerprint({
+      tenantId,
+      repository,
+      sequence: 1,
+      eventId: `projection-input:evidence:${checkpoint.id}`
+    })
+  );
   const repeated = await ingestFixture(store);
   assert.equal(repeated.id, checkpoint.id);
   assert.equal((await store.listManifest(checkpoint.id)).length, 2);
@@ -203,6 +213,7 @@ test("ingestion is content-addressed, idempotent, and produces deterministic str
     tenantId,
     repository,
     ref: "partial",
+    refSequence: 1,
     commitSha,
     aclFingerprint: "acl",
     observationFrontier: "bounded:1",
@@ -493,6 +504,7 @@ test("explicit file targets exclude provider records that merely mention the pat
     tenantId,
     repository,
     ref: "main",
+    refSequence: 1,
     commitSha,
     aclFingerprint: repositoryAclFingerprint(tenantId, repository),
     observationFrontier: "github:101",
@@ -541,6 +553,7 @@ test("ownership lookup includes CODEOWNERS while excluding provider chatter", as
     tenantId,
     repository,
     ref: "main",
+    refSequence: 1,
     commitSha,
     aclFingerprint: repositoryAclFingerprint(tenantId, repository),
     observationFrontier: "github:102",
@@ -639,6 +652,7 @@ test("candidate-level ACL filtering excludes inaccessible source and structural 
     tenantId,
     repository,
     ref: "main",
+    refSequence: 1,
     commitSha,
     aclFingerprint: "acl-public",
     observationFrontier: "1",
@@ -878,6 +892,8 @@ test("workflow names are clean and baseline indexing remains independent of deri
     leaseExpiresAt: "2026-07-26T12:10:00.000Z"
   });
   assert.ok(ingest);
+  assert.equal(build.refSequence, 1);
+  assert.equal(ingest.stage.metadata.refSequence, 1);
   assert.equal(ingest.stage.metadata.commitSha, commitSha);
   assert.equal(ingest.stage.metadata.githubInstallationId, 140435029);
   assert.equal(
@@ -926,6 +942,97 @@ test("workflow names are clean and baseline indexing remains independent of deri
   assert.equal(updated?.status, "succeeded");
 });
 
+test("per-ref build sequence prevents delayed older pushes from becoming current", async () => {
+  const coordinator = new MemoryContextPipelineCoordinator();
+  const older = await coordinator.createBuild({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha: "1".repeat(40),
+    requestKey: "push-older",
+    createdAt: "2026-07-26T12:00:00.000Z"
+  });
+  const newer = await coordinator.createBuild({
+    tenantId,
+    repository,
+    ref: "main",
+    commitSha: "2".repeat(40),
+    requestKey: "push-newer",
+    createdAt: "2026-07-26T12:00:01.000Z"
+  });
+  assert.equal(older.refSequence, 1);
+  assert.equal(newer.refSequence, 2);
+
+  const store = new MemoryContextEngineStore();
+  const newerCheckpoint = await new IngestEvidenceService(store).ingest({
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: newer.refSequence,
+    commitSha: "2".repeat(40),
+    aclFingerprint: "acl",
+    observationFrontier: "newer",
+    sourceComplete: true,
+    createdAt: "2026-07-26T12:00:02.000Z",
+    files: []
+  });
+  const newerFrontier = await store.projectionInputFingerprint(tenantId, repository);
+  const delayedOlderCheckpoint = await new IngestEvidenceService(store).ingest({
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: older.refSequence,
+    commitSha: "1".repeat(40),
+    aclFingerprint: "acl",
+    observationFrontier: "older-delayed",
+    sourceComplete: true,
+    createdAt: "2026-07-26T12:00:03.000Z",
+    files: []
+  });
+  assert.equal(await store.projectionInputFingerprint(tenantId, repository), newerFrontier);
+  assert.equal((await store.latestCheckpoint(tenantId, repository, "main"))?.id, newerCheckpoint.id);
+  await assert.rejects(
+    new IndexContextService(store).index(delayedOlderCheckpoint.id, "2026-07-26T12:00:04.000Z"),
+    /superseded/
+  );
+  assert.equal(
+    (await new IndexContextService(store).index(newerCheckpoint.id, "2026-07-26T12:00:05.000Z")).commitSha,
+    "2".repeat(40)
+  );
+});
+
+test("canonical input frontier rejects an index that races evidence erasure", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const hierarchy = {
+    async probe() {
+      return { available: true };
+    },
+    async build(input: HierarchyBuildInput) {
+      await store.eraseEvidence({
+        tenantId,
+        repository,
+        sourceType: "blob",
+        sourceId: blobSha,
+        actorId: "security-test",
+        reason: "race fixture",
+        createdAt: "2026-07-26T12:00:01.000Z"
+      });
+      return {
+        adapterName: "race-fixture",
+        adapterVersion: input.adapterVersion,
+        nodes: [],
+        diagnostics: []
+      };
+    }
+  };
+  await assert.rejects(
+    new IndexContextService(store, hierarchy).index(checkpoint.id, "2026-07-26T12:00:02.000Z"),
+    /Canonical projection inputs changed/
+  );
+  assert.equal(await store.latestPublished(tenantId, repository, "main"), undefined);
+});
+
 test("workflow release requeues work and stale leases cannot commit", async () => {
   const coordinator = new MemoryContextPipelineCoordinator();
   await coordinator.createBuild({ tenantId, repository, ref: "main", requestKey: "fence", createdAt });
@@ -962,6 +1069,7 @@ test("workflow release requeues work and stale leases cannot commit", async () =
       tenantId,
       repository,
       ref: "main",
+      refSequence: 1,
       commitSha,
       aclFingerprint: "acl",
       observationFrontier: "1",
@@ -979,6 +1087,7 @@ test("workflow release requeues work and stale leases cannot commit", async () =
           tenantId,
           repository,
           ref: "other",
+          refSequence: 1,
           commitSha,
           aclFingerprint: "acl",
           observationFrontier: "2",

@@ -238,6 +238,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       tenantId,
       repository,
       ref: "main",
+      refSequence: 1,
       commitSha,
       files: [{ path: "README.md", blobSha: "b".repeat(40), body, language: "markdown" }],
       observations: [],
@@ -684,6 +685,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
       const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.ingestEvidence);
       const input = parseIngestInput(body.input, principal.tenantId, lease.build.repository, lease.build.ref);
+      if (input.refSequence !== lease.build.refSequence) throw staleLease();
       const checkpoint = await new IngestEvidenceService(contextStore).ingest(input, lease.fence);
       json(response, 200, {
         effect: "changed",
@@ -1049,6 +1051,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               tenantId: claim.build.tenantId,
               repository: claim.build.repository,
               ref: claim.build.ref,
+              refSequence: claim.build.refSequence,
               ...claim.stage.metadata
             }
           }

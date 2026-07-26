@@ -36,6 +36,7 @@ create table if not exists jina_context.pipeline_builds (
   tenant_id text not null,
   repository text not null,
   ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
   request_key text not null,
   status text not null check (status in ('active','succeeded','degraded','failed')),
   created_at timestamptz not null,
@@ -43,10 +44,11 @@ create table if not exists jina_context.pipeline_builds (
   foreign key (tenant_id,repository)
     references jina_context.repositories(tenant_id,repository),
   unique (tenant_id,request_key),
+  unique (tenant_id,repository,ref_name,ref_sequence),
   check ((status='active') = (completed_at is null))
 );
 create index if not exists context_pipeline_builds_scope
-  on jina_context.pipeline_builds (tenant_id,repository,created_at desc,id desc);
+  on jina_context.pipeline_builds (tenant_id,repository,ref_name,ref_sequence desc,id desc);
 
 create table if not exists jina_context.pipeline_stages (
   id text primary key check (id ~ '^cs_'),
@@ -148,6 +150,7 @@ create table if not exists jina_context.evidence_checkpoints (
   tenant_id text not null,
   repository text not null,
   ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
   commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40,64}$'),
   parser_version text not null,
   source_completeness text not null check (source_completeness in ('complete','partial')),
@@ -158,11 +161,30 @@ create table if not exists jina_context.evidence_checkpoints (
   created_at timestamptz not null,
   foreign key (tenant_id,repository)
     references jina_context.repositories(tenant_id,repository),
-  unique (tenant_id,repository,ref_name,commit_sha,parser_version,evidence_fingerprint)
+  unique (tenant_id,repository,ref_name,ref_sequence)
 );
 create index if not exists context_evidence_checkpoints_latest
   on jina_context.evidence_checkpoints
-  (tenant_id,repository,ref_name,created_at desc,id desc);
+  (tenant_id,repository,ref_name,ref_sequence desc,id desc);
+
+create table if not exists jina_context.projection_input_events (
+  tenant_id text not null,
+  repository text not null,
+  sequence bigint not null check (sequence > 0),
+  id text not null,
+  event_type text not null check (event_type in (
+    'evidence.checkpoint.committed','knowledge.run.committed',
+    'knowledge.revision.event','evidence.erased'
+  )),
+  aggregate_id text not null,
+  occurred_at timestamptz not null,
+  primary key (tenant_id,repository,sequence),
+  unique (tenant_id,repository,id),
+  foreign key (tenant_id,repository)
+    references jina_context.repositories(tenant_id,repository)
+);
+create index if not exists context_projection_input_events_latest
+  on jina_context.projection_input_events (tenant_id,repository,sequence desc);
 
 create table if not exists jina_context.evidence_checkpoint_records (
   checkpoint_id text not null references jina_context.evidence_checkpoints(id),
@@ -195,6 +217,7 @@ create table if not exists jina_context.refs (
   tenant_id text not null,
   repository text not null,
   ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
   commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40,64}$'),
   is_default boolean not null default false,
   source_observation_id text not null,
@@ -204,10 +227,10 @@ create table if not exists jina_context.refs (
     references jina_context.repositories(tenant_id,repository),
   foreign key (tenant_id,repository,source_observation_id)
     references jina_context.observations(tenant_id,repository,id),
-  unique (tenant_id,repository,ref_name,commit_sha,source_observation_id)
+  unique (tenant_id,repository,ref_name,ref_sequence)
 );
 create index if not exists context_refs_current_lookup
-  on jina_context.refs (tenant_id,repository,ref_name,observed_at desc,id desc);
+  on jina_context.refs (tenant_id,repository,ref_name,ref_sequence desc,id desc);
 
 create table if not exists jina_context.commits (
   tenant_id text not null,
@@ -685,6 +708,7 @@ create table if not exists jina_context.index_generations (
   capabilities jsonb not null,
   required_fingerprint text,
   acl_fingerprint text not null check (acl_fingerprint ~ '^[0-9a-f]{64}$'),
+  projection_input_fingerprint text not null check (projection_input_fingerprint ~ '^[0-9a-f]{64}$'),
   degraded_capabilities text[] not null default '{}',
   created_at timestamptz not null,
   published_at timestamptz,
@@ -1055,7 +1079,7 @@ create or replace view jina_context.current_refs as
 select distinct on (tenant_id,repository,ref_name)
   tenant_id,repository,ref_name,commit_sha,is_default,observed_at,id as observation_id
 from jina_context.refs
-order by tenant_id,repository,ref_name,observed_at desc,id desc;
+order by tenant_id,repository,ref_name,ref_sequence desc,id desc;
 
 create or replace view jina_context.current_repository_acl as
 select tenant_id,repository,principal_id,permission,acl_fingerprint,observed_at
@@ -1121,7 +1145,8 @@ begin
     'commit_changes','blob_analyses','symbols','imports','structural_facts',
     'entities','identities','derivation_runs','knowledge_documents',
     'knowledge_document_revisions','knowledge_revision_evidence',
-    'knowledge_revision_events','repository_acl_observations','erasure_filters','audit_events'
+    'knowledge_revision_events','repository_acl_observations','erasure_filters','audit_events',
+    'projection_input_events'
   ] loop
     execute format('drop trigger if exists reject_immutable_change on jina_context.%I',table_name);
     execute format(

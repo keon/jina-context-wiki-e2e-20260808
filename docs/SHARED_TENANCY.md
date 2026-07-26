@@ -40,6 +40,31 @@ gcloud projects add-iam-policy-binding jina-463721 \
   --role='roles/cloudsql.client'
 ```
 
+The migration job uses the distinct
+`jina-migration@jina-v2.iam.gserviceaccount.com` service account. Grant that identity
+Cloud SQL Client and secret accessor on `jina-db-password` only. Remove
+`jina-runtime@jina-v2.iam.gserviceaccount.com` from that secret's IAM policy and do not
+grant either identity project-wide Secret Manager access.
+
+```sh
+gcloud secrets add-iam-policy-binding jina-db-password \
+  --project=jina-v2 \
+  --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
+  --role='roles/secretmanager.secretAccessor'
+
+gcloud secrets remove-iam-policy-binding jina-db-password \
+  --project=jina-v2 \
+  --member='serviceAccount:jina-runtime@jina-v2.iam.gserviceaccount.com' \
+  --role='roles/secretmanager.secretAccessor'
+
+gcloud secrets get-iam-policy jina-db-password --project=jina-v2
+```
+
+The build deployer needs permission to act as both service accounts, but that does not
+authorize either workload identity to impersonate the other. Never attach
+`jina-migration` to API, worker, dashboard, admin, or acceptance. Never mount
+`jina-db-password` into a `jina-runtime` revision.
+
 The deployer may need read-only instance metadata:
 
 ```sh
@@ -122,14 +147,17 @@ The context engine is a clean replacement. No old index data is copied into
 8. Trigger `build-context` for every active repository/ref.
 9. Require exact-commit baseline generations before enabling callers, then allow
    knowledge derivation to publish enriched successors.
-10. Audit commits, manifests, ACLs, required projector status, outbox depth, citations,
-    and exact queries. Run the production acceptance job.
+10. Audit per-ref build/checkpoint sequences, commits, manifests, projection-input
+    fingerprints, ACLs, required projector status, outbox depth, citations, and exact
+    queries. Run the production acceptance job and retain race-test output.
 11. Retain the restorable backup for the normal recovery window before deleting any
     archived prior schema.
 
 The API may run with `JINA_DB_MANAGE_SCHEMA=true` only in disposable/local environments.
 Production runs a separate migration job, then starts the API with schema management
-disabled.
+disabled. Release approval additionally verifies that the migration job uses
+`jina-migration`, all network-facing services use `jina-runtime`, and the runtime identity
+cannot access `jina-db-password`.
 
 ## Backup and rollback
 

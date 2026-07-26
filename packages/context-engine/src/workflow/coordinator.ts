@@ -35,6 +35,7 @@ export interface ContextBuild {
   tenantId: string;
   repository: string;
   ref: string;
+  refSequence: number;
   requestKey: string;
   status: "active" | "succeeded" | "degraded" | "failed";
   stages: ContextPipelineStage[];
@@ -119,6 +120,15 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     }
     const createdAt = normalizeIsoTime(input.createdAt);
     const repository = normalizeRepository(input.repository);
+    const refSequence =
+      Math.max(
+        0,
+        ...[...this.#builds.values()]
+          .filter(
+            (build) => build.tenantId === input.tenantId && build.repository === repository && build.ref === input.ref
+          )
+          .map((build) => build.refSequence)
+      ) + 1;
     const id = stableId("cb", { tenantId: input.tenantId, requestKey: input.requestKey });
     const stage = (type: ContextPipelineStage["type"], required: boolean, status: ContextStageStatus) => ({
       id: stableId("cs", { buildId: id, type }),
@@ -132,7 +142,8 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
         type === contextTaskTypes.ingestEvidence
           ? {
               ...(input.commitSha ? { commitSha: input.commitSha.toLowerCase() } : {}),
-              ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {})
+              ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
+              refSequence
             }
           : {}
     });
@@ -141,6 +152,7 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
       tenantId: input.tenantId,
       repository,
       ref: input.ref,
+      refSequence,
       requestKey: input.requestKey,
       status: "active",
       stages: [

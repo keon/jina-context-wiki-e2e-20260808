@@ -35,6 +35,7 @@ interface GenerationRow {
   capabilities: IndexGeneration["capabilities"];
   required_fingerprint: string;
   acl_fingerprint: string;
+  projection_input_fingerprint: string;
   created_at: Date;
   published_at: Date | null;
 }
@@ -293,6 +294,7 @@ function buildingGeneration(generation: IndexGeneration): Omit<IndexGeneration, 
     tenantId: generation.tenantId,
     repository: generation.repository,
     repositoryAccessFingerprint: generation.repositoryAccessFingerprint,
+    projectionInputFingerprint: generation.projectionInputFingerprint,
     ref: generation.ref,
     commitSha: generation.commitSha,
     checkpointId: generation.checkpointId,
@@ -610,7 +612,7 @@ async function acknowledgeSupersededScopedDeliveries(
             and event_checkpoint.ref_name=current_checkpoint.ref_name
            where current_checkpoint.id=$7
              and event_checkpoint.id <> current_checkpoint.id
-             and event_checkpoint.created_at <= current_checkpoint.created_at
+             and event_checkpoint.ref_sequence <= current_checkpoint.ref_sequence
              and (
                event_checkpoint.id=delivery.aggregate_id
                or event_checkpoint.id=delivery.payload->>'checkpointId'
@@ -677,7 +679,7 @@ async function acknowledgeRepositoryGlobalDeliveries(
            from jina_context.evidence_checkpoints checkpoint
            where checkpoint.tenant_id=delivery.tenant_id
              and checkpoint.repository=delivery.repository
-           order by checkpoint.ref_name,checkpoint.created_at desc,checkpoint.id desc
+           order by checkpoint.ref_name,checkpoint.ref_sequence desc,checkpoint.id desc
          ) latest
          where not exists (
            select 1
@@ -1002,6 +1004,7 @@ function generationFromRow(row: GenerationRow, statuses: IndexGeneration["projec
     tenantId: row.tenant_id,
     repository: row.repository,
     repositoryAccessFingerprint: row.acl_fingerprint,
+    projectionInputFingerprint: row.projection_input_fingerprint,
     ref: row.ref_name,
     commitSha: row.commit_sha,
     checkpointId: row.checkpoint_id,

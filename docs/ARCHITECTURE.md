@@ -49,6 +49,14 @@ Successful derivation publishes a successor enriched generation. The aggregate s
 when ingestion and baseline indexing succeed; derivation failure degrades rather than
 invalidates the usable baseline.
 
+Build admission assigns a monotonically increasing `refSequence` under a
+tenant/repository/ref lock. That sequence is fixed when the build request is accepted and
+travels through the ingest task into the evidence checkpoint; wall-clock timestamps and
+worker completion order never choose the current checkpoint. If an earlier accepted push
+finishes ingestion after a later accepted push, its lower sequence remains historical and
+`index-context` rejects it as superseded. Redelivery of the same request key returns the
+existing build and does not allocate another sequence.
+
 The board remains representation-neutral. It knows task state, dependency readiness,
 supersession, leases, and terminal propagation, but does not import context-domain types.
 
@@ -123,6 +131,23 @@ ACL observation rather than trusting a historical generation projection.
 `POST /internal/context/outbox/drain` selects only current checkpoints and actually re-runs
 the same idempotent `index-context` path.
 
+`projection_input_events` is an immutable, repository-scoped sequence over every canonical
+input that can change a projection: evidence checkpoints, successful knowledge runs,
+knowledge revision events, and evidence erasures. `index-context` samples a fingerprint
+of the latest sequence/event before materialization and samples it again after all
+projectors finish. Any change aborts the generation. Durable generation creation and
+publication also acquire the projection-input advisory lock and revalidate the stored
+fingerprint; publication additionally rechecks that the checkpoint has the highest
+`refSequence` for its ref. Canonical writers take the same lock before appending an input
+event, so no erasure or knowledge transition can commit between final validation and
+publication.
+
+Erasure appends its input event and invalidates every published generation for the
+repository in the same transaction. Terminal knowledge events—`rejected`, `superseded`,
+`invalidated`, `redacted`, and `expired`—append an input event and invalidate published
+generations for that revision's ref. Callers see no stale generation while an idempotent
+rebuild incorporates the new canonical state.
+
 The hierarchy is owned by Jina. A deterministic adapter is the active fallback. PageIndex
 is represented by an optional adapter behind the same hierarchy port, but no PageIndex
 client or dependency is wired into production. It remains disabled until long-document
@@ -191,9 +216,10 @@ The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are un
 
 Canonical objects and knowledge revisions use stable fingerprints over immutable input.
 Consumers own independent outbox deliveries, leases, and checkpoints. Generation identity
-includes tenant, repository, ref, exact commit, evidence fingerprint, source-completeness
-frontier, and projector versions. Replaying the same input converges, while a moved ref
-produces a new isolated generation.
+includes tenant, repository, ref, exact commit, checkpoint identity (which includes the
+monotonic `refSequence`), evidence fingerprint, source-completeness frontier, immutable
+projection-input frontier, and projector versions. Replaying the same input converges,
+while a moved ref produces a new isolated generation.
 
 ## Authentication and security
 
@@ -215,6 +241,12 @@ installs focused NOLOGIN capability roles, marks the runtime login `NOINHERIT`, 
 it role membership. Runtime services do not manage schema and have no ambient context
 table privileges: each database operation runs in a transaction and activates its
 declared capability with `SET LOCAL ROLE`.
+
+The Cloud Run migration job also has a dedicated Google identity,
+`jina-migration@jina-v2.iam.gserviceaccount.com`. Only that identity may access the
+migration-owner database secret. Network-facing API, workers, dashboard, admin, and
+acceptance run as `jina-runtime`, which must not have access to the owner secret; the
+migration identity is never assigned to those services.
 
 Repository credentials stay in the worker. Daytona isolates source inspection. Jina does
 not execute untrusted repository code or install its dependencies. Retrieved text and

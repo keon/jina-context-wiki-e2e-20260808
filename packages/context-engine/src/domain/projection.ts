@@ -145,6 +145,7 @@ export interface IndexGeneration {
   tenantId: string;
   repository: string;
   repositoryAccessFingerprint: string;
+  projectionInputFingerprint: string;
   ref: string;
   commitSha: string;
   checkpointId: string;

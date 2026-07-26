@@ -15,6 +15,12 @@ The snapshot contains tasks, dependencies, task events, and durable deliveries. 
 mutation is tenant-scoped and protected by a cross-instance transaction lock. Completion
 requires the current renewable lease.
 
+`pipeline_builds.ref_sequence` is allocated monotonically under a
+tenant/repository/ref advisory lock at build request time. The ingest stage and resulting
+checkpoint retain that immutable sequence. Current-ref selection orders by
+`ref_sequence`, not request timestamps, checkpoint creation time, or worker completion
+time.
+
 ## Context schema
 
 The context engine is normalized under `jina_context`.
@@ -25,7 +31,7 @@ The context engine is normalized under `jina_context`.
 | Evidence               | `observations`, `evidence_records`, `evidence_checkpoints`, `evidence_checkpoint_records`, `evidence_checkpoint_manifest`, `refs`, `commits`, `commit_parents`, `trees`, `tree_entries`, `blobs`, `commit_changes`          |
 | Deterministic analysis | `blob_analyses`, `symbols`, `imports`, `structural_facts`, `evidence_checkpoint_structural_facts`, `entities`, `identities`                                                                                                 |
 | Knowledge              | `derivation_runs`, `knowledge_documents`, `knowledge_document_revisions`, `knowledge_revision_evidence`, `knowledge_revision_events`                                                                                        |
-| Governance             | `repository_acl_observations`, `erasure_filters`, `audit_events`, `outbox`                                                                                                                                                  |
+| Governance             | `repository_acl_observations`, `erasure_filters`, `audit_events`, `projection_input_events`, `outbox`                                                                                                                       |
 | Generation control     | `index_generations`, `generation_projectors`, `projection_checkpoints`                                                                                                                                                      |
 | Projections            | `ref_manifest`, `current_knowledge_revisions`, `context_documents`, `context_fragments`, `exact_index`, `context_embeddings`, `hierarchy_nodes`, `structural_relations`, `identity_projection`, `repository_acl_projection` |
 | Query telemetry        | `query_runs`, `retrieval_candidates`, `answer_citations`, `retrieval_metrics`                                                                                                                                               |
@@ -39,7 +45,8 @@ fingerprint. `source_completeness` is explicitly `complete` or `partial`; the
 `observation_frontier` records the bounded Git history, GitHub pagination outcome, and
 omitted bodies that led to that value. Git objects and content-addressed blobs remain
 reusable across checkpoints; the checkpoint membership tables preserve what was valid
-for that build.
+for that build. The unique tenant/repository/ref/`ref_sequence` key preserves admission
+order even when an older worker completes after a newer one.
 
 Evidence records store base immutable bodies. Citation line ranges and JSON pointers are
 selectors over those bodies rather than separate record identities. Resolution validates
@@ -54,6 +61,8 @@ architecture, component, decision, change, incident, ownership record, or runboo
 metadata. `knowledge_revision_evidence` is the ordered set of original source anchors.
 State changes are append-only `knowledge_revision_events`; there is no mutable current
 flag on the revision. The current selection is a disposable generation projection.
+Terminal events (`rejected`, `superseded`, `invalidated`, `redacted`, or `expired`)
+invalidate published generations for the revision's ref immediately.
 
 ### Indexable context
 
@@ -75,6 +84,14 @@ Required projectors must be coherent before publication; optional projectors dec
 published without model output, and successful derivation can publish an enriched
 successor.
 
+`projection_input_events` is the immutable repository-wide frontier for materialization
+inputs. It assigns a monotonic sequence to evidence checkpoint commits, successful
+knowledge runs, knowledge revision events, and erasures. `index_generations` persists the
+fingerprint of the latest sequence/event sampled before materialization. The indexer
+re-samples after materialization, and generation creation/publication lock and revalidate
+the same fingerprint plus the latest per-ref checkpoint before a generation can become
+visible.
+
 Consumers use independent outbox deliveries and checkpoints. A slow optional consumer
 cannot acknowledge required projection work. Every delivery lease is consumer-owned, and
 each projector transaction activates only that consumer's capability role. Acknowledgement
@@ -87,6 +104,11 @@ checkpoints into new idempotent generations and never expose partial rows.
 ## Database invariants
 
 - Repository-owned identities and foreign keys include tenant and repository scope.
+- A build/checkpoint with a lower `ref_sequence` cannot become current or publish over a
+  higher sequence, regardless of completion timestamps.
+- Projection input events are immutable and uniquely sequenced per repository. A
+  generation cannot publish when evidence, knowledge state, or erasure state changed
+  after its initial frontier sample.
 - Immutable evidence, revision, and citation tables deny runtime `UPDATE` and `DELETE`.
 - Full Git SHAs and source-specific evidence anchors are validated.
 - Line ranges require a path and valid positive bounds.
@@ -106,6 +128,8 @@ checkpoints into new idempotent generations and never expose partial rows.
 - Documents derived from multiple sources require every source ACL fingerprint in lexical,
   hierarchy, and optional dense retrieval; wildcard fingerprints never bypass that rule.
 - Erasure filters are durable and checked during ingestion and rebuild.
+- Erasure invalidates every published repository generation in the same transaction as
+  its projection-input event. Terminal knowledge events do the same for their ref.
 - Exact, lexical, hierarchy, embedding, and relation projections are disposable.
 - Query telemetry stores bounded metadata and citation checks, not unrestricted source
   text.

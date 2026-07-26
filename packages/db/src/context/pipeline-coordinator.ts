@@ -18,6 +18,7 @@ interface BuildRow {
   tenant_id: string;
   repository: string;
   ref_name: string;
+  ref_sequence: string;
   request_key: string;
   status: ContextBuild["status"];
   created_at: Date;
@@ -75,16 +76,29 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
          on conflict (tenant_id,repository) do nothing`,
         [input.tenantId, input.repository, input.ref, input.createdAt]
       );
+      await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+        `context-pipeline-ref:${input.tenantId}:${input.repository}:${input.ref}`
+      ]);
       const existing = await client.query<BuildRow>(
         "select * from jina_context.pipeline_builds where tenant_id=$1 and request_key=$2",
         [input.tenantId, input.requestKey]
       );
       if (existing.rows[0]) return hydrateBuild(client, existing.rows[0]);
+      const nextSequence = await client.query<{ value: string }>(
+        `select (coalesce(max(ref_sequence),0)+1)::text value
+         from jina_context.pipeline_builds
+         where tenant_id=$1 and repository=$2 and ref_name=$3`,
+        [input.tenantId, input.repository, input.ref]
+      );
+      const refSequence = Number(nextSequence.rows[0]!.value);
+      if (!Number.isSafeInteger(refSequence) || refSequence <= 0) {
+        throw new Error(`Ref sequence exceeds the supported range for ${input.repository}@${input.ref}`);
+      }
       await client.query(
         `insert into jina_context.pipeline_builds
-          (id,tenant_id,repository,ref_name,request_key,status,created_at)
-         values ($1,$2,$3,$4,$5,'active',$6)`,
-        [id, input.tenantId, input.repository, input.ref, input.requestKey, input.createdAt]
+          (id,tenant_id,repository,ref_name,ref_sequence,request_key,status,created_at)
+         values ($1,$2,$3,$4,$5,$6,'active',$7)`,
+        [id, input.tenantId, input.repository, input.ref, refSequence, input.requestKey, input.createdAt]
       );
       const stages = [
         {
@@ -111,7 +125,8 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
           stage.type === contextTaskTypes.ingestEvidence
             ? {
                 ...(input.commitSha ? { commitSha: input.commitSha.toLowerCase() } : {}),
-                ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {})
+                ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
+                refSequence
               }
             : {};
         await client.query(
@@ -136,6 +151,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
         tenant_id: input.tenantId,
         repository: input.repository,
         ref_name: input.ref,
+        ref_sequence: String(refSequence),
         request_key: input.requestKey,
         status: "active",
         created_at: new Date(input.createdAt),
@@ -364,11 +380,16 @@ async function hydrateBuild(queryable: { query: PoolClient["query"] }, row: Buil
        else 2 end`,
     [row.id]
   );
+  const refSequence = Number(row.ref_sequence);
+  if (!Number.isSafeInteger(refSequence) || refSequence <= 0) {
+    throw new Error(`Invalid ref sequence on context build ${row.id}`);
+  }
   return {
     id: row.id,
     tenantId: row.tenant_id,
     repository: row.repository,
     ref: row.ref_name,
+    refSequence,
     requestKey: row.request_key,
     status: row.status,
     stages: stages.rows.map(stageFromRow),

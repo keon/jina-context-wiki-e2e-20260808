@@ -34,6 +34,7 @@ interface RepositoryContextMetadata {
   readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
+  readonly refSequence: number;
   readonly commitSha?: string;
   readonly checkpointId?: string;
   readonly githubInstallationId?: number;
@@ -334,6 +335,7 @@ async function runIngestEvidence(work: ClaimedWork<"run-ingest-evidence">): Prom
       tenantId,
       repository,
       ref,
+      refSequence: work.task.metadata.refSequence,
       commitSha: checkout.commitSha,
       files,
       observations: provider.observations,
@@ -1046,6 +1048,7 @@ function repositoryMetadata(metadata: Record<string, unknown>): RepositoryContex
     tenantId: requiredString(metadata.tenantId, "task tenantId"),
     repository: requiredString(metadata.repository, "task repository"),
     ref: requiredString(metadata.ref, "task ref"),
+    refSequence: requiredPositiveInteger(metadata.refSequence, "task refSequence"),
     ...(metadata.githubInstallationId === undefined
       ? {}
       : {

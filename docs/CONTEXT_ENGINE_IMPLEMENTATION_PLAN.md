@@ -43,6 +43,12 @@ The final implementation hardening also completed:
   persisted Git history, paginated GitHub observations, and omission frontiers;
 - separate migration-owner/runtime credentials, `NOINHERIT` runtime membership, and
   explicit `SET LOCAL ROLE` capability activation;
+- monotonic build-time `refSequence` allocation so delayed lower-sequence work cannot
+  become current;
+- immutable projection-input frontiers sampled before/after materialization and locked,
+  revalidated publication that races safely with erasure and knowledge state changes;
+- a dedicated `jina-migration` Google service account with owner-secret access isolated
+  from every `jina-runtime` service;
 - one coordinated Cloud Run release for API, workers, dashboard, and admin;
 - tenant-admin-only knowledge review.
 
@@ -166,6 +172,9 @@ flowchart LR
   index or block exact and structural queries.
 - A query response reports the selected generation and whether derived knowledge, dense
   retrieval, and hierarchy retrieval were available.
+- Every accepted build receives a monotonic tenant/repository/ref `refSequence`. That
+  admission-time sequence, not worker finish time, chooses the current checkpoint; a
+  lower-sequence push that completes late is retained but cannot publish.
 
 The aggregate task is successful when required ingestion and baseline indexing complete.
 It is `degraded` when optional knowledge derivation or an optional projector fails, and
@@ -390,6 +399,7 @@ Create a new `jina_context` schema from scratch. Do not alter or copy the
 | `audit_events`                 | append-only administrative and human actions                  |
 | `erasure_filters`              | durable filters preventing erased evidence from reappearing   |
 | `repository_acl_observations`  | source ACL state and provenance                               |
+| `projection_input_events`      | immutable repository-wide projection-input sequence/frontier  |
 | `outbox`                       | one delivery row per event and projection consumer            |
 
 Required constraints:
@@ -406,7 +416,9 @@ Required constraints:
 - all referenced evidence must share the revision tenant and allowed repository scope;
 - no `UPDATE` or `DELETE` grant on immutable evidence, revision, or citation tables for
   runtime roles;
-- append-only event sequence uniqueness per aggregate.
+- append-only event sequence uniqueness per aggregate;
+- unique positive `ref_sequence` per tenant/repository/ref for builds and checkpoints;
+- unique immutable projection-input sequence/event ID per tenant/repository.
 
 ### Projection tables
 
@@ -494,6 +506,7 @@ required capability.
 tenant
 repository/provider identity
 requested ref
+admission-time per-ref sequence
 resolved full commit SHA
 trigger observation
 optional GitHub App installation ID
@@ -516,9 +529,11 @@ bounded history policy
 7. Record identity and ACL observations.
 8. Apply erasure filters before canonical insert and derived event emission.
 9. Emit consumer-owned outbox deliveries in the same transaction as each canonical write.
-10. Produce an `EvidenceCheckpoint` containing the exact commit, parser version,
+10. Produce an `EvidenceCheckpoint` containing the ref sequence, exact commit, parser version,
     `complete`/`partial` source completeness, machine-readable Git/GitHub/body-omission
     frontier, and evidence fingerprint.
+11. Append an immutable projection-input event in the same locked transaction as the
+    checkpoint.
 
 ### Idempotency
 
@@ -526,7 +541,8 @@ bounded history policy
 - Blob analysis: blob SHA plus parser version.
 - Provider observation: provider event/request identity plus content digest.
 - Explicit fact: normalized source identity plus source observation.
-- Checkpoint: tenant, repository, commit, parser version, and completeness frontier.
+- Checkpoint: tenant, repository, ref sequence, commit, parser version, and completeness
+  frontier.
 
 ### Failure behavior
 
@@ -684,7 +700,8 @@ Implement each projection as an independent, versioned outbox consumer.
 ### Generation publication
 
 1. Create a target `IndexGeneration` for tenant, repository, ref, commit, and projector
-   version set.
+   version set. Sample the immutable repository projection-input frontier before reading
+   canonical inputs and include its fingerprint in generation identity.
 2. Required consumers process to the generation barrier using fenced leases.
    Each consumer activates its own capability role and commits its projection and lease
    completion independently.
@@ -695,10 +712,13 @@ Implement each projection as an independent, versioned outbox consumer.
    output fingerprint. ACL projection and publication each acquire the same repository
    access lock used by ACL mutation and compare the current fingerprint; a mismatch fails
    the attempt for retry.
-5. Queries select the latest published generation matching the requested ref/commit.
-6. Knowledge events may create a successor enriched generation after the baseline build
+5. Re-sample the projection-input frontier after materialization. Generation creation and
+   publication acquire the shared projection-input lock and revalidate that fingerprint
+   plus the latest per-ref checkpoint sequence. Any mismatch fails for retry.
+6. Queries select the latest published generation matching the requested ref/commit.
+7. Knowledge events may create a successor enriched generation after the baseline build
    has completed.
-7. Old generations are retained only for the configured debugging/rollback window and are
+8. Old generations are retained only for the configured debugging/rollback window and are
    then deleted by the retention consumer.
 
 Do not expose partially published rows through query views.
@@ -713,9 +733,11 @@ Do not expose partially published rows through query views.
   the newest ACL observation versions or retention event;
 - one ref-scoped lock and newest-checkpoint check reject stale publication, while older
   scoped deliveries are explicitly completed as superseded only after the successor is live;
+- evidence, knowledge-run, knowledge-event, and erasure writes advance an immutable
+  repository projection-input frontier under the same lock used at publication;
 - changing one projector version rebuilds only its outputs and any dependent projectors;
-- erasure invalidates every affected generation and is prioritized ahead of ordinary
-  indexing;
+- erasure invalidates every repository generation, and terminal knowledge events
+  invalidate their ref, in the same transaction that advances the frontier;
 - rebuild output is compared by deterministic fingerprints before publication.
 
 ### Acceptance gate
@@ -726,6 +748,9 @@ Do not expose partially published rows through query views.
 - required-projector failure prevents publication;
 - optional-projector failure produces a usable degraded generation;
 - concurrent rebuilds cannot publish stale checkpoints over a newer target;
+- lower-sequence checkpoints that finish after a newer accepted push cannot become current;
+- an erasure or knowledge transition between the indexer's initial/final frontier samples
+  prevents publication and leaves no stale query-visible generation;
 - a revoke committed after ACL projection but before publication prevents that generation
   from publishing, and current-ACL query authorization rejects the revoked principal;
 - no query can observe a mixed ref or mixed ACL generation;
@@ -1283,6 +1308,8 @@ identity or event semantics must also include retry, reordering, and rebuild tes
 - citation verifier rejection cases;
 - PageIndex adapter source-span validation;
 - outbox consumer and generation state machines.
+- monotonic per-ref build/checkpoint sequencing under reordered completion;
+- projection-input frontier mutation during materialization and final publication;
 
 ### PostgreSQL integration tests
 
@@ -1298,9 +1325,10 @@ Test:
 - duplicate/reordered event convergence;
 - immutable table update/delete rejection;
 - per-consumer acknowledgement;
-- ref and generation atomicity;
+- per-ref sequence and generation atomicity under delayed older completion;
+- immutable projection-input sequence/fingerprint validation;
 - ACL filtering before candidate creation;
-- erasure across every projection;
+- erasure and terminal knowledge invalidation across every projection;
 - rebuild equivalence;
 - retention of audit and review history.
 
@@ -1317,8 +1345,12 @@ For a fixture repository:
 7. query rationale/overview and inspect original citations;
 8. introduce a conflicting source and verify disclosure;
 9. move the ref and verify temporal isolation;
-10. revoke access and verify the source disappears from retrieval, traces, and synthesis;
-11. erase evidence and verify no rebuild resurrects it.
+10. finish a lower-sequence build after a newer build and verify it cannot publish;
+11. revoke access and verify the source disappears from retrieval, traces, and synthesis;
+12. erase evidence during materialization and verify publication aborts and no rebuild
+    resurrects it;
+13. append each terminal knowledge event and verify the affected ref remains unavailable
+    until a frontier-consistent rebuild.
 
 ### Required quality gates
 
@@ -1333,6 +1365,7 @@ For a fixture repository:
 | Citation precision       | target `>= 0.95` materially supporting citations               |
 | Groundedness             | target `>= 0.98` supported material answer claims              |
 | Ref/time correctness     | 100% on labeled historical-state fixtures                      |
+| Publication freshness    | zero stale ref/frontier generations published or query-visible |
 | Rebuild determinism      | identical logical fingerprints for identical inputs            |
 | Structured query p95     | target `< 250 ms` excluding network/provider fetches           |
 | Hybrid retrieval p95     | target `< 1 s` excluding answer-model generation               |
@@ -1404,6 +1437,9 @@ generation, query trace, and answer.
   embeddings, and old generations.
 - Make erasure high priority and verifiable across lexical, dense, hierarchy, knowledge,
   traces, and caches.
+- Run schema migration only as the dedicated non-serving `jina-migration` Google service
+  account. Grant its owner-secret access directly on that secret; deny `jina-runtime`
+  access and never attach the migration identity to a network-facing service.
 - Complete a data-processing and licensing review before PageIndex or embedding traffic
   leaves Jina-controlled infrastructure.
 
@@ -1419,15 +1455,16 @@ This is the only supported migration path:
 5. Wait for in-flight old writes to terminate; do not translate or replay their messages.
 6. Archive and delete pending, leased, or blocked graph workflow tasks and outbox messages.
 7. Deploy the new database schema and roles.
-8. Use the separate migration-owner credential to install roles and bind the `NOINHERIT`
-   runtime login.
+8. Run migration as the dedicated `jina-migration` Google service account using the
+   owner-only secret; install roles and bind the `NOINHERIT` runtime login. Confirm
+   `jina-runtime` cannot access that secret.
 9. Deploy API, workers, dashboard, admin, MCP-compatible API, and acceptance checks from
    the same exact source/build identity as one coordinated Cloud Run release.
 10. Trigger `build-context` for every active repository/ref.
 11. Require canonical ingestion and a baseline published generation before enabling
     `query_context`.
-12. Audit repository counts, selected commits, completeness frontiers, manifests, ACLs,
-    outbox depth, and exact
+12. Audit repository counts, per-ref sequences, selected commits, completeness and
+    projection-input frontiers, manifests, ACLs, outbox depth, race-test output, and exact
     query fixtures.
 13. Enable derivation, then optional dense and PageIndex consumers only if their earlier
     gates passed.

@@ -50,6 +50,10 @@ export class IndexContextService {
   async index(checkpointId: string, createdAt: string, fence?: ContextWriteFence): Promise<IndexGeneration> {
     const checkpoint = await this.store.getCheckpoint(checkpointId);
     if (checkpoint === undefined) throw new Error("Unknown evidence checkpoint");
+    const projectionInputFingerprint = await this.store.projectionInputFingerprint(
+      checkpoint.tenantId,
+      checkpoint.repository
+    );
     const projectedAt = normalizeIsoTime(createdAt);
     const projectorVersions = versions();
     const eligibleRevisions = (
@@ -58,6 +62,7 @@ export class IndexContextService {
     const evidence = await this.store.listEvidence(checkpointId);
     const manifest = await this.store.listManifest(checkpointId);
     const structuralFacts = await this.store.listStructuralFacts(checkpointId);
+    const allRevisions = await this.store.listRevisions(checkpoint.tenantId, checkpoint.repository);
     const repositoryAccessFingerprint = await this.store.repositoryAccessFingerprint(
       checkpoint.tenantId,
       checkpoint.repository
@@ -69,7 +74,8 @@ export class IndexContextService {
       evidenceIds: evidence.map((record) => record.id).sort(),
       manifest: manifest.map((entry) => [entry.path, entry.blobSha]).sort(),
       structuralFactIds: structuralFacts.map((fact) => fact.id).sort(),
-      repositoryAccessFingerprint
+      repositoryAccessFingerprint,
+      projectionInputFingerprint
     });
     const manifestOutput = new ManifestProjector().project({
       generationId,
@@ -161,6 +167,15 @@ export class IndexContextService {
         hierarchyStatus = "failed";
       }
     }
+    const completedProjectionInputFingerprint = await this.store.projectionInputFingerprint(
+      checkpoint.tenantId,
+      checkpoint.repository
+    );
+    if (completedProjectionInputFingerprint !== projectionInputFingerprint) {
+      throw new Error(
+        `Canonical projection inputs changed while indexing ${checkpoint.repository}; retry with a new generation`
+      );
+    }
     const projectorStatuses = initialStatuses();
     Object.assign(projectorStatuses, {
       manifest: "ready",
@@ -183,7 +198,8 @@ export class IndexContextService {
       structuralRelations,
       projectorVersions,
       projectorStatuses,
-      repositoryAccessFingerprint
+      repositoryAccessFingerprint,
+      projectionInputFingerprint
     };
     const generationFingerprint = fingerprint({
       checkpointId,
@@ -216,6 +232,7 @@ export class IndexContextService {
         anchors: relation.anchors
       })),
       repositoryAccessFingerprint,
+      projectionInputFingerprint,
       projectorVersions,
       projectorStatuses
     });
@@ -224,6 +241,7 @@ export class IndexContextService {
       tenantId: checkpoint.tenantId,
       repository: checkpoint.repository,
       repositoryAccessFingerprint,
+      projectionInputFingerprint,
       ref: checkpoint.ref,
       commitSha: checkpoint.commitSha,
       checkpointId,
@@ -235,8 +253,7 @@ export class IndexContextService {
         derivedKnowledge:
           eligibleRevisions.length === 0
             ? "unavailable"
-            : eligibleRevisions.length ===
-                (await this.store.listRevisions(checkpoint.tenantId, checkpoint.repository)).length
+            : eligibleRevisions.length === allRevisions.length
               ? "available"
               : "partial",
         dense: "disabled",

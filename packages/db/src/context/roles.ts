@@ -61,7 +61,8 @@ grant select,insert,update on
   jina_context.projection_checkpoints
 to jina_context_coordinator;
 grant select on
-  jina_context.evidence_checkpoints,jina_context.repository_acl_observations
+  jina_context.evidence_checkpoints,jina_context.repository_acl_observations,
+  jina_context.projection_input_events
 to jina_context_coordinator;
 grant select on jina_context.pipeline_builds,jina_context.pipeline_stages to
   jina_context_ingest,jina_context_derive,jina_context_manifest,jina_context_lexical,
@@ -85,7 +86,7 @@ grant select,insert on
   jina_context.blobs,jina_context.commit_changes,jina_context.blob_analyses,
   jina_context.symbols,jina_context.imports,jina_context.structural_facts,
   jina_context.entities,jina_context.identities,jina_context.repository_acl_observations,
-  jina_context.erasure_filters,jina_context.audit_events
+  jina_context.erasure_filters,jina_context.audit_events,jina_context.projection_input_events
 to jina_context_ingest;
 grant select,insert,update on jina_context.outbox to jina_context_ingest;
 
@@ -103,7 +104,8 @@ to jina_context_derive;
 grant insert,select on
   jina_context.derivation_runs,jina_context.knowledge_documents,
   jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence,
-  jina_context.knowledge_revision_events,jina_context.audit_events
+  jina_context.knowledge_revision_events,jina_context.audit_events,
+  jina_context.projection_input_events
 to jina_context_derive;
 grant select,insert,update on jina_context.outbox to jina_context_derive;
 
