@@ -560,12 +560,10 @@ create table if not exists jina_context.knowledge_document_revisions (
   foreign key (tenant_id,repository,logical_id)
     references jina_context.knowledge_documents(tenant_id,repository,logical_id),
   foreign key (tenant_id,repository,derivation_run_id)
-    references jina_context.derivation_runs(tenant_id,repository,id),
-  unique (
-    tenant_id,repository,logical_id,evidence_fingerprint,
-    generator_name,generator_version,body_digest
-  )
+    references jina_context.derivation_runs(tenant_id,repository,id)
 );
+alter table jina_context.knowledge_document_revisions
+  drop constraint if exists knowledge_document_revisions_tenant_id_repository_logical_i_key;
 create index if not exists context_knowledge_revisions_logical_created
   on jina_context.knowledge_document_revisions
   (tenant_id,repository,logical_id,created_at desc,id desc);

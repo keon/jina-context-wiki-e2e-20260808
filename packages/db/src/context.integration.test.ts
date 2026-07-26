@@ -913,6 +913,50 @@ test(
       /citation collection identity collision/
     );
     assert.deepEqual(await store.listCitations(revision.id), [citation, providerCitation]);
+    const retitledKnowledgeCreatedAt = nextLiveAt();
+    const retitledRevision = createKnowledgeRevision({
+      ...revision,
+      title: "Context deployment entry point",
+      createdAt: retitledKnowledgeCreatedAt
+    });
+    assert.notEqual(retitledRevision.id, revision.id);
+    const retitledCitation = createKnowledgeCitation(retitledRevision.id, 0, citation.claim, citation.anchor);
+    const retitledProviderCitation = createKnowledgeCitation(
+      retitledRevision.id,
+      1,
+      providerCitation.claim,
+      providerCitation.anchor
+    );
+    await store.commitKnowledge({
+      run: {
+        id: stableId("dr", {
+          checkpointId: providerSnapshot.checkpoint.id,
+          revisionId: retitledRevision.id
+        }),
+        tenantId,
+        repository,
+        checkpointId: providerSnapshot.checkpoint.id,
+        cacheKey: fingerprint({
+          checkpointId: providerSnapshot.checkpoint.id,
+          revisionId: retitledRevision.id
+        }),
+        focusFingerprint: fingerprint(["src/context.ts"]),
+        generatorName: "fixture",
+        generatorVersion: "fixture-v1",
+        model: "fixture",
+        promptVersion: "fixture-v1",
+        schemaVersion: "knowledge-v1",
+        rawOutputs: [{ documents: [retitledRevision.logicalId] }],
+        status: "succeeded",
+        diagnostics: [],
+        revisionIds: [retitledRevision.id],
+        createdAt: retitledKnowledgeCreatedAt
+      },
+      revisions: [retitledRevision],
+      citations: [retitledCitation, retitledProviderCitation]
+    });
+    assert.equal((await store.getRevision(revision.id))?.title, revision.title);
+    assert.equal((await store.getRevision(retitledRevision.id))?.title, retitledRevision.title);
     const enrichedGeneration = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, nextLiveAt());
     assert.notEqual(enrichedGeneration.id, generation.id);
     assert.equal(enrichedGeneration.capabilities.derivedKnowledge, "available");
