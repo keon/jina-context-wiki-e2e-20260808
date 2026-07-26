@@ -16,6 +16,7 @@ import {
   StoreScopeAuthorizer,
   assembleEvidencePack,
   buildKnowledgePrompt,
+  buildKnowledgeRepairPrompt,
   contextQueueTopics,
   contextTaskTypeDefinitions,
   contextTaskTypes,
@@ -406,6 +407,11 @@ test("derivation repairs once, validates source ranges, and caches immutable inp
   assert.match(prompt, /change:acme\/repo:a{40}/);
   assert.match(prompt, /issue:<provider>:acme\/repo#<cited-number>/);
   assert.match(prompt, /<kind>:acme\/repo:<evidence-backed-slug>/);
+  assert.match(prompt, /numberedBody/);
+  assert.match(prompt, /3\|export function handlePayment/);
+  const repairPrompt = buildKnowledgeRepairPrompt(prompt, ["documents[0].summary is unsupported"]);
+  assert.match(repairPrompt, /Return exactly one architecture document/);
+  assert.match(repairPrompt, /documents\[0\]\.summary is unsupported/);
   const generator = new SequenceGenerator([{ documents: [{ invalid: true }] }, validOutput()]);
   const service = new DeriveKnowledgeService(
     new EvidenceFocusSelector(store),

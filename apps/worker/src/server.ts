@@ -21,7 +21,7 @@ import type {
   IngestEvidenceInput,
   ProviderObservationInput
 } from "@jina/context-engine";
-import { repositoryAclFingerprint } from "@jina/context-engine";
+import { buildKnowledgeRepairPrompt, repositoryAclFingerprint } from "@jina/context-engine";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 
@@ -373,10 +373,7 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
   let diagnostics: readonly string[] = [];
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const rawOutput = await knowledgeGenerator.generate({
-      prompt:
-        attempt === 0
-          ? prepared.prompt
-          : `${prepared.prompt}\n\nRepair only these host validation failures:\n${diagnostics.join("\n")}`,
+      prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
       repairErrors: [...diagnostics]
     });
     const result = await internalApiJson<{
