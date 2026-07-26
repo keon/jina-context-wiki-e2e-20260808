@@ -43,9 +43,11 @@ export class PostgresContextQueryRepository {
     const result = await this.database.queryAs<{ permission: string; acl_fingerprint: string }>(
       "jina_context_query",
       `select acl.permission,acl.acl_fingerprint
-       from jina_context.published_repository_acl acl
+       from jina_context.current_repository_acl acl
+       join jina_context.index_generations generation
+         on generation.id=$4 and generation.tenant_id=acl.tenant_id
+        and generation.repository=acl.repository and generation.status='published'
        where acl.tenant_id=$1 and acl.repository=$2 and acl.principal_id=$3
-         and acl.generation_id=$4
        limit 1`,
       [tenantId, repository, principalId, generationId]
     );
@@ -69,8 +71,9 @@ export class PostgresContextQueryRepository {
        where generation.tenant_id=$1 and generation.repository=$2
          and generation.ref_name=$3 and generation.status='published'
          and exists (
-           select 1 from jina_context.repository_acl_projection acl
-           where acl.generation_id=generation.id and acl.principal_id=$4
+           select 1 from jina_context.current_repository_acl acl
+           where acl.tenant_id=generation.tenant_id and acl.repository=generation.repository
+             and acl.principal_id=$4
              and acl.permission in ('read','write','admin')
          )
        order by generation.published_at desc,generation.id desc limit 1`,
@@ -88,6 +91,7 @@ export class PostgresContextQueryRepository {
       id: row.id,
       tenantId: row.tenant_id,
       repository: row.repository,
+      repositoryAccessFingerprint: row.acl_fingerprint,
       ref: row.ref_name,
       commitSha: row.commit_sha,
       checkpointId: row.checkpoint_id,
@@ -118,11 +122,12 @@ export class PostgresContextQueryRepository {
       "jina_context_query",
       `with authorized as materialized (
          select acl.acl_fingerprint
-         from jina_context.repository_acl_projection acl
-         join jina_context.index_generations generation on generation.id=acl.generation_id
+         from jina_context.current_repository_acl acl
+         join jina_context.index_generations generation
+           on generation.id=$4 and generation.tenant_id=acl.tenant_id
+          and generation.repository=acl.repository
          where acl.tenant_id=$1 and acl.repository=$2 and acl.principal_id=$3
-           and acl.generation_id=$4 and acl.permission in ('read','write','admin')
-           and generation.status='published'
+           and acl.permission in ('read','write','admin') and generation.status='published'
        ), query as (
          select websearch_to_tsquery('simple',$5) exact,
                 websearch_to_tsquery('english',$5) prose
@@ -180,8 +185,8 @@ export class PostgresContextQueryRepository {
        from jina_context.published_context_documents document
        join jina_context.published_context_fragments fragment
          on fragment.generation_id=document.generation_id and fragment.document_id=document.id
-       join jina_context.repository_acl_projection acl
-         on acl.generation_id=document.generation_id
+       join jina_context.current_repository_acl acl
+         on acl.tenant_id=document.tenant_id and acl.repository=document.repository
         and acl.principal_id=$3 and acl.permission in ('read','write','admin')
         and acl.acl_fingerprint=document.effective_acl_fingerprint
        where document.tenant_id=$1 and document.repository=$2 and document.generation_id=$4
@@ -238,8 +243,9 @@ export class PostgresContextQueryRepository {
          and (relation.source_id=$5 or relation.target_id=$5)
          and ($6::text[] is null or relation.relation_kind=any($6))
          and exists (
-           select 1 from jina_context.repository_acl_projection acl
-           where acl.generation_id=relation.generation_id and acl.principal_id=$3
+           select 1 from jina_context.current_repository_acl acl
+           where acl.tenant_id=relation.tenant_id and acl.repository=relation.repository
+             and acl.principal_id=$3
              and acl.permission in ('read','write','admin')
          )
        order by relation.relation_kind,relation.id limit $7`,
@@ -378,6 +384,7 @@ interface GenerationQueryRow {
   projector_versions: IndexGeneration["projectorVersions"];
   capabilities: IndexGeneration["capabilities"];
   required_fingerprint: string;
+  acl_fingerprint: string;
   created_at: Date;
   published_at: Date;
 }

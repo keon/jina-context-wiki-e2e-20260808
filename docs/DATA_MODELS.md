@@ -96,9 +96,15 @@ checkpoints into new idempotent generations and never expose partial rows.
   claims must occur verbatim after whitespace/case normalization in the exact selected
   evidence excerpt.
 - ACL projection is generation-scoped. Principal permissions resolve to exact repository
-  ACL fingerprints, and SQL filters projection rows before candidate creation.
+  ACL fingerprints, and SQL filters projection rows before candidate creation. The
+  repository access snapshot fingerprint is persisted with the generation, included in
+  generation identity/output fingerprints, and rechecked under the repository access lock
+  at ACL projection and publication. Query authorization consults current ACL state so a
+  revoked principal cannot use an older published ACL projection.
 - Every ACL transition has a monotonic observation version. Revoke/regrant cycles therefore
   produce new immutable events and new generation identities rather than reusing old IDs.
+- Documents derived from multiple sources require every source ACL fingerprint in lexical,
+  hierarchy, and optional dense retrieval; wildcard fingerprints never bypass that rule.
 - Erasure filters are durable and checked during ingestion and rebuild.
 - Exact, lexical, hierarchy, embedding, and relation projections are disposable.
 - Query telemetry stores bounded metadata and citation checks, not unrestricted source

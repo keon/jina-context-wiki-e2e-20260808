@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ContextProjectionConsumer, IndexGeneration, ProjectionCheckpoint } from "@jina/context-engine";
 import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
+import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, dateString } from "./database.js";
 import { assertContextWriteFence } from "./write-fence.js";
 
@@ -45,8 +46,15 @@ export class PostgresGenerationCoordinator {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         generationRefLock(generation.tenantId, generation.repository, generation.ref)
       ]);
-      const checkpoint = await client.query<{ acl_fingerprint: string; created_at: Date }>(
-        `select acl_fingerprint,created_at from jina_context.evidence_checkpoints
+      await lockRepositoryAccess(client, generation.tenantId, generation.repository);
+      await assertRepositoryAccessFingerprint(
+        client,
+        generation.tenantId,
+        generation.repository,
+        generation.repositoryAccessFingerprint
+      );
+      const checkpoint = await client.query<{ created_at: Date }>(
+        `select created_at from jina_context.evidence_checkpoints
          where id=$1 and tenant_id=$2 and repository=$3 and ref_name=$4 and commit_sha=$5`,
         [generation.checkpointId, generation.tenantId, generation.repository, generation.ref, generation.commitSha]
       );
@@ -78,7 +86,7 @@ export class PostgresGenerationCoordinator {
           JSON.stringify(generation.projectorVersions),
           JSON.stringify(generation.capabilities),
           generation.fingerprint,
-          evidence.acl_fingerprint,
+          generation.repositoryAccessFingerprint,
           degradedCapabilities(generation),
           generation.createdAt
         ]
@@ -249,8 +257,19 @@ export class PostgresGenerationCoordinator {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         generationRefLock(scope.tenant_id, scope.repository, scope.ref_name)
       ]);
+      await lockRepositoryAccess(client, scope.tenant_id, scope.repository);
       await assertContextWriteFence(client, scope.tenant_id, ["run-index-context", "run-derive-knowledge"], fence);
       await assertLatestCheckpoint(client, scope.tenant_id, scope.repository, scope.ref_name, scope.checkpoint_id);
+      const expectedAccess = await client.query<{ acl_fingerprint: string }>(
+        "select acl_fingerprint from jina_context.index_generations where id=$1 and status='building'",
+        [generationId]
+      );
+      await assertRepositoryAccessFingerprint(
+        client,
+        scope.tenant_id,
+        scope.repository,
+        expectedAccess.rows[0]!.acl_fingerprint
+      );
       const incomplete = await client.query<{ consumer: ContextProjectionConsumer; status: string; required: boolean }>(
         `select consumer,status,required from jina_context.generation_projectors
          where generation_id=$1 and (
@@ -377,6 +396,7 @@ export async function loadGeneration(client: PoolClient, generationId: string): 
     projector_versions: IndexGeneration["projectorVersions"];
     capabilities: IndexGeneration["capabilities"];
     required_fingerprint: string;
+    acl_fingerprint: string;
     created_at: Date;
     published_at: Date | null;
   }>("select * from jina_context.index_generations where id=$1", [generationId]);
@@ -396,6 +416,7 @@ export async function loadGeneration(client: PoolClient, generationId: string): 
     id: row.id,
     tenantId: row.tenant_id,
     repository: row.repository,
+    repositoryAccessFingerprint: row.acl_fingerprint,
     ref: row.ref_name,
     commitSha: row.commit_sha,
     checkpointId: row.checkpoint_id,

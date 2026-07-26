@@ -76,10 +76,10 @@ async function ingestFixture(
         sourceType: "issue",
         sourceId: "issue-42",
         title: "Issue #42",
-        payload: { number: 42, state: "open", title: "Retry payments" },
+        payload: { number: 42, state: "open for retry", title: "Retry payments" },
         pathOrUrl: "https://example.test/acme/repo/issues/42",
         observedAt: createdAt,
-        metadata: { claimSubject: "issue:42:state", claimValue: "open" }
+        metadata: { claimSubject: "issue:42:state", claimValue: "open for retry" }
       }
     ]
   });
@@ -113,6 +113,30 @@ function validOutput(): KnowledgeGenerationOutput {
             endLine: 5
           }
         ]
+      },
+      {
+        logicalId: "issue:github:acme/repo#42",
+        kind: "issue_explanation",
+        title: "Issue 42 status",
+        summary: "Current issue state",
+        bodyMarkdown: "open for retry",
+        structuredSummary: { state: "open for retry" },
+        scope: {
+          paths: [],
+          symbols: [],
+          pullRequests: [],
+          issues: ["42"]
+        },
+        confidence: 1,
+        citations: [
+          {
+            claim: "open for retry",
+            sourceType: "issue",
+            sourceId: "issue-42",
+            pathOrUrl: "https://example.test/acme/repo/issues/42",
+            jsonPointer: "/state"
+          }
+        ]
       }
     ]
   };
@@ -141,7 +165,7 @@ async function deriveFixture(store: MemoryContextEngineStore, checkpointId: stri
     store,
     new KnowledgeOutputValidator(store)
   ).derive(checkpointId, "2026-07-26T12:01:00.000Z");
-  assert.equal(run.status, "succeeded");
+  assert.equal(run.status, "succeeded", run.diagnostics.join("; "));
   return run;
 }
 
@@ -231,7 +255,7 @@ test("derivation repairs once, validates source ranges, and caches immutable inp
     new KnowledgeOutputValidator(store)
   );
   const run = await service.derive(checkpoint.id, "2026-07-26T12:01:00.000Z");
-  assert.equal(run.status, "succeeded");
+  assert.equal(run.status, "succeeded", run.diagnostics.join("; "));
   assert.equal(generator.calls, 2);
   assert.equal(run.rawOutputs.length, 2);
   const cached = await service.derive(checkpoint.id, "2026-07-26T13:00:00.000Z");
@@ -446,6 +470,21 @@ test("query routes exact and structural work and return original evidence anchor
   assert.ok(knowledgeCitation);
   assert.match(knowledgeCitation.excerpt, /Source: src\/billing\.ts/);
   assert.match(knowledgeCitation.excerpt, /export function handlePayment/);
+  const issueStatus = await new QueryContextService(store).query({
+    tenantId,
+    principalId: "alice",
+    repository,
+    ref: "main",
+    taskKind: "status",
+    question: "What is the current state of issue 42?",
+    targets: { issues: ["42"] }
+  });
+  const pointerCitation = issueStatus.citations.find((citation) =>
+    citation.anchors.some((anchor) => anchor.sourceId === "issue-42" && anchor.jsonPointer === "/state")
+  );
+  assert.ok(pointerCitation);
+  assert.equal(pointerCitation.excerpt, "Source: https://example.test/acme/repo/issues/42\nopen for retry");
+  assert.doesNotMatch(pointerCitation.excerpt, /Retry payments|number/);
 });
 
 test("explicit file targets exclude provider records that merely mention the path", async () => {

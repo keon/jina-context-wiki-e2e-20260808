@@ -106,7 +106,17 @@ export class PostgresContextEmbeddingRepository implements DenseSearchPort {
        where embedding.tenant_id=$1 and embedding.repository=$2
          and embedding.generation_id=$3 and embedding.embedding_model=$4
          and embedding.dimensions=$5 and embedding.embedding is not null
-         and ($6::boolean or document.effective_acl_fingerprint=any($7::text[]))
+         and not exists (
+           select 1
+           from jsonb_array_elements_text(
+             case
+               when jsonb_typeof(document.metadata->'requiredAclFingerprints')='array'
+                 then document.metadata->'requiredAclFingerprints'
+               else jsonb_build_array(document.effective_acl_fingerprint)
+             end
+           ) required(value)
+           where not (required.value = any($6::text[]))
+         )
        order by embedding.fragment_id
        limit 5000`,
       [
@@ -115,7 +125,6 @@ export class PostgresContextEmbeddingRepository implements DenseSearchPort {
         input.generationId,
         input.model,
         input.vector.length,
-        input.allowedAclFingerprints.includes("*"),
         input.allowedAclFingerprints
       ]
     );

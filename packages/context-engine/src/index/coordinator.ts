@@ -215,6 +215,7 @@ export class IndexContextService {
         to: relation.to,
         anchors: relation.anchors
       })),
+      repositoryAccessFingerprint,
       projectorVersions,
       projectorStatuses
     });
@@ -222,6 +223,7 @@ export class IndexContextService {
       id: generationId,
       tenantId: checkpoint.tenantId,
       repository: checkpoint.repository,
+      repositoryAccessFingerprint,
       ref: checkpoint.ref,
       commitSha: checkpoint.commitSha,
       checkpointId,

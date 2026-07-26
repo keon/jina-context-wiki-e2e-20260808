@@ -115,8 +115,13 @@ Acknowledgements require the current, unexpired delivery lease and exact scoped 
 Repository-global ACL/erasure events remain pending until every current ref has rebuilt;
 older ref/commit deliveries are acknowledged only as proven superseded work. A ref-scoped
 advisory lock and newest-checkpoint barrier prevent an older build from replacing a newer
-generation. `POST /internal/context/outbox/drain` selects only current checkpoints and
-actually re-runs the same idempotent `index-context` path.
+generation. The repository access fingerprint is part of both generation identity and
+generation output fingerprint. ACL mutation, ACL projection, and final publication share a
+repository access lock and revalidate that fingerprint, so a revoke during indexing forces
+a retry instead of publishing mixed ACL state. Query authorization also checks the current
+ACL observation rather than trusting a historical generation projection.
+`POST /internal/context/outbox/drain` selects only current checkpoints and actually re-runs
+the same idempotent `index-context` path.
 
 The hierarchy is owned by Jina. A deterministic adapter is the active fallback. PageIndex
 is represented by an optional adapter behind the same hierarchy port, but no PageIndex
@@ -126,7 +131,9 @@ latency, cost, and data-egress review.
 
 The dense port, PostgreSQL lifecycle adapter, and retriever exist, but no dense route is
 advertised unless a generation declares the capability. Dense remains disabled until an
-approved model/backend passes the ablation gate.
+approved model/backend passes the ablation gate. Its dormant SQL path already applies the
+same all-required-fingerprint ACL predicate as lexical/hierarchy hydration; `"*"` has no
+privileged meaning.
 
 ## Query engine
 

@@ -691,6 +691,10 @@ Implement each projection as an independent, versioned outbox consumer.
 3. Optional consumers report `ready`, `disabled`, `skipped`, or `failed`.
 4. Publish the generation atomically only when manifest, lexical, structural, identity,
    ACL, and retention state are coherent.
+   The repository access snapshot fingerprint is part of the generation identity and
+   output fingerprint. ACL projection and publication each acquire the same repository
+   access lock used by ACL mutation and compare the current fingerprint; a mismatch fails
+   the attempt for retry.
 5. Queries select the latest published generation matching the requested ref/commit.
 6. Knowledge events may create a successor enriched generation after the baseline build
    has completed.
@@ -722,6 +726,8 @@ Do not expose partially published rows through query views.
 - required-projector failure prevents publication;
 - optional-projector failure produces a usable degraded generation;
 - concurrent rebuilds cannot publish stale checkpoints over a newer target;
+- a revoke committed after ACL projection but before publication prevents that generation
+  from publishing, and current-ACL query authorization rejects the revoked principal;
 - no query can observe a mixed ref or mixed ACL generation;
 - full rebuild from canonical rows reproduces the active generation.
 

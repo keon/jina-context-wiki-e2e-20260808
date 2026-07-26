@@ -10,6 +10,7 @@ import type {
 import { evidenceExcerpt } from "@jina/context-engine";
 import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
+import { lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, contextDigest, contextStableId, dateString } from "./database.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
 import { assertContextWriteFence } from "./write-fence.js";
@@ -176,6 +177,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
   async appendRepositoryAcl(observation: RepositoryAclObservation, fence?: ContextWriteFence): Promise<void> {
     await this.database.transactionAs("jina_context_ingest", async (client) => {
       await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
+      await lockRepositoryAccess(client, observation.tenantId, observation.repository);
       await client.query(
         `insert into jina_context.repository_acl_observations
           (id,tenant_id,repository,principal_id,permission,acl_fingerprint,

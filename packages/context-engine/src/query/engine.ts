@@ -1,3 +1,4 @@
+import { evidenceExcerpt } from "../domain/evidence.js";
 import { fingerprint, newId, normalizeRepository } from "../domain/fingerprint.js";
 import type {
   QueryCitation,
@@ -268,11 +269,7 @@ export class QueryContextService {
             ...(anchor.jsonPointer === undefined ? {} : { jsonPointer: anchor.jsonPointer })
           });
           if (record === undefined || record.anchor.contentDigest !== anchor.contentDigest) continue;
-          const lines = record.body.split(/\r?\n/);
-          const sourceText =
-            anchor.startLine === undefined
-              ? record.body
-              : lines.slice(anchor.startLine - 1, anchor.endLine ?? anchor.startLine).join("\n");
+          const sourceText = evidenceExcerpt(record, anchor);
           excerpts.push(
             [`Source: ${anchor.pathOrUrl ?? `${anchor.sourceType}:${anchor.sourceId}`}`, sourceText].join("\n")
           );

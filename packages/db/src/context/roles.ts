@@ -60,7 +60,9 @@ grant select,insert,update on
   jina_context.index_generations,jina_context.generation_projectors,
   jina_context.projection_checkpoints
 to jina_context_coordinator;
-grant select on jina_context.evidence_checkpoints to jina_context_coordinator;
+grant select on
+  jina_context.evidence_checkpoints,jina_context.repository_acl_observations
+to jina_context_coordinator;
 grant select on jina_context.pipeline_builds,jina_context.pipeline_stages to
   jina_context_ingest,jina_context_derive,jina_context_manifest,jina_context_lexical,
   jina_context_knowledge_current,jina_context_dense,jina_context_hierarchy,
@@ -202,7 +204,7 @@ to jina_context_retention;
 grant select,update,delete on jina_context.index_generations to jina_context_retention;
 
 grant select on
-  jina_context.current_refs,jina_context.published_repository_acl,
+  jina_context.current_refs,jina_context.current_repository_acl,jina_context.published_repository_acl,
   jina_context.index_generations,jina_context.generation_projectors,
   jina_context.repository_acl_projection,jina_context.published_context_documents,
   jina_context.published_context_fragments,

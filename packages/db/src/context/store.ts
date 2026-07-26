@@ -23,6 +23,7 @@ import {
 } from "@jina/context-engine";
 import type { PostgresContextDatabaseConfig } from "./database.js";
 import { ContextDatabase, contextDigest, contextStableId } from "./database.js";
+import { currentRepositoryAccessFingerprint, lockRepositoryAccess, repositoryAccessLockKey } from "./access.js";
 import { PostgresEvidenceRepository } from "./evidence-repository.js";
 import { PostgresKnowledgeRepository } from "./knowledge-repository.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
@@ -130,6 +131,29 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `repository-access:${tenantId}:${principalId}`
       ]);
+      const now = new Date().toISOString();
+      const registered = await client.query<{ repository: string }>(
+        "select repository from jina_context.repositories where tenant_id=$1",
+        [tenantId]
+      );
+      for (const repository of desired) {
+        if (!registered.rows.some((row) => row.repository === repository)) {
+          await client.query(
+            `insert into jina_context.repositories
+              (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
+             values ($1,$2,'unknown',$2,'main','{}'::jsonb,$3,$3)
+             on conflict do nothing`,
+            [tenantId, repository, now]
+          );
+          registered.rows.push({ repository });
+        }
+      }
+      const repositoryNames = [...new Set(registered.rows.map((row) => row.repository))].sort();
+      for (const repository of repositoryNames) {
+        await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
+          repositoryAccessLockKey(tenantId, repository)
+        ]);
+      }
       const known = await client.query<{
         repository: string;
         permission: string | null;
@@ -144,19 +168,6 @@ export class PostgresContextEngineStore implements ContextEngineStore {
          where repository.tenant_id=$1`,
         [tenantId, principalId]
       );
-      const now = new Date().toISOString();
-      for (const repository of desired) {
-        if (!known.rows.some((row) => row.repository === repository)) {
-          await client.query(
-            `insert into jina_context.repositories
-              (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
-             values ($1,$2,'unknown',$2,'main','{}'::jsonb,$3,$3)
-             on conflict do nothing`,
-            [tenantId, repository, now]
-          );
-          known.rows.push({ repository, permission: null, acl_fingerprint: null });
-        }
-      }
       for (const row of known.rows) {
         const permission = desired.has(row.repository) ? "read" : "denied";
         const aclFingerprint = repositoryAclFingerprint(tenantId, row.repository);
@@ -245,31 +256,10 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   }
 
   async repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string> {
-    await this.database.initialize();
-    const result = await this.database.queryAs<{
-      id: string;
-      principal_id: string;
-      permission: string;
-      acl_fingerprint: string;
-      observed_at: Date;
-    }>(
-      "jina_context_admin",
-      `select distinct on (principal_id)
-         id,principal_id,permission,acl_fingerprint,observed_at
-       from jina_context.repository_acl_observations
-       where tenant_id=$1 and repository=$2
-       order by principal_id,observed_at desc,id desc`,
-      [tenantId, repository]
-    );
-    return contextDigest(
-      result.rows.map((row) => ({
-        id: row.id,
-        principalId: row.principal_id,
-        permission: row.permission,
-        aclFingerprint: row.acl_fingerprint,
-        observedAt: row.observed_at.toISOString()
-      }))
-    );
+    return this.database.transactionAs("jina_context_admin", async (client) => {
+      await lockRepositoryAccess(client, tenantId, repository);
+      return currentRepositoryAccessFingerprint(client, tenantId, repository);
+    });
   }
 
   async listRepositories(tenantId: string): Promise<string[]> {

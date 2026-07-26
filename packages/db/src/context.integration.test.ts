@@ -323,6 +323,8 @@ test(
       [tenantId]
     );
     await store.replaceRepositoryAccess(tenantId, "reader-1", []);
+    assert.equal((await query.authorize(tenantId, repository, "reader-1", generation.id)).allowed, false);
+    assert.equal(await query.latestPublished(tenantId, repository, ref, "reader-1"), undefined);
     await assert.rejects(
       new QueryContextService(store).query({
         tenantId,
@@ -491,6 +493,46 @@ test(
     });
     assert.equal(denseMatches[0]?.fragmentId, fragment.id);
     assert.equal(denseMatches[0]?.score, 1);
+    await database.pool.query(
+      `update jina_context.context_documents
+       set metadata=jsonb_set(metadata,'{requiredAclFingerprints}',$2::jsonb)
+       where generation_id=$1 and id=$3`,
+      [enrichedGeneration.id, JSON.stringify([aclFingerprint, fingerprint("second-required-acl")]), fragment.documentId]
+    );
+    assert.deepEqual(
+      await embeddings.search({
+        tenantId,
+        repository,
+        generationId: enrichedGeneration.id,
+        model: "fixture-embedding-v1",
+        vector: [1, 0],
+        allowedAclFingerprints: [aclFingerprint],
+        limit: 10
+      }),
+      []
+    );
+    assert.deepEqual(
+      await embeddings.search({
+        tenantId,
+        repository,
+        generationId: enrichedGeneration.id,
+        model: "fixture-embedding-v1",
+        vector: [1, 0],
+        allowedAclFingerprints: ["*"],
+        limit: 10
+      }),
+      []
+    );
+    const allAclDenseMatches = await embeddings.search({
+      tenantId,
+      repository,
+      generationId: enrichedGeneration.id,
+      model: "fixture-embedding-v1",
+      vector: [1, 0],
+      allowedAclFingerprints: [aclFingerprint, fingerprint("second-required-acl")],
+      limit: 10
+    });
+    assert.equal(allAclDenseMatches[0]?.fragmentId, fragment.id);
     await store.recordQueryRun({
       id: "trace_integration",
       tenantId,
@@ -599,6 +641,70 @@ test(
     const successorGeneration = await new IndexContextService(store).index(successorCheckpoint.id, at(12_200));
     assert.equal((await store.latestPublished(tenantId, repository, ref))?.generation.id, successorGeneration.id);
     assert.ok(Object.values(await store.projectionBacklog(tenantId)).every((value) => value.count === 0));
+
+    const raceTenantId = `${tenantId}-acl-race`;
+    const raceRepository = "acme/acl-race";
+    const raceAclFingerprint = repositoryAclFingerprint(raceTenantId, raceRepository);
+    await store.replaceRepositoryAccess(raceTenantId, "race-reader", [raceRepository]);
+    const raceCheckpoint = await new IngestEvidenceService(store).ingest({
+      tenantId: raceTenantId,
+      repository: raceRepository,
+      ref,
+      commitSha: "7".repeat(40),
+      files: [
+        {
+          path: "README.md",
+          blobSha: "6".repeat(40),
+          body: "# ACL publication race fixture\n",
+          language: "markdown"
+        }
+      ],
+      observations: [],
+      aclFingerprint: raceAclFingerprint,
+      observationFrontier: at(13_000),
+      createdAt: at(13_000),
+      sourceComplete: true
+    });
+    const mutableDatabase = database as unknown as { transactionAs: ContextDatabase["transactionAs"] };
+    const originalTransactionAs = database.transactionAs.bind(database);
+    let revokeAfterAclProjection = true;
+    mutableDatabase.transactionAs = async (role, operation) => {
+      const result = await originalTransactionAs(role, operation);
+      if (role === "jina_context_acl" && revokeAfterAclProjection) {
+        revokeAfterAclProjection = false;
+        await store.replaceRepositoryAccess(raceTenantId, "race-reader", []);
+      }
+      return result;
+    };
+    try {
+      await assert.rejects(
+        new IndexContextService(store).index(raceCheckpoint.id, at(14_000)),
+        /Repository access changed while indexing/
+      );
+    } finally {
+      mutableDatabase.transactionAs = originalTransactionAs;
+    }
+    assert.equal(revokeAfterAclProjection, false);
+    assert.equal(
+      Number(
+        (
+          await database.pool.query<{ count: string }>(
+            `select count(*)::text count
+             from jina_context.index_generations
+             where tenant_id=$1 and repository=$2 and status='published'`,
+            [raceTenantId, raceRepository]
+          )
+        ).rows[0]?.count
+      ),
+      0
+    );
+    await store.replaceRepositoryAccess(raceTenantId, "race-reader", [raceRepository]);
+    const raceGeneration = await new IndexContextService(store).index(raceCheckpoint.id, at(15_000));
+    assert.equal(
+      raceGeneration.repositoryAccessFingerprint,
+      await store.repositoryAccessFingerprint(raceTenantId, raceRepository)
+    );
+    assert.equal((await query.authorize(raceTenantId, raceRepository, "race-reader", raceGeneration.id)).allowed, true);
 
     const buildAfter = await coordinator.get(build.id);
     assert.equal(buildAfter?.status, "degraded");

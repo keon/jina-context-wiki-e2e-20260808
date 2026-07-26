@@ -16,6 +16,7 @@ import type {
 import { contextProjectionConsumers } from "@jina/context-engine";
 import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
+import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, contextDigest, dateString } from "./database.js";
 import type { ContextDatabaseRole } from "./roles.js";
 import { PostgresGenerationCoordinator, requiredContextConsumers } from "./generation-coordinator.js";
@@ -33,6 +34,7 @@ interface GenerationRow {
   projector_versions: IndexGeneration["projectorVersions"];
   capabilities: IndexGeneration["capabilities"];
   required_fingerprint: string;
+  acl_fingerprint: string;
   created_at: Date;
   published_at: Date | null;
 }
@@ -290,6 +292,7 @@ function buildingGeneration(generation: IndexGeneration): Omit<IndexGeneration, 
     id: generation.id,
     tenantId: generation.tenantId,
     repository: generation.repository,
+    repositoryAccessFingerprint: generation.repositoryAccessFingerprint,
     ref: generation.ref,
     commitSha: generation.commitSha,
     checkpointId: generation.checkpointId,
@@ -364,7 +367,24 @@ async function runScopedProjector(
       throw new Error(`Projector ${consumer} could not claim generation ${generation.id}`);
     }
     if (status !== "failed") {
+      if (consumer === "acl") {
+        await lockRepositoryAccess(client, generation.tenantId, generation.repository);
+        await assertRepositoryAccessFingerprint(
+          client,
+          generation.tenantId,
+          generation.repository,
+          generation.repositoryAccessFingerprint
+        );
+      }
       await projectConsumerOutput(client, projection, consumer);
+      if (consumer === "acl") {
+        await assertRepositoryAccessFingerprint(
+          client,
+          generation.tenantId,
+          generation.repository,
+          generation.repositoryAccessFingerprint
+        );
+      }
       await acknowledgeScopedDeliveries(client, {
         generationId: generation.id,
         checkpointId: generation.checkpointId,
@@ -981,6 +1001,7 @@ function generationFromRow(row: GenerationRow, statuses: IndexGeneration["projec
     id: row.id,
     tenantId: row.tenant_id,
     repository: row.repository,
+    repositoryAccessFingerprint: row.acl_fingerprint,
     ref: row.ref_name,
     commitSha: row.commit_sha,
     checkpointId: row.checkpoint_id,

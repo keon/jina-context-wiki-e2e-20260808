@@ -272,6 +272,12 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
         throw new Error(`Missing projector version for ${consumer}`);
       }
     }
+    if (
+      generation.repositoryAccessFingerprint !==
+      (await this.repositoryAccessFingerprint(generation.tenantId, generation.repository))
+    ) {
+      throw new Error(`Repository access changed while indexing ${generation.repository}; retry with a new generation`);
+    }
     const existing = this.#projections.get(generation.id);
     if (existing !== undefined) {
       if (existing.generation.fingerprint !== generation.fingerprint) {
