@@ -711,12 +711,22 @@ test(
     );
     assert.equal(queryRunsAfterRevocation.rows[0]?.count, queryRunsBeforeRevocation.rows[0]?.count);
     await store.replaceRepositoryAccess(tenantId, "reader-1", [repository]);
-    const mainGenerationAfterRegrant = await new IndexContextService(store).index(snapshot.checkpoint.id, at(6_300));
+    // Access replacement records use the database wall clock. Advance the logical clock from
+    // wall time here so batching performance cannot make those events unavailable.
+    let liveClock = epoch + 6_200;
+    const nextLiveAt = () => {
+      liveClock = Math.max(liveClock + 1, Date.now());
+      return new Date(liveClock).toISOString();
+    };
+    const mainGenerationAfterRegrant = await new IndexContextService(store).index(snapshot.checkpoint.id, nextLiveAt());
     assert.notEqual(mainGenerationAfterRegrant.id, generation.id);
     const partialAccessProjection = await store.projectionBacklog(tenantId);
     assert.ok(partialAccessProjection.acl.count > 0);
     assert.ok(partialAccessProjection.retention.count > 0);
-    const releaseGenerationAfterRegrant = await new IndexContextService(store).index(releaseCheckpoint.id, at(6_400));
+    const releaseGenerationAfterRegrant = await new IndexContextService(store).index(
+      releaseCheckpoint.id,
+      nextLiveAt()
+    );
     assert.notEqual(releaseGenerationAfterRegrant.id, releaseGenerationBeforeRegrant.id);
     const completedAccessProjection = await store.projectionBacklog(tenantId);
     assert.equal(completedAccessProjection.acl.count, 0);
@@ -747,11 +757,12 @@ test(
         id: stableId("ec", { tenantId, repository, commitSha, provider: true }),
         refSequence: 2,
         evidenceFingerprint: fingerprint([...snapshot.records.map((entry) => entry.id), providerRecord.id]),
-        createdAt: at(6_500)
+        createdAt: nextLiveAt()
       },
       records: [...snapshot.records, providerRecord]
     };
     await store.commitSnapshot(providerSnapshot);
+    const knowledgeCreatedAt = nextLiveAt();
     const revision = createKnowledgeRevision({
       logicalId: `component:${repository}:deployment`,
       tenantId,
@@ -775,7 +786,7 @@ test(
       model: "fixture",
       promptVersion: "fixture-v1",
       confidence: 1,
-      createdAt: at(7_000)
+      createdAt: knowledgeCreatedAt
     });
     const citation = createKnowledgeCitation(
       revision.id,
@@ -804,13 +815,13 @@ test(
         status: "succeeded",
         diagnostics: [],
         revisionIds: [revision.id],
-        createdAt: at(7_000)
+        createdAt: knowledgeCreatedAt
       },
       revisions: [revision],
       citations: [citation, providerCitation]
     });
     assert.deepEqual(await store.listCitations(revision.id), [citation, providerCitation]);
-    const enrichedGeneration = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, at(8_000));
+    const enrichedGeneration = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, nextLiveAt());
     assert.notEqual(enrichedGeneration.id, generation.id);
     assert.equal(enrichedGeneration.capabilities.derivedKnowledge, "available");
 
