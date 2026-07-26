@@ -47,6 +47,10 @@ Cloud SQL Client and secret accessor on `jina-db-password` only. Remove
 grant either identity project-wide Secret Manager access.
 
 ```sh
+gcloud projects add-iam-policy-binding jina-463721 \
+  --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
+  --role='roles/cloudsql.client'
+
 gcloud secrets add-iam-policy-binding jina-db-password \
   --project=jina-v2 \
   --member='serviceAccount:jina-migration@jina-v2.iam.gserviceaccount.com' \
