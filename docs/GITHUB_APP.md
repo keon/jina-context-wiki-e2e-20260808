@@ -7,13 +7,13 @@ verifies the unmodified body with `X-Hub-Signature-256`, requires
 
 ## Current behavior
 
-| Event           | Action                  | Board result                                                                                                                                              |
-| --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Push            | non-deleted branch head | Creates `build-context` with `ingest-evidence`, `derive-knowledge`, and `index-context`; carries the event head SHA so the build is pinned to that commit |
-| Pull request    | `opened`                | Creates the review aggregate, review pass, and internal publication task                                                                                  |
-| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                                  |
-| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                                    |
-| Everything else | any                     | Acknowledged and ignored                                                                                                                                  |
+| Event           | Action                  | Board result                                                                                                                            |
+| --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| Push            | non-deleted branch head | Creates `build-context` with `ingest-evidence`, `derive-knowledge`, and `index-context`; carries the event head SHA and installation ID |
+| Pull request    | `opened`                | Creates the review aggregate, review pass, and internal publication task                                                                |
+| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                |
+| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                  |
+| Everything else | any                     | Acknowledged and ignored                                                                                                                |
 
 An unchanged latest head deduplicates redelivery. A real ref transition supersedes active
 older context work, including a force-push back to a previously seen SHA. Issue triage has
@@ -54,13 +54,25 @@ Create a private GitHub App under the account or organization that owns the repo
 
 Install the App on every repository Jina should observe. In shared-database mode, webhook
 intake resolves the original tenant UUID from the installation/repository identity tables.
-Workers carry that resolved tenant on every API call.
+Workers carry that resolved tenant and the installation ID in context-build metadata.
 
-The current worker uses `GITHUB_CLONE_TOKEN` for private Git clone and provider pagination.
-Use a fine-grained read-only token limited to the installed repositories and the
-permissions above. Installation-token minting should replace this temporary credential
-before GitHub write-side effects are enabled. Jina does not currently publish review
-comments or checks.
+Configure the context worker with the App identity:
+
+```text
+GITHUB_APP_ID=<numeric app ID>
+GITHUB_APP_PRIVATE_KEY=<PEM private key; literal \n escapes are accepted>
+```
+
+When `ingest-evidence` starts, the worker exchanges a short-lived App JWT for an
+installation access token. It uses that token for both the exact Git checkout and bounded
+GitHub REST pagination, keeps it only in the active lease, and never stores it in task or
+context data. If an installation ID is present and minting fails, ingestion fails closed.
+
+Trusted manual callers may include a positive `githubInstallationId` in
+`POST /context/build`. A build with no installation ID falls back to
+`GITHUB_API_TOKEN`, then `GITHUB_CLONE_TOKEN`, when configured; public repositories need
+neither. Keep any fallback token fine-grained, read-only, and limited to the required
+repositories. Jina does not currently publish review comments or checks.
 
 GitHub documents [App registration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app)
 and [webhook configuration](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/using-webhooks-with-github-apps).
@@ -94,8 +106,9 @@ curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
 ```
 
 For a push, verify that the root and all three context stages refer to the expected
-repository/ref and that ingestion records the event's full head SHA. A published
-generation returned by `/context/generations` must use that same commit.
+repository/ref, that the ingest stage carries the expected GitHub installation ID, and
+that ingestion records the event's full head SHA. A published generation returned by
+`/context/generations` must use that same commit.
 
 GitHub's App settings show delivery response status and support redelivery.
 

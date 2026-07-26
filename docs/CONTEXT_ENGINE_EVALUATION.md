@@ -2,7 +2,7 @@
 
 ## Latest checked-in-fixture result
 
-- **Run:** 2026-07-26T08:37:48.676Z
+- **Run:** 2026-07-26T08:48:42.757Z
 - **Command:** `pnpm evaluate:context`
 - **Fixture:** `packages/context-engine/evaluation/fixtures.v1.json`
 - **Fixture schema:** `context-evaluation-v1`
@@ -73,7 +73,8 @@ Dense must remain disabled until an evaluation:
 
 The active hierarchy is Jina's deterministic heading/section-tree adapter. It preserves
 source spans and gives long documents a hierarchy route. PageIndex is a replaceable
-adapter behind the same port, not the canonical store or public contract.
+adapter behind the same port, not the canonical store or public contract. No PageIndex
+client or dependency is configured in the current runtime.
 
 PageIndex must remain disabled until an expanded long-document slice compares:
 

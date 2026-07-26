@@ -12,6 +12,7 @@ export interface ProductionContextAcceptanceConfig {
   readonly principalId: string;
   readonly repository?: string;
   readonly ref?: string;
+  readonly githubInstallationId?: number;
   readonly requestKey?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -77,6 +78,7 @@ export async function runProductionContextAcceptance(
     body: JSON.stringify({
       repository,
       ref,
+      ...(config.githubInstallationId ? { githubInstallationId: config.githubInstallationId } : {}),
       requestKey: config.requestKey ?? `acceptance-${Date.now()}`
     })
   });
@@ -331,6 +333,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 async function main(): Promise<void> {
+  const githubInstallationId = optionalPositiveInteger(process.env.ACCEPTANCE_GITHUB_INSTALLATION_ID);
   const summary = await runProductionContextAcceptance({
     apiUrl: requiredEnv("JINA_API_URL"),
     internalToken: requiredEnv("INTERNAL_API_TOKEN"),
@@ -339,6 +342,7 @@ async function main(): Promise<void> {
     principalId: requiredEnv("ACCEPTANCE_PRINCIPAL_ID"),
     ...(process.env.ACCEPTANCE_REPOSITORY ? { repository: process.env.ACCEPTANCE_REPOSITORY } : {}),
     ...(process.env.ACCEPTANCE_REF ? { ref: process.env.ACCEPTANCE_REF } : {}),
+    ...(githubInstallationId ? { githubInstallationId } : {}),
     ...(process.env.ACCEPTANCE_REQUEST_KEY ? { requestKey: process.env.ACCEPTANCE_REQUEST_KEY } : {}),
     ...(process.env.ACCEPTANCE_TIMEOUT_MS ? { timeoutMs: Number(process.env.ACCEPTANCE_TIMEOUT_MS) } : {})
   });
@@ -349,6 +353,15 @@ function requiredEnv(name: string): string {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (!value?.trim()) return undefined;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error("ACCEPTANCE_GITHUB_INSTALLATION_ID must be a positive integer");
+  }
+  return parsed;
 }
 
 if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {

@@ -48,6 +48,7 @@ export interface ContextPipelineCoordinator {
     repository: string;
     ref: string;
     commitSha?: string;
+    githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
   }): Promise<ContextBuild>;
@@ -100,6 +101,7 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     repository: string;
     ref: string;
     commitSha?: string;
+    githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
   }): Promise<ContextBuild> {
@@ -108,6 +110,12 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     if (existingId !== undefined) return copy(this.#builds.get(existingId)!);
     if (input.commitSha !== undefined && !isFullCommitSha(input.commitSha)) {
       throw new Error("commitSha must be a full Git SHA");
+    }
+    if (
+      input.githubInstallationId !== undefined &&
+      (!Number.isSafeInteger(input.githubInstallationId) || input.githubInstallationId <= 0)
+    ) {
+      throw new Error("githubInstallationId must be a positive integer");
     }
     const createdAt = normalizeIsoTime(input.createdAt);
     const repository = normalizeRepository(input.repository);
@@ -121,7 +129,12 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
       status,
       attempt: 0,
       metadata:
-        type === contextTaskTypes.ingestEvidence && input.commitSha ? { commitSha: input.commitSha.toLowerCase() } : {}
+        type === contextTaskTypes.ingestEvidence
+          ? {
+              ...(input.commitSha ? { commitSha: input.commitSha.toLowerCase() } : {}),
+              ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {})
+            }
+          : {}
     });
     const build: ContextBuild = {
       id,

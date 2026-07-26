@@ -25,8 +25,8 @@ Trusted context client -> HTTP API or MCP -> ACL-filtered retrieval
 
 The API performs short state transitions. Workers perform external I/O outside the
 mutation lock, renew their leases, and complete through the API. Every internal context
-mutation carries task, lease, attempt, and write-fence identity. An expired or replaced
-lease cannot commit.
+worker-stage mutation carries task, lease, attempt, and write-fence identity. An expired
+or replaced lease cannot commit.
 
 ## Board and execution
 
@@ -58,8 +58,10 @@ supersession, leases, and terminal propagation, but does not import context-doma
 `ingest-evidence` resolves the requested ref to a full commit SHA, clones and checks out
 that exact commit, then stores immutable provider observations, commits and parents, exact
 trees, content-addressed blobs, first-parent changes, deterministic parser analyses,
-symbols, imports, structural facts, identities, and ACL observations. Oversized or binary
-content may be omitted from stored body text, but its manifest identity remains.
+symbols, imports, structural facts, identities, and ACL observations. Webhook builds carry
+their GitHub App installation ID; the worker mints a short-lived installation token and
+keeps it only for the active lease's Git and REST work. Oversized or binary content may be
+omitted from stored body text, but its manifest identity remains.
 
 Evidence is canonical. Model output cannot alter Git/provider facts, parser output,
 permissions, or audit events.
@@ -93,9 +95,10 @@ never combine refs, ACL states, or partially built projectors. Indexes rebuild f
 canonical evidence and immutable knowledge.
 
 The hierarchy is owned by Jina. A deterministic adapter is the active fallback. PageIndex
-is implemented as an optional adapter behind the same hierarchy port and remains disabled
-until long-document evaluation proves an incremental win including citation integrity,
-ACL isolation, latency, cost, and data-egress review.
+is represented by an optional adapter behind the same hierarchy port, but no PageIndex
+client or dependency is wired into production. It remains disabled until long-document
+evaluation proves an incremental win including citation integrity, ACL isolation,
+latency, cost, and data-egress review.
 
 The dense port, PostgreSQL lifecycle adapter, and retriever exist, but no dense route is
 advertised unless a generation declares the capability. Dense remains disabled until an
@@ -120,9 +123,28 @@ conflicts, ambiguities, coverage, retrievers used, and trace ID.
 
 ## Public surfaces
 
-The context workspace reads `/context/generations`, `/context/documents`,
-`/context/structure`, `/context/query`, and administrator metrics/rebuild/review/erasure
-operations. Lists use opaque cursor pagination.
+The implemented context HTTP surface is:
+
+```text
+POST /context/build
+POST /context/query
+GET  /context/generations
+GET  /context/generations/:id
+GET  /context/documents
+GET  /context/documents/:revisionId
+GET  /context/structure
+GET  /context/metrics
+POST /context/knowledge/:revisionId/review
+POST /context/rebuild
+POST /context/erasure
+```
+
+Generation and document lists use opaque cursor pagination. Metrics, rebuild, and erasure
+are tenant-administrator operations; review additionally requires access to the
+revision's repository. `POST /context/build` accepts optional `commitSha` and
+`githubInstallationId` fields. Signed push builds supply both from the verified webhook;
+trusted manual callers must supply the installation ID when private access should use the
+GitHub App.
 
 `POST /mcp` is stateless Streamable HTTP MCP. Server `jina-context` exposes exactly one
 read-only tool: `query_context`. Storage primitives and retriever controls are not public

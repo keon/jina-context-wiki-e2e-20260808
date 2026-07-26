@@ -13,6 +13,7 @@
     "@jina/ai": "workspace:*",
     "@jina/context-engine": "workspace:*",
     "@jina/daytona": "workspace:*",
+    "@jina/github": "workspace:*",
     "@jina/observability": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0"
   },

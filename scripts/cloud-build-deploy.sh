@@ -16,6 +16,7 @@ db_name="${JINA_DB_NAME:-jina}"
 db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
+acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-}"
 api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
 api_max_instances="${JINA_API_MAX_INSTANCES:-3}"
 api_concurrency="${JINA_API_CONCURRENCY:-20}"
@@ -53,6 +54,9 @@ validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
 validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
 validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
 validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
+if [[ -n "${acceptance_github_installation_id}" ]]; then
+  validate_positive_integer "JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID" "${acceptance_github_installation_id}"
+fi
 if (( api_min_instances > api_max_instances )); then
   echo "JINA_API_MIN_INSTANCES must not exceed JINA_API_MAX_INSTANCES" >&2
   exit 2
@@ -192,6 +196,8 @@ for secret_spec in \
   "jina-context-api-token:latest" \
   "jina-daytona-api-key:latest" \
   "jina-openrouter-api-key:latest" \
+  "jina-github-app-id:latest" \
+  "jina-github-app-private-key:latest" \
   "jina-openai-api-key:latest" \
   "jina-github-clone-token:latest"; do
   require_secret "${secret_spec}"
@@ -208,7 +214,7 @@ gcloud run jobs deploy jina-context-migrate \
   --set-cloudsql-instances="${cloud_sql_instance}" \
   --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}" \
   --set-secrets="DB_PASS=${db_pass_secret}" \
-  --args=node_modules/@jina/db/dist/migrate.js \
+  --args=node_modules/@jina/db/dist/migrate.js,--install-roles \
   --tasks=1 \
   --max-retries=0 \
   --task-timeout=15m \
@@ -256,7 +262,7 @@ gcloud run deploy jina-context-worker \
   --max-instances=3 \
   --no-cpu-throttling \
   --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=25165824~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
 route_latest_revision "jina-context-worker"
@@ -306,7 +312,7 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${runtime_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_TIMEOUT_MS=3000000" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \

@@ -77,6 +77,7 @@ steps:
       - JINA_DB_USER=${_JINA_DB_USER}
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
+      - JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
       - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
       - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
@@ -93,6 +94,7 @@ substitutions:
   _JINA_DB_USER: jina_v2_app
   _JINA_DB_PASS_SECRET: jina-shared-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
+  _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
   # start. Scale to three for concurrent ingestion and projection traffic; drain
   # work is single-flight per process and tenant-locked across instances.

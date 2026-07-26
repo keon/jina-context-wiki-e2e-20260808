@@ -45,12 +45,16 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
   let boardReads = 0;
   const requested: string[] = [];
   const requestedAuthorization: string[] = [];
+  let buildRequest: Record<string, unknown> | undefined;
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
     requested.push(`${init?.method ?? "GET"} ${url.pathname}`);
     requestedAuthorization.push(new Headers(init?.headers).get("authorization") ?? "");
     if (url.pathname === "/internal/context/access/sync") return json({ repositoryCount: 1 });
-    if (url.pathname === "/context/build") return json({ build: { id: "cb_acceptance" } }, 202);
+    if (url.pathname === "/context/build") {
+      buildRequest = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      return json({ build: { id: "cb_acceptance" } }, 202);
+    }
     if (url.pathname === "/board") {
       boardReads += 1;
       const done = boardReads > 1;
@@ -113,6 +117,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     principalId: "user:reader@example.com",
     repository: "omlabs/repo",
     ref: "main",
+    githubInstallationId: 140435029,
     pollIntervalMs: 0,
     fetchImpl,
     verifyMcp: async ({ commitSha }) => {
@@ -127,6 +132,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
   assert.equal(summary.documentCount, 1);
   assert.equal(summary.citationCount, 1);
   assert.equal(summary.mcpCitationCount, 2);
+  assert.equal(buildRequest?.githubInstallationId, 140435029);
   assert.deepEqual(requested, [
     "POST /internal/context/access/sync",
     "POST /context/build",

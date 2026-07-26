@@ -14,6 +14,7 @@ import {
   type ReviewRequest
 } from "@jina/ai";
 import { DaytonaCodexKnowledgeDocumentGenerator } from "@jina/daytona";
+import { createGitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import type {
   GitChange,
@@ -35,6 +36,7 @@ interface RepositoryContextMetadata {
   readonly ref: string;
   readonly commitSha?: string;
   readonly checkpointId?: string;
+  readonly githubInstallationId?: number;
 }
 
 interface WorkMetadataByTopic {
@@ -85,6 +87,7 @@ type WorkResult =
 
 interface LeaseExecutionState {
   readonly controller: AbortController;
+  githubToken?: string;
   lostReason?: string;
 }
 
@@ -304,7 +307,20 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
 }
 
 async function runIngestEvidence(work: ClaimedWork<"run-ingest-evidence">): Promise<Record<string, unknown>> {
-  const { tenantId, repository, ref, commitSha: expectedCommitSha } = work.task.metadata;
+  const { tenantId, repository, ref, commitSha: expectedCommitSha, githubInstallationId } = work.task.metadata;
+  if (githubInstallationId) {
+    const access = await createGitHubInstallationAccessToken(githubInstallationId);
+    assertLeaseOwned();
+    if (!activeLease) throw new Error("GitHub installation token was minted outside an active worker lease");
+    activeLease.githubToken = access.token;
+    logger.info(`GitHub installation access ready for ${repository}`, {
+      event: "github.installation_access_ready",
+      workerId,
+      repository,
+      githubInstallationId,
+      ...(access.expiresAt ? { expiresAt: access.expiresAt } : {})
+    });
+  }
   const checkout = await checkoutRepository(repository, ref, expectedCommitSha);
   try {
     const [files, observations, git] = await Promise.all([
@@ -780,7 +796,8 @@ async function githubText(path: string, accept: string): Promise<string> {
 }
 
 async function githubRequest(path: string, accept: string): Promise<Response> {
-  const githubToken = process.env.GITHUB_CLONE_TOKEN?.trim();
+  const githubToken =
+    activeLease?.githubToken ?? (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
   const baseUrl = (process.env.GITHUB_API_URL?.trim() || "https://api.github.com").replace(/\/$/, "");
   const attempts = positiveInt(process.env.GITHUB_RETRY_ATTEMPTS, 4);
   for (let attempt = 0; ; attempt += 1) {
@@ -805,7 +822,8 @@ async function githubRequest(path: string, accept: string): Promise<Response> {
 }
 
 function gitEnvironment(): NodeJS.ProcessEnv {
-  const cloneToken = process.env.GITHUB_CLONE_TOKEN?.trim();
+  const cloneToken =
+    activeLease?.githubToken ?? (process.env.GITHUB_API_TOKEN ?? process.env.GITHUB_CLONE_TOKEN)?.trim();
   if (!cloneToken) return process.env;
   return {
     ...process.env,
@@ -947,7 +965,12 @@ function repositoryMetadata(metadata: Record<string, unknown>): RepositoryContex
   return {
     tenantId: requiredString(metadata.tenantId, "task tenantId"),
     repository: requiredString(metadata.repository, "task repository"),
-    ref: requiredString(metadata.ref, "task ref")
+    ref: requiredString(metadata.ref, "task ref"),
+    ...(metadata.githubInstallationId === undefined
+      ? {}
+      : {
+          githubInstallationId: requiredPositiveInteger(metadata.githubInstallationId, "task githubInstallationId")
+        })
   };
 }
 

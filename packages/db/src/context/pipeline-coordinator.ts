@@ -53,11 +53,18 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     repository: string;
     ref: string;
     commitSha?: string;
+    githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
   }): Promise<ContextBuild> {
     if (input.commitSha !== undefined && !isFullCommitSha(input.commitSha)) {
       throw new Error("commitSha must be a full Git SHA");
+    }
+    if (
+      input.githubInstallationId !== undefined &&
+      (!Number.isSafeInteger(input.githubInstallationId) || input.githubInstallationId <= 0)
+    ) {
+      throw new Error("githubInstallationId must be a positive integer");
     }
     return this.database.transaction(async (client) => {
       const id = stableId("cb", { tenantId: input.tenantId, requestKey: input.requestKey });
@@ -101,8 +108,11 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
       ] as const;
       for (const stage of stages) {
         const metadata =
-          stage.type === contextTaskTypes.ingestEvidence && input.commitSha
-            ? { commitSha: input.commitSha.toLowerCase() }
+          stage.type === contextTaskTypes.ingestEvidence
+            ? {
+                ...(input.commitSha ? { commitSha: input.commitSha.toLowerCase() } : {}),
+                ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {})
+              }
             : {};
         await client.query(
           `insert into jina_context.pipeline_stages

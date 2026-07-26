@@ -37,9 +37,12 @@ origins, when present, must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
 
 Dashboard/admin values are server-side Vercel environment variables:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
-`JINA_WEB_AUTH_PASSWORD`, and the configured principal/allowlist. Never use a
-`NEXT_PUBLIC_` prefix for a credential. Preview deployments intentionally have no
-production API secret.
+`JINA_WEB_AUTH_PASSWORD`, and the configured tenant/allowlist. Both web apps bind API
+calls with `JINA_WEB_PRINCIPAL_ID`; the admin may instead derive
+`tenant:<JINA_TENANT_ID>` when a tenant ID is configured. One of those two principal
+bindings is required when the admin has `INTERNAL_API_TOKEN`. Never use a `NEXT_PUBLIC_`
+prefix for a credential. Preview deployments intentionally have no production API
+secret.
 
 ## Worker configuration
 
@@ -57,8 +60,10 @@ CONTEXT_CODEX_COMPACT_TOKENS=12000
 DAYTONA_RUN_TIMEOUT_SECONDS=2400
 ```
 
-It mounts read-only `GITHUB_CLONE_TOKEN`, `DAYTONA_API_KEY`, and
-`OPENROUTER_API_KEY`. The task worker has one instance and handles
+It mounts read-only `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLONE_TOKEN`,
+`DAYTONA_API_KEY`, and `OPENROUTER_API_KEY`. Ingestion mints a short-lived installation
+token whenever a build carries `githubInstallationId`; `GITHUB_CLONE_TOKEN` is the
+manual-build fallback. The task worker has one instance and handles
 `run-review|run-research|run-publish|run-cleanup`.
 
 Cloud Run CLI treats commas as environment separators, so deployed topic lists use pipes.
@@ -77,7 +82,7 @@ successor. Worker writes are fenced by the current board lease.
 
 Dense retrieval is disabled until its evaluation and approved embedding-provider gates
 pass. The deterministic hierarchy adapter is active; PageIndex remains an optional,
-disabled adapter until its long-document gate passes.
+unconfigured adapter until its long-document gate passes.
 
 ## CI and image build
 
@@ -149,7 +154,7 @@ gcloud builds submit \
 
 `scripts/cloud-build-deploy.sh` then:
 
-1. deploys and executes `jina-context-migrate`;
+1. deploys and executes `jina-context-migrate`, including capability-role installation;
 2. deploys `jina-api` with schema management disabled and checks `/health`;
 3. deploys `jina-context-worker` and verifies the exact three topics;
 4. removes the retired worker service after the replacement is healthy;
@@ -157,16 +162,23 @@ gcloud builds submit \
 6. deploys and executes `jina-acceptance`;
 7. fails the Cloud Build if migration, health, topic, or acceptance checks fail.
 
-The migration installs `jina_context` from scratch. It does not copy or translate prior
-semantic indexes. Active repositories must be reingested.
+The migration installs `jina_context` and its capability roles from scratch with
+`--install-roles`. The migration login therefore needs `CREATEROLE`; runtime services
+still start with schema management disabled. The migration does not copy or translate
+prior semantic indexes. Active repositories must be reingested.
 
 ## Production acceptance
 
 The 55-minute `jina-acceptance` job receives both service credentials from Secret Manager
-and uses a 50-minute polling budget. It:
+and uses a 50-minute polling budget. Unless `ACCEPTANCE_REPOSITORY` and `ACCEPTANCE_REF`
+override it, the job uses the existing external fixture
+`omxyz/jina-context-graph-e2e@main`; that repository name is historical and is not a
+runtime compatibility surface. Production also sets
+`ACCEPTANCE_GITHUB_INSTALLATION_ID=140435029`, causing the build to exercise GitHub App
+token minting instead of the fallback clone token. The job:
 
 1. replaces the fixture principal's repository ACL;
-2. starts `POST /context/build`;
+2. starts `POST /context/build` with the configured GitHub installation ID;
 3. waits for all three named stages and rejects failed/blocked work;
 4. requires a published enriched generation at one full commit SHA;
 5. requires a nonempty knowledge-document catalog;
@@ -191,9 +203,10 @@ DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate
 DATABASE_URL=postgresql://... pnpm --filter @jina/db migrate -- --install-roles
 ```
 
-Role installation requires `CREATEROLE`. Production runs the migration as a separate job;
-the API starts with `JINA_DB_MANAGE_SCHEMA=false`. Runtime logins must not own or alter
-the schema. See [DATA_MODELS.md](DATA_MODELS.md) for the capability-role list.
+Role installation requires `CREATEROLE`. Production runs
+`migrate.js,--install-roles` as a separate job; the API starts with
+`JINA_DB_MANAGE_SCHEMA=false`. Runtime logins must not own or alter the schema. See
+[DATA_MODELS.md](DATA_MODELS.md) for the capability-role list.
 
 Install the pgvector extension/schema only when an approved embedding provider is ready
 for evaluation:

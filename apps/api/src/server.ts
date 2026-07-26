@@ -384,17 +384,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       return;
     }
+    if (url.pathname.startsWith("/context/")) {
+      requireBoundPrincipal(principal, config);
+    }
     if (request.method === "POST" && url.pathname === "/context/build") {
-      requireBoundPrincipalForContextCredential(principal, request, config);
       const body = parseJsonObject(await readRawBody(request));
       const repository = requiredRepositoryName(body.repository, "repository");
       await requireRepositoryAccess(principal, repository);
       const commitSha = optionalString(body.commitSha);
+      const githubInstallationId =
+        body.githubInstallationId === undefined
+          ? undefined
+          : requiredPositiveInteger(body.githubInstallationId, "githubInstallationId");
       const build = await contextCoordinator.createBuild({
         tenantId: principal.tenantId,
         repository,
         ref: optionalString(body.ref) ?? "main",
         ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
+        ...(githubInstallationId ? { githubInstallationId } : {}),
         requestKey: optionalString(body.requestKey) ?? randomUUID(),
         createdAt: nowIso()
       });
@@ -402,7 +409,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (request.method === "POST" && url.pathname === "/context/query") {
-      requireBoundPrincipal(principal, config);
       const body = parseJsonObject(await readRawBody(request));
       const requestValue = parseQueryContextRequest(body, principal);
       json(response, 200, await queryContext(principal, requestValue));
@@ -778,6 +784,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         repository: webhook.repository,
         ref,
         commitSha: webhook.event.headSha,
+        ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
         requestKey: `push:${webhook.event.headSha}:delivery:${deliveryId}`,
         createdAt: nowIso()
       });
@@ -1278,21 +1285,6 @@ function authenticatedPrincipal(
 
 function requireBoundPrincipal(principal: Principal, config: ApiServerConfig): void {
   if (!config.enableDevEndpoints && !principal.forwarded) {
-    throw new ApiError(401, "bound_principal_required", "a bound principal is required");
-  }
-}
-
-function requireBoundPrincipalForContextCredential(
-  principal: Principal,
-  request: IncomingMessage,
-  config: ApiServerConfig
-): void {
-  if (
-    !config.enableDevEndpoints &&
-    config.contextApiToken &&
-    firstHeader(request.headers.authorization) === `Bearer ${config.contextApiToken}` &&
-    !principal.forwarded
-  ) {
     throw new ApiError(401, "bound_principal_required", "a bound principal is required");
   }
 }

@@ -47,8 +47,8 @@ gcloud projects add-iam-policy-binding jina-463721 \
 ```
 
 The runtime service account also needs `roles/secretmanager.secretAccessor` on the
-database, internal API, context API, webhook, clone, Daytona, and model-provider secrets
-mounted into its services.
+database, internal API, context API, webhook, GitHub App identity/private key, fallback
+clone, Daytona, and model-provider secrets mounted into its services.
 
 ## Database boundary
 

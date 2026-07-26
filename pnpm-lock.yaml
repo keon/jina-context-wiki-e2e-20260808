@@ -134,6 +134,9 @@ importers:
       '@jina/daytona':
         specifier: workspace:*
         version: link:../../packages/daytona
+      '@jina/github':
+        specifier: workspace:*
+        version: link:../../packages/github
       '@jina/observability':
         specifier: workspace:*
         version: link:../../packages/observability

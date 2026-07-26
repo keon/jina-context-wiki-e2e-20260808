@@ -18,7 +18,7 @@ sequenceDiagram
     ID-->>API: Original tenant UUID
     API->>DB: Lock board snapshot and dedupe delivery ID
     API->>DB: Create build-context and three stages
-    Note over API,DB: Build metadata carries repository, ref, and event head SHA
+    Note over API,DB: Build metadata carries repository, ref, event head SHA, and installation ID
     API-->>GH: 202 accepted
 ```
 
@@ -53,7 +53,7 @@ sequenceDiagram
 
     W->>API: POST /internal/worker/claim (run-ingest-evidence)
     API-->>W: task, lease, attempt, write-fence token
-    W->>Git: Clone/fetch repository and bounded provider history
+    W->>Git: Mint installation token; clone/fetch repository and bounded provider history
     W->>Git: Resolve and checkout exact commit SHA
     W->>W: Enumerate full manifest; omit unsafe bodies, not entries
     W->>API: POST /internal/context/ingest (lease + evidence input)

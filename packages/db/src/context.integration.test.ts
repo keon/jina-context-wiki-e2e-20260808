@@ -54,6 +54,7 @@ test(
       repository,
       ref,
       commitSha,
+      githubInstallationId: 140435029,
       requestKey: "integration-build-1",
       createdAt
     });
@@ -69,6 +70,7 @@ test(
     });
     assert.ok(ingestClaim);
     assert.equal(ingestClaim.stage.metadata.commitSha, commitSha);
+    assert.equal(ingestClaim.stage.metadata.githubInstallationId, 140435029);
 
     const aclPayload = { principalId: "reader-1", permission: "read" };
     const aclObservationId = stableId("observation", aclPayload);

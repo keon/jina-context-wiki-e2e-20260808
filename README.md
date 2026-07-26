@@ -71,7 +71,8 @@ The baseline index does not depend on a model. Derived knowledge can enrich a la
 generation, while exact and structural context remains available if derivation fails.
 Dense retrieval is implemented behind a port but disabled until an approved embedding
 backend demonstrates an evaluation win. PageIndex is an optional hierarchy adapter; the
-Jina-owned heading-tree fallback is active until PageIndex beats it on long-document
+Jina-owned heading-tree fallback is active, and no PageIndex client is wired into the
+deployed runtime. PageIndex stays off until it beats the fallback on long-document
 quality, latency, cost, ACL, and citation gates.
 
 `POST /context/query` routes requests across exact, structured, structural, lexical,
@@ -84,8 +85,12 @@ exactly one read-only tool, `query_context`, with the same storage-neutral query
 Both HTTP and MCP retrieval enforce repository access before candidate generation and
 require a bound principal.
 
-Local knowledge derivation requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and
-`OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
+Webhook-triggered private-repository builds carry the GitHub installation ID and mint a
+short-lived, installation-scoped token for ingestion. Manual builds may pass
+`githubInstallationId`; builds without one can use `GITHUB_API_TOKEN` or
+`GITHUB_CLONE_TOKEN` as a read-only fallback. Public repositories need no token.
+Knowledge derivation requires `DAYTONA_API_KEY` and either `OPENAI_API_KEY` or
+`OPENROUTER_API_KEY`.
 
 ## Repository layout
 

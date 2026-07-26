@@ -473,6 +473,7 @@ repository/provider identity
 requested ref
 resolved full commit SHA
 trigger observation
+optional GitHub App installation ID
 lease/write fence
 parser version
 bounded history policy
@@ -843,7 +844,7 @@ Not allowed:
 
 ### Public HTTP API
 
-Initial endpoints:
+Implemented endpoints:
 
 ```text
 POST /context/build
@@ -852,14 +853,19 @@ GET  /context/generations
 GET  /context/generations/:id
 GET  /context/documents
 GET  /context/documents/:revisionId
+GET  /context/structure
 GET  /context/metrics
 POST /context/knowledge/:revisionId/review
 POST /context/rebuild
+POST /context/erasure
 ```
 
 Requirements:
 
-- version request and response schemas from the first release;
+- validate the typed clean-cutover request/response contract without compatibility aliases;
+- require a bound principal on every public context route in production;
+- let trusted builds carry a positive GitHub App installation ID without persisting its
+  short-lived access token;
 - return ref, commit, generation, degraded capabilities, and trace ID;
 - paginate documents and generations with opaque cursors;
 - keep administrative rebuild/review operations separate from the query endpoint;
@@ -867,13 +873,15 @@ Requirements:
 
 ### Internal API
 
-Split the current monolithic handlers into route modules:
+The implemented worker/control-plane routes are:
 
 ```text
-/internal/context/ingest/*
-/internal/context/derive/*
-/internal/context/index/*
-/internal/context/outbox/*
+POST /internal/context/access/sync
+POST /internal/context/ingest
+POST /internal/context/derive/prepare
+POST /internal/context/derive/commit
+POST /internal/context/index
+POST /internal/context/outbox/drain
 ```
 
 Every mutation accepts the board task ID, lease ID, attempt, and write-fence token. Internal
@@ -907,17 +915,10 @@ Do not reproduce internal retriever selection or storage primitives in the MCP c
 
 ### Workers
 
-Create one handler module per topic:
-
-```text
-apps/worker/src/context/ingest-evidence.ts
-apps/worker/src/context/derive-knowledge.ts
-apps/worker/src/context/index-context.ts
-```
-
-The process-level server should only parse configuration, claim work, dispatch a typed
-handler, renew leases, and report health. Replace all `CONTEXT_GRAPH_*` variables in one
-cutover; do not read both names.
+`apps/worker/src/server.ts` dispatches three typed handlers, one for each context topic,
+and owns configuration, claim/renew/complete behavior, lease-loss cancellation, and
+health reporting. The clean cutover reads only `CONTEXT_*` configuration; it does not
+read both old and new names.
 
 ## Package and code layout
 

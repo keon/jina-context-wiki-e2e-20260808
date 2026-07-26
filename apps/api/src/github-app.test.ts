@@ -54,7 +54,13 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   const created = await api("/context/build", {
     method: "POST",
     headers: contextHeaders(),
-    body: JSON.stringify({ repository, ref: "main", commitSha, requestKey: "acceptance-build" })
+    body: JSON.stringify({
+      repository,
+      ref: "main",
+      commitSha,
+      githubInstallationId: 140435029,
+      requestKey: "acceptance-build"
+    })
   });
   assert.equal(created.response.status, 202);
   const build = record(created.body.build);
@@ -66,6 +72,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
 
   const ingest = await claim(coordinator, "run-ingest-evidence");
   assert.equal(ingest.stage.metadata.commitSha, commitSha);
+  assert.equal(ingest.stage.metadata.githubInstallationId, 140435029);
   const ingested = await api("/internal/context/ingest", {
     method: "POST",
     headers: internalHeaders(),
@@ -351,6 +358,55 @@ test("legacy graph routes and tool names are absent, ACL failures do not reveal 
     body: JSON.stringify({ repository, question: "What is indexed?", taskKind: "graph" })
   });
   assert.equal(invalid.response.status, 400);
+});
+
+test("all public context routes require a bound principal in production", async () => {
+  const protectedCoordinator = new MemoryContextPipelineCoordinator();
+  const protectedStore = new MemoryContextEngineStore(protectedCoordinator);
+  const protectedServer = createApiServer({
+    tenantId,
+    enableDevEndpoints: false,
+    internalApiToken: internalToken,
+    contextApiToken: contextToken,
+    contextCoordinator: protectedCoordinator,
+    contextStore: protectedStore
+  });
+  await new Promise<void>((resolve) => protectedServer.listen(0, "127.0.0.1", resolve));
+  const protectedUrl = `http://127.0.0.1:${(protectedServer.address() as AddressInfo).port}`;
+  try {
+    for (const path of [
+      "/context/generations",
+      "/context/generations/ig_hidden",
+      "/context/documents",
+      "/context/documents/kr_hidden",
+      `/context/structure?repository=${encodeURIComponent(repository)}`,
+      "/context/metrics"
+    ]) {
+      const response = await fetch(`${protectedUrl}${path}`, {
+        headers: { authorization: `Bearer ${contextToken}` }
+      });
+      assert.equal(response.status, 401, path);
+    }
+    for (const path of [
+      "/context/build",
+      "/context/query",
+      "/context/knowledge/kr_hidden/review",
+      "/context/rebuild",
+      "/context/erasure"
+    ]) {
+      const response = await fetch(`${protectedUrl}${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${internalToken}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({ repository })
+      });
+      assert.equal(response.status, 401, path);
+    }
+  } finally {
+    await new Promise<void>((resolve, reject) => protectedServer.close((error) => (error ? reject(error) : resolve())));
+  }
 });
 
 test("shared-database workers claim across provisioned tenants without a tenant header", async () => {

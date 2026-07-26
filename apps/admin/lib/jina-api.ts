@@ -52,11 +52,11 @@ export interface AdminContextMetrics {
 }
 
 export class JinaApiError extends Error {
-  constructor(
-    message: string,
-    readonly status?: number
-  ) {
+  readonly status?: number;
+
+  constructor(message: string, status?: number) {
     super(message);
+    if (status !== undefined) this.status = status;
   }
 }
 
@@ -65,11 +65,13 @@ function apiBaseUrl(): string {
 }
 
 async function apiGet(pathname: string): Promise<unknown> {
-  const headers: Record<string, string> = { accept: "application/json" };
   const token = process.env.INTERNAL_API_TOKEN?.trim();
-  if (token) headers.authorization = `Bearer ${token}`;
   const tenantId = process.env.JINA_TENANT_ID?.trim();
-  if (tenantId) headers["x-jina-tenant-id"] = tenantId;
+  const headers = adminApiHeaders({
+    token,
+    tenantId,
+    principalId: process.env.JINA_WEB_PRINCIPAL_ID?.trim()
+  });
   let response: Response;
   try {
     response = await fetch(`${apiBaseUrl()}${pathname}`, { headers, cache: "no-store" });
@@ -82,6 +84,23 @@ async function apiGet(pathname: string): Promise<unknown> {
     throw new JinaApiError(`Jina API responded ${response.status} for ${pathname}`, response.status);
   }
   return response.json();
+}
+
+export function adminApiHeaders(input: {
+  readonly token?: string | undefined;
+  readonly tenantId?: string | undefined;
+  readonly principalId?: string | undefined;
+}): Record<string, string> {
+  const headers: Record<string, string> = { accept: "application/json" };
+  if (!input.token) return headers;
+  const principalId = input.principalId || (input.tenantId ? `tenant:${input.tenantId}` : undefined);
+  if (!principalId) {
+    throw new JinaApiError("JINA_WEB_PRINCIPAL_ID or JINA_TENANT_ID is required when INTERNAL_API_TOKEN is configured");
+  }
+  headers.authorization = `Bearer ${input.token}`;
+  headers["x-jina-principal-id"] = principalId;
+  if (input.tenantId) headers["x-jina-tenant-id"] = input.tenantId;
+  return headers;
 }
 
 export async function listAllGenerations(): Promise<readonly AdminIndexGeneration[]> {

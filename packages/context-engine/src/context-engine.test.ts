@@ -789,6 +789,7 @@ test("workflow names are clean and baseline indexing remains independent of deri
     repository,
     ref: "main",
     commitSha,
+    githubInstallationId: 140435029,
     requestKey: "build-1",
     createdAt
   });
@@ -801,6 +802,7 @@ test("workflow names are clean and baseline indexing remains independent of deri
   });
   assert.ok(ingest);
   assert.equal(ingest.stage.metadata.commitSha, commitSha);
+  assert.equal(ingest.stage.metadata.githubInstallationId, 140435029);
   assert.equal(
     await coordinator.complete({
       tenantId,
