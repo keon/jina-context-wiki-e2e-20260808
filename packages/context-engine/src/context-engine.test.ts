@@ -885,6 +885,43 @@ test("knowledge reuse requires every citation digest to exist in the current che
   );
 });
 
+test("knowledge retries preserve canonical timestamps and reject all other immutable changes", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const firstRun = await deriveFixture(store, checkpoint.id);
+  const revision = await store.getRevision(firstRun.revisionIds[0]!);
+  assert.ok(revision);
+  const citations = await store.listCitations(revision.id);
+  const retryCreatedAt = "2026-07-26T12:02:00.000Z";
+  const retryRevision = { ...revision, createdAt: retryCreatedAt };
+  const retryRun = {
+    ...firstRun,
+    id: "retry-run",
+    cacheKey: "retry-cache",
+    revisionIds: [retryRevision.id],
+    createdAt: retryCreatedAt
+  };
+  await store.commitKnowledge({ run: retryRun, revisions: [retryRevision], citations });
+  assert.equal((await store.getRevision(revision.id))?.createdAt, revision.createdAt);
+
+  await assert.rejects(
+    store.commitKnowledge({
+      run: { ...retryRun, id: "divergent-revision-run", cacheKey: "divergent-revision-cache" },
+      revisions: [{ ...retryRevision, title: "divergent title" }],
+      citations
+    }),
+    /revision identity collision/
+  );
+  await assert.rejects(
+    store.commitKnowledge({
+      run: { ...retryRun, id: "divergent-citation-run", cacheKey: "divergent-citation-cache" },
+      revisions: [retryRevision],
+      citations: [{ ...citations[0]!, claim: "divergent claim" }, ...citations.slice(1)]
+    }),
+    /citations cannot be changed/
+  );
+});
+
 test("query routes exact and structural work and return original evidence anchors", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);

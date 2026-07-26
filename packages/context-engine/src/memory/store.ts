@@ -15,7 +15,11 @@ import type {
   KnowledgeEvidenceCitation,
   KnowledgeRevisionEvent
 } from "../domain/knowledge.js";
-import { requiresKnowledgeReview } from "../domain/knowledge.js";
+import {
+  requiresKnowledgeReview,
+  sameImmutableKnowledgeCitation,
+  sameImmutableKnowledgeRevision
+} from "../domain/knowledge.js";
 import type { GenerationProjection, IndexGeneration } from "../domain/projection.js";
 import { contextProjectionConsumers } from "../domain/projection.js";
 import type {
@@ -182,7 +186,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     }
     for (const revision of input.revisions) {
       const existingRevision = this.#revisions.get(revision.id);
-      if (existingRevision !== undefined && JSON.stringify(existingRevision) !== JSON.stringify(revision)) {
+      if (existingRevision !== undefined && !sameImmutableKnowledgeRevision(existingRevision, revision)) {
         throw new Error("Immutable revision identity collision");
       }
       const revisionCitations = input.citations
@@ -193,13 +197,21 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
         throw new Error("Knowledge citation ordinals must be contiguous");
       }
       const existingCitations = this.#citations.get(revision.id);
-      if (existingCitations !== undefined && JSON.stringify(existingCitations) !== JSON.stringify(revisionCitations)) {
+      if (
+        existingCitations !== undefined &&
+        (existingCitations.length !== revisionCitations.length ||
+          existingCitations.some(
+            (citation, index) => !sameImmutableKnowledgeCitation(citation, revisionCitations[index]!)
+          ))
+      ) {
         throw new Error("Immutable knowledge citations cannot be changed");
       }
     }
     this.#runs.set(input.run.id, copy(input.run));
     this.#successfulRuns.set(input.run.cacheKey, input.run.id);
-    for (const revision of input.revisions) this.#revisions.set(revision.id, copy(revision));
+    for (const revision of input.revisions) {
+      if (!this.#revisions.has(revision.id)) this.#revisions.set(revision.id, copy(revision));
+    }
     for (const citation of input.citations) {
       const values = this.#citations.get(citation.revisionId) ?? [];
       if (!values.some((value) => value.id === citation.id)) values.push(copy(citation));

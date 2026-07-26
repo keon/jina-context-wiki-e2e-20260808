@@ -9,7 +9,7 @@ import type {
   ContextWriteFence,
   EvidenceRecord
 } from "@jina/context-engine";
-import { evidenceExcerpt } from "@jina/context-engine";
+import { evidenceExcerpt, sameImmutableKnowledgeCitation, sameImmutableKnowledgeRevision } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, contextStableId, dateString } from "./database.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
@@ -165,26 +165,15 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
             revision.createdAt
           ]
         );
-        const storedRevision = await client.query<{ created_at: Date }>(
-          `select created_at from jina_context.knowledge_document_revisions
-           where tenant_id=$1 and repository=$2 and id=$3 and logical_id=$4
-             and evidence_fingerprint=$5 and body_digest=$6
-             and generator_name=$7 and generator_version=$8`,
-          [
-            revision.tenantId,
-            revision.repository,
-            revision.id,
-            revision.logicalId,
-            revision.evidenceFingerprint,
-            revision.bodyDigest,
-            revision.generatorName,
-            revision.generatorVersion
-          ]
+        const storedRevision = await client.query<RevisionRow>(
+          REVISION_SELECT + ` where revision.tenant_id=$1 and revision.repository=$2 and revision.id=$3`,
+          [revision.tenantId, revision.repository, revision.id]
         );
-        if (storedRevision.rowCount !== 1) {
+        const canonicalRevision = storedRevision.rows[0] && revisionFromRow(storedRevision.rows[0]);
+        if (!canonicalRevision || !sameImmutableKnowledgeRevision(canonicalRevision, revision)) {
           throw new Error(`Knowledge revision identity collision for ${revision.id}`);
         }
-        canonicalRevisionCreatedAt.set(revision.id, dateString(storedRevision.rows[0]!.created_at));
+        canonicalRevisionCreatedAt.set(revision.id, canonicalRevision.createdAt);
       }
       for (const citation of input.citations) {
         const revision = input.revisions.find((candidate) => candidate.id === citation.revisionId);
@@ -217,23 +206,13 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
             JSON.stringify(anchor)
           ]
         );
-        const storedCitation = await client.query(
-          `select 1 from jina_context.knowledge_revision_evidence
-           where tenant_id=$1 and repository=$2 and revision_id=$3 and ordinal=$4
-             and source_type=$5 and source_id=$6 and content_digest=$7
-             and anchor=$8::jsonb`,
-          [
-            revision.tenantId,
-            revision.repository,
-            citation.revisionId,
-            citation.ordinal,
-            anchor.sourceType,
-            anchor.sourceId,
-            anchor.contentDigest,
-            JSON.stringify(anchor)
-          ]
+        const storedCitation = await client.query<CitationRow>(
+          `select * from jina_context.knowledge_revision_evidence
+           where tenant_id=$1 and repository=$2 and revision_id=$3 and ordinal=$4`,
+          [revision.tenantId, revision.repository, citation.revisionId, citation.ordinal]
         );
-        if (storedCitation.rowCount !== 1) {
+        const canonicalCitation = storedCitation.rows[0] && citationFromRow(storedCitation.rows[0]);
+        if (!canonicalCitation || !sameImmutableKnowledgeCitation(canonicalCitation, citation)) {
           throw new Error(`Knowledge citation identity collision for ${citation.revisionId}:${citation.ordinal}`);
         }
       }

@@ -826,37 +826,62 @@ test(
       createdAt: repeatedKnowledgeCreatedAt
     });
     assert.equal(repeatedRevision.id, revision.id);
-    await store.commitKnowledge({
-      run: {
-        id: stableId("dr", {
-          checkpointId: providerSnapshot.checkpoint.id,
-          revisionId: repeatedRevision.id,
-          repeatedKnowledgeCreatedAt
-        }),
-        tenantId,
-        repository,
+    const repeatedRun = {
+      id: stableId("dr", {
         checkpointId: providerSnapshot.checkpoint.id,
-        cacheKey: fingerprint({
-          checkpointId: providerSnapshot.checkpoint.id,
-          revisionId: repeatedRevision.id,
-          repeatedKnowledgeCreatedAt
-        }),
-        focusFingerprint: fingerprint(["src/context.ts"]),
-        generatorName: "fixture",
-        generatorVersion: "fixture-v1",
-        model: "fixture",
-        promptVersion: "fixture-v1",
-        schemaVersion: "knowledge-v1",
-        rawOutputs: [{ documents: [repeatedRevision.logicalId] }],
-        status: "succeeded",
-        diagnostics: [],
-        revisionIds: [repeatedRevision.id],
-        createdAt: repeatedKnowledgeCreatedAt
-      },
+        revisionId: repeatedRevision.id,
+        repeatedKnowledgeCreatedAt
+      }),
+      tenantId,
+      repository,
+      checkpointId: providerSnapshot.checkpoint.id,
+      cacheKey: fingerprint({
+        checkpointId: providerSnapshot.checkpoint.id,
+        revisionId: repeatedRevision.id,
+        repeatedKnowledgeCreatedAt
+      }),
+      focusFingerprint: fingerprint(["src/context.ts"]),
+      generatorName: "fixture",
+      generatorVersion: "fixture-v1",
+      model: "fixture",
+      promptVersion: "fixture-v1",
+      schemaVersion: "knowledge-v1",
+      rawOutputs: [{ documents: [repeatedRevision.logicalId] }],
+      status: "succeeded" as const,
+      diagnostics: [],
+      revisionIds: [repeatedRevision.id],
+      createdAt: repeatedKnowledgeCreatedAt
+    };
+    await store.commitKnowledge({
+      run: repeatedRun,
       revisions: [repeatedRevision],
       citations: [citation, providerCitation]
     });
     assert.equal((await store.getRevision(revision.id))?.createdAt, knowledgeCreatedAt);
+    await assert.rejects(
+      store.commitKnowledge({
+        run: {
+          ...repeatedRun,
+          id: stableId("dr", { repeatedRun: repeatedRun.id, divergence: "revision" }),
+          cacheKey: fingerprint({ repeatedRun: repeatedRun.cacheKey, divergence: "revision" })
+        },
+        revisions: [{ ...repeatedRevision, title: "divergent title" }],
+        citations: [citation, providerCitation]
+      }),
+      /revision identity collision/
+    );
+    await assert.rejects(
+      store.commitKnowledge({
+        run: {
+          ...repeatedRun,
+          id: stableId("dr", { repeatedRun: repeatedRun.id, divergence: "citation" }),
+          cacheKey: fingerprint({ repeatedRun: repeatedRun.cacheKey, divergence: "citation" })
+        },
+        revisions: [repeatedRevision],
+        citations: [{ ...citation, claim: "divergent claim" }, providerCitation]
+      }),
+      /citation identity collision/
+    );
     assert.deepEqual(await store.listCitations(revision.id), [citation, providerCitation]);
     const enrichedGeneration = await new IndexContextService(store).index(providerSnapshot.checkpoint.id, nextLiveAt());
     assert.notEqual(enrichedGeneration.id, generation.id);

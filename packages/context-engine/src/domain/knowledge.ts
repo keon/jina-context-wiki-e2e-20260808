@@ -1,5 +1,5 @@
 import type { EvidenceAnchor } from "./evidence.js";
-import { fingerprint, normalizeIsoTime, normalizeRepository, stableId } from "./fingerprint.js";
+import { canonicalJson, fingerprint, normalizeIsoTime, normalizeRepository, stableId } from "./fingerprint.js";
 
 export const knowledgeDocumentKinds = [
   "architecture",
@@ -52,6 +52,22 @@ export interface KnowledgeDocumentRevision {
   promptVersion: string;
   confidence: number;
   createdAt: string;
+}
+
+export function sameImmutableKnowledgeRevision(
+  left: KnowledgeDocumentRevision,
+  right: KnowledgeDocumentRevision
+): boolean {
+  const { createdAt: _leftCreatedAt, ...leftImmutable } = left;
+  const { createdAt: _rightCreatedAt, ...rightImmutable } = right;
+  return canonicalJson(leftImmutable) === canonicalJson(rightImmutable);
+}
+
+export function sameImmutableKnowledgeCitation(
+  left: KnowledgeEvidenceCitation,
+  right: KnowledgeEvidenceCitation
+): boolean {
+  return canonicalJson(left) === canonicalJson(right);
 }
 
 export type KnowledgeRevisionEventType =
