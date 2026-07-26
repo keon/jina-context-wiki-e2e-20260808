@@ -1,0 +1,20 @@
+{
+  "name": "@jina/context-engine",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc -b",
+    "lint": "eslint . --max-warnings 0",
+    "test": "pnpm build && node --test dist/context-engine.test.js"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  }
+}

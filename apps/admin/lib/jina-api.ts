@@ -1,52 +1,54 @@
-// Server-side client for the Jina API. Requests authenticate with
-// INTERNAL_API_TOKEN and deliberately omit an x-jina-principal-id header, so
-// the API treats them as the svc:api tenant-admin principal, which is granted
-// every repository in the tenant. That is what lets this app list ALL
-// generated graphs rather than an ACL-scoped subset. The token never reaches
-// the browser: only server components import this module.
+// Server-only tenant-administrator client. The internal credential never reaches
+// the browser; only server components import this module.
 
-export interface AdminGraphGenerator {
-  readonly executor: "daytona" | "fixture" | "projection";
-  readonly model: string;
-  readonly sandboxId?: string;
-}
-
-export interface AdminGraphSummary {
+export interface AdminIndexGeneration {
   readonly id: string;
-  readonly tenantId: string;
+  readonly tenantId?: string;
   readonly repository: string;
   readonly ref: string;
   readonly commitSha: string;
-  readonly generatedAt: string;
-  readonly generator: AdminGraphGenerator;
-  readonly summary: string;
-  readonly nodeCount: number;
-  readonly edgeCount: number;
+  readonly status: "building" | "published" | "degraded" | "failed";
+  readonly derivedKnowledge: "available" | "partial" | "unavailable";
+  readonly projectors: Readonly<Record<string, string>>;
+  readonly createdAt: string;
+  readonly publishedAt?: string;
 }
 
-export interface AdminGraphNode {
+export interface AdminContextDocument {
   readonly id: string;
+  readonly logicalId: string;
+  readonly repository: string;
   readonly kind: string;
-  readonly label: string;
-  readonly description: string;
-  readonly path?: string;
-  readonly evidence: readonly string[];
+  readonly title: string;
+  readonly summary: string;
+  readonly bodyMarkdown?: string;
+  readonly confidence: number;
+  readonly reviewStatus: string;
+  readonly commitSha: string;
+  readonly createdAt: string;
+  readonly citations?: readonly {
+    readonly id: string;
+    readonly sourceType: string;
+    readonly sourceId: string;
+    readonly pathOrUrl?: string;
+    readonly startLine?: number;
+    readonly endLine?: number;
+  }[];
 }
 
-export interface AdminGraphEdge {
-  readonly id: string;
-  readonly source: string;
-  readonly target: string;
-  readonly predicate: string;
-  readonly plane: "code" | "knowledge";
-  readonly confidence?: number;
-  readonly why?: string;
-  readonly evidence: readonly string[];
-}
-
-export interface AdminGraph extends Omit<AdminGraphSummary, "nodeCount" | "edgeCount"> {
-  readonly nodes: readonly AdminGraphNode[];
-  readonly edges: readonly AdminGraphEdge[];
+export interface AdminContextMetrics {
+  readonly outboxDepthByConsumer: Readonly<Record<string, number>>;
+  readonly publishedGenerationCount: number;
+  readonly documentCount: number;
+  readonly fragmentCount: number;
+  readonly hierarchyNodeCount: number;
+  readonly embeddingCount: number;
+  readonly query?: {
+    readonly count: number;
+    readonly p95Ms: number;
+    readonly citationFailureCount: number;
+    readonly conflictCount: number;
+  };
 }
 
 export class JinaApiError extends Error {
@@ -82,17 +84,35 @@ async function apiGet(pathname: string): Promise<unknown> {
   return response.json();
 }
 
-export async function listAllGraphs(): Promise<readonly AdminGraphSummary[]> {
-  const body = (await apiGet("/context-graph")) as { readonly graphs?: readonly AdminGraphSummary[] };
-  const graphs = Array.isArray(body.graphs) ? (body.graphs as readonly AdminGraphSummary[]) : [];
-  return [...graphs].sort((left, right) => right.generatedAt.localeCompare(left.generatedAt));
+export async function listAllGenerations(): Promise<readonly AdminIndexGeneration[]> {
+  const body = (await apiGet("/context/generations")) as {
+    readonly generations?: readonly AdminIndexGeneration[];
+  };
+  const generations: readonly AdminIndexGeneration[] = Array.isArray(body.generations) ? body.generations : [];
+  return [...generations].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
-export async function getGraph(graphId: string): Promise<AdminGraph | undefined> {
+export async function listKnowledgeDocuments(repository?: string): Promise<readonly AdminContextDocument[]> {
+  const query = repository ? `?repository=${encodeURIComponent(repository)}` : "";
+  const body = (await apiGet(`/context/documents${query}`)) as {
+    readonly documents?: readonly AdminContextDocument[];
+  };
+  const documents: readonly AdminContextDocument[] = Array.isArray(body.documents) ? body.documents : [];
+  return documents;
+}
+
+export async function getKnowledgeDocument(id: string): Promise<AdminContextDocument | undefined> {
   try {
-    return (await apiGet(`/context-graph/graphs/${encodeURIComponent(graphId)}`)) as AdminGraph;
+    const body = (await apiGet(`/context/documents/${encodeURIComponent(id)}`)) as {
+      readonly document?: AdminContextDocument;
+    };
+    return body.document;
   } catch (error) {
     if (error instanceof JinaApiError && error.status === 404) return undefined;
     throw error;
   }
+}
+
+export async function getContextMetrics(): Promise<AdminContextMetrics> {
+  return (await apiGet("/context/metrics")) as AdminContextMetrics;
 }

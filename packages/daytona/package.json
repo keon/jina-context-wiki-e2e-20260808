@@ -12,11 +12,11 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm run build && node --test dist/context-graph-executor.test.js"
+    "test": "pnpm run build && node --test dist/knowledge-document-executor.test.js"
   },
   "dependencies": {
     "@daytona/sdk": "^0.199.0",
-    "@jina/context-graph": "workspace:*"
+    "@jina/context-engine": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

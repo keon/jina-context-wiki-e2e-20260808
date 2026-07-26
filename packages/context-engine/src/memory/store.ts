@@ -1,0 +1,444 @@
+import type {
+  EvidenceAnchor,
+  EvidenceCheckpoint,
+  EvidenceRecord,
+  EvidenceSnapshot,
+  RefManifestEntry,
+  StructuralFact
+} from "../domain/evidence.js";
+import { validateEvidenceRecord } from "../domain/evidence.js";
+import type {
+  DerivationRun,
+  KnowledgeDocumentRevision,
+  KnowledgeEvidenceCitation,
+  KnowledgeRevisionEvent
+} from "../domain/knowledge.js";
+import { requiresKnowledgeReview } from "../domain/knowledge.js";
+import type { GenerationProjection, IndexGeneration } from "../domain/projection.js";
+import { contextProjectionConsumers } from "../domain/projection.js";
+import type {
+  EraseEvidenceInput,
+  FencedContextEngineStore,
+  ProjectionBacklog,
+  QueryMetrics,
+  QueryRunTelemetry
+} from "../ports/context-engine-store.js";
+import type { KnowledgeCommit } from "../ports/knowledge-store.js";
+import type { ContextPipelineCoordinator, ContextWriteFence } from "../workflow/coordinator.js";
+
+function scopeKey(tenantId: string, repository: string, ref: string): string {
+  return `${tenantId}\u0000${repository}\u0000${ref}`;
+}
+
+function copy<T>(value: T): T {
+  return structuredClone(value);
+}
+
+function hasJsonPointer(body: string, pointer: string): boolean {
+  if (pointer === "") return true;
+  if (!pointer.startsWith("/")) return false;
+  let value: unknown;
+  try {
+    value = JSON.parse(body) as unknown;
+  } catch {
+    return false;
+  }
+  for (const encoded of pointer.slice(1).split("/")) {
+    const key = encoded.replace(/~1/g, "/").replace(/~0/g, "~");
+    if (Array.isArray(value)) {
+      if (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length) return false;
+      value = value[Number(key)];
+    } else if (value !== null && typeof value === "object" && Object.prototype.hasOwnProperty.call(value, key)) {
+      value = (value as Record<string, unknown>)[key];
+    } else {
+      return false;
+    }
+  }
+  return true;
+}
+
+export class MemoryContextEngineStore implements FencedContextEngineStore {
+  readonly enforcesWriteFences = true as const;
+  readonly #checkpoints = new Map<string, EvidenceCheckpoint>();
+  readonly #snapshots = new Map<string, EvidenceSnapshot>();
+  readonly #latestCheckpoints = new Map<string, string>();
+  readonly #runs = new Map<string, DerivationRun>();
+  readonly #successfulRuns = new Map<string, string>();
+  readonly #revisions = new Map<string, KnowledgeDocumentRevision>();
+  readonly #citations = new Map<string, KnowledgeEvidenceCitation[]>();
+  readonly #events = new Map<string, KnowledgeRevisionEvent[]>();
+  readonly #projections = new Map<string, GenerationProjection>();
+  readonly #latestGenerations = new Map<string, string>();
+  readonly #repositoryAccess = new Map<string, Set<string>>();
+  readonly #erasures = new Set<string>();
+  readonly #queryRuns: QueryRunTelemetry[] = [];
+  #closed = false;
+
+  constructor(
+    private readonly fenceValidator?: Pick<ContextPipelineCoordinator, "validateWriteFence">,
+    private readonly now: () => string = () => new Date().toISOString()
+  ) {}
+
+  #assertOpen(): void {
+    if (this.#closed) throw new Error("Context engine store is closed");
+  }
+
+  async commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
+    this.#assertOpen();
+    await this.#assertFence(snapshot.checkpoint.tenantId, fence);
+    const existing = this.#checkpoints.get(snapshot.checkpoint.id);
+    if (existing !== undefined) {
+      if (existing.evidenceFingerprint !== snapshot.checkpoint.evidenceFingerprint) {
+        throw new Error("Checkpoint identity collision");
+      }
+      return copy(existing);
+    }
+    for (const record of snapshot.records) validateEvidenceRecord(record);
+    const recordIds = new Set(snapshot.records.map((record) => record.id));
+    if (recordIds.size !== snapshot.records.length) throw new Error("Duplicate evidence record");
+    this.#checkpoints.set(snapshot.checkpoint.id, copy(snapshot.checkpoint));
+    this.#snapshots.set(snapshot.checkpoint.id, copy(snapshot));
+    this.#latestCheckpoints.set(
+      scopeKey(snapshot.checkpoint.tenantId, snapshot.checkpoint.repository, snapshot.checkpoint.ref),
+      snapshot.checkpoint.id
+    );
+    return copy(snapshot.checkpoint);
+  }
+
+  async getCheckpoint(checkpointId: string): Promise<EvidenceCheckpoint | undefined> {
+    const value = this.#checkpoints.get(checkpointId);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async latestCheckpoint(tenantId: string, repository: string, ref: string): Promise<EvidenceCheckpoint | undefined> {
+    const id = this.#latestCheckpoints.get(scopeKey(tenantId, repository, ref));
+    return id === undefined ? undefined : this.getCheckpoint(id);
+  }
+
+  async listEvidence(checkpointId: string): Promise<EvidenceRecord[]> {
+    return copy((this.#snapshots.get(checkpointId)?.records ?? []).filter((record) => !this.#isErased(record.anchor)));
+  }
+
+  async resolveAnchor(
+    checkpointId: string,
+    anchor: Omit<EvidenceAnchor, "contentDigest">
+  ): Promise<EvidenceRecord | undefined> {
+    const candidates = this.#snapshots.get(checkpointId)?.records ?? [];
+    const record = candidates.find(
+      (candidate) =>
+        !this.#isErased(candidate.anchor) &&
+        candidate.anchor.tenantId === anchor.tenantId &&
+        candidate.anchor.repository === anchor.repository &&
+        candidate.anchor.sourceType === anchor.sourceType &&
+        candidate.anchor.sourceId === anchor.sourceId &&
+        (anchor.commitSha === undefined || candidate.anchor.commitSha === anchor.commitSha) &&
+        (anchor.pathOrUrl === undefined || candidate.anchor.pathOrUrl === anchor.pathOrUrl)
+    );
+    if (record === undefined) return undefined;
+    const lineCount = record.body.split(/\r?\n/).length;
+    if (anchor.startLine !== undefined && anchor.startLine > lineCount) return undefined;
+    if (anchor.endLine !== undefined && anchor.endLine > lineCount) return undefined;
+    if (anchor.jsonPointer !== undefined && !hasJsonPointer(record.body, anchor.jsonPointer)) return undefined;
+    return copy(record);
+  }
+
+  async listManifest(checkpointId: string): Promise<RefManifestEntry[]> {
+    return copy(
+      (this.#snapshots.get(checkpointId)?.manifest ?? []).filter(
+        (entry) => !this.#erasures.has(`${entry.tenantId}\u0000${entry.repository}\u0000blob\u0000${entry.blobSha}`)
+      )
+    );
+  }
+
+  async listStructuralFacts(checkpointId: string): Promise<StructuralFact[]> {
+    return copy(
+      (this.#snapshots.get(checkpointId)?.structuralFacts ?? []).filter((fact) =>
+        fact.anchors.every((anchor) => !this.#isErased(anchor))
+      )
+    );
+  }
+
+  async findSuccessfulRun(cacheKey: string): Promise<DerivationRun | undefined> {
+    const id = this.#successfulRuns.get(cacheKey);
+    const value = id === undefined ? undefined : this.#runs.get(id);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
+    await this.#assertFence(input.run.tenantId, fence);
+    const existing = this.#successfulRuns.get(input.run.cacheKey);
+    if (existing !== undefined) return copy(this.#runs.get(existing)!);
+    if (input.run.status !== "succeeded") throw new Error("commitKnowledge requires a successful run");
+    const ids = new Set(input.revisions.map((revision) => revision.id));
+    if (ids.size !== input.revisions.length) throw new Error("Duplicate revisions in commit");
+    if (input.run.revisionIds.length !== ids.size || input.run.revisionIds.some((revisionId) => !ids.has(revisionId))) {
+      throw new Error("Derivation run revision IDs do not match the committed revisions");
+    }
+    for (const citation of input.citations) {
+      if (!ids.has(citation.revisionId)) throw new Error("Citation must belong to a committed revision");
+    }
+    for (const revision of input.revisions) {
+      const existingRevision = this.#revisions.get(revision.id);
+      if (existingRevision !== undefined && JSON.stringify(existingRevision) !== JSON.stringify(revision)) {
+        throw new Error("Immutable revision identity collision");
+      }
+      const revisionCitations = input.citations
+        .filter((citation) => citation.revisionId === revision.id)
+        .sort((left, right) => left.ordinal - right.ordinal);
+      if (revisionCitations.length === 0) throw new Error("Knowledge revisions require source citations");
+      if (revisionCitations.some((citation, index) => citation.ordinal !== index)) {
+        throw new Error("Knowledge citation ordinals must be contiguous");
+      }
+      const existingCitations = this.#citations.get(revision.id);
+      if (existingCitations !== undefined && JSON.stringify(existingCitations) !== JSON.stringify(revisionCitations)) {
+        throw new Error("Immutable knowledge citations cannot be changed");
+      }
+    }
+    this.#runs.set(input.run.id, copy(input.run));
+    this.#successfulRuns.set(input.run.cacheKey, input.run.id);
+    for (const revision of input.revisions) this.#revisions.set(revision.id, copy(revision));
+    for (const citation of input.citations) {
+      const values = this.#citations.get(citation.revisionId) ?? [];
+      if (!values.some((value) => value.id === citation.id)) values.push(copy(citation));
+      values.sort((left, right) => left.ordinal - right.ordinal);
+      this.#citations.set(citation.revisionId, values);
+    }
+    return copy(input.run);
+  }
+
+  async recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void> {
+    await this.#assertFence(run.tenantId, fence);
+    if (run.status !== "failed") throw new Error("recordFailedRun requires a failed run");
+    this.#runs.set(run.id, copy(run));
+  }
+
+  async getRun(runId: string): Promise<DerivationRun | undefined> {
+    const value = this.#runs.get(runId);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async getRevision(revisionId: string): Promise<KnowledgeDocumentRevision | undefined> {
+    const value = this.#revisions.get(revisionId);
+    return value === undefined || this.#isRevisionErased(revisionId) ? undefined : copy(value);
+  }
+
+  async listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
+    return [...this.#revisions.values()]
+      .filter(
+        (revision) =>
+          revision.tenantId === tenantId && revision.repository === repository && !this.#isRevisionErased(revision.id)
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map(copy);
+  }
+
+  async listCitations(revisionId: string): Promise<KnowledgeEvidenceCitation[]> {
+    return copy((this.#citations.get(revisionId) ?? []).filter((citation) => !this.#isErased(citation.anchor)));
+  }
+
+  async appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent> {
+    if (!this.#revisions.has(event.revisionId)) throw new Error("Unknown knowledge revision");
+    const values = this.#events.get(event.revisionId) ?? [];
+    const expected = values.length + 1;
+    if (event.sequence !== expected) throw new Error(`Expected event sequence ${expected}`);
+    if (values.some((value) => value.id === event.id)) throw new Error("Duplicate revision event");
+    values.push(copy(event));
+    this.#events.set(event.revisionId, values);
+    return copy(event);
+  }
+
+  async listRevisionEvents(revisionId: string): Promise<KnowledgeRevisionEvent[]> {
+    return copy(this.#events.get(revisionId) ?? []);
+  }
+
+  async listCurrentEligibleRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]> {
+    const revisions = await this.listRevisions(tenantId, repository);
+    const eligible = revisions.filter((revision) => {
+      const events = this.#events.get(revision.id) ?? [];
+      if (events.some((event) => ["rejected", "invalidated", "redacted", "superseded"].includes(event.type))) {
+        return false;
+      }
+      if ((this.#citations.get(revision.id) ?? []).some((citation) => this.#isErased(citation.anchor))) {
+        return false;
+      }
+      return !requiresKnowledgeReview(revision.kind) || events.some((event) => event.type === "reviewed");
+    });
+    const current = new Map<string, KnowledgeDocumentRevision>();
+    for (const revision of eligible) {
+      const prior = current.get(revision.logicalId);
+      if (
+        prior === undefined ||
+        prior.createdAt < revision.createdAt ||
+        (prior.createdAt === revision.createdAt && prior.id < revision.id)
+      ) {
+        current.set(revision.logicalId, revision);
+      }
+    }
+    return [...current.values()].map(copy);
+  }
+
+  async publish(projection: GenerationProjection, fence?: ContextWriteFence): Promise<IndexGeneration> {
+    this.#assertOpen();
+    await this.#assertFence(projection.generation.tenantId, fence);
+    const generation = projection.generation;
+    const required = ["manifest", "lexical", "structural", "identity", "acl", "retention"] as const;
+    if (generation.status !== "published" || generation.publishedAt === undefined) {
+      throw new Error("Only a fully published generation may be stored");
+    }
+    for (const consumer of required) {
+      if (generation.projectorStatuses[consumer] !== "ready") {
+        throw new Error(`Required projector ${consumer} is not ready`);
+      }
+    }
+    for (const consumer of contextProjectionConsumers) {
+      if (generation.projectorVersions[consumer] === undefined) {
+        throw new Error(`Missing projector version for ${consumer}`);
+      }
+    }
+    const existing = this.#projections.get(generation.id);
+    if (existing !== undefined) {
+      if (existing.generation.fingerprint !== generation.fingerprint) {
+        throw new Error("Generation identity collision");
+      }
+      return copy(existing.generation);
+    }
+    for (const [id, prior] of this.#projections) {
+      if (
+        id !== generation.id &&
+        prior.generation.tenantId === generation.tenantId &&
+        prior.generation.repository === generation.repository &&
+        prior.generation.ref === generation.ref
+      ) {
+        this.#projections.delete(id);
+      }
+    }
+    this.#projections.set(generation.id, copy(projection));
+    this.#latestGenerations.set(scopeKey(generation.tenantId, generation.repository, generation.ref), generation.id);
+    return copy(generation);
+  }
+
+  async getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
+    const value = this.#projections.get(generationId);
+    return value === undefined ? undefined : copy(value);
+  }
+
+  async latestPublished(tenantId: string, repository: string, ref: string): Promise<GenerationProjection | undefined> {
+    const id = this.#latestGenerations.get(scopeKey(tenantId, repository, ref));
+    return id === undefined ? undefined : this.getGeneration(id);
+  }
+
+  async listGenerations(tenantId: string, repository: string): Promise<IndexGeneration[]> {
+    return [...this.#projections.values()]
+      .map((projection) => projection.generation)
+      .filter((generation) => generation.tenantId === tenantId && generation.repository === repository)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map(copy);
+  }
+
+  async replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void> {
+    this.#assertOpen();
+    this.#repositoryAccess.set(
+      `${tenantId}\u0000${principalId}`,
+      new Set(repositories.map((repository) => repository.trim().toLowerCase()).filter(Boolean))
+    );
+  }
+
+  async repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]> {
+    return [...(this.#repositoryAccess.get(`${tenantId}\u0000${principalId}`) ?? new Set())].sort();
+  }
+
+  async listRepositories(tenantId: string): Promise<string[]> {
+    const repositories = new Set<string>();
+    for (const checkpoint of this.#checkpoints.values()) {
+      if (checkpoint.tenantId === tenantId) repositories.add(checkpoint.repository);
+    }
+    return [...repositories].sort();
+  }
+
+  async projectionBacklog(_tenantId: string): Promise<ProjectionBacklog> {
+    return Object.fromEntries(
+      contextProjectionConsumers.map((consumer) => [consumer, { count: 0 }])
+    ) as ProjectionBacklog;
+  }
+
+  async recordQueryRun(run: QueryRunTelemetry): Promise<void> {
+    this.#assertOpen();
+    if (!this.#queryRuns.some((candidate) => candidate.id === run.id)) this.#queryRuns.push(copy(run));
+  }
+
+  async queryMetrics(tenantId: string): Promise<QueryMetrics> {
+    const runs = this.#queryRuns.filter((run) => run.tenantId === tenantId);
+    const durations = runs.map((run) => run.durationMs).sort((left, right) => left - right);
+    const index = Math.max(0, Math.ceil(durations.length * 0.95) - 1);
+    return {
+      count: runs.length,
+      p95Ms: durations[index] ?? 0,
+      citationFailureCount: runs.reduce((sum, run) => sum + run.citationFailureCount, 0),
+      conflictCount: runs.reduce((sum, run) => sum + run.conflictCount, 0)
+    };
+  }
+
+  async eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }> {
+    this.#assertOpen();
+    if (!input.sourceId.trim() || !input.reason.trim() || !input.actorId.trim()) {
+      throw new Error("Evidence erasure requires sourceId, actorId, and reason");
+    }
+    this.#erasures.add(`${input.tenantId}\u0000${input.repository}\u0000${input.sourceType}\u0000${input.sourceId}`);
+    let erasedGenerationCount = 0;
+    for (const [id, projection] of [...this.#projections]) {
+      if (projection.generation.tenantId === input.tenantId && projection.generation.repository === input.repository) {
+        this.#projections.delete(id);
+        erasedGenerationCount += 1;
+      }
+    }
+    for (const [key, id] of [...this.#latestGenerations]) {
+      if (!this.#projections.has(id)) this.#latestGenerations.delete(key);
+    }
+    return { erasedGenerationCount };
+  }
+
+  async migrateTenantAliases(fromTenantId: string, toTenantId: string): Promise<void> {
+    this.#assertOpen();
+    if (fromTenantId === toTenantId) return;
+    const accessEntries = [...this.#repositoryAccess.entries()].filter(([key]) =>
+      key.startsWith(`${fromTenantId}\u0000`)
+    );
+    for (const [key, repositories] of accessEntries) {
+      const principalId = key.slice(fromTenantId.length + 1);
+      const targetKey = `${toTenantId}\u0000${principalId}`;
+      this.#repositoryAccess.set(
+        targetKey,
+        new Set([...(this.#repositoryAccess.get(targetKey) ?? []), ...repositories])
+      );
+      this.#repositoryAccess.delete(key);
+    }
+  }
+
+  async health(): Promise<{ ok: boolean; adapter: string }> {
+    return { ok: !this.#closed, adapter: "memory" };
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+  }
+
+  async #assertFence(tenantId: string, fence?: ContextWriteFence): Promise<void> {
+    if (fence === undefined) return;
+    if (
+      this.fenceValidator === undefined ||
+      !(await this.fenceValidator.validateWriteFence({ tenantId, fence, now: this.now() }))
+    ) {
+      throw new Error("Context write fence is stale or invalid");
+    }
+  }
+
+  #isErased(anchor: EvidenceAnchor): boolean {
+    return this.#erasures.has(
+      `${anchor.tenantId}\u0000${anchor.repository}\u0000${anchor.sourceType}\u0000${anchor.sourceId}`
+    );
+  }
+
+  #isRevisionErased(revisionId: string): boolean {
+    return (this.#citations.get(revisionId) ?? []).some((citation) => this.#isErased(citation.anchor));
+  }
+}

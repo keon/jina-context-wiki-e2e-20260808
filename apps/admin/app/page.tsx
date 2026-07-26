@@ -1,44 +1,51 @@
 import Link from "next/link";
-import { JinaApiError, listAllGraphs, type AdminGraphSummary } from "../lib/jina-api";
+import {
+  getContextMetrics,
+  JinaApiError,
+  listAllGenerations,
+  listKnowledgeDocuments,
+  type AdminIndexGeneration
+} from "../lib/jina-api";
 
 export const dynamic = "force-dynamic";
 
-export default async function AllGraphsPage({
+export default async function ContextAdminPage({
   searchParams
 }: {
   readonly searchParams: Promise<{ readonly repository?: string }>;
 }) {
   const { repository } = await searchParams;
-  let graphs: readonly AdminGraphSummary[];
+  let generations: readonly AdminIndexGeneration[];
+  let documentCount: number;
+  let metrics: Awaited<ReturnType<typeof getContextMetrics>>;
   try {
-    graphs = await listAllGraphs();
+    [generations, metrics] = await Promise.all([listAllGenerations(), getContextMetrics()]);
+    documentCount = (await listKnowledgeDocuments(repository)).length;
   } catch (error) {
     return (
       <div className="error-state">
-        <p>Could not load graphs from the Jina API.</p>
+        <p>Could not load repository context from the Jina API.</p>
         <p>
           <code>{error instanceof JinaApiError ? error.message : "unexpected error"}</code>
         </p>
         <p className="muted">
-          Check <code>JINA_API_URL</code> and <code>INTERNAL_API_TOKEN</code>, or start the local stack with{" "}
-          <code>pnpm dev</code>.
+          Check <code>JINA_API_URL</code> and <code>INTERNAL_API_TOKEN</code>, or start the local stack.
         </p>
       </div>
     );
   }
 
-  const repositories = [...new Set(graphs.map((graph) => graph.repository))].sort();
-  const visible = repository ? graphs.filter((graph) => graph.repository === repository) : graphs;
-  const totalNodes = visible.reduce((sum, graph) => sum + graph.nodeCount, 0);
-  const totalEdges = visible.reduce((sum, graph) => sum + graph.edgeCount, 0);
+  const repositories = [...new Set(generations.map((generation) => generation.repository))].sort();
+  const visible = repository ? generations.filter((generation) => generation.repository === repository) : generations;
+  const pending = Object.values(metrics.outboxDepthByConsumer).reduce((sum, count) => sum + count, 0);
 
   return (
     <main>
       <div className="stat-row">
-        <Stat label="Graphs" value={visible.length} />
+        <Stat label="Published generations" value={metrics.publishedGenerationCount} />
         <Stat label="Repositories" value={repository ? 1 : repositories.length} />
-        <Stat label="Nodes" value={totalNodes} />
-        <Stat label="Edges" value={totalEdges} />
+        <Stat label="Knowledge documents" value={documentCount} />
+        <Stat label="Pending projections" value={pending} />
       </div>
 
       {repositories.length > 1 || repository ? (
@@ -60,50 +67,44 @@ export default async function AllGraphsPage({
 
       {visible.length === 0 ? (
         <div className="empty-state">
-          <p>No context graphs have been generated yet{repository ? ` for ${repository}` : ""}.</p>
+          <p>No context index generations have been published{repository ? ` for ${repository}` : ""}.</p>
           <p>
-            Graphs appear here as soon as a <code>context-graph</code> build completes.
+            Generations appear after a <code>build-context</code> workflow publishes its required projectors.
           </p>
         </div>
       ) : (
-        <table className="graph-table">
+        <table className="context-table">
           <thead>
             <tr>
               <th>Repository</th>
               <th>Ref</th>
               <th>Commit</th>
-              <th>Generated</th>
-              <th>Generator</th>
-              <th>Nodes</th>
-              <th>Edges</th>
-              <th>Summary</th>
+              <th>Published</th>
+              <th>Status</th>
+              <th>Knowledge</th>
+              <th>Projectors</th>
             </tr>
           </thead>
           <tbody>
-            {visible.map((graph) => (
-              <tr key={graph.id}>
+            {visible.map((generation) => (
+              <tr key={generation.id}>
                 <td>
-                  <Link href={`/graphs/${encodeURIComponent(graph.id)}`}>{graph.repository}</Link>
+                  <Link href={`/?repository=${encodeURIComponent(generation.repository)}`}>
+                    {generation.repository}
+                  </Link>
                 </td>
                 <td>
-                  <code>{shortRef(graph.ref)}</code>
+                  <code>{shortRef(generation.ref)}</code>
                 </td>
                 <td>
-                  <code>{graph.commitSha.slice(0, 10)}</code>
+                  <code>{generation.commitSha.slice(0, 10)}</code>
                 </td>
-                <td title={graph.generatedAt}>{formatTimestamp(graph.generatedAt)}</td>
-                <td>
-                  {graph.generator.executor}
-                  {graph.generator.model ? (
-                    <>
-                      {" "}
-                      <span className="muted">({graph.generator.model})</span>
-                    </>
-                  ) : null}
+                <td title={generation.publishedAt ?? generation.createdAt}>
+                  {formatTimestamp(generation.publishedAt ?? generation.createdAt)}
                 </td>
-                <td>{graph.nodeCount}</td>
-                <td>{graph.edgeCount}</td>
-                <td className="summary-cell">{graph.summary}</td>
+                <td>{generation.status}</td>
+                <td>{generation.derivedKnowledge}</td>
+                <td className="summary-cell">{Object.keys(generation.projectors).sort().join(", ")}</td>
               </tr>
             ))}
           </tbody>

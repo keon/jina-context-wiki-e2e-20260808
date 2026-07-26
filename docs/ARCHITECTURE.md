@@ -1,86 +1,162 @@
 # Architecture
 
-This document describes the runtime in this repository. Domain-specific ContextGraph details live in [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md), persisted structures in [DATA_MODELS.md](DATA_MODELS.md), and request flows in [SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md).
+This document describes the deployed runtime. Persisted structures are in
+[DATA_MODELS.md](DATA_MODELS.md), request flows in
+[SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md), and the rationale in
+[CONTEXT_ENGINE_DECISION.md](CONTEXT_ENGINE_DECISION.md).
 
 ## Topology
 
-The deployed backend runs as three Cloud Run services backed by the shared PostgreSQL 16 database:
+The backend runs as three Cloud Run services against one shared PostgreSQL database:
 
-- `jina-api` verifies GitHub webhooks, applies commands, reduces readiness, and owns worker lease/completion transactions.
+- `jina-api` verifies GitHub webhooks, serves board and context APIs, serves stateless MCP,
+  and owns worker lease/completion transactions.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
-- `jina-context-graph-worker` handles repository ingest, semantic assertion, and projection topics.
+- `jina-context-worker` handles `ingest-evidence`, `derive-knowledge`, and
+  `index-context`.
 
-The dashboard and admin are Next.js applications deployed separately. An existing Cloud Run dashboard remains during the Vercel authentication cutover; see [DEPLOYMENT.md](DEPLOYMENT.md).
+The dashboard and admin are Next.js applications deployed separately through Vercel.
 
 ```text
 GitHub -> API -> PostgreSQL board/outbox <- renewable lease -> workers
 Browser -> authenticated web app -> API -> PostgreSQL
-Trusted graph caller -> graph API or MCP -> repository-scoped retrieval
+Trusted context client -> HTTP API or MCP -> ACL-filtered retrieval
 ```
 
-The API performs short state transitions. Workers perform external I/O outside the mutation lock, renew their leases, and complete through the API. Expired work is reclaimable; a stale completion changes no state.
+The API performs short state transitions. Workers perform external I/O outside the
+mutation lock, renew their leases, and complete through the API. Every internal context
+mutation carries task, lease, attempt, and write-fence identity. An expired or replaced
+lease cannot commit.
 
 ## Board and execution
 
-The board is both the operational source of truth and the orchestrator. A versioned planner creates tasks and dependency edges. The reducer queues a task only after its required dependencies are satisfied and writes its outbox message with the same state change.
+The generic board is the orchestrator. A versioned planner creates tasks and dependency
+edges. The reducer queues work only after required dependencies are satisfied and writes
+its durable delivery with the same state change.
 
-Task types and dispatch topics are worker-owned strings. The board remains generic: it validates commands, transitions, dependency readiness, terminal propagation, supersession, and leases without importing GitHub or context graph behavior.
+Opened pull requests create a review aggregate. Opened issues create manual triage work.
+Signed branch pushes and `POST /context/build` create `build-context` with three children:
 
-Opened PRs create a `pr_review` aggregate, `review_pass`, and `publish`. A new head SHA increments the epoch and supersedes active work from the old epoch. Opened issues create manual `issue_triage` tasks. Signed branch pushes start the context graph task tree, dedupe unchanged heads, and supersede stale ref work even when a force-push returns to an earlier SHA.
+```text
+ingest-evidence
+  ├─> index-context       required baseline
+  └─> derive-knowledge   optional enrichment
+```
 
-Automated dependency failures are terminal: failed work remains `failed`, dispatchable descendants become `canceled`, and the aggregate becomes `failed`. The reducer does not invent recovery tasks. A workflow that supports recovery must declare the human decision and resolution command explicitly.
+`index-context` can publish a raw-evidence generation as soon as ingestion completes.
+Successful derivation publishes a successor enriched generation. The aggregate succeeds
+when ingestion and baseline indexing succeed; derivation failure degrades rather than
+invalidates the usable baseline.
 
-The board is currently stored as one JSON snapshot. Each mutation holds a cross-instance PostgreSQL transaction lock while loading and saving it, so concurrent API instances cannot derive state from the same stale snapshot.
+The board remains representation-neutral. It knows task state, dependency readiness,
+supersession, leases, and terminal propagation, but does not import context-domain types.
 
-## Worker boundaries
+## Context planes
 
-The task worker fetches PR data from GitHub, calls the configured review harness, and records structured findings. Research currently records requested sources without arbitrary network retrieval. Publication currently upserts an internal record.
+### Evidence
 
-The context graph worker runs three stages:
+`ingest-evidence` resolves the requested ref to a full commit SHA, clones and checks out
+that exact commit, then stores immutable provider observations, commits and parents, exact
+trees, content-addressed blobs, first-parent changes, deterministic parser analyses,
+symbols, imports, structural facts, identities, and ACL observations. Oversized or binary
+content may be omitted from stored body text, but its manifest identity remains.
 
-1. `context_graph_ingest` walks unseen commit history, records exact trees and first-parent changes, parses new blobs, and normalizes explicit repository and GitHub facts.
-2. `context_graph_assert` checks out the pinned commit in Daytona and records cited semantic output as proposed assertions.
-3. `context_graph_project` drains consumer-owned canonical events and rebuilds manifests, search documents, redirects, and immutable content-addressed graphs.
+Evidence is canonical. Model output cannot alter Git/provider facts, parser output,
+permissions, or audit events.
 
-Only assertion generation uses a model. Assertions must carry checked repository evidence, a relationship explanation, and known typed identities. Reviewed assertions retain evidence, explanation, provenance, and review state when reconfirmed. Exact evidence fingerprints cache unchanged generations; generator-contract changes trigger one bounded refresh.
+### Knowledge
 
-## Read interfaces
+`derive-knowledge` selects a bounded bundle from one evidence checkpoint and asks the
+isolated Daytona executor for knowledge documents, not nodes or relationships.
+`KnowledgeOutputValidator` resolves stable logical subjects and checks each citation's
+tenant, repository, source identity, digest, commit, path/range, and JSON pointer before
+the immutable revision is stored. Invalid output receives at most one constrained repair.
 
-The dashboard is a Next.js application that reads board, history, task-type, graph, assertion, and fixed-template retrieval endpoints through its authenticated proxy. Its poll uses `GET /overview`, which serves the board and its event history from one ACL lookup and one pipeline listing, and `GET /context-graph?include=assertions`, which inlines the review queue so no dependent request follows. Polled read responses carry ETags: an unchanged poll revalidates to an empty 304, and the API itself skips reloading the board snapshot when its stored version has not moved. Historical graph lists contain summaries with counts denormalized at write time; full nodes and edges load only when requested.
+Review, rejection, invalidation, supersession, and redaction are append-only events.
+Derived interpretation never becomes terminal evidence; answer citations expand to the
+original source anchors.
 
-`POST /mcp` implements stateless Streamable HTTP MCP with one read-only `query_graph` tool. The server chooses bounded retrieval templates and returns cited results; callers do not choose SQL, graph generations, or internal tools.
+### Projection
 
-The simulation-facing graph API uses a dedicated credential and maps each simulation tenant to a bound principal. ACL synchronization replaces the complete repository set, so removed repositories are revoked on the next sync.
+`index-context` builds disposable, generation-scoped read models:
+
+- exact ref manifest;
+- current eligible knowledge revisions;
+- indexable context documents and anchor-preserving fragments;
+- exact-token and PostgreSQL lexical indexes;
+- deterministic structural relations and identity/ACL projections;
+- deterministic heading/section hierarchy;
+- optional embeddings.
+
+A generation is published only as one coherent tenant/repository/ref/commit view. Queries
+never combine refs, ACL states, or partially built projectors. Indexes rebuild from
+canonical evidence and immutable knowledge.
+
+The hierarchy is owned by Jina. A deterministic adapter is the active fallback. PageIndex
+is implemented as an optional adapter behind the same hierarchy port and remains disabled
+until long-document evaluation proves an incremental win including citation integrity,
+ACL isolation, latency, cost, and data-egress review.
+
+The dense port, PostgreSQL lifecycle adapter, and retriever exist, but no dense route is
+advertised unless a generation declares the capability. Dense remains disabled until an
+approved model/backend passes the ablation gate.
+
+## Query engine
+
+`POST /context/query` and MCP `query_context` use one storage-neutral contract:
+
+1. authenticate the credential and bound principal;
+2. resolve repository ACL, requested ref, and one published generation;
+3. plan exact, structured, structural, lexical, knowledge, temporal, hierarchy, and/or
+   bounded long-context routes;
+4. retrieve ACL-filtered candidates and fuse them deterministically;
+5. surface conflicts and coverage gaps;
+6. assemble an evidence pack from original source spans;
+7. synthesize and verify every returned citation.
+
+Exact and structured candidates cannot be displaced by weaker semantic matches. A
+response always reports the generation/ref/commit, original-evidence citations,
+conflicts, ambiguities, coverage, retrievers used, and trace ID.
+
+## Public surfaces
+
+The context workspace reads `/context/generations`, `/context/documents`,
+`/context/structure`, `/context/query`, and administrator metrics/rebuild/review/erasure
+operations. Lists use opaque cursor pagination.
+
+`POST /mcp` is stateless Streamable HTTP MCP. Server `jina-context` exposes exactly one
+read-only tool: `query_context`. Storage primitives and retriever controls are not public
+MCP tools.
 
 ## Persistence and idempotency
 
-The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in `jina_runtime.github_deliveries`. ContextGraph uses normalized canonical, audit, outbox, ACL, lifecycle, manifest, search, graph, and retrieval-metric tables under `jina_context_graph`.
+The board snapshot lives in `jina_runtime.api_state`; GitHub delivery IDs are unique in
+`jina_runtime.github_deliveries`. The context engine owns `jina_context`.
 
-Source writes, model observations, and projections are independently idempotent. A retry may repeat a stage, but canonical keys, consumer-owned outbox delivery, exact fingerprints, and immutable graph generations make the result converge. Graph identity includes tenant, repository, ref content, projection version, and canonical graph content.
+Canonical objects and knowledge revisions use stable fingerprints over immutable input.
+Consumers own their outbox delivery and checkpoint. Generation identity includes tenant,
+repository, ref, exact commit, evidence fingerprint, and projector versions. Replaying
+the same input converges, while a moved ref produces a new isolated generation.
 
 ## Authentication and security
 
-Production is scoped to the configured tenant. Health, task-type definitions, and signed webhook intake are public; board, worker, and context graph operations require the internal bearer credential.
+Health, task definitions, and signed webhook intake are public. `INTERNAL_API_TOKEN`
+authorizes board, worker, and administration traffic. `CONTEXT_API_TOKEN` is a narrower
+server-side credential for `/context/*`, `/mcp`, and exact ACL synchronization.
 
-The web application must authenticate users before forwarding a verified principal and service credential. The existing Cloud Run dashboard uses IAP; its replacement needs an equivalent identity boundary. The API applies tenant-administrator and repository ACL checks, and retrieval rechecks repository scope while assembling results.
+Context reads also require `x-jina-principal-id`; shared tenancy additionally carries the
+resolved tenant. Repository permissions are applied before candidate creation and checked
+again before citations leave the API. Tenant administrators can view metrics and issue
+rebuild/erasure commands. Browser MCP origins must match `JINA_MCP_ALLOWED_ORIGINS`.
 
-MCP requires both the internal credential and a bound `x-jina-principal-id`; it rejects the service credential alone. Browser MCP calls also require an exact origin allowlist match. The graph API uses `GRAPH_API_TOKEN`, which grants graph/ACL access only and must not be exposed to browsers or agents.
-
-Repository credentials remain in the worker boundary. Daytona isolates repository inspection. Jina does not execute untrusted repository code, install repository dependencies, or run repository tests.
-
-## Failure and observability contracts
-
-- Duplicate GitHub deliveries are no-ops.
-- Expired leases are reclaimable; replaced leases fence stale completion.
-- Provider transport, timeout, rate-limit, and retryable server failures retry within policy. Schema and evidence validation fail closed.
-- A new PR epoch or context graph ref attempt supersedes active older work.
-- Public worker health exposes only stable categories; redacted detail remains in authenticated task events and Cloud Logging.
-- Operational metrics cover canonical outbox depth/lag, parser backlog, projection staleness, assertion review, and retrieval latency/truncation.
+Repository credentials stay in the worker. Daytona isolates source inspection. Jina does
+not execute untrusted repository code or install its dependencies. Retrieved text and
+model output are untrusted and cannot change scope, tools, ACLs, or citation policy.
 
 ## Code boundaries
 
 - `apps/*` owns HTTP, process startup, external I/O, and runtime wiring.
 - `packages/board` owns generic workflow state.
-- `packages/context-graph` owns repository facts, assertions, retrieval, and store interfaces.
-- `packages/db` implements durable stores, transactions, and migrations.
-- Provider packages such as `github`, `daytona`, and `ai` adapt external systems.
+- `packages/context-engine` owns evidence, knowledge, projection, retrieval, and ports.
+- `packages/db/src/context` implements durable domain-specific adapters and roles.
+- `packages/github`, `packages/daytona`, and `packages/ai` adapt external systems.

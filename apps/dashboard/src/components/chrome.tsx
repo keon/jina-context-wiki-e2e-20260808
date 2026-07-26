@@ -9,13 +9,13 @@ const PAGES = [
   { href: "/", page: "board", label: "Board" },
   { href: "/history", page: "history", label: "History" },
   { href: "/tasks", page: "task-types", label: "Task types" },
-  { href: "/context-graph", page: "contextGraph", label: "ContextGraph" }
+  { href: "/context", page: "context", label: "Context" }
 ] as const;
 
 function activePage(pathname: string): string {
   if (pathname === "/history") return "history";
   if (pathname === "/tasks") return "task-types";
-  if (pathname === "/context-graph") return "contextGraph";
+  if (pathname === "/context" || pathname.startsWith("/context/")) return "context";
   return "board";
 }
 

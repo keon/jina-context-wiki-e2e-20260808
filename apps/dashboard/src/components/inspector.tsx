@@ -1,12 +1,12 @@
 import { clampConfidence, confidenceLabel } from "../lib/format.ts";
 
-/** Shared inspector primitives used by the history and context-graph panes. */
+/** Shared inspector primitives used by operational detail panes. */
 
 export function DetailGrid({ fields }: { readonly fields: readonly (readonly [string, string])[] }) {
   return (
-    <div className="context-graph-detail-grid">
+    <div className="inspector-detail-grid">
       {fields.map(([label, value]) => (
-        <div className="context-graph-detail-field" key={label}>
+        <div className="inspector-detail-field" key={label}>
           <span className="label">{label}</span>
           <span className="value">{value}</span>
         </div>
@@ -17,9 +17,9 @@ export function DetailGrid({ fields }: { readonly fields: readonly (readonly [st
 
 export function ExplanationSection({ value }: { readonly value: string }) {
   return (
-    <section className="context-graph-inspector-section">
+    <section className="inspector-section-block">
       <h3>Explanation</h3>
-      <p className="context-graph-explanation">{value}</p>
+      <p className="inspector-explanation">{value}</p>
     </section>
   );
 }
@@ -35,16 +35,16 @@ export function ConfidenceSection({
 }) {
   const scored = typeof value === "number" && Number.isFinite(value);
   return (
-    <section className="context-graph-inspector-section">
+    <section className="inspector-section-block">
       <h3>Confidence</h3>
-      <div className="context-graph-confidence">
-        <div className="context-graph-confidence-top">
+      <div className="inspector-confidence">
+        <div className="inspector-confidence-top">
           <span className="label">{label}</span>
-          <strong className="context-graph-confidence-value">{confidenceLabel(value)}</strong>
+          <strong className="inspector-confidence-value">{confidenceLabel(value)}</strong>
         </div>
         {scored ? (
           <div
-            className="context-graph-confidence-meter"
+            className="inspector-confidence-meter"
             role="meter"
             aria-label={label}
             aria-valuemin={0}
@@ -52,12 +52,12 @@ export function ConfidenceSection({
             aria-valuenow={Math.round(clampConfidence(value) * 100)}
           >
             <span
-              className="context-graph-confidence-fill"
+              className="inspector-confidence-fill"
               style={{ width: `${Math.round(clampConfidence(value) * 100)}%` }}
             />
           </div>
         ) : null}
-        <p className="context-graph-confidence-note">{note}</p>
+        <p className="inspector-confidence-note">{note}</p>
       </div>
     </section>
   );
@@ -65,14 +65,14 @@ export function ConfidenceSection({
 
 export function EvidenceSection({ evidence }: { readonly evidence: readonly string[] }) {
   return (
-    <section className="context-graph-inspector-section">
+    <section className="inspector-section-block">
       <h3>Evidence · {evidence.length}</h3>
       {evidence.length === 0 ? (
         <p className="empty-detail">No evidence citations were provided.</p>
       ) : (
-        <ul className="context-graph-evidence-list">
+        <ul className="inspector-evidence-list">
           {evidence.map((citation, index) => (
-            <li className="context-graph-evidence" key={`${index}-${citation}`}>
+            <li className="inspector-evidence" key={`${index}-${citation}`}>
               {citation}
             </li>
           ))}

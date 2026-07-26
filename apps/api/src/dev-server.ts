@@ -1,16 +1,17 @@
 import {
+  ContextDatabase,
+  PostgresContextEngineStore,
+  PostgresContextPipelineCoordinator,
   PostgresJsonStateStore,
-  PostgresContextGraphStore,
-  PostgresContextGraphPipelineCoordinator,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
 import {
-  MemoryContextGraphStore,
-  MemoryContextGraphPipelineCoordinator,
-  type ContextGraphStore,
-  type ContextGraphPipelineCoordinator
-} from "@jina/context-graph";
+  MemoryContextEngineStore,
+  MemoryContextPipelineCoordinator,
+  type ContextEngineStore,
+  type ContextPipelineCoordinator
+} from "@jina/context-engine";
 import { createLogger, errorLogFields } from "@jina/observability";
 import { createApiServer } from "./server.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
@@ -20,16 +21,12 @@ const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
 if (enableDevEndpoints && process.env.K_SERVICE) {
   throw new Error("JINA_ENABLE_DEV_ENDPOINTS must not be enabled on Cloud Run");
 }
-const stateStore = createStateStore();
-const contextGraphStore = createContextGraphStore();
-const contextGraphCoordinator = createContextGraphCoordinator();
 const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
 if (tenancyMode !== "fixed" && tenancyMode !== "shared-db") {
   throw new Error("JINA_TENANCY_MODE must be fixed or shared-db");
 }
-const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver() : undefined;
-if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.GRAPH_API_TOKEN)) {
-  throw new Error("INTERNAL_API_TOKEN and GRAPH_API_TOKEN are required in production");
+if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.CONTEXT_API_TOKEN)) {
+  throw new Error("INTERNAL_API_TOKEN and CONTEXT_API_TOKEN are required in production");
 }
 if (!enableDevEndpoints && tenancyMode === "fixed" && !process.env.JINA_TENANT_ID) {
   throw new Error("JINA_TENANT_ID is required in fixed tenancy mode");
@@ -37,6 +34,19 @@ if (!enableDevEndpoints && tenancyMode === "fixed" && !process.env.JINA_TENANT_I
 if (tenancyMode === "shared-db" && process.env.JINA_TENANT_ID) {
   throw new Error("JINA_TENANT_ID must be unset in shared-db tenancy mode");
 }
+
+const postgresConfig = databaseConfig();
+const contextDatabase = postgresConfig
+  ? new ContextDatabase({
+      ...postgresConfig,
+      manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false",
+      manageRoles: process.env.JINA_DB_MANAGE_ROLES === "true"
+    })
+  : undefined;
+const stateStore = createStateStore(postgresConfig);
+const contextCoordinator = createContextCoordinator(contextDatabase);
+const contextStore = createContextStore(contextDatabase, contextCoordinator);
+const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver(postgresConfig) : undefined;
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
@@ -46,18 +56,15 @@ const server = createApiServer({
   simulateRuns: process.env.JINA_SIMULATE_RUNS === "true",
   seedDemo: enableDevEndpoints && process.env.JINA_SEED_DEMO !== "false",
   ...(stateStore ? { stateStore } : {}),
-  contextGraphStore,
-  contextGraphCoordinator,
+  contextStore,
+  contextCoordinator,
   ...(sharedIdentityResolver ? { sharedIdentityResolver } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
-  ...(process.env.GRAPH_API_TOKEN ? { graphApiToken: process.env.GRAPH_API_TOKEN } : {}),
+  ...(process.env.CONTEXT_API_TOKEN ? { contextApiToken: process.env.CONTEXT_API_TOKEN } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
   mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")
 });
 
-// This file is also the production container entrypoint, so lifecycle events
-// must be single-line JSON for Cloud Logging; the human-readable endpoint
-// listing stays dev-only.
 const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
 
 server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
@@ -69,8 +76,8 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
   });
   if (enableDevEndpoints) {
     console.log(`jina api server: http://localhost:${port}`);
-    console.log("  GET  /board  /events  /context-graph  /health");
-    console.log("  POST /mcp  (query_graph MCP tool)");
+    console.log("  GET  /board  /events  /context/generations  /context/documents  /health");
+    console.log("  POST /context/build  /context/query  /mcp (query_context)");
     console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
   }
@@ -88,39 +95,26 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   });
 }
 
-function createStateStore(): ApiStateStore | undefined {
-  const config = databaseConfig();
-  if (!config) {
-    return undefined;
-  }
+function createStateStore(config: PostgresJsonStateStoreConfig | undefined): ApiStateStore | undefined {
+  if (!config) return undefined;
   return new PostgresJsonStateStore<ApiSnapshot>({
     ...config,
     manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
   });
 }
 
-function createContextGraphStore(): ContextGraphStore {
-  const config = databaseConfig();
-  return config
-    ? new PostgresContextGraphStore({
-        ...config,
-        manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
-      })
-    : new MemoryContextGraphStore();
+function createContextStore(
+  database: ContextDatabase | undefined,
+  coordinator: ContextPipelineCoordinator
+): ContextEngineStore {
+  return database ? new PostgresContextEngineStore(database) : new MemoryContextEngineStore(coordinator);
 }
 
-function createContextGraphCoordinator(): ContextGraphPipelineCoordinator {
-  const config = databaseConfig();
-  return config
-    ? new PostgresContextGraphPipelineCoordinator({
-        ...config,
-        manageSchema: process.env.JINA_DB_MANAGE_SCHEMA !== "false"
-      })
-    : new MemoryContextGraphPipelineCoordinator();
+function createContextCoordinator(database: ContextDatabase | undefined): ContextPipelineCoordinator {
+  return database ? new PostgresContextPipelineCoordinator(database) : new MemoryContextPipelineCoordinator();
 }
 
-function createSharedIdentityResolver(): PostgresSharedIdentityStore {
-  const config = databaseConfig();
+function createSharedIdentityResolver(config: PostgresJsonStateStoreConfig | undefined): PostgresSharedIdentityStore {
   if (!config) throw new Error("Postgres storage is required in shared-db tenancy mode");
   return new PostgresSharedIdentityStore({ ...config, applicationName: "jina-api-shared-identity" });
 }
@@ -130,21 +124,19 @@ function databaseConfig(): PostgresJsonStateStoreConfig | undefined {
   const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
   if (!connectionString && !host) return undefined;
   if (connectionString) return { connectionString };
-  const port = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
+  const databasePort = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
   return {
     host,
     user: requiredEnv("DB_USER"),
     password: requiredEnv("DB_PASS"),
     database: requiredEnv("DB_NAME"),
-    ...(port !== undefined ? { port } : {})
+    ...(databasePort !== undefined ? { port: databasePort } : {})
   };
 }
 
 function requiredEnv(name: string): string {
   const value = process.env[name];
-  if (!value) {
-    throw new Error(`${name} is required when Postgres storage is enabled`);
-  }
+  if (!value) throw new Error(`${name} is required when Postgres storage is enabled`);
   return value;
 }
 

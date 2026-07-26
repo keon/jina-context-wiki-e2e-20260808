@@ -4,8 +4,8 @@ import Link from "next/link";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Jina Admin — Context Graphs",
-  description: "Administrative view of every generated context graph across all repositories."
+  title: "Jina Admin — Repository Context",
+  description: "Administrative view of context index generations and knowledge health."
 };
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {
@@ -17,7 +17,7 @@ export default function RootLayout({ children }: { readonly children: ReactNode 
             <h1>
               <Link href="/">Jina Admin</Link>
             </h1>
-            <span className="scope-badge">All graphs</span>
+            <span className="scope-badge">All context</span>
             <span className="spacer" />
             <span className="muted">tenant-admin view</span>
           </header>

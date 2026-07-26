@@ -13,24 +13,24 @@ function task(overrides: Partial<BoardTask> & { readonly id: string }): BoardTas
   };
 }
 
-test("partitionBoardTasks keeps only the latest context-graph request per scope", () => {
+test("partitionBoardTasks keeps only the latest context build request per scope", () => {
   const scope = { tenantId: "t", repository: "o/r", ref: "main" };
   const tasks = [
     task({
       id: "old-build",
-      type: "context_graph_build",
+      type: "build-context",
       createdAt: "2026-01-01T00:00:00Z",
       metadata: { ...scope, requestKey: "old" }
     }),
     task({
       id: "new-build",
-      type: "context_graph_build",
+      type: "build-context",
       createdAt: "2026-01-02T00:00:00Z",
       metadata: { ...scope, requestKey: "new" }
     }),
     task({
       id: "old-stage",
-      type: "context_graph_ingest",
+      type: "ingest-evidence",
       metadata: { ...scope, requestKey: "old" }
     }),
     task({ id: "plain" }),

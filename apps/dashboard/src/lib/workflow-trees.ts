@@ -142,7 +142,8 @@ export function workflowSteps(definition: TaskTypeDefinition): readonly string[]
 
 export function taskTypeIcon(type: string): string {
   if (/review/i.test(type)) return "⑂";
-  if (/context-graph|graph/i.test(type)) return "⌘";
+  if (/ingest-evidence|derive-knowledge|index-context/i.test(type)) return "⌘";
+  if (/build-context|query-context/i.test(type)) return "⌘";
   if (/issue|investig/i.test(type)) return "⌕";
   if (/document/i.test(type)) return "▤";
   if (/publish|release/i.test(type)) return "◇";

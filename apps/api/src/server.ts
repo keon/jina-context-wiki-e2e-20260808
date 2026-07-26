@@ -6,49 +6,47 @@ import {
   findTask,
   leaseNextOutboxMessage,
   markOutboxDispatched,
-  renewOutboxLease,
   reduceBoard,
+  renewOutboxLease,
   taskTypeDefinitions,
-  type BoardTask,
   type BoardOutboxMessageId,
-  type TaskId,
-  type CommandActor
+  type BoardTask,
+  type CommandActor,
+  type TaskId
 } from "@jina/board";
-import type { ParsedGitHubWebhook } from "@jina/github";
-import { isContextGraphTrigger } from "@jina/github";
 import {
-  createContextGraph,
-  assertionsFromGeneratedContextGraph,
-  MemoryContextGraphPipelineCoordinator,
-  MemoryContextGraphStore,
-  CONTEXT_GRAPH_GENERATOR_VERSION,
-  CONTEXT_GRAPH_PARSER_VERSION,
-  CONTEXT_GRAPH_REGISTRY_VERSION,
-  RepositoryContextOrchestrator,
-  retrievalTemplateNames,
-  contextGraphNodeKinds,
-  contextGraphStagePrerequisites,
-  contextGraphStageRequired,
-  contextGraphTaskTypeDependencies,
-  contextGraphTaskTypeDefinitions,
-  contextGraphTaskTypeTriggers,
-  parseGeneratedContextGraph,
-  type BlobAnalysis,
-  type RepositorySourceObservation,
-  type ContextGraphCommand,
-  type ContextGraphAssertionBatch,
-  type ContextGraphBuildRecord,
-  type ContextGraph,
-  type ContextGraphStore,
-  type ContextGraphPipelineCoordinator,
-  type ContextGraphStageLease,
-  type ContextGraphStageRecord,
-  type ContextGraphWorkerTopic,
-  type ContextGraphNodeKind,
-  type RepositoryContextOperation,
-  type RepositorySnapshot,
-  type RetrievalRequest
-} from "@jina/context-graph";
+  DeriveKnowledgeService,
+  EvidenceFocusSelector,
+  IndexContextService,
+  IngestEvidenceService,
+  KnowledgeOutputValidator,
+  MemoryContextEngineStore,
+  MemoryContextPipelineCoordinator,
+  QueryContextService,
+  StaticScopeAuthorizer,
+  buildKnowledgePrompt,
+  contextQueueTopics,
+  contextTaskTypeDefinitions,
+  contextTaskTypeDependencies,
+  contextTaskTypeTriggers,
+  contextTaskTypes,
+  evidenceSourceTypes,
+  fingerprint,
+  isContextTaskType,
+  stableId,
+  type ContextBuild,
+  type ContextEngineStore,
+  type ContextPipelineCoordinator,
+  type ContextPipelineStage,
+  type ContextQueueTopic,
+  type ContextWriteFence,
+  type IngestEvidenceInput,
+  type KnowledgeDocumentGenerator,
+  type KnowledgeRevisionEvent,
+  type QueryContextRequest
+} from "@jina/context-engine";
+import type { ParsedGitHubWebhook } from "@jina/github";
+import { isContextTrigger } from "@jina/github";
 import {
   createLogger,
   errorLogFields,
@@ -58,18 +56,13 @@ import {
 } from "@jina/observability";
 import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
-import { DomainError, entityId, nowIso } from "@jina/shared-kernel";
+import { entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
+import { handleContextMcpRequest } from "./mcp.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
-import { buildTaskTypeCatalog } from "./task-type-catalog.js";
-import { handleGraphMcpRequest, publicGraphQueryResult } from "./mcp.js";
-import { publicGraph, publicGraphQueryResult as publicRestGraphQueryResult, publicGraphSummary } from "./graph-api.js";
+import { buildTaskTypeCatalog, type TaskTypeTriggerRule } from "./task-type-catalog.js";
 
-const MAX_WEBHOOK_BYTES = 2 * 1024 * 1024;
-const MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES = 25 * 1024 * 1024;
-// Context graph writes for large repositories can hold the durable mutation transaction
-// for several minutes. Keep the lease comfortably beyond that transaction so the
-// owning worker is not fenced while its write is still committing.
+const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
@@ -77,9 +70,7 @@ const WORKER_TOPICS = [
   "run-research",
   "run-publish",
   "run-cleanup",
-  "run-context-graph-ingest",
-  "run-context-graph-assert",
-  "run-context-graph-project"
+  ...Object.values(contextQueueTopics)
 ] as const;
 
 export interface ApiServerConfig {
@@ -90,15 +81,12 @@ export interface ApiServerConfig {
   readonly simulateRuns?: boolean;
   readonly seedDemo?: boolean;
   readonly stateStore?: ApiStateStore;
-  readonly contextGraphStore?: ContextGraphStore;
-  readonly contextGraphCoordinator?: ContextGraphPipelineCoordinator;
-  /** Read-only resolver backed by the original Jina public identity tables. */
+  readonly contextStore?: ContextEngineStore;
+  readonly contextCoordinator?: ContextPipelineCoordinator;
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
-  /** Narrow server-to-server credential accepted only by public graph routes and ACL synchronization. */
-  readonly graphApiToken?: string;
+  readonly contextApiToken?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
-  /** Browser origins allowed to call the MCP endpoint. Non-browser clients normally omit Origin. */
   readonly mcpAllowedOrigins?: readonly string[];
 }
 
@@ -131,12 +119,6 @@ export interface ApiSnapshot {
 
 export interface ApiStateStore {
   load(): Promise<ApiSnapshot | undefined>;
-  /**
-   * Optional read-path optimization: return "unchanged" instead of the full
-   * snapshot when the stored version is still sinceVersion. Read-only routes
-   * poll the snapshot on every request, so skipping the blob transfer and
-   * parse when nothing was written dominates their cost.
-   */
   loadNewer?(
     sinceVersion: number
   ): Promise<{ readonly snapshot: ApiSnapshot; readonly version: number } | "unchanged" | undefined>;
@@ -150,37 +132,84 @@ export interface ApiStateStore {
   close(): Promise<void>;
 }
 
+interface Principal {
+  readonly tenantId: string;
+  readonly principalId: string;
+  readonly forwarded: boolean;
+}
+
 /** Creates the HTTP API without binding a port. */
 export function createApiServer(config: ApiServerConfig = {}): Server {
   const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
   const metrics = new MetricsRegistry();
-  const startedAtIso = nowIso();
-  let intakeState: GitHubIntakeState = createGitHubIntakeState();
+  const startedAt = nowIso();
+  const contextCoordinator = config.contextCoordinator ?? new MemoryContextPipelineCoordinator();
+  const contextStore = config.contextStore ?? new MemoryContextEngineStore(contextCoordinator);
+  let intakeState = createGitHubIntakeState();
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
-  const deliveries = new DeliveryCache(10_000);
-  const contextGraphStore = config.contextGraphStore ?? new MemoryContextGraphStore();
-  const contextGraphCoordinator = config.contextGraphCoordinator ?? new MemoryContextGraphPipelineCoordinator();
-  const ready = initializeState();
-  let mutations = Promise.resolve();
-  let transactionActive = false;
-  /** Version of the last snapshot restored via loadNewer; 0 = never restored. */
   let restoredVersion = 0;
+  let mutations = Promise.resolve();
+  const deliveries = new DeliveryCache(10_000);
+  const ready = initialize();
 
-  function mutate<T>(operation: () => Promise<T>): Promise<T>;
-  function mutate<T>(operation: () => Promise<T>, deliveryId: string): Promise<T | undefined>;
+  async function initialize(): Promise<void> {
+    const stored = await config.stateStore?.load();
+    if (isApiSnapshot(stored)) {
+      restore(migrateSnapshotTenantAliases(stored, config.tenantId, config.tenantAliases ?? []));
+    }
+    if (config.tenantId) {
+      for (const alias of config.tenantAliases ?? []) {
+        await contextStore.migrateTenantAliases(alias, config.tenantId);
+      }
+    }
+    if (config.seedDemo) await seedDemoContext();
+  }
+
+  function restore(snapshot: ApiSnapshot): void {
+    const current = sanitizeSnapshotForCurrentRuntime(snapshot);
+    intakeState = current.intakeState;
+    publications = current.publications;
+    devDeliverySequence = current.devDeliverySequence;
+  }
+
+  function snapshot(): ApiSnapshot {
+    return { intakeState, publications, devDeliverySequence };
+  }
+
+  async function persist(deliveryId?: string): Promise<boolean> {
+    if (!config.stateStore) {
+      if (deliveryId) deliveries.add(deliveryId);
+      return true;
+    }
+    return config.stateStore.save(snapshot(), deliveryId);
+  }
+
+  async function reload(): Promise<void> {
+    if (!config.stateStore) return;
+    if (config.stateStore.loadNewer) {
+      const result = await config.stateStore.loadNewer(restoredVersion);
+      if (result === undefined || result === "unchanged") return;
+      if (!isApiSnapshot(result.snapshot)) return;
+      restore(result.snapshot);
+      restoredVersion = result.version;
+      return;
+    }
+    const stored = await config.stateStore.load();
+    if (isApiSnapshot(stored)) restore(stored);
+  }
+
   function mutate<T>(operation: () => Promise<T>, deliveryId?: string): Promise<T | undefined> {
     const result = mutations.then(async () => {
-      if (!config.stateStore) return operation();
+      if (!config.stateStore) {
+        const value = await operation();
+        await persist(deliveryId);
+        return value;
+      }
       const updated = await config.stateStore.update(async (stored) => {
-        if (stored) restore(stored);
-        transactionActive = true;
-        try {
-          const value = await operation();
-          return { state: snapshot(), result: value };
-        } finally {
-          transactionActive = false;
-        }
+        if (isApiSnapshot(stored)) restore(stored);
+        const value = await operation();
+        return { state: snapshot(), result: value };
       }, deliveryId);
       if (!updated.committed) {
         await reload();
@@ -195,226 +224,31 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return result;
   }
 
-  function restore(stored: ApiSnapshot): void {
-    intakeState = stored.intakeState;
-    publications = stored.publications;
-    devDeliverySequence = stored.devDeliverySequence;
-  }
-
-  async function synchronize(): Promise<void> {
-    if (!config.stateStore) return;
-    const result = mutations.then(reload);
-    mutations = result.then(
-      () => undefined,
-      () => undefined
-    );
-    await result;
-  }
-
-  async function initializeState(): Promise<void> {
-    const stored = await config.stateStore?.load();
-    if (stored) {
-      const migrated = migrateSnapshotTenantAliases(stored, config.tenantId, config.tenantAliases ?? []);
-      intakeState = migrated.snapshot.intakeState;
-      publications = migrated.snapshot.publications;
-      devDeliverySequence = migrated.snapshot.devDeliverySequence;
-      if (migrated.changed) await persist();
-      if (config.tenantId) await contextGraphStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
-      return;
-    }
-    if (config.tenantId) await contextGraphStore.migrateTenantAliases(config.tenantId, config.tenantAliases ?? []);
-    if (config.seedDemo) {
-      devDeliverySequence += 1;
-      acceptWebhook(devPullRequestWebhook("omlabs/example", 42, "abc123"), `dev-seed-${devDeliverySequence}`);
-      await seedDemoGraph();
-      await persist();
-    }
-  }
-
-  async function seedDemoGraph(): Promise<void> {
+  async function seedDemoContext(): Promise<void> {
     const tenantId = config.tenantId ?? "default";
+    const repository = "omlabs/example";
     const commitSha = "d".repeat(40);
-    const blobSha = "b".repeat(40);
-    const snapshot: RepositorySnapshot = {
+    const body = [
+      "# Demo repository",
+      "",
+      "The webhook service receives GitHub events and creates review tasks.",
+      "",
+      "Use handleWebhook to validate and normalize each delivery."
+    ].join("\n");
+    const checkpoint = await new IngestEvidenceService(contextStore).ingest({
       tenantId,
-      repository: "omlabs/example",
+      repository,
       ref: "main",
       commitSha,
-      treeSha: "e".repeat(40),
-      parents: [],
-      committedAt: "2026-07-21T00:00:00.000Z",
-      message: "Seed the local MCP graph",
-      isDefaultRef: true,
-      recordedAt: "2026-07-21T00:00:00.000Z",
-      taskId: "dev-mcp-seed",
-      files: [{ path: "src/server.ts", blobSha, size: 640 }]
-    };
-    await contextGraphStore.planIngestion(snapshot);
-    await contextGraphStore.applyBlobAnalyses(snapshot, [
-      {
-        blobSha,
-        parserVersion: CONTEXT_GRAPH_PARSER_VERSION,
-        language: "typescript",
-        symbols: [
-          {
-            moniker: "src/server.ts#handleWebhook",
-            name: "handleWebhook",
-            kind: "function",
-            signatureHash: "dev-handle-webhook",
-            startLine: 12,
-            endLine: 34
-          }
-        ],
-        imports: [],
-        edges: []
-      }
-    ]);
-    await contextGraphStore.save(
-      createContextGraph({
-        request: { tenantId, repository: snapshot.repository, ref: snapshot.ref, taskId: snapshot.taskId },
-        commitSha,
-        generatedAt: snapshot.recordedAt,
-        executor: "fixture",
-        model: "dev-seed",
-        contentAddressed: true,
-        generated: {
-          summary: "Local MCP development graph",
-          nodes: [
-            {
-              id: "repo",
-              kind: "Repository",
-              label: snapshot.repository,
-              description: "Demo repository",
-              evidence: ["src/server.ts:1"]
-            },
-            {
-              id: "file:src/server.ts",
-              kind: "File",
-              label: "server.ts",
-              description: "Demo API server",
-              path: "src/server.ts",
-              evidence: ["src/server.ts:1"]
-            },
-            {
-              id: "symbol:handleWebhook",
-              kind: "Symbol",
-              label: "handleWebhook",
-              description: "function in src/server.ts",
-              path: "src/server.ts",
-              evidence: ["src/server.ts:12-34"]
-            }
-          ],
-          edges: [
-            {
-              source: "repo",
-              target: "file:src/server.ts",
-              predicate: "CONTAINS",
-              plane: "code",
-              evidence: ["src/server.ts:1"]
-            },
-            {
-              source: "file:src/server.ts",
-              target: "symbol:handleWebhook",
-              predicate: "DECLARES",
-              plane: "code",
-              evidence: ["src/server.ts:12-34"]
-            }
-          ]
-        }
-      })
-    );
-  }
-
-  function snapshot(): ApiSnapshot {
-    return { intakeState, publications, devDeliverySequence };
-  }
-
-  async function persist(deliveryId?: string): Promise<boolean> {
-    if (transactionActive) return true;
-    if (!config.stateStore) {
-      if (deliveryId) deliveries.add(deliveryId);
-      return true;
-    }
-    return config.stateStore.save(snapshot(), deliveryId);
-  }
-
-  async function reload(): Promise<void> {
-    const store = config.stateStore;
-    if (!store) return;
-    if (store.loadNewer) {
-      // Local writes leave restoredVersion stale, so the next reload fetches
-      // the full snapshot once and re-anchors the version; every later poll
-      // with no intervening write is a cheap version probe.
-      const result = await store.loadNewer(restoredVersion);
-      if (result === "unchanged" || result === undefined) return;
-      restore(result.snapshot);
-      restoredVersion = result.version;
-      return;
-    }
-    const stored = await store.load();
-    if (stored) restore(stored);
-  }
-
-  async function hasDelivery(deliveryId: string): Promise<boolean> {
-    return config.stateStore ? config.stateStore.hasDelivery(deliveryId) : deliveries.has(deliveryId);
-  }
-
-  function acceptWebhook(webhook: ParsedGitHubWebhook, deliveryId: string, identity?: ResolvedRepositoryIdentity) {
-    const result = ingestGitHubWebhook(intakeState, webhook, {
-      deliveryId,
-      now: nowIso(),
-      ...(identity
-        ? {
-            tenantId: identity.tenantId,
-            workspaceLabel: identity.githubAccountLogin,
-            githubAccountId: identity.githubAccountId
-          }
-        : config.tenantId
-          ? { tenantId: config.tenantId }
-          : {})
+      files: [{ path: "README.md", blobSha: "b".repeat(40), body, language: "markdown" }],
+      observations: [],
+      aclFingerprint: createHash("sha256").update(`${tenantId}:${repository}`).digest("hex"),
+      observationFrontier: "dev-seed",
+      createdAt: "2026-07-26T00:00:00.000Z",
+      sourceComplete: true
     });
-    intakeState = result.state;
-    return result;
-  }
-
-  /** Local demo runner only. Context graph work is always claimed by the durable worker. */
-  async function drainOneSimulatedRun(): Promise<void> {
-    const message = intakeState.board.outbox.find(
-      (candidate) => candidate.status === "pending" && !candidate.topic.startsWith("run-context-graph")
-    );
-    if (!message) return;
-    let board = markOutboxDispatched(intakeState.board, message.id, nowIso());
-    const task = findTask(board, message.taskId);
-    if (!task || task.status !== "queued") {
-      intakeState = { ...intakeState, board };
-      await persist();
-      return;
-    }
-    board = applyCommand(
-      board,
-      { command: "TransitionTask", taskId: task.id, toStatus: "in_progress" },
-      {
-        actor: RUN_ACTOR,
-        now: nowIso()
-      }
-    ).state;
-    if (message.topic === "run-publish") {
-      const repository = stringValue(task.metadata.repository);
-      const pullRequestNumber = Number(task.metadata.pullRequestNumber ?? 0);
-      const headSha = stringValue(task.metadata.headSha);
-      const key = buildPublicationKey(`${repository}#${pullRequestNumber}`, headSha, "summary");
-      publications = upsertPublication(publications, { key, headSha, target: "summary" }).records;
-    }
-    board = applyCommand(
-      board,
-      { command: "TransitionTask", taskId: task.id, toStatus: "done" },
-      {
-        actor: RUN_ACTOR,
-        now: nowIso()
-      }
-    ).state;
-    intakeState = { ...intakeState, board: reduceBoard(board, nowIso()) };
-    await persist();
+    await contextStore.replaceRepositoryAccess(tenantId, "svc:dev", [repository]);
+    await new IndexContextService(contextStore).index(checkpoint.id, "2026-07-26T00:00:01.000Z");
   }
 
   const server = createServer((request, response) => {
@@ -423,55 +257,32 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const requestLogger = logger.withTrace(trace);
     const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
     const routeLabel = metricsRoute(pathname);
-    // Never retain a path this server does not serve: unauthenticated probes
-    // control it, so logging it verbatim would persist attacker-chosen (and
-    // potentially secret-bearing) strings and mint one unique message per
-    // probe. Served routes keep the real path, which is bounded vocabulary.
-    const loggedPath = routeLabel === "(unknown)" ? "(unknown)" : pathname;
-    // "finish" never fires for client disconnects and incomplete uploads, so
-    // "close" is the terminal backstop; the settled flag keeps the normal path
-    // (finish then close) counted exactly once.
-    let requestSettled = false;
-    const settleRequest = (aborted: boolean) => {
-      if (requestSettled) return;
-      requestSettled = true;
+    let settled = false;
+    const settle = (aborted: boolean): void => {
+      if (settled) return;
+      settled = true;
       recordHttpRequest({
         logger: requestLogger,
         metrics,
         method: request.method ?? "GET",
-        path: loggedPath,
+        path: routeLabel === "(unknown)" ? "(unknown)" : pathname,
         route: routeLabel,
-        // An abort before headers were sent has no real status; the default
-        // 200 on the unsent response must not masquerade as a success.
         statusCode: aborted && !response.headersSent ? 0 : response.statusCode,
         durationMs: Date.now() - requestStartedAt,
         trace,
         aborted,
-        quiet: !aborted && (routeLabel === "/health" || routeLabel === "/healthz") && response.statusCode < 400
+        quiet: routeLabel === "/health" && response.statusCode < 400
       });
     };
-    response.once("finish", () => settleRequest(false));
-    response.once("close", () => settleRequest(true));
+    response.once("finish", () => settle(false));
+    response.once("close", () => settle(true));
     void route(request, response).catch((error: unknown) => {
-      // A fully consumed request stream auto-destroys, so request.destroyed
-      // does not mean the client left — only a dead response/socket does.
-      if (response.destroyed || !response.socket || response.socket.destroyed) {
-        // The client is gone: the handler's failure is a consequence of the
-        // abort, not a server fault, and the dead response cannot be written.
-        // The close-settled http.request record already accounts for it.
-        requestLogger.warn("request aborted by client during handling", {
-          event: "http.request.client_abort",
-          method: request.method,
-          path: loggedPath,
-          ...errorLogFields(error)
-        });
-        return;
-      }
+      if (response.destroyed || response.socket?.destroyed) return;
       const apiError = httpError(error);
       requestLogger.error("API request failed", {
         event: "http.request.error",
         method: request.method,
-        path: loggedPath,
+        path: routeLabel,
         code: apiError.code,
         ...errorLogFields(error)
       });
@@ -486,34 +297,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
     await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
-    // Published context graph generations and repository ACLs live in their own
-    // relational store. Reads must never queue behind board/control-plane
-    // mutations; they serve the last atomically published graph head.
-    // Internal context graph data-plane and worker-coordination routes likewise
-    // never read the JSON api_state snapshot outside mutate(), so they skip
-    // the full snapshot reload; completeWork synchronizes its JSON-board
-    // branch itself before validating against the snapshot.
-    if (
-      url.pathname !== "/internal/observability" &&
-      !isDirectContextGraphRead(request.method, url.pathname) &&
-      !isSnapshotExemptInternalRoute(request.method, url.pathname)
-    )
-      await synchronize();
-
+    if (!isReadOnlyContextRoute(request.method, url.pathname) && !url.pathname.startsWith("/internal/")) {
+      await reload();
+    }
     if (request.method === "OPTIONS") {
       json(response, 204, {});
       return;
     }
     if (request.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-      await Promise.all([
+      const [contextHealth] = await Promise.all([
+        contextStore.health(),
         config.stateStore?.ping(),
-        contextGraphCoordinator.ping(),
         config.sharedIdentityResolver?.ping()
       ]);
-      json(response, 200, {
-        ok: true,
+      json(response, contextHealth.ok ? 200 : 503, {
+        ok: contextHealth.ok,
+        storage: contextHealth.adapter,
         githubWebhookConfigured: Boolean(config.githubWebhookSecret),
-        storage: config.stateStore ? "postgres" : "memory",
         durableWorker: true
       });
       return;
@@ -523,454 +323,426 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         request,
         response,
         buildTaskTypeCatalog(
-          [...taskTypeDefinitions, ...contextGraphTaskTypeDefinitions],
-          [...prReviewTaskTypeDependencies, ...contextGraphTaskTypeDependencies],
-          [...prReviewTaskTypeTriggers, ...contextGraphTaskTypeTriggers]
+          [...taskTypeDefinitions, ...contextTaskTypeDefinitions],
+          [...prReviewTaskTypeDependencies, ...contextTaskTypeDependencies],
+          [...prReviewTaskTypeTriggers, ...contextTriggers()]
         )
       );
       return;
     }
     if (request.method === "POST" && url.pathname === "/webhooks/github") {
-      await handleWebhook(request, response);
+      await acceptSignedWebhook(request, response);
       return;
     }
     if (request.method === "POST" && url.pathname === "/dev/webhooks/github" && config.enableDevEndpoints) {
-      const body = parseJsonObject(await readRawBody(request));
-      const webhook = parseDevWebhook(body);
-      const result = await mutate(async () => {
-        devDeliverySequence += 1;
-        const deliveryId = `dev-${devDeliverySequence}`;
-        const accepted = acceptWebhook(webhook, deliveryId);
-        await persist(deliveryId);
-        return { deliveryId, intake: accepted };
-      });
-      json(response, 202, {
-        accepted: true,
-        deliveryId: result.deliveryId,
-        outcome: result.intake.outcome,
-        createdTaskIds: result.intake.createdTaskIds
-      });
-      return;
-    }
-
-    // Shared-mode workers claim and drain across all active original-Jina tenants.
-    // Every request after a claim carries the concrete tenant header instead.
-    if (
-      config.sharedIdentityResolver &&
-      !firstHeader(request.headers["x-jina-tenant-id"]) &&
-      hasInternalApiCredential(request, config)
-    ) {
-      if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
-        await claimWork(request, response, await sharedTenantIdsForClaim());
-        return;
-      }
-      if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
-        await readRawBody(request);
-        const results = await Promise.all(
-          (await config.sharedIdentityResolver.listTenantIds()).map((tenantId) =>
-            contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso())
-          )
-        );
-        json(response, 200, {
-          processedEventCount: results.reduce((sum, result) => sum + result.processedEventCount, 0),
-          rebuiltRepositories: [...new Set(results.flatMap((result) => result.rebuiltRepositories))].sort()
-        });
-        return;
-      }
-    }
-
-    if (request.method === "POST" && url.pathname === "/internal/graph/access/sync") {
-      const syncTenantId = config.sharedIdentityResolver
-        ? normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]))
-        : config.tenantId;
-      if (
-        !config.graphApiToken ||
-        firstHeader(request.headers.authorization) !== `Bearer ${config.graphApiToken}` ||
-        !syncTenantId
-      ) {
-        json(response, 401, { error: "unauthorized" });
-        return;
-      }
-      let principalId: string;
-      let repositories: string[];
-      try {
-        const body = parseJsonObject(await readRawBody(request));
-        principalId = requiredTenantPrincipal(body.principalId);
-        if (config.sharedIdentityResolver && principalId !== `tenant:${syncTenantId}`) {
-          throw new Error("principalId must match x-jina-tenant-id");
-        }
-        if (!Array.isArray(body.repositories) || body.repositories.length > 5_000) {
-          throw new Error("repositories must be an array with at most 5000 entries");
-        }
-        repositories = [
-          ...new Set(body.repositories.map((repository) => requiredRepositoryName(repository, "repository")))
-        ].sort();
-      } catch (error) {
-        json(response, 400, { error: error instanceof Error ? error.message : "invalid graph access sync" });
-        return;
-      }
-      await contextGraphStore.replaceRepositoryAccess(syncTenantId, principalId, repositories);
-      json(response, 200, { principalId, repositoryCount: repositories.length });
+      const webhook = parseDevWebhook(parseJsonObject(await readRawBody(request)));
+      devDeliverySequence += 1;
+      const deliveryId = `dev-${devDeliverySequence}`;
+      const result = await acceptParsedWebhook(webhook, deliveryId);
+      json(response, 202, { accepted: true, deliveryId, ...result });
       return;
     }
 
     const principal = authenticatedPrincipal(request, config, url.pathname);
     if (!principal) {
-      json(response, 401, { accepted: false, error: "unauthorized" });
+      json(response, 401, { error: "unauthorized" });
       return;
     }
-    const { tenantId } = principal;
-
-    const usesGraphCredential = hasGraphApiCredential(request, config);
-    const requiresBoundGraphPrincipal =
-      isPublicGraphRoute(url.pathname) || (url.pathname === "/context-graph/build" && usesGraphCredential);
-    if (
-      requiresBoundGraphPrincipal &&
-      !config.enableDevEndpoints &&
-      !normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]))
-    ) {
-      json(response, 401, { error: "a bound principal is required" });
+    const isInternal = hasInternalApiCredential(request, config);
+    if (url.pathname.startsWith("/internal/") && !isInternal && url.pathname !== "/internal/context/access/sync") {
+      json(response, 401, { error: "internal credential required" });
       return;
     }
 
+    if (request.method === "POST" && url.pathname === "/internal/context/access/sync") {
+      await synchronizeRepositoryAccess(request, response, principal);
+      return;
+    }
     if (url.pathname === "/mcp") {
+      requireBoundPrincipal(principal, config);
       const origin = firstHeader(request.headers.origin);
       if (origin && !(config.mcpAllowedOrigins ?? []).includes(origin)) {
         json(response, 403, { error: "forbidden" });
         return;
       }
-      const parsedBody = request.method === "POST" ? parseJsonValue(await readRawBody(request)) : undefined;
-      await handleGraphMcpRequest(
+      const body = request.method === "POST" ? parseJsonValue(await readRawBody(request)) : undefined;
+      await handleContextMcpRequest(
         request,
         response,
-        async ({ repository, query, ref }) => {
-          const allowedRepositories = await repositoriesForPrincipal(principal);
-          const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
-            tenantId,
-            allowedRepositories,
-            repository,
-            question: query,
-            ...(ref ? { ref } : {})
-          });
-          return publicGraphQueryResult(context);
-        },
-        parsedBody
+        async (query) =>
+          queryContext(principal, {
+            tenantId: principal.tenantId,
+            principalId: principal.principalId,
+            repository: query.repository,
+            question: query.question,
+            ...(query.ref ? { ref: query.ref } : {}),
+            ...(query.taskKind ? { taskKind: query.taskKind } : {}),
+            ...(query.targets ? { targets: copyTargets(query.targets) } : {}),
+            ...(query.timeWindow ? { timeWindow: query.timeWindow } : {})
+          }),
+        body
       );
       return;
     }
-
-    if (request.method === "GET" && url.pathname === "/v1/graphs") {
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      const requestedRepository = url.searchParams.get("repository")?.trim();
-      if (requestedRepository && !allowedRepositories.includes(requestedRepository)) {
-        json(response, 404, { error: "graph not found" });
-        return;
-      }
-      const graphs = (await contextGraphStore.listSummaries(tenantId))
-        .filter((graph) => allowedRepositories.includes(graph.repository))
-        .filter((graph) => !requestedRepository || graph.repository === requestedRepository)
-        .sort((left, right) => right.generatedAt.localeCompare(left.generatedAt))
-        .map(publicGraphSummary);
-      json(response, 200, { graphs });
-      return;
-    }
-
-    if (request.method === "GET" && url.pathname.startsWith("/v1/graphs/")) {
-      const graphId = graphRouteId(url.pathname, "/v1/graphs/");
-      if (graphId === undefined) {
-        json(response, 404, { error: "graph not found" });
-        return;
-      }
-      const graph = await contextGraphStore.get(graphId, tenantId);
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!graph || !allowedRepositories.includes(graph.repository)) {
-        json(response, 404, { error: "graph not found" });
-        return;
-      }
-      json(response, 200, publicGraph(graph));
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/v1/graph/query") {
+    if (request.method === "POST" && url.pathname === "/context/build") {
+      requireBoundPrincipalForContextCredential(principal, request, config);
       const body = parseJsonObject(await readRawBody(request));
-      const graphId = requiredString(body.graphId, "graphId");
-      const query = requiredString(body.query, "query");
-      if (query.length > 4_000) throw new Error("query must not exceed 4000 characters");
-      const graph = await contextGraphStore.get(graphId, tenantId);
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!graph || !allowedRepositories.includes(graph.repository)) {
-        json(response, 404, { error: "graph not found" });
-        return;
-      }
-      const context = await new RepositoryContextOrchestrator(contextGraphStore).answer({
-        tenantId,
-        allowedRepositories,
-        repository: graph.repository,
-        ref: graph.ref,
-        question: query
+      const repository = requiredRepositoryName(body.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const commitSha = optionalString(body.commitSha);
+      const build = await contextCoordinator.createBuild({
+        tenantId: principal.tenantId,
+        repository,
+        ref: optionalString(body.ref) ?? "main",
+        ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
+        requestKey: optionalString(body.requestKey) ?? randomUUID(),
+        createdAt: nowIso()
       });
-      json(response, 200, publicRestGraphQueryResult(graph, publicGraphQueryResult(context)));
+      json(response, 202, { build });
       return;
     }
-
-    if (request.method === "GET" && url.pathname === "/board") {
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
-      const board = tenantBoardView(intakeState, publications, tenantId, allowedRepositories);
-      const pipeline = await contextGraphCoordinator.list(
-        tenantId,
-        allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
+    if (request.method === "POST" && url.pathname === "/context/query") {
+      requireBoundPrincipal(principal, config);
+      const body = parseJsonObject(await readRawBody(request));
+      const requestValue = parseQueryContextRequest(body, principal);
+      json(response, 200, await queryContext(principal, requestValue));
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/generations") {
+      const repositories = await permittedRepositories(principal);
+      const requested = url.searchParams.get("repository")?.trim();
+      if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
+      const selected = requested ? [requested] : repositories;
+      const generations = (
+        await Promise.all(selected.map((repository) => contextStore.listGenerations(principal.tenantId, repository)))
+      )
+        .flat()
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+        .map(publicGeneration);
+      const page = paginateByCreatedAt(generations, url);
+      jsonCacheable(request, response, {
+        generations: page.items,
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/context/generations/")) {
+      const generationId = routeId(url.pathname, "/context/generations/");
+      if (!generationId) throw notFound("context generation not found");
+      const projection = await contextStore.getGeneration(generationId);
+      const repositories = await permittedRepositories(principal);
+      if (
+        !projection ||
+        projection.generation.tenantId !== principal.tenantId ||
+        !repositories.includes(projection.generation.repository)
+      ) {
+        throw notFound("context generation not found");
+      }
+      json(response, 200, {
+        generation: {
+          ...publicGeneration(projection.generation),
+          capabilities: projection.generation.capabilities,
+          counts: {
+            manifest: projection.manifest.length,
+            knowledge: projection.currentKnowledge.length,
+            documents: projection.documents.length,
+            fragments: projection.fragments.length,
+            hierarchyNodes: projection.hierarchyNodes.length,
+            structuralRelations: projection.structuralRelations.length
+          }
+        }
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/documents") {
+      const repositories = await permittedRepositories(principal);
+      const requested = url.searchParams.get("repository")?.trim();
+      if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
+      const selected = requested ? [requested] : repositories;
+      const revisions = (
+        await Promise.all(selected.map((repository) => contextStore.listRevisions(principal.tenantId, repository)))
+      )
+        .flat()
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+      const page = paginateByCreatedAt(revisions, url);
+      jsonCacheable(request, response, {
+        documents: await Promise.all(
+          page.items.map(async (revision) =>
+            publicKnowledgeSummary(revision, await contextStore.listRevisionEvents(revision.id))
+          )
+        ),
+        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname.startsWith("/context/documents/")) {
+      const revisionId = routeId(url.pathname, "/context/documents/");
+      if (!revisionId) throw notFound("knowledge document not found");
+      const revision = await contextStore.getRevision(revisionId);
+      const repositories = await permittedRepositories(principal);
+      if (!revision || revision.tenantId !== principal.tenantId || !repositories.includes(revision.repository)) {
+        throw notFound("knowledge document not found");
+      }
+      json(response, 200, {
+        document: {
+          ...publicKnowledgeSummary(revision, await contextStore.listRevisionEvents(revision.id)),
+          bodyMarkdown: revision.bodyMarkdown,
+          structuredSummary: revision.structuredSummary,
+          scope: revision.scope,
+          citations: await contextStore.listCitations(revision.id),
+          events: await contextStore.listRevisionEvents(revision.id)
+        }
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/structure") {
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      await requireRepositoryAccess(principal, repository);
+      const ref = url.searchParams.get("ref")?.trim() || "main";
+      const projection = await contextStore.latestPublished(principal.tenantId, repository, ref);
+      if (!projection) throw notFound("published context generation not found");
+      const path = url.searchParams.get("path")?.toLowerCase();
+      const symbol = url.searchParams.get("symbol")?.toLowerCase();
+      const relations = projection.structuralRelations.filter(
+        (relation) =>
+          (!path || `${relation.from}\n${relation.to}`.toLowerCase().includes(path)) &&
+          (!symbol || `${relation.from}\n${relation.to}`.toLowerCase().includes(symbol))
       );
-      jsonCacheable(request, response, mergePipelineBoardView(board, pipeline, allowedRepositories));
+      json(response, 200, { generationId: projection.generation.id, relations });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/metrics") {
+      requireTenantAdmin(principal);
+      json(response, 200, await contextMetrics(principal.tenantId));
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/context/knowledge/") &&
+      url.pathname.endsWith("/review")
+    ) {
+      requireBoundPrincipal(principal, config);
+      const revisionId = routeId(url.pathname, "/context/knowledge/", "/review");
+      if (!revisionId) throw notFound("knowledge revision not found");
+      const revision = await contextStore.getRevision(revisionId);
+      if (!revision || revision.tenantId !== principal.tenantId) throw notFound("knowledge revision not found");
+      await requireRepositoryAccess(principal, revision.repository);
+      const body = parseJsonObject(await readRawBody(request));
+      const action = requiredString(body.action, "action");
+      const type =
+        action === "accept"
+          ? "reviewed"
+          : action === "reject"
+            ? "rejected"
+            : action === "invalidate"
+              ? "invalidated"
+              : undefined;
+      if (!type) throw invalidRequest("action must be accept, reject, or invalidate");
+      const prior = await contextStore.listRevisionEvents(revisionId);
+      const event: KnowledgeRevisionEvent = {
+        id: stableId("ke", { revisionId, sequence: prior.length + 1, type, actorId: principal.principalId }),
+        revisionId,
+        sequence: prior.length + 1,
+        type,
+        actorId: principal.principalId,
+        reason: optionalString(body.reason) ?? (type === "reviewed" ? "reviewed" : "no reason supplied"),
+        createdAt: nowIso()
+      };
+      const storedEvent = await contextStore.appendRevisionEvent(event);
+      const checkpoint = await contextStore.latestCheckpoint(
+        principal.tenantId,
+        revision.repository,
+        revision.scope.ref
+      );
+      const generation =
+        checkpoint?.commitSha === revision.scope.commitSha
+          ? await new IndexContextService(contextStore).index(checkpoint.id, nowIso())
+          : undefined;
+      json(response, 200, {
+        event: storedEvent,
+        ...(generation ? { generationId: generation.id } : {})
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/context/rebuild") {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      const repository = requiredRepositoryName(body.repository, "repository");
+      const ref = optionalString(body.ref) ?? "main";
+      const checkpoint = await contextStore.latestCheckpoint(principal.tenantId, repository, ref);
+      if (!checkpoint) throw notFound("evidence checkpoint not found");
+      const generation = await new IndexContextService(contextStore).index(checkpoint.id, nowIso());
+      json(response, 202, { generationId: generation.id, status: generation.status });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/context/erasure") {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      const repository = requiredRepositoryName(body.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const sourceType = requiredString(body.sourceType, "sourceType");
+      if (!evidenceSourceTypes.includes(sourceType as (typeof evidenceSourceTypes)[number])) {
+        throw invalidRequest("unsupported sourceType");
+      }
+      const erased = await contextStore.eraseEvidence({
+        tenantId: principal.tenantId,
+        repository,
+        sourceType: sourceType as (typeof evidenceSourceTypes)[number],
+        sourceId: requiredString(body.sourceId, "sourceId"),
+        actorId: principal.principalId,
+        reason: requiredString(body.reason, "reason"),
+        createdAt: nowIso()
+      });
+      const ref = optionalString(body.ref) ?? "main";
+      const checkpoint = await contextStore.latestCheckpoint(principal.tenantId, repository, ref);
+      const generation = checkpoint
+        ? await new IndexContextService(contextStore).index(checkpoint.id, nowIso())
+        : undefined;
+      json(response, 202, {
+        erasedGenerationCount: erased.erasedGenerationCount,
+        ...(generation
+          ? { generationId: generation.id, status: generation.status }
+          : { status: "awaiting-reingestion" })
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/board") {
+      jsonCacheable(request, response, await boardView(principal));
       return;
     }
     if (request.method === "GET" && url.pathname === "/overview") {
-      // Single round trip for the dashboard poll: the board and its event
-      // history share one ACL lookup and one pipeline listing instead of the
-      // separate /board + /events requests duplicating both.
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
-      const pipeline = await contextGraphCoordinator.list(
-        tenantId,
-        allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
-      );
-      const board = mergePipelineBoardView(
-        tenantBoardView(intakeState, publications, tenantId, allowedRepositories),
-        pipeline,
-        allowedRepositories
-      );
-      const events = await collectBoardEvents(tenantId, allowedRepositories, pipeline);
-      jsonCacheable(request, response, { board, events });
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/context-graph") {
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      // Optional repository/ref scope narrows the summary listing in the
-      // store, before its row limit, so a scoped caller's graphs cannot be
-      // pushed out of the page by other repositories' fresher heads.
-      const repositoryFilter = url.searchParams.get("repository");
-      const refFilter = url.searchParams.get("ref");
-      const scoped = repositoryFilter !== null || refFilter !== null;
-      const graphValues = await contextGraphStore.listSummaries(tenantId, {
-        ...(repositoryFilter ? { repository: repositoryFilter } : {}),
-        ...(refFilter ? { ref: refFilter } : {})
-      });
-      const graphs = graphValues.filter((graph) => allowedRepositories.includes(graph.repository));
-      // A scoped response must be internally consistent: its latest is the
-      // newest graph within the scope (summaries are ordered newest-first),
-      // never the unscoped tenant-wide head, which can belong to another
-      // repository entirely.
-      const latest = scoped
-        ? graphs[0]
-          ? await contextGraphStore.get(graphs[0].id, tenantId)
-          : undefined
-        : await contextGraphStore.latest(tenantId);
-      const permittedLatest = latest && allowedRepositories.includes(latest.repository) ? latest : null;
-      // ?include=assertions folds the assertion-review fetch into this
-      // response so the client does not need a dependent second round trip.
-      const assertions =
-        url.searchParams.get("include") === "assertions"
-          ? permittedLatest
-            ? await contextGraphStore.listAssertions(tenantId, permittedLatest.repository, {})
-            : []
-          : undefined;
+      const board = await boardView(principal);
       jsonCacheable(request, response, {
-        latest: permittedLatest,
-        graphs,
-        ...(assertions ? { assertions } : {})
+        board,
+        events: intakeState.board.events.filter(
+          (event) => !event.taskId || board.tasks.some((task) => task.id === event.taskId)
+        )
       });
       return;
     }
-    if (request.method === "GET" && url.pathname.startsWith("/context-graph/graphs/")) {
-      const graphId = graphRouteId(url.pathname, "/context-graph/graphs/");
-      if (graphId === undefined) {
-        json(response, 404, { error: "contextGraph graph not found" });
-        return;
-      }
-      const graph = await contextGraphStore.get(graphId, tenantId);
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      const permitted = graph && allowedRepositories.includes(graph.repository) ? graph : undefined;
-      json(response, permitted ? 200 : 404, permitted ?? { error: "contextGraph graph not found" });
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/context-graph/metrics") {
-      if (!isTenantAdmin(principal)) {
-        json(response, 403, { error: "tenant administrator access required" });
-        return;
-      }
-      json(response, 200, await contextGraphStore.operationalMetrics(tenantId, nowIso()));
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context-graph/retrieve") {
-      const body = parseJsonObject(await readRawBody(request));
-      const repository = requiredString(body.repository, "repository");
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      const template = requiredString(body.template, "template");
-      if (!retrievalTemplateNames.includes(template as (typeof retrievalTemplateNames)[number])) {
-        throw invalidRequest("unsupported retrieval template");
-      }
-      const result = await contextGraphStore.retrieve({
-        tenantId,
-        allowedRepositories,
-        repository,
-        template: template as (typeof retrievalTemplateNames)[number],
-        ...parseContextGraphSelectors(body),
-        ...(typeof body.query === "string" ? { query: body.query } : {}),
-        ...(typeof body.limit === "number" ? { limit: requiredPositiveInteger(body.limit, "limit") } : {})
-      });
-      json(response, 200, result);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context-graph/ask") {
-      const body = parseJsonObject(await readRawBody(request));
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      const orchestrator = new RepositoryContextOrchestrator(contextGraphStore);
-      json(
+    if (request.method === "GET" && url.pathname === "/events") {
+      const board = await boardView(principal);
+      jsonCacheable(
+        request,
         response,
-        200,
-        await orchestrator.answer({
-          tenantId,
-          allowedRepositories,
-          repository: requiredString(body.repository, "repository"),
-          question: requiredString(body.question, "question"),
-          ...parseContextGraphSelectors(body),
-          ...(typeof body.operation === "string" ? { operation: requiredContextOperation(body.operation) } : {}),
-          ...(typeof body.tokenBudget === "number"
-            ? { tokenBudget: requiredPositiveInteger(body.tokenBudget, "tokenBudget") }
-            : {})
-        })
-      );
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/context-graph/assertions") {
-      const repository = requiredString(url.searchParams.get("repository"), "repository");
-      const allowedRepositories = await repositoriesForPrincipal(principal);
-      if (!allowedRepositories.includes(repository)) throw new DomainError("repository access denied", "forbidden");
-      const statusValue = url.searchParams.get("status");
-      const status = statusValue === null ? undefined : requiredAssertionStatus(statusValue);
-      const predicate = url.searchParams.get("predicate")?.trim().toUpperCase() || undefined;
-      const entityKindValue = url.searchParams.get("entityKind")?.trim();
-      const entityKind =
-        entityKindValue && contextGraphNodeKinds.includes(entityKindValue as (typeof contextGraphNodeKinds)[number])
-          ? (entityKindValue as (typeof contextGraphNodeKinds)[number])
-          : undefined;
-      if (entityKindValue && !entityKind) throw invalidRequest("unsupported contextGraph entity kind");
-      jsonCacheable(request, response, {
-        assertions: await contextGraphStore.listAssertions(tenantId, repository, {
-          ...(status ? { status } : {}),
-          ...(predicate ? { predicate } : {}),
-          ...(entityKind ? { entityKind } : {})
-        })
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context-graph/commands") {
-      // The svc:api fallback is a tenant admin; state-changing context graph commands
-      // must carry an explicitly forwarded principal identity.
-      if (!principal.forwarded) {
-        json(response, 401, { accepted: false, error: "a bound principal is required" });
-        return;
-      }
-      const body = parseJsonObject(await readRawBody(request));
-      json(
-        response,
-        200,
-        await contextGraphStore.executeCommand(
-          tenantId,
-          principal.principalId,
-          parseContextGraphCommand(body),
-          nowIso(),
-          isTenantAdmin(principal)
+        intakeState.board.events.filter(
+          (event) => !event.taskId || board.tasks.some((task) => task.id === event.taskId)
         )
       );
       return;
     }
-    if (request.method === "GET" && url.pathname === "/events") {
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
-      const workflows = await contextGraphCoordinator.list(
-        tenantId,
-        allowedRepositories ? { repositories: [...allowedRepositories] } : undefined
-      );
-      jsonCacheable(request, response, await collectBoardEvents(tenantId, allowedRepositories, workflows));
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context-graph/build") {
-      const allowedRepositories = isTenantAdmin(principal)
-        ? undefined
-        : new Set(await repositoriesForPrincipal(principal));
-      await createContextGraphTask(request, response, tenantId, allowedRepositories);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/plan") {
-      await planContextGraphIngestion(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/save") {
-      await saveContextGraphAssertions(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/project/run") {
-      await runContextGraphProjection(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/known") {
-      await findKnownContextGraphCommits(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/blobs") {
-      await applyContextGraphBlobAnalyses(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/ingest/github") {
-      await applyContextGraphGitHubObservations(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/cached") {
-      await findCachedContextGraphAssertions(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/assertions/evidence") {
-      await loadContextGraphAssertionEvidence(request, response, tenantId);
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context-graph/outbox/drain") {
-      await readRawBody(request);
-      json(response, 200, await contextGraphStore.drainDerivedProjectionEvents(tenantId, nowIso()));
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/internal/observability") {
+
+    if (request.method === "POST" && url.pathname === "/internal/context/ingest") {
+      const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
+      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.ingestEvidence);
+      const input = parseIngestInput(body.input, principal.tenantId, lease.build.repository, lease.build.ref);
+      const checkpoint = await new IngestEvidenceService(contextStore).ingest(input, lease.fence);
       json(response, 200, {
-        service: process.env.K_SERVICE ?? "jina-api",
-        startedAt: startedAtIso,
-        metrics: metrics.snapshot()
+        effect: "changed",
+        checkpointId: checkpoint.id,
+        commitSha: checkpoint.commitSha,
+        evidenceFingerprint: checkpoint.evidenceFingerprint
       });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/context/derive/prepare") {
+      const body = parseJsonObject(await readRawBody(request));
+      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
+      const checkpointId = requiredString(body.checkpointId, "checkpointId");
+      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
+      const bundle = await new EvidenceFocusSelector(contextStore).select(checkpointId);
+      json(response, 200, { checkpointId, prompt: buildKnowledgePrompt(bundle), bundle });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/derive/commit") {
+      const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
+      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
+      const checkpointId = requiredString(body.checkpointId, "checkpointId");
+      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
+      const rawOutput = body.rawOutput;
+      const generator: KnowledgeDocumentGenerator = {
+        name: "daytona-codex",
+        version: "knowledge-documents-v1",
+        model: process.env.CONTEXT_CODEX_MODEL?.trim() || "openai/gpt-5.4-mini",
+        async generate() {
+          return rawOutput;
+        }
+      };
+      const service = new DeriveKnowledgeService(
+        new EvidenceFocusSelector(contextStore),
+        generator,
+        contextStore,
+        new KnowledgeOutputValidator(contextStore)
+      );
+      // The remote worker owns the single repair attempt. Each commit request
+      // validates exactly one untrusted model output and records that attempt.
+      const run = await service.derive(checkpointId, nowIso(), lease.fence, 1);
+      const enrichedGeneration =
+        run.status === "succeeded"
+          ? await new IndexContextService(contextStore).index(checkpointId, nowIso(), lease.fence)
+          : undefined;
+      json(response, 200, {
+        status: run.status,
+        runId: run.id,
+        diagnostics: run.diagnostics,
+        revisionIds: run.revisionIds,
+        ...(enrichedGeneration ? { enrichedGenerationId: enrichedGeneration.id } : {})
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/index") {
+      const body = parseJsonObject(await readRawBody(request));
+      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.indexContext);
+      const checkpointId = requiredString(body.checkpointId, "checkpointId");
+      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
+      const generation = await new IndexContextService(contextStore).index(checkpointId, nowIso(), lease.fence);
+      json(response, 200, {
+        effect: "changed",
+        generationId: generation.id,
+        commitSha: generation.commitSha,
+        status: generation.status,
+        capabilities: generation.capabilities
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/outbox/drain") {
+      await readRawBody(request);
+      const backlog = await contextStore.projectionBacklog(principal.tenantId);
+      json(response, 200, {
+        processedEventCount: 0,
+        consumers: Object.entries(backlog).map(([consumer, value]) => ({
+          consumer,
+          pending: value.count,
+          ...(value.oldestAvailableAt ? { oldestAvailableAt: value.oldestAvailableAt } : {})
+        }))
+      });
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/internal/observability") {
+      json(response, 200, { service: process.env.K_SERVICE ?? "jina-api", startedAt, metrics: metrics.snapshot() });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {
-      await claimWork(request, response, [tenantId]);
+      await claimWork(request, response, principal.tenantId);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/renew") {
-      await renewWork(request, response, tenantId);
+      await renewWork(request, response, principal.tenantId);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/release") {
-      await releaseWork(request, response, tenantId);
+      await releaseWork(request, response, principal.tenantId);
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/complete") {
-      await completeWork(request, response, tenantId);
+      await completeWork(request, response, principal.tenantId);
       return;
     }
 
     json(response, 404, { error: "not found" });
   }
 
-  async function handleWebhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  async function acceptSignedWebhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const rawBody = await readRawBody(request);
     const result = handleGitHubWebhook({
       rawBody,
@@ -987,409 +759,248 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
       return;
     }
-    const identity = result.webhook ? await resolveWebhookIdentity(result.webhook) : undefined;
-    if (result.webhook && isContextGraphTrigger(result.webhook.event)) {
-      const event = result.webhook.event;
-      const ref = event.ref.slice("refs/heads/".length);
-      const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
-      const builds = await contextGraphCoordinator.list(tenantId, {
-        repositories: [result.webhook.repository]
-      });
-      const latest = builds
-        .filter(({ build }) => build.repository === result.webhook!.repository && build.ref === ref)
-        .sort((left, right) => right.build.createdAt.localeCompare(left.build.createdAt))[0];
-      const duplicateHead = latest?.build.metadata.githubHeadSha === event.headSha;
-      let createdTaskIds: readonly string[] = [];
-      if (!duplicateHead) {
-        const build = await contextGraphCoordinator.createBuild({
-          tenantId,
-          repository: result.webhook.repository,
-          ref,
-          requestKey: `push:${event.headSha}:delivery:${result.deliveryId}`,
-          dedupeHeadSha: event.headSha,
-          snapshotFirst: true,
-          createdAt: nowIso(),
-          metadata: {
-            githubDeliveryId: result.deliveryId,
-            githubHeadSha: event.headSha,
-            ...(identity
-              ? {
-                  workspaceLabel: identity.githubAccountLogin,
-                  githubAccountId: identity.githubAccountId,
-                  githubAccountType: identity.githubAccountType
-                }
-              : {}),
-            ...(result.webhook.repositoryId !== undefined ? { githubRepositoryId: result.webhook.repositoryId } : {}),
-            ...(result.webhook.installationId !== undefined
-              ? { githubInstallationId: result.webhook.installationId }
-              : {})
-          }
-        });
-        const workflow = (
-          await contextGraphCoordinator.list(build.tenantId, { repositories: [build.repository] })
-        ).find((candidate) => candidate.build.id === build.id);
-        createdTaskIds = [build.id, ...(workflow?.stages.map((stage) => stage.id) ?? [])];
-      }
-      const committed = await mutate(async () => {
-        if (!config.stateStore) await persist(result.deliveryId);
-        return true;
-      }, result.deliveryId);
-      if (!committed) {
-        metrics.count("github.webhooks", { outcome: "duplicate" });
-        json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
-        return;
-      }
-      const outcome = duplicateHead ? "duplicate" : "created";
-      logger.info(`github webhook ${result.deliveryId}: ${outcome}`, {
-        event: "github.webhook",
-        deliveryId: result.deliveryId,
-        repository: result.webhook.repository,
-        outcome,
-        createdTaskCount: createdTaskIds.length
-      });
-      metrics.count("github.webhooks", { outcome });
-      json(response, result.statusCode, {
-        accepted: true,
-        deliveryId: result.deliveryId,
-        outcome,
-        createdTaskIds
-      });
-      return;
-    }
-    const committed = await mutate(async () => {
-      if (!result.webhook) {
-        await persist(result.deliveryId);
-        return { statusCode: result.statusCode, payload: result };
-      }
-      const intake = acceptWebhook(result.webhook, result.deliveryId!, identity);
+    if (!result.webhook) {
       await persist(result.deliveryId);
-      return {
-        statusCode: result.statusCode,
-        payload: {
-          accepted: true,
-          deliveryId: result.deliveryId,
-          outcome: intake.outcome,
-          createdTaskIds: intake.createdTaskIds
-        }
-      };
-    }, result.deliveryId);
-    if (!committed) {
-      metrics.count("github.webhooks", { outcome: "duplicate" });
-      json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
+      json(response, result.statusCode, result);
       return;
     }
-    if (result.webhook) {
-      const payload = committed.payload as { outcome?: string; createdTaskIds?: readonly string[] };
-      const outcome = payload.outcome ?? "accepted";
-      logger.info(`github webhook ${result.deliveryId}: ${outcome}`, {
-        event: "github.webhook",
-        deliveryId: result.deliveryId,
-        repository: result.webhook.repository,
-        outcome,
-        createdTaskCount: payload.createdTaskIds?.length ?? 0
+    const accepted = await acceptParsedWebhook(result.webhook, result.deliveryId);
+    json(response, result.statusCode, { accepted: true, deliveryId: result.deliveryId, ...accepted });
+  }
+
+  async function acceptParsedWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
+    const identity = await resolveWebhookIdentity(webhook);
+    const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
+    if (isContextTrigger(webhook.event)) {
+      const ref = webhook.event.ref.slice("refs/heads/".length);
+      const build = await contextCoordinator.createBuild({
+        tenantId,
+        repository: webhook.repository,
+        ref,
+        commitSha: webhook.event.headSha,
+        requestKey: `push:${webhook.event.headSha}:delivery:${deliveryId}`,
+        createdAt: nowIso()
       });
-      metrics.count("github.webhooks", { outcome });
+      await persist(deliveryId);
+      return { outcome: "created", createdTaskIds: [build.id, ...build.stages.map((stage) => stage.id)] };
     }
-    json(response, committed.statusCode, committed.payload);
+    const result = await mutate(async () => {
+      const accepted = ingestGitHubWebhook(intakeState, webhook, {
+        deliveryId,
+        now: nowIso(),
+        tenantId,
+        ...(identity ? { workspaceLabel: identity.githubAccountLogin, githubAccountId: identity.githubAccountId } : {})
+      });
+      intakeState = accepted.state;
+      return accepted;
+    }, deliveryId);
+    return result ?? { outcome: "duplicate", createdTaskIds: [] };
   }
 
   async function resolveWebhookIdentity(webhook: ParsedGitHubWebhook): Promise<ResolvedRepositoryIdentity | undefined> {
     if (!config.sharedIdentityResolver) return undefined;
     const identity = await config.sharedIdentityResolver.resolveRepository({
-      repository: webhook.repository,
-      ...(webhook.repositoryId !== undefined ? { githubRepositoryId: webhook.repositoryId } : {}),
-      ...(webhook.installationId !== undefined ? { githubInstallationId: webhook.installationId } : {})
+      ...(webhook.repositoryId === undefined ? {} : { githubRepositoryId: webhook.repositoryId }),
+      ...(webhook.installationId === undefined ? {} : { githubInstallationId: webhook.installationId }),
+      repository: webhook.repository
     });
-    if (!identity) {
-      throw new ApiError(
-        409,
-        "repository_tenant_not_found",
-        `repository ${webhook.repository} is not enabled for an original Jina tenant`
-      );
-    }
-    if (identity.repository.toLowerCase() !== webhook.repository.toLowerCase()) {
-      throw new ApiError(409, "repository_identity_mismatch", "resolved repository identity does not match webhook");
-    }
+    if (!identity) throw new ApiError(409, "repository_identity_missing", "repository identity is not provisioned");
     return identity;
   }
 
-  async function createContextGraphTask(
+  async function hasDelivery(deliveryId: string): Promise<boolean> {
+    return config.stateStore ? config.stateStore.hasDelivery(deliveryId) : deliveries.has(deliveryId);
+  }
+
+  async function synchronizeRepositoryAccess(
     request: IncomingMessage,
     response: ServerResponse,
-    tenantId: string,
-    allowedRepositories?: ReadonlySet<string>
+    principal: Principal
   ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
-    const repository = requiredRepositoryName(body.repository, "repository");
-    if (allowedRepositories && !allowedRepositories.has(repository)) {
-      throw new DomainError("repository access denied", "forbidden");
+    if (
+      !config.contextApiToken ||
+      firstHeader(request.headers.authorization) !== `Bearer ${config.contextApiToken}` ||
+      !principal.forwarded
+    ) {
+      throw new ApiError(401, "unauthorized", "context credential and bound principal required");
     }
-    const ref = typeof body.ref === "string" && body.ref.trim() ? body.ref.trim() : "main";
-    const suppliedRequestKey =
-      typeof body.requestKey === "string" && body.requestKey.trim() ? body.requestKey.trim() : undefined;
-    const requestKey = suppliedRequestKey ?? randomUUID();
-    const created = await contextGraphCoordinator.createBuild({
-      tenantId,
-      repository,
-      ref,
-      requestKey,
-      snapshotFirst: body.snapshotFirst !== false,
-      createdAt: nowIso()
-    });
-    json(response, 202, { accepted: true, task: pipelineBuildTask(created) });
-  }
-
-  /**
-   * Durable stage work runs on these dedicated long-window routes so that
-   * completion stays a fast status flip; the worker's 30-second completion
-   * timeout no longer races multi-minute canonical writes.
-   */
-  async function saveContextGraphAssertions(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES));
-    const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
-    const result = await contextGraphStore.saveAssertionBatch(
-      parseContextGraphAssertionBatch(body.assertionBatch, { id: task.stageId, metadata: task.metadata }, tenantId),
-      { stageId: task.stageId, leaseId: task.leaseId }
-    );
-    json(response, 200, result);
-  }
-
-  async function runContextGraphProjection(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
-    const now = nowIso();
-    const repository = requiredString(task.metadata.repository, "task.repository");
-    const ref = requiredString(task.metadata.ref, "task.ref");
-    const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
-    // Drain and rebuild produce disposable, rebuildable read models, so a lease
-    // lost mid-run cannot corrupt canonical state; the graph save below is the
-    // only publication and stays fenced. Still, re-check the lease between the
-    // expensive steps so a superseded worker stops early instead of spending
-    // minutes on work whose publication will be rejected.
-    const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
-    await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
-    const rebuilt = await contextGraphStore.rebuildDerivedProjections(tenantId, repository, ref, now);
-    await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-project");
-    const graph = await contextGraphStore.project({
-      tenantId,
-      repository,
-      ref,
-      commitSha: requiredGitSha(task.metadata.commitSha, "task.commitSha"),
-      taskId: task.stageId,
-      generatedAt: now,
-      writeFence: { stageId: task.stageId, leaseId: task.leaseId }
-    });
-    json(response, 200, {
-      ...rebuilt,
-      drainedEventCount: drained.processedEventCount,
-      rebuiltRepositories: drained.rebuiltRepositories,
-      effect: rebuilt.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop",
-      graphId: graph.id,
-      nodeCount: graph.nodes.length,
-      edgeCount: graph.edges.length,
-      commitSha: graph.commitSha
-    });
-  }
-
-  async function planContextGraphIngestion(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_GRAPH_SNAPSHOT_BYTES));
-    const snapshot = parseRepositorySnapshot(body.snapshot, tenantId);
-    const task = await requireLeasedContextGraphTask(body, snapshot.taskId, tenantId, "run-context-graph-ingest");
-    if (snapshot.repository !== task.metadata.repository || snapshot.ref !== task.metadata.ref) {
-      throw invalidRequest("repository snapshot does not match contextGraph task");
+    if (!Array.isArray(body.repositories) || body.repositories.length > 5_000) {
+      throw invalidRequest("repositories must be an array with at most 5000 entries");
     }
-    const plan = await contextGraphStore.planIngestion(snapshot, { stageId: task.stageId, leaseId: task.leaseId });
-    json(response, 200, plan);
+    const repositories = [
+      ...new Set(body.repositories.map((repository) => requiredRepositoryName(repository, "repository")))
+    ].sort();
+    await contextStore.replaceRepositoryAccess(principal.tenantId, principal.principalId, repositories);
+    json(response, 200, { principalId: principal.principalId, repositoryCount: repositories.length });
   }
 
-  async function findKnownContextGraphCommits(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
-    const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-ingest");
-    if (!Array.isArray(body.commitShas)) throw invalidRequest("commitShas must be an array");
-    const commitShas = body.commitShas.map((sha) => requiredGitSha(sha, "commitSha"));
-    json(response, 200, {
-      knownCommitShas: await contextGraphStore.knownCommits(
-        tenantId,
-        requiredString(task.metadata.repository, "task.repository"),
-        commitShas
-      )
-    });
-  }
-
-  async function applyContextGraphBlobAnalyses(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
-    const taskId = requiredString(body.taskId, "taskId");
-    const commitSha = requiredGitSha(body.commitSha, "commitSha");
-    const analyses = parseBlobAnalyses(body.analyses);
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-ingest");
-    await contextGraphStore.applyBlobAnalyses(
+  async function queryContext(principal: Principal, requestValue: QueryContextRequest) {
+    const allowed = await permittedRepositories(principal);
+    if (!allowed.includes(requestValue.repository)) throw notFound("repository context not found");
+    const authorizer = new StaticScopeAuthorizer([
       {
-        tenantId,
-        repository: requiredString(task.metadata.repository, "task.repository"),
-        commitSha
-      },
-      analyses,
-      { stageId: task.stageId, leaseId: task.leaseId }
-    );
-    json(response, 200, { accepted: true, count: analyses.length });
+        tenantId: principal.tenantId,
+        principalId: principal.principalId,
+        repository: requestValue.repository,
+        aclFingerprints: ["*"]
+      }
+    ]);
+    const startedAt = nowIso();
+    const started = Date.now();
+    const result = await new QueryContextService(contextStore, authorizer).query(requestValue);
+    const completedAt = nowIso();
+    await contextStore.recordQueryRun({
+      id: result.traceId,
+      tenantId: principal.tenantId,
+      repository: requestValue.repository,
+      principalFingerprint: fingerprint({ tenantId: principal.tenantId, principalId: principal.principalId }),
+      generationId: result.generation.id,
+      requestFingerprint: fingerprint(requestValue),
+      ...(requestValue.taskKind ? { taskKind: requestValue.taskKind } : {}),
+      routes: result.coverage.retrieversUsed,
+      coverageStatus: result.coverage.status,
+      degradedCapabilities: result.generation.derivedKnowledge === "unavailable" ? ["derivedKnowledge"] : [],
+      citationFailureCount: result.answer.startsWith("Synthesis failed citation verification") ? 1 : 0,
+      conflictCount: result.conflicts.length,
+      startedAt,
+      completedAt,
+      durationMs: Math.max(0, Date.now() - started)
+    });
+    return result;
   }
 
-  async function applyContextGraphGitHubObservations(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
-    const taskId = requiredString(body.taskId, "taskId");
-    if (!Array.isArray(body.observations)) throw invalidRequest("observations must be an array");
-    const observations = body.observations.map((value) => parseRepositorySourceObservation(value, tenantId));
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-ingest");
-    const repository = requiredString(task.metadata.repository, "task.repository");
-    if (observations.some((observation) => observation.repository !== repository)) {
-      throw invalidRequest("GitHub observation repository does not match task");
+  async function contextMetrics(tenantId: string) {
+    const repositories = await contextStore.listRepositories(tenantId);
+    const generations = (
+      await Promise.all(repositories.map((repository) => contextStore.listGenerations(tenantId, repository)))
+    ).flat();
+    const revisions = (
+      await Promise.all(repositories.map((repository) => contextStore.listRevisions(tenantId, repository)))
+    ).flat();
+    let fragmentCount = 0;
+    let hierarchyNodeCount = 0;
+    for (const generation of generations) {
+      const projection = await contextStore.getGeneration(generation.id);
+      fragmentCount += projection?.fragments.length ?? 0;
+      hierarchyNodeCount += projection?.hierarchyNodes.length ?? 0;
     }
-    const result = await contextGraphStore.applyGitHubObservations(observations, {
-      stageId: task.stageId,
-      leaseId: task.leaseId
-    });
-    json(response, 200, result);
+    const backlog = await contextStore.projectionBacklog(tenantId);
+    const oldestPendingAt = Object.values(backlog)
+      .map((value) => value.oldestAvailableAt)
+      .filter((value): value is string => Boolean(value))
+      .sort()[0];
+    const latestGeneration = [...generations].sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+    return {
+      outboxDepthByConsumer: Object.fromEntries(
+        Object.entries(backlog).map(([consumer, value]) => [consumer, value.count])
+      ),
+      ...(oldestPendingAt ? { oldestPendingAt } : {}),
+      publishedGenerationCount: generations.filter((generation) => generation.status === "published").length,
+      documentCount: revisions.length,
+      fragmentCount,
+      hierarchyNodeCount,
+      embeddingCount: 0,
+      query: await contextStore.queryMetrics(tenantId),
+      projectors: latestGeneration
+        ? Object.entries(latestGeneration.projectorStatuses).map(([name, status]) => ({
+            name,
+            status: backlog[name as keyof typeof backlog].count > 0 ? "behind" : status,
+            checkpoint: latestGeneration.id,
+            backlog: backlog[name as keyof typeof backlog].count,
+            version: latestGeneration.projectorVersions[name as keyof typeof latestGeneration.projectorVersions]
+          }))
+        : []
+    };
   }
 
-  async function findCachedContextGraphAssertions(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
-    const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
-    // Generations are content-addressed by (commit, generator, registry, evidence
-    // fingerprint), so a batch persisted by a worker that later lost its lease is
-    // byte-identical to what a retry would produce; serving it here is safe reuse.
-    const cached = await contextGraphStore.hasAssertionGeneration(
-      tenantId,
-      requiredString(task.metadata.repository, "task.repository"),
-      requiredGitSha(body.commitSha, "commitSha"),
-      CONTEXT_GRAPH_GENERATOR_VERSION,
-      CONTEXT_GRAPH_REGISTRY_VERSION,
-      requiredString(body.evidenceFingerprint, "evidenceFingerprint")
+  async function boardView(principal: Principal) {
+    const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
+    const base = tenantBoardView(intakeState, publications, principal.tenantId, allowed);
+    const builds = (await contextCoordinator.list(principal.tenantId)).filter(
+      (build) => !allowed || allowed.has(build.repository)
     );
-    json(response, 200, { cached: cached ?? null });
+    return mergeContextBuilds(base, builds);
   }
 
-  async function loadContextGraphAssertionEvidence(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantId: string
-  ): Promise<void> {
-    const body = parseJsonObject(await readRawBody(request));
-    const taskId = requiredString(body.taskId, "taskId");
-    const task = await requireLeasedContextGraphTask(body, taskId, tenantId, "run-context-graph-assert");
-    const repository = requiredString(task.metadata.repository, "task.repository");
-    const observationIds = Array.isArray(task.metadata.sourceObservationIds)
-      ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
-      : [];
-    const evidence = await contextGraphStore.loadAssertionEvidence(tenantId, repository, observationIds);
-    json(response, 200, { evidence });
+  async function permittedRepositories(principal: Principal): Promise<string[]> {
+    return isTenantAdmin(principal)
+      ? contextStore.listRepositories(principal.tenantId)
+      : contextStore.repositoriesForPrincipal(principal.tenantId, principal.principalId);
   }
 
-  async function requireLeasedContextGraphTask(
-    body: Record<string, unknown>,
-    taskId: string,
-    tenantId: string,
-    topic: ContextGraphWorkerTopic
-  ): Promise<ContextGraphStageLease & { readonly id: string }> {
-    const messageId = requiredString(body.messageId, "messageId");
-    if (messageId !== taskId) throw new ApiError(409, "stale_lease", "stale contextGraph worker lease");
-    const leaseId = requiredString(body.leaseId, "leaseId");
-    const stage = await contextGraphCoordinator.leasedStage({
-      tenantId,
-      stageId: taskId,
-      leaseId,
-      topic,
-      now: nowIso()
-    });
-    if (!stage) throw new ApiError(409, "stale_lease", "stale contextGraph worker lease");
-    return { ...stage, id: stage.stageId };
+  async function requireRepositoryAccess(principal: Principal, repository: string): Promise<void> {
+    if (isTenantAdmin(principal)) return;
+    if (!(await permittedRepositories(principal)).includes(repository)) throw notFound("repository context not found");
   }
 
-  async function sharedTenantIdsForClaim(): Promise<readonly string[]> {
-    return [...new Set(await config.sharedIdentityResolver!.listTenantIds())].sort();
+  function isTenantAdmin(principal: Principal): boolean {
+    return (
+      principal.principalId.startsWith("svc:") ||
+      principal.principalId === `tenant:${principal.tenantId}` ||
+      (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
+    );
   }
 
-  async function claimWork(
-    request: IncomingMessage,
-    response: ServerResponse,
-    tenantIds: readonly string[]
-  ): Promise<void> {
+  function requireTenantAdmin(principal: Principal): void {
+    if (!isTenantAdmin(principal)) throw new ApiError(403, "forbidden", "tenant administrator access required");
+  }
+
+  async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
     const workerId = requiredString(body.workerId, "workerId");
-    if (!Array.isArray(body.topics) || body.topics.length === 0)
-      throw invalidRequest("at least one supported topic is required");
-    const topics = body.topics.map((topic) => requiredString(topic, "topics"));
-    const unsupportedTopics = topics.filter(
-      (topic) => !WORKER_TOPICS.includes(topic as (typeof WORKER_TOPICS)[number])
-    );
-    if (unsupportedTopics.length > 0)
-      throw invalidRequest(`unsupported worker topics: ${unsupportedTopics.join(", ")}`);
-    const requestedTopics = topics as (typeof WORKER_TOPICS)[number][];
-    const contextGraphTopics = requestedTopics.filter(isContextGraphWorkerTopic);
-    if (contextGraphTopics.length > 0 && tenantIds.length > 0) {
-      const now = nowIso();
-      const claimed = await contextGraphCoordinator.claim({
-        tenantId: tenantIds[0]!,
-        ...(tenantIds.length > 1 ? { tenantIds } : {}),
+    if (!Array.isArray(body.topics) || body.topics.length === 0) {
+      throw invalidRequest("at least one topic is required");
+    }
+    const topics = body.topics.map((topic) => requiredString(topic, "topic"));
+    const unsupported = topics.filter((topic) => !WORKER_TOPICS.includes(topic as (typeof WORKER_TOPICS)[number]));
+    if (unsupported.length) throw invalidRequest(`unsupported worker topics: ${unsupported.join(", ")}`);
+    const contextTopics = topics.filter(isContextQueueTopic);
+    const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
+    if (contextTopics.length) {
+      const claim = await contextCoordinator.claim({
+        tenantIds: claimTenantIds,
         workerId,
-        topics: contextGraphTopics,
-        now,
+        topics: contextTopics,
+        now: nowIso(),
         leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
       });
-      if (claimed) {
-        json(response, 200, claimed);
+      if (claim) {
+        json(response, 200, {
+          message: {
+            id: claim.stage.id,
+            topic: claim.stage.topic,
+            leaseId: claim.fence.leaseId,
+            leaseExpiresAt: claim.fence.leaseExpiresAt,
+            attempt: claim.fence.attempt,
+            writeFenceToken: claim.fence.token
+          },
+          task: {
+            id: claim.stage.id,
+            metadata: {
+              tenantId: claim.build.tenantId,
+              repository: claim.build.repository,
+              ref: claim.build.ref,
+              ...claim.stage.metadata
+            }
+          }
+        });
         return;
       }
     }
-    if (contextGraphTopics.length === requestedTopics.length) {
+    if (contextTopics.length === topics.length) {
       json(response, 204, {});
       return;
     }
-    const tenantIdSet = new Set(tenantIds);
+    const requested = topics.filter((topic) => !isContextQueueTopic(topic));
     const claimed = await mutate(async () => {
       const taskIds = intakeState.board.tasks
-        .filter(
-          (task) =>
-            typeof task.metadata.tenantId === "string" &&
-            tenantIdSet.has(task.metadata.tenantId) &&
-            (task.status === "queued" || task.status === "in_progress")
-        )
+        .filter((task) => claimTenantIds.includes(String(task.metadata.tenantId)))
         .map((task) => task.id);
       const now = nowIso();
       const leaseId = randomUUID();
       const leased = leaseNextOutboxMessage(intakeState.board, {
-        topics: requestedTopics,
+        topics: requested,
         taskIds,
         leaseId,
         now,
@@ -1403,14 +1014,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         board = applyCommand(
           board,
           { command: "TransitionTask", taskId: task.id, toStatus: "in_progress" },
-          {
-            actor: { type: "run", id: workerId },
-            now
-          }
+          { actor: { type: "run", id: workerId }, now }
         ).state;
       }
       intakeState = { ...intakeState, board };
-      await persist();
       return { message: leased.message, task: findTask(board, task.id) };
     });
     json(response, claimed ? 200 : 204, claimed ?? {});
@@ -1418,37 +1025,44 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function renewWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const rawMessageId = requiredString(body.messageId, "messageId");
+    const messageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    if (rawMessageId.startsWith("context-graph-stage_")) {
-      const now = nowIso();
-      const renewed = await contextGraphCoordinator.renew({
+    if (messageId.startsWith("cs_")) {
+      const located = await findBuildByStage(tenantId, messageId);
+      const activeFence = located?.stages.find((stage) => stage.id === messageId)?.fence;
+      if (
+        !activeFence ||
+        activeFence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
+        activeFence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
+      ) {
+        throw staleLease();
+      }
+      const renewed = await contextCoordinator.renew({
         tenantId,
-        stageId: rawMessageId,
+        stageId: messageId,
         leaseId,
-        now,
+        now: nowIso(),
         leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
       });
       if (!renewed) throw staleLease();
       json(response, 200, { accepted: true });
       return;
     }
-    const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
+    const id = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
     const renewed = await mutate(async () => {
-      const message = findOutboxMessage(intakeState.board, messageId);
+      const message = findOutboxMessage(intakeState.board, id);
       const task = message ? findTask(intakeState.board, message.taskId) : undefined;
-      if (!task || task.metadata.tenantId !== tenantId || task.status !== "in_progress") return false;
+      if (!task || task.metadata.tenantId !== tenantId) return false;
       const now = nowIso();
       const board = renewOutboxLease(
         intakeState.board,
-        messageId,
+        id,
         leaseId,
         now,
         new Date(Date.now() + WORKER_LEASE_MS).toISOString()
       );
       if (!board) return false;
       intakeState = { ...intakeState, board };
-      await persist();
       return true;
     });
     if (!renewed) throw staleLease();
@@ -1457,269 +1071,178 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function releaseWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const messageId = requiredString(body.messageId, "messageId");
+    const stageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    const reason = requiredString(body.reason, "reason").slice(0, 500);
-    if (!messageId.startsWith("context-graph-stage_")) {
-      throw invalidRequest("only contextGraph task-board leases can be released");
+    const build = await findBuildByStage(tenantId, stageId);
+    const fence = build?.stages.find((stage) => stage.id === stageId)?.fence;
+    if (
+      !fence ||
+      fence.leaseId !== leaseId ||
+      fence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
+      fence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
+    ) {
+      throw staleLease();
     }
-    const released = await contextGraphCoordinator.release({
+    const released = await contextCoordinator.release?.({
       tenantId,
-      stageId: messageId,
+      stageId,
       leaseId,
       now: nowIso(),
-      reason
+      reason: optionalString(body.reason) ?? "worker release"
     });
-    if (!released) throw staleLease();
+    if (released === false) throw staleLease();
     json(response, 200, { accepted: true });
   }
 
   async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const rawMessageId = requiredString(body.messageId, "messageId");
+    const messageId = requiredString(body.messageId, "messageId");
+    const taskId = requiredString(body.taskId, "taskId");
     const leaseId = requiredString(body.leaseId, "leaseId");
     const outcome = body.outcome;
     if (outcome !== "done" && outcome !== "failed") throw invalidRequest("outcome must be done or failed");
-    const rawTaskId = requiredString(body.taskId, "taskId");
-    if (rawMessageId.startsWith("context-graph-stage_") || rawTaskId.startsWith("context-graph-stage_")) {
-      if (rawMessageId !== rawTaskId) throw staleLease();
-      const graph = await completeContextGraphStage(body, tenantId, rawTaskId, leaseId, outcome);
-      json(response, 200, { accepted: true, graphId: graph?.id });
+    if (messageId.startsWith("cs_") || taskId.startsWith("cs_")) {
+      if (messageId !== taskId) throw staleLease();
+      const located = await findBuildByStage(tenantId, taskId);
+      const stage = located?.stages.find((candidate) => candidate.id === taskId);
+      if (
+        !stage?.fence ||
+        stage.fence.leaseId !== leaseId ||
+        stage.fence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
+        stage.fence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
+      ) {
+        throw staleLease();
+      }
+      const result = safeResultPayload(body.result);
+      const completed = await contextCoordinator.complete({
+        tenantId,
+        stageId: taskId,
+        fence: stage.fence,
+        outcome: outcome === "done" ? "succeeded" : "failed",
+        now: nowIso(),
+        ...(outcome === "done" ? { metadata: result } : { error: optionalString(body.reason) ?? "worker failed" })
+      });
+      if (!completed) throw staleLease();
+      json(response, 200, { accepted: true });
       return;
     }
-    const messageId = entityId<"board_outbox_message">(rawMessageId) as BoardOutboxMessageId;
-    const taskId = entityId<"task">(rawTaskId) as TaskId;
-    // JSON-board completions validate against the snapshot outside mutate(),
-    // so reload it here; the route-level gate skips it for worker routes.
-    await synchronize();
-    const task = findTask(intakeState.board, taskId);
-    if (!task || task.metadata.tenantId !== tenantId) {
-      throw new ApiError(404, "not_found", "task not found");
-    }
-    const result = await mutate(async () => {
-      const message = findOutboxMessage(intakeState.board, messageId);
-      const currentTask = findTask(intakeState.board, taskId);
+    const outboxId = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
+    const boardTaskId = entityId<"task">(taskId) as TaskId;
+    const completed = await mutate(async () => {
+      const message = findOutboxMessage(intakeState.board, outboxId);
+      const task = findTask(intakeState.board, boardTaskId);
       const now = nowIso();
       if (
         !message ||
-        !currentTask ||
-        message.taskId !== taskId ||
+        !task ||
+        message.taskId !== boardTaskId ||
         message.status !== "leased" ||
         message.leaseId !== leaseId ||
-        !message.leaseExpiresAt ||
-        message.leaseExpiresAt <= now ||
-        currentTask.status !== "in_progress" ||
-        currentTask.metadata.tenantId !== tenantId
+        task.metadata.tenantId !== tenantId
       ) {
         return false;
       }
-      const previousIntakeState = intakeState;
-      const previousPublications = publications;
       let board = markOutboxDispatched(intakeState.board, message.id, now);
-      const eventPayload = safeResultPayload(body.result);
       board = applyCommand(
         board,
         {
           command: "CommentTask",
-          taskId,
+          taskId: boardTaskId,
           eventType: outcome === "failed" ? `${message.topic}.failed` : completionEventType(message.topic),
           payload:
-            outcome === "failed" ? { reason: stringValue(body.reason, "worker failed").slice(0, 2000) } : eventPayload
+            outcome === "failed"
+              ? { reason: optionalString(body.reason)?.slice(0, 2_000) ?? "worker failed" }
+              : safeResultPayload(body.result)
         },
         { actor: RUN_ACTOR, now }
       ).state;
       if (outcome === "done" && message.topic === "run-publish") {
-        const repository = stringValue(currentTask.metadata.repository);
-        const pullRequestNumber = Number(currentTask.metadata.pullRequestNumber ?? 0);
-        const headSha = stringValue(currentTask.metadata.headSha);
+        const repository = optionalString(task.metadata.repository) ?? "";
+        const pullRequestNumber = Number(task.metadata.pullRequestNumber ?? 0);
+        const headSha = optionalString(task.metadata.headSha) ?? "";
         const key = buildPublicationKey(`${repository}#${pullRequestNumber}`, headSha, "summary");
         publications = upsertPublication(publications, { key, headSha, target: "summary" }).records;
       }
       board = applyCommand(
         board,
-        {
-          command: "TransitionTask",
-          taskId,
-          toStatus: outcome
-        },
+        { command: "TransitionTask", taskId: boardTaskId, toStatus: outcome },
         { actor: RUN_ACTOR, now }
       ).state;
       intakeState = { ...intakeState, board: reduceBoard(board, now) };
-      try {
-        await persist();
-      } catch (error) {
-        intakeState = previousIntakeState;
-        publications = previousPublications;
-        throw error;
-      }
       return true;
     });
-    if (!result) throw staleLease();
+    if (!completed) throw staleLease();
     json(response, 200, { accepted: true });
   }
 
-  async function completeContextGraphStage(
-    body: Readonly<Record<string, unknown>>,
+  async function requireLeasedContextStage(
     tenantId: string,
-    stageId: string,
-    leaseId: string,
-    outcome: "done" | "failed"
-  ): Promise<ContextGraph | undefined> {
-    const now = nowIso();
-    const stage = await contextGraphCoordinator.leasedStage({ tenantId, stageId, leaseId, now });
-    if (!stage) throw staleLease();
-    if (outcome === "failed") {
-      const completed = await contextGraphCoordinator.complete({
-        tenantId,
-        stageId,
-        leaseId,
-        outcome,
-        now,
-        reason: stringValue(body.reason, "worker failed").slice(0, 2_000)
-      });
-      if (!completed) throw staleLease();
-      return undefined;
+    body: Record<string, unknown>,
+    topic: ContextQueueTopic
+  ): Promise<{ build: ContextBuild; stage: ContextPipelineStage; fence: ContextWriteFence }> {
+    const taskId = requiredString(body.taskId, "taskId");
+    if (requiredString(body.messageId, "messageId") !== taskId) throw staleLease();
+    const leaseId = requiredString(body.leaseId, "leaseId");
+    const build = await findBuildByStage(tenantId, taskId);
+    const stage = build?.stages.find((candidate) => candidate.id === taskId);
+    if (
+      !build ||
+      !stage?.fence ||
+      stage.topic !== topic ||
+      stage.fence.leaseId !== leaseId ||
+      stage.fence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
+      stage.fence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
+    ) {
+      throw staleLease();
     }
-
-    const rawResult = isRecord(body.result) ? body.result : {};
-    let result: Record<string, unknown> = safeResultPayload(rawResult);
-    let nextMetadata: Record<string, unknown> = {};
-    let graph: ContextGraph | undefined;
-    if (stage.topic === "run-context-graph-ingest") {
-      nextMetadata = contextGraphIngestCompletionMetadata(rawResult);
-      result = { ...result, ...nextMetadata };
-    } else if (stage.topic === "run-context-graph-assert") {
-      if (body.assertionBatch !== undefined) {
-        // Legacy in-request save for workers deployed before the API.
-        await contextGraphStore.saveAssertionBatch(
-          parseContextGraphAssertionBatch(
-            body.assertionBatch,
-            { id: stage.stageId, metadata: stage.metadata },
-            tenantId
-          ),
-          { stageId, leaseId }
-        );
-      }
-      // The completion receipt is derived from durable state bound to this
-      // stage's own commit and evidence fingerprint; caller-supplied result
-      // payloads are never trusted for canonical fields.
-      const generation = await contextGraphStore.hasAssertionGeneration(
-        tenantId,
-        requiredString(stage.metadata.repository, "task.repository"),
-        requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
-        CONTEXT_GRAPH_GENERATOR_VERSION,
-        CONTEXT_GRAPH_REGISTRY_VERSION,
-        requiredString(stage.metadata.evidenceFingerprint, "task.evidenceFingerprint")
-      );
-      if (!generation) throw invalidRequest("assertion generation is not durable for this stage");
-      const assertionResult = safeResultPayload(generation);
-      result = { ...assertionResult, effect: isRecord(rawResult.cached) ? "confirmed" : "changed" };
-      nextMetadata = {
-        commitSha: requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
-        knowledgeCheckpoint: requiredString(assertionResult.knowledgeCheckpoint, "knowledgeCheckpoint")
-      };
-    } else if (isRecord(rawResult.projected)) {
-      // Thin completion: verify the projection is durably published for this
-      // stage's ref and commit before recording it; canonical fields come from
-      // the graph head, not the caller.
-      const headState = await contextGraphStore.currentGraphHead(tenantId, stage.repository, stage.ref);
-      if (!headState || headState.commitSha !== requiredGitSha(stage.metadata.commitSha, "task.commitSha")) {
-        throw invalidRequest("projected graph head is not durable for this stage");
-      }
-      result = {
-        ...safeResultPayload(rawResult.projected),
-        graphId: headState.graphId,
-        commitSha: headState.commitSha
-      };
-    } else {
-      const existingGraphIds = new Set((await contextGraphStore.listSummaries(tenantId)).map((summary) => summary.id));
-      const drained = await contextGraphStore.drainDerivedProjectionEvents(tenantId, now);
-      const rebuilt = await contextGraphStore.rebuildDerivedProjections(tenantId, stage.repository, stage.ref, now);
-      graph = await contextGraphStore.project({
-        tenantId,
-        repository: stage.repository,
-        ref: stage.ref,
-        commitSha: requiredGitSha(stage.metadata.commitSha, "task.commitSha"),
-        taskId: stage.stageId,
-        generatedAt: now,
-        writeFence: { stageId, leaseId }
-      });
-      result = {
-        ...rebuilt,
-        drainedEventCount: drained.processedEventCount,
-        rebuiltRepositories: drained.rebuiltRepositories,
-        effect: rebuilt.rebuilt || !existingGraphIds.has(graph.id) ? "changed" : "noop",
-        graphId: graph.id,
-        nodeCount: graph.nodes.length,
-        edgeCount: graph.edges.length,
-        commitSha: graph.commitSha
-      };
-    }
-    const completed = await contextGraphCoordinator.complete({
-      tenantId,
-      stageId,
-      leaseId,
-      outcome: "done",
-      now: nowIso(),
-      result,
-      nextMetadata
-    });
-    if (!completed) throw staleLease();
-    return graph;
+    await requireFence(tenantId, stage.fence);
+    return { build, stage, fence: stage.fence };
   }
 
-  function isTenantAdmin(principal: { readonly tenantId?: string; readonly principalId: string }): boolean {
-    return (
-      principal.principalId.startsWith("svc:") ||
-      (principal.tenantId !== undefined && principal.principalId === `tenant:${principal.tenantId}`) ||
-      (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
+  async function requireFence(tenantId: string, fence: ContextWriteFence): Promise<void> {
+    if (!(await contextCoordinator.validateWriteFence({ tenantId, fence, now: nowIso() }))) throw staleLease();
+  }
+
+  async function findBuildByStage(tenantId: string, stageId: string): Promise<ContextBuild | undefined> {
+    return (await contextCoordinator.list(tenantId)).find((build) =>
+      build.stages.some((stage) => stage.id === stageId)
     );
   }
 
-  async function collectBoardEvents(
-    tenantId: string,
-    allowedRepositories: ReadonlySet<string> | undefined,
-    workflows: readonly {
-      readonly build: ContextGraphBuildRecord;
-      readonly stages: readonly ContextGraphStageRecord[];
-    }[]
-  ) {
-    const taskIds = tenantTaskIds(intakeState, tenantId, allowedRepositories);
-    const pipelineTaskIds = new Set(
-      workflows.flatMap(({ build, stages }) => [build.id, ...stages.map((stage) => stage.id)])
+  async function drainOneSimulatedRun(): Promise<void> {
+    const message = intakeState.board.outbox.find(
+      (candidate) => candidate.status === "pending" && !isContextQueueTopic(candidate.topic)
     );
-    const pipelineEvents = (await contextGraphCoordinator.listEvents(tenantId, { taskIds: [...pipelineTaskIds] }))
-      .filter((event) => pipelineTaskIds.has(event.taskId))
-      .map((event, index) => ({ ...event, seq: index + 1 }));
-    return [
-      ...intakeState.board.events.filter((event) => event.taskId && taskIds.has(event.taskId)),
-      ...pipelineEvents
-    ].sort((left, right) => left.at.localeCompare(right.at));
-  }
-
-  async function repositoriesForPrincipal(principal: {
-    readonly tenantId: string;
-    readonly principalId: string;
-  }): Promise<readonly string[]> {
-    return contextGraphStore.repositoriesForPrincipal(
-      principal.tenantId,
-      isTenantAdmin(principal) ? "svc:tenant-admin" : principal.principalId
-    );
+    if (!message) return;
+    let board = markOutboxDispatched(intakeState.board, message.id, nowIso());
+    const task = findTask(board, message.taskId);
+    if (!task || task.status !== "queued") return;
+    board = applyCommand(
+      board,
+      { command: "TransitionTask", taskId: task.id, toStatus: "in_progress" },
+      { actor: RUN_ACTOR, now: nowIso() }
+    ).state;
+    board = applyCommand(
+      board,
+      { command: "TransitionTask", taskId: task.id, toStatus: "done" },
+      { actor: RUN_ACTOR, now: nowIso() }
+    ).state;
+    intakeState = { ...intakeState, board: reduceBoard(board, nowIso()) };
+    await persist();
   }
 
   if (config.simulateRuns) {
     const timer = setInterval(
       () =>
         void mutate(drainOneSimulatedRun).catch((error) => logger.error("simulated run failed", errorLogFields(error))),
-      1500
+      1_500
     );
     timer.unref();
     server.once("close", () => clearInterval(timer));
   }
   if (config.stateStore) server.once("close", () => void config.stateStore?.close());
   if (config.sharedIdentityResolver) server.once("close", () => void config.sharedIdentityResolver?.close());
-  server.once("close", () => void contextGraphCoordinator.close());
-  server.once("close", () => void contextGraphStore.close());
+  server.once("close", () => void contextStore.close());
   return server;
 }
 
@@ -1727,24 +1250,23 @@ function authenticatedPrincipal(
   request: IncomingMessage,
   config: ApiServerConfig,
   pathname: string
-): { readonly tenantId: string; readonly principalId: string; readonly forwarded: boolean } | undefined {
+): Principal | undefined {
   if (config.enableDevEndpoints) {
     return {
       tenantId: firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default",
-      principalId: "svc:dev",
+      principalId: normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"])) ?? "svc:dev",
       forwarded: true
     };
   }
   const authorization = firstHeader(request.headers.authorization);
-  const hasInternalAccess = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
-  const hasGraphAccess = Boolean(
-    config.graphApiToken &&
-    authorization === `Bearer ${config.graphApiToken}` &&
-    (isPublicGraphRoute(pathname) || pathname === "/context-graph/build")
+  const internal = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
+  const context = Boolean(
+    config.contextApiToken && authorization === `Bearer ${config.contextApiToken}` && isContextCredentialRoute(pathname)
   );
-  if (!hasInternalAccess && !hasGraphAccess) return undefined;
+  if (!internal && !context) return undefined;
+  const requestedTenantId = normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]));
   const tenantId = config.sharedIdentityResolver
-    ? normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]))
+    ? (requestedTenantId ?? (internal && pathname === "/internal/worker/claim" ? "*" : undefined))
     : config.tenantId;
   if (!tenantId) return undefined;
   const forwarded = normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"]));
@@ -1752,6 +1274,416 @@ function authenticatedPrincipal(
     return undefined;
   }
   return { tenantId, principalId: forwarded ?? "svc:api", forwarded: forwarded !== undefined };
+}
+
+function requireBoundPrincipal(principal: Principal, config: ApiServerConfig): void {
+  if (!config.enableDevEndpoints && !principal.forwarded) {
+    throw new ApiError(401, "bound_principal_required", "a bound principal is required");
+  }
+}
+
+function requireBoundPrincipalForContextCredential(
+  principal: Principal,
+  request: IncomingMessage,
+  config: ApiServerConfig
+): void {
+  if (
+    !config.enableDevEndpoints &&
+    config.contextApiToken &&
+    firstHeader(request.headers.authorization) === `Bearer ${config.contextApiToken}` &&
+    !principal.forwarded
+  ) {
+    throw new ApiError(401, "bound_principal_required", "a bound principal is required");
+  }
+}
+
+function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
+  return Boolean(
+    config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
+  );
+}
+
+function isContextCredentialRoute(pathname: string): boolean {
+  return pathname === "/mcp" || pathname.startsWith("/context/") || pathname === "/internal/context/access/sync";
+}
+
+function contextTriggers(): TaskTypeTriggerRule[] {
+  return contextTaskTypeTriggers.flatMap((trigger) =>
+    trigger.taskTypes.map((taskType) => ({
+      workflow: trigger.workflow,
+      taskType,
+      source: trigger.source,
+      description: `Creates ${taskType} work for the repository context workflow.`
+    }))
+  );
+}
+
+function parseQueryContextRequest(body: Record<string, unknown>, principal: Principal): QueryContextRequest {
+  const taskKind = optionalString(body.taskKind);
+  const ref = optionalString(body.ref);
+  const from = isRecord(body.timeWindow) ? optionalIsoTime(body.timeWindow.from, "timeWindow.from") : undefined;
+  const to = isRecord(body.timeWindow) ? optionalIsoTime(body.timeWindow.to, "timeWindow.to") : undefined;
+  if (from && to && from > to) throw invalidRequest("timeWindow.from must not follow timeWindow.to");
+  if (taskKind && !["lookup", "structure", "change", "intent", "overview", "status"].includes(taskKind)) {
+    throw invalidRequest("unsupported taskKind");
+  }
+  return {
+    tenantId: principal.tenantId,
+    principalId: principal.principalId,
+    repository: requiredRepositoryName(body.repository, "repository"),
+    question: boundedString(body.question, "question", 4_000),
+    ...(ref ? { ref } : {}),
+    ...(taskKind ? { taskKind: taskKind as NonNullable<QueryContextRequest["taskKind"]> } : {}),
+    ...(isRecord(body.targets) ? { targets: parseTargets(body.targets) } : {}),
+    ...(isRecord(body.timeWindow) ? { timeWindow: { ...(from ? { from } : {}), ...(to ? { to } : {}) } } : {})
+  };
+}
+
+function parseTargets(value: Record<string, unknown>): NonNullable<QueryContextRequest["targets"]> {
+  const paths = optionalStringArray(value.paths, "targets.paths");
+  const symbols = optionalStringArray(value.symbols, "targets.symbols");
+  const pullRequests = optionalStringArray(value.pullRequests, "targets.pullRequests");
+  const issues = optionalStringArray(value.issues, "targets.issues");
+  return {
+    ...(paths ? { paths } : {}),
+    ...(symbols ? { symbols } : {}),
+    ...(pullRequests ? { pullRequests } : {}),
+    ...(issues ? { issues } : {})
+  };
+}
+
+function copyTargets(value: {
+  readonly paths?: readonly string[];
+  readonly symbols?: readonly string[];
+  readonly pullRequests?: readonly string[];
+  readonly issues?: readonly string[];
+}): NonNullable<QueryContextRequest["targets"]> {
+  return {
+    ...(value.paths ? { paths: [...value.paths] } : {}),
+    ...(value.symbols ? { symbols: [...value.symbols] } : {}),
+    ...(value.pullRequests ? { pullRequests: [...value.pullRequests] } : {}),
+    ...(value.issues ? { issues: [...value.issues] } : {})
+  };
+}
+
+function parseIngestInput(value: unknown, tenantId: string, repository: string, ref: string): IngestEvidenceInput {
+  if (!isRecord(value) || !Array.isArray(value.files)) throw invalidRequest("input.files must be an array");
+  if (value.tenantId !== tenantId || value.repository !== repository || value.ref !== ref) {
+    throw invalidRequest("ingest input does not match leased stage scope");
+  }
+  return value as unknown as IngestEvidenceInput;
+}
+
+function publicGeneration(generation: Awaited<ReturnType<ContextEngineStore["listGenerations"]>>[number]) {
+  return {
+    id: generation.id,
+    tenantId: generation.tenantId,
+    repository: generation.repository,
+    ref: generation.ref,
+    commitSha: generation.commitSha,
+    status: generation.status,
+    derivedKnowledge: generation.capabilities.derivedKnowledge,
+    projectors: generation.projectorStatuses,
+    createdAt: generation.createdAt,
+    ...(generation.publishedAt ? { publishedAt: generation.publishedAt } : {})
+  };
+}
+
+function publicKnowledgeSummary(
+  revision: Awaited<ReturnType<ContextEngineStore["getRevision"]>> & {},
+  events: readonly KnowledgeRevisionEvent[]
+) {
+  if (!revision) throw new Error("revision is required");
+  const terminal = events.at(-1)?.type;
+  const reviewStatus =
+    terminal === "reviewed"
+      ? "reviewed"
+      : terminal === "rejected" || terminal === "invalidated" || terminal === "redacted"
+        ? terminal
+        : "generated";
+  return {
+    id: revision.id,
+    logicalId: revision.logicalId,
+    repository: revision.repository,
+    kind: revision.kind,
+    title: revision.title,
+    summary: revision.summary,
+    confidence: revision.confidence,
+    reviewStatus,
+    commitSha: revision.scope.commitSha,
+    createdAt: revision.createdAt
+  };
+}
+
+function mergeContextBuilds(board: ReturnType<typeof tenantBoardView>, builds: readonly ContextBuild[]) {
+  const contextTasks = builds.flatMap((build) => [
+    buildBoardTask(build),
+    ...build.stages.map((stage) => stageBoardTask(build, stage))
+  ]);
+  const contextTaskIds = new Set(contextTasks.map((task) => task.id));
+  return {
+    ...board,
+    tasks: [...board.tasks.filter((task) => !isContextTaskType(task.type)), ...contextTasks],
+    dependencies: [
+      ...board.dependencies.filter(
+        (dependency) => !contextTaskIds.has(dependency.taskId) && !contextTaskIds.has(dependency.dependsOnTaskId)
+      ),
+      ...builds.flatMap((build) => {
+        const ingest = build.stages.find((stage) => stage.type === contextTaskTypes.ingestEvidence)!;
+        return [
+          ...build.stages
+            .filter((stage) => stage.type !== contextTaskTypes.ingestEvidence)
+            .map((stage) => ({
+              taskId: entityId<"task">(stage.id),
+              dependsOnTaskId: entityId<"task">(ingest.id),
+              relationship: "blocks" as const,
+              required: true,
+              blocksParentCompletion: stage.required
+            })),
+          ...build.stages.map((stage) => ({
+            taskId: entityId<"task">(build.id),
+            dependsOnTaskId: entityId<"task">(stage.id),
+            relationship: "blocks" as const,
+            required: stage.required,
+            blocksParentCompletion: stage.required
+          }))
+        ];
+      })
+    ],
+    outbox: [
+      ...board.outbox.filter((message) => !contextTaskIds.has(message.taskId)),
+      ...builds.flatMap((build) =>
+        build.stages
+          .filter((stage) => stage.status !== "blocked")
+          .map((stage) => ({
+            id: entityId<"board_outbox_message">(stage.id),
+            taskId: entityId<"task">(stage.id),
+            topic: stage.topic,
+            idempotencyKey: `${stage.id}:${stage.attempt}`,
+            status:
+              stage.status === "queued"
+                ? ("pending" as const)
+                : stage.status === "leased"
+                  ? ("leased" as const)
+                  : ("dispatched" as const),
+            payload: { taskId: stage.id, attempt: stage.attempt },
+            createdAt: build.createdAt,
+            ...(stage.fence
+              ? {
+                  leaseId: stage.fence.leaseId,
+                  leasedAt: stage.startedAt ?? build.createdAt,
+                  leaseExpiresAt: stage.fence.leaseExpiresAt
+                }
+              : {}),
+            ...(["succeeded", "failed"].includes(stage.status)
+              ? { dispatchedAt: stage.completedAt ?? build.completedAt ?? build.createdAt }
+              : {})
+          }))
+      )
+    ]
+  };
+}
+
+function buildBoardTask(build: ContextBuild): BoardTask {
+  return {
+    id: entityId<"task">(build.id),
+    type: contextTaskTypes.build,
+    title: `Build context for ${build.repository}@${build.ref}`,
+    status: build.status === "active" ? "in_progress" : build.status === "failed" ? "failed" : "done",
+    assigneeRole: "system",
+    dedupeKey: `context:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}`,
+    required: true,
+    attempt: 0,
+    metadata: {
+      tenantId: build.tenantId,
+      repository: build.repository,
+      ref: build.ref,
+      requestKey: build.requestKey,
+      ...(build.status === "degraded" ? { degraded: true } : {})
+    },
+    kind: "aggregate",
+    createdAt: build.createdAt,
+    updatedAt: build.completedAt ?? build.createdAt
+  };
+}
+
+function stageBoardTask(build: ContextBuild, stage: ContextPipelineStage): BoardTask {
+  return {
+    id: entityId<"task">(stage.id),
+    parentTaskId: entityId<"task">(build.id),
+    type: stage.type,
+    title: `${stage.type} for ${build.repository}@${build.ref}`,
+    status:
+      stage.status === "blocked"
+        ? "triage"
+        : stage.status === "queued"
+          ? "queued"
+          : stage.status === "leased"
+            ? "in_progress"
+            : stage.status === "succeeded"
+              ? "done"
+              : "failed",
+    assigneeRole: "context_worker",
+    dedupeKey: `context:${build.id}:${stage.type}`,
+    required: stage.required,
+    attempt: stage.attempt,
+    metadata: {
+      tenantId: build.tenantId,
+      repository: build.repository,
+      ref: build.ref,
+      ...stage.metadata,
+      ...(stage.error ? { error: stage.error } : {})
+    },
+    kind: "dispatchable",
+    dispatchTopic: stage.topic,
+    createdAt: build.createdAt,
+    updatedAt: stage.completedAt ?? stage.startedAt ?? build.createdAt
+  };
+}
+
+function tenantBoardView(
+  state: GitHubIntakeState,
+  records: readonly PublicationRecord[],
+  tenantId: string,
+  allowedRepositories?: ReadonlySet<string>
+) {
+  const taskIds = new Set(
+    state.board.tasks
+      .filter(
+        (task) =>
+          task.metadata.tenantId === tenantId &&
+          (!allowedRepositories ||
+            (typeof task.metadata.repository === "string" && allowedRepositories.has(task.metadata.repository)))
+      )
+      .map((task) => task.id)
+  );
+  const pullRequests = state.pullRequests.filter(
+    (pullRequest) =>
+      pullRequest.tenantId === tenantId && (!allowedRepositories || allowedRepositories.has(pullRequest.repository))
+  );
+  return {
+    tasks: state.board.tasks.filter((task) => taskIds.has(task.id)),
+    dependencies: state.board.dependencies.filter(
+      (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
+    ),
+    outbox: state.board.outbox.filter((message) => taskIds.has(message.taskId)),
+    publications: records.filter((record) =>
+      pullRequests.some((pr) => record.key.startsWith(`pr:${pr.repository}#${pr.number}:`))
+    ),
+    pullRequests
+  };
+}
+
+function completionEventType(topic: string): string {
+  if (topic === "run-review") return "review.completed";
+  if (topic === "run-research") return "context.collected";
+  if (topic === "run-publish") return "publish.completed";
+  if (topic === "run-cleanup") return "cleanup.completed";
+  return "worker.completed";
+}
+
+function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
+  const repository = requiredRepositoryName(body.repository, "repository");
+  if (body.ref !== undefined || body.push === true) {
+    return {
+      repository,
+      event: {
+        type: "push",
+        ref: `refs/heads/${optionalString(body.ref) ?? "main"}`,
+        headSha: requiredGitSha(body.headSha, "headSha"),
+        deleted: false
+      }
+    };
+  }
+  if (body.issueNumber !== undefined) {
+    return {
+      repository,
+      event: {
+        type: "issue.opened",
+        issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber"),
+        title: optionalString(body.title) ?? "Dev issue"
+      }
+    };
+  }
+  return {
+    repository,
+    event: {
+      type: "pull_request.opened",
+      pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber"),
+      headSha: requiredGitSha(body.headSha, "headSha")
+    }
+  };
+}
+
+function migrateSnapshotTenantAliases(
+  snapshot: ApiSnapshot,
+  tenantId: string | undefined,
+  aliases: readonly string[]
+): ApiSnapshot {
+  if (!tenantId || aliases.length === 0) return snapshot;
+  const set = new Set(aliases);
+  return {
+    ...snapshot,
+    intakeState: {
+      board: {
+        ...snapshot.intakeState.board,
+        tasks: snapshot.intakeState.board.tasks.map((task) =>
+          set.has(optionalString(task.metadata.tenantId) ?? "")
+            ? { ...task, metadata: { ...task.metadata, tenantId } }
+            : task
+        )
+      },
+      pullRequests: snapshot.intakeState.pullRequests.map((pullRequest) =>
+        set.has(pullRequest.tenantId) ? { ...pullRequest, tenantId } : pullRequest
+      )
+    }
+  };
+}
+
+function sanitizeSnapshotForCurrentRuntime(snapshot: ApiSnapshot): ApiSnapshot {
+  const supportedTypes = new Set(
+    [...taskTypeDefinitions, ...contextTaskTypeDefinitions].map((definition) => definition.type)
+  );
+  const tasks = snapshot.intakeState.board.tasks.filter((task) => supportedTypes.has(task.type));
+  const taskIds = new Set(tasks.map((task) => task.id));
+  return {
+    ...snapshot,
+    intakeState: {
+      ...snapshot.intakeState,
+      board: {
+        tasks,
+        dependencies: snapshot.intakeState.board.dependencies.filter(
+          (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
+        ),
+        outbox: snapshot.intakeState.board.outbox.filter(
+          (message) => taskIds.has(message.taskId) && (WORKER_TOPICS as readonly string[]).includes(message.topic)
+        ),
+        events: snapshot.intakeState.board.events.filter(
+          (event) => event.taskId === undefined || taskIds.has(event.taskId)
+        )
+      }
+    }
+  };
+}
+
+function safeResultPayload(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value)
+      .slice(0, 40)
+      .map(([key, item]) => [
+        key,
+        item === null || typeof item === "boolean" || typeof item === "number"
+          ? item
+          : typeof item === "string"
+            ? item.slice(0, 5_000)
+            : (JSON.stringify(item) ?? "").slice(0, 5_000)
+      ])
+  );
+}
+
+function isContextQueueTopic(value: string): value is ContextQueueTopic {
+  return Object.values(contextQueueTopics).includes(value as ContextQueueTopic);
 }
 
 function normalizedTenantId(value: string | undefined): string | undefined {
@@ -1764,31 +1696,11 @@ function normalizedTenantId(value: string | undefined): string | undefined {
 function normalizedForwardedPrincipal(value: string | undefined): string | undefined {
   if (!value) return undefined;
   if (/^user:[^\s@]+@[^\s@]+$/.test(value)) return value.toLowerCase();
-  if (/^tenant:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
-    return value.toLowerCase();
-  }
+  if (/^tenant:[0-9a-f-]{36}$/i.test(value)) return value.toLowerCase();
+  if (/^svc:[a-z0-9_.:-]+$/i.test(value)) return value.toLowerCase();
   return undefined;
 }
 
-function hasGraphApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
-  return Boolean(
-    config.graphApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.graphApiToken}`
-  );
-}
-
-function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
-  return Boolean(
-    config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
-  );
-}
-
-/**
- * Routes this server actually serves, used to label request metrics. Requests
- * outside this set (including unauthorized probes, which are rejected before
- * route matching and so can carry arbitrary raw paths) collapse into one
- * "(unknown)" series so probing cannot exhaust the metric registry's bounded
- * label cardinality.
- */
 const METRICS_ROUTES = new Set([
   "/health",
   "/healthz",
@@ -1797,50 +1709,51 @@ const METRICS_ROUTES = new Set([
   "/dev/webhooks/github",
   "/mcp",
   "/board",
+  "/overview",
   "/events",
-  "/v1/graphs",
-  "/v1/graph/query",
-  "/context-graph",
-  "/context-graph/ask",
-  "/context-graph/assertions",
-  "/context-graph/build",
-  "/context-graph/commands",
-  "/context-graph/metrics",
-  "/context-graph/retrieve",
-  "/internal/graph/access/sync",
-  "/internal/observability",
-  "/internal/context-graph/assertions/cached",
-  "/internal/context-graph/assertions/evidence",
-  "/internal/context-graph/assertions/save",
-  "/internal/context-graph/ingest/blobs",
-  "/internal/context-graph/ingest/github",
-  "/internal/context-graph/ingest/known",
-  "/internal/context-graph/ingest/plan",
-  "/internal/context-graph/outbox/drain",
-  "/internal/context-graph/project/run",
+  "/context/build",
+  "/context/query",
+  "/context/generations",
+  "/context/documents",
+  "/context/structure",
+  "/context/metrics",
+  "/context/rebuild",
+  "/context/erasure",
+  "/internal/context/access/sync",
+  "/internal/context/ingest",
+  "/internal/context/derive/prepare",
+  "/internal/context/derive/commit",
+  "/internal/context/index",
+  "/internal/context/outbox/drain",
   "/internal/worker/claim",
-  "/internal/worker/complete",
+  "/internal/worker/renew",
   "/internal/worker/release",
-  "/internal/worker/renew"
+  "/internal/worker/complete",
+  "/internal/observability"
 ]);
 
 function metricsRoute(pathname: string): string {
-  if (graphRouteId(pathname, "/v1/graphs/") !== undefined) return "/v1/graphs/:id";
-  if (graphRouteId(pathname, "/context-graph/graphs/") !== undefined) return "/context-graph/graphs/:id";
+  if (routeId(pathname, "/context/generations/")) return "/context/generations/:id";
+  if (routeId(pathname, "/context/documents/")) return "/context/documents/:id";
+  if (routeId(pathname, "/context/knowledge/", "/review")) return "/context/knowledge/:id/review";
   return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
 }
 
-/**
- * The decoded graph id when `pathname` matches the route grammar exactly —
- * one non-empty, validly percent-encoded segment after `prefix` — else
- * undefined. Prefix matching alone would let malformed or extra-segment
- * paths masquerade as served parameterized routes (retaining raw
- * attacker-controlled paths in logs) and let invalid escapes throw URIError
- * out of the dispatcher as a 500.
- */
-function graphRouteId(pathname: string, prefix: string): string | undefined {
-  if (!pathname.startsWith(prefix)) return undefined;
-  const segment = pathname.slice(prefix.length);
+function isReadOnlyContextRoute(method: string | undefined, pathname: string): boolean {
+  return (
+    method === "OPTIONS" ||
+    (method === "GET" &&
+      (pathname === "/health" ||
+        pathname === "/healthz" ||
+        pathname === "/task-types" ||
+        pathname.startsWith("/context/"))) ||
+    (method === "POST" && (pathname === "/context/query" || pathname === "/mcp"))
+  );
+}
+
+function routeId(pathname: string, prefix: string, suffix = ""): string | undefined {
+  if (!pathname.startsWith(prefix) || (suffix && !pathname.endsWith(suffix))) return undefined;
+  const segment = pathname.slice(prefix.length, suffix ? -suffix.length : undefined);
   if (!segment || segment.includes("/")) return undefined;
   try {
     return decodeURIComponent(segment);
@@ -1849,898 +1762,84 @@ function graphRouteId(pathname: string, prefix: string): string | undefined {
   }
 }
 
-function isPublicGraphRoute(pathname: string): boolean {
-  return (
-    pathname === "/mcp" ||
-    pathname === "/v1/graphs" ||
-    pathname.startsWith("/v1/graphs/") ||
-    pathname === "/v1/graph/query"
-  );
-}
-
-function isSnapshotExemptInternalRoute(method: string | undefined, pathname: string): boolean {
-  if (method !== "POST") return false;
-  // Relational context graph data-plane routes never read the JSON board snapshot.
-  if (pathname.startsWith("/internal/context-graph/")) return true;
-  // Worker coordination: context-graph-stage_* leases bypass the JSON board
-  // entirely, and the JSON-board claim/renew branches only read state inside
-  // mutate(), which restores the stored snapshot before operating. release is
-  // context-graph-only. complete re-synchronizes on its JSON-board path before it
-  // validates the task against the snapshot.
-  return (
-    pathname === "/internal/worker/claim" ||
-    pathname === "/internal/worker/renew" ||
-    pathname === "/internal/worker/release" ||
-    pathname === "/internal/worker/complete"
-  );
-}
-
-function isDirectContextGraphRead(method: string | undefined, pathname: string): boolean {
-  if (
-    method === "OPTIONS" ||
-    (method === "GET" && (pathname === "/health" || pathname === "/healthz" || pathname === "/task-types"))
-  ) {
-    return true;
-  }
-  if (isPublicGraphRoute(pathname)) return true;
-  if (
-    method === "GET" &&
-    (pathname === "/context-graph" ||
-      pathname === "/context-graph/metrics" ||
-      pathname === "/context-graph/assertions" ||
-      pathname.startsWith("/context-graph/graphs/"))
-  )
-    return true;
-  return method === "POST" && (pathname === "/context-graph/retrieve" || pathname === "/context-graph/ask");
-}
-
-function tenantTaskIds(
-  state: GitHubIntakeState,
-  tenantId: string,
-  allowedRepositories?: ReadonlySet<string>
-): Set<TaskId> {
-  return new Set(
-    state.board.tasks
-      .filter(
-        (task) =>
-          task.metadata.tenantId === tenantId &&
-          (!allowedRepositories ||
-            (typeof task.metadata.repository === "string" && allowedRepositories.has(task.metadata.repository)))
-      )
-      .map((task) => task.id)
-  );
-}
-
-function tenantBoardView(
-  state: GitHubIntakeState,
-  publications: readonly PublicationRecord[],
-  tenantId: string,
-  allowedRepositories?: ReadonlySet<string>
-) {
-  const taskIds = tenantTaskIds(state, tenantId, allowedRepositories);
-  const pullRequests = state.pullRequests.filter(
-    (pullRequest) =>
-      pullRequest.tenantId === tenantId && (!allowedRepositories || allowedRepositories.has(pullRequest.repository))
-  );
-  const publicationSubjects = pullRequests.map((pullRequest) => `pr:${pullRequest.repository}#${pullRequest.number}:`);
-  return {
-    tasks: state.board.tasks.filter((task) => taskIds.has(task.id)),
-    dependencies: state.board.dependencies.filter(
-      (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
-    ),
-    outbox: state.board.outbox.filter((message) => taskIds.has(message.taskId)),
-    publications: publications.filter((record) =>
-      publicationSubjects.some((subject) => record.key.startsWith(subject))
-    ),
-    pullRequests
-  };
-}
-
-function mergePipelineBoardView(
-  board: ReturnType<typeof tenantBoardView>,
-  pipeline: readonly { readonly build: ContextGraphBuildRecord; readonly stages: readonly ContextGraphStageRecord[] }[],
-  allowedRepositories?: ReadonlySet<string>
-) {
-  const visible = pipeline.filter(({ build }) => !allowedRepositories || allowedRepositories.has(build.repository));
-  const pipelineTasks = visible.flatMap(({ build, stages }) => [
-    pipelineBuildTask(build),
-    ...stages.map((stage) => pipelineStageTask(build, stage))
-  ]);
-  const dependencies = visible.flatMap(({ build, stages }) =>
-    stages.flatMap((stage) =>
-      contextGraphStagePrerequisites(stage, build.snapshotFirst).map((prerequisite) => {
-        const dependency = stages.find(
-          (candidate) => candidate.phase === prerequisite.phase && candidate.stage === prerequisite.stage
-        );
-        if (!dependency)
-          throw new Error(`missing contextGraph stage prerequisite ${prerequisite.phase}:${prerequisite.stage}`);
-        return {
-          taskId: stage.id,
-          dependsOnTaskId: dependency.id,
-          relationship: "blocks",
-          required: contextGraphStageRequired(stage),
-          blocksParentCompletion: contextGraphStageRequired(stage)
-        };
-      })
-    )
-  );
-  return {
-    ...board,
-    tasks: [...board.tasks.filter((task) => !task.type.startsWith("context_graph_")), ...pipelineTasks],
-    dependencies: [
-      ...board.dependencies.filter(
-        (dependency) =>
-          !board.tasks.some((task) => task.id === dependency.taskId && task.type.startsWith("context_graph_"))
-      ),
-      ...dependencies
-    ],
-    outbox: [
-      ...board.outbox.filter(
-        (message) => !board.tasks.some((task) => task.id === message.taskId && task.type.startsWith("context_graph_"))
-      ),
-      ...visible.flatMap(({ stages }) =>
-        stages
-          .filter((stage) => stage.status !== "triage")
-          .map((stage) => ({
-            id: stage.id,
-            taskId: stage.id,
-            topic: stage.topic,
-            idempotencyKey: `${stage.id}:${stage.attempt}`,
-            status: stage.status === "queued" ? "pending" : stage.status === "in_progress" ? "leased" : "dispatched",
-            payload: { taskId: stage.id, attempt: stage.attempt },
-            createdAt: stage.createdAt,
-            ...(stage.leaseId ? { leaseId: stage.leaseId, leasedAt: stage.updatedAt } : {}),
-            ...(stage.leaseExpiresAt ? { leaseExpiresAt: stage.leaseExpiresAt } : {}),
-            ...(["done", "failed", "canceled", "superseded"].includes(stage.status)
-              ? { dispatchedAt: stage.updatedAt }
-              : {})
-          }))
-      )
-    ]
-  };
-}
-
-function pipelineBuildTask(build: ContextGraphBuildRecord): BoardTask {
-  return {
-    id: entityId<"task">(build.id),
-    type: "context_graph_build",
-    title: `Build context graph for ${build.repository}@${build.ref}`,
-    status: pipelineBuildBoardStatus(build.status),
-    assigneeRole: "system",
-    dedupeKey: `contextGraph:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}:root`,
-    required: true,
-    attempt: 0,
-    metadata: {
-      ...build.metadata,
-      tenantId: build.tenantId,
-      repository: build.repository,
-      ref: build.ref,
-      requestKey: build.requestKey,
-      snapshotFirst: build.snapshotFirst
-    },
-    kind: "aggregate",
-    createdAt: build.createdAt,
-    updatedAt: build.updatedAt
-  };
-}
-
-function pipelineStageTask(build: ContextGraphBuildRecord, stage: ContextGraphStageRecord): BoardTask {
-  const timing = {
-    ...(stage.startedAt ? { startedAt: stage.startedAt } : {}),
-    ...(stage.completedAt ? { completedAt: stage.completedAt } : {}),
-    ...(stage.durationMs !== undefined ? { durationMs: stage.durationMs } : {})
-  };
-  return {
-    id: entityId<"task">(stage.id),
-    parentTaskId: entityId<"task">(build.id),
-    type: `context_graph_${stage.stage}`,
-    title: `${stage.stage === "ingest" ? "Ingest" : stage.stage === "assert" ? "Derive assertions for" : "Project graph for"} ${stage.repository}@${stage.ref} (${stage.phase})`,
-    status: stage.status,
-    assigneeRole: "context_graph_worker",
-    dedupeKey: `contextGraph:${stage.buildId}:${stage.phase}:${stage.stage}`,
-    required: contextGraphStageRequired(stage),
-    attempt: stage.attempt,
-    metadata: {
-      ...stage.metadata,
-      ...(Object.keys(timing).length > 0 ? { timing } : {})
-    },
-    kind: "dispatchable",
-    dispatchTopic: stage.topic,
-    createdAt: stage.createdAt,
-    updatedAt: stage.updatedAt
-  };
-}
-
-function pipelineBuildBoardStatus(status: ContextGraphBuildRecord["status"]): BoardTask["status"] {
-  if (status === "queued") return "queued";
-  if (status === "done" || status === "failed") return status;
-  if (status === "superseded") return "superseded";
-  if (status === "enriching") return "done";
-  return "in_progress";
-}
-
-function isContextGraphWorkerTopic(topic: string): topic is ContextGraphWorkerTopic {
-  return (
-    topic === "run-context-graph-ingest" ||
-    topic === "run-context-graph-assert" ||
-    topic === "run-context-graph-project"
-  );
-}
-
-function contextGraphIngestCompletionMetadata(result: Record<string, unknown>): Record<string, unknown> {
-  const positiveIntegers = (value: unknown, field: string) =>
-    Array.isArray(value) ? value.map((item) => requiredPositiveInteger(item, field)) : [];
-  const strings = (value: unknown, field: string) =>
-    Array.isArray(value) ? value.map((item) => requiredString(item, field)) : [];
-  return {
-    commitSha: requiredGitSha(result.commitSha, "result.commitSha"),
-    codeCheckpoint: requiredString(result.codeCheckpoint, "result.codeCheckpoint"),
-    evidenceFingerprint: requiredString(result.evidenceFingerprint, "result.evidenceFingerprint"),
-    analysisPaths: Array.isArray(result.analysisPaths)
-      ? result.analysisPaths.map((path) => requiredRepositoryPath(path, "result.analysisPath"))
-      : [],
-    sourceObservationIds: strings(result.sourceObservationIds, "result.sourceObservationId"),
-    problemEvidencePullRequestNumbers: positiveIntegers(
-      result.problemEvidencePullRequestNumbers,
-      "result.problemEvidencePullRequestNumber"
-    ),
-    sourcePullRequestNumbers: positiveIntegers(result.sourcePullRequestNumbers, "result.sourcePullRequestNumber"),
-    resolvedPullRequestNumbers: positiveIntegers(result.resolvedPullRequestNumbers, "result.resolvedPullRequestNumber")
-  };
-}
-
-function completionEventType(topic: string): string {
-  switch (topic) {
-    case "run-review":
-      return "review.completed";
-    case "run-research":
-      return "context.collected";
-    case "run-publish":
-      return "publish.completed";
-    case "run-cleanup":
-      return "cleanup.completed";
-    default:
-      return "worker.completed";
-  }
-}
-
-function safeResultPayload(value: unknown): Record<string, unknown> {
-  if (!isRecord(value)) return {};
-  return Object.fromEntries(
-    Object.entries(value)
-      .slice(0, 30)
-      .map(([key, item]): [string, unknown] => {
-        if (item === null || typeof item === "boolean" || typeof item === "number") return [key, item];
-        if (typeof item === "string") return [key, item.slice(0, 5_000)];
-        return [key, (JSON.stringify(item) ?? "").slice(0, 5_000)];
-      })
-  );
-}
-
-function migrateSnapshotTenantAliases(
-  snapshot: ApiSnapshot,
-  tenantId: string | undefined,
-  aliases: readonly string[]
-): { readonly snapshot: ApiSnapshot; readonly changed: boolean } {
-  if (!tenantId) return { snapshot, changed: false };
-  const aliasSet = new Set(aliases.filter((alias) => alias && alias !== tenantId));
-  if (aliasSet.size === 0) return { snapshot, changed: false };
-  let changed = false;
-  const tasks = snapshot.intakeState.board.tasks.map((task) => {
-    if (!aliasSet.has(stringValue(task.metadata.tenantId))) return task;
-    changed = true;
-    return { ...task, metadata: { ...task.metadata, tenantId } };
-  });
-  const pullRequests = snapshot.intakeState.pullRequests.map((pullRequest) => {
-    if (!aliasSet.has(pullRequest.tenantId)) return pullRequest;
-    changed = true;
-    return { ...pullRequest, tenantId };
-  });
-  return changed
-    ? {
-        changed,
-        snapshot: {
-          ...snapshot,
-          intakeState: {
-            board: { ...snapshot.intakeState.board, tasks },
-            pullRequests
-          }
-        }
-      }
-    : { snapshot, changed };
-}
-
-function parseRepositorySnapshot(value: unknown, tenantId: string): RepositorySnapshot {
-  if (!isRecord(value) || !Array.isArray(value.files) || !Array.isArray(value.parents)) {
-    throw invalidRequest("snapshot must include files and parents");
-  }
-  if (value.mode !== undefined && value.mode !== "tree" && value.mode !== "delta") {
-    throw invalidRequest("snapshot.mode must be tree or delta");
-  }
-  const isDelta = value.mode === "delta";
-  if (isDelta) {
-    if (!Array.isArray(value.deltas)) throw invalidRequest("delta snapshot must include deltas");
-    if (value.files.length > 0) throw invalidRequest("delta snapshot must not carry a full tree");
-  }
-  const deltas = isDelta
-    ? (value.deltas as unknown[]).map((delta) => {
-        if (!isRecord(delta)) throw invalidRequest("snapshot delta must be an object");
-        const size =
-          typeof delta.size === "number" && Number.isSafeInteger(delta.size) && delta.size >= 0 ? delta.size : 0;
-        return {
-          path: requiredRepositoryPath(delta.path, "snapshot.delta.path"),
-          blobSha: delta.blobSha === null ? null : requiredGitSha(delta.blobSha, "snapshot.delta.blobSha"),
-          size
-        };
-      })
-    : undefined;
-  return {
-    ...(isDelta && deltas ? { mode: "delta" as const, deltas } : {}),
-    tenantId,
-    repository: requiredString(value.repository, "snapshot.repository"),
-    ref: requiredString(value.ref, "snapshot.ref"),
-    commitSha: requiredGitSha(value.commitSha, "snapshot.commitSha"),
-    treeSha: requiredGitSha(value.treeSha, "snapshot.treeSha"),
-    parents: value.parents.map((parent) => requiredGitSha(parent, "snapshot.parent")),
-    ...(typeof value.authorExternalId === "string" && value.authorExternalId.trim()
-      ? { authorExternalId: value.authorExternalId.trim() }
-      : {}),
-    ...(typeof value.authorGitHubLogin === "string" && value.authorGitHubLogin.trim()
-      ? { authorGitHubLogin: value.authorGitHubLogin.trim() }
-      : {}),
-    ...(typeof value.authorName === "string" && value.authorName.trim() ? { authorName: value.authorName.trim() } : {}),
-    ...(typeof value.committedAt === "string" && value.committedAt.trim()
-      ? { committedAt: value.committedAt.trim() }
-      : {}),
-    ...(typeof value.message === "string" ? { message: value.message } : {}),
-    ...(typeof value.isDefaultRef === "boolean" ? { isDefaultRef: value.isDefaultRef } : {}),
-    ...(typeof value.updateRef === "boolean" ? { updateRef: value.updateRef } : {}),
-    recordedAt: requiredString(value.recordedAt, "snapshot.recordedAt"),
-    taskId: requiredString(value.taskId, "snapshot.taskId"),
-    files: value.files.map((file) => {
-      if (!isRecord(file)) throw invalidRequest("snapshot file must be an object");
-      const path = requiredRepositoryPath(file.path, "snapshot.file.path");
-      const size = typeof file.size === "number" && Number.isSafeInteger(file.size) && file.size >= 0 ? file.size : 0;
-      return { path, blobSha: requiredGitSha(file.blobSha, "snapshot.file.blobSha"), size };
-    })
-  };
-}
-
-function parseRepositorySourceObservation(value: unknown, tenantId: string): RepositorySourceObservation {
-  if (!isRecord(value)) throw invalidRequest("GitHub observation must be an object");
-  const kind = requiredString(value.kind, "observation.kind");
-  if (kind === "codeowners") {
-    if (!Array.isArray(value.entries)) throw invalidRequest("CODEOWNERS observation entries must be an array");
-    return {
-      tenantId,
-      repository: requiredString(value.repository, "observation.repository"),
-      kind,
-      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
-      path: requiredRepositoryPath(value.path, "observation.path"),
-      entries: value.entries.map((entry) => {
-        if (!isRecord(entry) || !Array.isArray(entry.owners)) throw invalidRequest("CODEOWNERS entry is invalid");
-        return {
-          pattern: requiredString(entry.pattern, "entry.pattern"),
-          owners: entry.owners.map((owner) => requiredString(owner, "entry.owner"))
-        };
-      }),
-      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
-    };
-  }
-  if (kind === "package_manifest") {
-    if (!Array.isArray(value.dependencies)) throw invalidRequest("package manifest dependencies must be an array");
-    return {
-      tenantId,
-      repository: requiredString(value.repository, "observation.repository"),
-      kind,
-      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
-      path: requiredRepositoryPath(value.path, "observation.path"),
-      ecosystem: requiredString(value.ecosystem, "observation.ecosystem"),
-      dependencies: value.dependencies.map((dependency) => {
-        if (!isRecord(dependency)) throw invalidRequest("package dependency must be an object");
-        return {
-          name: requiredString(dependency.name, "dependency.name"),
-          ...(typeof dependency.version === "string" ? { version: dependency.version } : {})
-        };
-      }),
-      ...(value.removed === true ? { removed: true } : {}),
-      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
-    };
-  }
-  if (kind === "service_definition") {
-    const dependsOnServices = Array.isArray(value.dependsOnServices)
-      ? value.dependsOnServices.map((dependency) => {
-          if (!isRecord(dependency)) throw invalidRequest("service dependency must be an object");
-          return {
-            source: requiredString(dependency.source, "observation.dependency.source"),
-            externalId: requiredString(dependency.externalId, "observation.dependency.externalId"),
-            name: requiredString(dependency.name, "observation.dependency.name")
-          };
-        })
-      : [];
-    return {
-      tenantId,
-      repository: requiredString(value.repository, "observation.repository"),
-      kind,
-      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
-      path: requiredRepositoryPath(value.path, "observation.path"),
-      source: requiredString(value.source, "observation.source"),
-      externalId: requiredString(value.externalId, "observation.externalId"),
-      name: requiredString(value.name, "observation.name"),
-      ...(dependsOnServices.length > 0 ? { dependsOnServices } : {}),
-      ...(value.removed === true ? { removed: true } : {}),
-      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
-    };
-  }
-  if (kind === "deployment") {
-    const service = isRecord(value.service)
-      ? {
-          source: requiredString(value.service.source, "observation.service.source"),
-          externalId: requiredString(value.service.externalId, "observation.service.externalId"),
-          name: requiredString(value.service.name, "observation.service.name")
-        }
-      : undefined;
-    return {
-      tenantId,
-      repository: requiredString(value.repository, "observation.repository"),
-      kind,
-      source: requiredString(value.source, "observation.source"),
-      externalId: requiredString(value.externalId, "observation.externalId"),
-      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
-      environment: requiredString(value.environment, "observation.environment"),
-      status: requiredString(value.status, "observation.status"),
-      ...(service ? { service } : {}),
-      ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
-      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
-    };
-  }
-  if (kind === "incident") {
-    const impactedService = isRecord(value.impactedService)
-      ? {
-          source: requiredString(value.impactedService.source, "observation.impactedService.source"),
-          externalId: requiredString(value.impactedService.externalId, "observation.impactedService.externalId"),
-          name: requiredString(value.impactedService.name, "observation.impactedService.name")
-        }
-      : undefined;
-    return {
-      tenantId,
-      repository: requiredString(value.repository, "observation.repository"),
-      kind,
-      source: requiredString(value.source, "observation.source"),
-      externalId: requiredString(value.externalId, "observation.externalId"),
-      title: requiredString(value.title, "observation.title"),
-      ...(typeof value.url === "string" ? { url: value.url } : {}),
-      ...(typeof value.issueNumber === "number"
-        ? { issueNumber: requiredPositiveInteger(value.issueNumber, "observation.issueNumber") }
-        : {}),
-      ...(impactedService ? { impactedService } : {}),
-      ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
-      ...(value.removed === true ? { removed: true } : {}),
-      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
-    };
-  }
-  if (kind === "move_candidate") {
-    if (!Array.isArray(value.candidates)) throw invalidRequest("move candidates must be an array");
-    return {
-      tenantId,
-      repository: requiredString(value.repository, "observation.repository"),
-      kind,
-      commitSha: requiredGitSha(value.commitSha, "observation.commitSha"),
-      candidates: value.candidates.map((candidate) => {
-        if (!isRecord(candidate) || !Array.isArray(candidate.matchingSignatureHashes))
-          throw invalidRequest("move candidate is invalid");
-        const similarity = typeof candidate.similarity === "number" ? candidate.similarity : Number.NaN;
-        if (!Number.isFinite(similarity) || similarity < 0 || similarity > 1)
-          throw invalidRequest("move candidate similarity is invalid");
-        return {
-          oldPath: requiredRepositoryPath(candidate.oldPath, "candidate.oldPath"),
-          newPath: requiredRepositoryPath(candidate.newPath, "candidate.newPath"),
-          similarity,
-          matchingSignatureHashes: candidate.matchingSignatureHashes.map((signature) =>
-            requiredString(signature, "candidate.signature")
-          )
-        };
-      }),
-      recordedAt: requiredString(value.recordedAt, "observation.recordedAt")
-    };
-  }
-  if (kind !== "pull_request" && kind !== "issue") {
-    throw invalidRequest("repository source observation kind is unsupported");
-  }
-  const positiveIntegerArray = (input: unknown, name: string): number[] =>
-    Array.isArray(input) ? input.map((item) => requiredPositiveInteger(item, name)) : [];
-  return {
-    tenantId,
-    repository: requiredString(value.repository, "observation.repository"),
-    kind,
-    number: requiredPositiveInteger(value.number, "observation.number"),
-    title: requiredString(value.title, "observation.title"),
-    ...(typeof value.body === "string" ? { body: value.body } : {}),
-    state: requiredString(value.state, "observation.state"),
-    url: requiredString(value.url, "observation.url"),
-    ...(typeof value.authorId === "number"
-      ? { authorId: requiredPositiveInteger(value.authorId, "observation.authorId") }
-      : {}),
-    ...(typeof value.authorLogin === "string" && value.authorLogin.trim()
-      ? { authorLogin: value.authorLogin.trim() }
-      : {}),
-    ...(typeof value.authorName === "string" && value.authorName.trim() ? { authorName: value.authorName.trim() } : {}),
-    ...(typeof value.authorAccountType === "string" && value.authorAccountType.trim()
-      ? { authorAccountType: value.authorAccountType.trim() }
-      : {}),
-    ...(typeof value.occurredAt === "string" ? { occurredAt: value.occurredAt } : {}),
-    ...(typeof value.mergedAt === "string" && value.mergedAt ? { mergedAt: value.mergedAt } : {}),
-    ...(typeof value.mergeCommitSha === "string"
-      ? { mergeCommitSha: requiredGitSha(value.mergeCommitSha, "observation.mergeCommitSha") }
-      : {}),
-    recordedAt: requiredString(value.recordedAt, "observation.recordedAt"),
-    commitShas: Array.isArray(value.commitShas)
-      ? value.commitShas.map((sha) => requiredGitSha(sha, "observation.commitSha"))
-      : [],
-    resolvesIssueNumbers: positiveIntegerArray(value.resolvesIssueNumbers, "observation.resolvesIssueNumber"),
-    referencesIssueNumbers: positiveIntegerArray(value.referencesIssueNumbers, "observation.referencesIssueNumber")
-  };
-}
-
-function parseContextGraphCommand(value: Record<string, unknown>): ContextGraphCommand {
-  const type = requiredString(value.type, "command.type");
-  const reason = typeof value.reason === "string" && value.reason.trim() ? value.reason.trim() : undefined;
-  if (type === "review_assertion") {
-    const decision = requiredString(value.decision, "command.decision");
-    if (decision !== "accept" && decision !== "reject" && decision !== "retract") {
-      throw invalidRequest("unsupported assertion review decision");
-    }
-    const rejectionCode = typeof value.rejectionCode === "string" ? value.rejectionCode : undefined;
-    if (decision === "reject") {
-      if (!reason) throw invalidRequest("assertion rejection reason is required");
-      if (
-        !rejectionCode ||
-        !["incorrect_relationship", "insufficient_evidence", "unsupported_explanation", "other"].includes(rejectionCode)
-      ) {
-        throw invalidRequest("assertion rejection code is required");
-      }
-    } else if (rejectionCode) {
-      throw invalidRequest("assertion rejection code is only valid for rejection decisions");
-    }
-    return {
-      type,
-      assertionId: requiredString(value.assertionId, "command.assertionId"),
-      decision,
-      ...(reason ? { reason } : {}),
-      ...(rejectionCode
-        ? {
-            rejectionCode: rejectionCode as
-              "incorrect_relationship" | "insufficient_evidence" | "unsupported_explanation" | "other"
-          }
-        : {})
-    };
-  }
-  if (type === "relate_assertions") {
-    const relation = requiredString(value.relation, "command.relation");
-    if (relation !== "supports" && relation !== "contradicts") throw invalidRequest("unsupported assertion relation");
-    return {
-      type,
-      relation,
-      sourceAssertionId: requiredString(value.sourceAssertionId, "command.sourceAssertionId"),
-      targetAssertionId: requiredString(value.targetAssertionId, "command.targetAssertionId"),
-      evidenceObservationId: requiredString(value.evidenceObservationId, "command.evidenceObservationId"),
-      ...(reason ? { reason } : {})
-    };
-  }
-  if (type === "merge_entities" || type === "unmerge_entities") {
-    return {
-      type,
-      fromEntityId: requiredString(value.fromEntityId, "command.fromEntityId"),
-      toEntityId: requiredString(value.toEntityId, "command.toEntityId"),
-      ...(reason ? { reason } : {})
-    };
-  }
-  if (type === "redact_observation") {
-    if (!reason) throw invalidRequest("redaction reason is required");
-    return {
-      type,
-      observationId: requiredString(value.observationId, "command.observationId"),
-      reason,
-      ...(Array.isArray(value.commitShas)
-        ? { commitShas: value.commitShas.map((sha) => requiredGitSha(sha, "command.commitSha")) }
-        : {})
-    };
-  }
-  if (type === "erase_person") {
-    if (!reason) throw invalidRequest("erasure reason is required");
-    return { type, entityId: requiredString(value.entityId, "command.entityId"), reason };
-  }
-  if (type === "tombstone_repository") {
-    if (!reason) throw invalidRequest("tombstone reason is required");
-    return { type, repository: requiredString(value.repository, "command.repository"), reason };
-  }
-  if (type === "grant_repository_access") {
-    const role = requiredString(value.role, "command.role");
-    if (role !== "reader" && role !== "writer" && role !== "admin") throw invalidRequest("unsupported repository role");
-    return {
-      type,
-      repository: requiredString(value.repository, "command.repository"),
-      principalId: requiredString(value.principalId, "command.principalId"),
-      role
-    };
-  }
-  if (type === "assign_relationship") {
-    if (!reason) throw new Error("relationship explanation is required");
-    const entity = (input: unknown, name: string) => {
-      if (!isRecord(input)) throw invalidRequest(`${name} must be an object`);
-      const kind = requiredString(input.kind, `${name}.kind`);
-      if (!contextGraphNodeKinds.includes(kind as ContextGraphNodeKind)) {
-        throw invalidRequest(`${name}.kind is unsupported`);
-      }
-      return {
-        kind: kind as ContextGraphNodeKind,
-        key: requiredString(input.key, `${name}.key`),
-        ...(typeof input.displayName === "string" ? { displayName: input.displayName } : {})
-      };
-    };
-    const qualifiers = isRecord(value.qualifiers)
-      ? Object.fromEntries(
-          Object.entries(value.qualifiers).map(([key, item]) => {
-            if (!["string", "number", "boolean"].includes(typeof item)) {
-              throw invalidRequest(`qualifier ${key} has an unsupported value`);
-            }
-            return [key, item as string | number | boolean];
-          })
-        )
-      : undefined;
-    return {
-      type,
-      ...(typeof value.repository === "string" ? { repository: value.repository } : {}),
-      subject: entity(value.subject, "command.subject"),
-      predicate: requiredString(value.predicate, "command.predicate"),
-      object: entity(value.object, "command.object"),
-      ...(qualifiers ? { qualifiers } : {}),
-      reason
-    };
-  }
-  throw invalidRequest("unsupported contextGraph command");
-}
-
-function parseBlobAnalyses(value: unknown): readonly BlobAnalysis[] {
-  if (!Array.isArray(value)) throw invalidRequest("analyses must be an array");
-  return value.map((analysis) => {
-    if (
-      !isRecord(analysis) ||
-      !Array.isArray(analysis.symbols) ||
-      !Array.isArray(analysis.imports) ||
-      !Array.isArray(analysis.edges)
-    ) {
-      throw invalidRequest("blob analysis must include symbols, imports, and edges");
-    }
-    const parserVersion = requiredString(analysis.parserVersion, "analysis.parserVersion");
-    if (parserVersion !== CONTEXT_GRAPH_PARSER_VERSION) throw invalidRequest("unsupported contextGraph parser version");
-    return {
-      blobSha: requiredGitSha(analysis.blobSha, "analysis.blobSha"),
-      parserVersion,
-      ...(typeof analysis.language === "string" && analysis.language.trim()
-        ? { language: analysis.language.trim() }
-        : {}),
-      symbols: analysis.symbols.map((symbol) => {
-        if (!isRecord(symbol)) throw invalidRequest("symbol must be an object");
-        return {
-          moniker: requiredString(symbol.moniker, "symbol.moniker"),
-          name: requiredString(symbol.name, "symbol.name"),
-          kind: requiredString(symbol.kind, "symbol.kind"),
-          signatureHash: requiredString(symbol.signatureHash, "symbol.signatureHash"),
-          startLine: requiredPositiveInteger(symbol.startLine, "symbol.startLine"),
-          endLine: requiredPositiveInteger(symbol.endLine, "symbol.endLine")
-        };
-      }),
-      imports: analysis.imports.map((item) => {
-        if (!isRecord(item)) throw invalidRequest("import must be an object");
-        return {
-          specifier: requiredString(item.specifier, "import.specifier"),
-          line: requiredPositiveInteger(item.line, "import.line")
-        };
-      }),
-      edges: analysis.edges.map((edge) => {
-        if (!isRecord(edge)) throw invalidRequest("symbol edge must be an object");
-        const kind = requiredString(edge.kind, "edge.kind");
-        if (!(["calls", "imports", "references", "extends"] as const).includes(kind as "calls")) {
-          throw invalidRequest("unsupported symbol edge kind");
-        }
-        return {
-          fromMoniker: requiredString(edge.fromMoniker, "edge.fromMoniker"),
-          kind: kind as "calls" | "imports" | "references" | "extends",
-          toMoniker: requiredString(edge.toMoniker, "edge.toMoniker"),
-          startLine: requiredPositiveInteger(edge.startLine, "edge.startLine"),
-          endLine: requiredPositiveInteger(edge.endLine, "edge.endLine")
-        };
-      })
-    };
-  });
-}
-
-function parseContextGraphAssertionBatch(
-  value: unknown,
-  task: { readonly id: string; readonly metadata: Readonly<Record<string, unknown>> },
-  tenantId: string
-): ContextGraphAssertionBatch {
-  if (!isRecord(value)) throw invalidRequest("assertionBatch must be an object");
-  const commitSha = requiredGitSha(value.commitSha, "assertionBatch.commitSha");
-  if (commitSha !== task.metadata.commitSha) throw invalidRequest("assertion batch commit does not match task source");
-  const evidenceFingerprint = requiredString(value.evidenceFingerprint, "assertionBatch.evidenceFingerprint");
-  if (evidenceFingerprint !== task.metadata.evidenceFingerprint)
-    throw invalidRequest("assertion batch evidence does not match task source");
-  const repository = requiredString(task.metadata.repository, "task.repository");
-  const evidenceObservationIds = Array.isArray(value.evidenceObservationIds)
-    ? value.evidenceObservationIds.map((id) => requiredString(id, "assertionBatch.evidenceObservationIds"))
-    : [];
-  const expectedObservationIds = Array.isArray(task.metadata.sourceObservationIds)
-    ? task.metadata.sourceObservationIds.map((id) => requiredString(id, "task.sourceObservationIds"))
-    : [];
-  if (JSON.stringify([...evidenceObservationIds].sort()) !== JSON.stringify([...expectedObservationIds].sort())) {
-    throw invalidRequest("assertion batch source evidence does not match task source");
-  }
-  const rawOutput = parseGeneratedContextGraph(value.rawOutput);
-  const sourcePullRequestNumbers = Array.isArray(task.metadata.sourcePullRequestNumbers)
-    ? task.metadata.sourcePullRequestNumbers.map((number) =>
-        requiredPositiveInteger(number, "task.sourcePullRequestNumber")
-      )
-    : [];
-  const resolvedPullRequestNumbers = Array.isArray(task.metadata.resolvedPullRequestNumbers)
-    ? task.metadata.resolvedPullRequestNumbers.map((number) =>
-        requiredPositiveInteger(number, "task.resolvedPullRequestNumber")
-      )
-    : [];
-  return {
-    tenantId,
-    repository,
-    ref: requiredString(task.metadata.ref, "task.ref"),
-    commitSha,
-    taskId: task.id,
-    generatedAt: requiredString(value.generatedAt, "assertionBatch.generatedAt"),
-    generatorVersion: CONTEXT_GRAPH_GENERATOR_VERSION,
-    registryVersion: CONTEXT_GRAPH_REGISTRY_VERSION,
-    evidenceFingerprint,
-    evidenceObservationIds,
-    model: requiredString(value.model, "assertionBatch.model"),
-    ...(typeof value.sandboxId === "string" && value.sandboxId ? { sandboxId: value.sandboxId } : {}),
-    summary: requiredString(value.summary, "assertionBatch.summary"),
-    ...(value.modelOutputRaw !== undefined ? { modelOutputRaw: value.modelOutputRaw } : {}),
-    rawOutput,
-    assertions: assertionsFromGeneratedContextGraph(rawOutput, repository, {
-      sourcePullRequestNumbers,
-      resolvedPullRequestNumbers
-    })
-  };
-}
-
-function requiredRepositoryPath(value: unknown, field: string): string {
-  const path = requiredString(value, field);
-  if (path.startsWith("/") || path.split("/").includes(".."))
-    throw invalidRequest(`${field} must be repository-relative`);
-  return path;
-}
-
-type ContextGraphRequestSelectors = Pick<
-  RetrievalRequest,
-  | "ref"
-  | "symbol"
-  | "path"
-  | "pullRequestNumber"
-  | "issueEntityId"
-  | "issueNumber"
-  | "issueText"
-  | "featureText"
-  | "rootText"
-  | "rootEntityId"
-  | "commitSha"
->;
-
-function parseContextGraphSelectors(body: Record<string, unknown>): ContextGraphRequestSelectors {
-  return {
-    ...(typeof body.ref === "string" ? { ref: body.ref } : {}),
-    ...(typeof body.symbol === "string" ? { symbol: body.symbol } : {}),
-    ...(typeof body.path === "string" ? { path: requiredRepositoryPath(body.path, "path") } : {}),
-    ...(typeof body.pullRequestNumber === "number"
-      ? { pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber") }
-      : {}),
-    ...(typeof body.issueEntityId === "string"
-      ? { issueEntityId: requiredString(body.issueEntityId, "issueEntityId") }
-      : {}),
-    ...(typeof body.issueNumber === "number"
-      ? { issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber") }
-      : {}),
-    ...(typeof body.issueText === "string" ? { issueText: requiredIssueText(body.issueText, "issueText") } : {}),
-    ...(typeof body.featureText === "string"
-      ? { featureText: requiredFeatureText(body.featureText, "featureText") }
-      : {}),
-    ...(typeof body.rootText === "string" ? { rootText: requiredFeatureText(body.rootText, "rootText") } : {}),
-    ...(typeof body.rootEntityId === "string"
-      ? { rootEntityId: requiredString(body.rootEntityId, "rootEntityId") }
-      : {}),
-    ...(typeof body.commitSha === "string" ? { commitSha: requiredGitShaPrefix(body.commitSha, "commitSha") } : {})
-  };
-}
-
-function requiredIssueText(value: unknown, field: string): string {
-  const text = requiredString(value, field).replace(/\s+/g, " ");
-  if (text.length > 500) throw invalidRequest(`${field} must not exceed 500 characters`);
-  return text;
-}
-
-function requiredFeatureText(value: unknown, field: string): string {
-  const text = requiredString(value, field).replace(/\s+/g, " ");
-  if (text.length > 200) throw invalidRequest(`${field} must not exceed 200 characters`);
-  return text;
-}
-
-function requiredGitShaPrefix(value: unknown, field: string): string {
-  const sha = requiredString(value, field).toLowerCase();
-  if (!/^[a-f0-9]{7,40}$/.test(sha)) throw invalidRequest(`${field} must be a 7-40 character Git SHA`);
-  return sha;
-}
-
-function requiredAssertionStatus(value: string): "proposed" | "active" | "rejected" | "superseded" | "retracted" {
-  if (
-    value === "proposed" ||
-    value === "active" ||
-    value === "rejected" ||
-    value === "superseded" ||
-    value === "retracted"
-  )
-    return value;
-  throw invalidRequest("unsupported assertion status");
-}
-
-function requiredContextOperation(value: string): RepositoryContextOperation {
-  if (value === "lookup" || value === "counterfactual") return value;
-  throw invalidRequest("operation must be lookup or counterfactual");
-}
-
-function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
-  const repository = requiredString(body.repository, "repository");
-  if (body.issueNumber !== undefined) {
-    return {
-      repository,
-      event: {
-        type: "issue.opened",
-        issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber"),
-        title: typeof body.title === "string" ? body.title : "Dev issue"
-      }
-    };
-  }
-  return devPullRequestWebhook(
-    repository,
-    requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber"),
-    requiredString(body.headSha, "headSha")
-  );
-}
-
-function devPullRequestWebhook(repository: string, pullRequestNumber: number, headSha: string): ParsedGitHubWebhook {
-  return { repository, event: { type: "pull_request.opened", pullRequestNumber, headSha } };
-}
-
-async function readRawBody(request: IncomingMessage, maximumBytes = MAX_WEBHOOK_BYTES): Promise<Buffer> {
+async function readRawBody(request: IncomingMessage, maximumBytes = MAX_REQUEST_BYTES): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let bytes = 0;
   for await (const chunk of request) {
     const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
     bytes += buffer.length;
-    if (bytes > maximumBytes) throw new RequestBodyTooLargeError(`request body exceeds ${maximumBytes} bytes`);
+    if (bytes > maximumBytes) throw new ApiError(413, "payload_too_large", "request body is too large");
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);
 }
 
-function parseJsonObject(rawBody: Uint8Array): Record<string, unknown> {
-  const value = parseJsonValue(rawBody);
-  if (!isRecord(value)) throw invalidRequest("request body must be a JSON object");
-  return value;
+function parseJsonObject(value: Uint8Array): Record<string, unknown> {
+  const parsed = parseJsonValue(value);
+  if (!isRecord(parsed)) throw invalidRequest("request body must be a JSON object");
+  return parsed;
 }
 
-function parseJsonValue(rawBody: Uint8Array): unknown {
-  let value: unknown;
+function parseJsonValue(value: Uint8Array): unknown {
   try {
-    value = JSON.parse(Buffer.from(rawBody).toString("utf8"));
+    return JSON.parse(Buffer.from(value).toString("utf8"));
   } catch {
     throw invalidRequest("request body is not valid JSON");
+  }
+}
+
+function firstHeader(value: string | readonly string[] | undefined): string | undefined {
+  return typeof value === "string" ? value : value?.[0];
+}
+
+function requiredString(value: unknown, field: string): string {
+  if (typeof value !== "string" || !value.trim()) throw invalidRequest(`${field} is required`);
+  return value.trim();
+}
+
+function boundedString(value: unknown, field: string, maximum: number): string {
+  const text = requiredString(value, field);
+  if (text.length > maximum) throw invalidRequest(`${field} must not exceed ${maximum} characters`);
+  return text;
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionalIsoTime(value: unknown, field: string): string | undefined {
+  const text = optionalString(value);
+  if (!text) return undefined;
+  const parsed = new Date(text);
+  if (!Number.isFinite(parsed.getTime())) throw invalidRequest(`${field} must be an ISO-8601 timestamp`);
+  return parsed.toISOString();
+}
+
+function optionalStringArray(value: unknown, field: string): string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+    throw invalidRequest(`${field} must be an array of strings`);
+  }
+  return value.map((item) => String(item).trim()).filter(Boolean);
+}
+
+function requiredRepositoryName(value: unknown, field: string): string {
+  const repository = requiredString(value, field).toLowerCase();
+  if (!/^[a-z0-9_.-]+\/[a-z0-9_.-]+$/.test(repository)) {
+    throw invalidRequest(`${field} must be owner/name`);
+  }
+  return repository;
+}
+
+function requiredGitSha(value: unknown, field: string): string {
+  const sha = requiredString(value, field).toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(sha)) throw invalidRequest(`${field} must be a full Git SHA`);
+  return sha;
+}
+
+function requiredPositiveInteger(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+    throw invalidRequest(`${field} must be a positive integer`);
   }
   return value;
 }
@@ -2749,76 +1848,85 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function firstHeader(value: string | readonly string[] | undefined): string | undefined {
-  return typeof value === "string" ? value : value?.[0];
+function isApiSnapshot(value: unknown): value is ApiSnapshot {
+  if (!isRecord(value) || !isRecord(value.intakeState)) return false;
+  const intake = value.intakeState;
+  return (
+    isRecord(intake.board) &&
+    Array.isArray(intake.board.tasks) &&
+    Array.isArray(intake.board.dependencies) &&
+    Array.isArray(intake.board.events) &&
+    Array.isArray(intake.board.outbox) &&
+    Array.isArray(intake.pullRequests) &&
+    Array.isArray(value.publications) &&
+    typeof value.devDeliverySequence === "number"
+  );
 }
 
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.trim().length === 0)
-    throw invalidRequest(`${field} must be a non-empty string`);
-  return value.trim();
-}
-
-function stringValue(value: unknown, fallback = ""): string {
-  return typeof value === "string" ? value : fallback;
-}
-
-function requiredTenantPrincipal(value: unknown): string {
-  const principalId = requiredString(value, "principalId").toLowerCase();
-  if (!/^tenant:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(principalId)) {
-    throw invalidRequest("principalId must be tenant:<uuid>");
-  }
-  return principalId;
-}
-
-function requiredGitSha(value: unknown, field: string): string {
-  const sha = requiredString(value, field);
-  if (!/^[a-f0-9]{40}$/i.test(sha)) throw invalidRequest(`${field} must be a full Git SHA`);
-  return sha;
-}
-
-function requiredRepositoryName(value: unknown, field: string): string {
-  const repository = requiredString(value, field);
-  const segments = repository.split("/");
-  if (
-    segments.length !== 2 ||
-    segments.some((segment) => !segment || segment === "." || segment === ".." || !/^[A-Za-z0-9_.-]+$/.test(segment))
-  ) {
-    throw invalidRequest(`${field} must be owner/name without traversal segments`);
-  }
-  return repository;
-}
-
-function requiredPositiveInteger(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0)
-    throw invalidRequest(`${field} must be a positive integer`);
-  return value;
-}
-
-const JSON_RESPONSE_HEADERS = {
+const JSON_HEADERS = {
   "content-type": "application/json; charset=utf-8",
+  "x-jina-schema-version": "context-api-v1",
   "access-control-allow-origin": "*",
   "access-control-allow-headers":
     "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
   "access-control-allow-methods": "GET, POST, OPTIONS"
 } as const;
 
+function paginateByCreatedAt<T extends { id: string; createdAt: string }>(
+  values: readonly T[],
+  url: URL
+): { items: T[]; nextCursor?: string } {
+  const rawLimit = url.searchParams.get("limit");
+  const limit = rawLimit === null ? 100 : Number(rawLimit);
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+    throw invalidRequest("limit must be an integer between 1 and 200");
+  }
+  const cursor = url.searchParams.get("cursor");
+  let start = 0;
+  if (cursor) {
+    const decoded = decodeCursor(cursor);
+    const located = values.findIndex((value) => value.id === decoded.id && value.createdAt === decoded.createdAt);
+    if (located < 0) throw invalidRequest("cursor is invalid for this result set");
+    start = located + 1;
+  }
+  const items = values.slice(start, start + limit);
+  const last = items.at(-1);
+  return {
+    items,
+    ...(last && start + items.length < values.length
+      ? { nextCursor: Buffer.from(JSON.stringify({ id: last.id, createdAt: last.createdAt })).toString("base64url") }
+      : {})
+  };
+}
+
+function decodeCursor(value: string): { id: string; createdAt: string } {
+  try {
+    const parsed: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+    if (
+      !isRecord(parsed) ||
+      typeof parsed.id !== "string" ||
+      typeof parsed.createdAt !== "string" ||
+      !parsed.id ||
+      !parsed.createdAt
+    ) {
+      throw new Error("invalid cursor");
+    }
+    return { id: parsed.id, createdAt: parsed.createdAt };
+  } catch {
+    throw invalidRequest("cursor is invalid");
+  }
+}
+
 function json(response: ServerResponse, statusCode: number, payload: unknown): void {
   if (response.headersSent || response.destroyed) return;
-  response.writeHead(statusCode, JSON_RESPONSE_HEADERS);
+  response.writeHead(statusCode, JSON_HEADERS);
   response.end(statusCode === 204 ? undefined : JSON.stringify(payload));
 }
 
-/**
- * Success response for polled read routes. Dashboard clients revalidate every
- * few seconds, so a matching ETag turns an unchanged multi-megabyte payload
- * (board snapshot, full context graph) into an empty 304.
- */
 function jsonCacheable(request: IncomingMessage, response: ServerResponse, payload: unknown): void {
-  if (response.headersSent || response.destroyed) return;
   const body = JSON.stringify(payload);
   const etag = `"${createHash("sha1").update(body).digest("base64url")}"`;
-  const headers = { ...JSON_RESPONSE_HEADERS, etag, "cache-control": "no-cache" };
+  const headers = { ...JSON_HEADERS, etag, "cache-control": "no-cache" };
   if (request.headers["if-none-match"] === etag) {
     response.writeHead(304, headers);
     response.end();
@@ -2840,15 +1948,12 @@ class ApiError extends Error {
   }
 }
 
-class RequestBodyTooLargeError extends ApiError {
-  constructor(message: string) {
-    super(413, "payload_too_large", message);
-    this.name = "RequestBodyTooLargeError";
-  }
-}
-
 function invalidRequest(message: string): ApiError {
   return new ApiError(400, "invalid_request", message);
+}
+
+function notFound(message: string): ApiError {
+  return new ApiError(404, "not_found", message);
 }
 
 function staleLease(): ApiError {
@@ -2857,32 +1962,21 @@ function staleLease(): ApiError {
 
 function httpError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
-  if (error instanceof DomainError) {
-    const statusCode =
-      error.code === "invalid_argument"
-        ? 400
-        : error.code === "not_found"
-          ? 404
-          : error.code === "forbidden"
-            ? 403
-            : 409;
-    return new ApiError(statusCode, error.code, error.message);
-  }
   return new ApiError(500, "internal_error", "internal server error", false);
 }
 
 class DeliveryCache {
-  private readonly ids = new Set<string>();
+  readonly #ids = new Set<string>();
   constructor(private readonly capacity: number) {}
-  has(deliveryId: string): boolean {
-    return this.ids.has(deliveryId);
+  has(id: string): boolean {
+    return this.#ids.has(id);
   }
-  add(deliveryId: string): void {
-    if (this.ids.has(deliveryId)) return;
-    if (this.ids.size >= Math.max(1, this.capacity)) {
-      const oldest = this.ids.values().next().value;
-      if (oldest !== undefined) this.ids.delete(oldest);
+  add(id: string): void {
+    if (this.#ids.has(id)) return;
+    if (this.#ids.size >= this.capacity) {
+      const oldest = this.#ids.values().next().value;
+      if (oldest) this.#ids.delete(oldest);
     }
-    this.ids.add(deliveryId);
+    this.#ids.add(id);
   }
 }

@@ -1,43 +1,98 @@
 # Data models
 
-This document summarizes deployed storage. Executable definitions remain authoritative: `CONTEXT_GRAPH_SCHEMA_SQL` in `packages/db/src/context-graph-schema.ts` and the board types in `packages/board`.
+This document summarizes deployed storage. Executable definitions are authoritative:
+`CONTEXT_SCHEMA_SQL` and `CONTEXT_PGVECTOR_SCHEMA_SQL` in
+`packages/db/src/context/schema.ts`, roles in `packages/db/src/context/roles.ts`, and
+generic board types in `packages/board`.
 
-## Implemented runtime state
+## Runtime state
 
-The generic board currently uses two tables:
-
-- `jina_runtime.api_state` stores the versioned JSON board snapshot, tracked pull requests, publications, and delivery sequence.
+- `jina_runtime.api_state` stores the versioned board snapshot, tracked pull requests,
+  publications, and delivery sequence.
 - `jina_runtime.github_deliveries` uniquely records processed GitHub delivery IDs.
 
-The snapshot contains tasks, dependency edges, task events, and durable outbox messages. Task IDs and dedupe keys make planning idempotent. Outbox messages carry renewable lease IDs and expirations; completion requires the current lease. Every mutation is tenant-scoped and runs under a cross-instance transaction lock.
+The snapshot contains tasks, dependencies, task events, and durable deliveries. Every
+mutation is tenant-scoped and protected by a cross-instance transaction lock. Completion
+requires the current renewable lease.
 
-## Implemented context graph schema
+## Context schema
 
-The context graph is normalized under `jina_context_graph`:
+The context engine is normalized under `jina_context`.
 
-| Area               | Tables                                                                                         |
-| ------------------ | ---------------------------------------------------------------------------------------------- |
-| Source intake      | `observations`                                                                                 |
-| Repository history | `commits`, `trees`, `refs`, `commit_changes`                                                   |
-| Parsed code        | `blobs`, `blob_analyses`, `blob_symbols`, `blob_imports`, `symbol_edges`                       |
-| Knowledge          | `entities`, `identities`, `entity_redirects`, `assertions`, `assertion_relations`, `audit_log` |
-| Projection control | `outbox`, `erasure_filters`, `repository_acl`, `retrieval_metrics`                             |
-| Read models        | `ref_manifest`, `search_documents`, `graphs`, `graph_heads`, `nodes`, `edges`                  |
+| Plane                  | Tables                                                                                                                                                                                                                      |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workflow               | `repositories`, `pipeline_builds`, `pipeline_stages`                                                                                                                                                                        |
+| Evidence               | `observations`, `evidence_records`, `evidence_checkpoints`, `evidence_checkpoint_records`, `evidence_checkpoint_manifest`, `refs`, `commits`, `commit_parents`, `trees`, `tree_entries`, `blobs`, `commit_changes`          |
+| Deterministic analysis | `blob_analyses`, `symbols`, `imports`, `structural_facts`, `evidence_checkpoint_structural_facts`, `entities`, `identities`                                                                                                 |
+| Knowledge              | `derivation_runs`, `knowledge_documents`, `knowledge_document_revisions`, `knowledge_revision_evidence`, `knowledge_revision_events`                                                                                        |
+| Governance             | `repository_acl_observations`, `erasure_filters`, `audit_events`, `outbox`                                                                                                                                                  |
+| Generation control     | `index_generations`, `generation_projectors`, `projection_checkpoints`                                                                                                                                                      |
+| Projections            | `ref_manifest`, `current_knowledge_revisions`, `context_documents`, `context_fragments`, `exact_index`, `context_embeddings`, `hierarchy_nodes`, `structural_relations`, `identity_projection`, `repository_acl_projection` |
+| Query telemetry        | `query_runs`, `retrieval_candidates`, `answer_citations`, `retrieval_metrics`                                                                                                                                               |
 
-`commits` records each immutable commit; `trees` stores the exact path/blob tree content-addressed by tree SHA; `commit_changes` records first-parent churn. `ref_manifest` is the disposable current-ref projection. Blob analysis is keyed by tenant, content hash, and parser version.
+### Evidence records and checkpoints
 
-Entities have stable natural keys. Identities and redirects reconcile provider identifiers without rewriting assertion history. Assertions retain status, confidence, typed qualifiers, checked evidence, an immutable explanation, generator/registry versions, validity, supersession, confirmation time, and audit provenance. Model facts begin as proposals; reviewed facts are projected only while their cited source paths still match canonical content.
+Evidence records share an `EvidenceAnchor`: tenant, repository, source type and ID,
+content digest, and optional commit, path/range, JSON pointer, and observation time.
+Checkpoints bind one complete evidence selection to an exact repository/ref/commit and
+fingerprint. Git objects and content-addressed blobs remain reusable across checkpoints;
+the checkpoint membership tables preserve what was valid for that build.
 
-Canonical outbox deliveries are consumer-owned so manifest, search, reconciliation, and graph consumers acknowledge their own work independently. Graphs are immutable and content-addressed; `graph_heads` selects the current generation per ref. Counterfactual retrieval changes no persisted state.
+### Knowledge revisions
 
-## Implemented invariants
+`knowledge_documents` provides a stable logical identity such as a repository
+architecture, component, decision, change, incident, ownership record, or runbook.
+`knowledge_document_revisions` stores immutable generated or human-authored bodies and
+metadata. `knowledge_revision_evidence` is the ordered set of original source anchors.
+State changes are append-only `knowledge_revision_events`; there is no mutable current
+flag on the revision. The current selection is a disposable generation projection.
 
-- Every context graph row is tenant-scoped, including relationship and provenance foreign keys.
-- Repository reads and mutations pass repository ACL checks.
-- Deliveries, observations, blobs, assertions, outbox events, and graphs use idempotent keys.
-- Live assertion uniqueness and cardinality-one relationships are serialized by partial indexes and locks.
-- Canonical facts remain separate from rebuildable manifest, search, and graph projections.
-- Schema migration is administrative; runtime capability roles do not own or alter the schema.
-- Source-like content is retained only according to lifecycle/erasure policy.
+### Indexable context
 
-See [CONTEXT_GRAPH.md](CONTEXT_GRAPH.md) for ingestion and retrieval behavior and [DEPLOYMENT.md](DEPLOYMENT.md) for migration commands and capability roles.
+`context_documents` is a retrieval envelope over source code, provider evidence, or
+derived knowledge. It is not authoritative. `context_fragments` preserves exact source
+and character ranges. Context added to improve retrieval is separate from source text so
+it cannot be cited as source material.
+
+Exact tokens and two generated `tsvector` forms preserve path/identifier and prose
+semantics. Structural relations come only from deterministic parser/provider facts.
+Hierarchy leaves map back to allowed source spans. Embeddings are optional and record
+model, dimensions, input fingerprint, and projector version.
+
+### Generations
+
+An `index_generation` is an atomic view for one tenant, repository, ref, and commit.
+Required projectors must be coherent before publication; optional projectors declare
+`ready`, `disabled`, `skipped`, or `failed`. A raw-evidence baseline generation can be
+published without model output, and successful derivation can publish an enriched
+successor.
+
+Consumers use independent outbox deliveries and checkpoints. A slow optional consumer
+cannot acknowledge required projection work. Rebuilds write a new generation and never
+expose partial rows through query selection.
+
+## Database invariants
+
+- Repository-owned identities and foreign keys include tenant and repository scope.
+- Immutable evidence, revision, and citation tables deny runtime `UPDATE` and `DELETE`.
+- Full Git SHAs and source-specific evidence anchors are validated.
+- Line ranges require a path and valid positive bounds.
+- Knowledge citations terminate at evidence, never another generated revision.
+- ACL projection is generation-scoped and applied before candidate creation.
+- Erasure filters are durable and checked during ingestion and rebuild.
+- Exact, lexical, hierarchy, embedding, and relation projections are disposable.
+- Query telemetry stores bounded metadata and citation checks, not unrestricted source
+  text.
+
+## Capability roles
+
+The schema defines focused NOLOGIN roles:
+
+`jina_context_coordinator`, `jina_context_ingest`, `jina_context_derive`,
+`jina_context_manifest`, `jina_context_knowledge_current`, `jina_context_lexical`,
+`jina_context_dense`, `jina_context_hierarchy`, `jina_context_structural`,
+`jina_context_identity`, `jina_context_acl`, `jina_context_retention`,
+`jina_context_query`, and `jina_context_admin`.
+
+Application logins must not own the schema. The migration principal owns schema changes;
+runtime roles receive only the reads and writes needed for their plane or projection.

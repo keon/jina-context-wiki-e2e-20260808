@@ -10,7 +10,6 @@
     "dev": "next dev -p 3000"
   },
   "dependencies": {
-    "@cosmos.gl/graph": "^3.3.0",
     "next": "^15.5.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"

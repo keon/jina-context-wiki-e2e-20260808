@@ -52,7 +52,7 @@ export type GitHubReviewTriggerEvent = Extract<
 >;
 
 export type GitHubIssueTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "issue.opened" }>;
-export type GitHubContextGraphTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "push" }>;
+export type GitHubContextTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "push" }>;
 
 export interface ParsedGitHubWebhook {
   readonly event: GitHubWebhookEvent;
@@ -78,7 +78,7 @@ export function isIssueTrigger(event: GitHubWebhookEvent): event is GitHubIssueT
   return event.type === "issue.opened";
 }
 
-export function isContextGraphTrigger(event: GitHubWebhookEvent): event is GitHubContextGraphTriggerEvent {
+export function isContextTrigger(event: GitHubWebhookEvent): event is GitHubContextTriggerEvent {
   return event.type === "push" && !event.deleted && event.ref.startsWith("refs/heads/");
 }
 

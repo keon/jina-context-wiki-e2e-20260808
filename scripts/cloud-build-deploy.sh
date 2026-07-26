@@ -33,7 +33,7 @@ if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ]]; then
 fi
 
 api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false"
-api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,GRAPH_API_TOKEN=jina-graph-api-token:latest"
+api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest"
 
 case "${tenancy_mode}" in
   fixed)
@@ -115,6 +115,25 @@ for attempt in range(1, 21):
 PY
 }
 
+gcloud run jobs deploy jina-context-migrate \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --image="${api_image}" \
+  --service-account="${runtime_service_account}" \
+  --set-cloudsql-instances="${cloud_sql_instance}" \
+  --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}" \
+  --set-secrets="DB_PASS=${db_pass_secret}" \
+  --args=node_modules/@jina/db/dist/migrate.js \
+  --tasks=1 \
+  --max-retries=0 \
+  --task-timeout=15m \
+  --quiet
+
+gcloud run jobs execute jina-context-migrate \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --wait
+
 gcloud run deploy jina-api \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -136,7 +155,7 @@ api_url="$(gcloud run services describe jina-api \
   --format='value(status.url)')"
 retry_health "${api_url}/health"
 
-gcloud run deploy jina-context-graph-worker \
+gcloud run deploy jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
@@ -147,22 +166,22 @@ gcloud run deploy jina-context-graph-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-context-graph-ingest|run-context-graph-assert|run-context-graph-project~CONTEXT_GRAPH_HISTORY_LIMIT=10000~CONTEXT_GRAPH_INGEST_TRANSPORT=git~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_GRAPH_CODEX_PROVIDER=openrouter~CONTEXT_GRAPH_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_GRAPH_CODEX_CONTEXT_TOKENS=16000~CONTEXT_GRAPH_CODEX_COMPACT_TOKENS=12000" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=25165824~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   --quiet
 
-context_graph_worker_url="$(gcloud run services describe jina-context-graph-worker \
+context_worker_url="$(gcloud run services describe jina-context-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --format='value(status.url)')"
 verify_worker_health \
-  "${context_graph_worker_url}" \
-  "run-context-graph-ingest|run-context-graph-assert|run-context-graph-project"
+  "${context_worker_url}" \
+  "run-ingest-evidence|run-derive-knowledge|run-index-context"
 
-if gcloud run services describe jina-ontology-worker \
+if gcloud run services describe jina-context-graph-worker \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" >/dev/null 2>&1; then
-  gcloud run services delete jina-ontology-worker \
+  gcloud run services delete jina-context-graph-worker \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --quiet
@@ -196,8 +215,8 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${runtime_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_TIMEOUT_MS=3000000~ACCEPTANCE_ISSUE_NUMBER=4~ACCEPTANCE_RESOLUTION_PR_NUMBER=5~ACCEPTANCE_CAUSING_PR_NUMBER=3~ACCEPTANCE_CAUSING_COMMIT_SHA=334234b30d3fe8c85fbf9f4c276d0ce6f26c35e2~ACCEPTANCE_CAUSAL_REASON_INCLUDES=admin~ACCEPTANCE_V51_FIXTURE=true" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_TIMEOUT_MS=3000000" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \
   --max-retries=0 \
@@ -239,7 +258,7 @@ fi
 cat <<SUMMARY
 Cloud Build deployment complete
 API: ${api_url}
-ContextGraph worker: ${context_graph_worker_url}
+Context worker: ${context_worker_url}
 Task worker: ${task_worker_url}
 Image tag: ${image_tag}
 Cloud SQL: ${cloud_sql_instance}

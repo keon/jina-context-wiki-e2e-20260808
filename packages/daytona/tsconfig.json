@@ -8,5 +8,5 @@
     "types": ["node"]
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../context-graph" }]
+  "references": [{ "path": "../context-engine" }]
 }

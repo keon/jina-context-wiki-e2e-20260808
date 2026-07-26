@@ -13,7 +13,8 @@
     "test": "turbo run test",
     "dev": "turbo run dev --filter=@jina/api --filter=@jina/dashboard",
     "simulate:pr-review": "pnpm --filter @jina/workflows simulate:pr-review",
-    "review:pr": "pnpm --filter @jina/workflows review:pr"
+    "review:pr": "pnpm --filter @jina/workflows review:pr",
+    "evaluate:context": "pnpm --filter @jina/context-engine build && node scripts/context-evaluation.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

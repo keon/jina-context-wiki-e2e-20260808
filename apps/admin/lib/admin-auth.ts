@@ -1,11 +1,11 @@
 // Inbound authentication policy for the admin console.
 //
-// The app renders tenant-wide graph data by calling the API as the
+// The app renders tenant-wide repository context by calling the API as the
 // tenant-admin service principal, so the app itself is the security boundary:
 // it must never serve a request that did not arrive through the trusted
 // identity-aware proxy. This mirrors the dashboard, which enforces a valid
 // Google IAP identity whenever the internal API token is configured. Because
-// this console is strictly more privileged (every repository's graphs, not an
+// this console is strictly more privileged (every repository's context, not an
 // ACL-scoped subset), it additionally supports an explicit admin allowlist.
 //
 // These helpers are pure so the decision is unit-testable and identical
@@ -78,7 +78,7 @@ export function isValidBasicAuthorization(
   }
 }
 
-/** Decides whether an inbound request may view tenant-wide graphs. */
+/** Decides whether an inbound request may view tenant-wide repository context. */
 export function evaluateAdminAccess(input: AdminAccessInput): AdminAccessDecision {
   // Local and CI runs deploy without the internal token and are not internet
   // reachable; enforcing IAP there would break `pnpm dev`. This matches the

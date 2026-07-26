@@ -3,9 +3,9 @@ import Link from "next/link";
 export default function NotFound() {
   return (
     <div className="empty-state">
-      <p>That graph does not exist (or was superseded).</p>
+      <p>That context document does not exist (or is no longer eligible).</p>
       <p>
-        <Link href="/">Back to all graphs</Link>
+        <Link href="/">Back to context administration</Link>
       </p>
     </div>
   );

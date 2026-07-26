@@ -1,20 +1,25 @@
 # Jina
 
-Jina is a tenant-scoped task board for software-work agents. The current runtime handles GitHub pull-request review and repository context graph generation.
-
-Signed GitHub events create board tasks and dependencies. The API persists the board and leases ready work to Cloud Run workers. The review worker reads PR diffs and calls the OpenAI Responses API. The context graph worker incrementally records repository facts, runs cited semantic analysis in Daytona, and builds queryable graph projections. Publication is currently an internal idempotent record; Jina does not yet post findings to GitHub.
+Jina is a tenant-scoped task board and repository context engine for software-work agents.
+Signed GitHub events create durable board workflows. Cloud Run workers perform pull-request
+review and build repository context at an exact commit. PostgreSQL stores board state,
+canonical evidence, immutable knowledge-document revisions, disposable indexes, ACLs, and
+query telemetry.
 
 ## Quick start
 
 ```sh
 pnpm install
-pnpm lint
-pnpm typecheck
-pnpm test
+pnpm check
+pnpm evaluate:context
 pnpm dev
 ```
 
-`pnpm dev` starts the API on port 4000 and dashboard on port 3000. `pnpm --filter @jina/admin dev` starts the Next.js admin app on port 3100, which lists every generated context graph across all repositories (see `apps/admin/README.md`). It uses memory stores, enables the unsigned demo endpoint, seeds a PR and a small cited graph, and simulates non-context-graph task completion. Production requires PostgreSQL, `INTERNAL_API_TOKEN`, and `JINA_TENANT_ID`.
+`pnpm dev` starts the API on port 4000 and dashboard on port 3000.
+`pnpm --filter @jina/admin dev` starts the tenant-wide administration app on port 3100.
+Development uses in-memory stores unless PostgreSQL configuration is supplied. Production
+requires PostgreSQL, `INTERNAL_API_TOKEN`, `CONTEXT_API_TOKEN`, and either fixed or
+shared-database tenancy configuration.
 
 To exercise the separate local PR-review harness:
 
@@ -25,7 +30,8 @@ pnpm review:pr owner/repo 123 --harness codex-cli
 pnpm review:pr owner/repo 123 --post
 ```
 
-The harness needs `gh` and `OPENROUTER_API_KEY`. Its local trace and usage model are separate from the deployed worker.
+The harness needs `gh` and `OPENROUTER_API_KEY`. Its local trace and usage model are
+separate from the deployed worker.
 
 ## Runtime
 
@@ -38,59 +44,76 @@ GitHub event
   -> reducer advances dependents
 ```
 
-The board is the orchestrator. PostgreSQL owns board state, delivery deduplication, leases, and context graph data. Every board mutation loads and writes the JSON snapshot while holding a cross-instance transaction lock, preventing horizontally scaled API instances from overwriting newer state.
+The board is the orchestrator. A cross-instance PostgreSQL transaction lock protects each
+snapshot mutation, and lease/write fences prevent a stale worker from committing.
+Opened PRs create review and publication tasks. Opened issues create manual triage tasks.
+Signed branch pushes create an exact-commit context build, deduplicate unchanged heads, and
+supersede stale ref work.
 
-Opened PRs create review and publication tasks. Opened issues create manual triage tasks. Signed branch pushes create the same four-task ContextGraph workflow as `POST /context-graph/build`; unchanged heads dedupe and moved refs supersede stale work.
+External review publication, automated fixes, repository dependency installation, and
+repository test execution are not shipped.
 
-The current review pipeline is:
+## Repository context
 
-```text
-signed intake -> review pass -> internal publication -> aggregate completion
-```
+The context engine has three board-visible stages:
 
-External publication, automated fixes, test execution, releases, and arbitrary external research are not shipped.
+1. `ingest-evidence` pins a full commit SHA and stores immutable provider observations,
+   Git objects, an exact tree, content-addressed blobs, deterministic parser output,
+   structural facts, and ACL observations.
+2. `derive-knowledge` turns a bounded evidence bundle into immutable, versioned
+   knowledge-document revisions. Host validation checks stable subject identity and every
+   citation against original evidence before persistence.
+3. `index-context` publishes a coherent generation of indexable context documents,
+   fragments, exact and lexical indexes, deterministic structure, current knowledge, and
+   a deterministic long-document hierarchy.
 
-## Repository knowledge
+The baseline index does not depend on a model. Derived knowledge can enrich a later
+generation, while exact and structural context remains available if derivation fails.
+Dense retrieval is implemented behind a port but disabled until an approved embedding
+backend demonstrates an evaluation win. PageIndex is an optional hierarchy adapter; the
+Jina-owned heading-tree fallback is active until PageIndex beats it on long-document
+quality, latency, cost, ACL, and citation gates.
 
-The context graph workflow runs as three board-visible stages:
+`POST /context/query` routes requests across exact, structured, structural, lexical,
+knowledge, temporal, hierarchy, and bounded long-context retrieval. Results identify the
+selected ref, commit, and generation and return original-evidence citations, conflicts,
+ambiguities, coverage, and a trace ID.
 
-1. `context_graph_ingest` stores immutable source observations, exact commit trees, first-parent changes, and parsed content-addressed blobs.
-2. `context_graph_assert` checks out the pinned commit in Daytona and records cited, explained, typed proposals.
-3. `context_graph_project` consumes canonical events and rebuilds the current manifest, search documents, and immutable graph.
+Stateless Streamable HTTP MCP is served at `POST /mcp`. The `jina-context` server exposes
+exactly one read-only tool, `query_context`, with the same storage-neutral query contract.
+Both HTTP and MCP retrieval enforce repository access before candidate generation and
+require a bound principal.
 
-Reviewed assertions retain their evidence, explanation, review state, and provenance when later runs confirm them. Counterfactual queries remove selected paths from the reviewed graph in memory; they do not create facts or tasks.
-
-Local context graph execution requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and `OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
-
-Repository knowledge is also exposed over stateless Streamable HTTP MCP at `POST /mcp`. Its single read-only tool, `query_graph`, accepts a repository, natural-language query, and optional ref. Production requires the internal service credential plus a bound application principal, and every request is repository-ACL scoped. The simulation integration uses a separate `GRAPH_API_TOKEN` for graph reads and exact ACL synchronization without granting board or worker access.
+Local knowledge derivation requires `DAYTONA_API_KEY`, `GITHUB_CLONE_TOKEN`, and
+`OPENAI_API_KEY` or `OPENROUTER_API_KEY`.
 
 ## Repository layout
 
 ```text
-apps/api/          webhooks, board API, graph API, MCP, commands, leases
-apps/admin/        tenant-wide context graph administration UI
-apps/dashboard/    operator UI and authenticated read proxy
-apps/worker/       review and context graph workers
-apps/workflows/    local review CLI and deterministic simulation
-packages/board/    tasks, dependencies, commands, reducer
-packages/context-graph/ repository facts, assertions, retrieval, projections
-packages/db/       PostgreSQL stores and migrations
-packages/github/   webhook verification and parsing
-packages/daytona/  context graph sandbox executor
-packages/ai/       review harnesses and model clients
-packages/observability/ structured logging, traces, and in-process metrics
+apps/api/             webhooks, board API, context API, MCP, leases
+apps/admin/           tenant-wide context health UI
+apps/dashboard/       operator board and context workspace
+apps/worker/          review and context-stage workers
+apps/workflows/       local review CLI and deterministic simulation
+packages/board/       generic tasks, dependencies, commands, reducer
+packages/context-engine/ evidence, knowledge, indexes, routed retrieval
+packages/db/          PostgreSQL stores, context adapters, migrations
+packages/github/      webhook verification and parsing
+packages/daytona/     isolated knowledge-document executor
+packages/ai/          review harnesses and model clients
+packages/observability/ structured logging, traces, live metrics
 ```
-
-Smaller packages contain review planning, context policy, publication, billing policy, and shared primitives.
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [ContextGraph](docs/CONTEXT_GRAPH.md)
+- [Context engine decision](docs/CONTEXT_ENGINE_DECISION.md)
+- [Context engine implementation record](docs/CONTEXT_ENGINE_IMPLEMENTATION_PLAN.md)
+- [Context evaluation report and runbook](docs/CONTEXT_ENGINE_EVALUATION.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)
 - [Shared original Jina database](docs/SHARED_TENANCY.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
-- [Billing](docs/BILLING.md)
 - [Observability](docs/OBSERVABILITY.md)
+- [Archived prior design](docs/CONTEXT_GRAPH.md)
