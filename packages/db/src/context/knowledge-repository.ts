@@ -102,6 +102,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
 
   async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
     await this.database.transactionAs("jina_context_derive", { tenantIds: [input.run.tenantId] }, async (client) => {
+      const canonicalRevisionCreatedAt = new Map<string, string>();
       await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, input.run.checkpointId);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
@@ -164,8 +165,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
             revision.createdAt
           ]
         );
-        const storedRevision = await client.query(
-          `select 1 from jina_context.knowledge_document_revisions
+        const storedRevision = await client.query<{ created_at: Date }>(
+          `select created_at from jina_context.knowledge_document_revisions
            where tenant_id=$1 and repository=$2 and id=$3 and logical_id=$4
              and evidence_fingerprint=$5 and body_digest=$6
              and generator_name=$7 and generator_version=$8`,
@@ -183,6 +184,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
         if (storedRevision.rowCount !== 1) {
           throw new Error(`Knowledge revision identity collision for ${revision.id}`);
         }
+        canonicalRevisionCreatedAt.set(revision.id, dateString(storedRevision.rows[0]!.created_at));
       }
       for (const citation of input.citations) {
         const revision = input.revisions.find((candidate) => candidate.id === citation.revisionId);
@@ -236,6 +238,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
         }
       }
       for (const revision of input.revisions) {
+        const occurredAt = canonicalRevisionCreatedAt.get(revision.id);
+        if (!occurredAt) throw new Error(`Knowledge revision ${revision.id} has no canonical creation time`);
         await enqueueContextEvent(client, {
           id: contextStableId("event", { revision: revision.id, type: "created" }),
           sequence: 1,
@@ -246,7 +250,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
           eventType: "knowledge.revision.created",
           payload: { revisionId: revision.id, logicalId: revision.logicalId },
           consumers: ["knowledge-current", "lexical", "dense", "hierarchy", "retention"],
-          occurredAt: revision.createdAt
+          occurredAt
         });
       }
       await appendProjectionInputEvent(client, {
