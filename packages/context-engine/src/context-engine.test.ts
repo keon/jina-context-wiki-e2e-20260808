@@ -302,6 +302,10 @@ test("omitted blobs remain unavailable without aliasing empty content and can la
   assert.equal(omittedManifest.length, 2);
   assert.ok(omittedManifest.every((entry) => !entry.contentAvailable));
   assert.equal(new Set(omittedManifest.map((entry) => entry.contentDigest)).size, 2);
+  const partialGeneration = await new IndexContextService(store).index(partial.id, "2026-07-26T12:00:30.000Z");
+  const partialProjection = await store.getGeneration(partialGeneration.id);
+  assert.equal(partialProjection?.manifest.length, 2);
+  assert.equal(partialProjection?.documents.length, 0);
 
   const completed = await service.ingest({
     tenantId,
