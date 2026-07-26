@@ -14,7 +14,7 @@ export const contextTaskTypeDefinitions = [
     type: contextTaskTypes.build,
     kind: "aggregate",
     defaultAssigneeRole: "system",
-    description: "Coordinates evidence ingestion, optional knowledge derivation, and required context indexing."
+    description: "Coordinates required evidence ingestion, knowledge derivation, and context indexing."
   },
   {
     type: contextTaskTypes.ingestEvidence,
@@ -72,8 +72,8 @@ export const contextTaskTypeDependencies = [
     workflow: contextTaskTypes.build,
     taskType: contextTaskTypes.build,
     dependsOnTaskType: contextTaskTypes.deriveKnowledge,
-    relationship: "degrades",
-    required: false
+    relationship: "blocks",
+    required: true
   }
 ] as const;
 

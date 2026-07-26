@@ -131,7 +131,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   const checkpointId = string(ingested.body.checkpointId);
   await complete(ingest, record(ingested.body));
 
-  // A combined worker must claim the required baseline before optional model work.
+  // A combined worker publishes the baseline before the required model work.
   const baseline = await claim(coordinator, "run-index-context");
   const indexed = await api("/internal/context/index", {
     method: "POST",

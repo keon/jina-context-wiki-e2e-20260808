@@ -167,6 +167,7 @@ test(
     assert.match(build.id, /^cb_/);
     assert.equal(build.refSequence, 1);
     assert.ok(build.stages.every((stage) => stage.id.startsWith("cs_")));
+    assert.ok(build.stages.every((stage) => stage.required));
 
     let ingestClaim = await coordinator.claim({
       tenantId,
@@ -436,7 +437,7 @@ test(
         fence: deriveClaim.fence,
         outcome: "failed",
         now: at(6_000),
-        error: "optional fixture derivation disabled"
+        error: "required fixture derivation failed"
       }),
       true
     );
@@ -1288,7 +1289,8 @@ test(
     );
 
     const buildAfter = await coordinator.get(build.id);
-    assert.equal(buildAfter?.status, "degraded");
+    assert.equal(buildAfter?.status, "failed");
+    assert.equal(buildAfter?.stages.find((stage) => stage.topic === "run-derive-knowledge")?.required, true);
     assert.equal(buildAfter?.stages.find((stage) => stage.topic === "run-index-context")?.status, "succeeded");
     const forbidden = await database.pool.query<{ table_name: string }>(
       `select table_name from information_schema.tables

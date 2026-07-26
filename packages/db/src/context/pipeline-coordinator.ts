@@ -110,7 +110,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
         {
           type: contextTaskTypes.deriveKnowledge,
           topic: contextQueueTopics.deriveKnowledge,
-          required: false,
+          required: true,
           status: "blocked"
         },
         {

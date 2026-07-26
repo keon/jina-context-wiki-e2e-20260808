@@ -158,7 +158,7 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
       status: "active",
       stages: [
         stage(contextTaskTypes.ingestEvidence, true, "queued"),
-        stage(contextTaskTypes.deriveKnowledge, false, "blocked"),
+        stage(contextTaskTypes.deriveKnowledge, true, "blocked"),
         stage(contextTaskTypes.indexContext, true, "blocked")
       ],
       createdAt
@@ -188,8 +188,8 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
       left.createdAt.localeCompare(right.createdAt)
     )) {
       if (!allowedTenants.has(build.tenantId) || build.status !== "active") continue;
-      // Publish the required evidence-only baseline before spending time on
-      // optional model derivation when one worker consumes every context topic.
+      // Publish the evidence-only baseline before model derivation so queries
+      // remain available while the required derivation stage is running.
       for (const stage of [...build.stages].sort(
         (left, right) => claimPriority(left.type) - claimPriority(right.type)
       )) {

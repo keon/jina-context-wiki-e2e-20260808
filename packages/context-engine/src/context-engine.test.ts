@@ -1313,7 +1313,7 @@ test("evidence packing enforces source boundaries and citation verification fail
   );
 });
 
-test("workflow names are clean and baseline indexing remains independent of derivation", async () => {
+test("workflow names are clean and derivation is required after baseline indexing", async () => {
   assert.deepEqual(contextTaskTypes, {
     build: "build-context",
     ingestEvidence: "ingest-evidence",
@@ -1336,6 +1336,7 @@ test("workflow names are clean and baseline indexing remains independent of deri
     requestKey: "build-1",
     createdAt
   });
+  assert.ok(build.stages.every((stage) => stage.required));
   const ingest = await coordinator.claim({
     tenantIds: [tenantId],
     workerId: "worker",
@@ -1402,6 +1403,50 @@ test("workflow names are clean and baseline indexing remains independent of deri
   const updated = await coordinator.get(build.id);
   assert.equal(updated?.stages.find((stage) => stage.type === "index-context")?.status, "succeeded");
   assert.equal(updated?.status, "succeeded");
+});
+
+test("a failed required derivation fails the context build", async () => {
+  const coordinator = new MemoryContextPipelineCoordinator();
+  const build = await coordinator.createBuild({
+    tenantId,
+    repository,
+    ref: "main",
+    requestKey: "required-derivation-failure",
+    createdAt
+  });
+  const claimAndComplete = async (
+    topic: (typeof contextQueueTopics)[keyof typeof contextQueueTopics],
+    outcome: "succeeded" | "failed",
+    second: number
+  ) => {
+    const claimedAt = `2026-07-26T12:00:${String(second).padStart(2, "0")}.000Z`;
+    const completedAt = `2026-07-26T12:00:${String(second + 1).padStart(2, "0")}.000Z`;
+    const claim = await coordinator.claim({
+      tenantId,
+      workerId: "worker",
+      topics: [topic],
+      now: claimedAt,
+      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
+    });
+    assert.ok(claim);
+    assert.equal(
+      await coordinator.complete({
+        tenantId,
+        stageId: claim.stage.id,
+        fence: claim.fence,
+        outcome,
+        now: completedAt,
+        ...(outcome === "failed" ? { error: "required derivation failed" } : {})
+      }),
+      true
+    );
+  };
+  await claimAndComplete(contextQueueTopics.ingestEvidence, "succeeded", 1);
+  await claimAndComplete(contextQueueTopics.indexContext, "succeeded", 3);
+  await claimAndComplete(contextQueueTopics.deriveKnowledge, "failed", 5);
+  const failed = await coordinator.get(build.id);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.stages.find((stage) => stage.type === "derive-knowledge")?.required, true);
 });
 
 test("per-ref build sequence prevents delayed older pushes from becoming current", async () => {

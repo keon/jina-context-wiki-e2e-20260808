@@ -81,6 +81,24 @@ create table if not exists jina_context.pipeline_stages (
 create index if not exists context_pipeline_stages_claim
   on jina_context.pipeline_stages (tenant_id,topic,status,created_at,id);
 
+-- Knowledge derivation is a required pipeline outcome. Repair builds created
+-- by the earlier optional-stage implementation and make prior derivation
+-- failures unambiguously terminal.
+update jina_context.pipeline_stages
+set required=true,updated_at=greatest(updated_at,now())
+where type='derive-knowledge' and required=false;
+
+update jina_context.pipeline_builds build
+set status='failed',completed_at=coalesce(build.completed_at,now())
+where build.status='degraded'
+  and exists (
+    select 1
+    from jina_context.pipeline_stages stage
+    where stage.build_id=build.id
+      and stage.type='derive-knowledge'
+      and stage.status='failed'
+  );
+
 create table if not exists jina_context.observations (
   id text not null,
   tenant_id text not null,
