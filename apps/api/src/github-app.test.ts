@@ -14,6 +14,7 @@ import { createApiServer, type ApiSnapshot, type ApiStateStore } from "./server.
 
 const tenantId = "tenant-a";
 const repository = "omlabs/context-engine-fixture";
+const mixedCaseRepository = "OmLabs/Context-Engine-Fixture";
 const principalId = "user:reader@example.com";
 const internalToken = "internal-test-token";
 const contextToken = "context-test-token";
@@ -56,7 +57,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
-      repository,
+      repository: mixedCaseRepository,
       ref: "main",
       commitSha,
       githubInstallationId: 140435029,
@@ -234,7 +235,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
     method: "POST",
     headers: contextHeaders(),
     body: JSON.stringify({
-      repository,
+      repository: mixedCaseRepository,
       ref: "main",
       question: "What does the context engine index?"
     })
@@ -253,7 +254,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   assert.notEqual(record(queried.body.generation).derivedKnowledge, "unavailable");
   assert.match(string(queried.body.traceId), /^trace_/);
 
-  const generations = await api(`/context/generations?repository=${encodeURIComponent(repository)}`, {
+  const generations = await api(`/context/generations?repository=${encodeURIComponent(mixedCaseRepository)}`, {
     headers: contextHeaders()
   });
   assert.equal(generations.response.status, 200);
@@ -269,7 +270,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   assert.equal(generationDetail.response.status, 200);
   assert.equal(record(generationDetail.body.generation).id, generationId);
 
-  const documents = await api(`/context/documents?repository=${encodeURIComponent(repository)}`, {
+  const documents = await api(`/context/documents?repository=${encodeURIComponent(mixedCaseRepository)}`, {
     headers: contextHeaders()
   });
   assert.equal(documents.response.status, 200);
@@ -290,7 +291,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   });
   assert.equal(forbiddenReview.response.status, 403);
 
-  const structure = await api(`/context/structure?repository=${encodeURIComponent(repository)}&ref=main`, {
+  const structure = await api(`/context/structure?repository=${encodeURIComponent(mixedCaseRepository)}&ref=main`, {
     headers: contextHeaders()
   });
   assert.equal(structure.response.status, 200);
@@ -328,7 +329,7 @@ test("MCP exposes only query_context and preserves complete structured conflicts
     const result = await client.callTool({
       name: "query_context",
       arguments: {
-        repository,
+        repository: mixedCaseRepository,
         ref: "main",
         question: "What does the context engine do?",
         taskKind: "overview"

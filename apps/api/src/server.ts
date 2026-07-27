@@ -456,7 +456,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "GET" && url.pathname === "/context/generations") {
       const repositories = await permittedRepositories(principal);
-      const requested = url.searchParams.get("repository")?.trim();
+      const requestedValue = url.searchParams.get("repository");
+      const requested = requestedValue === null ? undefined : requiredRepositoryName(requestedValue, "repository");
       if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
       const selected = requested ? [requested] : repositories;
       const generations = (
@@ -506,7 +507,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "GET" && url.pathname === "/context/documents") {
       const repositories = await permittedRepositories(principal);
-      const requested = url.searchParams.get("repository")?.trim();
+      const requestedValue = url.searchParams.get("repository");
+      const requested = requestedValue === null ? undefined : requiredRepositoryName(requestedValue, "repository");
       if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
       const selected = requested ? [requested] : repositories;
       const revisions = (
@@ -929,21 +931,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   async function queryContext(principal: Principal, requestValue: QueryContextRequest) {
+    const normalizedRequest = {
+      ...requestValue,
+      repository: requiredRepositoryName(requestValue.repository, "repository")
+    };
     const allowed = await permittedRepositories(principal);
-    if (!allowed.includes(requestValue.repository)) throw notFound("repository context not found");
+    if (!allowed.includes(normalizedRequest.repository)) throw notFound("repository context not found");
     const startedAt = nowIso();
     const started = Date.now();
-    const execution = await new QueryContextService(contextStore).queryWithTrace(requestValue);
+    const execution = await new QueryContextService(contextStore).queryWithTrace(normalizedRequest);
     const result = execution.response;
     const completedAt = nowIso();
     await contextStore.recordQueryRun({
       id: result.traceId,
       tenantId: principal.tenantId,
-      repository: requestValue.repository,
+      repository: normalizedRequest.repository,
       principalFingerprint: fingerprint({ tenantId: principal.tenantId, principalId: principal.principalId }),
       generationId: result.generation.id,
-      requestFingerprint: fingerprint(requestValue),
-      ...(requestValue.taskKind ? { taskKind: requestValue.taskKind } : {}),
+      requestFingerprint: fingerprint(normalizedRequest),
+      ...(normalizedRequest.taskKind ? { taskKind: normalizedRequest.taskKind } : {}),
       routes: result.coverage.retrieversUsed,
       coverageStatus: result.coverage.status,
       degradedCapabilities: result.generation.derivedKnowledge === "unavailable" ? ["derivedKnowledge"] : [],
