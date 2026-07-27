@@ -57,20 +57,18 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
        if exists (
          select 1
          from pg_roles
-         where rolname=runtime_user and (rolsuper or rolbypassrls or rolreplication)
+         where rolname=runtime_user
+           and (rolsuper or rolbypassrls or rolreplication or rolcreatedb or rolcreaterole)
        ) then
          raise exception
-           'runtime role % must already be NOSUPERUSER NOBYPASSRLS NOREPLICATION',
+           'runtime role % must already be NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB NOCREATEROLE',
            runtime_user
            using errcode='42501';
        end if;
      end
      $runtime_preflight$`
   );
-  await pool.query(
-    `alter role "${escapedRuntimeUser}"
-       noinherit nocreatedb nocreaterole`
-  );
+  await pool.query(`alter role "${escapedRuntimeUser}" noinherit`);
   await pool.query(
     `do $hardening$
      declare runtime_user constant text := '${runtimeLiteral}';
@@ -136,24 +134,22 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
        end if;
        if not exists (select 1 from pg_roles where rolname=archive_owner) then
          execute format(
-           'create role %I nologin noinherit nocreatedb nocreaterole',
+           'create role %I nologin noinherit',
            archive_owner
          );
        else
          if exists (
            select 1
            from pg_roles
-           where rolname=archive_owner and (rolsuper or rolbypassrls or rolreplication)
+           where rolname=archive_owner
+             and (rolsuper or rolbypassrls or rolreplication or rolcreatedb or rolcreaterole)
          ) then
            raise exception
-             'archive role % must already be NOSUPERUSER NOBYPASSRLS NOREPLICATION',
+             'archive role % must already be NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB NOCREATEROLE',
              archive_owner
              using errcode='42501';
          end if;
-         execute format(
-           'alter role %I nologin noinherit nocreatedb nocreaterole',
-           archive_owner
-         );
+         execute format('alter role %I nologin noinherit', archive_owner);
        end if;
        if archive_owner <> migration_owner then
          -- ALTER TABLE transfers an identity sequence to the new table owner.

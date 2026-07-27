@@ -108,10 +108,7 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
     await bootstrap.query("drop schema if exists jina_runtime cascade");
     await bootstrap.query("drop role if exists jina_legacy_archive");
     await bootstrap.query(`drop role if exists ${runtimeRole}`);
-    await bootstrap.query(
-      `create role ${runtimeRole}
-         login inherit createdb createrole`
-    );
+    await bootstrap.query(`create role ${runtimeRole} login inherit`);
     await bootstrap.query(`create schema jina_context_graph authorization ${runtimeRole}`);
     await bootstrap.query(`create schema jina_runtime`);
     await bootstrap.query(
@@ -235,7 +232,7 @@ test("documented CREATEROLE migration login can harden an ordinary runtime login
     await bootstrap.query(`drop role if exists ${migrationRole}`);
     await bootstrap.query(`create role ${migrationRole} login createrole password '${password}'`);
     await bootstrap.query(`set role ${migrationRole}`);
-    await bootstrap.query(`create role ${runtimeRole} login inherit createdb createrole`);
+    await bootstrap.query(`create role ${runtimeRole} login inherit`);
     await bootstrap.query("reset role");
 
     const migrationUrl = new URL(databaseUrl!);
