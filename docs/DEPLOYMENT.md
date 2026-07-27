@@ -123,11 +123,23 @@ CONTEXT_MAX_SNAPSHOT_BYTES=8388608
 CONTEXT_CODEX_PROVIDER=openrouter
 CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini
 CONTEXT_CODEX_EFFORT=medium
-CONTEXT_CODEX_CONTEXT_TOKENS=64000
-CONTEXT_CODEX_COMPACT_TOKENS=48000
+CONTEXT_CODEX_CONTEXT_TOKENS=16000
+CONTEXT_CODEX_COMPACT_TOKENS=12000
 CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728
 DAYTONA_RUN_TIMEOUT_SECONDS=2400
 ```
+
+The context window governs how long one derivation runs, and the required
+`derive-knowledge` stage fails if it overruns `DAYTONA_RUN_TIMEOUT_SECONDS`. A 64k
+window overran the 2400-second ceiling on the acceptance repository and failed
+every release; 16k completes the same stage in under two minutes. Override with
+`JINA_CONTEXT_CODEX_CONTEXT_TOKENS` and `JINA_CONTEXT_CODEX_COMPACT_TOKENS`, and
+raise them only together with the Daytona ceiling.
+
+Keep `CONTEXT_CODEX_EXECUTION_ATTEMPTS` (default 2) multiplied by
+`DAYTONA_RUN_TIMEOUT_SECONDS` below the `deploy-backend` step timeout in
+`cloudbuild.yaml`, currently 4200 seconds. At the default ceiling two attempts
+reach 4800 seconds, so one retry outlives the build waiting on it.
 
 It mounts read-only `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLONE_TOKEN`,
 `DAYTONA_API_KEY`, and `OPENROUTER_API_KEY`. Ingestion mints a short-lived installation

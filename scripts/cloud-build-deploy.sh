@@ -39,6 +39,16 @@ api_request_timeout_seconds="${JINA_API_REQUEST_TIMEOUT_SECONDS:-3600}"
 context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-3720000}"
 context_completion_timeout_ms="${JINA_CONTEXT_COMPLETION_TIMEOUT_MS:-600000}"
 context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-4500000}"
+# Knowledge derivation runs one agent per build inside Daytona, and its context
+# window governs how long that run takes. A 64k window overran the 2400s Daytona
+# ceiling on the acceptance repository and failed the required derive stage, while
+# 16k completed the same stage in well under two minutes. Raise these only
+# alongside DAYTONA_RUN_TIMEOUT_SECONDS, and keep
+# CONTEXT_CODEX_EXECUTION_ATTEMPTS x DAYTONA_RUN_TIMEOUT_SECONDS below the
+# deploy-backend step timeout in cloudbuild.yaml, or a single retry outlives the
+# build that is waiting for it.
+context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-16000}"
+context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-12000}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
 context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
@@ -100,6 +110,12 @@ validate_positive_integer "JINA_API_REQUEST_TIMEOUT_SECONDS" "${api_request_time
 validate_positive_integer "JINA_CONTEXT_API_TIMEOUT_MS" "${context_api_timeout_ms}"
 validate_positive_integer "JINA_CONTEXT_COMPLETION_TIMEOUT_MS" "${context_completion_timeout_ms}"
 validate_positive_integer "JINA_CONTEXT_WORKER_LEASE_MS" "${context_worker_lease_ms}"
+validate_positive_integer "JINA_CONTEXT_CODEX_CONTEXT_TOKENS" "${context_codex_context_tokens}"
+validate_positive_integer "JINA_CONTEXT_CODEX_COMPACT_TOKENS" "${context_codex_compact_tokens}"
+if (( context_codex_compact_tokens >= context_codex_context_tokens )); then
+  echo "JINA_CONTEXT_CODEX_COMPACT_TOKENS must stay below the context window it compacts" >&2
+  exit 2
+fi
 if [[ -n "${acceptance_github_installation_id}" ]]; then
   validate_positive_integer "JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID" "${acceptance_github_installation_id}"
 fi
@@ -844,7 +860,7 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=64000~CONTEXT_CODEX_COMPACT_TOKENS=48000~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${deploy_traffic_args[@]}" \
   --quiet
