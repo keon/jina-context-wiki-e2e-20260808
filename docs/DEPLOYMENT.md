@@ -66,15 +66,18 @@ rejected as amplification rather than reduced below the raw-entry limit.
 | Cloud Build substitution      | Default | Guidance                                                                     |
 | ----------------------------- | ------: | ---------------------------------------------------------------------------- |
 | `_JINA_API_MIN_INSTANCES`     |     `1` | Keep at least one warm for interactive reads.                                |
-| `_JINA_API_MAX_INSTANCES`     |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.    |
+| `_JINA_API_MAX_INSTANCES`     |     `1` | Raise only after enforcing one aggregate budget across all PostgreSQL pools. |
 | `_JINA_API_CONCURRENCY`       |    `10` | Production currently overrides this to `4` to bound per-instance contention. |
 | `_JINA_API_CPU`               |     `1` | Production currently overrides this to `2`.                                  |
 | `_JINA_API_MEMORY`            |   `1Gi` | Production currently overrides this to `2Gi`.                                |
 | `_JINA_CONTEXT_WORKER_MEMORY` |   `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.    |
 | `_JINA_CONTEXT_CUTOVER`       | `false` | Set to `true` only for the first destructive graph-to-context release.       |
 
-The shipped production API uses 2 vCPU, 2 GiB memory, concurrency 4, and a 3,600-second
-Cloud Run request timeout.
+The shipped production API uses 2 vCPU, 2 GiB memory, concurrency 4, one warm/maximum
+instance, and a 3,600-second Cloud Run request timeout. Its context, state, and shared
+identity PostgreSQL pools have configured maxima totaling 18 connections, so increasing
+API instances without first imposing a shared pool budget can exhaust the database even
+at low request concurrency.
 
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
@@ -432,9 +435,17 @@ Source `050623ce17df30caf14fbc5e798baea6ff3fee30` was deployed by Cloud Build
 
 An isolated larger PostgreSQL candidate in `us-central1` completed the Alliance
 repository's exact-release build in 3 minutes 54 seconds with 2 documents and 16 HTTP
-plus 16 MCP citations. This is capacity/placement evidence only: the shared production
-database remains `jina-463721:us-east1:jina-db` and was not migrated or resized by this
-release.
+plus 16 MCP citations.
+
+On 2026-07-27, a two-query concurrency audit exposed the production connection-budget
+limit: up to three API instances, each owning three pools with maxima totaling 18
+connections, exhausted the 25-connection `db-f1-micro` instance. The audit was stopped,
+an on-demand backup was taken, API scale was capped at one, and the shared database
+`jina-463721:us-east1:jina-db` was resized in place to `db-custom-1-3840`. PostgreSQL now
+reports `max_connections=100`. Traffic was moved to recovery revision
+`jina-api-conn-drain`; six consecutive database-backed health checks passed, subsequent
+worker claims returned 204, and the legacy application remained healthy. The database
+was resized but not migrated to another region or instance.
 
 The legacy code-review application remains deployed for its dashboard, OAuth, webhook,
 and review responsibilities, but its stale `JINA_GRAPH_API_URL` and
