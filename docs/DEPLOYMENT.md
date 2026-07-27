@@ -99,7 +99,7 @@ JINA_REQUIRE_GITHUB_INSTALLATION=false
 CONTEXT_GITHUB_HISTORY_LIMIT=500
 CONTEXT_GIT_HISTORY_LIMIT=5000
 CONTEXT_MAX_FILE_BYTES=5242880
-CONTEXT_MAX_SNAPSHOT_BYTES=25165824
+CONTEXT_MAX_SNAPSHOT_BYTES=8388608
 CONTEXT_CODEX_PROVIDER=openrouter
 CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini
 CONTEXT_CODEX_EFFORT=medium
@@ -360,13 +360,48 @@ graph-to-context cutover deliberately follows the isolated recovery procedure be
 instead.
 
 The migration installs `jina_context` and its capability roles from scratch with
-`--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, marks that login `NOINHERIT`,
-revokes any `jina_context_admin` membership, and grants the remaining focused NOLOGIN
-roles. Tenant administration uses `jina_context_tenant_admin`, whose RLS never accepts
-the wildcard system scope. The migration login therefore needs schema ownership and
-`CREATEROLE`; runtime services start with schema management disabled and activate a
-capability per transaction with `SET LOCAL ROLE`. The migration does not copy or
-translate prior semantic indexes. Active repositories must be reingested.
+`--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, ensures that login is
+`NOINHERIT` and outside `cloudsqlsuperuser`, revokes any `jina_context_admin`
+membership, and grants the remaining focused NOLOGIN roles. Tenant administration uses
+`jina_context_tenant_admin`, whose RLS never accepts the wildcard system scope. The
+migration login therefore needs schema ownership and `CREATEROLE`; runtime services
+start with schema management disabled and activate a capability per transaction with
+`SET LOCAL ROLE`. The migration does not copy or translate prior semantic indexes.
+Active repositories must be reingested.
+
+### One-time runtime-login precondition
+
+PostgreSQL 16 and later only let a `CREATEROLE` login alter a role it holds `ADMIN
+OPTION` on. The migration login (`JINA_MIGRATION_DB_USER`, `jina_app`) therefore cannot
+alter a runtime login that the instance superuser created, which is how a managed Cloud
+SQL user is provisioned. The migration reflects that split:
+
+- when the runtime login is already `NOINHERIT` and outside `cloudsqlsuperuser`, both
+  capability statements are skipped, so re-running `--install-roles` is idempotent
+- when a change is still required and this login may make it, the migration applies it
+- when a change is required and this login may not make it, the migration fails with
+  `42501` and names the exact statement to run once
+
+Create the runtime login `NOINHERIT` (see `docs/SHARED_TENANCY.md`) and no manual step is
+needed. To pre-harden an existing managed login, run once as the instance superuser:
+
+```sql
+ALTER ROLE jina_v2_app NOINHERIT;
+REVOKE cloudsqlsuperuser FROM jina_v2_app;
+```
+
+Confirm the precondition before approving a release, because `jina-main-deploy` starts a
+full release on every push to `main`:
+
+```sql
+SELECT rolname, rolinherit FROM pg_roles WHERE rolname = 'jina_v2_app';
+SELECT 1 FROM pg_auth_members m
+  JOIN pg_roles g ON g.oid = m.roleid
+  JOIN pg_roles u ON u.oid = m.member
+  WHERE g.rolname = 'cloudsqlsuperuser' AND u.rolname = 'jina_v2_app';
+```
+
+The first query must report `rolinherit = f` and the second must return no rows.
 
 Before approving a release, inspect IAM and the deployed identities:
 

@@ -222,7 +222,7 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
   }
 });
 
-test("documented CREATEROLE migration login can harden an ordinary runtime login", { skip: !databaseUrl }, async () => {
+test("CREATEROLE migration login hardens a runtime login it administers", { skip: !databaseUrl }, async () => {
   const bootstrap = new Pool({ connectionString: databaseUrl });
   const migrationRole = "jina_context_cutover_test_migration";
   const runtimeRole = "jina_context_cutover_test_ordinary";
@@ -275,3 +275,56 @@ test("documented CREATEROLE migration login can harden an ordinary runtime login
     await bootstrap.end();
   }
 });
+
+// Production runs this migration against a managed runtime login (a Cloud SQL
+// BUILT_IN user) that the instance superuser created, so the CREATEROLE-only
+// migration login holds no ADMIN OPTION on it and cannot alter it at all. The
+// migration must name the one-time superuser step instead of failing with a
+// bare privilege error, and must succeed once that step has been performed.
+test(
+  "hardening directs an operator to pre-harden a runtime login it cannot alter",
+  { skip: !databaseUrl },
+  async () => {
+    const bootstrap = new Pool({ connectionString: databaseUrl });
+    const migrationRole = "jina_context_cutover_test_unprivileged_migration";
+    const runtimeRole = "jina_context_cutover_test_managed";
+    const password = "context-cutover-managed-password";
+    try {
+      await bootstrap.query(`drop role if exists ${runtimeRole}`);
+      await bootstrap.query(`drop role if exists ${migrationRole}`);
+      await bootstrap.query(`create role ${migrationRole} login createrole password '${password}'`);
+      // Created by the superuser, exactly as a managed runtime login is, so the
+      // migration login is deliberately left without ADMIN OPTION on it.
+      await bootstrap.query(`create role ${runtimeRole} login inherit`);
+
+      const migrationUrl = new URL(databaseUrl!);
+      migrationUrl.username = migrationRole;
+      migrationUrl.password = password;
+      const migration = new Pool({ connectionString: migrationUrl.toString(), max: 1 });
+      try {
+        await assert.rejects(
+          () => hardenContextRuntimeRole(migration, runtimeRole),
+          (error: NodeJS.ErrnoException & { code?: string }) =>
+            error.code === "42501" && String(error.message).includes("must already be NOINHERIT")
+        );
+
+        // The documented one-time superuser step, after which the migration must pass.
+        await bootstrap.query(`alter role ${runtimeRole} noinherit`);
+        await hardenContextRuntimeRole(migration, runtimeRole);
+      } finally {
+        await migration.end();
+      }
+
+      const runtime = await bootstrap.query<{ rolinherit: boolean; rolsuper: boolean }>(
+        "select rolinherit,rolsuper from pg_roles where rolname=$1",
+        [runtimeRole]
+      );
+      assert.deepEqual(runtime.rows, [{ rolinherit: false, rolsuper: false }]);
+    } finally {
+      await bootstrap.query("reset role");
+      await bootstrap.query(`drop role if exists ${runtimeRole}`);
+      await bootstrap.query(`drop role if exists ${migrationRole}`);
+      await bootstrap.end();
+    }
+  }
+);

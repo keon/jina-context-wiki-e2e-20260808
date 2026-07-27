@@ -48,7 +48,6 @@ interface AuditCountRow {
  * objects left in the retired schema to a non-login archive owner.
  */
 export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string): Promise<void> {
-  const escapedRuntimeUser = runtimeUser.replaceAll('"', '""');
   const runtimeLiteral = runtimeUser.replaceAll("'", "''");
   await pool.query(
     `do $runtime_preflight$
@@ -68,19 +67,51 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
      end
      $runtime_preflight$`
   );
-  await pool.query(`alter role "${escapedRuntimeUser}" noinherit`);
+  // Capability hardening is applied when this login may alter the runtime role,
+  // and verified otherwise. A managed runtime login (for example a Cloud SQL
+  // BUILT_IN user) is created by the instance superuser, so a CREATEROLE-only
+  // migration login holds no ADMIN OPTION on it and cannot alter it at all.
+  // Both statements are therefore skipped once the desired state already holds,
+  // which keeps re-runs idempotent, and any remaining change that this login
+  // cannot make is reported as an actionable one-time superuser step instead of
+  // aborting the release with a bare privilege error.
   await pool.query(
     `do $hardening$
-     declare runtime_user constant text := '${runtimeLiteral}';
+     declare
+       runtime_user constant text := '${runtimeLiteral}';
+       runtime_inherits boolean;
+       retains_cloudsql_superuser boolean;
      begin
-       if exists (
+       select rolinherit into runtime_inherits from pg_roles where rolname=runtime_user;
+       if runtime_inherits is null then
+         raise exception 'runtime role % does not exist', runtime_user using errcode='42704';
+       end if;
+       retains_cloudsql_superuser := exists (
          select 1
          from pg_auth_members membership
          join pg_roles granted on granted.oid=membership.roleid
          join pg_roles member on member.oid=membership.member
          where granted.rolname='cloudsqlsuperuser' and member.rolname=runtime_user
-       ) then
-         execute format('revoke cloudsqlsuperuser from %I', runtime_user);
+       );
+       if runtime_inherits then
+         begin
+           execute format('alter role %I noinherit', runtime_user);
+         exception when insufficient_privilege then
+           raise exception
+             'runtime role % must already be NOINHERIT; run once as the instance superuser: ALTER ROLE % NOINHERIT',
+             runtime_user, quote_ident(runtime_user)
+             using errcode='42501';
+         end;
+       end if;
+       if retains_cloudsql_superuser then
+         begin
+           execute format('revoke cloudsqlsuperuser from %I', runtime_user);
+         exception when insufficient_privilege then
+           raise exception
+             'runtime role % must not belong to cloudsqlsuperuser; run once as the instance superuser: REVOKE cloudsqlsuperuser FROM %',
+             runtime_user, quote_ident(runtime_user)
+             using errcode='42501';
+         end;
        end if;
      end
      $hardening$`

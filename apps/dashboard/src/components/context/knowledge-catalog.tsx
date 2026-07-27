@@ -9,7 +9,7 @@ import {
   shortDigest
 } from "../../lib/context.ts";
 import { confidenceLabel, formatTime, humanize, shortId } from "../../lib/format.ts";
-import { usePoll } from "../../lib/poll.ts";
+import { useCursorPoll } from "../../lib/poll.ts";
 import type {
   ContextDocumentResponse,
   ContextDocumentsResponse,
@@ -18,8 +18,11 @@ import type {
 } from "../../lib/types.ts";
 
 export function KnowledgeCatalog({ repository }: { readonly repository: string }) {
-  const resource = usePoll<ContextDocumentsResponse>(
+  // Knowledge revisions are cursor-paginated, so every page is followed here.
+  // A single request would silently hide a repository's older documents.
+  const resource = useCursorPoll<ContextDocumentsResponse>(
     `/api/context/documents?repository=${encodeURIComponent(repository)}&limit=100`,
+    "documents",
     10_000
   );
   const documents = useMemo(
