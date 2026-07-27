@@ -32,17 +32,18 @@ stale delivery fails rather than becoming the current ref generation.
 flowchart LR
     B["build-context"] --> I["ingest-evidence (required)"]
     I --> X["index-context baseline (required)"]
-    X --> K["derive-knowledge (optional)"]
-    K --> E["index-context enriched successor"]
-    X --> Q["query_context available"]
-    E --> Q
+    X --> K["derive-knowledge (required; one repair)"]
+    K --> E["index-context enriched successor (required)"]
+    X --> D["baseline available for diagnosis/retry"]
+    E --> Q["query_context successful build"]
 ```
 
 The coordinator queues only the next stage: ingestion first, baseline indexing second,
-and optional derivation only after the baseline succeeds. This prevents independent
+and required derivation only after the baseline succeeds. This prevents independent
 workers from racing baseline projection inputs with a knowledge commit. The board can
-serve the baseline without model output. Production acceptance waits for all three stages
-and requires the enriched successor so it exercises the complete release path.
+serve the baseline for diagnosis and retry without model output, but derivation failure
+fails the root build. Production acceptance waits for all three stages and requires the
+enriched successor so it exercises the complete release path.
 
 ## Ingest immutable evidence
 
@@ -92,7 +93,7 @@ sequenceDiagram
     API->>DB: Build manifest, documents/fragments, exact/lexical, structure, hierarchy, ACL
     DB->>DB: Check required projector barrier
     DB-->>API: Atomically published baseline generation
-    Note over API,KW: Baseline completion queues optional derivation
+    Note over API,KW: Baseline completion queues required derivation
     KW->>API: POST /internal/context/derive/prepare
     API->>DB: Select bounded immutable evidence bundle
     API-->>KW: Prompt and evidence bundle
@@ -105,8 +106,10 @@ sequenceDiagram
         DB->>DB: Under ref lock, reject if checkpoint is behind admitted/current sequence
         DB->>DB: Append derivation run, revisions, evidence, events
         DB->>DB: Publish enriched successor generation
-    else invalid
+    else first result invalid
         API-->>KW: Diagnostics for one bounded repair
+    else repaired result or executor fails
+        API-->>KW: Fail derivation stage and root build
     end
 ```
 

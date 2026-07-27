@@ -17,7 +17,10 @@ requires the current renewable lease.
 
 A context build starts with only `ingest-evidence` queued; baseline `index-context` and
 `derive-knowledge` are blocked. Successful ingestion queues only baseline indexing, and
-successful baseline publication then queues optional derivation/enriched publication.
+successful baseline publication then queues required derivation/enriched publication.
+The derivation stage permits one repair. If the repaired result or executor fails, the
+root build fails even though the baseline generation remains available for diagnosis and
+retry.
 The store never exposes both projection-input-producing stages as simultaneously
 claimable work.
 

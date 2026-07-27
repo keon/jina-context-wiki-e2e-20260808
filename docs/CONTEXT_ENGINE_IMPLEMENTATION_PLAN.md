@@ -2,15 +2,16 @@
 
 ## Status
 
-- **State:** source implementation complete; production acceptance remains a per-release gate
+- **State:** implemented, deployed, and production-accepted
 - **Date:** 2026-07-26
+- **Shipped source:** `050623ce17df30caf14fbc5e798baea6ff3fee30`
 - **Architecture decision:** [CONTEXT_ENGINE_DECISION.md](CONTEXT_ENGINE_DECISION.md)
 - **Current runtime:** [ARCHITECTURE.md](ARCHITECTURE.md)
 - **Evaluation:** [CONTEXT_ENGINE_EVALUATION.md](CONTEXT_ENGINE_EVALUATION.md)
 - **Compatibility policy:** clean replacement; no API aliases, dual writes, legacy task
   names, legacy queue topics, or graph-data migration
 
-The implementation phases in this document are complete in source. The old package,
+The implementation phases in this document are complete in source and production. The old package,
 schema adapters, public/internal routes, topics, MCP server/tool, executor output shape,
 and dashboard graph canvas have been removed. The current system implements immutable
 evidence, immutable cited knowledge-document revisions, generation-scoped projections,
@@ -29,9 +30,10 @@ Optional capability decisions remain deliberately closed:
 required-source-kind failures on the checked-in v1 fixture. Its PostgreSQL mode also
 requires access revocation to take effect immediately. The hard exactness, citation, ACL,
 conflict, and source-kind gates pass, and recall exceeds the initial `0.90` target.
-Production completion additionally requires the snapshot, authoritative-head reingestion
-recorded at exact commits, ACL audit, drained required outboxes, and real HTTP/MCP
-acceptance described below.
+The coordinated production release passed authoritative-head ingestion at an exact
+commit, required three-stage execution, enriched generation publication, ACL-scoped HTTP
+retrieval, real MCP `query_context` retrieval, citation-anchor verification, retired-route
+verification, and required-outbox drain.
 
 The final implementation hardening also completed:
 
@@ -57,6 +59,27 @@ The final implementation hardening also completed:
   from every `jina-runtime` service;
 - one coordinated Cloud Run release for API, workers, dashboard, and admin;
 - tenant-admin-only knowledge review.
+- context-specific long-running-operation hardening: a 60-minute Cloud Run API request
+  timeout, 62-minute worker operation timeout, 10-minute terminal-completion timeout, and
+  75-minute fenced context lease;
+- a required derivation stage with exactly one constrained repair; terminal derivation
+  failure fails the root build while preserving the baseline only for diagnosis/retry.
+
+## Completion record
+
+- [x] Phase 0 — evaluation fixtures, target contracts, naming, and metrics
+- [x] Phase 1 — context-engine package, database schema, roles, coordinator, and leases
+- [x] Phase 2 — canonical evidence ingestion, deterministic structure, ACLs, and erasure
+- [x] Phase 3 — cited knowledge-document derivation, validation, revision events, and review
+- [x] Phase 4 — required exact/lexical baseline indexes and atomic publication
+- [x] Phase 5 — routed hybrid retrieval, conflicts, coverage, citations, and telemetry
+- [x] Phase 6 — dense port evaluated and deliberately left disabled
+- [x] Phase 7 — deterministic hierarchy shipped; PageIndex deliberately left disabled
+- [x] Phase 8 — HTTP, MCP, dashboard, admin, workers, alerts, and runbooks replaced
+- [x] Phase 9 — clean production cutover, graph-runtime deletion, reingestion, and acceptance
+
+Production acceptance remains a mandatory gate for every subsequent release; it is no
+longer an outstanding implementation phase.
 
 ## Outcome
 
@@ -139,9 +162,10 @@ The following are non-negotiable implementation constraints:
 4. **Indexes are disposable.** Every search document, embedding, hierarchy node, current
    selection, and relation projection can be rebuilt from canonical evidence and immutable
    knowledge revisions.
-5. **Model failure does not hide deterministic context.** Exact code, provider state, and
-   structural retrieval remain available if knowledge derivation, dense indexing,
-   PageIndex, reranking, or synthesis is unavailable.
+5. **Model failure does not destroy deterministic context.** Exact code, provider state,
+   and structural retrieval remain available from the baseline for diagnosis/retry if
+   knowledge derivation fails, but required derivation failure still fails the root
+   build. Dense indexing, PageIndex, reranking, and query-time synthesis remain optional.
 6. **Permissions are applied before retrieval.** Unauthorized candidates must not enter
    ranking, prompt construction, traces visible to the caller, or caches shared across
    principals.
@@ -173,24 +197,24 @@ flowchart LR
 - `index-context` is required and is the only stage queued after successful ingestion. It
   publishes a deterministic raw-evidence baseline without waiting for a model.
 - `derive-knowledge` remains blocked until baseline `index-context` succeeds. It is then
-  the only next queued stage; successful commit emits knowledge events and publishes the
-  enriched successor generation.
+  the only next queued, required stage; successful commit emits knowledge events and
+  publishes the enriched successor generation.
 - The coordinator never queues baseline indexing and derivation as siblings. This
   prevents separate workers from changing the projection-input frontier while the
   baseline is materializing.
-- A failed derivation is visible on the build, but it does not invalidate the baseline
-  index or block exact and structural queries.
+- Invalid derivation output receives exactly one constrained repair. A second invalid
+  result or executor failure fails the derivation stage and root build. It does not
+  invalidate the baseline index, which remains available for diagnosis and retry.
 - A query response reports the selected generation and whether derived knowledge, dense
   retrieval, and hierarchy retrieval were available.
 - Every accepted build receives a monotonic tenant/repository/ref `refSequence`. That
   admission-time sequence, not worker finish time, chooses the current checkpoint; a
   lower-sequence push that completes late is retained but cannot publish.
 
-The baseline becomes queryable when required ingestion and baseline indexing complete.
-The aggregate terminates after optional derivation succeeds or fails; it is `degraded`
-when optional knowledge derivation or an optional projector fails, and `failed` when
-canonical ingestion, ACL projection, manifest projection, or required exact indexing
-fails.
+The baseline becomes queryable when required ingestion and baseline indexing complete,
+but the aggregate succeeds only after required derivation and enriched publication. A
+terminal derivation failure makes the aggregate `failed`, while failure of a genuinely
+optional projector can produce a usable degraded generation.
 
 ## Target domain model
 
@@ -666,8 +690,9 @@ Before storing a revision:
 12. persist raw output, validation diagnostics, revisions, citations, and outbox events
     atomically.
 
-One repair attempt may use only the original bundle plus explicit validation errors. A
-second invalid result records a failed derivation run and writes no revision.
+Exactly one repair attempt may use only the original bundle plus explicit validation
+errors. A second invalid result records a failed derivation run, writes no revision, and
+fails the derivation stage and root build.
 
 ### Review and supersession
 
@@ -713,7 +738,8 @@ digest to exist in the exact target checkpoint.
 - unsupported logical IDs and source identities fail closed;
 - identical inputs generate no duplicate revisions or events;
 - review and supersession never update immutable content;
-- model failure leaves the baseline exact/structural index queryable;
+- model failure leaves the baseline exact/structural index queryable for diagnosis/retry
+  while the root build is failed;
 - no semantic relation is materialized solely because the model proposed it.
 
 ## Projection plane: `index-context` (baseline step 2 and enriched successor)
@@ -1546,8 +1572,8 @@ This is the only supported migration path:
 12. Audit repository counts, per-ref sequences, selected commits, completeness and
     projection-input frontiers, manifests, ACLs, outbox depth, race-test output, and exact
     query fixtures.
-13. Enable derivation, then optional dense and PageIndex consumers only if their earlier
-    gates passed.
+13. Enable required derivation; enable optional dense and PageIndex consumers only if
+    their earlier gates passed.
 14. Delete the retired graph database and its `jina_context_graph` schema only after both
     snapshots pass the retention window.
 15. Remove the old package and every runtime reference in the same release branch.
@@ -1622,7 +1648,7 @@ The successor is done when:
 
 - the three stages run under only `ingest-evidence`, `derive-knowledge`, and
   `index-context`;
-- runtime scheduling is strictly `ingest-evidence` → baseline `index-context` → optional
+- runtime scheduling is strictly `ingest-evidence` → baseline `index-context` → required
   `derive-knowledge` with enriched publication, with only the next stage queued;
 - canonical evidence and knowledge revisions are immutable and independently auditable;
 - every eligible knowledge revision has validated terminal evidence;
@@ -1633,7 +1659,8 @@ The successor is done when:
   storage-neutral query contract;
 - answers expose citations, conflicts, ambiguities, coverage, ref, commit, generation, and
   trace identity;
-- query service remains useful when optional model, dense, or PageIndex capabilities fail;
+- a failed required model derivation fails the root while retaining baseline context for
+  diagnosis/retry; query-time models, dense retrieval, and PageIndex remain optional;
 - ACL, erasure, citation, exactness, ref, and evaluation gates pass;
 - ACL fingerprints filter PostgreSQL rows before retrieval candidates exist;
 - dashboard, admin, and MCP expose context rather than graph internals;

@@ -42,7 +42,8 @@ alone. Same-commit checkpoint tests prove unchanged citation identity/digest can
 reuse cached knowledge while a changed mutable provider observation excludes stale
 PR/issue-derived revisions and lowers exact-checkpoint `derivedKnowledge` coverage.
 Production acceptance separately verifies HTTP and MCP anchors at a real repository
-commit.
+commit. The release built from `050623ce17df30caf14fbc5e798baea6ff3fee30`
+passed that production acceptance gate.
 
 ## Ablation results
 
@@ -172,7 +173,7 @@ The fixture evaluator is necessary but insufficient. Each deployment also execut
 - use the internal credential and `mode:"merge"` to add the fixture without replacing the
   bound non-admin query principal's existing repositories;
 - use a distinct tenant administrator to run `build-context` through strict
-  `ingest-evidence`, baseline `index-context`, then optional `derive-knowledge`/enriched
+  `ingest-evidence`, baseline `index-context`, then required `derive-knowledge`/enriched
   publication ordering;
 - select a published enriched generation at one exact full commit SHA;
 - return a nonempty knowledge-document catalog;
@@ -186,6 +187,14 @@ The fixture evaluator is necessary but insufficient. Each deployment also execut
 Release evidence must record the build ID, stage IDs, repository/ref/commit, generation ID,
 document count, HTTP citation count, MCP citation count, duration, and outbox depth. It
 must also record the pre-cutover database backup ID and immutable image/source SHA.
+
+The shipped release passed this gate against a real repository through both HTTP and the
+MCP SDK. An additional isolated performance candidate used a larger PostgreSQL instance
+in the same region as the API and completed the Alliance repository build in 3 minutes
+54 seconds. That result demonstrates that database placement/capacity can remove the
+observed indexing bottleneck; it is not evidence that the existing shared production
+database was migrated or resized. Production still uses the shared database documented
+in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ## Follow-up evaluation work
 

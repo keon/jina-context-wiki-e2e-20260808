@@ -39,13 +39,16 @@ separate from the deployed worker.
 GitHub event
   -> API plans board tasks and dependencies
   -> reducer queues ready tasks and durable outbox messages
-  -> worker claims and renews a five-minute lease
+  -> worker claims and renews a fenced lease
   -> worker completes through the API
   -> reducer advances dependents
 ```
 
 The board is the orchestrator. A cross-instance PostgreSQL transaction lock protects each
 snapshot mutation, and lease/write fences prevent a stale worker from committing.
+Ordinary task leases are 30 minutes. Context stages use a 75-minute lease so one
+60-minute Cloud Run request, the worker's 62-minute operation deadline, and a separate
+10-minute terminal-completion deadline remain ordered safely.
 Opened PRs create review and publication tasks. Opened issues create manual triage tasks.
 Signed branch pushes create a current-ref context build fenced by the event head SHA,
 deduplicate unchanged heads, and supersede stale ref work. Ingestion fetches the
@@ -71,7 +74,7 @@ The context engine has three board-visible stages:
    a deterministic long-document hierarchy. Projection consumers use independent leases
    and scoped acknowledgements; rebuild/drain work replays pending checkpoints without
    sharing a global processed bit.
-3. Only after baseline publication, `derive-knowledge` turns a bounded evidence bundle
+3. Only after baseline publication, required `derive-knowledge` turns a bounded evidence bundle
    into immutable, versioned
    knowledge-document revisions. Host validation checks stable subject identity, resolves
    each exact line range or JSON pointer against original evidence, and requires the
@@ -85,15 +88,18 @@ The context engine has three board-visible stages:
    unified execution, multi-agent, apps/plugins/remote plugins, hooks, browser/in-app
    browser, computer use, image generation, code-mode host, workspace dependencies, skill
    MCP dependency installation, and web search. It can return only the requested JSON.
-   Successful commit publishes the enriched successor generation. Derived revisions are
+   Invalid output receives exactly one constrained repair. A successful commit publishes
+   the required enriched successor generation; a second invalid result or executor
+   failure fails the derivation stage and root build. Derived revisions are
    eligible only when every stored citation's source identity and `contentDigest` exists
    in that exact evidence checkpoint.
 
 The baseline index does not depend on a model. Derived knowledge can enrich a later
-generation, while exact and structural context remains available if derivation fails.
-The coordinator queues only ingestion, then only baseline indexing, then optional
-derivation/enriched publication. This prevents different context workers from racing
-projection-input changes against the baseline build.
+generation. If derivation fails, the already-published baseline remains queryable for
+diagnosis and retry, but the root build is failed rather than reported as degraded
+success. The coordinator queues only ingestion, then only baseline indexing, then
+required derivation/enriched publication. This prevents different context workers from
+racing projection-input changes against the baseline build.
 The generation's `derivedKnowledge` capability is computed only from logical IDs and
 eligible revisions whose citations are present in that exact checkpoint; matching
 repository/ref/commit history alone cannot make it report `available`. Unchanged cited
@@ -136,6 +142,11 @@ API, context worker, task worker, dashboard, and admin are built from the same s
 revision and deployed as one Cloud Run release. Database DDL and capability-role grants
 run first under a separate migration login; the runtime login is `NOINHERIT` and every
 context transaction explicitly activates its capability with `SET LOCAL ROLE`.
+The deployed API uses 2 vCPU, 2 GiB memory, concurrency 4, and a 60-minute Cloud Run
+request timeout. Context workers use a 62-minute operation timeout, a 10-minute terminal
+completion timeout, and the 75-minute context lease described above. Production
+acceptance exercises a real repository build, HTTP query, and MCP `query_context` call
+before a release passes.
 
 Webhook-triggered private-repository builds carry the GitHub installation ID and mint a
 short-lived, installation-scoped token for ingestion. Manual builds may pass

@@ -7,12 +7,13 @@ This document describes the deployed runtime. Persisted structures are in
 
 ## Topology
 
-The release runs as five Cloud Run services against one shared PostgreSQL database:
+The release runs as five Cloud Run services against the existing shared PostgreSQL
+database:
 
 - `jina-api` verifies GitHub webhooks, serves board and context APIs, serves stateless MCP,
   and owns worker lease/completion transactions.
 - `jina-task-worker` handles review, research, publication, and cleanup topics.
-- `jina-context-worker` handles `ingest-evidence`, baseline `index-context`, and optional
+- `jina-context-worker` handles `ingest-evidence`, baseline `index-context`, and required
   `derive-knowledge`/enriched publication in that strict queue order.
 - `jina-dashboard` serves the operator board and repository context workspace.
 - `jina-admin` serves tenant-wide context health and administrative views behind
@@ -29,6 +30,12 @@ mutation lock, renew their leases, and complete through the API. Every internal 
 worker-stage mutation carries task, lease, attempt, and write-fence identity. An expired
 or replaced lease cannot commit.
 
+The production API is deployed with 2 vCPU, 2 GiB memory, concurrency 4, and the Cloud
+Run maximum 60-minute request timeout. A context worker allows 62 minutes for the
+operation request and 10 additional minutes for terminal completion; its 75-minute
+context-only lease exceeds those two worker deadlines combined. These longer values do
+not change ordinary task deadlines or leases.
+
 ## Board and execution
 
 The generic board is the orchestrator. A versioned planner creates tasks and dependency
@@ -41,7 +48,7 @@ Signed branch pushes and `POST /context/build` create `build-context` with three
 ```text
 ingest-evidence
   └─> index-context baseline (required)
-        └─> derive-knowledge + enriched index publish (optional)
+        └─> derive-knowledge + enriched index publish (required)
 ```
 
 `index-context` can publish a raw-evidence generation as soon as ingestion completes.
@@ -49,9 +56,10 @@ Only after that baseline completes does the coordinator queue `derive-knowledge`
 successful derivation publishes its successor enriched generation within the derive
 stage. At most the next stage is queued, so separate workers cannot race baseline
 materialization against knowledge commits and their projection-input events. The
-baseline is usable when ingestion and baseline indexing succeed; the aggregate terminates
-after optional derivation and becomes degraded, rather than losing that baseline, if
-derivation fails.
+baseline is usable when ingestion and baseline indexing succeed, but it is not completion
+of the root build. Invalid derivation output receives one constrained repair. If the
+repair or executor still fails, the derivation stage and root build fail; the published
+baseline remains available only for diagnosis and retry.
 
 Build admission assigns a monotonically increasing `refSequence` under a
 tenant/repository/ref advisory lock shared with checkpoint, knowledge, and generation
@@ -104,7 +112,7 @@ the immutable revision is stored. A citation may select a complete evidence body
 exact inclusive line range, or an RFC 6901-style JSON pointer, but it cannot mix line and
 JSON selectors. The normalized citation claim must occur verbatim in the exact selected
 excerpt; support from a nearby line or different JSON field is rejected. Invalid output
-receives at most one constrained repair.
+receives exactly one constrained repair before the required stage fails.
 
 Logical IDs are trimmed and persisted in canonical lowercase before they contribute to
 revision identity. Their repository and change-commit segments must equal the checkpoint;

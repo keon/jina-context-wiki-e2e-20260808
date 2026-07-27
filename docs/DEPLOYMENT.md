@@ -63,15 +63,18 @@ trimmed, empty strings dropped, accepted values deduplicated, and each non-empty
 limited to 1,000 characters. A request containing 101 duplicates is intentionally
 rejected as amplification rather than reduced below the raw-entry limit.
 
-| Cloud Build substitution      | Default | Guidance                                                                          |
-| ----------------------------- | ------: | --------------------------------------------------------------------------------- |
-| `_JINA_API_MIN_INSTANCES`     |     `1` | Keep at least one warm for interactive reads.                                     |
-| `_JINA_API_MAX_INSTANCES`     |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.         |
-| `_JINA_API_CONCURRENCY`       |    `20` | Lowering this can reduce per-instance contention, but may require more instances. |
-| `_JINA_API_CPU`               |     `1` | Increase if JSON serialization or event-loop utilization is saturated.            |
-| `_JINA_API_MEMORY`            | `512Mi` | Increase if context assembly approaches the container limit.                      |
-| `_JINA_CONTEXT_WORKER_MEMORY` |   `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.         |
-| `_JINA_CONTEXT_CUTOVER`       | `false` | Set to `true` only for the first destructive graph-to-context release.            |
+| Cloud Build substitution      | Default | Guidance                                                                     |
+| ----------------------------- | ------: | ---------------------------------------------------------------------------- |
+| `_JINA_API_MIN_INSTANCES`     |     `1` | Keep at least one warm for interactive reads.                                |
+| `_JINA_API_MAX_INSTANCES`     |     `3` | Change only after calculating the aggregate PostgreSQL connection budget.    |
+| `_JINA_API_CONCURRENCY`       |    `10` | Production currently overrides this to `4` to bound per-instance contention. |
+| `_JINA_API_CPU`               |     `1` | Production currently overrides this to `2`.                                  |
+| `_JINA_API_MEMORY`            |   `1Gi` | Production currently overrides this to `2Gi`.                                |
+| `_JINA_CONTEXT_WORKER_MEMORY` |   `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.    |
+| `_JINA_CONTEXT_CUTOVER`       | `false` | Set to `true` only for the first destructive graph-to-context release.       |
+
+The shipped production API uses 2 vCPU, 2 GiB memory, concurrency 4, and a 3,600-second
+Cloud Run request timeout.
 
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,
@@ -135,11 +138,13 @@ checkpoint remains stored for audit but cannot advance the projection-input fron
 commit derived knowledge, become current, or publish a generation over the higher
 admitted sequence. Request-key redelivery reuses the existing build and sequence.
 
-`ingest-evidence` and baseline `index-context` are required. The coordinator queues only
-ingestion, then baseline indexing, then optional `derive-knowledge`; baseline completion
-is the gate that queues derivation. This prevents distinct workers from racing knowledge
-projection-input changes against baseline materialization. Derivation uses one bounded
-repair and can publish an enriched successor. Codex derivation ignores user configuration and disables shell, shell
+`ingest-evidence`, baseline `index-context`, and `derive-knowledge` are required. The
+coordinator queues only ingestion, then baseline indexing, then derivation; baseline
+completion is the gate that queues derivation. This prevents distinct workers from
+racing knowledge projection-input changes against baseline materialization. Invalid
+derivation output receives one bounded repair. A failed repair or executor fails the
+root build; the baseline remains available only for diagnosis/retry. Successful
+derivation publishes the required enriched successor. Codex derivation ignores user configuration and disables shell, shell
 snapshots, unified execution, multi-agent, apps, plugins, remote plugins, hooks,
 browser/in-app browser, computer use, image generation, the code-mode host, workspace
 dependencies, skill MCP dependency installation, and web search; exact claim grounding
@@ -149,6 +154,11 @@ present in the exact generation checkpoint are selectable; matching ref+commit h
 not enough. Equivalent-evidence derivation cache reuse remains safe because indexing
 performs that checkpoint-membership check. Worker writes are fenced by the current board
 lease.
+
+The API Cloud Run request timeout is 60 minutes. The context worker operation client
+allows 62 minutes and terminal completion has a separate 10-minute deadline. The
+context-only lease is 75 minutes, exceeding both worker deadlines combined; deployment
+validation rejects inconsistent values. Ordinary task timing is unchanged.
 
 Dense retrieval is disabled until its evaluation and approved embedding-provider gates
 pass. The deterministic hierarchy adapter is active; PageIndex remains an optional,
@@ -411,6 +421,20 @@ Release evidence also records the build ID, stage IDs, repository/ref/commit,
 `refSequence`, generation ID and projection-input fingerprint, document/citation counts,
 duration, outbox depth, both backup IDs, immutable image/source SHA, deployed service accounts,
 and owner-secret IAM inspection.
+
+### Current accepted release
+
+Source `050623ce17df30caf14fbc5e798baea6ff3fee30` was deployed by Cloud Build
+`b1e03ff3-89ba-44f5-8e7a-a775aaf4a9e6` to API revision
+`jina-api-00021-pps` and context-worker revision
+`jina-context-worker-00020-tzl`. Production acceptance passed with 7 indexed documents,
+16 verified HTTP citations, and 16 verified MCP citations.
+
+An isolated larger PostgreSQL candidate in `us-central1` completed the Alliance
+repository's exact-release build in 3 minutes 54 seconds with 2 documents and 16 HTTP
+plus 16 MCP citations. This is capacity/placement evidence only: the shared production
+database remains `jina-463721:us-east1:jina-db` and was not migrated or resized by this
+release.
 
 ## Outbox recovery and rebuild
 
