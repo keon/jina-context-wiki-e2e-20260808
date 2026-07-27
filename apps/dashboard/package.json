@@ -10,7 +10,6 @@
     "dev": "next dev -p 3000"
   },
   "dependencies": {
-    "@jina/graph-renderer": "workspace:*",
     "next": "^16.2.11",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"

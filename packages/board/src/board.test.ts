@@ -30,12 +30,12 @@ test("workers can pass small durable metadata to a dependent task", () => {
       command: "CreateTask",
       task: {
         id: taskId,
-        type: "context_graph_assert",
+        type: "fixture_transform",
         kind: "dispatchable",
-        title: "Generate assertions",
-        assigneeRole: "context_graph_worker",
-        dedupeKey: "contextGraph:assert",
-        dispatchTopic: "run-context-graph-assert"
+        title: "Transform fixture",
+        assigneeRole: "fixture_worker",
+        dedupeKey: "contextPipeline:assert",
+        dispatchTopic: "run-context-pipeline-assert"
       }
     },
     { actor: { type: "user", id: "test" }, now }
@@ -47,20 +47,20 @@ test("workers can pass small durable metadata to a dependent task", () => {
       taskId,
       metadata: { commitSha: "a".repeat(40) }
     },
-    { actor: { type: "run", id: "context-graph-worker" }, now }
+    { actor: { type: "run", id: "context-pipeline-worker" }, now }
   ).state;
 
   assert.equal(findTask(updated, taskId)?.metadata.commitSha, "a".repeat(40));
-  assert.deepEqual(created.events[0]?.payload, { type: "context_graph_assert", actor: "test", actorType: "user" });
+  assert.deepEqual(created.events[0]?.payload, { type: "fixture_transform", actor: "test", actorType: "user" });
   assert.equal(updated.events.at(-1)?.type, "task.updated");
 });
 
 test("failed automated dependencies terminate their workflow without synthetic blockers", () => {
   const now = "2026-01-01T00:00:00.000Z";
-  const rootId = entityId<"task">("context-graph-root");
-  const ingestId = entityId<"task">("context-graph-ingest");
-  const assertId = entityId<"task">("context-graph-assert");
-  const projectId = entityId<"task">("context-graph-project");
+  const rootId = entityId<"task">("context-pipeline-root");
+  const ingestId = entityId<"task">("context-pipeline-ingest");
+  const assertId = entityId<"task">("context-pipeline-assert");
+  const projectId = entityId<"task">("context-pipeline-project");
   let state = createEmptyBoardState();
   const create = (task: Parameters<typeof applyCommand>[1] & { command: "CreateTask" }) => {
     state = applyCommand(state, task, { actor: { type: "system", id: "test" }, now }).state;
@@ -70,23 +70,23 @@ test("failed automated dependencies terminate their workflow without synthetic b
     blocksParentCompletion: false,
     task: {
       id: rootId,
-      type: "context_graph_build",
+      type: "fixture_build",
       kind: "aggregate",
-      title: "Build contextGraph",
+      title: "Build fixture pipeline",
       assigneeRole: "system",
-      dedupeKey: "contextGraph:root"
+      dedupeKey: "contextPipeline:root"
     }
   });
   create({
     command: "CreateTask",
     task: {
       id: ingestId,
-      type: "context_graph_ingest",
+      type: "fixture_ingest",
       kind: "dispatchable",
       title: "Ingest",
       assigneeRole: "worker",
-      dedupeKey: "contextGraph:ingest",
-      dispatchTopic: "run-context-graph-ingest",
+      dedupeKey: "contextPipeline:ingest",
+      dispatchTopic: "run-context-pipeline-ingest",
       parentTaskId: rootId
     }
   });
@@ -94,12 +94,12 @@ test("failed automated dependencies terminate their workflow without synthetic b
     command: "CreateTask",
     task: {
       id: assertId,
-      type: "context_graph_assert",
+      type: "fixture_transform",
       kind: "dispatchable",
-      title: "Assert",
+      title: "Transform",
       assigneeRole: "worker",
-      dedupeKey: "contextGraph:assert",
-      dispatchTopic: "run-context-graph-assert",
+      dedupeKey: "contextPipeline:assert",
+      dispatchTopic: "run-context-pipeline-assert",
       parentTaskId: rootId
     },
     dependencies: [
@@ -116,12 +116,12 @@ test("failed automated dependencies terminate their workflow without synthetic b
     command: "CreateTask",
     task: {
       id: projectId,
-      type: "context_graph_project",
+      type: "fixture_publish",
       kind: "dispatchable",
-      title: "Project",
+      title: "Publish",
       assigneeRole: "worker",
-      dedupeKey: "contextGraph:project",
-      dispatchTopic: "run-context-graph-project",
+      dedupeKey: "contextPipeline:project",
+      dispatchTopic: "run-context-pipeline-project",
       parentTaskId: rootId
     },
     dependencies: [
@@ -225,7 +225,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
       {
         id: entityId<"board_outbox_message">("message-a"),
         taskId: firstTask,
-        topic: "run-context-graph-assert",
+        topic: "run-context-pipeline-assert",
         idempotencyKey: "a:1",
         status: "leased",
         payload: { taskId: firstTask, attempt: 1 },
@@ -237,7 +237,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
       {
         id: entityId<"board_outbox_message">("message-b"),
         taskId: secondTask,
-        topic: "run-context-graph-assert",
+        topic: "run-context-pipeline-assert",
         idempotencyKey: "b:1",
         status: "pending",
         payload: { taskId: secondTask, attempt: 1 },
@@ -247,7 +247,7 @@ test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
   };
 
   const claimed = leaseNextOutboxMessage(state, {
-    topics: ["run-context-graph-assert"],
+    topics: ["run-context-pipeline-assert"],
     taskIds: [firstTask],
     leaseId: "new",
     now: "2026-01-01T00:02:00.000Z",

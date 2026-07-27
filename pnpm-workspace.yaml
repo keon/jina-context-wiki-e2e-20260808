@@ -24,6 +24,9 @@ overrides:
   # libvips advisory; the admin app uses no next/image, so force the patched
   # line to keep `pnpm audit --prod --audit-level=high` clean.
   "sharp": ">=0.35.0"
+  # Patched transitive releases for minimatch/ESLint and the Daytona SDK.
+  "brace-expansion": ">=5.0.8"
+  "tar": ">=7.5.21"
 
 minimumReleaseAgeExclude:
   - knip@6.29.0

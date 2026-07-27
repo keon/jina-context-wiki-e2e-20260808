@@ -40,13 +40,15 @@ function metadataText(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function contextGraphScope(metadata: Readonly<Record<string, unknown>>): string {
+function contextBuildScope(metadata: Readonly<Record<string, unknown>>): string {
   return `${metadataText(metadata.tenantId)}:${metadataText(metadata.repository)}:${metadataText(metadata.ref)}`;
 }
 
+const contextTaskTypes = new Set(["build-context", "ingest-evidence", "derive-knowledge", "index-context"]);
+
 /**
  * Splits tasks into the operational board and its history: superseded work,
- * and context-graph tasks that no longer belong to the latest build request
+ * and context-engine tasks that no longer belong to the latest build request
  * for their repository/ref scope.
  */
 export function partitionBoardTasks(tasks: readonly BoardTask[]): {
@@ -55,10 +57,10 @@ export function partitionBoardTasks(tasks: readonly BoardTask[]): {
 } {
   const latestRequestByScope = new Map<string, { requestKey: unknown; createdAt: string; id: string }>();
   for (const task of tasks) {
-    if (task.type !== "context_graph_build") continue;
+    if (task.type !== "build-context") continue;
     const metadata = task.metadata ?? {};
     if (!metadata.repository || !metadata.ref || !metadata.requestKey) continue;
-    const scope = contextGraphScope(metadata);
+    const scope = contextBuildScope(metadata);
     const existing = latestRequestByScope.get(scope);
     const createdAt = String(task.createdAt);
     if (!existing || createdAt > existing.createdAt || (createdAt === existing.createdAt && task.id > existing.id)) {
@@ -69,10 +71,9 @@ export function partitionBoardTasks(tasks: readonly BoardTask[]): {
   const history: BoardTask[] = [];
   for (const task of tasks) {
     const metadata = task.metadata ?? {};
-    const contextGraphTask =
-      task.type.startsWith("context_graph_") && metadata.repository && metadata.ref && metadata.requestKey;
-    if (contextGraphTask) {
-      const scope = contextGraphScope(metadata);
+    const contextTask = contextTaskTypes.has(task.type) && metadata.repository && metadata.ref && metadata.requestKey;
+    if (contextTask) {
+      const scope = contextBuildScope(metadata);
       const latest = latestRequestByScope.get(scope);
       (latest && latest.requestKey === metadata.requestKey ? current : history).push(task);
     } else {

@@ -8,7 +8,7 @@ export type WorkerFailureCategory =
   | "git_checkout"
   | "daytona"
   | "model"
-  | "context_graph_validation"
+  | "context_validation"
   | "lease"
   | "worker_execution";
 
@@ -28,8 +28,7 @@ export function workerFailureCategory(reason: string): WorkerFailureCategory {
   if (/clone|repository ref|prepared commit|git fetch|git checkout/.test(value)) return "git_checkout";
   if (/daytona|sandbox/.test(value)) return "daytona";
   if (/openai|openrouter|codex|model_provider/.test(value)) return "model";
-  if (/evidence|citation|contextGraph output|contextGraph result|schema|assertion/.test(value))
-    return "context_graph_validation";
+  if (/evidence|citation|knowledge output|context result|schema|document/.test(value)) return "context_validation";
   if (/lease|completion/.test(value)) return "lease";
   return "worker_execution";
 }

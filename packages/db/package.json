@@ -16,8 +16,7 @@
     "test": "pnpm build && node --test dist/*.test.js"
   },
   "dependencies": {
-    "@jina/context-graph": "workspace:*",
-    "@jina/shared-kernel": "workspace:*",
+    "@jina/context-engine": "workspace:*",
     "pg": "^8.22.0"
   },
   "devDependencies": {

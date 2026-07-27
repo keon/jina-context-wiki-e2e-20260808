@@ -6,15 +6,16 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/acceptance.test.js dist/diagnostics.test.js dist/history-limit.test.js dist/server.test.js",
+    "test": "pnpm build && node --test dist/acceptance.test.js dist/completion.test.js dist/diagnostics.test.js dist/git-ref.test.js dist/git-tree.test.js",
     "start": "node dist/server.js"
   },
   "dependencies": {
     "@jina/ai": "workspace:*",
-    "@jina/context-graph": "workspace:*",
+    "@jina/context-engine": "workspace:*",
     "@jina/daytona": "workspace:*",
     "@jina/github": "workspace:*",
-    "@jina/observability": "workspace:*"
+    "@jina/observability": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

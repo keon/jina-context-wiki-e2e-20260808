@@ -51,7 +51,7 @@ export function HistoryInspector({
       <EvidenceSection evidence={evidence} />
       <ExplanationSection value={historyEventExplanation(event, context.task)} />
       {payload && Object.keys(payload).length ? (
-        <section className="context-graph-inspector-section">
+        <section className="inspector-section-block">
           <h3>Payload</h3>
           <pre className="inspector-payload">{JSON.stringify(payload, null, 2)}</pre>
         </section>

@@ -15,7 +15,7 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("Unable to fetch prepared commit"), "git_checkout");
   assert.equal(workerFailureCategory("Daytona sandbox creation failed"), "daytona");
   assert.equal(workerFailureCategory("Codex contextGraph build failed"), "model");
-  assert.equal(workerFailureCategory("citation path is outside the checkout"), "context_graph_validation");
+  assert.equal(workerFailureCategory("citation path is outside the checkout"), "context_validation");
   assert.equal(workerFailureCategory("stale worker lease"), "lease");
   assert.equal(workerFailureCategory("unexpected failure with private details"), "worker_execution");
 });

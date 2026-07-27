@@ -42,6 +42,24 @@ steps:
       - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
       - .
 
+  - id: build-dashboard
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    args:
+      - build
+      - --file=apps/dashboard/Dockerfile
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
+      - .
+
+  - id: build-admin
+    name: gcr.io/cloud-builders/docker
+    waitFor: [validate]
+    args:
+      - build
+      - --file=apps/admin/Dockerfile
+      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID
+      - .
+
   - id: push-api
     name: gcr.io/cloud-builders/docker
     waitFor: [build-api]
@@ -62,9 +80,19 @@ steps:
         docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
         docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
 
+  - id: push-dashboard
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-dashboard]
+    args: [push, us-central1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID]
+
+  - id: push-admin
+    name: gcr.io/cloud-builders/docker
+    waitFor: [build-admin]
+    args: [push, us-central1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID]
+
   - id: deploy-backend
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
-    waitFor: [push-api, push-worker]
+    waitFor: [push-api, push-worker, push-dashboard, push-admin]
     entrypoint: bash
     args: [scripts/cloud-build-deploy.sh]
     env:
@@ -72,14 +100,12 @@ steps:
       - GCP_REGION=us-central1
       - CLOUD_BUILD_ID=$BUILD_ID
       - CLOUD_SQL_INSTANCE=${_CLOUD_SQL_INSTANCE}
-      - GRAPH_CLOUD_SQL_INSTANCE=${_GRAPH_CLOUD_SQL_INSTANCE}
       - JINA_TENANCY_MODE=${_JINA_TENANCY_MODE}
       - JINA_DB_NAME=${_JINA_DB_NAME}
       - JINA_DB_USER=${_JINA_DB_USER}
       - JINA_DB_PASS_SECRET=${_JINA_DB_PASS_SECRET}
-      - JINA_GRAPH_DB_NAME=${_JINA_GRAPH_DB_NAME}
-      - JINA_GRAPH_DB_USER=${_JINA_GRAPH_DB_USER}
-      - JINA_GRAPH_DB_PASS_SECRET=${_JINA_GRAPH_DB_PASS_SECRET}
+      - JINA_MIGRATION_DB_USER=${_JINA_MIGRATION_DB_USER}
+      - JINA_MIGRATION_DB_PASS_SECRET=${_JINA_MIGRATION_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
       - JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
@@ -87,30 +113,42 @@ steps:
       - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
       - JINA_API_CPU=${_JINA_API_CPU}
       - JINA_API_MEMORY=${_JINA_API_MEMORY}
+      - JINA_CONTEXT_WORKER_MEMORY=${_JINA_CONTEXT_WORKER_MEMORY}
+      - JINA_CONTEXT_CUTOVER=${_JINA_CONTEXT_CUTOVER}
+      - JINA_CONTEXT_CUTOVER_BACKUP_ID=${_JINA_CONTEXT_CUTOVER_BACKUP_ID}
+      - JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID=${_JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID}
+      - JINA_LEGACY_CUTOVER_TENANT_IDS=${_JINA_LEGACY_CUTOVER_TENANT_IDS}
+      - JINA_RELEASE_SHA=${_JINA_RELEASE_SHA}
+      - JINA_BUILD_COMMIT_SHA=$COMMIT_SHA
     timeout: 4200s
 
 substitutions:
-  # Identity/control-plane reads stay on the original Jina database. ContextGraph
-  # ingestion and projections use the dedicated same-region database.
+  # Identity/control-plane and context schemas share the production database;
+  # tenant isolation is enforced by bound principals, tenant-scoped SQL, and
+  # NOINHERIT capability roles. RLS additionally fences consumer-owned queues.
   _CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db
-  _GRAPH_CLOUD_SQL_INSTANCE: jina-v2:us-central1:jina-postgres
   _JINA_TENANCY_MODE: shared-db
   _JINA_DB_NAME: jina
   _JINA_DB_USER: jina_v2_app
   _JINA_DB_PASS_SECRET: jina-shared-db-password:latest
-  _JINA_GRAPH_DB_NAME: jina
-  _JINA_GRAPH_DB_USER: jina_app
-  _JINA_GRAPH_DB_PASS_SECRET: jina-db-password:latest
+  _JINA_MIGRATION_DB_USER: jina_app
+  _JINA_MIGRATION_DB_PASS_SECRET: jina-primary-owner-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
   _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
-  # start. Scale to three for concurrent ingestion and projection traffic; drain
-  # work is single-flight per process and tenant-locked across instances.
+  # start. The API owns three PostgreSQL pools whose configured maxima total 18
+  # connections, so keep one instance until the pools share a bounded budget.
   _JINA_API_MIN_INSTANCES: "1"
-  _JINA_API_MAX_INSTANCES: "3"
-  _JINA_API_CONCURRENCY: "20"
+  _JINA_API_MAX_INSTANCES: "1"
+  _JINA_API_CONCURRENCY: "10"
   _JINA_API_CPU: "1"
-  _JINA_API_MEMORY: 512Mi
+  _JINA_API_MEMORY: 1Gi
+  _JINA_CONTEXT_WORKER_MEMORY: 1Gi
+  _JINA_CONTEXT_CUTOVER: "false"
+  _JINA_CONTEXT_CUTOVER_BACKUP_ID: "0"
+  _JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID: "0"
+  _JINA_LEGACY_CUTOVER_TENANT_IDS: unset
+  _JINA_RELEASE_SHA: unset
 
 timeout: 7200s
 serviceAccount: projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com

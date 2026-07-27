@@ -2,6 +2,10 @@
 
 Date: 2026-07-21
 
+> **Archived benchmark.** This measured a deleted graph-first query path and is not
+> representative of the current context engine. The current evaluation entry point is
+> [CONTEXT_ENGINE_EVALUATION.md](CONTEXT_ENGINE_EVALUATION.md).
+
 ## Evidence status
 
 This file is a historical architecture-decision record, not a reproducible
@@ -16,9 +20,12 @@ generator, record the PostgreSQL version and relevant settings, emit raw samples
 or a machine-readable summary, and compare result parity before updating the
 numbers in this document.
 
-## Decision
+## Historical decision
 
-`issue_trace` reads the materialized relational graph directly. The former per-issue JSON cache is not retained because direct traversal meets the 100 ms database p95 target at the tested scale. `context_graph_project` remains the exclusive owner of graph materialization; retrieval performs no writes.
+The old `issue_trace` path read its materialized relational graph directly. Its per-issue
+JSON cache was removed because direct traversal met the 100 ms database p95 target at the
+tested scale. Both the query and graph materialization it measured were later removed by
+the clean context-engine cutover.
 
 ## Method
 
@@ -37,6 +44,9 @@ The scaled fixture contained one graph generation with 5,000 Issues, 5,000 Pull 
 
 The initial unindexed full-graph direct implementation measured 855.2 ms p95 at synthetic scale. Narrowing traversal to the selected issue neighborhood and adding relational indexes reduced p95 to 35.7 ms. The optimized direct path is slower than denormalized JSON, but it avoids duplicated projection logic and remains well within the target.
 
-## Revisit condition
+## Historical revisit condition
 
-Reconsider a dedicated cache only if production telemetry shows direct `issue_trace` database latency above 100 ms p95 on representative repository sizes after query/index tuning. Any future cache must remain disposable, be written only by `context_graph_project`, and pass result-parity tests against direct graph traversal.
+The original decision proposed reconsidering a dedicated cache only if direct traversal
+exceeded 100 ms p95. That condition no longer applies because the route does not exist.
+Any new structural-query cache needs a current fixture, checked-in benchmark command,
+result-parity test, ACL isolation, and generation-scoped invalidation.

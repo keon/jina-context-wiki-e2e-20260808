@@ -30,7 +30,7 @@ export async function createGitHubInstallationAccessToken(
     headers: {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${appJwt}`,
-      "user-agent": "jina-context-graph-worker",
+      "user-agent": "jina-context-engine-worker",
       "x-github-api-version": "2022-11-28"
     }
   });

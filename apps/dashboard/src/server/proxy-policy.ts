@@ -9,17 +9,22 @@ export function isAllowedDashboardApiRequest(
       pathname === "/api/events" ||
       pathname === "/api/overview" ||
       pathname === "/api/task-types" ||
-      pathname === "/api/context-graph" ||
-      pathname === "/api/context-graph/assertions" ||
-      pathname === "/api/context-graph/execution-settings");
+      pathname === "/api/context/generations" ||
+      /^\/api\/context\/generations\/[^/]+$/.test(pathname) ||
+      pathname === "/api/context/documents" ||
+      /^\/api\/context\/documents\/[^/]+$/.test(pathname) ||
+      pathname === "/api/context/metrics" ||
+      pathname === "/api/context/structure");
   const allowedLocalDemo = !hasInternalApiToken && method === "POST" && pathname === "/api/dev/webhooks/github";
-  const allowedContextGraphQuery =
+  const allowedContextMutation =
     method === "POST" &&
-    (pathname === "/api/context-graph/ask" ||
-      pathname === "/api/context-graph/commands" ||
-      pathname === "/api/context-graph/execution-settings");
+    (pathname === "/api/context/build" ||
+      pathname === "/api/context/query" ||
+      pathname === "/api/context/rebuild" ||
+      pathname === "/api/context/erasure" ||
+      /^\/api\/context\/knowledge\/[^/]+\/review$/.test(pathname));
 
-  return allowedRead || allowedLocalDemo || allowedContextGraphQuery;
+  return allowedRead || allowedLocalDemo || allowedContextMutation;
 }
 
 export interface DashboardPrincipalInput {

@@ -9,7 +9,7 @@
     { "path": "./packages/board" },
     { "path": "./packages/review" },
     { "path": "./packages/context" },
-    { "path": "./packages/context-graph" },
+    { "path": "./packages/context-engine" },
     { "path": "./packages/publication" },
     { "path": "./packages/policy" },
     { "path": "./packages/db" },

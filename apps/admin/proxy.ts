@@ -6,8 +6,6 @@ import { evaluateAdminAccess } from "./lib/admin-auth";
 export function proxy(request: NextRequest): NextResponse {
   const decision = evaluateAdminAccess({
     authRequired: Boolean(process.env.INTERNAL_API_TOKEN?.trim() || process.env.JINA_GLOBAL_ADMIN_TOKEN?.trim()),
-    iapEmailHeader: request.headers.get("x-goog-authenticated-user-email"),
-    allowlistRaw: process.env.JINA_ADMIN_ALLOWED_EMAILS,
     authorizationHeader: request.headers.get("authorization"),
     webAuthUsername: process.env.JINA_WEB_AUTH_USERNAME,
     webAuthPassword: process.env.JINA_WEB_AUTH_PASSWORD
@@ -26,7 +24,7 @@ export function proxy(request: NextRequest): NextResponse {
   }
   const requestHeaders = new Headers(request.headers);
   // Never trust a caller-supplied actor. Replace it with the identity that
-  // passed this app's IAP/basic-auth boundary before forwarding internally.
+  // passed this app's Basic-auth boundary before forwarding internally.
   requestHeaders.set("x-jina-admin-actor-id", decision.actorId);
   return NextResponse.next({ request: { headers: requestHeaders } });
 }

@@ -7,5 +7,5 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../context-graph" }, { "path": "../shared-kernel" }]
+  "references": [{ "path": "../context-engine" }, { "path": "../shared-kernel" }]
 }

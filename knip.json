@@ -5,6 +5,9 @@
     "apps/api": {
       "entry": ["src/dev-server.ts", "src/**/*.test.ts"]
     },
+    "apps/worker": {
+      "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]
+    },
     "apps/workflows": {
       "entry": [
         "src/cli/review-pr.ts",

@@ -74,59 +74,183 @@ export interface TaskTypeDefinition {
   readonly triggeredBy?: readonly TaskTypeTrigger[];
 }
 
-export interface ContextGraphNode {
-  readonly id: string;
-  readonly kind: string;
-  readonly label: string;
-  readonly description: string;
-  readonly path?: string;
-  readonly evidence: readonly string[];
+type KnowledgeDocumentKind =
+  | "architecture"
+  | "component"
+  | "feature"
+  | "decision"
+  | "change_summary"
+  | "incident"
+  | "issue_explanation"
+  | "ownership"
+  | "runbook"
+  | "glossary";
+
+export interface ContextCitation {
+  readonly id?: string;
+  readonly tenantId?: string;
+  readonly sourceType: string;
+  readonly sourceId: string;
+  readonly repository: string;
+  readonly commitSha?: string;
+  readonly pathOrUrl?: string;
+  readonly startLine?: number;
+  readonly endLine?: number;
+  readonly jsonPointer?: string;
+  readonly observedAt?: string;
+  readonly contentDigest?: string;
+  readonly excerpt?: string;
+  readonly url?: string;
 }
 
-export interface ContextGraphEdge {
+export interface ContextGeneration {
   readonly id: string;
-  readonly source: string;
-  readonly target: string;
-  readonly predicate: string;
-  readonly plane: "code" | "knowledge";
-  readonly confidence?: number;
-  readonly why?: string;
-  readonly qualifiers?: Readonly<Record<string, unknown>>;
-  readonly evidence: readonly string[];
-}
-
-export interface ContextGraph {
-  readonly id: string;
-  readonly tenantId: string;
   readonly repository: string;
   readonly ref: string;
   readonly commitSha: string;
-  readonly generatedAt: string;
-  readonly generator: {
-    readonly executor: string;
-    readonly model: string;
-    readonly sandboxId?: string;
-  };
-  readonly summary: string;
-  readonly nodes: readonly ContextGraphNode[];
-  readonly edges: readonly ContextGraphEdge[];
-}
-
-export interface ContextGraphAssertion {
-  readonly id: string;
   readonly status: string;
-  readonly predicate: string;
-  readonly subject: { readonly kind: string; readonly label: string; readonly naturalKey?: string };
-  readonly object: { readonly kind: string; readonly label: string; readonly naturalKey?: string };
-  readonly explanation?: string;
-  readonly confidence?: number;
-  readonly evidence?: readonly string[];
-  readonly [key: string]: unknown;
+  readonly derivedKnowledge: "available" | "partial" | "unavailable";
+  readonly projectors: Readonly<Record<string, string>> | readonly ContextProjector[];
+  readonly createdAt: string;
+  readonly publishedAt?: string;
 }
 
-/** GET /api/context-graph — graph state plus an optional assertion queue. */
-export interface ContextGraphResponse {
-  readonly latest: ContextGraph | null;
-  readonly graphs: readonly Readonly<Record<string, unknown>>[];
-  readonly assertions?: readonly ContextGraphAssertion[];
+export interface ContextProjector {
+  readonly name: string;
+  readonly status: string;
+  readonly checkpoint?: string;
+  readonly backlog?: number;
+  readonly version?: string;
+  readonly durationMs?: number;
+  readonly error?: string;
+}
+
+export interface ContextGenerationsResponse {
+  readonly generations: readonly ContextGeneration[];
+  readonly nextCursor?: string;
+}
+
+export interface KnowledgeDocumentSummary {
+  readonly id: string;
+  readonly logicalId: string;
+  readonly repository: string;
+  readonly kind: KnowledgeDocumentKind;
+  readonly title: string;
+  readonly summary: string;
+  readonly confidence: number;
+  readonly reviewStatus: string;
+  readonly commitSha: string;
+  readonly generatorName: string;
+  readonly generatorVersion: string;
+  readonly model: string;
+  readonly promptVersion: string;
+  readonly createdAt: string;
+}
+
+interface KnowledgeRevisionEvent {
+  readonly id?: string;
+  readonly action?: string;
+  readonly type?: string;
+  readonly reason?: string;
+  readonly actorId?: string;
+  readonly createdAt?: string;
+  readonly at?: string;
+}
+
+export interface KnowledgeDocument extends KnowledgeDocumentSummary {
+  readonly bodyMarkdown: string;
+  readonly structuredSummary: Readonly<Record<string, unknown>>;
+  readonly scope: {
+    readonly ref?: string;
+    readonly commitSha?: string;
+    readonly paths?: readonly string[];
+    readonly symbols?: readonly string[];
+    readonly pullRequests?: readonly string[];
+    readonly issues?: readonly string[];
+  };
+  readonly citations: readonly KnowledgeCitation[];
+  readonly events: readonly KnowledgeRevisionEvent[];
+  readonly priorRevisionId?: string;
+  readonly validation?: Readonly<Record<string, unknown>>;
+}
+
+interface KnowledgeCitation {
+  readonly id: string;
+  readonly revisionId: string;
+  readonly ordinal: number;
+  readonly claim: string;
+  readonly anchor: ContextCitation;
+}
+
+export interface ContextDocumentsResponse {
+  readonly documents: readonly KnowledgeDocumentSummary[];
+  readonly nextCursor?: string;
+}
+
+export interface ContextDocumentResponse {
+  readonly document: KnowledgeDocument;
+}
+
+interface ContextConflict {
+  readonly subject: string;
+  readonly description: string;
+  readonly citationIds: readonly string[];
+}
+
+export interface ContextQueryResponse {
+  readonly answer: string;
+  readonly generation: {
+    readonly id: string;
+    readonly ref: string;
+    readonly commitSha: string;
+    readonly derivedKnowledge: "available" | "partial" | "unavailable";
+  };
+  readonly citations: readonly QueryCitation[];
+  readonly conflicts: readonly ContextConflict[];
+  readonly ambiguities: readonly string[];
+  readonly coverage: {
+    readonly status: "complete" | "partial" | "insufficient";
+    readonly missing: readonly string[];
+    readonly retrieversUsed: readonly string[];
+  };
+  readonly traceId: string;
+}
+
+export interface QueryCitation {
+  readonly id: string;
+  readonly title: string;
+  readonly excerpt: string;
+  readonly anchors: readonly ContextCitation[];
+  readonly authorityClass: string;
+  readonly sourceKind: "code" | "provider" | "knowledge";
+  readonly sourceId: string;
+  readonly sourceRevisionId?: string;
+}
+
+export interface ContextMetricsResponse {
+  readonly outboxDepthByConsumer: Readonly<Record<string, number>>;
+  readonly oldestPendingAt?: string;
+  readonly publishedGenerationCount: number;
+  readonly documentCount: number;
+  readonly fragmentCount: number;
+  readonly hierarchyNodeCount: number;
+  readonly embeddingCount: number;
+  readonly query: {
+    readonly count: number;
+    readonly p95Ms: number;
+    readonly citationFailureCount: number;
+    readonly conflictCount: number;
+  };
+  readonly projectors: readonly ContextProjector[];
+}
+
+export interface StructuralRelation {
+  readonly kind: string;
+  readonly from: string;
+  readonly to: string;
+  readonly anchors: readonly ContextCitation[];
+}
+
+export interface ContextStructureResponse {
+  readonly relations: readonly StructuralRelation[];
 }

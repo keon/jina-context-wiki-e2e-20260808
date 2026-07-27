@@ -13,6 +13,6 @@
     { "path": "../../packages/daytona" },
     { "path": "../../packages/github" },
     { "path": "../../packages/observability" },
-    { "path": "../../packages/context-graph" }
+    { "path": "../../packages/context-engine" }
   ]
 }

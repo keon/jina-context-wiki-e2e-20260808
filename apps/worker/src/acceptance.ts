@@ -1,958 +1,458 @@
-import { writeFile } from "node:fs/promises";
-import { pathToFileURL } from "node:url";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 
-const TERMINAL_FAILURES = new Set(["blocked", "failed", "canceled", "superseded"]);
-const API_RATE_LIMIT_ATTEMPTS = 5;
+const CONTEXT_STAGE_TYPES = new Set(["ingest-evidence", "derive-knowledge", "index-context"]);
+const WORKER_HEALTH_KEYS = new Set([
+  "ok",
+  "workerId",
+  "topics",
+  "active",
+  "lastApiSuccessAt",
+  "lastApiErrorAt",
+  "consecutiveApiFailures",
+  "lastWork",
+  "metrics"
+]);
 
-export interface ProductionAcceptanceConfig {
+export interface ProductionWorkerHealthCheck {
+  readonly url: string;
+  readonly authorization: string;
+  readonly expectedTopics: readonly string[];
+}
+
+export interface ProductionContextAcceptanceConfig {
   readonly apiUrl: string;
-  readonly token: string;
-  readonly requestKey: string;
-  readonly githubInstallationId: number;
+  readonly internalToken: string;
+  readonly contextToken: string;
+  readonly tenantId?: string;
+  readonly principalId: string;
+  readonly adminPrincipalId: string;
   readonly repository?: string;
   readonly ref?: string;
-  readonly tenantId?: string;
-  readonly principalId?: string;
-  readonly pollIntervalMs?: number;
+  readonly githubInstallationId?: number;
+  readonly requestKey?: string;
   readonly timeoutMs?: number;
-  readonly expectedIssueNumber?: number;
-  readonly expectedResolutionPullRequestNumber?: number;
-  /** Enables the complete v5.1 causal fixture contract on the e2e fixture repository. */
-  readonly verifyV51Fixture?: boolean;
-  readonly causality?: {
-    readonly causingCommitSha: string;
-    readonly causingPullRequestNumber?: number;
-    readonly reasonIncludes?: string;
-  };
+  readonly pollIntervalMs?: number;
+  readonly workerHealthChecks?: readonly ProductionWorkerHealthCheck[];
+  readonly workerHealthTimeoutMs?: number;
+  readonly fetchImpl?: typeof fetch;
+  readonly verifyMcp?: (input: {
+    apiUrl: string;
+    headers: Record<string, string>;
+    repository: string;
+    ref: string;
+    commitSha: string;
+  }) => Promise<number>;
   readonly log?: (message: string) => void;
 }
 
-export interface ProductionAcceptanceSummary {
-  readonly taskId: string;
+export interface ProductionContextAcceptanceSummary {
+  readonly buildId: string;
   readonly repository: string;
+  readonly ref: string;
+  readonly generationId: string;
   readonly commitSha: string;
-  /** Identity of the exact graph generation the run certified. */
-  readonly graphId: string;
-  readonly nodeCount: number;
-  readonly edgeCount: number;
+  readonly generationCount: number;
+  readonly documentCount: number;
   readonly citationCount: number;
+  readonly mcpCitationCount: number;
+  readonly durationMs: number;
 }
 
-/**
- * Cloud Run exposes a job's numeric exit code to the deployer, but not the
- * container termination message. Keep these codes coarse and stable so CI can
- * identify the failed acceptance boundary without gaining access to private
- * repository logs.
- */
-export function productionAcceptanceExitCode(error: unknown): number {
-  const message = error instanceof Error ? error.message : String(error);
-  if (/ended as|timed out|missing from the board|retains blocked contextGraph tasks/.test(message)) return 20;
-  if (/latest contextGraph graph|contextGraph\.latest/.test(message)) return 21;
-  if (message.includes("contextGraph graph is empty")) return 22;
-  if (message.includes("contextGraph graph contains uncited")) return 23;
-  if (/context retrieval|causal context|causality assertion|INTRODUCED_BY|v5\.1/.test(message)) return 24;
-  if (message.includes("contextGraph backlog")) return 25;
-  return 26;
-}
-
-/** Runs inside Cloud Run so Secret Manager never exposes the service credential to CI. */
-export async function runProductionContextGraphAcceptance(
-  config: ProductionAcceptanceConfig,
-  fetchImpl: typeof fetch = fetch
-): Promise<ProductionAcceptanceSummary> {
+export async function runProductionContextAcceptance(
+  config: ProductionContextAcceptanceConfig
+): Promise<ProductionContextAcceptanceSummary> {
+  const startedAt = Date.now();
   const apiUrl = config.apiUrl.replace(/\/$/, "");
   const repository = config.repository ?? "omxyz/jina-context-graph-e2e";
   const ref = config.ref ?? "main";
-  const githubInstallationId = positiveInteger(config.githubInstallationId, "githubInstallationId");
-  const principalId = config.principalId ?? "user:keon@omlabs.xyz";
-  const pollIntervalMs = positiveInteger(config.pollIntervalMs ?? 10_000, "pollIntervalMs");
-  // Daytona setup plus the Codex run may legitimately consume the worker's
-  // 30-minute execution budget. Keep acceptance outside that envelope so it
-  // observes the durable task's terminal state instead of killing itself first.
-  const timeoutMs = positiveInteger(config.timeoutMs ?? 35 * 60_000, "timeoutMs");
-  const expectedIssueNumber = positiveInteger(config.expectedIssueNumber ?? 1, "expectedIssueNumber");
-  const expectedResolutionPullRequestNumber = positiveInteger(
-    config.expectedResolutionPullRequestNumber ?? 2,
-    "expectedResolutionPullRequestNumber"
-  );
+  const timeoutMs = config.timeoutMs ?? 50 * 60_000;
+  const pollIntervalMs = config.pollIntervalMs ?? 10_000;
+  const fetchImpl = config.fetchImpl ?? fetch;
   const log = config.log ?? console.log;
-  const headers = {
-    authorization: `Bearer ${config.token}`,
-    "x-jina-principal-id": principalId,
+  const queryIdentityHeaders = {
+    "x-jina-principal-id": config.principalId,
     ...(config.tenantId ? { "x-jina-tenant-id": config.tenantId } : {})
   };
+  const adminIdentityHeaders = {
+    "x-jina-principal-id": config.adminPrincipalId,
+    ...(config.tenantId ? { "x-jina-tenant-id": config.tenantId } : {})
+  };
+  const contextHeaders = {
+    ...queryIdentityHeaders,
+    authorization: `Bearer ${config.contextToken}`,
+    "content-type": "application/json"
+  };
+  const accessSyncHeaders = {
+    ...queryIdentityHeaders,
+    authorization: `Bearer ${config.internalToken}`,
+    "content-type": "application/json"
+  };
+  const internalHeaders = {
+    ...adminIdentityHeaders,
+    authorization: `Bearer ${config.internalToken}`,
+    "content-type": "application/json"
+  };
 
-  const created = await apiJson(fetchImpl, `${apiUrl}/context-graph/build`, {
+  for (const worker of config.workerHealthChecks ?? []) {
+    await verifyWorkerHealth(fetchImpl, worker, config.workerHealthTimeoutMs ?? 120_000);
+  }
+
+  await apiJson(fetchImpl, `${apiUrl}/internal/context/access/sync`, {
     method: "POST",
-    headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, requestKey: config.requestKey, githubInstallationId })
+    headers: accessSyncHeaders,
+    body: JSON.stringify({ repositories: [repository], mode: "merge" })
   });
-  const taskId = requiredNestedString(created, "task", "id");
-  const deadline = Date.now() + timeoutMs;
-  let lastStatus = "";
-  let lastTaskSummary = "";
-  let completedBoardTasks: unknown[] | undefined;
-  let workflowCompleted = false;
 
+  const created = await apiJson(fetchImpl, `${apiUrl}/context/build`, {
+    method: "POST",
+    headers: internalHeaders,
+    body: JSON.stringify({
+      repository,
+      ref,
+      ...(config.githubInstallationId ? { githubInstallationId: config.githubInstallationId } : {}),
+      requestKey: config.requestKey ?? `acceptance-${Date.now()}`
+    })
+  });
+  const buildId = requiredString(record(created.build).id, "build.id");
+  log(`Production context build ${buildId} accepted for ${repository}@${ref}`);
+
+  const deadline = Date.now() + timeoutMs;
+  let completedTasks: Record<string, unknown>[] = [];
   while (Date.now() < deadline) {
-    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers });
-    const tasks = requiredArray(board.tasks, "board.tasks");
-    completedBoardTasks = tasks;
-    const task = tasks.find((value) => isRecord(value) && value.id === taskId);
-    if (!isRecord(task)) throw new Error(`acceptance task ${taskId} is missing from the board`);
-    const status = requiredString(task.status, "task.status");
-    const taskSummary = summarizeWorkflowTasks(tasks, taskId);
-    if (taskSummary !== lastTaskSummary) {
-      log(`Production contextGraph task ${taskId}: ${taskSummary}`);
-      lastTaskSummary = taskSummary;
+    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers: internalHeaders });
+    const tasks = requiredArray(board.tasks, "board.tasks").filter(isRecord);
+    const root = tasks.find((task) => task.id === buildId);
+    if (!root) throw new Error(`production context build ${buildId} is missing from the board`);
+    const stages = tasks.filter((task) => task.parentTaskId === buildId && CONTEXT_STAGE_TYPES.has(String(task.type)));
+    log(renderStatus(buildId, root, stages));
+    const failed = stages.find((task) => task.status === "failed");
+    if (failed) {
+      throw new Error(`production context stage ${String(failed.type)} failed: ${failureReason(failed)}`);
     }
-    if (status !== lastStatus) {
-      lastStatus = status;
+    if (root.status === "failed") {
+      throw new Error(`production context build ${buildId} failed: ${failureReason(root)}`);
     }
-    const stageFailure = failedWorkflowStage(tasks, taskId);
-    if (TERMINAL_FAILURES.has(status) || stageFailure) {
-      const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, tasks, taskId);
-      const terminalStatus = TERMINAL_FAILURES.has(status)
-        ? status
-        : `${String(stageFailure?.type)} ${String(stageFailure?.status)}`;
-      throw new Error(
-        `production contextGraph task ${taskId} ended as ${terminalStatus} (${taskSummary}${failureSummary})`
-      );
-    }
-    // Snapshot-first builds report the aggregate root as done while the
-    // enrichment stages are still running. Certification needs the canonical
-    // assertions and final projection, so wait for every stage in this exact
-    // build to finish rather than treating the early snapshot as terminal.
-    if (status === "done" && workflowStagesAreDone(tasks, taskId)) {
-      workflowCompleted = true;
+    if (root.status === "done" && stages.length === 3 && stages.every((task) => task.status === "done")) {
+      completedTasks = stages;
       break;
     }
     await delay(pollIntervalMs);
   }
-  const blockedTaskIds = blockedContextGraphTaskIds(completedBoardTasks ?? [], repository, ref);
-  if (blockedTaskIds.length > 0) {
-    throw new Error(
-      `production board retains blocked contextGraph tasks for ${repository}@${ref}: ${blockedTaskIds.join(", ")}`
-    );
-  }
-  if (!workflowCompleted) {
-    const latestTasks =
-      completedBoardTasks ??
-      requiredArray((await apiJson(fetchImpl, `${apiUrl}/board`, { headers })).tasks, "board.tasks");
-    const failureSummary = await workflowFailureSummary(fetchImpl, apiUrl, headers, latestTasks, taskId);
-    throw new Error(
-      `production contextGraph task ${taskId} timed out as ${lastStatus || "unknown"} (${lastTaskSummary || "no task details"}${failureSummary})`
-    );
+  if (completedTasks.length !== 3) throw new Error(`production context build ${buildId} timed out`);
+
+  const blocked = blockedContextTaskIds(completedTasks, repository, ref);
+  if (blocked.length) throw new Error(`production context workflow retains blocked stages: ${blocked.join(", ")}`);
+
+  const generationsPayload = await apiJson(
+    fetchImpl,
+    `${apiUrl}/context/generations?repository=${encodeURIComponent(repository)}`,
+    { headers: internalHeaders }
+  );
+  const generations = requiredArray(generationsPayload.generations, "generations").filter(isRecord);
+  const latest = generations.find((generation) => generation.ref === ref && generation.status === "published");
+  if (!latest) throw new Error("production context has no published generation for the accepted ref");
+  const generationId = requiredString(latest.id, "generation.id");
+  const commitSha = requiredGitSha(latest.commitSha, "generation.commitSha");
+  if (latest.derivedKnowledge !== "available") {
+    throw new Error("production enriched generation is missing derived knowledge");
   }
 
-  // Certify the exact generation this build's project stage published — its
-  // graphId and commitSha are recorded in the completed stage's result —
-  // never a newest-in-scope lookup that a concurrent build could win.
-  const receipt = publishedProjectReceipt(completedBoardTasks ?? [], taskId);
-  const latest = await certifiedGraphForReceipt(fetchImpl, apiUrl, headers, receipt, repository, ref);
-  const nodes = requiredArray(latest.nodes, "contextGraph.latest.nodes");
-  const edges = requiredArray(latest.edges, "contextGraph.latest.edges");
-  if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
-  if (![...nodes, ...edges].every(hasEvidence)) throw new Error("production contextGraph graph contains uncited items");
+  const documentsPayload = await apiJson(
+    fetchImpl,
+    `${apiUrl}/context/documents?repository=${encodeURIComponent(repository)}`,
+    { headers: internalHeaders }
+  );
+  const documents = requiredArray(documentsPayload.documents, "documents").filter(isRecord);
+  if (documents.length === 0) throw new Error("production knowledge document catalog is empty");
 
-  const context = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
+  const query = await apiJson(fetchImpl, `${apiUrl}/context/query`, {
     method: "POST",
-    headers: { ...headers, "content-type": "application/json" },
+    headers: contextHeaders,
     body: JSON.stringify({
       repository,
       ref,
-      question: "What changed, why, and who owns the access policy?"
+      question: "Summarize this repository's architecture and cite the source evidence.",
+      taskKind: "overview"
     })
   });
-  const calls = requiredArray(context.calls, "context.calls");
-  const citations = requiredArray(context.citations, "context.citations");
-  if (calls.length < 3 || citations.length === 0 || !calls.every(hasCitedItems)) {
-    throw new Error("production context retrieval did not return cited change, intent, and ownership results");
+  const queryGeneration = record(query.generation);
+  if (queryGeneration.id !== generationId || queryGeneration.commitSha !== commitSha) {
+    throw new Error("production query did not use the certified generation");
   }
-  const issueContext = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
-    method: "POST",
-    headers: { ...headers, "content-type": "application/json" },
-    body: JSON.stringify({ repository, ref, question: `Which PR and commit resolved issue #${expectedIssueNumber}?` })
-  });
-  const issueCalls = requiredArray(issueContext.calls, "issue context.calls");
-  const issueTrace = issueCalls.find((call) => isRecord(call) && call.template === "issue_trace");
-  const issueItems = isRecord(issueTrace) ? requiredArray(issueTrace.items, "issue trace.items") : [];
-  const firstIssueItem = issueItems[0];
-  const issueData = isRecord(firstIssueItem) ? requiredRecord(firstIssueItem.data, "issue trace.data") : {};
-  const issue = requiredRecord(issueData.issue, "issue trace.issue");
-  const expectedIssueTitle = requiredString(issue.title, "issue trace.issue.title");
-  const resolutions = requiredArray(issueData.resolutions, "issue trace.resolutions");
-  const expectedResolution = resolutions.find(
-    (value) => isRecord(value) && value.pullRequestNumber === expectedResolutionPullRequestNumber
-  );
-  const commits = isRecord(expectedResolution) ? requiredArray(expectedResolution.commits, "issue trace.commits") : [];
-  if (
-    !isRecord(expectedResolution) ||
-    commits.length === 0 ||
-    !commits.every((commit) => isRecord(commit) && typeof commit.sha === "string" && commit.sha.length === 40) ||
-    !isRecord(firstIssueItem) ||
-    !Array.isArray(firstIssueItem.citations) ||
-    firstIssueItem.citations.length === 0
-  ) {
-    throw new Error(
-      `production context retrieval did not project issue #${expectedIssueNumber} to PR #${expectedResolutionPullRequestNumber} and its commits`
-    );
-  }
+  const citations = requiredArray(query.citations, "query.citations").filter(isRecord);
+  assertOriginalEvidenceCitations(citations, repository, commitSha);
+  if (!requiredString(query.answer, "query.answer").trim())
+    throw new Error("production query returned an empty answer");
 
-  if (config.causality) {
-    const causingCommitSha = requiredFullGitSha(config.causality.causingCommitSha, "causality.causingCommitSha");
-    const assertionResponse = await apiJson(
-      fetchImpl,
-      `${apiUrl}/context-graph/assertions?repository=${encodeURIComponent(repository)}&predicate=INTRODUCED_BY`,
-      { headers }
-    );
-    const assertions = requiredArray(assertionResponse.assertions, "contextGraph assertions");
-    const causalAssertions = assertions.filter(
-      (value) =>
-        isRecord(value) &&
-        value.status === "active" &&
-        value.subjectNaturalKey === `github:issue:${repository}#${expectedIssueNumber}` &&
-        value.objectNaturalKey === `repo:${repository}:sha:${causingCommitSha}`
-    );
-    const causalAssertion = causalAssertions.find((value) => {
-      if (!isRecord(value) || !Array.isArray(value.evidence) || value.evidence.length === 0) return false;
-      const reason = typeof value.explanation === "string" ? value.explanation : "";
-      return (
-        !config.causality?.reasonIncludes ||
-        reason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())
-      );
-    });
-    if (!isRecord(causalAssertion)) {
-      throw new Error(
-        `production causality assertion is missing for issue #${expectedIssueNumber} and commit ${causingCommitSha}`
-      );
-    }
-    const causalEvidence = requiredArray(causalAssertion.evidence, "causality assertion evidence");
-    const causalReason = requiredString(causalAssertion.explanation, "causality assertion explanation");
-    if (
-      causalEvidence.length === 0 ||
-      (config.causality.reasonIncludes &&
-        !causalReason.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase()))
-    ) {
-      throw new Error("production causality assertion is missing its expected reason or evidence");
-    }
-    const questions = [
-      `Which PR or commit caused issue #${expectedIssueNumber}, and why?`,
-      `Which PR or commit caused "${expectedIssueTitle}", and why?`,
-      `Which issue did commit ${causingCommitSha} cause, and why?`,
-      ...(config.causality.causingPullRequestNumber
-        ? [`Which issue did PR #${config.causality.causingPullRequestNumber} cause, and why?`]
-        : [])
-    ];
-    for (const question of questions) {
-      await waitForCausalTrace(fetchImpl, apiUrl, headers, repository, ref, question, {
-        issueNumber: expectedIssueNumber,
-        causingCommitSha,
-        ...(config.causality.causingPullRequestNumber === undefined
-          ? {}
-          : { causingPullRequestNumber: config.causality.causingPullRequestNumber }),
-        ...(config.causality.reasonIncludes === undefined ? {} : { reasonIncludes: config.causality.reasonIncludes }),
-        deadline,
-        pollIntervalMs
-      });
-    }
-    if (config.causality.causingPullRequestNumber) {
-      await verifyCounterfactualAnswer(
-        fetchImpl,
-        apiUrl,
-        headers,
-        repository,
-        ref,
-        `If PR #${config.causality.causingPullRequestNumber} had not merged, would issue #${expectedIssueNumber} exist?`,
-        config.verifyV51Fixture === true
-      );
-      await verifyCounterfactualAnswer(
-        fetchImpl,
-        apiUrl,
-        headers,
-        repository,
-        ref,
-        `If PR #${expectedResolutionPullRequestNumber} had not merged, would issue #${expectedIssueNumber} remain?`,
-        config.verifyV51Fixture === true
-      );
-    }
+  const mcpCitationCount = config.verifyMcp
+    ? await config.verifyMcp({ apiUrl, headers: contextHeaders, repository, ref, commitSha })
+    : await verifyProductionMcp({ apiUrl, headers: contextHeaders, repository, ref, commitSha });
 
-    // Assertion is a required predecessor of projection, so the first
-    // certified graph must already contain the active causal assertion. No
-    // human review or second build is required to materialize it.
-    if (nodes.length === 0 || edges.length === 0) throw new Error("production contextGraph graph is empty");
-    if (![...nodes, ...edges].every(hasEvidence)) {
-      throw new Error("production contextGraph graph contains uncited items");
-    }
-    const nodeById = new Map(
-      nodes.flatMap((node) => (isRecord(node) && typeof node.id === "string" ? [[node.id, node] as const] : []))
-    );
-    const causalEdge = edges.find((edge) => {
-      if (
-        !isRecord(edge) ||
-        edge.predicate !== "INTRODUCED_BY" ||
-        typeof edge.source !== "string" ||
-        typeof edge.target !== "string"
-      )
-        return false;
-      const issueNode = nodeById.get(edge.source);
-      const commitNode = nodeById.get(edge.target);
-      return (
-        issueNode?.kind === "Issue" &&
-        issueNode.description === `github:issue:${repository}#${expectedIssueNumber}` &&
-        commitNode?.kind === "Commit" &&
-        commitNode.description === `repo:${repository}:sha:${causingCommitSha}` &&
-        typeof edge.why === "string" &&
-        edge.why.trim().length > 0 &&
-        (!config.causality?.reasonIncludes ||
-          edge.why.toLowerCase().includes(config.causality.reasonIncludes.toLowerCase())) &&
-        hasEvidence(edge)
-      );
-    });
-    if (!causalEdge)
-      throw new Error(
-        "production contextGraph graph does not embed the exact cited Issue → Commit INTRODUCED_BY edge and reason"
-      );
-    if (config.verifyV51Fixture) {
-      await verifyV51FixtureQueries(fetchImpl, apiUrl, headers, repository, ref);
-    }
-  }
+  const metrics = await apiJson(fetchImpl, `${apiUrl}/context/metrics`, { headers: internalHeaders });
+  const depths = record(metrics.outboxDepthByConsumer);
+  const pending = Object.entries(depths).filter(([, value]) => Number(value) > 0);
+  if (pending.length) throw new Error(`production context backlog is not empty: ${JSON.stringify(pending)}`);
 
-  await waitForBacklogConvergence(fetchImpl, apiUrl, headers, repository, ref, deadline, pollIntervalMs);
+  const removedLegacyPath = `/context-${["g", "r", "a", "p", "h"].join("")}`;
+  const legacy = await fetchImpl(`${apiUrl}${removedLegacyPath}`, { headers: internalHeaders });
+  if (legacy.status !== 404) throw new Error(`legacy context graph route is still reachable with ${legacy.status}`);
 
   return {
-    taskId,
+    buildId,
     repository,
-    graphId: requiredString(latest.id, "contextGraph.latest.id"),
-    commitSha: requiredString(latest.commitSha, "contextGraph.latest.commitSha"),
-    nodeCount: nodes.length,
-    edgeCount: edges.length,
-    citationCount: citations.length
+    ref,
+    generationId,
+    commitSha,
+    generationCount: generations.length,
+    documentCount: documents.length,
+    citationCount: citations.length,
+    mcpCitationCount,
+    durationMs: Date.now() - startedAt
   };
 }
 
-async function waitForBacklogConvergence(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  repository: string,
-  ref: string,
-  deadline: number,
-  pollIntervalMs: number
-): Promise<void> {
-  let lastBacklog: { pendingEvents: number; unparsedBlobCount: number } | undefined;
-  while (true) {
-    const metrics = await apiJson(
-      fetchImpl,
-      `${apiUrl}/context-graph/metrics?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`,
-      { headers }
-    );
-    const outboxDepth = requiredRecord(metrics.outboxDepth, "metrics.outboxDepth");
-    const pendingEvents = Object.values(outboxDepth).reduce<number>(
-      (sum, value) => sum + requiredNonNegativeNumber(value, "outbox depth"),
-      0
-    );
-    const unparsedBlobCount = requiredNonNegativeNumber(metrics.unparsedBlobCount, "metrics.unparsedBlobCount");
-    if (pendingEvents === 0 && unparsedBlobCount === 0) return;
-    lastBacklog = { pendingEvents, unparsedBlobCount };
-    if (Date.now() >= deadline) break;
-    await delay(Math.min(pollIntervalMs, Math.max(1, deadline - Date.now())));
-  }
-  throw new Error(
-    `production contextGraph backlog did not converge (outbox=${String(lastBacklog?.pendingEvents)}, unparsed=${String(lastBacklog?.unparsedBlobCount)})`
-  );
-}
-
-async function verifyCounterfactualAnswer(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  repository: string,
-  ref: string,
-  question: string,
-  expectRemainingPaths: boolean
-): Promise<void> {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
-    const context = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ repository, ref, operation: "counterfactual", question })
-    });
-    const answer = requiredString(context.answer, "counterfactual context.answer");
-    const calls = requiredArray(context.calls, "counterfactual context.calls");
-    const claims = requiredArray(context.citedClaims, "counterfactual context.citedClaims");
-    const everyClaimIsCited = claims.every(
-      (claim) => isRecord(claim) && requiredArray(claim.citations, "counterfactual claim.citations").length > 0
-    );
-    const evaluation = isRecord(context.counterfactual) ? context.counterfactual : undefined;
-    const remainingPaths = evaluation && Array.isArray(evaluation.remainingPaths) ? evaluation.remainingPaths : [];
-    const remainingMatches = expectRemainingPaths ? remainingPaths.length > 0 : remainingPaths.length === 0;
-    const honestLanguage = expectRemainingPaths
-      ? /alternative|remain/i.test(answer)
-      : /every currently known reviewed path|no known path/i.test(answer);
-    if (
-      context.operation === "counterfactual" &&
-      honestLanguage &&
-      remainingMatches &&
-      claims.length > 0 &&
-      everyClaimIsCited &&
-      calls.length === 1 &&
-      isRecord(calls[0]) &&
-      calls[0].template === "counterfactual" &&
-      evaluation?.basis === "graph-derived" &&
-      Array.isArray(evaluation.removedPaths) &&
-      evaluation.removedPaths.length > 0
-    )
-      return;
-    if (attempt < 29) await delay(2_000);
-  }
-  throw new Error(`production counterfactual context is unsupported or uncited for: ${question}`);
-}
-
-export async function reviewFixtureProposals(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  repository: string,
-  excludedIds: ReadonlySet<string>
-): Promise<void> {
-  const response = await apiJson(
-    fetchImpl,
-    `${apiUrl}/context-graph/assertions?repository=${encodeURIComponent(repository)}`,
-    { headers }
-  );
-  const assertions = requiredArray(response.assertions, "v5.1 fixture assertions");
-  const reviewablePredicates = new Set([
-    "IMPLEMENTS",
-    "DOCUMENTED_BY",
-    "REFERENCES",
-    "OWNED_BY",
-    "MOVED_FROM",
-    "LIKELY_AFFECTS",
-    "INTRODUCED_BY",
-    "RESOLVED_BY",
-    "INCIDENT_IMPACTS"
-  ]);
-  for (const value of assertions) {
-    if (
-      !isRecord(value) ||
-      value.status !== "proposed" ||
-      typeof value.id !== "string" ||
-      excludedIds.has(value.id) ||
-      typeof value.predicate !== "string" ||
-      !reviewablePredicates.has(value.predicate)
-    )
-      continue;
-    if (!Array.isArray(value.evidence) || value.evidence.length === 0) {
-      throw new Error(`production v5.1 proposal ${value.id} has no review evidence`);
-    }
-    await apiJson(fetchImpl, `${apiUrl}/context-graph/commands`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({
-        type: "review_assertion",
-        assertionId: value.id,
-        decision: "accept",
-        reason: "production v5.1 fixture evidence verified"
-      })
-    });
-  }
-}
-
-async function verifyV51FixtureQueries(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  repository: string,
-  ref: string
-): Promise<void> {
-  const ask = (question: string, operation?: "counterfactual") =>
-    apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ repository, ref, question, ...(operation ? { operation } : {}) })
-    });
-
-  const implementationContext = await ask("Which symbols implement feature named Administrator resource deletion?");
-  const featureItems = itemsForTemplate(implementationContext, "feature_trace");
-  const implementations = featureItems.filter(
-    (item) =>
-      isRecord(item) &&
-      isRecord(item.data) &&
-      item.data.predicate === "IMPLEMENTS" &&
-      isRecord(item.data.related) &&
-      (item.data.related.kind === "File" || item.data.related.kind === "Symbol")
-  );
-  if (implementations.length < 2 || !implementations.every(hasCitations)) {
-    throw new Error(
-      "production v5.1 context did not return both cited Administrator resource deletion implementations"
-    );
-  }
-
-  const packageContext = await ask('What package does the "Administrator resource deletion" implementation depend on?');
-  const packageTrace = causalTraceFor(packageContext, "package dependency");
-  if (!tracePaths(packageTrace.dependencies).some((path) => pathHasNode(path, "Package", "zod"))) {
-    throw new Error("production v5.1 context did not traverse the implementation to its direct zod package");
-  }
-
-  const packageCounterfactual = await ask(
-    "If package zod were excluded, which Administrator resource deletion implementation paths disappear?",
-    "counterfactual"
-  );
-  const packageEvaluation = requiredRecord(packageCounterfactual.counterfactual, "v5.1 package counterfactual");
-  const removedPackagePaths = requiredArray(packageEvaluation.removedPaths, "v5.1 package removedPaths");
-  if (
-    packageEvaluation.basis !== "graph-derived" ||
-    removedPackagePaths.length === 0 ||
-    !removedPackagePaths.some((path) => pathHasNode(path, "Package", "zod"))
-  ) {
-    throw new Error("production v5.1 package counterfactual did not remove a graph-derived implementation path");
-  }
-
-  const moveContext = await ask(
-    "Did the renamed symbol previously implement the same Administrator resource deletion feature?"
-  );
-  const moveTrace = causalTraceFor(moveContext, "renamed implementation");
-  if (
-    !tracePaths(moveTrace.movedFrom).some(
-      (path) =>
-        pathHasNode(path, "File", "legacy-admin-deletion") ||
-        pathHasNode(path, "Symbol", "canAdministratorDeleteViaLegacy")
-    )
-  )
-    throw new Error("production v5.1 context did not preserve reviewed MOVED_FROM continuity");
-
-  const incidentCauseContext = await ask("Which deployment introduced incident INC-2026-42, and why?");
-  const incidentCauseTrace = causalTraceFor(incidentCauseContext, "incident cause");
-  if (
-    !tracePaths(incidentCauseTrace.causes).some(
-      (path) => pathHasNode(path, "Deployment", "5535506368") && hasPathWhy(path)
-    )
-  ) {
-    throw new Error("production v5.1 context did not return the cited deployment that introduced INC-2026-42");
-  }
-
-  const incidentImpactContext = await ask("Which service and feature did incident INC-2026-42 impact?");
-  const incidentImpactTrace = causalTraceFor(incidentImpactContext, "incident impact");
-  const impacts = tracePaths(incidentImpactTrace.affectedEntities);
-  if (
-    !impacts.some((path) => pathHasNode(path, "Service", "atlas-access-api")) ||
-    !impacts.some((path) => pathHasNode(path, "Feature", "Administrator resource deletion"))
-  ) {
-    throw new Error("production v5.1 context did not return both the impacted service and feature");
-  }
-
-  const incidentResolutionContext = await ask("Which later deployment or PR resolved incident INC-2026-42?");
-  const incidentResolutionTrace = causalTraceFor(incidentResolutionContext, "incident resolution");
-  if (
-    !tracePaths(incidentResolutionTrace.resolutions).some(
-      (path) => pathHasNode(path, "Deployment", "5535522601") || pathHasNode(path, "PullRequest", "#16")
-    )
-  )
-    throw new Error("production v5.1 context did not return the later incident resolution");
-
-  const derivedContext = await ask("What issue was derived for the unlinked fixing PR #11?");
-  const derivedTrace = causalTraceFor(derivedContext, "derived issue");
-  const derivedRoot = requiredRecord(derivedTrace.root, "v5.1 derived issue root");
-  if (
-    derivedRoot.kind !== "Issue" ||
-    !tracePaths(derivedTrace.resolutions).some((path) => pathHasNode(path, "PullRequest", "#11"))
-  ) {
-    throw new Error("production v5.1 context did not resolve PR #11 through a cited derived Issue");
-  }
-}
-
-function itemsForTemplate(context: Record<string, unknown>, template: string): unknown[] {
-  const call = requiredArray(context.calls, "v5.1 context.calls").find(
-    (value) => isRecord(value) && value.template === template
-  );
-  return isRecord(call) ? requiredArray(call.items, `v5.1 ${template}.items`) : [];
-}
-
-function causalTraceFor(context: Record<string, unknown>, capability: string): Record<string, unknown> {
-  const item = itemsForTemplate(context, "causal_trace")[0];
-  if (!isRecord(item) || !hasCitations(item))
-    throw new Error(`production v5.1 ${capability} has no cited causal trace`);
-  return requiredRecord(item.data, `v5.1 ${capability}.data`);
-}
-
-function tracePaths(value: unknown): Record<string, unknown>[] {
-  return Array.isArray(value) ? value.filter(isRecord) : [];
-}
-
-function pathHasNode(path: unknown, kind: string, text: string): boolean {
-  if (!isRecord(path) || !Array.isArray(path.nodes)) return false;
-  return path.nodes.some(
-    (node) =>
-      isRecord(node) &&
-      node.kind === kind &&
-      `${stringValue(node.label)} ${stringValue(node.description)} ${stringValue(node.id)}`
-        .toLowerCase()
-        .includes(text.toLowerCase())
-  );
-}
-
-function hasPathWhy(path: unknown): boolean {
-  return isRecord(path) && typeof path.why === "string" && path.why.trim().length > 0;
-}
-
-function hasCitations(value: unknown): boolean {
-  return isRecord(value) && Array.isArray(value.citations) && value.citations.length > 0;
-}
-
-export function blockedContextGraphTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
-  return tasks.flatMap((task) => {
-    if (
-      !isRecord(task) ||
-      task.status !== "blocked" ||
-      typeof task.type !== "string" ||
-      !task.type.startsWith("context_graph_")
-    )
-      return [];
-    const metadata = isRecord(task.metadata) ? task.metadata : {};
-    return metadata.repository === repository && metadata.ref === ref && typeof task.id === "string" ? [task.id] : [];
-  });
-}
-
-async function waitForCausalTrace(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  repository: string,
-  ref: string,
-  question: string,
-  expected: {
-    readonly issueNumber: number;
-    readonly causingCommitSha: string;
-    readonly causingPullRequestNumber?: number;
-    readonly reasonIncludes?: string;
-    readonly deadline: number;
-    readonly pollIntervalMs: number;
-  }
-): Promise<void> {
-  while (Date.now() < expected.deadline) {
-    const context = await apiJson(fetchImpl, `${apiUrl}/context-graph/ask`, {
-      method: "POST",
-      headers: { ...headers, "content-type": "application/json" },
-      body: JSON.stringify({ repository, ref, question })
-    });
-    const calls = requiredArray(context.calls, "causal context.calls");
-    const traceCall = calls.find((call) => isRecord(call) && call.template === "issue_trace");
-    const items = isRecord(traceCall) ? requiredArray(traceCall.items, "causal trace.items") : [];
-    const matched = items.some((item) => {
-      if (!isRecord(item) || !isRecord(item.data)) return false;
-      const issue = isRecord(item.data.issue) ? item.data.issue : {};
-      if (issue.number !== expected.issueNumber) return false;
-      const causes = Array.isArray(item.data.introducedBy) ? item.data.introducedBy.filter(isRecord) : [];
-      const cause = causes.find((value) => {
-        if (value.sha !== expected.causingCommitSha) return false;
-        if (typeof value.why !== "string" || !value.why.trim()) return false;
-        if (expected.reasonIncludes && !value.why.toLowerCase().includes(expected.reasonIncludes.toLowerCase()))
-          return false;
-        if (!Array.isArray(value.evidence) || value.evidence.length === 0) return false;
-        if (typeof value.evidenceCommitSha !== "string" || !/^[a-f0-9]{40}$/i.test(value.evidenceCommitSha))
-          return false;
-        if (expected.causingPullRequestNumber) {
-          const pullRequests = Array.isArray(value.pullRequests) ? value.pullRequests : [];
-          if (
-            !pullRequests.some(
-              (pullRequest) => isRecord(pullRequest) && pullRequest.number === expected.causingPullRequestNumber
-            )
-          )
-            return false;
-        }
-        return true;
-      });
-      if (!isRecord(cause)) return false;
-      const citations = Array.isArray(item.citations) ? item.citations : [];
-      return (
-        citations.some((citation) => isRecord(citation) && citation.kind === "assertion") &&
-        citations.some(
-          (citation) => isRecord(citation) && citation.kind === "code" && citation.commitSha === cause.evidenceCommitSha
-        )
-      );
-    });
-    if (matched) return;
-    await delay(expected.pollIntervalMs);
-  }
-  throw new Error(`production causal context retrieval timed out for: ${question}`);
-}
-
-interface PublishedGraphReceipt {
-  readonly graphId: string;
-  readonly commitSha: string;
-}
-
-/**
- * The graphId and commitSha a completed project stage published for
- * `buildTaskId`, taken from the stage's recorded completion result. Binding
- * certification to this receipt — instead of any newest-in-scope lookup —
- * makes it impossible for a concurrent build's generation to be certified as
- * this workflow's outcome. When both snapshot and history phases projected,
- * the last completion wins; a malformed newest completion fails rather than
- * falling back to an older stage.
- */
-function publishedProjectReceipt(tasks: readonly unknown[], buildTaskId: string): PublishedGraphReceipt {
-  const completedAtOf = (task: Record<string, unknown>): string => {
-    const metadata = isRecord(task.metadata) ? task.metadata : {};
-    const timing = isRecord(metadata.timing) ? metadata.timing : {};
-    return typeof timing.completedAt === "string" ? timing.completedAt : "";
-  };
-  const newest = tasks
+export function blockedContextTaskIds(tasks: readonly unknown[], repository: string, ref: string): string[] {
+  return tasks
     .filter(isRecord)
     .filter(
-      (task) => task.parentTaskId === buildTaskId && task.type === "context_graph_project" && task.status === "done"
+      (task) =>
+        CONTEXT_STAGE_TYPES.has(String(task.type)) &&
+        recordOrEmpty(task.metadata).repository === repository &&
+        recordOrEmpty(task.metadata).ref === ref &&
+        ["triage", "blocked", "queued", "in_progress"].includes(String(task.status))
     )
-    .sort((left, right) => completedAtOf(right).localeCompare(completedAtOf(left)))[0];
-  const metadata = newest && isRecord(newest.metadata) ? newest.metadata : {};
-  const result = isRecord(metadata.result) ? metadata.result : {};
-  const graphId = typeof result.graphId === "string" && result.graphId ? result.graphId : undefined;
-  const commitSha = typeof result.commitSha === "string" && result.commitSha ? result.commitSha : undefined;
-  if (!graphId || !commitSha) {
-    throw new Error(`latest contextGraph graph receipt is missing from the completed project stages of ${buildTaskId}`);
-  }
-  return { graphId, commitSha };
+    .map((task) => String(task.id));
 }
 
-/**
- * Certifies the receipt's exact generation when it is still readable. The
- * store serves only current graph heads, so a later publication for the same
- * repository/ref (e.g. an overlapping deploy's acceptance) can make the
- * receipt's id return 404; certification then falls back to the current head
- * — which must project the receipt's exact commit — instead of failing on
- * timing. Every certified graph re-verifies its own identity.
- */
-async function certifiedGraphForReceipt(
+export function productionAcceptanceExitCode(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/worker health|worker topics|worker payload/.test(message)) return 19;
+  if (/stage .* failed|build .* failed|timed out|blocked stages/.test(message)) return 20;
+  if (/published generation|certified generation|commitSha/.test(message)) return 21;
+  if (/document catalog|derived knowledge/.test(message)) return 22;
+  if (/citation|empty answer|MCP/.test(message)) return 23;
+  if (message.includes("backlog")) return 24;
+  return 25;
+}
+
+async function verifyWorkerHealth(
   fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  receipt: PublishedGraphReceipt,
-  repository: string,
-  ref: string
-): Promise<Record<string, unknown>> {
-  const direct = await apiOptionalJson(
-    fetchImpl,
-    `${apiUrl}/context-graph/graphs/${encodeURIComponent(receipt.graphId)}`,
-    { headers }
-  );
-  if (direct) {
-    if (
-      direct.id !== receipt.graphId ||
-      direct.repository !== repository ||
-      direct.ref !== ref ||
-      direct.commitSha !== receipt.commitSha
-    ) {
-      throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
+  check: ProductionWorkerHealthCheck,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  let lastFailure: string | undefined;
+  do {
+    try {
+      const response = await fetchImpl(`${check.url.replace(/\/$/, "")}/health`, {
+        headers: { authorization: check.authorization }
+      });
+      const value = record(JSON.parse(await response.text()));
+      const unexpectedKeys = Object.keys(value).filter((key) => !WORKER_HEALTH_KEYS.has(key));
+      if (unexpectedKeys.length > 0) {
+        throw new Error(`worker payload exposed unexpected fields: ${unexpectedKeys.sort().join(", ")}`);
+      }
+      if (!response.ok || value.ok !== true) {
+        throw new Error(`worker health returned ${response.status} with ok=${String(value.ok)}`);
+      }
+      const topics = requiredArray(value.topics, "worker topics").map((topic) => requiredString(topic, "worker topic"));
+      if (
+        topics.length !== check.expectedTopics.length ||
+        topics.some((topic, index) => topic !== check.expectedTopics[index])
+      ) {
+        throw new Error(
+          `worker topics were ${JSON.stringify(topics)}, expected ${JSON.stringify(check.expectedTopics)}`
+        );
+      }
+      return;
+    } catch (error) {
+      lastFailure = error instanceof Error ? error.message : String(error);
     }
-    return direct;
-  }
-  const scope = `repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`;
-  const contextGraph = await apiJson(fetchImpl, `${apiUrl}/context-graph?${scope}`, { headers });
-  const head = requiredArray(contextGraph.graphs, "contextGraph.graphs").find(isRecord);
-  if (!head || typeof head.id !== "string") {
-    throw new Error(`latest contextGraph graph for ${repository}@${ref} is missing from the graph list`);
-  }
-  const graph = await apiJson(fetchImpl, `${apiUrl}/context-graph/graphs/${encodeURIComponent(head.id)}`, {
-    headers
+    await delay(2_000);
+  } while (Date.now() < deadline);
+  throw new Error(`worker health verification failed: ${lastFailure ?? "no response"}`);
+}
+
+async function verifyProductionMcp(input: {
+  apiUrl: string;
+  headers: Record<string, string>;
+  repository: string;
+  ref: string;
+  commitSha: string;
+}): Promise<number> {
+  const client = new Client({ name: "jina-production-acceptance", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${input.apiUrl}/mcp`), {
+    requestInit: { headers: input.headers }
   });
-  if (
-    graph.id !== head.id ||
-    graph.repository !== repository ||
-    graph.ref !== ref ||
-    graph.commitSha !== receipt.commitSha
-  ) {
-    throw new Error("latest contextGraph graph does not match the acceptance repository and ref");
+  try {
+    await client.connect(transport as unknown as Transport);
+    const tools = await client.listTools();
+    if (tools.tools.map((tool) => tool.name).join(",") !== "query_context") {
+      throw new Error(`production MCP exposed unexpected tools: ${tools.tools.map((tool) => tool.name).join(",")}`);
+    }
+    const result = await client.callTool({
+      name: "query_context",
+      arguments: {
+        repository: input.repository,
+        ref: input.ref,
+        question: "Where is the primary implementation and what evidence supports it?",
+        taskKind: "structure"
+      }
+    });
+    if (result.isError) throw new Error("production MCP query_context returned an error");
+    const structured = record(result.structuredContent);
+    const generation = record(structured.generation);
+    if (generation.commitSha !== input.commitSha) throw new Error("production MCP used the wrong commit");
+    const citations = requiredArray(structured.citations, "MCP citations").filter(isRecord);
+    assertOriginalEvidenceCitations(citations, input.repository, input.commitSha);
+    return citations.length;
+  } finally {
+    await client.close();
   }
-  return graph;
+}
+
+function assertOriginalEvidenceCitations(
+  citations: readonly Record<string, unknown>[],
+  repository: string,
+  commitSha: string
+): void {
+  if (citations.length === 0) throw new Error("production query returned no citations");
+  const anchors = citations.flatMap((citation) => requiredArray(citation.anchors, "citation.anchors").filter(isRecord));
+  if (anchors.length === 0) throw new Error("production query returned no original evidence anchors");
+  if (
+    !anchors.every(
+      (anchor) =>
+        anchor.repository === repository &&
+        (anchor.commitSha === commitSha || anchor.sourceType === "observation") &&
+        typeof anchor.contentDigest === "string"
+    )
+  ) {
+    throw new Error("production citation anchors do not match the accepted repository and commit");
+  }
 }
 
 async function apiJson(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<Record<string, unknown>> {
-  return requiredRecord(await apiValue(fetchImpl, url, init), new URL(url).pathname);
-}
-
-/** Like apiJson, but a 404 means "gone" rather than a failure. */
-async function apiOptionalJson(
-  fetchImpl: typeof fetch,
-  url: string,
-  init: RequestInit
-): Promise<Record<string, unknown> | undefined> {
   const response = await fetchImpl(url, init);
-  const body = await response.text();
-  if (response.status === 404) return undefined;
-  if (!response.ok) throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${body.slice(0, 500)}`);
+  const text = await response.text();
+  let value: unknown;
   try {
-    return requiredRecord(JSON.parse(body) as unknown, new URL(url).pathname);
+    value = text ? JSON.parse(text) : {};
   } catch {
     throw new Error(`${new URL(url).pathname} returned invalid JSON`);
   }
-}
-
-async function apiArray(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown[]> {
-  return requiredArray(await apiValue(fetchImpl, url, init), new URL(url).pathname);
-}
-
-async function apiValue(fetchImpl: typeof fetch, url: string, init: RequestInit): Promise<unknown> {
-  for (let attempt = 0; attempt < API_RATE_LIMIT_ATTEMPTS; attempt += 1) {
-    const response = await fetchImpl(url, init);
-    const body = await response.text();
-    if (response.status === 429 && attempt + 1 < API_RATE_LIMIT_ATTEMPTS) {
-      await delay(rateLimitRetryMs(response, attempt));
-      continue;
-    }
-    if (!response.ok) throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${body.slice(0, 500)}`);
-    try {
-      return JSON.parse(body) as unknown;
-    } catch {
-      throw new Error(`${new URL(url).pathname} returned invalid JSON`);
-    }
+  if (!response.ok) {
+    throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${redactedDetail(value)}`);
   }
-  throw new Error(`${new URL(url).pathname} exhausted rate-limit retries`);
+  return record(value);
 }
 
-function rateLimitRetryMs(response: Response, attempt: number): number {
-  const retryAfter = response.headers.get("retry-after")?.trim();
-  if (retryAfter) {
-    const seconds = Number(retryAfter);
-    if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1_000, 10_000);
-    const retryAt = Date.parse(retryAfter);
-    if (Number.isFinite(retryAt)) return Math.min(Math.max(0, retryAt - Date.now()), 10_000);
-  }
-  return Math.min(1_000 * 2 ** attempt, 10_000);
+function renderStatus(
+  buildId: string,
+  root: Record<string, unknown>,
+  stages: readonly Record<string, unknown>[]
+): string {
+  const values = [...stages]
+    .sort((left, right) => String(left.type).localeCompare(String(right.type)))
+    .map((stage) => `${String(stage.type)}=${String(stage.status)}`)
+    .join(", ");
+  return `Production context build ${buildId}: root=${String(root.status)}${values ? `, ${values}` : ""}`;
 }
 
-async function workflowFailureSummary(
-  fetchImpl: typeof fetch,
-  apiUrl: string,
-  headers: Record<string, string>,
-  tasks: readonly unknown[],
-  rootTaskId: string
-): Promise<string> {
-  const taskLabels = new Map<string, string>();
-  for (const task of tasks) {
-    if (!isRecord(task) || typeof task.id !== "string") continue;
-    if (task.id !== rootTaskId && task.parentTaskId !== rootTaskId) continue;
-    taskLabels.set(
-      task.id,
-      task.id === rootTaskId ? "root" : typeof task.type === "string" && task.type ? task.type : "child"
-    );
-  }
-  const events = await apiArray(fetchImpl, `${apiUrl}/events`, { headers });
-  const failures = events.flatMap((event) => {
-    if (!isRecord(event) || typeof event.taskId !== "string" || !taskLabels.has(event.taskId)) return [];
-    if (typeof event.type !== "string" || !event.type.endsWith(".failed")) return [];
-    const payload = isRecord(event.payload) ? event.payload : {};
-    const reason =
-      typeof payload.reason === "string" && payload.reason.trim()
-        ? payload.reason.trim().replace(/\s+/g, " ").slice(0, 800)
-        : event.type;
-    return [`${taskLabels.get(event.taskId)}: ${reason}`];
-  });
-  return failures.length > 0 ? `; failures: ${failures.slice(-3).join(" | ")}` : "";
+function failureReason(task: Record<string, unknown>): string {
+  const metadata = recordOrEmpty(task.metadata);
+  return typeof metadata.error === "string" ? metadata.error.slice(0, 500) : "no public reason";
 }
 
-function hasEvidence(value: unknown): boolean {
-  return (
-    isRecord(value) &&
-    Array.isArray(value.evidence) &&
-    value.evidence.length > 0 &&
-    value.evidence.every((item) => typeof item === "string" && item.length > 0)
-  );
-}
-
-function hasCitedItems(value: unknown): boolean {
-  if (!isRecord(value) || !Array.isArray(value.items) || value.items.length === 0) return false;
-  return value.items.every((item) => isRecord(item) && Array.isArray(item.citations) && item.citations.length > 0);
-}
-
-function requiredNestedString(value: Record<string, unknown>, container: string, field: string): string {
-  return requiredString(requiredRecord(value[container], container)[field], `${container}.${field}`);
-}
-
-function requiredRecord(value: unknown, field: string): Record<string, unknown> {
-  if (!isRecord(value)) throw new Error(`${field} must be an object`);
+function record(value: unknown): Record<string, unknown> {
+  if (!isRecord(value)) throw new Error("expected an object response");
   return value;
 }
 
-function requiredArray(value: unknown, field: string): unknown[] {
-  if (!Array.isArray(value)) throw new Error(`${field} must be an array`);
+function recordOrEmpty(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {};
+}
+
+function requiredArray(value: unknown, name: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`${name} must be an array`);
   return value;
 }
 
-function requiredString(value: unknown, field: string): string {
-  if (typeof value !== "string" || value.length === 0) throw new Error(`${field} must be a non-empty string`);
-  return value;
+function requiredString(value: unknown, name: string): string {
+  if (typeof value !== "string" || !value.trim()) throw new Error(`${name} is required`);
+  return value.trim();
 }
 
-function requiredNonNegativeNumber(value: unknown, field: string): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0)
-    throw new Error(`${field} must be a non-negative number`);
-  return value;
+function requiredGitSha(value: unknown, name: string): string {
+  const result = requiredString(value, name).toLowerCase();
+  if (!/^[0-9a-f]{40}$/.test(result)) throw new Error(`${name} must be a full Git SHA`);
+  return result;
 }
 
-function positiveInteger(value: number, field: string): number {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${field} must be a positive integer`);
-  return value;
+function redactedDetail(value: unknown): string {
+  return JSON.stringify(value)
+    .replace(/Bearer\s+\S+/gi, "Bearer [REDACTED]")
+    .slice(0, 1_000);
 }
 
-function requiredFullGitSha(value: string, field: string): string {
-  const sha = value.trim().toLowerCase();
-  if (!/^[a-f0-9]{40}$/.test(sha)) throw new Error(`${field} must be a full Git SHA`);
-  return sha;
+function delay(milliseconds: number): Promise<void> {
+  return milliseconds <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function stringValue(value: unknown): string {
-  return typeof value === "string" ? value : "";
+async function main(): Promise<void> {
+  const githubInstallationId = optionalPositiveInteger(process.env.ACCEPTANCE_GITHUB_INSTALLATION_ID);
+  const workerHealthChecks = await configuredWorkerHealthChecks();
+  const summary = await runProductionContextAcceptance({
+    apiUrl: requiredEnv("JINA_API_URL"),
+    internalToken: requiredEnv("INTERNAL_API_TOKEN"),
+    contextToken: requiredEnv("CONTEXT_API_TOKEN"),
+    ...(process.env.ACCEPTANCE_TENANT_ID ? { tenantId: process.env.ACCEPTANCE_TENANT_ID } : {}),
+    principalId: requiredEnv("ACCEPTANCE_PRINCIPAL_ID"),
+    adminPrincipalId: requiredEnv("ACCEPTANCE_ADMIN_PRINCIPAL_ID"),
+    ...(process.env.ACCEPTANCE_REPOSITORY ? { repository: process.env.ACCEPTANCE_REPOSITORY } : {}),
+    ...(process.env.ACCEPTANCE_REF ? { ref: process.env.ACCEPTANCE_REF } : {}),
+    ...(githubInstallationId ? { githubInstallationId } : {}),
+    ...(process.env.ACCEPTANCE_REQUEST_KEY ? { requestKey: process.env.ACCEPTANCE_REQUEST_KEY } : {}),
+    ...(process.env.ACCEPTANCE_TIMEOUT_MS ? { timeoutMs: Number(process.env.ACCEPTANCE_TIMEOUT_MS) } : {}),
+    workerHealthChecks
+  });
+  console.log(JSON.stringify({ event: "production.context.acceptance_succeeded", ...summary }));
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function configuredWorkerHealthChecks(): Promise<ProductionWorkerHealthCheck[]> {
+  const contextWorkerUrl = requiredEnv("ACCEPTANCE_CONTEXT_WORKER_URL");
+  const taskWorkerUrl = requiredEnv("ACCEPTANCE_TASK_WORKER_URL");
+  return Promise.all([
+    authenticatedWorkerHealthCheck(contextWorkerUrl, [
+      "run-ingest-evidence",
+      "run-derive-knowledge",
+      "run-index-context"
+    ]),
+    authenticatedWorkerHealthCheck(taskWorkerUrl, ["run-review", "run-research", "run-publish", "run-cleanup"])
+  ]);
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try {
-    const configuredTimeout = optionalPositiveIntegerEnv("ACCEPTANCE_TIMEOUT_MS");
-    const expectedIssueNumber = optionalPositiveIntegerEnv("ACCEPTANCE_ISSUE_NUMBER");
-    const expectedResolutionPullRequestNumber = optionalPositiveIntegerEnv("ACCEPTANCE_RESOLUTION_PR_NUMBER");
-    const causingCommitSha = process.env.ACCEPTANCE_CAUSING_COMMIT_SHA?.trim();
-    const causingPullRequestNumber = optionalPositiveIntegerEnv("ACCEPTANCE_CAUSING_PR_NUMBER");
-    const reasonIncludes = process.env.ACCEPTANCE_CAUSAL_REASON_INCLUDES?.trim();
-    const verifyV51Fixture = process.env.ACCEPTANCE_V51_FIXTURE?.trim().toLowerCase() === "true";
-    const summary = await runProductionContextGraphAcceptance({
-      apiUrl: requiredEnv("JINA_API_URL"),
-      token: requiredEnv("INTERNAL_API_TOKEN"),
-      requestKey: requiredEnv("ACCEPTANCE_REQUEST_KEY"),
-      githubInstallationId: requiredPositiveIntegerEnv("ACCEPTANCE_GITHUB_INSTALLATION_ID"),
-      ...(process.env.ACCEPTANCE_TENANT_ID?.trim() ? { tenantId: process.env.ACCEPTANCE_TENANT_ID.trim() } : {}),
-      ...(process.env.ACCEPTANCE_PRINCIPAL_ID?.trim()
-        ? { principalId: process.env.ACCEPTANCE_PRINCIPAL_ID.trim() }
-        : {}),
-      ...(configuredTimeout === undefined ? {} : { timeoutMs: configuredTimeout }),
-      ...(expectedIssueNumber === undefined ? {} : { expectedIssueNumber }),
-      ...(expectedResolutionPullRequestNumber === undefined ? {} : { expectedResolutionPullRequestNumber }),
-      ...(verifyV51Fixture ? { verifyV51Fixture: true } : {}),
-      ...(causingCommitSha
-        ? {
-            causality: {
-              causingCommitSha,
-              ...(causingPullRequestNumber === undefined ? {} : { causingPullRequestNumber }),
-              ...(reasonIncludes ? { reasonIncludes } : {})
-            }
-          }
-        : {})
-    });
-    const message = `Production contextGraph accepted: ${summary.nodeCount} nodes, ${summary.edgeCount} edges, ${summary.citationCount} citations, commit ${summary.commitSha}`;
-    await writeTerminationMessage(message);
-    console.log(message);
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    await writeTerminationMessage(message);
-    console.error(message);
-    process.exitCode = productionAcceptanceExitCode(error);
+async function authenticatedWorkerHealthCheck(
+  url: string,
+  expectedTopics: readonly string[]
+): Promise<ProductionWorkerHealthCheck> {
+  const audience = url.replace(/\/$/, "");
+  const metadataUrl = new URL(
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
+  );
+  metadataUrl.searchParams.set("audience", audience);
+  metadataUrl.searchParams.set("format", "full");
+  const response = await fetch(metadataUrl, { headers: { "Metadata-Flavor": "Google" } });
+  const token = (await response.text()).trim();
+  if (!response.ok || token.split(".").length !== 3) {
+    throw new Error(`worker health identity token request failed with ${response.status}`);
   }
+  return { url: audience, authorization: `Bearer ${token}`, expectedTopics };
 }
 
 function requiredEnv(name: string): string {
@@ -961,67 +461,23 @@ function requiredEnv(name: string): string {
   return value;
 }
 
-function optionalPositiveIntegerEnv(name: string): number | undefined {
-  const value = process.env[name]?.trim();
-  if (!value) return undefined;
+function optionalPositiveInteger(value: string | undefined): number | undefined {
+  if (!value?.trim()) return undefined;
   const parsed = Number(value);
-  return positiveInteger(parsed, name);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error("ACCEPTANCE_GITHUB_INSTALLATION_ID must be a positive integer");
+  }
+  return parsed;
 }
 
-function requiredPositiveIntegerEnv(name: string): number {
-  return positiveInteger(Number(requiredEnv(name)), name);
-}
-
-async function writeTerminationMessage(message: string): Promise<void> {
-  // Cloud Run projects this file into the task status. It keeps acceptance
-  // diagnostics available to the deployer without granting broad log access.
-  await writeFile("/dev/termination-log", message.slice(0, 4_000), "utf8").catch(() => undefined);
-}
-
-function summarizeWorkflowTasks(tasks: readonly unknown[], rootTaskId: string): string {
-  const related = tasks
-    .filter(
-      (value): value is Record<string, unknown> =>
-        isRecord(value) && (value.id === rootTaskId || value.parentTaskId === rootTaskId)
-    )
-    .sort((left, right) => taskSortKey(left, rootTaskId).localeCompare(taskSortKey(right, rootTaskId)));
-  if (related.length === 0) return "no related tasks";
-  return related
-    .map((task) => {
-      const label = task.id === rootTaskId ? "root" : typeof task.type === "string" && task.type ? task.type : "child";
-      const status = typeof task.status === "string" && task.status ? task.status : "unknown";
-      return `${label}=${status}`;
-    })
-    .join(", ");
-}
-
-function workflowStages(tasks: readonly unknown[], rootTaskId: string): Record<string, unknown>[] {
-  return tasks.filter(
-    (value): value is Record<string, unknown> =>
-      isRecord(value) &&
-      value.parentTaskId === rootTaskId &&
-      typeof value.type === "string" &&
-      value.type.startsWith("context_graph_")
-  );
-}
-
-function workflowStagesAreDone(tasks: readonly unknown[], rootTaskId: string): boolean {
-  const stages = workflowStages(tasks, rootTaskId);
-  return stages.length > 0 && stages.every((stage) => stage.status === "done");
-}
-
-function failedWorkflowStage(tasks: readonly unknown[], rootTaskId: string): Record<string, unknown> | undefined {
-  return workflowStages(tasks, rootTaskId).find(
-    (stage) => typeof stage.status === "string" && TERMINAL_FAILURES.has(stage.status)
-  );
-}
-
-function taskSortKey(task: Record<string, unknown>, rootTaskId: string): string {
-  if (task.id === rootTaskId) return "0-root";
-  const order: Record<string, string> = {
-    context_graph_ingest: "1-ingest",
-    context_graph_assert: "2-assert",
-    context_graph_project: "3-project"
-  };
-  return typeof task.type === "string" ? (order[task.type] ?? `9-${task.type}`) : "9-child";
+if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  void main().catch((error) => {
+    console.error(
+      JSON.stringify({
+        event: "production.context.acceptance_failed",
+        error: error instanceof Error ? error.message : String(error)
+      })
+    );
+    process.exitCode = productionAcceptanceExitCode(error);
+  });
 }

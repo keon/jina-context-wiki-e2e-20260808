@@ -1,186 +1,190 @@
-import type { Metadata } from "next";
 import Link from "next/link";
-import { ErrorPanel, formatRelativeTime, PageHeader, shortRef, shortTenant, Status } from "../components/ui";
-import { filterGraphs } from "../lib/admin-data";
-import { listAllGraphs } from "../lib/jina-api";
+import {
+  getContextMetrics,
+  JinaApiError,
+  listAllGenerations,
+  listKnowledgeDocuments,
+  type AdminIndexGeneration
+} from "../lib/jina-api";
 
 export const dynamic = "force-dynamic";
 
-export const metadata: Metadata = {
-  title: "Graphs"
-};
-
-interface GraphSearchParams {
-  readonly q?: string;
-  readonly tenant?: string;
-  readonly repository?: string;
-  readonly ref?: string;
-  readonly generated?: string;
-}
-
-export default async function AllGraphsPage({ searchParams }: { readonly searchParams: Promise<GraphSearchParams> }) {
-  const filters = await searchParams;
-  let graphs;
+export default async function ContextAdminPage({
+  searchParams
+}: {
+  readonly searchParams: Promise<{ readonly repository?: string }>;
+}) {
+  const { repository } = await searchParams;
+  let generations: readonly AdminIndexGeneration[];
+  let documents: Awaited<ReturnType<typeof listKnowledgeDocuments>>;
+  let metrics: Awaited<ReturnType<typeof getContextMetrics>>;
   try {
-    graphs = await listAllGraphs();
+    [generations, metrics, documents] = await Promise.all([
+      listAllGenerations(),
+      getContextMetrics(),
+      listKnowledgeDocuments(repository)
+    ]);
   } catch (error) {
     return (
-      <main>
-        <PageHeader title="Graphs" description="Every current graph across all tenants and repositories." />
-        <ErrorPanel error={error} message="Could not load graphs from the Jina API." />
-      </main>
+      <div className="error-state">
+        <p>Could not load repository context from the Jina API.</p>
+        <p>
+          <code>{error instanceof JinaApiError ? error.message : "unexpected error"}</code>
+        </p>
+        <p className="muted">
+          Check <code>JINA_API_URL</code> and <code>INTERNAL_API_TOKEN</code>, or start the local stack.
+        </p>
+      </div>
     );
   }
 
-  const visible = filterGraphs(graphs, {
-    ...(filters.q ? { query: filters.q } : {}),
-    ...(filters.tenant ? { tenantId: filters.tenant } : {}),
-    ...(filters.repository ? { repository: filters.repository } : {}),
-    ...(filters.ref ? { ref: filters.ref } : {}),
-    ...(filters.generated ? { generated: filters.generated } : {})
-  });
-  const tenants = unique(graphs.map((graph) => graph.tenantId));
-  const repositories = unique(graphs.map((graph) => graph.repository));
-  const refs = unique(graphs.map((graph) => graph.ref));
-  const now = new Date();
+  const repositories = [...new Set(generations.map((generation) => generation.repository))].sort();
+  const visible = repository ? generations.filter((generation) => generation.repository === repository) : generations;
+  const pending = Object.values(metrics.outboxDepthByConsumer).reduce((sum, count) => sum + count, 0);
+  const currentDocuments = new Map(documents.map((document) => [document.logicalId, document])).size;
+  const knowledgeKinds = new Map<string, number>();
+  for (const document of documents) knowledgeKinds.set(document.kind, (knowledgeKinds.get(document.kind) ?? 0) + 1);
 
   return (
     <main>
-      <PageHeader
-        title="Graphs"
-        description="Every current graph across all tenants and repositories."
-        action={
-          <Link href="/build" className="primary-button">
-            <span aria-hidden="true">＋</span> Build graph
-          </Link>
-        }
-      />
+      <div className="stat-row">
+        <Stat label="Published generations" value={metrics.publishedGenerationCount} />
+        <Stat label="Repositories" value={repository ? 1 : repositories.length} />
+        <Stat label="Current knowledge docs" value={currentDocuments} />
+        <Stat label="Pending projections" value={pending} />
+      </div>
 
-      <form className="filters" method="get">
-        <label className="search-field">
-          <SearchIcon />
-          <span className="sr-only">Search graphs</span>
-          <input name="q" defaultValue={filters.q} placeholder="Search graphs" />
-        </label>
-        <label>
-          <span className="sr-only">Filter by tenant</span>
-          <select name="tenant" defaultValue={filters.tenant ?? ""}>
-            <option value="">Tenant: All</option>
-            {tenants.map((tenant) => (
-              <option key={tenant} value={tenant}>
-                {shortTenant(tenant)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="sr-only">Filter by repository</span>
-          <select name="repository" defaultValue={filters.repository ?? ""}>
-            <option value="">Repository: All</option>
-            {repositories.map((repository) => (
-              <option key={repository} value={repository}>
-                {repository}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="sr-only">Filter by ref</span>
-          <select name="ref" defaultValue={filters.ref ?? ""}>
-            <option value="">Ref: All</option>
-            {refs.map((ref) => (
-              <option key={ref} value={ref}>
-                {shortRef(ref)}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          <span className="sr-only">Filter by generation date</span>
-          <select name="generated" defaultValue={filters.generated ?? ""}>
-            <option value="">Generated: Any time</option>
-            <option value="hour">Last hour</option>
-            <option value="day">Last 24 hours</option>
-            <option value="week">Last 7 days</option>
-          </select>
-        </label>
-        <button type="submit" className="filter-button">
-          Apply
-        </button>
-        {hasFilters(filters) ? (
-          <Link href="/" className="reset-link">
-            Reset
+      {repositories.length > 1 || repository ? (
+        <nav className="repo-filter" aria-label="Filter by repository">
+          <Link href="/" className={repository ? "" : "active"}>
+            All repositories
           </Link>
-        ) : null}
-      </form>
+          {repositories.map((candidate) => (
+            <Link
+              key={candidate}
+              href={`/?repository=${encodeURIComponent(candidate)}`}
+              className={candidate === repository ? "active" : ""}
+            >
+              {candidate}
+            </Link>
+          ))}
+        </nav>
+      ) : null}
 
       {visible.length === 0 ? (
         <div className="empty-state">
-          <p>No graphs match these filters.</p>
-          <Link href="/">Clear all filters</Link>
+          <p>No context index generations have been published{repository ? ` for ${repository}` : ""}.</p>
+          <p>
+            Generations appear after a <code>build-context</code> workflow publishes its required projectors.
+          </p>
         </div>
       ) : (
-        <div className="table-wrap">
-          <table className="data-table">
+        <table className="context-table">
+          <thead>
+            <tr>
+              <th>Repository</th>
+              <th>Ref</th>
+              <th>Commit</th>
+              <th>Published</th>
+              <th>Status</th>
+              <th>Knowledge</th>
+              <th>Projectors</th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((generation) => (
+              <tr key={generation.id}>
+                <td>
+                  <Link href={`/?repository=${encodeURIComponent(generation.repository)}`}>
+                    {generation.repository}
+                  </Link>
+                </td>
+                <td>
+                  <code>{shortRef(generation.ref)}</code>
+                </td>
+                <td>
+                  <code>{generation.commitSha.slice(0, 10)}</code>
+                </td>
+                <td title={generation.publishedAt ?? generation.createdAt}>
+                  {formatTimestamp(generation.publishedAt ?? generation.createdAt)}
+                </td>
+                <td>{generation.status}</td>
+                <td>{generation.derivedKnowledge}</td>
+                <td className="summary-cell">{Object.keys(generation.projectors).sort().join(", ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <section className="knowledge-admin-section">
+        <h2>Agent-derived knowledge</h2>
+        <p className="muted">
+          {documents.length} immutable revisions across{" "}
+          {[...knowledgeKinds.entries()]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([kind, count]) => `${kind}: ${count}`)
+            .join(", ") || "no document kinds"}
+          .
+        </p>
+        {documents.length > 0 ? (
+          <table className="context-table">
             <thead>
               <tr>
                 <th>Repository</th>
-                <th>Tenant</th>
-                <th>Ref</th>
-                <th>Status</th>
-                <th>Updated</th>
-                <th className="numeric">Nodes</th>
-                <th className="numeric">Edges</th>
+                <th>Kind</th>
+                <th>Document</th>
+                <th>Commit</th>
+                <th>Agent / model</th>
+                <th>Review</th>
+                <th>Confidence</th>
               </tr>
             </thead>
             <tbody>
-              {visible.map((graph) => (
-                <tr key={`${graph.tenantId}:${graph.id}`}>
-                  <td>
-                    <Link
-                      href={`/graphs/${encodeURIComponent(graph.id)}?tenantId=${encodeURIComponent(graph.tenantId)}`}
-                    >
-                      {graph.repository}
-                    </Link>
-                  </td>
-                  <td title={graph.tenantId}>
-                    <code>{shortTenant(graph.tenantId)}</code>
+              {documents.slice(0, 100).map((document) => (
+                <tr key={document.id}>
+                  <td>{document.repository}</td>
+                  <td>{document.kind}</td>
+                  <td className="summary-cell" title={document.logicalId}>
+                    <strong>{document.title}</strong>
+                    <br />
+                    <span className="muted">{document.summary}</span>
                   </td>
                   <td>
-                    <code>{shortRef(graph.ref)}</code>
+                    <code>{document.commitSha.slice(0, 10)}</code>
                   </td>
                   <td>
-                    <Status tone="success">Ready</Status>
+                    {document.generatorName}
+                    <br />
+                    <code>{document.model}</code>
                   </td>
-                  <td title={graph.generatedAt}>{formatRelativeTime(graph.generatedAt, now)}</td>
-                  <td className="numeric">{graph.nodeCount.toLocaleString("en-US")}</td>
-                  <td className="numeric">{graph.edgeCount.toLocaleString("en-US")}</td>
+                  <td>{document.reviewStatus}</td>
+                  <td>{Math.round(document.confidence * 100)}%</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <div className="table-footer">
-            {visible.length.toLocaleString("en-US")} of {graphs.length.toLocaleString("en-US")} graphs
-          </div>
-        </div>
-      )}
+        ) : null}
+      </section>
     </main>
   );
 }
 
-function unique(values: readonly string[]): readonly string[] {
-  return [...new Set(values)].sort();
-}
-
-function hasFilters(filters: GraphSearchParams): boolean {
-  return Boolean(filters.q || filters.tenant || filters.repository || filters.ref || filters.generated);
-}
-
-function SearchIcon() {
+function Stat({ label, value }: { readonly label: string; readonly value: number }) {
   return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <circle cx="11" cy="11" r="7" />
-      <path d="m16.5 16.5 4 4" />
-    </svg>
+    <div className="stat">
+      <div className="value">{value.toLocaleString("en-US")}</div>
+      <div className="label">{label}</div>
+    </div>
   );
+}
+
+function shortRef(ref: string): string {
+  return ref.replace(/^refs\/heads\//, "") || ref;
+}
+
+function formatTimestamp(iso: string): string {
+  const parsed = new Date(iso);
+  if (Number.isNaN(parsed.getTime())) return iso;
+  return parsed.toISOString().replace("T", " ").slice(0, 16) + " UTC";
 }

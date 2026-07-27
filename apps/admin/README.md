@@ -1,49 +1,61 @@
 # @jina/admin
 
-Next.js admin app that shows the current graph head for **every** repository across **every tenant**, without repository-ACL scoping.
+Next.js tenant-administration app for repository context health. It lists published index
+generations across every repository in the tenant, summarizes knowledge documents and
+pending projections, and exposes exact ref/commit and projector state.
 
-## How it sees all graphs
+## Tenant-wide access
 
-The app calls the Jina API from the server only (`lib/jina-api.ts`). Its index and operations pages use the read-only `JINA_GLOBAL_ADMIN_TOKEN` to fetch graph-head summaries and cursor-paginated workflow history directly across all graph tenants. Opening or querying a graph switches back to `INTERNAL_API_TOKEN` and forwards that graph's `tenantId`, preserving the existing tenant-scoped authorization path. Neither token is sent to the browser.
+The app calls the Jina API only from server components in `lib/jina-api.ts` with
+`INTERNAL_API_TOKEN`. No bearer credential reaches the browser. The API authenticates the
+server caller as the tenant administrator and therefore returns all repositories in that
+tenant rather than applying an end-user repository subset.
 
-When `JINA_GLOBAL_ADMIN_TOKEN` is absent, local and legacy deployments fall back to the original `JINA_TENANT_ID`-scoped index.
+The app itself is a security boundary. In production, every request must provide HTTP
+Basic credentials matching the server-only `JINA_WEB_AUTH_USERNAME` and
+`JINA_WEB_AUTH_PASSWORD`. Caller-supplied identity headers are ignored. The coordinated
+Cloud Run deployment exposes the app only through this Basic-auth path.
 
-## Authentication boundary
+- When `INTERNAL_API_TOKEN` is unset for local development/CI, inbound checks are relaxed;
+  this mode must not be internet-reachable.
 
-Because the app renders cross-tenant graph data, **the app itself is the security boundary**. `proxy.ts` accepts either of the two configured production boundaries:
+The decision logic is in `lib/admin-auth.ts` and has unit tests.
 
-- Google Cloud: a request must carry a valid IAP identity (`x-goog-authenticated-user-email`) or it receives `401`.
-- Vercel: a request must carry valid HTTP credentials matching the server-only `JINA_WEB_AUTH_USERNAME` and `JINA_WEB_AUTH_PASSWORD` values.
-- If `JINA_ADMIN_ALLOWED_EMAILS` is set, the IAP identity must appear in that allowlist or it receives `403`.
-- When both API credentials are unset (local `pnpm dev`, CI), the app is not internet-reachable and requests pass through, matching the dashboard.
+## Page
 
-The decision logic lives in `lib/admin-auth.ts` and is covered by `lib/admin-auth.test.ts`.
+`/` shows tenant-wide generation, repository, current logical knowledge-document, and
+pending-projection counts. Operators can filter by repository and inspect each
+generation's ref, full commit identity, publication time, knowledge availability, and
+projector set.
 
-## Pages
-
-- `/` — every current graph head, with tenant, repository, ref, search, and date filters.
-- `/history` — every context-graph build attempt, including failed and in-progress runs.
-- `/observability` — generation throughput, success rate, latency, queue depth, actor/channel access auditing, and a dedicated rolling 24-hour MCP monitor.
-- `/health` — direct API and worker health checks plus durable graph-pipeline backlog state.
-- `/tenants` — tenant, GitHub installation, repository, and graph coverage.
-- `/access` — the configured IAP/web authentication boundary and global-admin credential state.
-- `/build` — an explicit tenant/repository/ref/installation form for starting a graph generation.
-- `/graphs/:id` — full graph detail: metadata, cited repository queries, an interactive force-directed node/edge visualization, and node/relationship inspection.
+The agent-derived knowledge section reports immutable revision counts by document kind and
+shows each visible revision's repository, kind, logical document, commit, generator/model,
+review state, and confidence. It is an operational catalog of
+`knowledge-documents-v4`; it does not expose or imply a semantic graph.
 
 ## Running
 
 ```sh
-pnpm --filter @jina/admin dev      # http://localhost:3100
+pnpm --filter @jina/admin dev
 ```
+
+The app listens at `http://localhost:3100` by default.
 
 Environment:
 
-- `JINA_API_URL` — base URL of the Jina API (default `http://localhost:4000`).
-- `JINA_GLOBAL_ADMIN_TOKEN` — dedicated read-only credential for production cross-tenant graph discovery and operational history. It must differ from `INTERNAL_API_TOKEN`.
-- `INTERNAL_API_TOKEN` — required against a production API for tenant-scoped graph reads and queries; optional locally when the API runs with dev endpoints enabled (`pnpm dev`), where every request is already treated as a dev service principal. Its presence also switches on the inbound IAP authentication boundary described above.
-- `JINA_TENANT_ID` — optional original tenant UUID used only by the legacy/local listing fallback and direct links without a tenant query parameter.
-- `JINA_ADMIN_ALLOWED_EMAILS` — optional comma-separated allowlist of IAP identities permitted to view graphs. When unset, any IAP-authenticated identity is allowed.
-- `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — app-level HTTP credentials for Vercel production.
-- `JINA_CONTEXT_GRAPH_WORKER_URL` — optional Cloud Run URL used by the Service health page.
-- `JINA_TASK_WORKER_URL` — optional Cloud Run URL used by the Service health page.
-- `JINA_GITHUB_APP_INSTALL_URL` — optional GitHub App installation URL shown as the Tenants page action.
+- `JINA_API_URL` — API base URL; defaults to `http://localhost:4000`.
+- `INTERNAL_API_TOKEN` — server-side tenant-administrator credential.
+- `JINA_WEB_PRINCIPAL_ID` — trusted principal forwarded to the API. Required with
+  `INTERNAL_API_TOKEN` unless `JINA_TENANT_ID` supplies the binding.
+- `JINA_TENANT_ID` — original tenant UUID forwarded to a shared-database API. When
+  `JINA_WEB_PRINCIPAL_ID` is absent, the client binds as `tenant:<JINA_TENANT_ID>`.
+  Fixed/local deployments may omit it only when `JINA_WEB_PRINCIPAL_ID` is set.
+- `JINA_WEB_AUTH_USERNAME` / `JINA_WEB_AUTH_PASSWORD` — server-side HTTP credentials.
+
+When `JINA_WEB_PRINCIPAL_ID` is a user principal, that principal must also be configured
+as a tenant administrator by the API. The admin client fails before making a request when
+`INTERNAL_API_TOKEN` is configured without either principal-binding variable.
+
+The admin uses `/context/generations`, `/context/documents`, and `/context/metrics`.
+Metrics access is tenant-administrator only. Knowledge review is also tenant-admin-only;
+repository read access by itself cannot append a review event.

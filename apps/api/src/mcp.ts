@@ -5,75 +5,114 @@ import {
   type StreamableHTTPServerTransportOptions
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { OrchestratedContext, RetrievalCitation } from "@jina/context-graph";
+import type { QueryContextResponse } from "@jina/context-engine";
 import * as z from "zod/v4";
 
-const citationSchema = z.object({
-  kind: z.enum(["code", "commit_change", "assertion", "observation", "entity"]),
-  id: z.string(),
-  repository: z.string(),
-  commitSha: z.string().optional(),
-  path: z.string().optional(),
-  startLine: z.number().int().positive().optional(),
-  endLine: z.number().int().positive().optional()
-});
+const taskKindSchema = z.enum(["lookup", "structure", "change", "intent", "overview", "status", "diagnose"]);
 
-const graphQueryResultSchema = {
-  answer: z.string(),
-  claims: z.array(
+const citationSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  excerpt: z.string(),
+  anchors: z.array(
     z.object({
-      text: z.string(),
-      citations: z.array(citationSchema)
+      tenantId: z.string(),
+      repository: z.string(),
+      sourceType: z.enum(["observation", "blob", "commit", "pull_request", "issue", "document"]),
+      sourceId: z.string(),
+      contentDigest: z.string(),
+      commitSha: z.string().optional(),
+      pathOrUrl: z.string().optional(),
+      startLine: z.number().int().positive().optional(),
+      endLine: z.number().int().positive().optional(),
+      jsonPointer: z.string().optional(),
+      observedAt: z.string().optional()
     })
   ),
-  incomplete: z.boolean(),
-  notes: z.array(z.string())
+  authorityClass: z.string(),
+  sourceKind: z.enum(["code", "provider", "knowledge"]),
+  sourceId: z.string(),
+  sourceRevisionId: z.string().optional()
+});
+
+const queryContextResultSchema = {
+  answer: z.string(),
+  generation: z.object({
+    id: z.string(),
+    ref: z.string(),
+    commitSha: z.string(),
+    derivedKnowledge: z.enum(["available", "partial", "unavailable"])
+  }),
+  citations: z.array(citationSchema),
+  conflicts: z.array(
+    z.object({
+      subject: z.string(),
+      description: z.string(),
+      citationIds: z.array(z.string()),
+      resolution: z.enum(["unresolved", "authority_preferred", "newer_source_preferred"])
+    })
+  ),
+  ambiguities: z.array(z.string()),
+  coverage: z.object({
+    status: z.enum(["complete", "partial", "insufficient"]),
+    missing: z.array(z.string()),
+    retrieversUsed: z.array(z.string())
+  }),
+  traceId: z.string()
 };
 
-interface GraphQuery {
+interface ContextMcpQuery {
   readonly repository: string;
-  readonly query: string;
+  readonly question: string;
   readonly ref?: string;
+  readonly taskKind?: "lookup" | "structure" | "change" | "intent" | "overview" | "status" | "diagnose";
+  readonly targets?: {
+    readonly paths?: readonly string[];
+    readonly symbols?: readonly string[];
+    readonly pullRequests?: readonly string[];
+    readonly issues?: readonly string[];
+  };
+  readonly timeWindow?: { readonly from?: string; readonly to?: string };
 }
 
-export interface GraphQueryResult {
-  readonly answer: string;
-  readonly claims: readonly {
-    readonly text: string;
-    readonly citations: readonly RetrievalCitation[];
-  }[];
-  readonly incomplete: boolean;
-  readonly notes: readonly string[];
-}
+export type ContextQueryExecutor = (query: ContextMcpQuery) => Promise<QueryContextResponse>;
 
-export type GraphQueryExecutor = (query: GraphQuery) => Promise<GraphQueryResult>;
-
-/** Creates the complete public MCP surface. Deliberately exposes one read-only graph query. */
-function createGraphMcpServer(execute: GraphQueryExecutor): McpServer {
+/** Creates Jina's storage-neutral, read-only repository-context MCP surface. */
+function createContextMcpServer(execute: ContextQueryExecutor): McpServer {
   const server = new McpServer(
-    { name: "jina-graph", version: "1.0.0" },
+    { name: "jina-context", version: "1.0.0" },
     {
-      instructions: "Use query_graph for questions about a repository. Answers are bounded to cited graph evidence."
+      instructions:
+        "Use query_context for repository questions and incident diagnosis. Agent-derived knowledge includes cited symptoms, likely causes, checks, and fixes; answers preserve original evidence citations, material conflicts, and coverage gaps."
     }
   );
   server.registerTool(
-    "query_graph",
+    "query_context",
     {
-      title: "Query Jina graph",
+      title: "Query repository context",
       description:
-        "Answer a question about repository code, history, ownership, issues, pull requests, commits, features, and relationships using cited graph evidence.",
+        "Answer or diagnose a repository question using routed exact, lexical, structural, temporal, and agent-derived knowledge retrieval with verified original-evidence citations.",
       inputSchema: {
         repository: z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina"),
-        query: z.string().trim().min(1).max(4_000).describe("Natural-language question about the repository"),
-        ref: z
-          .string()
-          .trim()
-          .min(1)
-          .max(300)
+        question: z.string().trim().min(1).max(4_000).describe("Natural-language repository question"),
+        ref: z.string().trim().min(1).max(300).optional().describe("Optional branch, tag, or ref"),
+        taskKind: taskKindSchema.optional().describe("Optional retrieval intent hint"),
+        targets: z
+          .object({
+            paths: z.array(z.string().trim().min(1).max(1_000)).max(100).optional(),
+            symbols: z.array(z.string().trim().min(1).max(1_000)).max(100).optional(),
+            pullRequests: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
+            issues: z.array(z.string().trim().min(1).max(100)).max(100).optional()
+          })
+          .optional(),
+        timeWindow: z
+          .object({
+            from: z.iso.datetime().optional(),
+            to: z.iso.datetime().optional()
+          })
           .optional()
-          .describe("Optional branch, tag, or ref; the default ref is used when omitted")
       },
-      outputSchema: graphQueryResultSchema,
+      outputSchema: queryContextResultSchema,
       annotations: {
         readOnlyHint: true,
         destructiveHint: false,
@@ -82,13 +121,30 @@ function createGraphMcpServer(execute: GraphQueryExecutor): McpServer {
       }
     },
     async (input) => {
+      const targets = input.targets
+        ? {
+            ...(input.targets.paths ? { paths: input.targets.paths } : {}),
+            ...(input.targets.symbols ? { symbols: input.targets.symbols } : {}),
+            ...(input.targets.pullRequests ? { pullRequests: input.targets.pullRequests } : {}),
+            ...(input.targets.issues ? { issues: input.targets.issues } : {})
+          }
+        : undefined;
+      const timeWindow = input.timeWindow
+        ? {
+            ...(input.timeWindow.from ? { from: input.timeWindow.from } : {}),
+            ...(input.timeWindow.to ? { to: input.timeWindow.to } : {})
+          }
+        : undefined;
       const result = await execute({
         repository: input.repository,
-        query: input.query,
-        ...(input.ref ? { ref: input.ref } : {})
+        question: input.question,
+        ...(input.ref ? { ref: input.ref } : {}),
+        ...(input.taskKind ? { taskKind: input.taskKind } : {}),
+        ...(targets ? { targets } : {}),
+        ...(timeWindow ? { timeWindow } : {})
       });
       return {
-        content: [{ type: "text", text: renderGraphQueryResult(result) }],
+        content: [{ type: "text", text: renderContextQueryResult(result) }],
         structuredContent: { ...result }
       };
     }
@@ -96,11 +152,11 @@ function createGraphMcpServer(execute: GraphQueryExecutor): McpServer {
   return server;
 }
 
-/** Handles one stateless Streamable HTTP request. No sessions or server notifications are retained. */
-export async function handleGraphMcpRequest(
+/** Handles one stateless Streamable HTTP request. */
+export async function handleContextMcpRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  execute: GraphQueryExecutor,
+  execute: ContextQueryExecutor,
   parsedBody?: unknown
 ): Promise<void> {
   if (request.method !== "POST") {
@@ -115,9 +171,7 @@ export async function handleGraphMcpRequest(
     return;
   }
 
-  const server = createGraphMcpServer(execute);
-  // The SDK models stateless mode as an explicit undefined, which needs a
-  // boundary cast under this workspace's exactOptionalPropertyTypes setting.
+  const server = createContextMcpServer(execute);
   const transportOptions = {
     sessionIdGenerator: undefined,
     enableJsonResponse: true
@@ -131,32 +185,30 @@ export async function handleGraphMcpRequest(
   await transport.handleRequest(request, response, parsedBody);
 }
 
-export function publicGraphQueryResult(context: OrchestratedContext): GraphQueryResult {
-  const notes = [...context.unresolvedAmbiguities, ...context.coverageGaps.map((gap) => gap.message)];
-  return {
-    answer: context.answer,
-    claims: context.citedClaims,
-    incomplete: context.truncated || notes.length > 0,
-    notes
-  };
-}
-
-function renderGraphQueryResult(result: GraphQueryResult): string {
-  const evidence = result.claims.flatMap((claim) =>
-    claim.citations.map((citation) => `- ${claim.text} (${formatCitation(citation)})`)
-  );
-  const notes = result.notes.map((note) => `- ${note}`);
+function renderContextQueryResult(result: QueryContextResponse): string {
+  const evidence = result.citations.map((citation) => `- ${formatCitation(citation)}`);
+  const conflicts = result.conflicts.map((conflict) => `- ${conflict.subject}: ${conflict.description}`);
+  const gaps = result.coverage.missing.map((gap) => `- ${gap}`);
   return [
     result.answer,
+    "",
+    `Generation: ${result.generation.id} (${result.generation.ref}@${result.generation.commitSha})`,
     ...(evidence.length ? ["", "Evidence:", ...evidence] : []),
-    ...(notes.length ? ["", "Limitations:", ...notes] : [])
+    ...(conflicts.length ? ["", "Conflicts:", ...conflicts] : []),
+    ...(gaps.length ? ["", "Coverage gaps:", ...gaps] : [])
   ].join("\n");
 }
 
-function formatCitation(citation: RetrievalCitation): string {
-  const revision = citation.commitSha ? `@${citation.commitSha}` : "";
-  const location = citation.path
-    ? ` ${citation.path}${citation.startLine ? `:${citation.startLine}${citation.endLine && citation.endLine !== citation.startLine ? `-${citation.endLine}` : ""}` : ""}`
+function formatCitation(citation: QueryContextResponse["citations"][number]): string {
+  const anchor = citation.anchors[0];
+  if (!anchor) return `${citation.sourceKind}:${citation.sourceId}`;
+  const revision = anchor.commitSha ? `@${anchor.commitSha}` : "";
+  const location = anchor.pathOrUrl
+    ? ` ${anchor.pathOrUrl}${
+        anchor.startLine
+          ? `:${anchor.startLine}${anchor.endLine && anchor.endLine !== anchor.startLine ? `-${anchor.endLine}` : ""}`
+          : ""
+      }`
     : "";
-  return `${citation.repository}${revision}${location}; ${citation.kind}:${citation.id}`;
+  return `${anchor.repository}${revision}${location}; ${anchor.sourceType}:${anchor.sourceId}`;
 }
