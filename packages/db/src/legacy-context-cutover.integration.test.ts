@@ -279,49 +279,76 @@ test("CREATEROLE migration login hardens a runtime login it administers", { skip
 // Production runs this migration against a managed runtime login (a Cloud SQL
 // BUILT_IN user) that the instance superuser created, so the CREATEROLE-only
 // migration login holds no ADMIN OPTION on it and cannot alter it at all. The
-// migration must name the one-time superuser step instead of failing with a
-// bare privilege error, and must succeed once that step has been performed.
+// capability split must therefore survive without altering the runtime role:
+// memberships are granted with inherit false, which needs ADMIN OPTION only on
+// the capability roles this migration creates.
 test(
-  "hardening directs an operator to pre-harden a runtime login it cannot alter",
+  "capabilities stay dormant for a managed runtime login the migration cannot alter",
   { skip: !databaseUrl },
   async () => {
     const bootstrap = new Pool({ connectionString: databaseUrl });
     const migrationRole = "jina_context_cutover_test_unprivileged_migration";
     const runtimeRole = "jina_context_cutover_test_managed";
+    const capabilityRole = "jina_context_cutover_test_capability";
     const password = "context-cutover-managed-password";
+    const runtimePassword = "context-cutover-managed-runtime-password";
     try {
+      await bootstrap.query(`drop role if exists ${capabilityRole}`);
       await bootstrap.query(`drop role if exists ${runtimeRole}`);
       await bootstrap.query(`drop role if exists ${migrationRole}`);
       await bootstrap.query(`create role ${migrationRole} login createrole password '${password}'`);
       // Created by the superuser, exactly as a managed runtime login is, so the
       // migration login is deliberately left without ADMIN OPTION on it.
-      await bootstrap.query(`create role ${runtimeRole} login inherit`);
+      await bootstrap.query(`create role ${runtimeRole} login inherit password '${runtimePassword}'`);
 
       const migrationUrl = new URL(databaseUrl!);
       migrationUrl.username = migrationRole;
       migrationUrl.password = password;
       const migration = new Pool({ connectionString: migrationUrl.toString(), max: 1 });
       try {
-        await assert.rejects(
-          () => hardenContextRuntimeRole(migration, runtimeRole),
-          (error: NodeJS.ErrnoException & { code?: string }) =>
-            error.code === "42501" && String(error.message).includes("must already be NOINHERIT")
-        );
-
-        // The documented one-time superuser step, after which the migration must pass.
-        await bootstrap.query(`alter role ${runtimeRole} noinherit`);
+        // Must not abort the release just because it cannot alter this login.
         await hardenContextRuntimeRole(migration, runtimeRole);
+        // The capability split itself only needs ADMIN OPTION on roles created here.
+        await migration.query(`create role ${capabilityRole} nologin`);
+        await migration.query(`grant ${capabilityRole} to ${runtimeRole} with inherit false`);
       } finally {
         await migration.end();
       }
 
+      // The runtime role is left exactly as the superuser created it.
       const runtime = await bootstrap.query<{ rolinherit: boolean; rolsuper: boolean }>(
         "select rolinherit,rolsuper from pg_roles where rolname=$1",
         [runtimeRole]
       );
-      assert.deepEqual(runtime.rows, [{ rolinherit: false, rolsuper: false }]);
+      assert.deepEqual(runtime.rows, [{ rolinherit: true, rolsuper: false }]);
+
+      // Yet the capability is dormant: it carries no inheritance and stays settable.
+      const membership = await bootstrap.query<{ inherit_option: boolean; set_option: boolean }>(
+        `select membership.inherit_option,membership.set_option
+         from pg_auth_members membership
+         join pg_roles granted on granted.oid=membership.roleid
+         join pg_roles member on member.oid=membership.member
+         where granted.rolname=$1 and member.rolname=$2`,
+        [capabilityRole, runtimeRole]
+      );
+      assert.deepEqual(membership.rows, [{ inherit_option: false, set_option: true }]);
+
+      // And the runtime login cannot re-enable inheritance on its own membership.
+      const runtimeUrl = new URL(databaseUrl!);
+      runtimeUrl.username = runtimeRole;
+      runtimeUrl.password = runtimePassword;
+      const runtimePool = new Pool({ connectionString: runtimeUrl.toString(), max: 1 });
+      try {
+        await assert.rejects(
+          () => runtimePool.query(`grant ${capabilityRole} to ${runtimeRole} with inherit true`),
+          (error: NodeJS.ErrnoException & { code?: string }) => error.code === "42501"
+        );
+      } finally {
+        await runtimePool.end();
+      }
     } finally {
       await bootstrap.query("reset role");
+      await bootstrap.query(`drop role if exists ${capabilityRole}`);
       await bootstrap.query(`drop role if exists ${runtimeRole}`);
       await bootstrap.query(`drop role if exists ${migrationRole}`);
       await bootstrap.end();

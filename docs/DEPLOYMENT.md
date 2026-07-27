@@ -369,39 +369,36 @@ start with schema management disabled and activate a capability per transaction 
 `SET LOCAL ROLE`. The migration does not copy or translate prior semantic indexes.
 Active repositories must be reingested.
 
-### One-time runtime-login precondition
+### How the capability split survives a managed runtime login
 
 PostgreSQL 16 and later only let a `CREATEROLE` login alter a role it holds `ADMIN
 OPTION` on. The migration login (`JINA_MIGRATION_DB_USER`, `jina_app`) therefore cannot
 alter a runtime login that the instance superuser created, which is how a managed Cloud
-SQL user is provisioned. The migration reflects that split:
+SQL user is provisioned. The capability split does not depend on altering it.
 
-- when the runtime login is already `NOINHERIT` and outside `cloudsqlsuperuser`, both
-  capability statements are skipped, so re-running `--install-roles` is idempotent
-- when a change is still required and this login may make it, the migration applies it
-- when a change is required and this login may not make it, the migration fails with
-  `42501` and names the exact statement to run once
+Each capability is granted `WITH INHERIT FALSE`, so the membership is dormant until a
+transaction activates exactly one with `SET LOCAL ROLE`. That needs `ADMIN OPTION` only
+on the capability roles the migration just created, never on the runtime login, so
+`--install-roles` requires no privileged preparation and stays idempotent. Marking the
+runtime login `NOINHERIT` is attempted as well, but is skipped with a notice when this
+login may not alter it, because the per-membership grants already carry the guarantee.
 
-Create the runtime login `NOINHERIT` (see `docs/SHARED_TENANCY.md`) and no manual step is
-needed. To pre-harden an existing managed login, run once as the instance superuser:
-
-```sql
-ALTER ROLE jina_v2_app NOINHERIT;
-REVOKE cloudsqlsuperuser FROM jina_v2_app;
-```
-
-Confirm the precondition before approving a release, because `jina-main-deploy` starts a
-full release on every push to `main`:
+This holds regardless of how the runtime login was provisioned. To confirm it after a
+release, check that no capability membership inherits (both queries must return `0`):
 
 ```sql
-SELECT rolname, rolinherit FROM pg_roles WHERE rolname = 'jina_v2_app';
-SELECT 1 FROM pg_auth_members m
+SELECT count(*) FROM pg_auth_members m
+  JOIN pg_roles u ON u.oid = m.member
+  WHERE u.rolname = 'jina_v2_app' AND m.inherit_option;
+SELECT count(*) FROM pg_auth_members m
   JOIN pg_roles g ON g.oid = m.roleid
   JOIN pg_roles u ON u.oid = m.member
-  WHERE g.rolname = 'cloudsqlsuperuser' AND u.rolname = 'jina_v2_app';
+  WHERE u.rolname = 'jina_v2_app' AND g.rolname = 'jina_context_admin';
 ```
 
-The first query must report `rolinherit = f` and the second must return no rows.
+Because membership grants require `ADMIN OPTION`, the runtime login can neither restore
+inheritance on its own membership nor grant itself `jina_context_admin`. Note that
+`jina-main-deploy` starts a full release on every push to `main`.
 
 Before approving a release, inspect IAM and the deployed identities:
 

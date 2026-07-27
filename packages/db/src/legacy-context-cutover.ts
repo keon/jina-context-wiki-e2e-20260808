@@ -97,10 +97,13 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
          begin
            execute format('alter role %I noinherit', runtime_user);
          exception when insufficient_privilege then
-           raise exception
-             'runtime role % must already be NOINHERIT; run once as the instance superuser: ALTER ROLE % NOINHERIT',
-             runtime_user, quote_ident(runtime_user)
-             using errcode='42501';
+           -- Capability memberships are granted with inherit false, so each one
+           -- is already dormant until a transaction activates it. Marking the role
+           -- itself NOINHERIT only extends that to memberships this migration does
+           -- not control, so a login it may not alter is left as it is.
+           raise notice
+             'runtime role % left INHERIT; capability memberships are granted with inherit false, so context capabilities stay dormant until set explicitly',
+             runtime_user;
          end;
        end if;
        if retains_cloudsql_superuser then
