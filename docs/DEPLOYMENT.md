@@ -450,9 +450,9 @@ was resized but not migrated to another region or instance.
 The same recovery review enabled automated backups at 08:00 UTC with seven retained
 backups and enabled point-in-time recovery with seven days of transaction logs. The
 `jina_app` database password was rotated after an audit transcript exposed the previous
-credential. Legacy API revision `jina-code-review-api-00106-94t` serves 100% of traffic
-using `jina-database-url` version 7; every older version is disabled. A direct connection
-through the Cloud SQL Auth Proxy verified version 7 as `jina_app` against the `jina`
+credential. Legacy API revision `jina-code-review-api-00107-zmk` serves 100% of traffic
+using `jina-database-url` version 8; every older version is disabled. A direct connection
+through the Cloud SQL Auth Proxy verified version 8 as `jina_app` against the `jina`
 database after the rotation.
 
 The legacy code-review application remains deployed for its dashboard, OAuth, webhook,
