@@ -85,7 +85,13 @@ test(
         ]
       }
     });
-    assert.equal((await store.listEvidence(omittedCheckpoint.id)).length, 0);
+    assert.deepEqual(
+      (await store.listEvidence(omittedCheckpoint.id)).map((record) => ({
+        sourceType: record.anchor.sourceType,
+        sourceId: record.anchor.sourceId
+      })),
+      [{ sourceType: "commit", sourceId: "1".repeat(40) }]
+    );
     const omittedBlobs = await database.queryAs<{ count: string }>(
       "jina_context_admin",
       { tenantIds: [omittedTenantId] },
