@@ -45,6 +45,26 @@ have Secret Manager access to any owner or cutover-auditor secret; the migration
 service account must not be assigned to a network-facing service. Do not swap or reuse
 these identities or credentials.
 
+Each runtime service account must hold `roles/secretmanager.secretAccessor` on every secret
+its service mounts. The deployment does not grant these bindings, and it cannot detect a
+missing one until Cloud Run rejects the revision, which happens after every image has been
+built and pushed. `jina-context-worker` mounts `jina-github-clone-token` for the manual and
+public-repository build fallback, so that binding is required in addition to the ones it
+already held:
+
+```bash
+gcloud secrets add-iam-policy-binding jina-github-clone-token \
+  --project=jina-v2 \
+  --member=serviceAccount:jina-context-worker@jina-v2.iam.gserviceaccount.com \
+  --role=roles/secretmanager.secretAccessor
+```
+
+A missing binding surfaces as
+`Permission denied on secret: ... for Revision service account ...` from
+`gcloud run services update-traffic`. Because the migration has already run by that point,
+the traffic restore leaves the prior release serving a forward-migrated database, so
+recover by fixing the binding and rolling forward rather than by retrying the rollback.
+
 `INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic. It is also the
 only service credential accepted by `POST /internal/context/access/sync`.
 `CONTEXT_API_TOKEN` is deliberately narrower: it is accepted only by
@@ -358,6 +378,22 @@ This traffic restoration protects a routine forward-compatible application relea
 is not a schema down-migration or a compatibility promise. The first destructive
 graph-to-context cutover deliberately follows the isolated recovery procedure below
 instead.
+
+Restoration is therefore skipped once the migration has advanced the schema. Past that
+point the previous revision predates the schema it would have to serve, so restoring it
+reports `ok=false` and Cloud Run kills the instances on liveness — an outage caused by the
+recovery rather than by the failure. A release that fails after the migration leaves the
+traffic assignments alone and prints the roll-forward command instead. Recovery is to route
+traffic to the newest ready revision, resolve the failure, and re-run the release:
+
+```bash
+gcloud run services update-traffic jina-api \
+  --project=jina-v2 --region=us-central1 \
+  --to-revisions=<newest-ready-revision>=100
+```
+
+A failure before the migration still restores every captured assignment, because the
+previous revision can serve that schema.
 
 The migration installs `jina_context` and its capability roles from scratch with
 `--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, ensures that login is

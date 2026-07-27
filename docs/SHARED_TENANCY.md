@@ -111,6 +111,38 @@ operate its board/runtime schemas, but it must not own `jina_context`, mutate `p
 read session/OAuth credential tables. `jina_app` is the separate context
 migration/schema owner used only by the migration job.
 
+### `jina_app` is shared with Jina v1
+
+`jina_app` is not exclusive to this repository. Jina v1
+([omxyz/jina-simulation](https://github.com/omxyz/jina-simulation)) connects to the same
+instance as `jina_app` through `jina-database-url` in project `jina-463721`, while this
+repository reads the same password from `jina-primary-owner-db-password` in project
+`jina-v2` for its migration login. Two secret stores therefore hold one credential with
+nothing keeping them in step.
+
+Rotating it on one side alone breaks the other. A v1 rotation that left this repository's
+copy stale failed a production release at the schema step with
+`28P01 password authentication failed for user "jina_app"`, and resetting the role's
+password to match this repository would equally break v1, which pins an explicit version.
+
+Treat v1's `jina-database-url` as the source of truth and copy the password across rather
+than resetting the role. The value never needs to be displayed:
+
+```bash
+gcloud secrets versions access latest --secret=jina-database-url --project=jina-463721 \
+  | python3 -c "import sys,urllib.parse as p; print(p.unquote(p.urlparse(sys.stdin.read().strip()).password or ''), end='')" \
+  | gcloud secrets versions add jina-primary-owner-db-password --project=jina-v2 --data-file=-
+```
+
+`scripts/cloud-build-deploy.sh` compares the two fingerprints before it builds anything and
+stops with this command when they diverge, so a stale copy can no longer surface only once
+the migration runs. Set `JINA_SHARED_OWNER_SECRET_PROJECT` and `JINA_SHARED_OWNER_SECRET`
+if v1's secret moves. Only fingerprints are printed, and a release still proceeds where the
+upstream secret is unreadable, because cross-project access is not required to deploy.
+
+The runtime login `jina_v2_app` is unaffected by this coupling, so a healthy API says
+nothing about whether the migration login can still authenticate.
+
 If `gcloud sql users create` grants `cloudsqlsuperuser`, revoke it before using the role:
 
 ```sql
@@ -170,8 +202,9 @@ CONTEXT_RUNTIME_DB_USER=jina_v2_app \
 The migration verifies that the runtime role is already an ordinary
 `NOSUPERUSER NOBYPASSRLS NOREPLICATION NOCREATEDB NOCREATEROLE` login, applies only the
 hardening attributes a documented `CREATEROLE` migration login may change, and grants
-focused context capabilities except `jina_context_admin`. `NOINHERIT` means membership
-does not grant ambient table access: runtime adapters must enter a transaction and issue
+focused context capabilities except `jina_context_admin`, each granted `WITH INHERIT
+FALSE`. A dormant membership grants no ambient table access: runtime adapters must enter a
+transaction and issue
 `SET LOCAL ROLE` for coordinator, ingest, derive, query, projector, or strictly
 tenant-scoped administrative work. Tests connect as this exact runtime login and verify
 capability activation, denial of the wildcard admin role, and denied direct access.

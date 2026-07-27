@@ -369,8 +369,11 @@ read/modify/write races cannot discard one of two concurrent merges; a serialize
 replacement still has its documented complete-set semantics.
 
 The schema-owning migration login is separate from the application login. The migration
-installs focused NOLOGIN capability roles, marks the runtime login `NOINHERIT`, and grants
-it role membership except for the wildcard `jina_context_admin` role. Tenant-scoped
+installs focused NOLOGIN capability roles and grants the runtime login membership of each
+one `WITH INHERIT FALSE`, except for the wildcard `jina_context_admin` role. Carrying
+dormancy on the membership rather than on the runtime login means the migration needs
+`ADMIN OPTION` only on the capability roles it creates, so it never has to alter a runtime
+login provisioned by the instance superuser. Tenant-scoped
 administration activates `jina_context_tenant_admin`, whose RLS policies never accept the
 wildcard system scope. Runtime services do not manage schema and have no ambient context
 table privileges: each database operation runs in a transaction and activates its

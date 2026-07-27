@@ -25,6 +25,9 @@ db_user="${JINA_DB_USER:-jina_app}"
 db_pass_secret="${JINA_DB_PASS_SECRET:-jina-db-password:latest}"
 migration_db_user="${JINA_MIGRATION_DB_USER:-jina_app}"
 migration_db_pass_secret="${JINA_MIGRATION_DB_PASS_SECRET:-jina-primary-owner-db-password:latest}"
+# Jina v1 owns the migration login's password; this is where it keeps it.
+shared_owner_secret_project="${JINA_SHARED_OWNER_SECRET_PROJECT:-jina-463721}"
+shared_owner_secret="${JINA_SHARED_OWNER_SECRET:-jina-database-url}"
 fixed_tenant_id="${JINA_FIXED_TENANT_ID:-omlabs}"
 acceptance_github_installation_id="${JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID:-}"
 api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
@@ -219,6 +222,86 @@ require_secret() {
   gcloud secrets describe "${secret_name}" --project="${GCP_PROJECT_ID}" >/dev/null
 }
 
+# The migration login is shared with Jina v1 (omxyz/jina-simulation), which holds
+# the same password in its own secret in another project. Nothing keeps the two
+# copies in step, and existence checks cannot see the difference, so a v1
+# rotation leaves this release authenticating with a stale password and failing
+# at the schema step after every image has already been built and pushed.
+# Compare fingerprints up front and fail before that expensive work. Only
+# fingerprints are ever printed. A release is not blocked when the upstream
+# secret is unreadable, because cross-project access is not required to deploy.
+require_migration_credential_matches_shared_owner() {
+  local upstream migration_secret migration_version
+  if ! upstream="$(gcloud secrets versions access latest \
+    --secret="${shared_owner_secret}" \
+    --project="${shared_owner_secret_project}" 2>/dev/null)" || [[ -z "${upstream}" ]]; then
+    echo "Skipping shared migration-credential check: cannot read ${shared_owner_secret} in ${shared_owner_secret_project}" >&2
+    return 0
+  fi
+  migration_secret="${migration_db_pass_secret%%:*}"
+  migration_version="${migration_db_pass_secret#*:}"
+  local migration
+  migration="$(gcloud secrets versions access "${migration_version}" \
+    --secret="${migration_secret}" \
+    --project="${GCP_PROJECT_ID}")"
+  UPSTREAM_URL="${upstream}" MIGRATION_PASSWORD="${migration}" \
+    UPSTREAM_PROJECT="${shared_owner_secret_project}" \
+    UPSTREAM_SECRET="${shared_owner_secret}" \
+    MIGRATION_PROJECT="${GCP_PROJECT_ID}" \
+    MIGRATION_SECRET="${migration_secret}" \
+    MIGRATION_VERSION="${migration_version}" \
+    python3 -c '
+import hashlib
+import os
+import sys
+import urllib.parse
+
+
+def fingerprint(value):
+    return hashlib.sha256(value.encode()).hexdigest()[:12]
+
+
+upstream_project = os.environ["UPSTREAM_PROJECT"]
+upstream_secret = os.environ["UPSTREAM_SECRET"]
+migration_project = os.environ["MIGRATION_PROJECT"]
+migration_secret = os.environ["MIGRATION_SECRET"]
+migration_version = os.environ["MIGRATION_VERSION"]
+upstream_label = f"{upstream_project}/{upstream_secret}"
+migration_label = f"{migration_project}/{migration_secret}:{migration_version}"
+
+expected = urllib.parse.unquote(
+    urllib.parse.urlparse(os.environ["UPSTREAM_URL"].strip()).password or ""
+)
+actual = os.environ["MIGRATION_PASSWORD"].rstrip("\n")
+if not expected or not actual:
+    # Nothing to compare against, so report it and leave the release alone. The
+    # migration still fails loudly if the password it holds is wrong.
+    print(f"Skipping shared migration-credential check: {upstream_label} carries no password to compare")
+    raise SystemExit(0)
+if expected == actual:
+    print(f"Migration credential matches {upstream_label} ({fingerprint(actual)})")
+    raise SystemExit(0)
+
+sys.exit(
+    "\n".join(
+        [
+            "Migration credential is stale.",
+            f"  {upstream_label} has {fingerprint(expected)}",
+            f"  {migration_label} has {fingerprint(actual)}",
+            "Jina v1 owns this password. Copy it across rather than resetting the",
+            "role, which would break v1:",
+            f"  gcloud secrets versions access latest --secret={upstream_secret} \\",
+            f"    --project={upstream_project} \\",
+            "    | python3 -c \"import sys,urllib.parse as p; sys.stdout.write("
+            "p.unquote(p.urlparse(sys.stdin.read().strip()).password or str()))\" \\",
+            f"    | gcloud secrets versions add {migration_secret} \\",
+            f"      --project={migration_project} --data-file=-",
+        ]
+    )
+)
+'
+}
+
 resolve_release_image() {
   local tagged_image="$1"
   local digest_image
@@ -365,10 +448,31 @@ prior_context_worker_traffic=""
 prior_task_worker_traffic=""
 prior_dashboard_traffic=""
 prior_admin_traffic=""
+# Set once the migration has advanced the schema, after which restoring the
+# previous traffic assignments would take the API down rather than recover it.
+schema_migration_applied="false"
 
 rollback_failed_release() {
   local status=$?
   trap - EXIT
+  # Restoring traffic assumes the previous revision can still serve the database.
+  # Once the migration has advanced the schema that is no longer true: the
+  # previous revision predates the context engine, so restoring it takes the API
+  # down instead of recovering it, and a traffic switch cannot undo a migration.
+  # Leave the assignments alone and say what recovery actually requires.
+  if [[ "${status}" -ne 0 && "${schema_migration_applied}" == "true" ]]; then
+    cat >&2 <<'ROLLFORWARD'
+Release failed after the migration advanced the database schema.
+Cloud Run traffic has deliberately NOT been restored: the previous revision
+predates this schema and returns ok=false, so restoring it causes an outage
+rather than recovering from one.
+Recover by rolling forward to the newest ready revision, for example:
+  gcloud run services update-traffic jina-api --region=<region> --project=<project> \
+    --to-revisions=<newest-ready-revision>=100
+Then resolve the failure above and re-run the release.
+ROLLFORWARD
+    exit "${status}"
+  fi
   if [[ "${status}" -ne 0 && "${release_cutover_started}" == "true" &&
         "${context_cutover}" == "false" ]]; then
     echo "Release failed; restoring the previous Cloud Run traffic assignments" >&2
@@ -402,6 +506,7 @@ for secret_spec in \
   require_secret "${secret_spec}"
 done
 require_secret "jina-web-auth-password:latest"
+require_migration_credential_matches_shared_owner
 for service_account in \
   "${api_service_account}" \
   "${context_worker_service_account}" \
@@ -688,6 +793,9 @@ gcloud run jobs execute jina-context-migrate \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
   --wait
+# The schema is now ahead of whatever the previous revision expects, so a later
+# failure must not restore the previous traffic assignments.
+schema_migration_applied="true"
 
 if [[ "${context_cutover}" == "false" ]]; then
   prior_api_traffic="$(snapshot_service_traffic "jina-api")"

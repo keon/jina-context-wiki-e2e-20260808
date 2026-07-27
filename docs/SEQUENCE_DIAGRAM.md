@@ -252,7 +252,7 @@ sequenceDiagram
     participant A as Acceptance job
 
     CB->>M: Deploy/execute jina-context-migrate using audited image SHA
-    M->>M: Install roles; make runtime login NOINHERIT and grant memberships
+    M->>M: Install roles; grant dormant memberships WITH INHERIT FALSE
     M-->>CB: jina_context ready
     CB->>CR: Deploy API and verify /health
     CB->>CR: Deploy context worker and verify exact topics
