@@ -91,6 +91,7 @@ interface LeaseExecutionState {
   readonly controller: AbortController;
   githubToken?: string;
   lostReason?: string;
+  renewalInFlight?: boolean;
 }
 
 class LeaseLostError extends Error {
@@ -108,7 +109,9 @@ const token = requiredEnv("INTERNAL_API_TOKEN");
 const topics = configuredTopics(process.env.WORKER_TOPICS);
 const workerId = process.env.WORKER_ID?.trim() || `worker-${process.pid}`;
 const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
-const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 15 * 60_000);
+const workerApiTimeoutMs = positiveInt(process.env.WORKER_API_TIMEOUT_MS, 30_000);
+const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 * 60_000);
+const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TIMEOUT_MS, 10 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const knowledgeGenerator = topics.includes("run-derive-knowledge")
@@ -196,20 +199,26 @@ async function execute(work: ClaimedWork): Promise<void> {
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
   const heartbeat = setInterval(() => {
-    void renew(work).catch((error) => {
-      if (error instanceof LeaseLostError) {
-        loseLease(lease, error);
-        metrics.count("worker.lease_lost", { topic: work.message.topic });
-        return;
-      }
-      recordApiFailure(error);
-      logger.warn("worker lease renewal failed, retrying", {
-        event: "worker.lease_renewal_retry",
-        workerId,
-        taskId: work.task.id,
-        ...errorLogFields(error)
+    if (lease.renewalInFlight) return;
+    lease.renewalInFlight = true;
+    void renew(work)
+      .catch((error) => {
+        if (error instanceof LeaseLostError) {
+          loseLease(lease, error);
+          metrics.count("worker.lease_lost", { topic: work.message.topic });
+          return;
+        }
+        recordApiFailure(error);
+        logger.warn("worker lease renewal failed, retrying", {
+          event: "worker.lease_renewal_retry",
+          workerId,
+          taskId: work.task.id,
+          ...errorLogFields(error)
+        });
+      })
+      .finally(() => {
+        lease.renewalInFlight = false;
       });
-    });
   }, heartbeatIntervalMs);
   heartbeat.unref();
 
@@ -791,7 +800,7 @@ async function renew(work: ClaimedWork): Promise<void> {
       ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
       ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken })
     },
-    contextApiTimeoutMs
+    isContextTopic(work.topic) ? contextApiTimeoutMs : workerApiTimeoutMs
   );
   if (!response.ok) {
     const message = `renewal failed with ${response.status}: ${await boundedFailureDetail(response)}`;
@@ -802,14 +811,18 @@ async function renew(work: ClaimedWork): Promise<void> {
 }
 
 async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
-  const response = await apiRequest("/internal/worker/complete", {
-    messageId: work.message.id,
-    leaseId: work.message.leaseId,
-    taskId: work.task.id,
-    ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
-    ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken }),
-    ...result
-  });
+  const response = await apiRequest(
+    "/internal/worker/complete",
+    {
+      messageId: work.message.id,
+      leaseId: work.message.leaseId,
+      taskId: work.task.id,
+      ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
+      ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken }),
+      ...result
+    },
+    isContextTopic(work.topic) ? contextCompletionTimeoutMs : workerApiTimeoutMs
+  );
   if (response.status === 409) {
     throw new LeaseLostError(`completion rejected after lease loss: ${await boundedFailureDetail(response)}`);
   }
@@ -818,7 +831,7 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   recordApiSuccess();
 }
 
-function apiRequest(path: string, body: unknown, timeoutMs = 30_000): Promise<Response> {
+function apiRequest(path: string, body: unknown, timeoutMs = workerApiTimeoutMs): Promise<Response> {
   assertLeaseOwned();
   const tenantId = activeWork?.task.metadata.tenantId;
   return fetch(`${apiUrl}${path}`, {

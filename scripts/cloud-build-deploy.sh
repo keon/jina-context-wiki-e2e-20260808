@@ -32,6 +32,10 @@ api_max_instances="${JINA_API_MAX_INSTANCES:-3}"
 api_concurrency="${JINA_API_CONCURRENCY:-10}"
 api_cpu="${JINA_API_CPU:-1}"
 api_memory="${JINA_API_MEMORY:-1Gi}"
+api_request_timeout_seconds="${JINA_API_REQUEST_TIMEOUT_SECONDS:-3600}"
+context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-3720000}"
+context_completion_timeout_ms="${JINA_CONTEXT_COMPLETION_TIMEOUT_MS:-600000}"
+context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-4500000}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
 context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
@@ -89,11 +93,27 @@ validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
 validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
 validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
 validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
+validate_positive_integer "JINA_API_REQUEST_TIMEOUT_SECONDS" "${api_request_timeout_seconds}"
+validate_positive_integer "JINA_CONTEXT_API_TIMEOUT_MS" "${context_api_timeout_ms}"
+validate_positive_integer "JINA_CONTEXT_COMPLETION_TIMEOUT_MS" "${context_completion_timeout_ms}"
+validate_positive_integer "JINA_CONTEXT_WORKER_LEASE_MS" "${context_worker_lease_ms}"
 if [[ -n "${acceptance_github_installation_id}" ]]; then
   validate_positive_integer "JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID" "${acceptance_github_installation_id}"
 fi
 if (( api_min_instances > api_max_instances )); then
   echo "JINA_API_MIN_INSTANCES must not exceed JINA_API_MAX_INSTANCES" >&2
+  exit 2
+fi
+if (( api_request_timeout_seconds > 3600 )); then
+  echo "JINA_API_REQUEST_TIMEOUT_SECONDS must not exceed Cloud Run's 3600-second limit" >&2
+  exit 2
+fi
+if (( context_api_timeout_ms <= api_request_timeout_seconds * 1000 )); then
+  echo "JINA_CONTEXT_API_TIMEOUT_MS must exceed the API request timeout" >&2
+  exit 2
+fi
+if (( context_worker_lease_ms <= context_api_timeout_ms + context_completion_timeout_ms )); then
+  echo "JINA_CONTEXT_WORKER_LEASE_MS must exceed the combined context operation and completion timeouts" >&2
   exit 2
 fi
 if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ||
@@ -146,7 +166,7 @@ raise SystemExit(1)
 '
 }
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false"
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest"
 
 case "${tenancy_mode}" in
@@ -606,7 +626,7 @@ gcloud run deploy jina-api \
   --concurrency="${api_concurrency}" \
   --cpu="${api_cpu}" \
   --memory="${api_memory}" \
-  --timeout=900 \
+  --timeout="${api_request_timeout_seconds}" \
   --liveness-probe="initialDelaySeconds=30,timeoutSeconds=10,periodSeconds=30,failureThreshold=3,httpGet.path=/health,httpGet.port=8080" \
   --min-instances="${api_min_instances}" \
   --max-instances="${api_max_instances}" \
@@ -633,7 +653,7 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=true~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=true~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest" \
   --quiet
 

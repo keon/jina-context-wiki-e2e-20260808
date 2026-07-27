@@ -47,6 +47,7 @@ const stateStore = createStateStore(postgresConfig);
 const contextCoordinator = createContextCoordinator(contextDatabase);
 const contextStore = createContextStore(contextDatabase, contextCoordinator);
 const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver(postgresConfig) : undefined;
+const contextWorkerLeaseMs = optionalPositiveIntegerEnv("CONTEXT_WORKER_LEASE_MS");
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
@@ -64,7 +65,8 @@ const server = createApiServer({
   ...(process.env.JINA_CONTEXT_TENANT_ID ? { contextApiTenantId: process.env.JINA_CONTEXT_TENANT_ID } : {}),
   ...(process.env.JINA_CONTEXT_PRINCIPAL_ID ? { contextApiPrincipalId: process.env.JINA_CONTEXT_PRINCIPAL_ID } : {}),
   tenantAdminPrincipalIds: commaSeparatedEnv("JINA_TENANT_ADMIN_PRINCIPALS"),
-  mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS")
+  mcpAllowedOrigins: commaSeparatedEnv("JINA_MCP_ALLOWED_ORIGINS"),
+  ...(contextWorkerLeaseMs === undefined ? {} : { contextWorkerLeaseMs })
 });
 
 const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
@@ -147,4 +149,14 @@ function commaSeparatedEnv(name: string): readonly string[] {
     .split(",")
     .map((value) => value.trim())
     .filter(Boolean);
+}
+
+function optionalPositiveIntegerEnv(name: string): number | undefined {
+  const raw = process.env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive safe integer`);
+  }
+  return value;
 }

@@ -66,6 +66,7 @@ const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
 const MAX_CONTEXT_TARGETS_PER_KIND = 100;
 const MAX_CONTEXT_TARGET_LENGTH = 1_000;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
+const DEFAULT_CONTEXT_WORKER_LEASE_MS = 75 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
 const WORKER_TOPICS = [
   "run-review",
@@ -92,6 +93,7 @@ export interface ApiServerConfig {
   readonly contextApiPrincipalId?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   readonly mcpAllowedOrigins?: readonly string[];
+  readonly contextWorkerLeaseMs?: number;
 }
 
 interface ResolvedRepositoryIdentity {
@@ -146,6 +148,10 @@ interface Principal {
 
 /** Creates the HTTP API without binding a port. */
 export function createApiServer(config: ApiServerConfig = {}): Server {
+  const contextWorkerLeaseMs = config.contextWorkerLeaseMs ?? DEFAULT_CONTEXT_WORKER_LEASE_MS;
+  if (!Number.isSafeInteger(contextWorkerLeaseMs) || contextWorkerLeaseMs <= 0) {
+    throw new Error("contextWorkerLeaseMs must be a positive safe integer");
+  }
   const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
   const metrics = new MetricsRegistry();
   const startedAt = nowIso();
@@ -1059,7 +1065,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         workerId,
         topics: contextTopics,
         now: nowIso(),
-        leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+        leaseExpiresAt: new Date(Date.now() + contextWorkerLeaseMs).toISOString()
       });
       if (claim) {
         json(response, 200, {
@@ -1139,7 +1145,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         stageId: messageId,
         leaseId,
         now: nowIso(),
-        leaseExpiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
+        leaseExpiresAt: new Date(Date.now() + contextWorkerLeaseMs).toISOString()
       });
       if (!renewed) throw staleLease();
       json(response, 200, { accepted: true });

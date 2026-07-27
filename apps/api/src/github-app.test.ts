@@ -671,6 +671,7 @@ test("shared-database workers claim across provisioned tenants without a tenant 
   const sharedServer = createApiServer({
     internalApiToken: internalToken,
     contextApiToken: contextToken,
+    contextWorkerLeaseMs: 90_000,
     contextCoordinator: sharedCoordinator,
     contextStore: sharedStore,
     sharedIdentityResolver: {
@@ -687,6 +688,7 @@ test("shared-database workers claim across provisioned tenants without a tenant 
   await new Promise<void>((resolve) => sharedServer.listen(0, "127.0.0.1", resolve));
   const sharedUrl = `http://127.0.0.1:${(sharedServer.address() as AddressInfo).port}`;
   try {
+    const claimStartedAt = Date.now();
     const response = await fetch(`${sharedUrl}/internal/worker/claim`, {
       method: "POST",
       headers: {
@@ -695,14 +697,30 @@ test("shared-database workers claim across provisioned tenants without a tenant 
       },
       body: JSON.stringify({ workerId: "shared-worker", topics: ["run-ingest-evidence"] })
     });
+    const claimCompletedAt = Date.now();
     assert.equal(response.status, 200);
     const body = record(await response.json());
+    const message = record(body.message);
     const task = record(body.task);
     assert.equal(record(task.metadata).tenantId, sharedTenant);
-    assert.equal(typeof record(body.message).writeFenceToken, "string");
+    assert.equal(typeof message.writeFenceToken, "string");
+    const leaseExpiresAt = Date.parse(String(message.leaseExpiresAt));
+    assert.ok(leaseExpiresAt >= claimStartedAt + 90_000);
+    assert.ok(leaseExpiresAt <= claimCompletedAt + 90_000);
   } finally {
     await new Promise<void>((resolve, reject) => sharedServer.close((error) => (error ? reject(error) : resolve())));
   }
+});
+
+test("worker lease duration rejects unsafe API configuration", () => {
+  assert.throws(
+    () => createApiServer({ contextWorkerLeaseMs: 0 }),
+    /contextWorkerLeaseMs must be a positive safe integer/
+  );
+  assert.throws(
+    () => createApiServer({ contextWorkerLeaseMs: Number.MAX_SAFE_INTEGER + 1 }),
+    /contextWorkerLeaseMs must be a positive safe integer/
+  );
 });
 
 test("malformed persisted runtime state is ignored instead of breaking unrelated API reads", async () => {
