@@ -140,6 +140,10 @@ export interface KnowledgeDocumentSummary {
   readonly confidence: number;
   readonly reviewStatus: string;
   readonly commitSha: string;
+  readonly generatorName: string;
+  readonly generatorVersion: string;
+  readonly model: string;
+  readonly promptVersion: string;
   readonly createdAt: string;
 }
 

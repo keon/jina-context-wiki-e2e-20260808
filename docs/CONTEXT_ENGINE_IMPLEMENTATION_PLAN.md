@@ -374,7 +374,7 @@ interface QueryContextRequest {
   repository: string;
   ref?: string;
   question: string;
-  taskKind?: "lookup" | "structure" | "change" | "intent" | "overview" | "status";
+  taskKind?: "lookup" | "structure" | "change" | "intent" | "overview" | "status" | "diagnose";
   targets?: {
     paths?: string[];
     symbols?: string[];
@@ -607,32 +607,38 @@ bounded history policy
 - erasure replay does not recreate filtered rows;
 - no table named `graph`, `node`, `edge`, or `assertion` is written.
 
-## Knowledge plane: `derive-knowledge` (runtime step 3, after baseline)
+## Knowledge plane: required agentic `derive-knowledge`
 
 ### Input selection
 
 Derivation runs against an immutable `EvidenceCheckpoint`. A deterministic selector builds
-a bounded focus bundle from:
+a bounded focus bundle from up to 2,000 records / 8 MiB, prioritizing:
 
-1. changed files at the selected head;
-2. relevant documentation, ADRs, tests, manifests, and runbooks still present in the tree;
-3. recent complete PR/issue observations associated with the selected history;
-4. explicit incident/root-cause sources;
-5. deterministic symbols and structural facts needed to resolve citations.
+1. issues, pull requests, repository/provider observations, and documents;
+2. architecture, design, README, ADR, RFC, and runbook sources;
+3. up to 500 recent citable Git commits, with changed paths on the checkpoint commit;
+4. manifests and tests; and
+5. remaining source blobs and deterministic evidence.
 
 The selector, ordering, truncation decisions, and omitted counts are recorded. The model
 cannot widen repository, ref, tenant, or provider scope.
 
-The untrusted Codex invocation ignores user configuration and disables shell, shell
-snapshot, unified execution, multi-agent, apps, plugins, remote plugins, hooks, browser,
+The worker gives the Daytona Codex agent four checkpoint-pinned inputs: a read-only Git
+archive of the exact commit, the immutable evidence catalog, the exact repository
+manifest, and the latest eligible prior knowledge revisions. GitHub evidence includes
+PRs, issues, issue comments, PR review comments, and commit discussion comments.
+
+The untrusted invocation ignores user configuration and repository instructions. Codex
+can explore the supplied repository and derivation-input directory with a read-only shell.
+It has no login shell, inherited environment, repository credential, or network. Shell
+snapshots, unified execution, multi-agent, apps, plugins, remote plugins, hooks, browser,
 in-app browser, computer use, image generation, code-mode host, workspace dependencies,
-skill MCP dependency installation, and web-search surfaces. It receives the evidence as
-data and may only emit the schema-constrained JSON result; it cannot fetch more context or
-execute repository instructions.
+skill MCP dependency installation, and web search are disabled. The default context
+window is 64,000 tokens with compaction at 48,000 and medium reasoning effort.
 
 ### Model output
 
-Replace the graph-shaped output schema with:
+The graph-shaped output schema is replaced by `knowledge-documents-v4`:
 
 ```json
 {
@@ -642,8 +648,27 @@ Replace the graph-shaped output schema with:
       "kind": "component",
       "title": "Billing component",
       "summary": "Short retrieval summary",
-      "bodyMarkdown": "Cited explanation with uncertainty where needed.",
-      "structuredSummary": {},
+      "summaryCitationOrdinals": [1],
+      "bodyMarkdown": "Cited explanation with uncertainty where needed. [cite:1]",
+      "structuredSummary": {
+        "facts": [
+          {
+            "text": "Billing has a retry path.",
+            "citationOrdinals": [1],
+            "confidence": 0.91
+          }
+        ],
+        "questionsAnswered": [],
+        "diagnostics": {
+          "symptoms": [],
+          "causes": [],
+          "checks": [],
+          "fixes": []
+        },
+        "claimSubject": null,
+        "claimValue": null,
+        "claimCitationOrdinals": []
+      },
       "scope": {
         "paths": ["src/billing"],
         "symbols": [],
@@ -658,16 +683,26 @@ Replace the graph-shaped output schema with:
           "sourceId": "<sha>",
           "pathOrUrl": "src/billing/service.ts",
           "startLine": 20,
-          "endLine": 37
+          "endLine": 37,
+          "jsonPointer": null
         }
       ]
     }
-  ]
+  ],
+  "retiredDocuments": []
 }
 ```
 
 Do not accept output fields for nodes, edges, predicates, inferred entities, or graph
 operations.
+
+Initial derivation organizes a complete supported catalog across architecture, components,
+features, decisions, changes, issues, incidents, ownership, runbooks, and glossary
+concepts. Incremental derivation uses prior knowledge as the baseline and must re-emit
+every still-supported logical ID, revise affected documents, add new documents, and
+explicitly retire every omitted prior logical ID with a reason. The host rejects silent
+drops, unknown retirements, and emit/retire conflicts. The output supports 1–50 documents;
+it is not a tiny quote-document generator.
 
 ### Host validation
 
@@ -682,7 +717,8 @@ Before storing a revision:
 4. check every cited source against the checkpoint;
 5. verify code path, blob, digest, and exact inclusive line range;
 6. verify provider source ID, raw observation digest, and exact JSON pointer;
-7. require every material paragraph or structured claim to have supporting evidence;
+7. require every non-heading body block, summary, fact, answered question, diagnostic
+   symptom/cause/check/fix, and optional conflict claim to have valid citation ordinals;
 8. reject mixed line/JSON selectors, out-of-bounds selectors, and citations whose
    normalized claim does not occur verbatim in the exact selected excerpt;
 9. require scope paths both to exist in the manifest and to be supported by those exact
@@ -692,9 +728,10 @@ Before storing a revision:
 12. persist raw output, validation diagnostics, revisions, citations, and outbox events
     atomically.
 
-Exactly one repair attempt may use only the original bundle plus explicit validation
-errors. A second invalid result records a failed derivation run, writes no revision, and
-fails the derivation stage and root build.
+Exactly one repair attempt receives the same checkpoint-pinned repository, evidence,
+manifest, and prior catalog plus explicit validation errors. A second invalid result
+records a failed derivation run, writes no revision, and fails the derivation stage and
+root build.
 
 ### Review and supersession
 
@@ -738,6 +775,10 @@ digest to exist in the exact target checkpoint.
 - all initial document kinds have positive and negative fixtures;
 - citation mutation tests reject changed paths, ranges, blobs, JSON pointers, and digests;
 - unsupported logical IDs and source identities fail closed;
+- initial and incremental fixtures cover a later commit plus new PR, issue, and comment
+  evidence; prior documents must be re-emitted or explicitly retired;
+- the read-only Codex workspace permits repository exploration but prevents network,
+  credential, dependency-installation, repository mutation, and subagent access;
 - identical inputs generate no duplicate revisions or events;
 - review and supersession never update immutable content;
 - model failure leaves the baseline exact/structural index queryable for diagnosis/retry
@@ -1259,15 +1300,18 @@ checkpoint.
 Deliver:
 
 - bounded focus selector;
-- knowledge output JSON schema and prompts;
-- renamed Daytona executor;
+- cited `knowledge-documents-v4` schema, full-initialization prompt, and incremental
+  re-emit-or-retire prompt;
+- checkpoint-pinned Daytona Codex executor with a read-only shell workspace and separate
+  evidence/manifest/prior-knowledge inputs;
 - host citation and logical-ID validator;
 - derivation run, revision, evidence, and event repositories;
 - current-revision projector;
 - review/supersession operations and UI skeleton.
 
 Gate: citation integrity is 100% on mutation tests, invalid output writes no revision,
-retries are idempotent, review is append-only, and the model emits no graph operations.
+retries are idempotent, review is append-only, full initialization and incremental
+commit/PR/issue fixtures pass, and the model emits no graph operations.
 
 ### Phase 4 — Implement required exact and lexical indexes
 
@@ -1451,6 +1495,14 @@ For a fixture repository:
     resurrects it;
 14. append each terminal knowledge event and verify the affected ref remains unavailable
     until a frontier-consistent rebuild.
+15. initialize a repository with no prior catalog and verify organized, cited architecture,
+    component, change, issue, and diagnostic documents where the fixture supports them;
+16. add a commit with changed paths, a PR, an issue, and a discussion comment, then verify
+    prior documents are re-emitted or retired, affected documents are revised, and new
+    knowledge is queryable through HTTP/MCP and visible through dashboard/admin catalog
+    contracts;
+17. run the maintained Markdown question corpus one by one and retain each answer,
+    citation, coverage gap, retriever set, trace ID, and latency.
 
 ### Required quality gates
 

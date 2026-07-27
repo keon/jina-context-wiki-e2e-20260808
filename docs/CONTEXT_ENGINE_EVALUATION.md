@@ -45,6 +45,14 @@ Production acceptance separately verifies HTTP and MCP anchors at a real reposit
 commit. The release built from `050623ce17df30caf14fbc5e798baea6ff3fee30`
 passed that production acceptance gate.
 
+Agentic derivation has additional contract coverage outside this deterministic retrieval
+fixture. Tests exercise `knowledge-documents-v4`, cited summaries/body blocks/facts/
+questions/diagnostics, checkpoint commit changed paths, GitHub issue/PR/discussion
+comments, a checkpoint-pinned read-only Codex shell workspace, explicit prior-document
+re-emission or retirement, one repair then fail-closed behavior, and `diagnose` routing.
+API integration covers a full initialization followed by an incremental commit with new
+PR and issue evidence, then queries the resulting context through both HTTP and MCP.
+
 ## Ablation results
 
 | Variant                 | Enabled | Evidence recall | Exact completeness | Citation integrity | ACL leaks |
@@ -150,6 +158,37 @@ pnpm evaluate:context > /tmp/context-evaluation-report.json
 
 Do not edit reported numbers by hand. Re-run after any change to evidence selection,
 fragmentation, planner routing, retrieval, fusion, hierarchy, citations, or the fixture.
+
+## Evaluate a real question corpus
+
+`pnpm evaluate:questions` checks each Markdown bullet question against a running
+`POST /context/query` API. Headings become report categories. Use it for the engineering
+questions agents actually need to answer, especially historical issues, root causes,
+regression detection, diagnosis, and evidence-backed fixes:
+
+```sh
+JINA_API_URL=https://api.example.com \
+JINA_CONTEXT_REPOSITORY=owner/repository \
+JINA_CONTEXT_REF=main \
+CONTEXT_QUESTION_FILE=/absolute/path/questions.md \
+CONTEXT_API_TOKEN='<bound query token>' \
+CONTEXT_QUESTION_CONCURRENCY=4 \
+CONTEXT_QUESTION_MIN_ANSWERED_RATE=0.8 \
+pnpm evaluate:questions > /tmp/context-question-report.json
+```
+
+For every question the report records `answered`, `partial`, `unanswered`, or `error`;
+answer text; citation source IDs; coverage and missing reasons; retrievers; trace ID; and
+latency. It also reports per-category totals and median/p95/maximum latency. The command
+fails for request errors or when the answered-or-partial rate is below
+`CONTEXT_QUESTION_MIN_ANSWERED_RATE`.
+
+This automated label is a coverage screen, not a semantic correctness grade: a response
+with citations is `answered` only when API coverage is complete, but causal,
+counterfactual, and fix-quality questions still need human or rubric grading. Keep the
+individual rows so failures can drive evidence intake, derivation prompts, document
+organization, and retrieval improvements. Never commit bearer tokens or reports that
+contain private answer text.
 
 ## CI use
 

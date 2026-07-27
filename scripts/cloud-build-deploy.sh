@@ -125,6 +125,10 @@ if [[ "${context_cutover}" != "true" && "${context_cutover}" != "false" ]]; then
   echo "JINA_CONTEXT_CUTOVER must be true or false" >&2
   exit 2
 fi
+deploy_traffic_args=()
+if [[ "${context_cutover}" == "false" ]]; then
+  deploy_traffic_args=(--no-traffic)
+fi
 
 legacy_api_env_value() {
   local environment_name="$1"
@@ -313,6 +317,75 @@ route_latest_revision() {
     --quiet >/dev/null
   echo "Routed ${service} 100% to ${revision}"
 }
+
+snapshot_service_traffic() {
+  local service="$1"
+  local description
+  if ! description="$(gcloud run services describe "${service}" \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --format=json 2>/dev/null)"; then
+    return 0
+  fi
+  SERVICE_DESCRIPTION="${description}" python3 -c '
+import json
+import os
+
+description = json.loads(os.environ["SERVICE_DESCRIPTION"])
+assignments = []
+for target in description.get("status", {}).get("traffic", []):
+    revision = target.get("revisionName")
+    percent = target.get("percent")
+    if revision and isinstance(percent, int) and percent > 0:
+        assignments.append(f"{revision}={percent}")
+if assignments and sum(int(item.rsplit("=", 1)[1]) for item in assignments) != 100:
+    raise SystemExit("serving traffic does not total 100 percent")
+print(",".join(assignments))
+'
+}
+
+restore_service_traffic() {
+  local service="$1"
+  local assignments="$2"
+  if [[ -z "${assignments}" ]]; then
+    echo "No prior traffic assignment recorded for ${service}; leaving it unchanged" >&2
+    return 0
+  fi
+  gcloud run services update-traffic "${service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --to-revisions="${assignments}" \
+    --quiet >/dev/null
+  echo "Restored ${service} traffic to ${assignments}" >&2
+}
+
+release_cutover_started="false"
+prior_api_traffic=""
+prior_context_worker_traffic=""
+prior_task_worker_traffic=""
+prior_dashboard_traffic=""
+prior_admin_traffic=""
+
+rollback_failed_release() {
+  local status=$?
+  trap - EXIT
+  if [[ "${status}" -ne 0 && "${release_cutover_started}" == "true" &&
+        "${context_cutover}" == "false" ]]; then
+    echo "Release failed; restoring the previous Cloud Run traffic assignments" >&2
+    local rollback_status=0
+    restore_service_traffic "jina-context-worker" "${prior_context_worker_traffic}" || rollback_status=$?
+    restore_service_traffic "jina-task-worker" "${prior_task_worker_traffic}" || rollback_status=$?
+    restore_service_traffic "jina-api" "${prior_api_traffic}" || rollback_status=$?
+    restore_service_traffic "jina-dashboard" "${prior_dashboard_traffic}" || rollback_status=$?
+    restore_service_traffic "jina-admin" "${prior_admin_traffic}" || rollback_status=$?
+    if [[ "${rollback_status}" -ne 0 ]]; then
+      echo "One or more Cloud Run services could not be rolled back automatically" >&2
+    fi
+  fi
+  exit "${status}"
+}
+
+trap rollback_failed_release EXIT
 
 for secret_spec in \
   "${db_pass_secret}" \
@@ -616,6 +689,15 @@ gcloud run jobs execute jina-context-migrate \
   --region="${GCP_REGION}" \
   --wait
 
+if [[ "${context_cutover}" == "false" ]]; then
+  prior_api_traffic="$(snapshot_service_traffic "jina-api")"
+  prior_context_worker_traffic="$(snapshot_service_traffic "jina-context-worker")"
+  prior_task_worker_traffic="$(snapshot_service_traffic "jina-task-worker")"
+  prior_dashboard_traffic="$(snapshot_service_traffic "jina-dashboard")"
+  prior_admin_traffic="$(snapshot_service_traffic "jina-admin")"
+fi
+release_cutover_started="true"
+
 gcloud run deploy jina-api \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -632,6 +714,7 @@ gcloud run deploy jina-api \
   --max-instances="${api_max_instances}" \
   --set-env-vars="${api_env_vars}" \
   --set-secrets="${api_secrets}" \
+  "${deploy_traffic_args[@]}" \
   --quiet
 
 route_latest_revision "jina-api"
@@ -653,8 +736,9 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_CONTEXT_TOKENS=16000~CONTEXT_CODEX_COMPACT_TOKENS=12000" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=64000~CONTEXT_CODEX_COMPACT_TOKENS=48000~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  "${deploy_traffic_args[@]}" \
   --quiet
 
 route_latest_revision "jina-context-worker"
@@ -676,6 +760,7 @@ gcloud run deploy jina-task-worker \
   --no-cpu-throttling \
   --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-review|run-research|run-publish|run-cleanup~REVIEW_MODEL=gpt-5.6-sol" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  "${deploy_traffic_args[@]}" \
   --quiet
 
 route_latest_revision "jina-task-worker"
@@ -703,6 +788,7 @@ gcloud run deploy jina-dashboard \
   --service-account="${dashboard_service_account}" \
   --set-env-vars="${web_env_vars}" \
   --set-secrets="${web_secrets}" \
+  "${deploy_traffic_args[@]}" \
   --quiet
 route_latest_revision "jina-dashboard"
 dashboard_url="$(gcloud run services describe jina-dashboard \
@@ -718,6 +804,7 @@ gcloud run deploy jina-admin \
   --service-account="${admin_service_account}" \
   --set-env-vars="${web_env_vars}" \
   --set-secrets="${web_secrets}" \
+  "${deploy_traffic_args[@]}" \
   --quiet
 route_latest_revision "jina-admin"
 admin_url="$(gcloud run services describe jina-admin \
@@ -769,6 +856,8 @@ if [[ "${acceptance_status}" -ne 0 ]]; then
     --limit=500 || true
   exit "${acceptance_status}"
 fi
+
+release_cutover_started="false"
 
 cat <<SUMMARY
 Cloud Build deployment complete

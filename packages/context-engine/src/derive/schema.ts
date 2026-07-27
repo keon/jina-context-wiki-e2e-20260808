@@ -1,12 +1,14 @@
 import {
   knowledgeDocumentKinds,
+  type CitedKnowledgeStatement,
   type KnowledgeDocumentDraft,
   type KnowledgeDocumentDraftCitation,
   type KnowledgeGenerationOutput,
-  type KnowledgeScope
+  type KnowledgeScope,
+  type KnowledgeStructuredSummary
 } from "../domain/knowledge.js";
 
-export const KNOWLEDGE_OUTPUT_SCHEMA_VERSION = "knowledge-documents-v2";
+export const KNOWLEDGE_OUTPUT_SCHEMA_VERSION = "knowledge-documents-v4";
 
 function object(value: unknown, path: string): Record<string, unknown> {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
@@ -30,6 +32,13 @@ function strings(value: unknown, path: string): string[] {
     throw new Error(`${path} must be an array of strings`);
   }
   return value.map((item) => item.trim()).filter(Boolean);
+}
+
+function positiveIntegers(value: unknown, path: string): number[] {
+  if (!Array.isArray(value) || !value.every((item) => Number.isSafeInteger(item) && Number(item) >= 1)) {
+    throw new Error(`${path} must be an array of positive integers`);
+  }
+  return [...new Set(value as number[])];
 }
 
 function optionalString(value: unknown, path: string): string | undefined {
@@ -79,17 +88,49 @@ function parseCitation(value: unknown, path: string): KnowledgeDocumentDraftCita
   };
 }
 
-function parseStructuredSummary(value: unknown, path: string): Record<string, unknown> {
+function parseCitedStatement(value: unknown, path: string): CitedKnowledgeStatement {
   const input = object(value, path);
-  onlyKeys(input, ["facts", "claimSubject", "claimValue"], path);
+  onlyKeys(input, ["text", "citationOrdinals", "confidence"], path);
+  if (typeof input.confidence !== "number" || !Number.isFinite(input.confidence)) {
+    throw new Error(`${path}.confidence must be a number`);
+  }
   return {
-    facts: strings(input.facts, `${path}.facts`),
+    text: string(input.text, `${path}.text`),
+    citationOrdinals: positiveIntegers(input.citationOrdinals, `${path}.citationOrdinals`),
+    confidence: input.confidence
+  };
+}
+
+function parseCitedStatements(value: unknown, path: string): CitedKnowledgeStatement[] {
+  if (!Array.isArray(value)) throw new Error(`${path} must be an array`);
+  return value.map((item, index) => parseCitedStatement(item, `${path}[${index}]`));
+}
+
+function parseStructuredSummary(value: unknown, path: string): KnowledgeStructuredSummary {
+  const input = object(value, path);
+  onlyKeys(
+    input,
+    ["facts", "questionsAnswered", "diagnostics", "claimSubject", "claimValue", "claimCitationOrdinals"],
+    path
+  );
+  const diagnostics = object(input.diagnostics, `${path}.diagnostics`);
+  onlyKeys(diagnostics, ["symptoms", "causes", "checks", "fixes"], `${path}.diagnostics`);
+  return {
+    facts: parseCitedStatements(input.facts, `${path}.facts`),
+    questionsAnswered: parseCitedStatements(input.questionsAnswered, `${path}.questionsAnswered`),
+    diagnostics: {
+      symptoms: parseCitedStatements(diagnostics.symptoms, `${path}.diagnostics.symptoms`),
+      causes: parseCitedStatements(diagnostics.causes, `${path}.diagnostics.causes`),
+      checks: parseCitedStatements(diagnostics.checks, `${path}.diagnostics.checks`),
+      fixes: parseCitedStatements(diagnostics.fixes, `${path}.diagnostics.fixes`)
+    },
     ...(optionalString(input.claimSubject, `${path}.claimSubject`) === undefined
       ? {}
       : { claimSubject: optionalString(input.claimSubject, `${path}.claimSubject`)! }),
     ...(optionalString(input.claimValue, `${path}.claimValue`) === undefined
       ? {}
-      : { claimValue: optionalString(input.claimValue, `${path}.claimValue`)! })
+      : { claimValue: optionalString(input.claimValue, `${path}.claimValue`)! }),
+    claimCitationOrdinals: positiveIntegers(input.claimCitationOrdinals, `${path}.claimCitationOrdinals`)
   };
 }
 
@@ -97,7 +138,18 @@ function parseDocument(value: unknown, path: string): KnowledgeDocumentDraft {
   const input = object(value, path);
   onlyKeys(
     input,
-    ["logicalId", "kind", "title", "summary", "bodyMarkdown", "structuredSummary", "scope", "confidence", "citations"],
+    [
+      "logicalId",
+      "kind",
+      "title",
+      "summary",
+      "summaryCitationOrdinals",
+      "bodyMarkdown",
+      "structuredSummary",
+      "scope",
+      "confidence",
+      "citations"
+    ],
     path
   );
   const kind = string(input.kind, `${path}.kind`);
@@ -115,6 +167,7 @@ function parseDocument(value: unknown, path: string): KnowledgeDocumentDraft {
     kind: kind as KnowledgeDocumentDraft["kind"],
     title: string(input.title, `${path}.title`),
     summary: string(input.summary, `${path}.summary`),
+    summaryCitationOrdinals: positiveIntegers(input.summaryCitationOrdinals, `${path}.summaryCitationOrdinals`),
     bodyMarkdown: string(input.bodyMarkdown, `${path}.bodyMarkdown`),
     structuredSummary: parseStructuredSummary(input.structuredSummary, `${path}.structuredSummary`),
     scope: parseScope(input.scope, `${path}.scope`),
@@ -129,20 +182,42 @@ export function parseKnowledgeGenerationOutput(value: unknown): KnowledgeGenerat
   for (const field of prohibited) {
     if (field in input) throw new Error(`output.${field} is prohibited`);
   }
-  onlyKeys(input, ["documents"], "output");
+  onlyKeys(input, ["documents", "retiredDocuments"], "output");
   if (!Array.isArray(input.documents)) throw new Error("output.documents must be an array");
+  if (input.documents.length === 0) throw new Error("output.documents must contain at least one document");
   if (input.documents.length > 50) throw new Error("output.documents exceeds the maximum of 50");
-  return { documents: input.documents.map((document, index) => parseDocument(document, `documents[${index}]`)) };
+  const retiredDocuments =
+    input.retiredDocuments === undefined
+      ? undefined
+      : (() => {
+          if (!Array.isArray(input.retiredDocuments)) throw new Error("output.retiredDocuments must be an array");
+          if (input.retiredDocuments.length > 50) {
+            throw new Error("output.retiredDocuments exceeds the maximum of 50");
+          }
+          return input.retiredDocuments.map((retired, index) => {
+            const entry = object(retired, `retiredDocuments[${index}]`);
+            onlyKeys(entry, ["logicalId", "reason"], `retiredDocuments[${index}]`);
+            return {
+              logicalId: string(entry.logicalId, `retiredDocuments[${index}].logicalId`).toLowerCase(),
+              reason: string(entry.reason, `retiredDocuments[${index}].reason`)
+            };
+          });
+        })();
+  return {
+    documents: input.documents.map((document, index) => parseDocument(document, `documents[${index}]`)),
+    ...(retiredDocuments ? { retiredDocuments } : {})
+  };
 }
 
 export const knowledgeGenerationJsonSchema = {
   $id: KNOWLEDGE_OUTPUT_SCHEMA_VERSION,
   type: "object",
   additionalProperties: false,
-  required: ["documents"],
+  required: ["documents", "retiredDocuments"],
   properties: {
     documents: {
       type: "array",
+      minItems: 1,
       maxItems: 50,
       items: {
         type: "object",
@@ -152,6 +227,12 @@ export const knowledgeGenerationJsonSchema = {
           kind: { type: "string", enum: knowledgeDocumentKinds },
           title: { type: "string", minLength: 1 },
           summary: { type: "string", minLength: 1 },
+          summaryCitationOrdinals: {
+            type: "array",
+            minItems: 1,
+            maxItems: 500,
+            items: { type: "integer", minimum: 1 }
+          },
           bodyMarkdown: { type: "string", minLength: 1 },
           structuredSummary: {
             type: "object",
@@ -160,12 +241,56 @@ export const knowledgeGenerationJsonSchema = {
               facts: {
                 type: "array",
                 maxItems: 100,
-                items: { type: "string", minLength: 1 }
+                items: { $ref: "#/$defs/citedStatement" }
+              },
+              questionsAnswered: {
+                type: "array",
+                maxItems: 100,
+                items: { $ref: "#/$defs/citedStatement" }
+              },
+              diagnostics: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  symptoms: {
+                    type: "array",
+                    maxItems: 100,
+                    items: { $ref: "#/$defs/citedStatement" }
+                  },
+                  causes: {
+                    type: "array",
+                    maxItems: 100,
+                    items: { $ref: "#/$defs/citedStatement" }
+                  },
+                  checks: {
+                    type: "array",
+                    maxItems: 100,
+                    items: { $ref: "#/$defs/citedStatement" }
+                  },
+                  fixes: {
+                    type: "array",
+                    maxItems: 100,
+                    items: { $ref: "#/$defs/citedStatement" }
+                  }
+                },
+                required: ["symptoms", "causes", "checks", "fixes"]
               },
               claimSubject: { type: ["string", "null"], minLength: 1 },
-              claimValue: { type: ["string", "null"], minLength: 1 }
+              claimValue: { type: ["string", "null"], minLength: 1 },
+              claimCitationOrdinals: {
+                type: "array",
+                maxItems: 500,
+                items: { type: "integer", minimum: 1 }
+              }
             },
-            required: ["facts", "claimSubject", "claimValue"]
+            required: [
+              "facts",
+              "questionsAnswered",
+              "diagnostics",
+              "claimSubject",
+              "claimValue",
+              "claimCitationOrdinals"
+            ]
           },
           scope: {
             type: "object",
@@ -207,6 +332,7 @@ export const knowledgeGenerationJsonSchema = {
           "kind",
           "title",
           "summary",
+          "summaryCitationOrdinals",
           "bodyMarkdown",
           "structuredSummary",
           "scope",
@@ -214,6 +340,36 @@ export const knowledgeGenerationJsonSchema = {
           "citations"
         ]
       }
+    },
+    retiredDocuments: {
+      type: "array",
+      maxItems: 50,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          logicalId: { type: "string", minLength: 1 },
+          reason: { type: "string", minLength: 1 }
+        },
+        required: ["logicalId", "reason"]
+      }
+    }
+  },
+  $defs: {
+    citedStatement: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        text: { type: "string", minLength: 1 },
+        citationOrdinals: {
+          type: "array",
+          minItems: 1,
+          maxItems: 500,
+          items: { type: "integer", minimum: 1 }
+        },
+        confidence: { type: "number", minimum: 0, maximum: 1 }
+      },
+      required: ["text", "citationOrdinals", "confidence"]
     }
   }
 } as const;

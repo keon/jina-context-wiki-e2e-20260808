@@ -102,8 +102,10 @@ CONTEXT_MAX_FILE_BYTES=5242880
 CONTEXT_MAX_SNAPSHOT_BYTES=25165824
 CONTEXT_CODEX_PROVIDER=openrouter
 CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini
-CONTEXT_CODEX_CONTEXT_TOKENS=16000
-CONTEXT_CODEX_COMPACT_TOKENS=12000
+CONTEXT_CODEX_EFFORT=medium
+CONTEXT_CODEX_CONTEXT_TOKENS=64000
+CONTEXT_CODEX_COMPACT_TOKENS=48000
+CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728
 DAYTONA_RUN_TIMEOUT_SECONDS=2400
 ```
 
@@ -124,8 +126,10 @@ the branch to `refs/remotes/origin/<ref>`, resolves the fetched remote head, and
 out detached. The optional SHA is an expected-head fence, not permission to index a
 historical commit as current: a mismatch means the ref moved and fails ingestion. A
 manual build without `commitSha` selects the fetched head. The worker persists up to
-`CONTEXT_GIT_HISTORY_LIMIT` commits and parents and paginates PR/issue observations up to
-`CONTEXT_GITHUB_HISTORY_LIMIT`. It preserves every manifest entry when binary or
+`CONTEXT_GIT_HISTORY_LIMIT` commits and parents, materializes up to 500 recent commits for
+derivation, and includes changed paths on the checkpoint commit. It paginates repository
+metadata, PRs, issues, issue comments, PR review comments, and commit discussion comments
+up to `CONTEXT_GITHUB_HISTORY_LIMIT`. It preserves every manifest entry when binary or
 oversized file bodies are omitted.
 
 The checkpoint is `complete` only when Git history reaches its root, every optional
@@ -149,16 +153,24 @@ completion is the gate that queues derivation. This prevents distinct workers fr
 racing knowledge projection-input changes against baseline materialization. Invalid
 derivation output receives one bounded repair. A failed repair or executor fails the
 root build; the baseline remains available only for diagnosis/retry. Successful
-derivation publishes the required enriched successor. Codex derivation ignores user configuration and disables shell, shell
-snapshots, unified execution, multi-agent, apps, plugins, remote plugins, hooks,
-browser/in-app browser, computer use, image generation, the code-mode host, workspace
-dependencies, skill MCP dependency installation, and web search; exact claim grounding
-and scope validation occur host-side against the exact selected citation excerpts and
-intrinsic source identities. Only revisions whose every citation identity/digest is
-present in the exact generation checkpoint are selectable; matching ref+commit history is
-not enough. Equivalent-evidence derivation cache reuse remains safe because indexing
-performs that checkpoint-membership check. Worker writes are fenced by the current board
-lease.
+derivation publishes the required enriched successor. The worker fetches the exact
+checkpoint SHA, creates a bounded Git archive, and supplies Codex a read-only repository,
+immutable evidence catalog, exact manifest, and eligible prior knowledge. Codex ignores
+user configuration and repository instructions. Its shell is read-only and has no login
+shell, inherited environment, repository credential, or network. Shell snapshots,
+unified execution, multi-agent, apps, plugins, remote plugins, hooks, browser/in-app
+browser, computer use, image generation, the code-mode host, workspace dependencies,
+skill MCP dependency installation, and web search are disabled.
+
+The result must match `knowledge-documents-v4`. Full initialization organizes a supported
+knowledge catalog; incremental commit/PR/issue builds must re-emit every still-valid prior
+logical document or explicitly retire it. The host validates body markers, structured
+facts/questions/diagnostics, citation ordinals, exact claim excerpts, identities, and
+scope. Only revisions whose every citation identity/digest is present in the exact
+generation checkpoint are selectable; matching ref+commit history is not enough.
+Equivalent-evidence derivation cache reuse remains safe because indexing performs that
+checkpoint-membership check. One invalid result receives one repair; a second invalid
+result fails closed. Worker writes are fenced by the current board lease.
 
 The API Cloud Run request timeout is 60 minutes. The context worker operation client
 allows 62 minutes and terminal completion has a separate 10-minute deadline. The
@@ -330,13 +342,22 @@ The coordinated `cloudbuild.yaml` invocation above calls
 2. deploys and executes `jina-context-migrate` as the dedicated `jina-migration` Google
    service account with the migration-owner credential, including capability-role
    installation and runtime-login grants;
-3. deploys `jina-api` with schema management disabled and checks `/health`;
-4. deploys `jina-context-worker` and verifies the exact three topics;
-5. deploys `jina-task-worker` and verifies its topics;
-6. deploys `jina-dashboard` and `jina-admin` using the exact images built in this release;
+3. for an ordinary non-destructive release, snapshots the exact serving traffic
+   assignments for all five services and creates each new revision with `--no-traffic`;
+4. routes the ready `jina-api` revision, with schema management disabled, and checks
+   `/health`;
+5. routes `jina-context-worker` and verifies the exact three topics;
+6. routes `jina-task-worker`, `jina-dashboard`, and `jina-admin` using the exact images
+   built in this release and verifies the worker topics;
 7. deploys and executes `jina-acceptance`;
 8. fails the Cloud Build if preflight, migration, health, topic, or acceptance checks
-   fail.
+   fail. For an ordinary release, the exit trap restores every captured traffic
+   assignment before the build reports failure.
+
+This traffic restoration protects a routine forward-compatible application release; it
+is not a schema down-migration or a compatibility promise. The first destructive
+graph-to-context cutover deliberately follows the isolated recovery procedure below
+instead.
 
 The migration installs `jina_context` and its capability roles from scratch with
 `--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, marks that login `NOINHERIT`,
@@ -408,8 +429,8 @@ ensures production acceptance exercises ordinary query authorization.
    query principal's ACL without replacing unrelated repositories;
 2. uses the distinct administrator to start `POST /context/build` with the configured
    GitHub installation ID;
-3. waits through the strict three-stage order, where baseline indexing gates derivation,
-   and rejects failed/blocked work;
+3. waits through the strict three-stage order, where baseline indexing gates required
+   agentic derivation and enriched indexing, and rejects failed/blocked work;
 4. requires a published enriched generation at one full commit SHA;
 5. uses the administrator to require a nonempty knowledge-document catalog;
 6. uses only the bound non-admin context bearer to call `/context/query` and verifies
@@ -423,6 +444,27 @@ The job exits `20` for workflow failures, `21` for generation/commit failures, `
 knowledge availability, `23` for HTTP/MCP answer or citation failures, `24` for backlog,
 and `25` for transport or unexpected failures. Inspect the job execution logs before
 retrying with a new request key.
+
+For release-candidate quality checks beyond the deployment smoke query, run the checked-in
+fixture evaluator and the real-question corpus evaluator:
+
+```sh
+pnpm evaluate:context
+
+JINA_API_URL="${JINA_API_URL}" \
+JINA_CONTEXT_REPOSITORY=owner/repository \
+JINA_CONTEXT_REF=main \
+CONTEXT_QUESTION_FILE=/absolute/path/questions.md \
+CONTEXT_API_TOKEN='<bound context query token>' \
+CONTEXT_QUESTION_MIN_ANSWERED_RATE=0.8 \
+pnpm evaluate:questions > /tmp/context-question-report.json
+```
+
+The question file uses Markdown headings plus bullet questions. The JSON report records
+every answered/partial/unanswered/error result, original citation source IDs, coverage
+gaps, retrievers, trace ID, and latency. Do not put the report or a query token in
+repository source. See [AGENTIC_DERIVATION.md](AGENTIC_DERIVATION.md) and
+[CONTEXT_ENGINE_EVALUATION.md](CONTEXT_ENGINE_EVALUATION.md).
 
 Release evidence also records the build ID, stage IDs, repository/ref/commit,
 `refSequence`, generation ID and projection-input fingerprint, document/citation counts,

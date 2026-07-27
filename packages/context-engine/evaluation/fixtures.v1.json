@@ -151,6 +151,14 @@
       "expectedSourceIds": ["github:issue:77"]
     },
     {
+      "id": "incident-diagnosis",
+      "category": "diagnosis",
+      "taskKind": "diagnose",
+      "question": "A context publication is stalled. What is the likely cause, what should I check, and how do I fix it?",
+      "expectedSourceIds": ["2222222222222222222222222222222222222222"],
+      "requiredSourceKind": "knowledge"
+    },
+    {
       "id": "ownership",
       "category": "ownership",
       "taskKind": "status",

@@ -45,6 +45,10 @@ serve the baseline for diagnosis and retry without model output, but derivation 
 fails the root build. Production acceptance waits for all three stages and requires the
 enriched successor so it exercises the complete release path.
 
+The semantic data flow is `ingest-evidence` → required `derive-knowledge` →
+`index-context`; the first index publication is the raw-evidence safety baseline and the
+second is the required enriched result.
+
 ## Ingest immutable evidence
 
 ```mermaid
@@ -57,10 +61,10 @@ sequenceDiagram
 
     W->>API: POST /internal/worker/claim (run-ingest-evidence)
     API-->>W: task, lease, attempt, write-fence token
-    W->>Git: Mint installation token; full blob-filtered clone and paginated provider history
+    W->>Git: Mint installation token; full clone and paginated provider history/comments
     W->>Git: Fetch refs/heads/ref to refs/remotes/origin/ref
     W->>Git: Require event SHA == fetched head; detached checkout
-    W->>W: Persist bounded commit/parent history; enumerate full manifest
+    W->>W: Persist commit history and head changed paths; enumerate full manifest
     W->>W: Record Git/GitHub frontiers and omitted bodies as complete or partial
     W->>API: POST /internal/context/ingest (lease + evidence input)
     API->>API: Validate topic, lease, attempt, and fence
@@ -95,13 +99,17 @@ sequenceDiagram
     DB-->>API: Atomically published baseline generation
     Note over API,KW: Baseline completion queues required derivation
     KW->>API: POST /internal/context/derive/prepare
-    API->>DB: Select bounded immutable evidence bundle
-    API-->>KW: Prompt and evidence bundle
-    KW->>DX: Run schema-only knowledge generator with all agentic tools disabled
-    DX-->>KW: Untrusted JSON document output
+    API->>DB: Select evidence bundle, exact manifest, and eligible prior revisions
+    API-->>KW: Agent prompt + evidence + manifest + prior knowledge
+    KW->>KW: Fetch exact checkpoint SHA and create Git archive
+    KW->>DX: Upload read-only checkpoint archive and derivation inputs
+    KW->>DX: Run Codex with read-only shell, no network/credentials, v4 schema
+    DX->>DX: Explore repository; organize full or incremental cited catalog
+    DX-->>KW: Untrusted documents + explicit retiredDocuments JSON
     KW->>API: POST /internal/context/derive/commit (fence + raw output)
     API->>DB: Resolve exact range/JSON excerpts and validate terminal source citations
-    API->>DB: Require each normalized claim verbatim in its selected evidence excerpt
+    API->>DB: Validate body/structured ordinals and citation claims verbatim
+    API->>DB: Require every prior logical ID to be re-emitted or explicitly retired
     alt valid
         DB->>DB: Under ref lock, reject if checkpoint is behind admitted/current sequence
         DB->>DB: Append derivation run, revisions, evidence, events
@@ -116,6 +124,10 @@ sequenceDiagram
 The baseline contains raw evidence as indexable context documents. Derived knowledge is
 also projected as indexable documents, but its answer citations expand through immutable
 revision evidence to original blobs, observations, commits, pull requests, or issues.
+The structured payload includes cited facts, questions answered, symptoms, likely causes,
+diagnostic checks, and evidence-backed fixes. On a later commit, PR, issue, or comment
+checkpoint, the prior catalog is an explicit input and silent logical-document drops fail
+validation.
 Only revisions whose every stored citation source identity and `contentDigest` exists in
 the exact evidence checkpoint can enter either generation; ref+commit equality alone is
 insufficient. Equivalent same-commit checkpoints safely reuse unchanged cited facts, but
@@ -163,6 +175,10 @@ when a generation advertises an evaluated/available embedding capability; it is 
 in the current release. If the final authorization differs from the initial fingerprint
 set, the API drops the response.
 
+For `taskKind: diagnose`, the planner explicitly combines knowledge, structured provider
+state, and temporal history so symptoms, likely causes, checks, fixes, issues, pull
+requests, and recent changes can contribute to one cited answer.
+
 ## Stateless MCP query
 
 ```mermaid
@@ -175,7 +191,7 @@ sequenceDiagram
     API-->>MC: Stateless Streamable HTTP response
     MC->>API: tools/list
     API-->>MC: query_context only
-    MC->>API: tools/call query_context
+    MC->>API: tools/call query_context (including taskKind diagnose)
     API->>QE: Same QueryContextRequest as HTTP
     QE-->>API: Storage-neutral cited response
     API-->>MC: Text plus structuredContent

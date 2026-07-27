@@ -23,9 +23,15 @@ The decision logic is in `lib/admin-auth.ts` and has unit tests.
 
 ## Page
 
-`/` shows tenant-wide generation, repository, knowledge-document, and pending-projection
-counts. Operators can filter by repository and inspect each generation's ref, full commit
-identity, publication time, knowledge availability, and projector set.
+`/` shows tenant-wide generation, repository, current logical knowledge-document, and
+pending-projection counts. Operators can filter by repository and inspect each
+generation's ref, full commit identity, publication time, knowledge availability, and
+projector set.
+
+The agent-derived knowledge section reports immutable revision counts by document kind and
+shows each visible revision's repository, kind, logical document, commit, generator/model,
+review state, and confidence. It is an operational catalog of
+`knowledge-documents-v4`; it does not expose or imply a semantic graph.
 
 ## Running
 

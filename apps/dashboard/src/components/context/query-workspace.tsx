@@ -6,7 +6,7 @@ import { citationLocation, queryCitationAnchors, safeSourceUrl, shortDigest } fr
 import { humanize, shortId } from "../../lib/format.ts";
 import type { ContextGeneration, ContextQueryResponse, QueryCitation } from "../../lib/types.ts";
 
-const TASK_KINDS = ["lookup", "structure", "change", "intent", "overview", "status"] as const;
+const TASK_KINDS = ["lookup", "structure", "change", "intent", "overview", "status", "diagnose"] as const;
 
 export function QueryWorkspace({ generation }: { readonly generation: ContextGeneration }) {
   const [question, setQuestion] = useState("");

@@ -1,17 +1,42 @@
 import { fingerprint, normalizeIsoTime, stableId } from "../domain/fingerprint.js";
-import type { DerivationRun, KnowledgeGenerationOutput } from "../domain/knowledge.js";
+import type { RefManifestEntry } from "../domain/evidence.js";
+import type {
+  DerivationRun,
+  KnowledgeDocumentRevision,
+  KnowledgeEvidenceCitation,
+  KnowledgeGenerationOutput
+} from "../domain/knowledge.js";
 import type { KnowledgeStore } from "../ports/knowledge-store.js";
-import { buildKnowledgePrompt, KNOWLEDGE_PROMPT_VERSION } from "./prompt.js";
-import { type FocusBundle, EvidenceFocusSelector } from "./selector.js";
+import { buildKnowledgePrompt, buildKnowledgeRepairPrompt, KNOWLEDGE_PROMPT_VERSION } from "./prompt.js";
+import { type FocusBundle, EvidenceFocusSelector, selectPriorKnowledge } from "./selector.js";
 import { KNOWLEDGE_OUTPUT_SCHEMA_VERSION, parseKnowledgeGenerationOutput } from "./schema.js";
 import { KnowledgeOutputValidator, KnowledgeValidationError } from "./validator.js";
 import type { ContextWriteFence } from "../workflow/coordinator.js";
+
+export interface PriorKnowledgeRevision {
+  revision: KnowledgeDocumentRevision;
+  citations: KnowledgeEvidenceCitation[];
+  reviewStatus: "generated" | "reviewed";
+}
+
+export interface KnowledgeAgentWorkspace {
+  repositoryDirectory: string;
+  manifest: RefManifestEntry[];
+  priorKnowledge: PriorKnowledgeRevision[];
+}
+
+export interface KnowledgeDocumentGenerationInput {
+  prompt: string;
+  bundle: FocusBundle;
+  repairErrors: string[];
+  workspace?: KnowledgeAgentWorkspace;
+}
 
 export interface KnowledgeDocumentGenerator {
   readonly name: string;
   readonly version: string;
   readonly model: string;
-  generate(input: { prompt: string; bundle: FocusBundle; repairErrors: string[] }): Promise<unknown>;
+  generate(input: KnowledgeDocumentGenerationInput): Promise<unknown>;
 }
 
 export class DeriveKnowledgeService {
@@ -56,13 +81,18 @@ export class DeriveKnowledgeService {
     let validated: Awaited<ReturnType<KnowledgeOutputValidator["validate"]>> | undefined;
     for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
       const raw = await this.generator.generate({
-        prompt: buildKnowledgePrompt(bundle, diagnostics),
+        prompt:
+          attempt === 0
+            ? buildKnowledgePrompt(bundle)
+            : buildKnowledgeRepairPrompt(buildKnowledgePrompt(bundle), diagnostics),
         bundle,
         repairErrors: diagnostics
       });
       rawOutputs.push(raw);
       try {
         const output: KnowledgeGenerationOutput = parseKnowledgeGenerationOutput(raw);
+        const priorKnowledge = await selectPriorKnowledge(this.knowledgeStore, bundle.checkpoint);
+        validateIncrementalCatalog(output, priorKnowledge);
         validated = await this.#validator.validate({
           output,
           checkpointId,
@@ -132,4 +162,26 @@ export class DeriveKnowledgeService {
       fence
     );
   }
+}
+
+function validateIncrementalCatalog(
+  output: KnowledgeGenerationOutput,
+  priorKnowledge: readonly PriorKnowledgeRevision[]
+): void {
+  const priorIds = new Set(priorKnowledge.map((entry) => entry.revision.logicalId));
+  const documentIds = new Set(output.documents.map((document) => document.logicalId));
+  const retired = output.retiredDocuments ?? [];
+  const retiredIds = new Set(retired.map((entry) => entry.logicalId));
+  const diagnostics: string[] = [];
+  if (retiredIds.size !== retired.length) diagnostics.push("retiredDocuments contains duplicate logical IDs");
+  for (const logicalId of retiredIds) {
+    if (!priorIds.has(logicalId)) diagnostics.push(`retiredDocuments contains unknown prior logical ID ${logicalId}`);
+    if (documentIds.has(logicalId)) diagnostics.push(`logical ID ${logicalId} is both emitted and retired`);
+  }
+  for (const logicalId of priorIds) {
+    if (!documentIds.has(logicalId) && !retiredIds.has(logicalId)) {
+      diagnostics.push(`prior logical ID ${logicalId} was silently dropped; re-emit or retire it`);
+    }
+  }
+  if (diagnostics.length > 0) throw new KnowledgeValidationError(diagnostics);
 }

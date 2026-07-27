@@ -101,13 +101,36 @@ export interface KnowledgeDocumentDraftCitation {
   jsonPointer?: string;
 }
 
+export interface CitedKnowledgeStatement {
+  text: string;
+  citationOrdinals: number[];
+  confidence: number;
+}
+
+export interface KnowledgeDiagnosticSummary {
+  symptoms: CitedKnowledgeStatement[];
+  causes: CitedKnowledgeStatement[];
+  checks: CitedKnowledgeStatement[];
+  fixes: CitedKnowledgeStatement[];
+}
+
+export interface KnowledgeStructuredSummary {
+  facts: CitedKnowledgeStatement[];
+  questionsAnswered: CitedKnowledgeStatement[];
+  diagnostics: KnowledgeDiagnosticSummary;
+  claimSubject?: string;
+  claimValue?: string;
+  claimCitationOrdinals: number[];
+}
+
 export interface KnowledgeDocumentDraft {
   logicalId: string;
   kind: KnowledgeDocumentKind;
   title: string;
   summary: string;
+  summaryCitationOrdinals: number[];
   bodyMarkdown: string;
-  structuredSummary: Record<string, unknown>;
+  structuredSummary: KnowledgeStructuredSummary;
   scope: Omit<KnowledgeScope, "ref" | "commitSha">;
   confidence: number;
   citations: KnowledgeDocumentDraftCitation[];
@@ -115,6 +138,10 @@ export interface KnowledgeDocumentDraft {
 
 export interface KnowledgeGenerationOutput {
   documents: KnowledgeDocumentDraft[];
+  retiredDocuments?: {
+    logicalId: string;
+    reason: string;
+  }[];
 }
 
 export interface DerivationRun {

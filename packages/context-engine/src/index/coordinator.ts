@@ -23,7 +23,7 @@ export const INDEX_COORDINATOR_VERSION = "context-index-v1";
 function versions(): Record<ContextProjectionConsumer, string> {
   return {
     manifest: "manifest-v1",
-    "knowledge-current": "knowledge-current-v1",
+    "knowledge-current": "knowledge-current-v2",
     lexical: "lexical-v2",
     dense: "disabled-v1",
     hierarchy: "hierarchy-v1",

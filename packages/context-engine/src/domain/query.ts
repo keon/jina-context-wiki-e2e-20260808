@@ -1,7 +1,7 @@
 import type { EvidenceAnchor } from "./evidence.js";
 import type { GenerationCapabilities } from "./projection.js";
 
-export type QueryTaskKind = "lookup" | "structure" | "change" | "intent" | "overview" | "status";
+export type QueryTaskKind = "lookup" | "structure" | "change" | "intent" | "overview" | "status" | "diagnose";
 
 export interface QueryContextRequest {
   tenantId: string;

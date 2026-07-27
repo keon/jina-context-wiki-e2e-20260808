@@ -1,6 +1,8 @@
 import type { EvidenceCheckpoint, EvidenceRecord } from "../domain/evidence.js";
+import type { PriorKnowledgeRevision } from "./service.js";
 import { fingerprint } from "../domain/fingerprint.js";
 import type { EvidenceStore } from "../ports/evidence-store.js";
+import type { KnowledgeStore } from "../ports/knowledge-store.js";
 
 export interface FocusBundleItem {
   evidenceId: string;
@@ -20,24 +22,25 @@ export interface FocusBundle {
   fingerprint: string;
 }
 
-export const FOCUS_SELECTOR_VERSION = "bounded-evidence-v1";
+export const FOCUS_SELECTOR_VERSION = "agent-evidence-v2";
 
 function priority(record: EvidenceRecord): number {
   const path = record.anchor.pathOrUrl?.toLowerCase() ?? "";
-  if (/\/(?:adr|rfcs?|runbooks?)\//.test(`/${path}`) || /(?:readme|architecture|design)/.test(path)) return 0;
-  if (/(?:package\.json|pyproject\.toml|cargo\.toml|go\.mod)$/.test(path)) return 1;
-  if (/(?:test|spec)\.[a-z0-9]+$/.test(path)) return 2;
-  if (record.anchor.sourceType !== "blob") return 3;
-  return 4;
+  if (["issue", "pull_request", "document", "observation"].includes(record.anchor.sourceType)) return 0;
+  if (/\/(?:adr|rfcs?|runbooks?)\//.test(`/${path}`) || /(?:readme|architecture|design)/.test(path)) return 1;
+  if (record.anchor.sourceType === "commit") return 2;
+  if (/(?:package\.json|pyproject\.toml|cargo\.toml|go\.mod)$/.test(path)) return 3;
+  if (/(?:test|spec)\.[a-z0-9]+$/.test(path)) return 4;
+  return 5;
 }
 
 export class EvidenceFocusSelector {
   constructor(
     private readonly store: EvidenceStore,
     private readonly limits: { maxItems: number; maxCharacters: number; maxItemCharacters: number } = {
-      maxItems: 80,
-      maxCharacters: 120_000,
-      maxItemCharacters: 20_000
+      maxItems: 2_000,
+      maxCharacters: 8 * 1024 * 1024,
+      maxItemCharacters: 256 * 1024
     }
   ) {}
 
@@ -84,4 +87,32 @@ export class EvidenceFocusSelector {
       })
     };
   }
+}
+
+export async function selectPriorKnowledge(
+  store: KnowledgeStore,
+  checkpoint: EvidenceCheckpoint,
+  maximumDocuments = 50
+): Promise<PriorKnowledgeRevision[]> {
+  const revisions = (await store.listRevisions(checkpoint.tenantId, checkpoint.repository)).sort(
+    (left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id)
+  );
+  const selected: PriorKnowledgeRevision[] = [];
+  const logicalIds = new Set<string>();
+  for (const revision of revisions) {
+    if (selected.length >= maximumDocuments) break;
+    if (revision.scope.ref !== checkpoint.ref) continue;
+    if (logicalIds.has(revision.logicalId)) continue;
+    const events = await store.listRevisionEvents(revision.id);
+    if (events.some((event) => ["rejected", "invalidated", "redacted", "superseded"].includes(event.type))) {
+      continue;
+    }
+    logicalIds.add(revision.logicalId);
+    selected.push({
+      revision,
+      citations: await store.listCitations(revision.id),
+      reviewStatus: events.some((event) => event.type === "reviewed") ? "reviewed" : "generated"
+    });
+  }
+  return selected;
 }

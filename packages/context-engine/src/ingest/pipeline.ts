@@ -8,6 +8,7 @@ import type {
 } from "../domain/evidence.js";
 import { createEvidenceRecord } from "../domain/evidence.js";
 import {
+  canonicalJson,
   fingerprint,
   isFullCommitSha,
   normalizeIsoTime,
@@ -47,6 +48,7 @@ export interface IngestEvidenceInput {
 }
 
 export const CONTEXT_ENGINE_PARSER_VERSION = "deterministic-source-v1";
+export const DERIVATION_GIT_COMMIT_EVIDENCE_LIMIT = 500;
 
 export class IngestEvidenceService {
   readonly #parser: SourceParser;
@@ -151,6 +153,46 @@ export class IngestEvidenceService {
           }).facts
         );
       }
+    }
+    const gitCommits = new Map<string, NonNullable<GitSnapshotMetadata["history"]>[number]>();
+    if (input.git) {
+      gitCommits.set(input.commitSha, { sha: input.commitSha, ...input.git.commit });
+      for (const commit of input.git.history ?? []) gitCommits.set(commit.sha, commit);
+    }
+    for (const commit of [...gitCommits.values()].slice(0, DERIVATION_GIT_COMMIT_EVIDENCE_LIMIT)) {
+      const isCheckpointCommit = commit.sha === input.commitSha;
+      const commitEvidence = {
+        ...commit,
+        ...(isCheckpointCommit && input.git ? { changes: input.git.changes } : {})
+      };
+      const body = canonicalJson(commitEvidence);
+      records.push(
+        createEvidenceRecord({
+          anchor: {
+            tenantId: input.tenantId,
+            repository,
+            sourceType: "commit",
+            sourceId: commit.sha,
+            contentDigest: fingerprint(body),
+            commitSha: input.commitSha
+          },
+          ref: input.ref,
+          title: `${commit.sha.slice(0, 12)} ${commit.message.split(/\r?\n/, 1)[0] || "Git commit"}`,
+          body,
+          metadata: {
+            sha: commit.sha,
+            treeSha: commit.treeSha,
+            parentShas: commit.parentShas,
+            author: commit.author ?? null,
+            authoredAt: commit.authoredAt ?? null,
+            committedAt: commit.committedAt ?? null,
+            ...(isCheckpointCommit && input.git ? { changedPaths: input.git.changes.map((change) => change.path) } : {})
+          },
+          authorityClass: "source_code",
+          aclFingerprint: input.aclFingerprint,
+          createdAt
+        })
+      );
     }
     for (const observationInput of input.observations ?? []) {
       const observation = normalizeProviderObservation(observationInput);

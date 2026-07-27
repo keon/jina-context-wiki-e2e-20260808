@@ -160,6 +160,10 @@ test("terminal knowledge states are not reviewable", () => {
     confidence: 0.9,
     reviewStatus: "generated",
     commitSha: "222",
+    generatorName: "daytona-codex",
+    generatorVersion: "agentic-knowledge-documents-v2",
+    model: "openai/gpt-5.4-mini",
+    promptVersion: "agentic-cited-knowledge-v1",
     createdAt: "2026-01-02T00:00:00Z"
   } satisfies KnowledgeDocumentSummary;
   assert.equal(reviewableDocument(document), true);

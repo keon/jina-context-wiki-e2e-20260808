@@ -26,6 +26,10 @@ export function KnowledgeCatalog({ repository }: { readonly repository: string }
     () => documentsForScope(resource.data?.documents ?? [], repository),
     [repository, resource.data]
   );
+  const currentDocumentCount = useMemo(
+    () => new Set(documents.map((document) => document.logicalId)).size,
+    [documents]
+  );
   const [selectedId, setSelectedId] = useState("");
   const [document, setDocument] = useState<KnowledgeDocument | null>(null);
   const [detailError, setDetailError] = useState("");
@@ -83,9 +87,11 @@ export function KnowledgeCatalog({ repository }: { readonly repository: string }
       <header className="context-panel-heading">
         <div>
           <span className="context-eyebrow">Knowledge catalog</span>
-          <h2>Immutable revisions</h2>
+          <h2>Agent-organized knowledge</h2>
         </div>
-        <span>{documents.length} revisions</span>
+        <span>
+          {currentDocumentCount} documents · {documents.length} revisions
+        </span>
       </header>
       <div className="context-knowledge-layout">
         <nav className="context-document-list" aria-label="Knowledge document revisions">
@@ -131,7 +137,7 @@ function DocumentButton({
       <strong>{document.title}</strong>
       <span>{document.summary}</span>
       <small>
-        {document.reviewStatus} · {confidenceLabel(document.confidence)}
+        {document.reviewStatus} · {confidenceLabel(document.confidence)} · {document.model}
       </small>
     </button>
   );
@@ -198,7 +204,20 @@ function DocumentDetail({
           <dt>Prior revision</dt>
           <dd>{document.priorRevisionId ? shortId(document.priorRevisionId) : "None"}</dd>
         </div>
+        <div>
+          <dt>Agent</dt>
+          <dd>{document.generatorName}</dd>
+        </div>
+        <div>
+          <dt>Model</dt>
+          <dd>{document.model}</dd>
+        </div>
+        <div>
+          <dt>Prompt</dt>
+          <dd>{document.promptVersion}</dd>
+        </div>
       </dl>
+      <StructuredKnowledge summary={document.structuredSummary} />
       <section className="context-document-body">
         <h4>Revision body</h4>
         <div className="context-markdown">{document.bodyMarkdown}</div>
@@ -283,4 +302,73 @@ function DocumentDetail({
       ) : null}
     </article>
   );
+}
+
+interface StructuredStatement {
+  readonly text: string;
+  readonly citationOrdinals: readonly number[];
+  readonly confidence: number;
+}
+
+function StructuredKnowledge({ summary }: { readonly summary: Readonly<Record<string, unknown>> }) {
+  const facts = statements(summary.facts);
+  const questions = statements(summary.questionsAnswered);
+  const diagnostics =
+    summary.diagnostics && typeof summary.diagnostics === "object"
+      ? (summary.diagnostics as Readonly<Record<string, unknown>>)
+      : {};
+  const groups = [
+    ["Facts", facts],
+    ["Questions this answers", questions],
+    ["Symptoms", statements(diagnostics.symptoms)],
+    ["Likely causes", statements(diagnostics.causes)],
+    ["Diagnostic checks", statements(diagnostics.checks)],
+    ["Evidence-backed fixes", statements(diagnostics.fixes)]
+  ] as const;
+  if (groups.every(([, values]) => values.length === 0)) return null;
+  return (
+    <section className="context-document-body context-structured-knowledge">
+      <h4>Structured knowledge</h4>
+      {groups.map(([label, values]) =>
+        values.length > 0 ? (
+          <div key={label}>
+            <strong>{label}</strong>
+            <ul>
+              {values.map((statement, index) => (
+                <li key={`${label}-${index}`}>
+                  {statement.text}{" "}
+                  <small>
+                    citations {statement.citationOrdinals.join(", ")} · {confidenceLabel(statement.confidence)}
+                  </small>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null
+      )}
+    </section>
+  );
+}
+
+function statements(value: unknown): readonly StructuredStatement[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    if (!entry || typeof entry !== "object") return [];
+    const candidate = entry as Readonly<Record<string, unknown>>;
+    if (
+      typeof candidate.text !== "string" ||
+      !Array.isArray(candidate.citationOrdinals) ||
+      candidate.citationOrdinals.some((ordinal) => !Number.isSafeInteger(ordinal) || Number(ordinal) <= 0) ||
+      typeof candidate.confidence !== "number"
+    ) {
+      return [];
+    }
+    return [
+      {
+        text: candidate.text,
+        citationOrdinals: candidate.citationOrdinals as number[],
+        confidence: candidate.confidence
+      }
+    ];
+  });
 }

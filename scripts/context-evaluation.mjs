@@ -70,24 +70,75 @@ const readmeRecord = (await store.listEvidence(checkpoint.id)).find(
   (record) => record.anchor.sourceId === "2222222222222222222222222222222222222222"
 );
 if (!readmeRecord) throw new Error("Evaluation README evidence was not ingested");
+const runbookRecord = (await store.listEvidence(checkpoint.id)).find(
+  (record) => record.anchor.sourceId === "5555555555555555555555555555555555555555"
+);
+if (!runbookRecord) throw new Error("Evaluation runbook evidence was not ingested");
 const knowledge = createKnowledgeRevision({
   logicalId: `component:${fixture.repository}:context-service`,
   tenantId: fixture.tenantId,
   repository: fixture.repository,
   kind: "component",
   title: "Context service knowledge",
-  bodyMarkdown: "The service ingests immutable evidence.",
-  summary: "The service ingests immutable evidence.",
-  structuredSummary: { responsibility: "context" },
+  bodyMarkdown:
+    "The service ingests immutable evidence. If publication stalls, inspect the required projector barrier and replay the idempotent projector delivery.",
+  summary: "The service ingests immutable evidence and provides a cited publication-stall diagnostic.",
+  structuredSummary: {
+    facts: [
+      {
+        text: "The service ingests immutable evidence.",
+        citationOrdinals: [1],
+        confidence: 1
+      }
+    ],
+    questionsAnswered: [
+      {
+        text: "How should a stalled context publication be diagnosed?",
+        citationOrdinals: [2],
+        confidence: 0.9
+      }
+    ],
+    diagnostics: {
+      symptoms: [
+        {
+          text: "A context publication can stall.",
+          citationOrdinals: [2],
+          confidence: 0.9
+        }
+      ],
+      causes: [
+        {
+          text: "A required projector barrier may remain incomplete.",
+          citationOrdinals: [2],
+          confidence: 0.85
+        }
+      ],
+      checks: [
+        {
+          text: "Inspect the required projector barrier and outbox age.",
+          citationOrdinals: [2],
+          confidence: 0.95
+        }
+      ],
+      fixes: [
+        {
+          text: "Replay the idempotent projector delivery.",
+          citationOrdinals: [2],
+          confidence: 0.95
+        }
+      ]
+    },
+    claimCitationOrdinals: []
+  },
   scope: {
     ref: fixture.ref,
     commitSha: fixture.commitSha,
-    paths: ["README.md"],
+    paths: ["README.md", "docs/runbook.md"],
     symbols: [],
     pullRequests: [],
     issues: []
   },
-  evidenceFingerprint: fingerprint(readmeRecord.anchor),
+  evidenceFingerprint: fingerprint([readmeRecord.anchor, runbookRecord.anchor]),
   generatorName: "evaluation",
   generatorVersion: "v1",
   model: "deterministic-evaluation",
@@ -100,6 +151,12 @@ const knowledgeCitation = createKnowledgeCitation(
   0,
   "The service ingests immutable evidence",
   readmeRecord.anchor
+);
+const runbookCitation = createKnowledgeCitation(
+  knowledge.id,
+  1,
+  "If context publication stalls, inspect the required projector barrier and outbox age.",
+  runbookRecord.anchor
 );
 await store.commitKnowledge({
   run: {
@@ -121,20 +178,18 @@ await store.commitKnowledge({
     createdAt: fixture.createdAt
   },
   revisions: [knowledge],
-  citations: [knowledgeCitation]
+  citations: [knowledgeCitation, runbookCitation]
 });
-const persistedKnowledgeCitation = (await store.listCitations(knowledge.id))[0];
-const persistedKnowledgeEvidence = persistedKnowledgeCitation
-  ? await store.resolveAnchor(checkpoint.id, persistedKnowledgeCitation.anchor)
-  : undefined;
-const persistedKnowledgeExcerpt =
-  persistedKnowledgeCitation && persistedKnowledgeEvidence
-    ? evidenceExcerpt(persistedKnowledgeEvidence, persistedKnowledgeCitation.anchor)
-    : undefined;
-const groundedKnowledgeCitation =
-  persistedKnowledgeCitation !== undefined &&
-  persistedKnowledgeExcerpt !== undefined &&
-  persistedKnowledgeExcerpt.includes(persistedKnowledgeCitation.claim);
+const persistedKnowledgeCitations = await store.listCitations(knowledge.id);
+const groundedKnowledgeCitation = (
+  await Promise.all(
+    persistedKnowledgeCitations.map(async (citation) => {
+      const evidence = await store.resolveAnchor(checkpoint.id, citation.anchor);
+      const excerpt = evidence ? evidenceExcerpt(evidence, citation.anchor) : undefined;
+      return excerpt !== undefined && excerpt.includes(citation.claim);
+    })
+  )
+).every(Boolean);
 await new IndexContextService(store).index(checkpoint.id, fixture.createdAt);
 
 const projectionStore = new Proxy(store, {
@@ -210,6 +265,7 @@ for (const [name, variant] of Object.entries(variants)) {
     const indexedExpectation = indexedRouteExpectations[testCase.id];
     if (
       variant.indexed &&
+      database &&
       indexedExpectation &&
       !execution.telemetry.candidates.some(
         (candidate) =>

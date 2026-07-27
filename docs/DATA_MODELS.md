@@ -58,6 +58,12 @@ reusable across checkpoints; the checkpoint membership tables preserve what was 
 for that build. The unique tenant/repository/ref/`ref_sequence` key preserves admission
 order even when an older worker completes after a newer one.
 
+Recent Git commits are also normalized into citable evidence records for derivation. The
+checkpoint commit carries its changed paths. GitHub repository metadata, PRs, issues,
+issue comments, PR review comments, and commit discussion comments are immutable
+observations within a checkpoint; later provider updates produce new identities/digests
+rather than mutating prior evidence.
+
 Evidence records store base immutable bodies. Citation line ranges and JSON pointers are
 selectors over those bodies rather than separate record identities. Resolution validates
 the source identity and digest, then extracts exactly the requested inclusive lines or
@@ -69,6 +75,13 @@ JSON value. Mixed line/JSON selectors and out-of-bounds selectors do not resolve
 architecture, component, decision, change, incident, ownership record, or runbook.
 `knowledge_document_revisions` stores immutable generated or human-authored bodies and
 metadata. `knowledge_revision_evidence` is the ordered set of original source anchors.
+Generated revisions use the `knowledge-documents-v4` contract: cited summary and body,
+cited structured facts and questions answered, cited diagnostic symptoms, causes, checks,
+and fixes, an optional conflict-comparable claim, scope, confidence, and ordered
+citations. `retiredDocuments` is a derivation result control rather than a mutable
+knowledge row. For an incremental run, the host compares it with the latest eligible
+prior revisions and rejects any prior logical ID that is neither re-emitted nor explicitly
+retired, any unknown retirement, or any logical ID that is both emitted and retired.
 Logical IDs are canonical lowercase and participate in stable revision identity only
 after grounding: repository and change-commit portions come from the checkpoint, while
 model-controlled subject and issue segments must be supported by resolved cited evidence.
@@ -151,6 +164,12 @@ checkpoints into new idempotent generations and never expose partial rows.
   claims must occur verbatim after whitespace/case normalization in the exact selected
   evidence excerpt. Identity and scope grounding can use only that excerpt and intrinsic
   source identity; unrelated record text and manifest membership alone cannot support it.
+- Every non-heading generated body block ends in a citation marker. Summary, structured
+  fact/question, diagnostic symptom/cause/check/fix, and optional claim citation ordinals
+  must resolve into the same revision's ordered citation set.
+- An incremental derivation cannot silently delete prior knowledge; every latest eligible
+  logical document is re-emitted for the new checkpoint or named in the validated
+  retirement result.
 - Knowledge projection requires every citation's source identity and digest to be a
   member of the exact generation checkpoint. Equivalent-evidence cache reuse is safe
   because this membership is rechecked at indexing; mutable provider changes remove stale

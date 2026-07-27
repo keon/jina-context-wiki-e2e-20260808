@@ -150,7 +150,7 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
     body: JSON.stringify({ ...leaseBody(derived), checkpointId })
   });
   assert.equal(prepared.response.status, 200);
-  assert.match(string(prepared.body.prompt), /immutable repository evidence/);
+  assert.match(string(prepared.body.prompt), /derive-knowledge repository analysis agent/);
 
   const committed = await api("/internal/context/derive/commit", {
     method: "POST",
@@ -159,17 +159,33 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
       ...leaseBody(derived),
       checkpointId,
       rawOutput: {
+        retiredDocuments: [],
         documents: [
           {
             logicalId: `repository:${repository}:architecture`,
             kind: "architecture",
             title: "The context engine indexes immutable repository evidence.",
             summary: "The context engine indexes immutable repository evidence.",
-            bodyMarkdown: "The context engine indexes immutable repository evidence.",
+            summaryCitationOrdinals: [1],
+            bodyMarkdown: "The context engine indexes immutable repository evidence. [cite:1]",
             structuredSummary: {
-              facts: ["The context engine indexes immutable repository evidence."],
+              facts: [
+                {
+                  text: "The context engine indexes immutable repository evidence.",
+                  citationOrdinals: [1],
+                  confidence: 0.96
+                }
+              ],
+              questionsAnswered: [],
+              diagnostics: {
+                symptoms: [],
+                causes: [],
+                checks: [],
+                fixes: []
+              },
               claimSubject: "context engine",
-              claimValue: "immutable repository evidence"
+              claimValue: "immutable repository evidence",
+              claimCitationOrdinals: [1]
             },
             scope: {
               paths: ["README.md"],
@@ -194,11 +210,26 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
             kind: "component",
             title: "The context engine uses queryContext to retrieve cited answers.",
             summary: "The context engine uses queryContext to retrieve cited answers.",
-            bodyMarkdown: "The context engine uses queryContext to retrieve cited answers.",
+            summaryCitationOrdinals: [1],
+            bodyMarkdown: "The context engine uses queryContext to retrieve cited answers. [cite:1]",
             structuredSummary: {
-              facts: ["The context engine uses queryContext to retrieve cited answers."],
+              facts: [
+                {
+                  text: "The context engine uses queryContext to retrieve cited answers.",
+                  citationOrdinals: [1],
+                  confidence: 0.94
+                }
+              ],
+              questionsAnswered: [],
+              diagnostics: {
+                symptoms: [],
+                causes: [],
+                checks: [],
+                fixes: []
+              },
               claimSubject: "context engine",
-              claimValue: "queryContext"
+              claimValue: "queryContext",
+              claimCitationOrdinals: [1]
             },
             scope: {
               paths: ["README.md"],
@@ -281,7 +312,10 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
     headers: contextHeaders()
   });
   assert.equal(detail.response.status, 200);
-  assert.equal(record(detail.body.document).bodyMarkdown, "The context engine indexes immutable repository evidence.");
+  assert.equal(
+    record(detail.body.document).bodyMarkdown,
+    "The context engine indexes immutable repository evidence. [cite:1]"
+  );
   const nonAdminPrincipal = "user:repository-reader@example.com";
   await store.replaceRepositoryAccess(tenantId, nonAdminPrincipal, [repository]);
   const forbiddenReview = await api(`/context/knowledge/${encodeURIComponent(string(document.id))}/review`, {
@@ -346,6 +380,337 @@ test("MCP exposes only query_context and preserves complete structured conflicts
   }
 });
 
+test("incremental API and MCP build revises prior knowledge and adds commit, PR, issue, and diagnostic context", async () => {
+  const incrementalCommitSha = "2".repeat(40);
+  const incrementalBlobSha = "3".repeat(40);
+  const incrementalReadme = `${readme}\n\nAdministrators can delete resources after the authorization fix.`;
+  const created = await api("/context/build", {
+    method: "POST",
+    headers: contextHeaders(),
+    body: JSON.stringify({
+      repository,
+      ref: "main",
+      commitSha: incrementalCommitSha,
+      githubInstallationId: 140435029,
+      requestKey: "incremental-commit-pr-issue"
+    })
+  });
+  assert.equal(created.response.status, 202);
+  const build = record(created.body.build);
+  assert.equal(build.refSequence, 2);
+
+  const ingest = await claim(coordinator, "run-ingest-evidence");
+  const ingested = await api("/internal/context/ingest", {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({
+      ...leaseBody(ingest),
+      input: {
+        tenantId,
+        repository,
+        ref: "main",
+        refSequence: 2,
+        commitSha: incrementalCommitSha,
+        files: [
+          { path: "README.md", blobSha: incrementalBlobSha, body: incrementalReadme, language: "markdown" },
+          {
+            path: "src/query.ts",
+            blobSha: "c".repeat(40),
+            body: 'export function queryContext() { return "cited"; }',
+            language: "typescript"
+          }
+        ],
+        observations: [
+          {
+            sourceType: "pull_request",
+            sourceId: `github:pull_request:${repository}#5`,
+            title: "PR #5: Restore administrator resource deletion",
+            payload: {
+              number: 5,
+              state: "closed",
+              merged: true,
+              title: "Restore administrator resource deletion",
+              body: "PR #5 fixes the administrator deletion regression by restoring the authorization check."
+            },
+            pathOrUrl: `https://github.com/${repository}/pull/5`,
+            observedAt: "2026-07-26T12:05:00.000Z",
+            metadata: { provider: "github", number: 5 }
+          },
+          {
+            sourceType: "issue",
+            sourceId: `github:issue:${repository}#91`,
+            title: "Issue #91: Administrators cannot delete resources",
+            payload: {
+              number: 91,
+              state: "closed",
+              title: "Administrators cannot delete resources",
+              body: "Administrators cannot delete resources after the authorization dependency upgrade.",
+              closed_by_pull_request: 5
+            },
+            pathOrUrl: `https://github.com/${repository}/issues/91`,
+            observedAt: "2026-07-26T12:04:00.000Z",
+            metadata: { provider: "github", number: 91 }
+          },
+          {
+            sourceType: "observation",
+            sourceId: `github:issue_comment:${repository}:9101`,
+            title: "Issue #91 root-cause discussion",
+            payload: {
+              id: 9101,
+              issue_number: 91,
+              body: "The dependency upgrade exposed a missing administrator authorization check.",
+              pull_request: 5
+            },
+            pathOrUrl: `https://github.com/${repository}/issues/91#issuecomment-9101`,
+            observedAt: "2026-07-26T12:04:30.000Z",
+            metadata: { provider: "github", kind: "issue_comment" }
+          }
+        ],
+        git: {
+          commit: {
+            treeSha: "4".repeat(40),
+            parentShas: [commitSha],
+            author: "Jina Test <test@example.com>",
+            authoredAt: "2026-07-26T12:05:00.000Z",
+            committedAt: "2026-07-26T12:05:00.000Z",
+            message: "Fix administrator resource deletion after dependency upgrade"
+          },
+          changes: [
+            {
+              kind: "modify",
+              path: "README.md",
+              oldBlobSha: blobSha,
+              newBlobSha: incrementalBlobSha
+            }
+          ],
+          history: [
+            {
+              sha: commitSha,
+              treeSha: "d".repeat(40),
+              parentShas: ["e".repeat(40)],
+              message: "Add repository context fixture"
+            }
+          ]
+        },
+        aclFingerprint: repositoryAclFingerprint(tenantId, repository),
+        observationFrontier: `${incrementalCommitSha}:fixture`,
+        createdAt: "2026-07-26T12:05:00.000Z",
+        sourceComplete: true
+      }
+    })
+  });
+  assert.equal(ingested.response.status, 200);
+  const checkpointId = string(ingested.body.checkpointId);
+  await complete(ingest, record(ingested.body));
+
+  const baseline = await claim(coordinator, "run-index-context");
+  const indexed = await api("/internal/context/index", {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ ...leaseBody(baseline), checkpointId })
+  });
+  assert.equal(indexed.response.status, 200);
+  await complete(baseline, record(indexed.body));
+
+  const derived = await claim(coordinator, "run-derive-knowledge");
+  const prepared = await api("/internal/context/derive/prepare", {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ ...leaseBody(derived), checkpointId })
+  });
+  assert.equal(prepared.response.status, 200);
+  const priorKnowledge = array(prepared.body.priorKnowledge).map(record);
+  assert.equal(priorKnowledge.length, 2);
+  assert.ok(
+    priorKnowledge.some((entry) => record(entry.revision).logicalId === `repository:${repository}:architecture`)
+  );
+  assert.ok(priorKnowledge.every((entry) => array(entry.citations).length > 0));
+
+  const architectureClaim = "The context engine indexes immutable repository evidence.";
+  const queryClaim = "The context engine uses queryContext to retrieve cited answers.";
+  const issueClaim = "Administrators cannot delete resources after the authorization dependency upgrade.";
+  const causeClaim = "The dependency upgrade exposed a missing administrator authorization check.";
+  const changeClaim = "Fix administrator resource deletion after dependency upgrade";
+  const committed = await api("/internal/context/derive/commit", {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({
+      ...leaseBody(derived),
+      checkpointId,
+      rawOutput: {
+        retiredDocuments: [],
+        documents: [
+          citedDocument({
+            logicalId: `repository:${repository}:architecture`,
+            kind: "architecture",
+            title: "Repository context architecture",
+            summary: architectureClaim,
+            claim: architectureClaim,
+            sourceType: "blob",
+            sourceId: incrementalBlobSha,
+            pathOrUrl: "README.md",
+            startLine: 3,
+            endLine: 3,
+            paths: ["README.md"]
+          }),
+          citedDocument({
+            logicalId: `component:${repository}:query-context`,
+            kind: "component",
+            title: "Query context component",
+            summary: queryClaim,
+            claim: queryClaim,
+            sourceType: "blob",
+            sourceId: incrementalBlobSha,
+            pathOrUrl: "README.md",
+            startLine: 5,
+            endLine: 5,
+            paths: ["README.md"],
+            symbols: ["queryContext"]
+          }),
+          citedDocument({
+            logicalId: `change:${repository}:${incrementalCommitSha}`,
+            kind: "change_summary",
+            title: "Administrator deletion authorization fix",
+            summary: changeClaim,
+            claim: changeClaim,
+            sourceType: "commit",
+            sourceId: incrementalCommitSha,
+            jsonPointer: "/message",
+            pullRequests: ["#5"],
+            extraCitations: [
+              {
+                claim: "PR #5 fixes the administrator deletion regression by restoring the authorization check.",
+                sourceType: "pull_request",
+                sourceId: `github:pull_request:${repository}#5`,
+                pathOrUrl: `https://github.com/${repository}/pull/5`,
+                jsonPointer: "/body"
+              }
+            ]
+          }),
+          citedDocument({
+            logicalId: `issue:github:${repository}#91`,
+            kind: "issue_explanation",
+            title: "Administrators cannot delete resources",
+            summary: issueClaim,
+            claim: issueClaim,
+            sourceType: "issue",
+            sourceId: `github:issue:${repository}#91`,
+            pathOrUrl: `https://github.com/${repository}/issues/91`,
+            jsonPointer: "/body",
+            issues: ["91"],
+            diagnostics: {
+              symptoms: [{ text: "Administrators cannot delete resources.", citationOrdinals: [1], confidence: 1 }],
+              causes: [
+                {
+                  text: "The reported failure followed the authorization dependency upgrade.",
+                  citationOrdinals: [1],
+                  confidence: 0.9
+                }
+              ],
+              checks: [],
+              fixes: []
+            }
+          }),
+          citedDocument({
+            logicalId: "incident:github:dependency-upgrade-administrator-authorization",
+            kind: "incident",
+            title: "Dependency upgrade exposed missing administrator authorization",
+            summary: causeClaim,
+            claim: causeClaim,
+            sourceType: "observation",
+            sourceId: `github:issue_comment:${repository}:9101`,
+            pathOrUrl: `https://github.com/${repository}/issues/91#issuecomment-9101`,
+            jsonPointer: "/body",
+            issues: ["91"],
+            diagnostics: {
+              symptoms: [{ text: issueClaim, citationOrdinals: [2], confidence: 1 }],
+              causes: [{ text: causeClaim, citationOrdinals: [1], confidence: 0.95 }],
+              checks: [
+                {
+                  text: "Inspect the administrator authorization check changed around the dependency upgrade.",
+                  citationOrdinals: [1],
+                  confidence: 0.85
+                }
+              ],
+              fixes: [
+                {
+                  text: "Restore the missing administrator authorization check in PR #5.",
+                  citationOrdinals: [1],
+                  confidence: 0.9
+                }
+              ]
+            },
+            extraCitations: [
+              {
+                claim: issueClaim,
+                sourceType: "issue",
+                sourceId: `github:issue:${repository}#91`,
+                pathOrUrl: `https://github.com/${repository}/issues/91`,
+                jsonPointer: "/body"
+              }
+            ]
+          })
+        ]
+      }
+    })
+  });
+  assert.equal(committed.response.status, 200);
+  assert.equal(committed.body.status, "succeeded", JSON.stringify(committed.body.diagnostics));
+  await complete(derived, record(committed.body));
+  assert.equal((await coordinator.get(string(build.id)))?.status, "succeeded");
+
+  const queried = await api("/context/query", {
+    method: "POST",
+    headers: contextHeaders(),
+    body: JSON.stringify({
+      repository,
+      ref: "main",
+      taskKind: "diagnose",
+      question: "Why could administrators not delete resources, what should I check, and what fixed it?"
+    })
+  });
+  assert.equal(queried.response.status, 200);
+  assert.equal(record(queried.body.generation).commitSha, incrementalCommitSha);
+  assert.ok(array(queried.body.citations).some((citation) => record(citation).sourceKind === "knowledge"));
+  assert.match(JSON.stringify(queried.body), /missing administrator authorization check/i);
+
+  const documents = await api(`/context/documents?repository=${encodeURIComponent(repository)}&limit=100`, {
+    headers: contextHeaders()
+  });
+  const architectureRevisions = array(documents.body.documents)
+    .map(record)
+    .filter((document) => document.logicalId === `repository:${repository}:architecture`);
+  assert.equal(architectureRevisions.length, 2);
+  const currentArchitecture = architectureRevisions.find((document) => document.commitSha === incrementalCommitSha);
+  assert.ok(currentArchitecture);
+  const detail = await api(`/context/documents/${encodeURIComponent(string(currentArchitecture.id))}`, {
+    headers: contextHeaders()
+  });
+  assert.match(string(record(detail.body.document).priorRevisionId), /^kr_/);
+
+  const client = new Client({ name: "jina-context-incremental-test", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+    requestInit: { headers: contextHeaders() }
+  });
+  try {
+    await client.connect(transport as unknown as Transport);
+    const result = await client.callTool({
+      name: "query_context",
+      arguments: {
+        repository,
+        ref: "main",
+        taskKind: "diagnose",
+        question: "Diagnose the administrator delete failure and identify the fix."
+      }
+    });
+    assert.equal(result.isError, undefined);
+    assert.match(JSON.stringify(result.structuredContent), /authorization/i);
+    assert.match(JSON.stringify(result.structuredContent), new RegExp(incrementalCommitSha));
+  } finally {
+    await client.close();
+  }
+});
+
 test("public context queries bound body and target amplification", async () => {
   const tooManyTargets = await api("/context/query", {
     method: "POST",
@@ -385,7 +750,13 @@ test("evidence erasure invalidates generations, hides derived documents, and reb
   const documentsBefore = await api(`/context/documents?repository=${encodeURIComponent(repository)}`, {
     headers: contextHeaders()
   });
-  const revisionId = string(record(array(documentsBefore.body.documents)[0]).id);
+  const erasedRevision = array(documentsBefore.body.documents)
+    .map(record)
+    .find(
+      (document) => document.logicalId === `repository:${repository}:architecture` && document.commitSha === commitSha
+    );
+  assert.ok(erasedRevision);
+  const revisionId = string(erasedRevision.id);
   const erased = await api("/context/erasure", {
     method: "POST",
     headers: contextHeaders(),
@@ -820,6 +1191,70 @@ test("persisted tasks unsupported by the current runtime are removed with their 
     await new Promise<void>((resolve, reject) => staleServer.close((error) => (error ? reject(error) : resolve())));
   }
 });
+
+function citedDocument(input: {
+  readonly logicalId: string;
+  readonly kind: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly claim: string;
+  readonly sourceType: string;
+  readonly sourceId: string;
+  readonly pathOrUrl?: string;
+  readonly startLine?: number;
+  readonly endLine?: number;
+  readonly jsonPointer?: string;
+  readonly paths?: readonly string[];
+  readonly symbols?: readonly string[];
+  readonly pullRequests?: readonly string[];
+  readonly issues?: readonly string[];
+  readonly diagnostics?: {
+    readonly symptoms: readonly Record<string, unknown>[];
+    readonly causes: readonly Record<string, unknown>[];
+    readonly checks: readonly Record<string, unknown>[];
+    readonly fixes: readonly Record<string, unknown>[];
+  };
+  readonly extraCitations?: readonly Record<string, unknown>[];
+}): Record<string, unknown> {
+  const primaryCitation = {
+    claim: input.claim,
+    sourceType: input.sourceType,
+    sourceId: input.sourceId,
+    ...(input.pathOrUrl ? { pathOrUrl: input.pathOrUrl } : {}),
+    ...(input.startLine ? { startLine: input.startLine } : {}),
+    ...(input.endLine ? { endLine: input.endLine } : {}),
+    ...(input.jsonPointer ? { jsonPointer: input.jsonPointer } : {})
+  };
+  return {
+    logicalId: input.logicalId,
+    kind: input.kind,
+    title: input.title,
+    summary: input.summary,
+    summaryCitationOrdinals: [1],
+    bodyMarkdown: `${input.summary} [cite:1]`,
+    structuredSummary: {
+      facts: [{ text: input.summary, citationOrdinals: [1], confidence: 0.95 }],
+      questionsAnswered: [],
+      diagnostics: input.diagnostics ?? {
+        symptoms: [],
+        causes: [],
+        checks: [],
+        fixes: []
+      },
+      claimSubject: null,
+      claimValue: null,
+      claimCitationOrdinals: []
+    },
+    scope: {
+      paths: input.paths ?? [],
+      symbols: input.symbols ?? [],
+      pullRequests: input.pullRequests ?? [],
+      issues: input.issues ?? []
+    },
+    confidence: 0.93,
+    citations: [primaryCitation, ...(input.extraCitations ?? [])]
+  };
+}
 
 function readOnlyStateStore(snapshot: ApiSnapshot): ApiStateStore {
   return {

@@ -16,11 +16,14 @@ export default async function ContextAdminPage({
 }) {
   const { repository } = await searchParams;
   let generations: readonly AdminIndexGeneration[];
-  let documentCount: number;
+  let documents: Awaited<ReturnType<typeof listKnowledgeDocuments>>;
   let metrics: Awaited<ReturnType<typeof getContextMetrics>>;
   try {
-    [generations, metrics] = await Promise.all([listAllGenerations(), getContextMetrics()]);
-    documentCount = (await listKnowledgeDocuments(repository)).length;
+    [generations, metrics, documents] = await Promise.all([
+      listAllGenerations(),
+      getContextMetrics(),
+      listKnowledgeDocuments(repository)
+    ]);
   } catch (error) {
     return (
       <div className="error-state">
@@ -38,13 +41,16 @@ export default async function ContextAdminPage({
   const repositories = [...new Set(generations.map((generation) => generation.repository))].sort();
   const visible = repository ? generations.filter((generation) => generation.repository === repository) : generations;
   const pending = Object.values(metrics.outboxDepthByConsumer).reduce((sum, count) => sum + count, 0);
+  const currentDocuments = new Map(documents.map((document) => [document.logicalId, document])).size;
+  const knowledgeKinds = new Map<string, number>();
+  for (const document of documents) knowledgeKinds.set(document.kind, (knowledgeKinds.get(document.kind) ?? 0) + 1);
 
   return (
     <main>
       <div className="stat-row">
         <Stat label="Published generations" value={metrics.publishedGenerationCount} />
         <Stat label="Repositories" value={repository ? 1 : repositories.length} />
-        <Stat label="Knowledge documents" value={documentCount} />
+        <Stat label="Current knowledge docs" value={currentDocuments} />
         <Stat label="Pending projections" value={pending} />
       </div>
 
@@ -110,6 +116,56 @@ export default async function ContextAdminPage({
           </tbody>
         </table>
       )}
+
+      <section className="knowledge-admin-section">
+        <h2>Agent-derived knowledge</h2>
+        <p className="muted">
+          {documents.length} immutable revisions across{" "}
+          {[...knowledgeKinds.entries()]
+            .sort(([left], [right]) => left.localeCompare(right))
+            .map(([kind, count]) => `${kind}: ${count}`)
+            .join(", ") || "no document kinds"}
+          .
+        </p>
+        {documents.length > 0 ? (
+          <table className="context-table">
+            <thead>
+              <tr>
+                <th>Repository</th>
+                <th>Kind</th>
+                <th>Document</th>
+                <th>Commit</th>
+                <th>Agent / model</th>
+                <th>Review</th>
+                <th>Confidence</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documents.slice(0, 100).map((document) => (
+                <tr key={document.id}>
+                  <td>{document.repository}</td>
+                  <td>{document.kind}</td>
+                  <td className="summary-cell" title={document.logicalId}>
+                    <strong>{document.title}</strong>
+                    <br />
+                    <span className="muted">{document.summary}</span>
+                  </td>
+                  <td>
+                    <code>{document.commitSha.slice(0, 10)}</code>
+                  </td>
+                  <td>
+                    {document.generatorName}
+                    <br />
+                    <code>{document.model}</code>
+                  </td>
+                  <td>{document.reviewStatus}</td>
+                  <td>{Math.round(document.confidence * 100)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : null}
+      </section>
     </main>
   );
 }

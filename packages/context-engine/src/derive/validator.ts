@@ -4,6 +4,7 @@ import {
   createKnowledgeCitation,
   createKnowledgeRevision,
   validateLogicalId,
+  type CitedKnowledgeStatement,
   type KnowledgeDocumentRevision,
   type KnowledgeEvidenceCitation,
   type KnowledgeGenerationOutput
@@ -21,36 +22,23 @@ export class KnowledgeValidationError extends Error {
   }
 }
 
-function materialParagraphs(markdown: string): string[] {
+function materialBodyBlocks(markdown: string): string[] {
   return markdown
     .split(/\n\s*\n/)
-    .map((value) => value.replace(/^#+\s*/gm, "").trim())
-    .filter((value) => value !== "" && !/^[-*]\s*$/.test(value));
+    .map((value) => value.trim())
+    .filter((value) => value !== "" && !value.split(/\r?\n/).every((line) => /^#{1,6}\s+\S/.test(line.trim())));
 }
 
-function claimsCoverParagraph(claims: readonly string[], paragraph: string): boolean {
-  let remaining = paragraph.toLowerCase().replace(/\s+/g, " ").trim();
-  const normalizedClaims = claims
-    .map((claim) => claim.toLowerCase().replace(/\s+/g, " ").trim())
-    .filter((claim) => claim.length >= 12)
-    .sort((left, right) => right.length - left.length);
-  for (const claim of normalizedClaims) {
-    remaining = remaining.split(claim).join(" ");
-  }
-  return remaining.replace(/[\s`*_~#[\](){}<>:;,.!?'"|/+\\=-]/g, "") === "";
+function bodyCitationOrdinals(block: string): number[] | undefined {
+  const match = /\[cite:([1-9][0-9]*(?:\s*,\s*[1-9][0-9]*)*)\]\s*$/.exec(block);
+  if (!match) return undefined;
+  return [...new Set(match[1]!.split(",").map((value) => Number(value.trim())))];
 }
 
 function evidenceSupportsClaim(claim: string, excerpt: string): boolean {
   const normalizedClaim = claim.toLowerCase().replace(/\s+/g, " ").trim();
   const normalizedExcerpt = excerpt.toLowerCase().replace(/\s+/g, " ").trim();
   return normalizedClaim.length >= 8 && normalizedExcerpt.includes(normalizedClaim);
-}
-
-function textSupportedByClaims(value: string, claims: readonly string[]): boolean {
-  const normalized = value.toLowerCase().replace(/\s+/g, " ").trim();
-  return (
-    normalized.length >= 3 && claims.some((claim) => claim.toLowerCase().replace(/\s+/g, " ").includes(normalized))
-  );
 }
 
 function textSupportedByResolvedEvidence(
@@ -66,15 +54,27 @@ function textSupportedByResolvedEvidence(
   );
 }
 
-function structuredSummaryStrings(summary: Record<string, unknown>): string[] {
-  const values: string[] = [];
-  const visit = (value: unknown): void => {
-    if (typeof value === "string") values.push(value);
-    else if (Array.isArray(value)) value.forEach(visit);
-    else if (value !== null && typeof value === "object") Object.values(value).forEach(visit);
-  };
-  visit(summary);
-  return values;
+function structuredStatements(document: KnowledgeGenerationOutput["documents"][number]): CitedKnowledgeStatement[] {
+  const diagnostics = document.structuredSummary.diagnostics;
+  return [
+    ...document.structuredSummary.facts,
+    ...document.structuredSummary.questionsAnswered,
+    ...diagnostics.symptoms,
+    ...diagnostics.causes,
+    ...diagnostics.checks,
+    ...diagnostics.fixes
+  ];
+}
+
+function citationOrdinalError(
+  ordinals: readonly number[],
+  citationCount: number,
+  path: string,
+  required: boolean
+): string | undefined {
+  if (required && ordinals.length === 0) return `${path} must contain at least one citation ordinal`;
+  const invalid = ordinals.find((ordinal) => !Number.isSafeInteger(ordinal) || ordinal < 1 || ordinal > citationCount);
+  return invalid === undefined ? undefined : `${path} references missing citation ${invalid}`;
 }
 
 function logicalIdGroundingError(
@@ -140,6 +140,10 @@ export class KnowledgeOutputValidator {
     const diagnostics: string[] = [];
     const revisions: KnowledgeDocumentRevision[] = [];
     const citations: KnowledgeEvidenceCitation[] = [];
+    const logicalIds = input.output.documents.map((document) => document.logicalId);
+    if (new Set(logicalIds).size !== logicalIds.length) {
+      throw new KnowledgeValidationError(["output contains duplicate logical IDs"]);
+    }
     for (const [documentIndex, document] of input.output.documents.entries()) {
       try {
         validateLogicalId(document.kind, document.logicalId, checkpoint.repository);
@@ -199,29 +203,53 @@ export class KnowledgeOutputValidator {
         }
       }
       if (resolved.length !== document.citations.length) continue;
-      const claims = resolved.map((citation) => citation.claim);
-      // A bounded repair may discard unsupported prose, but it must never
-      // invent replacement knowledge. Canonicalizing the presentation from
-      // already-resolved verbatim claims keeps the raw model output auditable
-      // while ensuring every published word remains source-grounded.
-      const repairedClaims = input.repairPresentationFields
-        ? [...new Set(claims.flatMap((claim) => materialParagraphs(claim)))]
-        : undefined;
-      const title = repairedClaims?.[0] ?? document.title;
-      const summary = repairedClaims?.[0] ?? document.summary;
-      const bodyMarkdown = repairedClaims?.join("\n\n") ?? document.bodyMarkdown;
-      const structuredSummary = repairedClaims ? { facts: repairedClaims } : document.structuredSummary;
-      if (!textSupportedByClaims(title, claims)) {
-        diagnostics.push(`documents[${documentIndex}].title is not supported by a citation claim`);
-      }
-      if (!textSupportedByClaims(summary, claims)) {
-        diagnostics.push(`documents[${documentIndex}].summary is not supported by a citation claim`);
-      }
-      for (const value of structuredSummaryStrings(structuredSummary)) {
-        if (!textSupportedByClaims(value, claims)) {
-          diagnostics.push(`documents[${documentIndex}].structuredSummary contains unsupported text`);
-          break;
+      const summaryOrdinalError = citationOrdinalError(
+        document.summaryCitationOrdinals,
+        resolved.length,
+        `documents[${documentIndex}].summaryCitationOrdinals`,
+        true
+      );
+      if (summaryOrdinalError) diagnostics.push(summaryOrdinalError);
+      for (const [statementIndex, statement] of structuredStatements(document).entries()) {
+        const statementPath = `documents[${documentIndex}].structuredSummary.statements[${statementIndex}]`;
+        const ordinalError = citationOrdinalError(statement.citationOrdinals, resolved.length, statementPath, true);
+        if (ordinalError) diagnostics.push(ordinalError);
+        if (statement.confidence < 0 || statement.confidence > 1) {
+          diagnostics.push(`${statementPath}.confidence must be between 0 and 1`);
         }
+      }
+      const claimSubject = document.structuredSummary.claimSubject;
+      const claimValue = document.structuredSummary.claimValue;
+      if ((claimSubject === undefined) !== (claimValue === undefined)) {
+        diagnostics.push(`documents[${documentIndex}].structuredSummary claimSubject and claimValue must be paired`);
+      }
+      const claimOrdinalError = citationOrdinalError(
+        document.structuredSummary.claimCitationOrdinals,
+        resolved.length,
+        `documents[${documentIndex}].structuredSummary.claimCitationOrdinals`,
+        claimSubject !== undefined
+      );
+      if (claimOrdinalError) diagnostics.push(claimOrdinalError);
+      if (claimSubject === undefined && document.structuredSummary.claimCitationOrdinals.length > 0) {
+        diagnostics.push(
+          `documents[${documentIndex}].structuredSummary.claimCitationOrdinals requires claimSubject and claimValue`
+        );
+      }
+      for (const block of materialBodyBlocks(document.bodyMarkdown)) {
+        const ordinals = bodyCitationOrdinals(block);
+        if (!ordinals) {
+          diagnostics.push(
+            `documents[${documentIndex}] contains a body paragraph without a trailing citation marker: ${block.slice(0, 80)}`
+          );
+          continue;
+        }
+        const ordinalError = citationOrdinalError(
+          ordinals,
+          resolved.length,
+          `documents[${documentIndex}].bodyMarkdown`,
+          true
+        );
+        if (ordinalError) diagnostics.push(ordinalError);
       }
       for (const path of document.scope.paths) {
         if (!manifestPaths.has(path)) {
@@ -240,15 +268,6 @@ export class KnowledgeOutputValidator {
       if (logicalIdError) {
         diagnostics.push(`documents[${documentIndex}].logicalId ${logicalIdError}`);
       }
-      if (!input.repairPresentationFields) {
-        for (const paragraph of materialParagraphs(bodyMarkdown)) {
-          if (!claimsCoverParagraph(claims, paragraph)) {
-            diagnostics.push(
-              `documents[${documentIndex}] contains an unsupported paragraph: ${paragraph.slice(0, 80)}`
-            );
-          }
-        }
-      }
       if (diagnostics.some((value) => value.startsWith(`documents[${documentIndex}]`))) continue;
       if (!isFullCommitSha(checkpoint.commitSha)) {
         diagnostics.push(`documents[${documentIndex}] checkpoint commit is invalid`);
@@ -260,10 +279,10 @@ export class KnowledgeOutputValidator {
         tenantId: checkpoint.tenantId,
         repository: checkpoint.repository,
         kind: document.kind,
-        title,
-        bodyMarkdown,
-        summary,
-        structuredSummary,
+        title: document.title,
+        bodyMarkdown: document.bodyMarkdown,
+        summary: document.summary,
+        structuredSummary: { ...document.structuredSummary },
         scope: {
           ref: checkpoint.ref,
           commitSha: checkpoint.commitSha,

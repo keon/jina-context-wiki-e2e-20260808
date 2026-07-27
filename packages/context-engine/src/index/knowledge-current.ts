@@ -2,7 +2,7 @@ import { fingerprint, stableId } from "../domain/fingerprint.js";
 import type { KnowledgeDocumentRevision, KnowledgeEvidenceCitation } from "../domain/knowledge.js";
 import type { ContextDocument, CurrentKnowledgeRevision } from "../domain/projection.js";
 
-export const KNOWLEDGE_CURRENT_PROJECTOR_VERSION = "knowledge-current-v1";
+export const KNOWLEDGE_CURRENT_PROJECTOR_VERSION = "knowledge-current-v2";
 
 export class CurrentKnowledgeProjector {
   project(input: {
@@ -46,7 +46,14 @@ export class CurrentKnowledgeProjector {
         knowledgeKind: revision.kind,
         title: revision.title,
         body: revision.bodyMarkdown,
-        contextualText: `${revision.summary}\n${revision.scope.paths.join(" ")}\n${revision.scope.symbols.join(" ")}`,
+        contextualText: [
+          revision.summary,
+          JSON.stringify(revision.structuredSummary),
+          revision.scope.paths.join(" "),
+          revision.scope.symbols.join(" "),
+          revision.scope.pullRequests.join(" "),
+          revision.scope.issues.join(" ")
+        ].join("\n"),
         metadata: {
           logicalId: revision.logicalId,
           confidence: revision.confidence,

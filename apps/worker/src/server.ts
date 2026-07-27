@@ -16,9 +16,12 @@ import { DaytonaCodexKnowledgeDocumentGenerator } from "@jina/daytona";
 import { createGitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import type {
+  FocusBundle,
   GitChange,
   GitSnapshotMetadata,
   IngestEvidenceInput,
+  PriorKnowledgeRevision,
+  RefManifestEntry,
   ProviderObservationInput
 } from "@jina/context-engine";
 import { buildKnowledgeRepairPrompt, repositoryAclFingerprint } from "@jina/context-engine";
@@ -379,38 +382,59 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
   const prepared = await internalApiJson<{
     readonly prompt: string;
     readonly checkpointId: string;
+    readonly bundle: FocusBundle;
+    readonly manifest: RefManifestEntry[];
+    readonly priorKnowledge: PriorKnowledgeRevision[];
   }>("/internal/context/derive/prepare", leaseBody(work, { checkpointId: work.task.metadata.checkpointId }));
-  let diagnostics: readonly string[] = [];
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const rawOutput = await knowledgeGenerator.generate({
-      prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
-      repairErrors: [...diagnostics]
-    });
-    const result = await internalApiJson<{
-      readonly status: "succeeded" | "failed";
-      readonly diagnostics?: readonly string[];
-      readonly revisionIds?: readonly string[];
-      readonly runId: string;
-      readonly enrichedGenerationId?: string;
-    }>(
-      "/internal/context/derive/commit",
-      leaseBody(work, {
-        checkpointId: prepared.checkpointId,
-        rawOutput,
-        repairPresentationFields: attempt > 0
-      })
-    );
-    if (result.status === "succeeded") {
-      return {
-        effect: result.revisionIds?.length ? "changed" : "noop",
-        runId: result.runId,
-        revisionIds: result.revisionIds ?? [],
-        ...(result.enrichedGenerationId ? { generationId: result.enrichedGenerationId } : {})
-      };
-    }
-    diagnostics = result.diagnostics ?? ["knowledge validation failed"];
+  const { repository, ref, commitSha } = work.task.metadata;
+  if (
+    prepared.bundle.checkpoint.repository !== repository ||
+    prepared.bundle.checkpoint.ref !== ref ||
+    prepared.bundle.checkpoint.commitSha !== commitSha
+  ) {
+    throw new Error("prepared derivation checkpoint does not match the leased repository scope");
   }
-  throw new Error(`knowledge derivation failed: ${diagnostics.join("; ")}`);
+  const checkout = await checkoutRepository(repository, ref, commitSha, false);
+  try {
+    let diagnostics: readonly string[] = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const rawOutput = await knowledgeGenerator.generate({
+        prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
+        bundle: prepared.bundle,
+        repairErrors: [...diagnostics],
+        workspace: {
+          repositoryDirectory: checkout.directory,
+          manifest: prepared.manifest,
+          priorKnowledge: prepared.priorKnowledge
+        }
+      });
+      const result = await internalApiJson<{
+        readonly status: "succeeded" | "failed";
+        readonly diagnostics?: readonly string[];
+        readonly revisionIds?: readonly string[];
+        readonly runId: string;
+        readonly enrichedGenerationId?: string;
+      }>(
+        "/internal/context/derive/commit",
+        leaseBody(work, {
+          checkpointId: prepared.checkpointId,
+          rawOutput
+        })
+      );
+      if (result.status === "succeeded") {
+        return {
+          effect: result.revisionIds?.length ? "changed" : "noop",
+          runId: result.runId,
+          revisionIds: result.revisionIds ?? [],
+          ...(result.enrichedGenerationId ? { generationId: result.enrichedGenerationId } : {})
+        };
+      }
+      diagnostics = result.diagnostics ?? ["knowledge validation failed"];
+    }
+    throw new Error(`knowledge derivation failed: ${diagnostics.join("; ")}`);
+  } finally {
+    await rm(checkout.directory, { recursive: true, force: true });
+  }
 }
 
 async function runIndexContext(work: ClaimedWork<"run-index-context">): Promise<Record<string, unknown>> {
@@ -439,7 +463,8 @@ function leaseBody(work: ClaimedWork, value: Record<string, unknown>): Record<st
 async function checkoutRepository(
   repository: string,
   ref: string,
-  expectedCommitSha?: string
+  expectedCommitSha?: string,
+  requireExpectedRemoteHead = true
 ): Promise<{ readonly directory: string; readonly commitSha: string }> {
   if (!/^[\w.-]+\/[\w.-]+$/.test(repository)) throw new Error("repository must be owner/name");
   const directory = await mkdtemp(join(tmpdir(), "jina-context-"));
@@ -472,7 +497,17 @@ async function checkoutRepository(
       env: environment,
       maxBuffer: 1024
     });
-    const targetCommitSha = assertExpectedRemoteHead(repository, ref, remoteHead, expectedCommitSha);
+    const targetCommitSha =
+      expectedCommitSha && !requireExpectedRemoteHead
+        ? requiredGitSha(expectedCommitSha, "checkpoint commit SHA")
+        : assertExpectedRemoteHead(repository, ref, remoteHead, expectedCommitSha);
+    if (expectedCommitSha && !requireExpectedRemoteHead) {
+      await execFileAsync("git", ["fetch", "origin", targetCommitSha], {
+        cwd: directory,
+        env: environment,
+        maxBuffer: 10 * 1024 * 1024
+      });
+    }
     await execFileAsync("git", ["checkout", "--detach", targetCommitSha], {
       cwd: directory,
       env: environment,
@@ -709,10 +744,13 @@ async function loadProviderObservations(
   readonly frontier: Record<string, unknown>;
 }> {
   const observedAt = new Date().toISOString();
-  const [metadata, pullRequests, issues] = await Promise.all([
+  const [metadata, pullRequests, issues, issueComments, reviewComments, commitComments] = await Promise.all([
     githubJson(`/repos/${repository}`),
     githubOptionalPaginatedArray(`/repos/${repository}/pulls?state=all&sort=updated&direction=desc`),
-    githubOptionalPaginatedArray(`/repos/${repository}/issues?state=all&sort=updated&direction=desc`)
+    githubOptionalPaginatedArray(`/repos/${repository}/issues?state=all&sort=updated&direction=desc`),
+    githubOptionalPaginatedArray(`/repos/${repository}/issues/comments?sort=updated&direction=desc`),
+    githubOptionalPaginatedArray(`/repos/${repository}/pulls/comments?sort=updated&direction=desc`),
+    githubOptionalPaginatedArray(`/repos/${repository}/comments`)
   ]);
   const observations: ProviderObservationInput[] = [
     {
@@ -754,9 +792,68 @@ async function loadProviderObservations(
       metadata: { provider: "github", number }
     });
   }
+  for (const comment of issueComments.values) {
+    const id = Number(comment.id);
+    if (!Number.isSafeInteger(id) || id <= 0) continue;
+    const pathOrUrl = stringValue(comment.html_url);
+    observations.push({
+      sourceType: "observation",
+      sourceId: `github:issue_comment:${repository}:${id}`,
+      title: `GitHub issue discussion comment ${id}`,
+      payload: comment,
+      ...(pathOrUrl ? { pathOrUrl } : {}),
+      observedAt: stringValue(comment.updated_at) || stringValue(comment.created_at) || observedAt,
+      metadata: {
+        provider: "github",
+        kind: "issue_comment",
+        ...(stringValue(comment.issue_url) ? { issueUrl: stringValue(comment.issue_url) } : {})
+      }
+    });
+  }
+  for (const comment of reviewComments.values) {
+    const id = Number(comment.id);
+    if (!Number.isSafeInteger(id) || id <= 0) continue;
+    const pathOrUrl = stringValue(comment.html_url);
+    observations.push({
+      sourceType: "observation",
+      sourceId: `github:pull_request_review_comment:${repository}:${id}`,
+      title: `GitHub pull request review comment ${id}`,
+      payload: comment,
+      ...(pathOrUrl ? { pathOrUrl } : {}),
+      observedAt: stringValue(comment.updated_at) || stringValue(comment.created_at) || observedAt,
+      metadata: {
+        provider: "github",
+        kind: "pull_request_review_comment",
+        ...(stringValue(comment.pull_request_url) ? { pullRequestUrl: stringValue(comment.pull_request_url) } : {})
+      }
+    });
+  }
+  for (const comment of commitComments.values) {
+    const id = Number(comment.id);
+    if (!Number.isSafeInteger(id) || id <= 0) continue;
+    const pathOrUrl = stringValue(comment.html_url);
+    observations.push({
+      sourceType: "observation",
+      sourceId: `github:commit_comment:${repository}:${id}`,
+      title: `GitHub commit discussion comment ${id}`,
+      payload: comment,
+      ...(pathOrUrl ? { pathOrUrl } : {}),
+      observedAt: stringValue(comment.updated_at) || stringValue(comment.created_at) || observedAt,
+      metadata: {
+        provider: "github",
+        kind: "commit_comment",
+        ...(stringValue(comment.commit_id) ? { commitSha: stringValue(comment.commit_id) } : {})
+      }
+    });
+  }
   return {
     observations,
-    complete: pullRequests.complete && issues.complete,
+    complete:
+      pullRequests.complete &&
+      issues.complete &&
+      issueComments.complete &&
+      reviewComments.complete &&
+      commitComments.complete,
     frontier: {
       pullRequests: {
         observed: pullRequests.values.length,
@@ -767,6 +864,21 @@ async function loadProviderObservations(
         observed: issues.values.length,
         complete: issues.complete,
         ...(issues.reason ? { reason: issues.reason } : {})
+      },
+      issueComments: {
+        observed: issueComments.values.length,
+        complete: issueComments.complete,
+        ...(issueComments.reason ? { reason: issueComments.reason } : {})
+      },
+      reviewComments: {
+        observed: reviewComments.values.length,
+        complete: reviewComments.complete,
+        ...(reviewComments.reason ? { reason: reviewComments.reason } : {})
+      },
+      commitComments: {
+        observed: commitComments.values.length,
+        complete: commitComments.complete,
+        ...(commitComments.reason ? { reason: commitComments.reason } : {})
       }
     }
   };

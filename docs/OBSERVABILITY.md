@@ -97,6 +97,9 @@ A production context dashboard should show:
 
 - stage throughput/failure and p95 duration by `ingest-evidence`, baseline
   `index-context`, and `derive-knowledge`/enriched publication;
+- derivation input size, prior-document count, re-emitted/retired logical IDs, Codex
+  model/prompt/schema version, first-pass validation failures, repair outcome, and
+  fail-closed count;
 - lease loss and API polling failures;
 - repository/ref ingestion freshness and latest published generation age;
 - complete/partial checkpoint rate plus Git history count/root status, GitHub pagination
@@ -106,6 +109,8 @@ A production context dashboard should show:
 - generation build time and degraded/disabled projector capabilities;
 - query count and p95, route contribution, coverage status, conflict count, and citation
   verification failures;
+- `diagnose` query count, answered/partial/unanswered rate for the maintained real-question
+  corpus, and the missing evidence/retriever categories behind failures;
 - Cloud Run request/instance health and Cloud SQL connections/latency.
 
 Do not combine all projector backlog into one number; ACL/retention lag is more severe
@@ -155,7 +160,9 @@ Each release must retain:
 - certified repository/ref/commit and generation ID;
 - HTTP and real MCP citation counts;
 - final outbox depth;
-- evaluation report produced by `pnpm evaluate:context`.
+- evaluation report produced by `pnpm evaluate:context`;
+- per-question coverage report produced by `pnpm evaluate:questions` for the maintained
+  engineering-question corpus.
 
 The acceptance job output is a release gate, not a substitute for ongoing SLO monitoring.
 

@@ -20,8 +20,11 @@ they describe evaluation-dependent future choices.
 Jina uses a **hybrid repository context engine**:
 
 1. `ingest-evidence` remains the canonical, immutable evidence plane.
-2. `derive-knowledge` produces versioned, cited knowledge documents rather than
-   making broad model-generated graph relationships the primary semantic representation.
+2. Required `derive-knowledge` runs a checkpoint-pinned Codex agent with read-only shell
+   exploration over the exact repository plus immutable evidence, manifest, and prior
+   knowledge. It produces versioned, cited `knowledge-documents-v4` rather than making
+   broad model-generated graph relationships the primary semantic representation.
+   Incremental runs must re-emit or explicitly retire every prior logical document.
 3. `index-context` remains responsible for freshness, ref selection, permissions,
    invalidation, and rebuildable indexes. It projects:
    - a current knowledge-document catalog;
@@ -46,6 +49,10 @@ immutable evidence
   -> task-aware retrieval and synthesis
   -> answer grounded in original evidence
 ```
+
+The documents include cited facts, answered questions, and diagnostic symptoms, likely
+causes, checks, and fixes. HTTP and MCP expose a `diagnose` task kind that combines this
+knowledge with structured provider state and temporal change history.
 
 ## Why this is the decision
 

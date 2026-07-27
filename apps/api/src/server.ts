@@ -32,6 +32,7 @@ import {
   evidenceSourceTypes,
   fingerprint,
   isContextTaskType,
+  selectPriorKnowledge,
   stableId,
   type ContextBuild,
   type ContextEngineStore,
@@ -556,6 +557,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ) {
         throw notFound("knowledge document not found");
       }
+      const priorRevision = (await contextStore.listRevisions(revision.tenantId, revision.repository))
+        .filter((candidate) => candidate.logicalId === revision.logicalId && candidate.id !== revision.id)
+        .filter((candidate) => candidate.createdAt <= revision.createdAt)
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0];
       json(response, 200, {
         document: {
           ...publicKnowledgeSummary(revision, await contextStore.listRevisionEvents(revision.id)),
@@ -563,7 +568,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           structuredSummary: revision.structuredSummary,
           scope: revision.scope,
           citations: await contextStore.listCitations(revision.id),
-          events: await contextStore.listRevisionEvents(revision.id)
+          events: await contextStore.listRevisionEvents(revision.id),
+          ...(priorRevision ? { priorRevisionId: priorRevision.id } : {})
         }
       });
       return;
@@ -735,7 +741,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const checkpointId = requiredString(body.checkpointId, "checkpointId");
       if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
       const bundle = await new EvidenceFocusSelector(contextStore).select(checkpointId);
-      json(response, 200, { checkpointId, prompt: buildKnowledgePrompt(bundle), bundle });
+      const [manifest, priorKnowledge] = await Promise.all([
+        contextStore.listManifest(checkpointId),
+        selectPriorKnowledge(contextStore, bundle.checkpoint)
+      ]);
+      json(response, 200, {
+        checkpointId,
+        prompt: buildKnowledgePrompt(bundle),
+        bundle,
+        manifest,
+        priorKnowledge
+      });
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/context/derive/commit") {
@@ -747,7 +763,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repairPresentationFields = body.repairPresentationFields === true;
       const generator: KnowledgeDocumentGenerator = {
         name: "daytona-codex",
-        version: "knowledge-documents-v1",
+        version: "agentic-knowledge-documents-v2",
         model: process.env.CONTEXT_CODEX_MODEL?.trim() || "openai/gpt-5.4-mini",
         async generate() {
           return rawOutput;
@@ -1461,7 +1477,7 @@ function parseQueryContextRequest(body: Record<string, unknown>, principal: Prin
   const from = isRecord(body.timeWindow) ? optionalIsoTime(body.timeWindow.from, "timeWindow.from") : undefined;
   const to = isRecord(body.timeWindow) ? optionalIsoTime(body.timeWindow.to, "timeWindow.to") : undefined;
   if (from && to && from > to) throw invalidRequest("timeWindow.from must not follow timeWindow.to");
-  if (taskKind && !["lookup", "structure", "change", "intent", "overview", "status"].includes(taskKind)) {
+  if (taskKind && !["lookup", "structure", "change", "intent", "overview", "status", "diagnose"].includes(taskKind)) {
     throw invalidRequest("unsupported taskKind");
   }
   return {
@@ -1534,6 +1550,10 @@ function publicKnowledgeSummary(
     confidence: revision.confidence,
     reviewStatus,
     commitSha: revision.scope.commitSha,
+    generatorName: revision.generatorName,
+    generatorVersion: revision.generatorVersion,
+    model: revision.model,
+    promptVersion: revision.promptVersion,
     createdAt: revision.createdAt
   };
 }

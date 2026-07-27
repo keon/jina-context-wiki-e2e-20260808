@@ -25,6 +25,10 @@ export interface AdminContextDocument {
   readonly confidence: number;
   readonly reviewStatus: string;
   readonly commitSha: string;
+  readonly generatorName: string;
+  readonly generatorVersion: string;
+  readonly model: string;
+  readonly promptVersion: string;
   readonly createdAt: string;
   readonly citations?: readonly {
     readonly id: string;

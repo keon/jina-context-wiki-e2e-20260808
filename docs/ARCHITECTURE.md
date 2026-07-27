@@ -61,6 +61,11 @@ of the root build. Invalid derivation output receives one constrained repair. If
 repair or executor still fails, the derivation stage and root build fail; the published
 baseline remains available only for diagnosis and retry.
 
+Viewed as data planes rather than board scheduling, the architecture is
+`ingest-evidence` → required `derive-knowledge` → enriched `index-context`. The
+pre-derivation baseline is a safety and recovery publication, not an optional derivation
+path.
+
 Build admission assigns a monotonically increasing `refSequence` under a
 tenant/repository/ref advisory lock shared with checkpoint, knowledge, and generation
 publication fences. That sequence is fixed when the build request is accepted and travels
@@ -91,6 +96,13 @@ the worker mints a short-lived installation token and keeps it only for the acti
 Git and REST work. Oversized or binary content may be omitted from stored body text, but
 its manifest identity remains.
 
+For derivation, ingestion also materializes up to 500 recent commits as citable evidence.
+The checkpoint commit includes its changed paths. Bounded GitHub intake stores repository
+metadata, pull requests, issues, issue comments, pull-request review comments, and commit
+discussion comments. These provider records retain immutable observed bodies and
+source-specific identities so the agent can connect a change to issue or incident history
+without turning the inference into canonical evidence.
+
 Git tree fidelity is preserved independently of searchable source text. Executable blobs
 retain mode `100755`; symlinks retain mode `120000` and their link target as manifest
 metadata without indexing that target as source; gitlinks retain mode `160000` and the
@@ -110,7 +122,11 @@ permissions, or audit events.
 ### Knowledge
 
 `derive-knowledge` selects a bounded bundle from one evidence checkpoint and asks the
-isolated Daytona executor for knowledge documents, not nodes or relationships.
+isolated Daytona executor for knowledge documents, not nodes or relationships. The
+worker also supplies the exact repository manifest and the latest eligible prior
+knowledge revisions. It archives the exact checkpoint commit and extracts it into the
+ephemeral sandbox, so Codex can explore the repository with read-only shell tools while
+all citations still resolve through immutable host-created inputs.
 `KnowledgeOutputValidator` resolves stable logical subjects and checks each citation's
 tenant, repository, source identity, digest, commit, path/range, and JSON pointer before
 the immutable revision is stored. A citation may select a complete evidence body, an
@@ -118,6 +134,22 @@ exact inclusive line range, or an RFC 6901-style JSON pointer, but it cannot mix
 JSON selectors. The normalized citation claim must occur verbatim in the exact selected
 excerpt; support from a nearby line or different JSON field is rejected. Invalid output
 receives exactly one constrained repair before the required stage fails.
+
+The `knowledge-documents-v4` result contains 1–50 documents plus an explicit
+`retiredDocuments` list. A first initialization organizes supported architecture,
+components, features, decisions, changes, issues, incidents, ownership, runbooks, and
+glossary concepts. An incremental build uses prior knowledge as the catalog baseline:
+every still-valid logical document must be re-emitted with current-checkpoint citations,
+every affected document is revised, and every omitted prior logical ID must be explicitly
+retired with a reason. Host validation rejects silent drops, unknown retirements, and an
+ID that is both emitted and retired.
+
+Every non-heading body paragraph has citation markers. The summary, facts, answered
+questions, and diagnostic symptoms, likely causes, checks, and fixes carry citation
+ordinals and calibrated confidence. Derived prose is allowed, but its supporting
+citation claim remains a verbatim excerpt from the selected evidence. Likely
+issue/change/incident relationships require multiple cited signals, explicit uncertainty,
+and lower confidence.
 
 Logical IDs are trimmed and persisted in canonical lowercase before they contribute to
 revision identity. Their repository and change-commit segments must equal the checkpoint;
@@ -128,13 +160,17 @@ path's presence in the checkpoint manifest is necessary but not sufficient. Unre
 text elsewhere in the evidence record cannot ground identity or scope. A syntactically
 valid but hallucinated identity cannot create or collide with a durable logical subject.
 
-The Daytona Codex invocation treats the evidence bundle as untrusted data, ignores user
-configuration, uses strict configuration, and disables shell, shell snapshots, unified
-execution, multi-agent, apps, plugins, remote plugins, hooks, browser use, the in-app
-browser, computer use, image generation, the code-mode host, workspace dependencies,
-skill MCP dependency installation, and web search. It receives no repository credential
-and can only write the schema-constrained JSON result; all grounding and identity
-validation remain host-side.
+The Daytona Codex invocation treats repository files, evidence, provider text, and prior
+knowledge as untrusted data and ignores both user configuration and repository
+instructions. Codex gets a read-only shell, a read-only checkpoint archive, and the
+derivation input directory. It receives no repository credential, inherited environment,
+login shell, or network. Shell snapshots, unified execution, multi-agent, apps, plugins,
+remote plugins, hooks, browser use, the in-app browser, computer use, image generation,
+the code-mode host, workspace dependencies, skill MCP dependency installation, and web
+search remain disabled. It may inspect only the supplied paths and can return only the
+schema-constrained JSON result; all grounding and identity validation remain host-side.
+The default model window is 64,000 tokens, compacts at 48,000, and uses medium reasoning
+effort.
 
 Successful derivation cache reuse requires the same commit, selector/focus fingerprint,
 complete checkpoint evidence fingerprint, generator/model, prompt, and schema versions.
@@ -241,6 +277,11 @@ Exact and structured candidates cannot be displaced by weaker semantic matches. 
 response always reports the generation/ref/commit, original-evidence citations,
 conflicts, ambiguities, coverage, retrievers used, and trace ID.
 
+`taskKind: "diagnose"` is available through both HTTP and MCP. It selects knowledge,
+structured, and temporal routes so an engineering agent can retrieve cited symptoms,
+likely causes, diagnostic checks, evidence-backed fixes, issue/PR state, and relevant
+change history.
+
 ## Public surfaces
 
 The implemented context HTTP surface is:
@@ -272,6 +313,12 @@ GitHub App.
 `POST /mcp` is stateless Streamable HTTP MCP. Server `jina-context` exposes exactly one
 read-only tool: `query_context`. Storage primitives and retriever controls are not public
 MCP tools.
+
+The dashboard exposes `diagnose` in the query workspace. Its knowledge catalog shows
+logical-document and immutable-revision counts, prior revision, generator/model/prompt
+metadata, cited facts and answered questions, and symptoms/causes/checks/fixes. The admin
+view shows current logical-document count, revisions by kind, and agent/model, review,
+confidence, and commit metadata across the tenant.
 
 Public `POST /context/query` and `POST /mcp` bodies are limited to 128 KiB. Each raw
 target category (`paths`, `symbols`, `pullRequests`, or `issues`) accepts at most 100

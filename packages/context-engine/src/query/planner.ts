@@ -3,6 +3,13 @@ import type { QueryContextRequest, QueryPlan, QueryRoute, QueryTaskKind } from "
 export const QUERY_PLANNER_VERSION = "deterministic-router-v1";
 
 function inferredTask(question: string): QueryTaskKind {
+  if (
+    /\b(?:diagnos(?:e|is|ing)|root cause|incident|outage|failure|failing|broken|symptom|remediat(?:e|ion)|how (?:do|can|should) (?:i|we) fix|fix (?:it|this))\b/i.test(
+      question
+    )
+  ) {
+    return "diagnose";
+  }
   if (/\b(?:who owns|owner|status|state|open|closed)\b/i.test(question)) return "status";
   if (/\b(?:what changed|change|diff|commit|pull request|pr\s*#?)\b/i.test(question)) return "change";
   if (/\b(?:why|rationale|decision|intent|reason)\b/i.test(question)) return "intent";
@@ -42,6 +49,11 @@ export function planContextQuery(request: QueryContextRequest): QueryPlan {
   if (taskKind === "intent") {
     add(routes, "knowledge", "rationale benefits from cited interpretation");
     add(routes, "temporal", "rationale requires temporally relevant sources");
+  }
+  if (taskKind === "diagnose") {
+    add(routes, "knowledge", "diagnosis benefits from cited symptoms, causes, checks, and fixes", 20);
+    add(routes, "structured", "diagnosis benefits from issue and pull-request state", 16);
+    add(routes, "temporal", "diagnosis benefits from incident and change history", 16);
   }
   if (taskKind === "change") add(routes, "temporal", "change query requires temporally relevant sources");
   if (request.timeWindow) add(routes, "temporal", "explicit time window requires temporal filtering");

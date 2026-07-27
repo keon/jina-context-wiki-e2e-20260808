@@ -71,9 +71,12 @@ GitHub REST pagination, keeps it only in the active lease, and never stores it i
 context data. Git uses a full blob-filtered clone rather than a shallow clone, explicitly
 fetches the branch to its remote-tracking ref, requires the fetched head to equal any
 event-supplied SHA, and checks out that fetched head detached. The worker persists bounded
-commit/parent history and paginates PR/issue sources; reaching a configured limit or
-receiving an optional-source 403/404 records a `partial` checkpoint and exact omission
-reason. If an installation ID is present and token minting fails, ingestion fails closed.
+commit/parent history, including changed paths for the checkpoint commit, and paginates
+repository metadata, PRs, issues, issue comments, PR review comments, and commit
+discussion comments. These become citable inputs to the checkpoint-pinned
+`derive-knowledge` agent. Reaching a configured limit or receiving an optional-source
+403/404 records a `partial` checkpoint and exact omission reason. If an installation ID
+is present and token minting fails, ingestion fails closed.
 
 Trusted manual callers may include a positive `githubInstallationId` in
 `POST /context/build`. A build with no installation ID falls back to
@@ -126,7 +129,8 @@ For a push, verify that the root and all three context stages refer to the expec
 repository/ref, that the ingest stage carries the expected GitHub installation ID, and
 that ingestion records the event's full head SHA only if it still matches the fetched
 remote head. A published generation returned by `/context/generations` must use that same
-commit.
+commit. The knowledge catalog should include an agent-derived change summary cited to the
+checkpoint commit and changed paths when the evidence supports one.
 
 GitHub's App settings show delivery response status and support redelivery.
 

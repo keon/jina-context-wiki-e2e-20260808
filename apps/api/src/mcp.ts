@@ -8,7 +8,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { QueryContextResponse } from "@jina/context-engine";
 import * as z from "zod/v4";
 
-const taskKindSchema = z.enum(["lookup", "structure", "change", "intent", "overview", "status"]);
+const taskKindSchema = z.enum(["lookup", "structure", "change", "intent", "overview", "status", "diagnose"]);
 
 const citationSchema = z.object({
   id: z.string(),
@@ -65,7 +65,7 @@ interface ContextMcpQuery {
   readonly repository: string;
   readonly question: string;
   readonly ref?: string;
-  readonly taskKind?: "lookup" | "structure" | "change" | "intent" | "overview" | "status";
+  readonly taskKind?: "lookup" | "structure" | "change" | "intent" | "overview" | "status" | "diagnose";
   readonly targets?: {
     readonly paths?: readonly string[];
     readonly symbols?: readonly string[];
@@ -83,7 +83,7 @@ function createContextMcpServer(execute: ContextQueryExecutor): McpServer {
     { name: "jina-context", version: "1.0.0" },
     {
       instructions:
-        "Use query_context for repository questions. Answers include the selected ref, index generation, original evidence citations, material conflicts, and coverage gaps."
+        "Use query_context for repository questions and incident diagnosis. Agent-derived knowledge includes cited symptoms, likely causes, checks, and fixes; answers preserve original evidence citations, material conflicts, and coverage gaps."
     }
   );
   server.registerTool(
@@ -91,7 +91,7 @@ function createContextMcpServer(execute: ContextQueryExecutor): McpServer {
     {
       title: "Query repository context",
       description:
-        "Answer a repository question using routed exact, lexical, structural, knowledge-document, and hierarchy retrieval with verified original-evidence citations.",
+        "Answer or diagnose a repository question using routed exact, lexical, structural, temporal, and agent-derived knowledge retrieval with verified original-evidence citations.",
       inputSchema: {
         repository: z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina"),
         question: z.string().trim().min(1).max(4_000).describe("Natural-language repository question"),

@@ -60,7 +60,10 @@ repository test execution are not shipped.
 
 ## Repository context
 
-The context engine has three board-visible stages:
+The context engine's conceptual data flow is
+`ingest-evidence` → required `derive-knowledge` → `index-context`. The coordinator also
+publishes a raw-evidence `index-context` baseline before derivation, then an enriched
+successor after derivation:
 
 1. `ingest-evidence` fetches the authoritative remote branch head, verifies any
    event-supplied full SHA against it, checks it out detached, and stores immutable
@@ -69,25 +72,35 @@ The context engine has three board-visible stages:
    uses a full blob-filtered clone rather than a shallow clone. Every checkpoint is
    explicitly `complete` or `partial`; the observation frontier records Git/GitHub
    limits and omitted file bodies instead of overstating coverage.
-2. `index-context` publishes the required coherent raw-evidence baseline: indexable
+2. `index-context` publishes the coherent raw-evidence baseline: indexable
    context documents, fragments, exact and lexical indexes, deterministic structure, and
    a deterministic long-document hierarchy. Projection consumers use independent leases
    and scoped acknowledgements; rebuild/drain work replays pending checkpoints without
    sharing a global processed bit.
-3. Only after baseline publication, required `derive-knowledge` turns a bounded evidence bundle
-   into immutable, versioned
-   knowledge-document revisions. Host validation checks stable subject identity, resolves
-   each exact line range or JSON pointer against original evidence, and requires the
-   normalized citation claim to occur verbatim in that selected excerpt before persistence.
+3. Only after baseline publication, required `derive-knowledge` gives Codex a
+   checkpoint-pinned, read-only repository plus separate immutable evidence, exact
+   manifest, and prior-knowledge inputs. The agent explores the repository with read-only
+   shell tools and organizes a complete subject-oriented catalog as
+   `knowledge-documents-v4`: immutable, versioned documents rather than graph nodes.
+   Commit evidence includes the checkpoint's changed paths, and bounded GitHub evidence
+   includes PRs, issues, issue comments, PR review comments, and commit discussion
+   comments. On an incremental build every prior logical document must be re-emitted
+   with current citations or explicitly retired.
+   Documents carry cited summaries, facts, answered questions, and diagnostic symptoms,
+   likely causes, checks, and fixes. Host validation checks stable subject identity,
+   resolves each exact line range or JSON pointer against original evidence, validates
+   every body/structured citation ordinal, and requires the normalized citation claim to
+   occur verbatim in that selected excerpt before persistence.
    Logical IDs are canonical lowercase; repository/commit portions come from the
    checkpoint and every model-controlled subject segment must be supported by resolved
    cited evidence. Identity and scope grounding sees only the exact selected
    line-range/JSON-pointer excerpt plus intrinsic cited-source identity; unrelated record
    text and a merely present manifest path do not count.
-   The untrusted Codex run ignores user configuration and disables shell/shell snapshots,
-   unified execution, multi-agent, apps/plugins/remote plugins, hooks, browser/in-app
-   browser, computer use, image generation, code-mode host, workspace dependencies, skill
-   MCP dependency installation, and web search. It can return only the requested JSON.
+   The untrusted Codex run ignores user configuration and repository instructions. Its
+   shell is read-only, has no inherited environment or login shell, and cannot use the
+   network, web search, repository credentials, unified execution, multi-agent, apps,
+   plugins, hooks, browser/computer/image tools, workspace dependencies, or skill MCP
+   dependency installation. It can return only the requested schema-constrained JSON.
    Invalid output receives exactly one constrained repair. A successful commit publishes
    the required enriched successor generation; a second invalid result or executor
    failure fails the derivation stage and root build. Derived revisions are
@@ -121,6 +134,8 @@ selected ref, commit, and generation and return original-evidence citations, con
 ambiguities, coverage, and a trace ID. Omitting `ref` selects `main`. Authorization and
 its exact ACL-fingerprint set are rechecked after retrieval and synthesis, so a concurrent
 revoke cannot release a response.
+The `diagnose` task kind routes agent-derived symptoms, causes, checks, and fixes together
+with structured issue/PR state and temporal change history.
 
 Stateless Streamable HTTP MCP is served at `POST /mcp`. The `jina-context` server exposes
 exactly one read-only tool, `query_context`, with the same storage-neutral query contract.
@@ -180,6 +195,7 @@ packages/observability/ structured logging, traces, live metrics
 - [Architecture](docs/ARCHITECTURE.md)
 - [Context engine decision](docs/CONTEXT_ENGINE_DECISION.md)
 - [Context engine implementation record](docs/CONTEXT_ENGINE_IMPLEMENTATION_PLAN.md)
+- [Agentic knowledge derivation](docs/AGENTIC_DERIVATION.md)
 - [Context evaluation report and runbook](docs/CONTEXT_ENGINE_EVALUATION.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
