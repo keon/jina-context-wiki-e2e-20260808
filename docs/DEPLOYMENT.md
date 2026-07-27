@@ -68,7 +68,14 @@ recover by fixing the binding and rolling forward rather than by retrying the ro
 `INTERNAL_API_TOKEN` authorizes board, worker, and administration traffic. It is also the
 only service credential accepted by `POST /internal/context/access/sync`.
 `CONTEXT_API_TOKEN` is deliberately narrower: it is accepted only by
-`POST /context/query` and `POST /mcp`.
+`POST /context/query`, `POST /mcp`, and the read-only context projections
+`GET /context/generations`, `GET /context/documents`, `GET /context/structure`, and a
+single generation or document by id. Answering a question is not useful without the reads
+that let a caller find what to ask about, and those reads carry the same protection as the
+query route: the credential is bound server-side to one tenant and principal, and every
+route is repository-filtered by that principal's access. Writes, administration, board
+traffic, and metrics stay with `INTERNAL_API_TOKEN`, and the method is checked so a write
+cannot reach a read path.
 
 Every production API revision with a context credential must also set
 `JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID`. Those values

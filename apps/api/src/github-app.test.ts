@@ -932,12 +932,32 @@ test("context bearer is query-only and server-side bound to its configured tenan
       body: JSON.stringify({ repository, question: "What is indexed?" })
     });
     assert.equal(rejected.status, 401);
+    // Reading is part of answering: a caller cannot ask about what it cannot find.
+    // These stay bound to the same tenant and repository access as the query route.
+    for (const path of [
+      "/context/generations",
+      "/context/documents",
+      `/context/generations/${encodeURIComponent("ig_missing")}`,
+      `/context/documents/${encodeURIComponent("kr_missing")}`,
+      `/context/structure?repository=${encodeURIComponent(repository)}`
+    ]) {
+      const response = await fetch(`${boundUrl}${path}`, {
+        headers: { authorization: `Bearer ${contextToken}` }
+      });
+      assert.notEqual(response.status, 401, `GET ${path}`);
+    }
     for (const [method, path] of [
       ["POST", "/context/build"],
-      ["GET", "/context/generations"],
       ["POST", "/context/rebuild"],
       ["POST", "/context/erasure"],
-      ["POST", "/internal/context/access/sync"]
+      ["POST", "/internal/context/access/sync"],
+      // Writes must not ride in on a read path, administration stays internal,
+      // and a deeper path under an allowed parent is not itself allowed.
+      ["POST", "/context/generations"],
+      ["GET", "/context/metrics"],
+      ["GET", "/board"],
+      ["GET", "/overview"],
+      ["POST", "/context/knowledge/kr_1/review"]
     ] as const) {
       const response = await fetch(`${boundUrl}${path}`, {
         method,

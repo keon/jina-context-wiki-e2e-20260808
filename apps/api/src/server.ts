@@ -1391,7 +1391,9 @@ function authenticatedPrincipal(
   const authorization = firstHeader(request.headers.authorization);
   const internal = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
   const context = Boolean(
-    config.contextApiToken && authorization === `Bearer ${config.contextApiToken}` && isContextCredentialRoute(pathname)
+    config.contextApiToken &&
+    authorization === `Bearer ${config.contextApiToken}` &&
+    isContextCredentialRoute(pathname, request.method ?? "GET")
   );
   if (!internal && !context) return undefined;
   if (internal && pathname === "/internal/context/access/sync") {
@@ -1450,8 +1452,32 @@ function hasInternalApiCredential(request: IncomingMessage, config: ApiServerCon
   );
 }
 
-function isContextCredentialRoute(pathname: string): boolean {
-  return pathname === "/mcp" || pathname === "/context/query";
+/**
+ * Routes the narrow context credential may reach. Answering a question is
+ * useless without the reads that let a caller find what to ask about, so the
+ * read-only context projections are included. They are safe for this credential
+ * for the same reasons the query route is: it is bound server-side to one tenant
+ * and principal, and every one of these routes is repository-filtered by that
+ * principal's access. Writes, administration, and board traffic stay with the
+ * internal credential, so the method is checked rather than assumed.
+ */
+function isContextCredentialRoute(pathname: string, method: string): boolean {
+  if (method === "POST") return pathname === "/mcp" || pathname === "/context/query";
+  if (method !== "GET") return false;
+  return (
+    pathname === "/context/structure" ||
+    pathname === "/context/generations" ||
+    pathname === "/context/documents" ||
+    isSingleSegmentChildOf(pathname, "/context/generations") ||
+    isSingleSegmentChildOf(pathname, "/context/documents")
+  );
+}
+
+/** Matches `${parent}/{id}` without matching a deeper path such as `${parent}/{id}/review`. */
+function isSingleSegmentChildOf(pathname: string, parent: string): boolean {
+  if (!pathname.startsWith(`${parent}/`)) return false;
+  const remainder = pathname.slice(parent.length + 1);
+  return remainder.length > 0 && !remainder.includes("/");
 }
 
 function contextCredentialTenantId(value: string | undefined, config: ApiServerConfig): string | undefined {
