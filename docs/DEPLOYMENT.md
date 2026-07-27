@@ -52,10 +52,11 @@ only service credential accepted by `POST /internal/context/access/sync`.
 
 Every production API revision with a context credential must also set
 `JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID`. Those values
-server-side bind the bearer to one query identity; tenant/principal headers may be omitted
-or repeat the configured values but cannot select different ones. Internal-token callers
-send `x-jina-principal-id`; shared-database callers also send `x-jina-tenant-id`. Browser
-MCP origins, when present, must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
+server-side bind the query bearer and the access-synchronization mutation target to one
+identity; tenant/principal headers may be omitted or repeat the configured values but
+cannot select different ones. Other internal-token routes send `x-jina-principal-id`;
+shared-database callers also send `x-jina-tenant-id`. Browser MCP origins, when present,
+must exactly match `JINA_MCP_ALLOWED_ORIGINS`.
 
 Public `POST /context/query` and `POST /mcp` bodies are capped at 128 KiB. Every raw
 target category accepts at most 100 array entries before deduplication. Values are
@@ -94,6 +95,7 @@ The context service runs three one-concurrency instances with continuous CPU and
 
 ```text
 WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context
+JINA_REQUIRE_GITHUB_INSTALLATION=false
 CONTEXT_GITHUB_HISTORY_LIMIT=500
 CONTEXT_GIT_HISTORY_LIMIT=5000
 CONTEXT_MAX_FILE_BYTES=5242880
@@ -338,10 +340,12 @@ The coordinated `cloudbuild.yaml` invocation above calls
 
 The migration installs `jina_context` and its capability roles from scratch with
 `--install-roles`. It requires `CONTEXT_RUNTIME_DB_USER`, marks that login `NOINHERIT`,
-and grants membership in the focused NOLOGIN roles. The migration login therefore needs
-schema ownership and `CREATEROLE`; runtime services start with schema management disabled
-and activate a capability per transaction with `SET LOCAL ROLE`. The migration does not
-copy or translate prior semantic indexes. Active repositories must be reingested.
+revokes any `jina_context_admin` membership, and grants the remaining focused NOLOGIN
+roles. Tenant administration uses `jina_context_tenant_admin`, whose RLS never accepts
+the wildcard system scope. The migration login therefore needs schema ownership and
+`CREATEROLE`; runtime services start with schema management disabled and activate a
+capability per transaction with `SET LOCAL ROLE`. The migration does not copy or
+translate prior semantic indexes. Active repositories must be reingested.
 
 Before approving a release, inspect IAM and the deployed identities:
 

@@ -43,6 +43,8 @@ export interface RefManifestEntry {
   contentAvailable: boolean;
   language?: string;
   executable: boolean;
+  entryType?: "file" | "symlink" | "gitlink";
+  linkTarget?: string;
 }
 
 export type StructuralFactKind =

@@ -228,10 +228,35 @@ create table if not exists jina_context.evidence_checkpoint_manifest (
   content_available boolean not null default true,
   language text,
   executable boolean not null,
+  entry_type text not null default 'file',
+  link_target text,
   primary key (checkpoint_id,path)
 );
 alter table jina_context.evidence_checkpoint_manifest
   add column if not exists content_available boolean not null default true;
+alter table jina_context.evidence_checkpoint_manifest
+  add column if not exists entry_type text not null default 'file';
+alter table jina_context.evidence_checkpoint_manifest
+  add column if not exists link_target text;
+do $manifest_entry_type$
+begin
+  if not exists (
+    select 1
+    from pg_constraint
+    where conname='evidence_checkpoint_manifest_entry_semantics_check'
+      and conrelid='jina_context.evidence_checkpoint_manifest'::regclass
+  ) then
+    alter table jina_context.evidence_checkpoint_manifest
+      add constraint evidence_checkpoint_manifest_entry_semantics_check
+      check (
+        entry_type in ('file','symlink','gitlink')
+        and (entry_type='file' or not content_available)
+        and (entry_type='file' or not executable)
+        and (entry_type='symlink' or link_target is null)
+      );
+  end if;
+end
+$manifest_entry_type$;
 
 create table if not exists jina_context.refs (
   id text not null,

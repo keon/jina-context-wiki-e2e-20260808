@@ -167,12 +167,14 @@ CONTEXT_RUNTIME_DB_USER=jina_v2_app \
   pnpm --filter @jina/db migrate -- --install-roles
 ```
 
-The migration verifies the runtime role name, applies `ALTER ROLE ... NOINHERIT`, and
-grants membership in every focused context capability role. `NOINHERIT` means membership
-does not grant ambient table access: runtime adapters must enter a transaction and issue
-`SET LOCAL ROLE` for coordinator, ingest, derive, query, projector, or administrative
-work. Tests connect as this exact runtime login and verify capability activation and
-denied direct access.
+The migration verifies that the runtime role is already an ordinary
+`NOSUPERUSER NOBYPASSRLS NOREPLICATION` login, applies only the hardening attributes a
+documented `CREATEROLE` migration login may change, and grants focused context
+capabilities except `jina_context_admin`. `NOINHERIT` means membership does not grant
+ambient table access: runtime adapters must enter a transaction and issue `SET LOCAL
+ROLE` for coordinator, ingest, derive, query, projector, or strictly tenant-scoped
+administrative work. Tests connect as this exact runtime login and verify capability
+activation, denial of the wildcard admin role, and denied direct access.
 
 ## Context-engine cutover
 

@@ -12,8 +12,11 @@ export const CONTEXT_ROLES = [
   "jina_context_acl",
   "jina_context_retention",
   "jina_context_query",
+  "jina_context_tenant_admin",
   "jina_context_admin"
 ] as const;
+
+export const CONTEXT_RUNTIME_ROLES = CONTEXT_ROLES.filter((role) => role !== "jina_context_admin");
 
 const CONTEXT_CONSUMER_ROLES = [
   ["manifest", "jina_context_manifest"],
@@ -274,9 +277,12 @@ grant select,insert on
   jina_context.retrieval_metrics
 to jina_context_query;
 
-grant all privileges on all tables in schema jina_context to jina_context_admin;
-grant all privileges on all sequences in schema jina_context to jina_context_admin;
-grant execute on all functions in schema jina_context to jina_context_admin;
+grant all privileges on all tables in schema jina_context to
+  jina_context_tenant_admin,jina_context_admin;
+grant all privileges on all sequences in schema jina_context to
+  jina_context_tenant_admin,jina_context_admin;
+grant execute on all functions in schema jina_context to
+  jina_context_tenant_admin,jina_context_admin;
 
 revoke update on jina_context.outbox from
   jina_context_ingest,jina_context_derive,
@@ -315,11 +321,11 @@ create policy context_outbox_producer_read on jina_context.outbox
   using (${tenantScopeSql("tenant_id", false)});
 drop policy if exists context_outbox_admin on jina_context.outbox;
 create policy context_outbox_admin on jina_context.outbox
-  to jina_context_admin
+  to jina_context_tenant_admin,jina_context_admin
   using (${tenantScopeSql()}) with check (${tenantScopeSql()});
 drop policy if exists context_generation_projectors_admin on jina_context.generation_projectors;
 create policy context_generation_projectors_admin on jina_context.generation_projectors
-  to jina_context_admin
+  to jina_context_tenant_admin,jina_context_admin
   using (
     exists (
       select 1 from jina_context.index_generations generation
@@ -353,7 +359,7 @@ create policy context_generation_projectors_coordinator on jina_context.generati
   );
 drop policy if exists context_projection_checkpoints_admin on jina_context.projection_checkpoints;
 create policy context_projection_checkpoints_admin on jina_context.projection_checkpoints
-  to jina_context_admin
+  to jina_context_tenant_admin,jina_context_admin
   using (${tenantScopeSql()}) with check (${tenantScopeSql()});
 drop policy if exists context_projection_checkpoints_coordinator on jina_context.projection_checkpoints;
 create policy context_projection_checkpoints_coordinator on jina_context.projection_checkpoints

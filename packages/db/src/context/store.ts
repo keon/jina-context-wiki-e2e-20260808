@@ -63,6 +63,10 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     this.query = new PostgresContextQueryRepository(this.database);
   }
 
+  runInTenantScope<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {
+    return this.database.runInTenantScope(tenantId, operation);
+  }
+
   commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
     return this.evidence.commitSnapshot(snapshot, fence);
   }
@@ -837,7 +841,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   async health(): Promise<{ ok: boolean; adapter: string }> {
     try {
       await this.database.initialize();
-      await this.database.queryAs("jina_context_admin", { system: true }, "select 1");
+      await this.database.pool.query("select 1");
       return { ok: true, adapter: "postgres" };
     } catch {
       return { ok: false, adapter: "postgres" };

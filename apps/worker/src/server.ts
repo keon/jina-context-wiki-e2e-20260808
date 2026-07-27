@@ -24,6 +24,7 @@ import type {
 import { buildKnowledgeRepairPrompt, repositoryAclFingerprint } from "@jina/context-engine";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
+import { parseGitTreeEntries } from "./git-tree.js";
 
 const execFileAsync = promisify(execFile);
 const CONTEXT_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"] as const;
@@ -616,38 +617,59 @@ async function readRepositoryFiles(directory: string, commitSha: string): Promis
   });
   const maximumFileBytes = positiveInt(process.env.CONTEXT_MAX_FILE_BYTES, 5 * 1024 * 1024);
   const maximumTotalBytes = positiveInt(process.env.CONTEXT_MAX_SNAPSHOT_BYTES, 8 * 1024 * 1024);
-  const entries = stdout
-    .split("\0")
-    .filter(Boolean)
-    .map((entry) => {
-      const match = /^(\d+)\s+blob\s+([0-9a-f]{40})\s+(\d+|-)\t(.+)$/.exec(entry);
-      if (!match) throw new Error(`unsupported git tree entry: ${entry.slice(0, 120)}`);
-      return {
-        mode: match[1]!,
-        blobSha: match[2]!,
-        size: match[3] === "-" ? 0 : Number(match[3]),
-        path: match[4]!
-      };
-    });
+  const entries = parseGitTreeEntries(stdout);
   let selectedBytes = 0;
   const selected = entries.map((entry) => {
-    const includeContent = entry.size <= maximumFileBytes && selectedBytes + entry.size <= maximumTotalBytes;
+    const includeContent =
+      entry.entryType === "file" && entry.size <= maximumFileBytes && selectedBytes + entry.size <= maximumTotalBytes;
     if (includeContent) selectedBytes += entry.size;
     return { ...entry, includeContent };
   });
   return mapWithConcurrency(selected, 12, async (entry) => {
+    if (entry.entryType === "gitlink") {
+      return {
+        path: entry.path,
+        blobSha: entry.objectId,
+        body: "",
+        executable: false,
+        contentOmitted: true,
+        entryType: "gitlink" as const
+      };
+    }
+    if (entry.entryType === "symlink") {
+      let linkTarget: string | undefined;
+      if (entry.size <= maximumFileBytes) {
+        const { stdout: blob } = await execFileAsync("git", ["cat-file", "blob", entry.objectId], {
+          cwd: directory,
+          env: gitEnvironment(),
+          encoding: "buffer",
+          maxBuffer: maximumFileBytes + 1
+        });
+        const buffer = Buffer.isBuffer(blob) ? blob : Buffer.from(String(blob));
+        if (!isProbablyBinary(buffer)) linkTarget = buffer.toString("utf8");
+      }
+      return {
+        path: entry.path,
+        blobSha: entry.objectId,
+        body: "",
+        executable: false,
+        contentOmitted: true,
+        entryType: "symlink" as const,
+        ...(linkTarget === undefined ? {} : { linkTarget })
+      };
+    }
     const language = languageForPath(entry.path);
     if (!entry.includeContent) {
       return {
         path: entry.path,
-        blobSha: entry.blobSha,
+        blobSha: entry.objectId,
         body: "",
         ...(language ? { language } : {}),
-        executable: entry.mode.endsWith("1"),
+        executable: entry.mode === "100755",
         contentOmitted: true
       };
     }
-    const { stdout: blob } = await execFileAsync("git", ["cat-file", "blob", entry.blobSha], {
+    const { stdout: blob } = await execFileAsync("git", ["cat-file", "blob", entry.objectId], {
       cwd: directory,
       env: gitEnvironment(),
       encoding: "buffer",
@@ -658,10 +680,10 @@ async function readRepositoryFiles(directory: string, commitSha: string): Promis
     const body = contentOmitted ? "" : buffer.toString("utf8");
     return {
       path: entry.path,
-      blobSha: entry.blobSha,
+      blobSha: entry.objectId,
       body,
       ...(language ? { language } : {}),
-      executable: entry.mode.endsWith("1"),
+      executable: entry.mode === "100755",
       ...(contentOmitted ? { contentOmitted: true } : {})
     };
   });

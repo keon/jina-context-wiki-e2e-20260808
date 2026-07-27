@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 import { applySchema } from "../apply-schema.js";
 import { CONTEXT_ROLES_SQL } from "./roles.js";
@@ -31,6 +32,7 @@ export class ContextDatabase {
   readonly pool: Pool;
   private readonly manageSchema: boolean;
   private readonly manageRoles: boolean;
+  private readonly ambientTenantScope = new AsyncLocalStorage<ContextDatabaseScope>();
   private initialized?: Promise<void>;
 
   constructor(config: PostgresContextDatabaseConfig) {
@@ -52,18 +54,26 @@ export class ContextDatabase {
     return this.transactionAs("jina_context_admin", contextSystemScope, operation);
   }
 
+  runInTenantScope<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {
+    return this.ambientTenantScope.run(contextTenantScope(tenantId), operation);
+  }
+
   async transactionAs<T>(
     role: ContextDatabaseRole,
     scope: ContextDatabaseScope,
     operation: (client: PoolClient) => Promise<T>
   ): Promise<T> {
     await this.initialize();
+    const ambientScope = this.ambientTenantScope.getStore();
+    const effectiveScope = "system" in scope && ambientScope ? ambientScope : scope;
+    const effectiveRole =
+      role === "jina_context_admin" && "tenantIds" in effectiveScope ? "jina_context_tenant_admin" : role;
     const client = await this.pool.connect();
     try {
       await client.query("begin");
-      await client.query(`set local role ${role}`);
+      await client.query(`set local role ${effectiveRole}`);
       await client.query("select set_config('jina.tenant_id',$1,true)", [
-        "tenantIds" in scope ? scope.tenantIds.join("\u001f") : "*"
+        "tenantIds" in effectiveScope ? effectiveScope.tenantIds.join("\u001f") : "*"
       ]);
       const result = await operation(client);
       await client.query("commit");

@@ -529,6 +529,18 @@ test("context bearer is query-only and server-side bound to its configured tenan
     });
     assert.equal(merged.status, 200);
     assert.deepEqual(await boundStore.repositoriesForPrincipal(tenantId, principalId), ["acme/other", repository]);
+    const spoofedAccessSync = await fetch(`${boundUrl}/internal/context/access/sync`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalToken}`,
+        "content-type": "application/json",
+        "x-jina-tenant-id": "tenant-attacker",
+        "x-jina-principal-id": "user:attacker@example.com"
+      },
+      body: JSON.stringify({ repositories: ["attacker/repository"], mode: "replace" })
+    });
+    assert.equal(spoofedAccessSync.status, 401);
+    assert.deepEqual(await boundStore.repositoriesForPrincipal("tenant-attacker", "user:attacker@example.com"), []);
     const accepted = await fetch(`${boundUrl}/context/query`, {
       method: "POST",
       headers: {

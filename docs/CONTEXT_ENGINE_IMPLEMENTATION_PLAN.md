@@ -526,6 +526,7 @@ jina_context_identity
 jina_context_acl
 jina_context_retention
 jina_context_query
+jina_context_tenant_admin
 jina_context_admin
 ```
 
@@ -535,7 +536,8 @@ revisions, citations, and events. Projector roles own only their projection tabl
 their outbox delivery rows. The schema-owning migration login installs these NOLOGIN
 roles, marks the separate runtime login `NOINHERIT`, and grants membership. Membership is
 not ambient access: every runtime transaction explicitly uses `SET LOCAL ROLE` for the
-required capability.
+required capability. Runtime membership excludes the wildcard `jina_context_admin`;
+tenant-scoped administrative operations use `jina_context_tenant_admin`.
 
 ## Evidence plane: `ingest-evidence` (runtime step 1)
 

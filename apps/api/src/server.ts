@@ -289,7 +289,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     };
     response.once("finish", () => settle(false));
     response.once("close", () => settle(true));
-    void route(request, response).catch((error: unknown) => {
+    const scopePrincipal = authenticatedPrincipal(request, config, pathname);
+    const routed =
+      scopePrincipal && scopePrincipal.tenantId !== "*" && contextStore.runInTenantScope
+        ? contextStore.runInTenantScope(scopePrincipal.tenantId, () => route(request, response))
+        : route(request, response);
+    void routed.catch((error: unknown) => {
       if (response.destroyed || response.socket?.destroyed) return;
       const apiError = httpError(error);
       requestLogger.error("API request failed", {
@@ -1373,6 +1378,22 @@ function authenticatedPrincipal(
     config.contextApiToken && authorization === `Bearer ${config.contextApiToken}` && isContextCredentialRoute(pathname)
   );
   if (!internal && !context) return undefined;
+  if (internal && pathname === "/internal/context/access/sync") {
+    const tenantId = contextCredentialTenantId(config.contextApiTenantId, config);
+    const principalId = normalizedForwardedPrincipal(config.contextApiPrincipalId);
+    if (!tenantId || !principalId) return undefined;
+    const requestedTenantHeader = firstHeader(request.headers["x-jina-tenant-id"]);
+    const requestedPrincipalHeader = firstHeader(request.headers["x-jina-principal-id"]);
+    const requestedTenantId = contextCredentialTenantId(requestedTenantHeader, config);
+    const requestedPrincipalId = normalizedForwardedPrincipal(requestedPrincipalHeader);
+    if (
+      (requestedTenantHeader !== undefined && requestedTenantId !== tenantId) ||
+      (requestedPrincipalHeader !== undefined && requestedPrincipalId !== principalId)
+    ) {
+      return undefined;
+    }
+    return { tenantId, principalId, forwarded: true };
+  }
   if (context && !internal) {
     const tenantId = contextCredentialTenantId(config.contextApiTenantId, config);
     const principalId = normalizedForwardedPrincipal(config.contextApiPrincipalId);

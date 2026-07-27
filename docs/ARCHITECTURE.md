@@ -91,6 +91,11 @@ the worker mints a short-lived installation token and keeps it only for the acti
 Git and REST work. Oversized or binary content may be omitted from stored body text, but
 its manifest identity remains.
 
+Git tree fidelity is preserved independently of searchable source text. Executable blobs
+retain mode `100755`; symlinks retain mode `120000` and their link target as manifest
+metadata without indexing that target as source; gitlinks retain mode `160000` and the
+submodule commit without aborting unrelated-file ingestion.
+
 Each checkpoint records `sourceCompleteness` as `complete` or `partial`. Its observation
 frontier records the observed Git commit count and oldest commit, whether the configured
 Git bound reached history root, per-source GitHub pagination status/reason, and omitted
@@ -254,8 +259,10 @@ POST /context/rebuild
 POST /context/erasure
 ```
 
-Generation and document lists use opaque cursor pagination. Metrics, rebuild, erasure,
-and knowledge review are tenant-administrator operations. Review also checks that the
+Generation and document lists use opaque cursor pagination. The dashboard scope picker
+and tenant-admin listings follow cursors to exhaustion, with duplicate-cursor and page
+count guards, so older scopes and documents are not silently hidden. Metrics, rebuild,
+erasure, and knowledge review are tenant-administrator operations. Review also checks that the
 selected revision belongs to the principal's tenant; repository read access alone cannot
 append a review event. `POST /context/build` accepts optional `commitSha` and
 `githubInstallationId` fields. Signed push builds supply both from the verified webhook;
@@ -296,8 +303,10 @@ In production the context credential is usable only when
 `JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID` server-side bind it to one
 identity.
 Tenant/principal headers may repeat that identity but cannot override it; a mismatch is
-unauthorized. Internal callers must carry a normalized, forwarded principal and, in
-shared tenancy, a tenant. Current ACL observations resolve that principal to exact
+unauthorized. Repository-access synchronization uses that same server-side tenant and
+principal binding even though it requires the internal credential; caller-selected
+identity headers are rejected. Other internal callers must carry a normalized, forwarded
+principal and, in shared tenancy, a tenant. Current ACL observations resolve that principal to exact
 repository ACL fingerprints. PostgreSQL applies those fingerprints while hydrating
 documents, fragments, exact terms, hierarchy nodes, manifests, and current knowledge,
 before retrievers can create candidates; structural relations are retained only when all
@@ -314,7 +323,9 @@ replacement still has its documented complete-set semantics.
 
 The schema-owning migration login is separate from the application login. The migration
 installs focused NOLOGIN capability roles, marks the runtime login `NOINHERIT`, and grants
-it role membership. Runtime services do not manage schema and have no ambient context
+it role membership except for the wildcard `jina_context_admin` role. Tenant-scoped
+administration activates `jina_context_tenant_admin`, whose RLS policies never accept the
+wildcard system scope. Runtime services do not manage schema and have no ambient context
 table privileges: each database operation runs in a transaction and activates its
 declared capability with `SET LOCAL ROLE`.
 

@@ -186,11 +186,13 @@ The schema defines focused NOLOGIN roles:
 `jina_context_manifest`, `jina_context_knowledge_current`, `jina_context_lexical`,
 `jina_context_dense`, `jina_context_hierarchy`, `jina_context_structural`,
 `jina_context_identity`, `jina_context_acl`, `jina_context_retention`,
-`jina_context_query`, and `jina_context_admin`.
+`jina_context_query`, `jina_context_tenant_admin`, and `jina_context_admin`.
 
 Application logins must not own the schema. The migration principal owns schema changes
 and installs/grants the capability roles. The runtime login is `NOINHERIT`, so role
 membership supplies no ambient table access. Every adapter operation begins a transaction,
 executes `SET LOCAL ROLE <capability>`, and then performs only the reads/writes granted to
-that capability. Production runs migration and runtime services with separate database
-credentials.
+that capability. The runtime login is never a member of `jina_context_admin`;
+tenant-administration transactions use `jina_context_tenant_admin` with ordinary strict
+tenant RLS, while the wildcard admin remains migration-only. Production runs migration
+and runtime services with separate database credentials.

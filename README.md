@@ -130,8 +130,9 @@ PostgreSQL filters documents, fragments, exact entries, hierarchy rows, manifest
 and current-knowledge rows before retrievers can create candidates. In production,
 `CONTEXT_API_TOKEN` reaches only these two query surfaces and is server-side bound by
 `JINA_CONTEXT_TENANT_ID` plus `JINA_CONTEXT_PRINCIPAL_ID`; callers cannot use identity
-headers to change that binding. Administrative and synchronization routes require the
-internal credential.
+headers to change that binding. Administrative routes require the internal credential.
+Repository-access synchronization also requires that credential, but applies only to the
+same server-bound tenant and principal; caller headers cannot select another identity.
 
 Public HTTP and MCP query request bodies are capped at 128 KiB. Each raw target category
 accepts at most 100 entries; entries are trimmed, empty values are dropped, accepted
@@ -141,7 +142,9 @@ values are deduplicated, and each non-empty value is at most 1,000 characters. T
 API, context worker, task worker, dashboard, and admin are built from the same source
 revision and deployed as one Cloud Run release. Database DDL and capability-role grants
 run first under a separate migration login; the runtime login is `NOINHERIT` and every
-context transaction explicitly activates its capability with `SET LOCAL ROLE`.
+context transaction explicitly activates its capability with `SET LOCAL ROLE`. Runtime
+membership excludes the wildcard `jina_context_admin` role; tenant administration uses a
+strictly RLS-scoped capability.
 The deployed API uses 2 vCPU, 2 GiB memory, concurrency 4, and a 60-minute Cloud Run
 request timeout. Context workers use a 62-minute operation timeout, a 10-minute terminal
 completion timeout, and the 75-minute context lease described above. Production

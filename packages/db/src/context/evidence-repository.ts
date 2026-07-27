@@ -68,6 +68,8 @@ interface ManifestRow {
   content_available: boolean;
   language: string | null;
   executable: boolean;
+  entry_type: "file" | "symlink" | "gitlink";
+  link_target: string | null;
 }
 
 interface StructuralFactRow {
@@ -720,7 +722,15 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
       checkpoint.repository,
       git.commit.treeSha,
       manifest.length,
-      contextDigest(manifest.map(({ path, blobSha, executable }) => ({ path, blobSha, executable }))),
+      contextDigest(
+        manifest.map(({ path, blobSha, executable, entryType, linkTarget }) => ({
+          path,
+          blobSha,
+          executable,
+          entryType: entryType ?? "file",
+          ...(linkTarget === undefined ? {} : { linkTarget })
+        }))
+      ),
       checkpoint.createdAt
     ]
   );
@@ -796,7 +806,14 @@ async function persistGitSnapshot(client: PoolClient, snapshot: EvidenceSnapshot
       tree_sha: git.commit.treeSha,
       path: entry.path,
       blob_sha: entry.blobSha,
-      mode: entry.executable ? "100755" : "100644"
+      mode:
+        entry.entryType === "gitlink"
+          ? "160000"
+          : entry.entryType === "symlink"
+            ? "120000"
+            : entry.executable
+              ? "100755"
+              : "100644"
     })),
     `tenant_id text,repository text,tree_sha text,path text,blob_sha text,mode text`,
     `insert into jina_context.tree_entries
@@ -1100,18 +1117,21 @@ async function insertCheckpointManifest(
     content_digest: entry.contentDigest,
     content_available: entry.contentAvailable,
     language: entry.language ?? null,
-    executable: entry.executable
+    executable: entry.executable,
+    entry_type: entry.entryType ?? "file",
+    link_target: entry.linkTarget ?? null
   }));
   for (const chunk of snapshotChunks(selections)) {
     await client.query(
       `insert into jina_context.evidence_checkpoint_manifest
         (checkpoint_id,tenant_id,repository,ref_name,commit_sha,path,blob_sha,
-         content_digest,content_available,language,executable)
+         content_digest,content_available,language,executable,entry_type,link_target)
        select $1,$2,$3,input.ref_name,input.commit_sha,input.path,input.blob_sha,
-              input.content_digest,input.content_available,input.language,input.executable
+              input.content_digest,input.content_available,input.language,input.executable,
+              input.entry_type,input.link_target
        from jsonb_to_recordset($4::jsonb) as input(
          ref_name text,commit_sha text,path text,blob_sha text,content_digest text,
-         content_available boolean,language text,executable boolean
+         content_available boolean,language text,executable boolean,entry_type text,link_target text
        )
        on conflict do nothing`,
       [checkpoint.id, checkpoint.tenantId, checkpoint.repository, JSON.stringify(chunk)]
@@ -1217,7 +1237,9 @@ function manifestFromRow(row: ManifestRow): RefManifestEntry {
     contentDigest: row.content_digest,
     contentAvailable: row.content_available,
     ...(row.language ? { language: row.language } : {}),
-    executable: row.executable
+    executable: row.executable,
+    ...(row.entry_type === "file" ? {} : { entryType: row.entry_type }),
+    ...(row.link_target === null ? {} : { linkTarget: row.link_target })
   };
 }
 

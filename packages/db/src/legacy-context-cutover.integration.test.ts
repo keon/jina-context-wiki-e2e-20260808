@@ -110,7 +110,7 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
     await bootstrap.query(`drop role if exists ${runtimeRole}`);
     await bootstrap.query(
       `create role ${runtimeRole}
-         login inherit createdb createrole bypassrls replication`
+         login inherit createdb createrole`
     );
     await bootstrap.query(`create schema jina_context_graph authorization ${runtimeRole}`);
     await bootstrap.query(`create schema jina_runtime`);
@@ -221,6 +221,60 @@ test("legacy schema hardening archives runtime-owned identity sequences", { skip
     await bootstrap.query("drop schema if exists jina_runtime cascade");
     await bootstrap.query("drop role if exists jina_legacy_archive");
     await bootstrap.query(`drop role if exists ${runtimeRole}`);
+    await bootstrap.end();
+  }
+});
+
+test("documented CREATEROLE migration login can harden an ordinary runtime login", { skip: !databaseUrl }, async () => {
+  const bootstrap = new Pool({ connectionString: databaseUrl });
+  const migrationRole = "jina_context_cutover_test_migration";
+  const runtimeRole = "jina_context_cutover_test_ordinary";
+  const password = "context-cutover-migration-password";
+  try {
+    await bootstrap.query(`drop role if exists ${runtimeRole}`);
+    await bootstrap.query(`drop role if exists ${migrationRole}`);
+    await bootstrap.query(`create role ${migrationRole} login createrole password '${password}'`);
+    await bootstrap.query(`set role ${migrationRole}`);
+    await bootstrap.query(`create role ${runtimeRole} login inherit createdb createrole`);
+    await bootstrap.query("reset role");
+
+    const migrationUrl = new URL(databaseUrl!);
+    migrationUrl.username = migrationRole;
+    migrationUrl.password = password;
+    const migration = new Pool({ connectionString: migrationUrl.toString(), max: 1 });
+    try {
+      await hardenContextRuntimeRole(migration, runtimeRole);
+    } finally {
+      await migration.end();
+    }
+
+    const runtime = await bootstrap.query<{
+      rolbypassrls: boolean;
+      rolcreatedb: boolean;
+      rolcreaterole: boolean;
+      rolinherit: boolean;
+      rolreplication: boolean;
+      rolsuper: boolean;
+    }>(
+      `select rolbypassrls,rolcreatedb,rolcreaterole,rolinherit,rolreplication,rolsuper
+       from pg_roles
+       where rolname=$1`,
+      [runtimeRole]
+    );
+    assert.deepEqual(runtime.rows, [
+      {
+        rolbypassrls: false,
+        rolcreatedb: false,
+        rolcreaterole: false,
+        rolinherit: false,
+        rolreplication: false,
+        rolsuper: false
+      }
+    ]);
+  } finally {
+    await bootstrap.query("reset role");
+    await bootstrap.query(`drop role if exists ${runtimeRole}`);
+    await bootstrap.query(`drop role if exists ${migrationRole}`);
     await bootstrap.end();
   }
 });

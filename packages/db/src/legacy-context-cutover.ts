@@ -51,14 +51,37 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
   const escapedRuntimeUser = runtimeUser.replaceAll('"', '""');
   const runtimeLiteral = runtimeUser.replaceAll("'", "''");
   await pool.query(
+    `do $runtime_preflight$
+     declare runtime_user constant text := '${runtimeLiteral}';
+     begin
+       if exists (
+         select 1
+         from pg_roles
+         where rolname=runtime_user and (rolsuper or rolbypassrls or rolreplication)
+       ) then
+         raise exception
+           'runtime role % must already be NOSUPERUSER NOBYPASSRLS NOREPLICATION',
+           runtime_user
+           using errcode='42501';
+       end if;
+     end
+     $runtime_preflight$`
+  );
+  await pool.query(
     `alter role "${escapedRuntimeUser}"
-       noinherit nocreatedb nocreaterole nobypassrls noreplication`
+       noinherit nocreatedb nocreaterole`
   );
   await pool.query(
     `do $hardening$
      declare runtime_user constant text := '${runtimeLiteral}';
      begin
-       if exists (select 1 from pg_roles where rolname='cloudsqlsuperuser') then
+       if exists (
+         select 1
+         from pg_auth_members membership
+         join pg_roles granted on granted.oid=membership.roleid
+         join pg_roles member on member.oid=membership.member
+         where granted.rolname='cloudsqlsuperuser' and member.rolname=runtime_user
+       ) then
          execute format('revoke cloudsqlsuperuser from %I', runtime_user);
        end if;
      end
@@ -113,12 +136,22 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
        end if;
        if not exists (select 1 from pg_roles where rolname=archive_owner) then
          execute format(
-           'create role %I nologin noinherit nocreatedb nocreaterole nobypassrls noreplication',
+           'create role %I nologin noinherit nocreatedb nocreaterole',
            archive_owner
          );
        else
+         if exists (
+           select 1
+           from pg_roles
+           where rolname=archive_owner and (rolsuper or rolbypassrls or rolreplication)
+         ) then
+           raise exception
+             'archive role % must already be NOSUPERUSER NOBYPASSRLS NOREPLICATION',
+             archive_owner
+             using errcode='42501';
+         end if;
          execute format(
-           'alter role %I nologin noinherit nocreatedb nocreaterole nobypassrls noreplication',
+           'alter role %I nologin noinherit nocreatedb nocreaterole',
            archive_owner
          );
        end if;

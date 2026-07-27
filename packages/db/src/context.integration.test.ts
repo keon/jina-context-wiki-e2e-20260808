@@ -22,7 +22,7 @@ import { PostgresEvidenceRepository } from "./context/evidence-repository.js";
 import { PostgresContextOutboxRepository } from "./context/outbox-repository.js";
 import { PostgresContextPipelineCoordinator } from "./context/pipeline-coordinator.js";
 import { PostgresContextQueryRepository } from "./context/query-repository.js";
-import { CONTEXT_ROLES } from "./context/roles.js";
+import { CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
 import { PostgresContextEngineStore } from "./context/store.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -124,7 +124,10 @@ test(
       { path: "assets/two.bin", blobSha: "3".repeat(40), executable: false }
     ];
     assert.equal(omittedTree.rows[0]?.entry_count, omittedTreeEntries.rows.length);
-    assert.equal(omittedTree.rows[0]?.content_digest, fingerprint(expectedOmittedTree));
+    assert.equal(
+      omittedTree.rows[0]?.content_digest,
+      fingerprint(expectedOmittedTree.map((entry) => ({ ...entry, entryType: "file" })))
+    );
     assert.deepEqual(
       omittedTreeEntries.rows,
       expectedOmittedTree.map((entry) => ({
@@ -1883,7 +1886,7 @@ test(
     const runtimePassword = "context-runtime-test-password";
     await database.pool.query(`drop role if exists ${runtimeRole}`);
     await database.pool.query(`create role ${runtimeRole} login password '${runtimePassword}' noinherit`);
-    await database.pool.query(`grant ${CONTEXT_ROLES.join(",")} to ${runtimeRole}`);
+    await database.pool.query(`grant ${CONTEXT_RUNTIME_ROLES.join(",")} to ${runtimeRole}`);
     const runtimeUrl = new URL(databaseUrl!);
     runtimeUrl.username = runtimeRole;
     runtimeUrl.password = runtimePassword;
@@ -1892,6 +1895,7 @@ test(
       rawRuntime.query("select count(*) from jina_context.evidence_checkpoints"),
       /permission denied/
     );
+    await assert.rejects(rawRuntime.query("set role jina_context_admin"), /permission denied/);
     await rawRuntime.end();
     const runtimeDatabase = new ContextDatabase({
       connectionString: runtimeUrl.toString(),
@@ -1900,7 +1904,11 @@ test(
     });
     const runtimeStore = new PostgresContextEngineStore(runtimeDatabase);
     assert.ok((await runtimeStore.listRepositories(tenantId)).includes(repository));
-    assert.equal((await runtimeStore.getGeneration(successorGeneration.id))?.generation.id, successorGeneration.id);
+    assert.equal(
+      (await runtimeStore.runInTenantScope(tenantId, () => runtimeStore.getGeneration(successorGeneration.id)))
+        ?.generation.id,
+      successorGeneration.id
+    );
     const scopedTenantRows = await runtimeDatabase.queryAs<{ tenant_id: string }>(
       "jina_context_admin",
       { tenantIds: [tenantId] },
@@ -1915,7 +1923,7 @@ test(
     );
     assert.equal(crossTenantRows.rows[0]?.count, "0");
     await runtimeStore.close();
-    await database.pool.query(`revoke ${CONTEXT_ROLES.join(",")} from ${runtimeRole}`);
+    await database.pool.query(`revoke ${CONTEXT_RUNTIME_ROLES.join(",")} from ${runtimeRole}`);
     await database.pool.query(`drop role ${runtimeRole}`);
 
     await store.close();

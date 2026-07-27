@@ -27,6 +27,8 @@ export interface IngestFile {
   executable?: boolean;
   aclFingerprint?: string;
   contentOmitted?: boolean;
+  entryType?: "file" | "symlink" | "gitlink";
+  linkTarget?: string;
 }
 
 export interface IngestEvidenceInput {
@@ -78,10 +80,21 @@ export class IngestEvidenceService {
         throw new Error(`Invalid repository path: ${file.path}`);
       }
       if (!isFullCommitSha(file.blobSha)) throw new Error(`blobSha must be a full Git SHA for ${file.path}`);
-      const contentAvailable = file.contentOmitted !== true;
+      const entryType = file.entryType ?? "file";
+      if (entryType === "file" && file.linkTarget !== undefined) {
+        throw new Error(`Regular file cannot declare a link target: ${file.path}`);
+      }
+      if (entryType === "gitlink" && file.linkTarget !== undefined) {
+        throw new Error(`Gitlink cannot declare a symlink target: ${file.path}`);
+      }
+      const contentAvailable = entryType === "file" && file.contentOmitted !== true;
       const contentDigest = contentAvailable
         ? fingerprint(file.body)
-        : fingerprint({ unavailableBlobSha: file.blobSha });
+        : fingerprint({
+            unavailableBlobSha: file.blobSha,
+            entryType,
+            ...(file.linkTarget === undefined ? {} : { linkTarget: file.linkTarget })
+          });
       const anchor = {
         tenantId: input.tenantId,
         repository,
@@ -119,7 +132,9 @@ export class IngestEvidenceService {
         contentDigest,
         contentAvailable,
         ...(file.language === undefined ? {} : { language: file.language }),
-        executable: file.executable ?? false
+        executable: entryType === "file" && (file.executable ?? false),
+        ...(entryType === "file" ? {} : { entryType }),
+        ...(file.linkTarget === undefined ? {} : { linkTarget: file.linkTarget })
       });
       if (contentAvailable && this.#parser.supports(file.path, file.language)) {
         structuralFacts.push(

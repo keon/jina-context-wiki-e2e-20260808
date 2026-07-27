@@ -87,20 +87,20 @@ and [webhook configuration](https://docs.github.com/en/apps/creating-github-apps
 ## Repository access synchronization
 
 Context retrieval is independent of webhook installation visibility. A trusted server
-uses `INTERNAL_API_TOKEN` plus an explicitly bound principal to synchronize that
-principal's repository set:
+uses `INTERNAL_API_TOKEN` to synchronize the repository set for the server-side
+`JINA_CONTEXT_TENANT_ID`/`JINA_CONTEXT_PRINCIPAL_ID` binding:
 
 ```sh
 curl -X POST "${JINA_API_URL}/internal/context/access/sync" \
   -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
-  -H "X-Jina-Principal-Id: tenant:<uuid>" \
-  -H "X-Jina-Tenant-Id: <uuid>" \
   -H "Content-Type: application/json" \
   --data '{"repositories":["owner/repository"],"mode":"merge"}'
 ```
 
 `mode:"merge"` unions the submitted repositories with the principal's existing set and is
 used by production acceptance so the fixture grant cannot erase unrelated access.
+Tenant/principal headers may repeat the configured binding but cannot select another
+identity.
 The union is a store-level transaction: PostgreSQL acquires the same
 tenant/principal advisory lock used by replacement, reads the current grants, and writes
 the union before releasing the lock. Concurrent merge/replace requests therefore

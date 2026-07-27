@@ -64,6 +64,10 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     private readonly now: () => string = () => new Date().toISOString()
   ) {}
 
+  runInTenantScope<T>(_tenantId: string, operation: () => Promise<T>): Promise<T> {
+    return operation();
+  }
+
   #assertOpen(): void {
     if (this.#closed) throw new Error("Context engine store is closed");
   }

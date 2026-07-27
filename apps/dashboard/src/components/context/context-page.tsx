@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { contextScopes, generationForScope, projectorRows, publishedGenerations } from "../../lib/context.ts";
 import { formatTime, humanize, shortId } from "../../lib/format.ts";
-import { usePoll } from "../../lib/poll.ts";
+import { useCursorPoll, usePoll } from "../../lib/poll.ts";
 import type { ContextGeneration, ContextGenerationsResponse, ContextMetricsResponse } from "../../lib/types.ts";
 import { IndexHealth } from "./index-health.tsx";
 import { KnowledgeCatalog } from "./knowledge-catalog.tsx";
@@ -11,7 +11,11 @@ import { QueryWorkspace } from "./query-workspace.tsx";
 import { StructureBrowser } from "./structure-browser.tsx";
 
 export function ContextPage() {
-  const generationsResource = usePoll<ContextGenerationsResponse>("/api/context/generations?limit=50");
+  const generationsResource = useCursorPoll<ContextGenerationsResponse>(
+    "/api/context/generations?limit=100",
+    "generations",
+    10_000
+  );
   const metricsResource = usePoll<ContextMetricsResponse>("/api/context/metrics", 10_000);
   const generations = useMemo(
     () => publishedGenerations(generationsResource.data?.generations ?? []),

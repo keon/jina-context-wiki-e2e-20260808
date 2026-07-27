@@ -86,6 +86,30 @@ async function apiGet(pathname: string): Promise<unknown> {
   return response.json();
 }
 
+async function apiGetAllPages<T>(pathname: string, collection: string): Promise<readonly T[]> {
+  const values: T[] = [];
+  const seenCursors = new Set<string>();
+  let cursor: string | undefined;
+  for (let page = 0; page < 10_000; page += 1) {
+    const separator = pathname.includes("?") ? "&" : "?";
+    const pagePath = cursor ? `${pathname}${separator}cursor=${encodeURIComponent(cursor)}` : pathname;
+    const body = (await apiGet(pagePath)) as Record<string, unknown>;
+    const items = body[collection];
+    if (!Array.isArray(items)) {
+      throw new JinaApiError(`Jina API response for ${pagePath} omitted ${collection}`);
+    }
+    values.push(...(items as T[]));
+    const nextCursor = typeof body.nextCursor === "string" ? body.nextCursor.trim() : "";
+    if (!nextCursor) return values;
+    if (seenCursors.has(nextCursor)) {
+      throw new JinaApiError(`Jina API repeated a pagination cursor for ${pathname}`);
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  throw new JinaApiError(`Jina API pagination exceeded the safety limit for ${pathname}`);
+}
+
 export function adminApiHeaders(input: {
   readonly token?: string | undefined;
   readonly tenantId?: string | undefined;
@@ -104,20 +128,13 @@ export function adminApiHeaders(input: {
 }
 
 export async function listAllGenerations(): Promise<readonly AdminIndexGeneration[]> {
-  const body = (await apiGet("/context/generations")) as {
-    readonly generations?: readonly AdminIndexGeneration[];
-  };
-  const generations: readonly AdminIndexGeneration[] = Array.isArray(body.generations) ? body.generations : [];
+  const generations = await apiGetAllPages<AdminIndexGeneration>("/context/generations?limit=100", "generations");
   return [...generations].sort((left, right) => right.createdAt.localeCompare(left.createdAt));
 }
 
 export async function listKnowledgeDocuments(repository?: string): Promise<readonly AdminContextDocument[]> {
-  const query = repository ? `?repository=${encodeURIComponent(repository)}` : "";
-  const body = (await apiGet(`/context/documents${query}`)) as {
-    readonly documents?: readonly AdminContextDocument[];
-  };
-  const documents: readonly AdminContextDocument[] = Array.isArray(body.documents) ? body.documents : [];
-  return documents;
+  const query = repository ? `?repository=${encodeURIComponent(repository)}&limit=100` : "?limit=100";
+  return apiGetAllPages<AdminContextDocument>(`/context/documents${query}`, "documents");
 }
 
 export async function getContextMetrics(): Promise<AdminContextMetrics> {

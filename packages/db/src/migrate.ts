@@ -1,6 +1,6 @@
 import { Pool, type PoolConfig } from "pg";
 import { applySchema } from "./apply-schema.js";
-import { CONTEXT_ROLES, CONTEXT_ROLES_SQL } from "./context/roles.js";
+import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
 import { CONTEXT_PGVECTOR_SCHEMA_SQL, CONTEXT_SCHEMA_SQL } from "./context/schema.js";
 import { hardenContextRuntimeRole } from "./legacy-context-cutover.js";
 
@@ -26,7 +26,8 @@ try {
     await applySchema(pool, "jina_context.roles", CONTEXT_ROLES_SQL);
     const runtimeUser = requiredRuntimeRoleName(process.env.CONTEXT_RUNTIME_DB_USER);
     await hardenContextRuntimeRole(pool, runtimeUser);
-    await pool.query(`grant ${CONTEXT_ROLES.join(",")} to "${runtimeUser}"`);
+    await pool.query(`revoke jina_context_admin from "${runtimeUser}"`);
+    await pool.query(`grant ${CONTEXT_RUNTIME_ROLES.join(",")} to "${runtimeUser}"`);
   }
 } finally {
   await pool.end();

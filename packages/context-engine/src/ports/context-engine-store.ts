@@ -74,6 +74,7 @@ export interface QueryMetrics {
 }
 
 export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, ProjectionStore {
+  runInTenantScope?<T>(tenantId: string, operation: () => Promise<T>): Promise<T>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
   mergeRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]>;
