@@ -7,13 +7,13 @@ verifies the unmodified body with `X-Hub-Signature-256`, requires
 
 ## Current behavior
 
-| Event           | Action                  | Board result                                                                                                                                                            |
-| --------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Push            | non-deleted branch head | Creates `build-context` with strict `ingest-evidence` → baseline `index-context` → optional `derive-knowledge` ordering; carries the event head SHA and installation ID |
-| Pull request    | `opened`                | Creates the review aggregate, review pass, and internal publication task                                                                                                |
-| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                                                |
-| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                                                  |
-| Everything else | any                     | Acknowledged and ignored                                                                                                                                                |
+| Event           | Action                  | Board result                                                                                                                                                                             |
+| --------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Push            | non-deleted branch head | Creates `build-context` with strict `ingest-evidence` → baseline `index-context` → required `derive-knowledge` with enriched publication; carries the event head SHA and installation ID |
+| Pull request    | `opened`                | Creates the review aggregate, review pass, and internal publication task                                                                                                                 |
+| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                                                                 |
+| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                                                                   |
+| Everything else | any                     | Acknowledged and ignored                                                                                                                                                                 |
 
 An unchanged latest head deduplicates redelivery. A real ref transition supersedes active
 older context work, including a force-push back to a previously seen SHA. At ingestion,

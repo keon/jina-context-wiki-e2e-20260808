@@ -436,6 +436,13 @@ plus 16 MCP citations. This is capacity/placement evidence only: the shared prod
 database remains `jina-463721:us-east1:jina-db` and was not migrated or resized by this
 release.
 
+The legacy code-review application remains deployed for its dashboard, OAuth, webhook,
+and review responsibilities, but its stale `JINA_GRAPH_API_URL` and
+`JINA_GRAPH_API_TOKEN` settings are removed. The old
+`/internal/graph/mcp-access` bridge is intentionally retired; restoring it or routing it
+to a compatibility graph API would violate the clean cutover. New consumers use `/mcp`
+and `query_context` with a bound tenant and principal.
+
 ## Outbox recovery and rebuild
 
 Outbox consumers own independent delivery rows and leases. If metrics show a backlog,

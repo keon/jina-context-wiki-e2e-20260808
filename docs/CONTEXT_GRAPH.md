@@ -11,6 +11,12 @@ the MCP tool `query_graph`, graph-specific worker topics and environment variabl
 None of those surfaces remain. There is intentionally no compatibility router, dual
 write, queue translation, package alias, schema view, or old-data migration.
 
+The separate legacy code-review application must leave `JINA_GRAPH_API_URL` and
+`JINA_GRAPH_API_TOKEN` unset. Its `/internal/graph/mcp-access` bridge is retired rather
+than translated onto the new model. Callers that need repository context must integrate
+with the current `/mcp` endpoint and its sole `query_context` tool using a bound tenant
+and principal.
+
 Use the current documentation instead:
 
 - [Architecture](ARCHITECTURE.md)
