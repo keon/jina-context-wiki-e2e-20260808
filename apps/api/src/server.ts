@@ -187,6 +187,10 @@ const API_TOKEN_USE_STAMP_MS = 60_000;
  * tenant and a one-day floor would mean a fleet of day-long bearer tokens held in
  * a web tier's memory. Day-shaped lifetimes are a presentation choice.
  */
+// Floor: below this no run reaches a first document. Ceiling: the sandbox
+// enforces the same two hours, and the worker lease must outlast it.
+const MIN_DERIVATION_BUDGET_SECONDS = 300;
+const MAX_DERIVATION_BUDGET_SECONDS = 2 * 60 * 60;
 const MIN_API_TOKEN_MINUTES = 5;
 const MAX_API_TOKEN_MINUTES = 525_600;
 
@@ -657,6 +661,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (derivationDetail !== undefined && !isDerivationDetail(derivationDetail)) {
         throw invalidRequest(`derivationDetail must be one of ${derivationDetailLevels.join(", ")}`);
       }
+      // The wall clock the whole derive stage may use. A release passes a small
+      // one so a slow repository cannot hold up a deploy, and an ordinary build
+      // can ask for the ceiling.
+      const derivationBudgetSeconds =
+        body.derivationBudgetSeconds === undefined
+          ? undefined
+          : requiredPositiveInteger(body.derivationBudgetSeconds, "derivationBudgetSeconds");
+      if (
+        derivationBudgetSeconds !== undefined &&
+        (derivationBudgetSeconds < MIN_DERIVATION_BUDGET_SECONDS ||
+          derivationBudgetSeconds > MAX_DERIVATION_BUDGET_SECONDS)
+      ) {
+        throw invalidRequest(
+          `derivationBudgetSeconds must be between ${MIN_DERIVATION_BUDGET_SECONDS} and ${MAX_DERIVATION_BUDGET_SECONDS}`
+        );
+      }
       const requestedGithubInstallationId =
         body.githubInstallationId === undefined
           ? undefined
@@ -682,6 +702,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
         ...(githubInstallationId ? { githubInstallationId } : {}),
         ...(derivationDetail ? { derivationDetail } : {}),
+        ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
         requestKey: optionalString(body.requestKey) ?? randomUUID(),
         createdAt: nowIso()
       });
@@ -982,6 +1003,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, {
         checkpointId,
         detail: derivationDetailOrDefault(lease.stage.metadata.derivationDetail),
+        ...(typeof lease.stage.metadata.derivationBudgetSeconds === "number"
+          ? { budgetSeconds: lease.stage.metadata.derivationBudgetSeconds }
+          : {}),
         prompt:
           process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true"
             ? buildKnowledgeFilePrompt(bundle)

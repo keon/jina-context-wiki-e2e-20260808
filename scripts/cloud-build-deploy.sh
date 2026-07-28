@@ -36,26 +36,29 @@ api_concurrency="${JINA_API_CONCURRENCY:-10}"
 api_cpu="${JINA_API_CPU:-1}"
 api_memory="${JINA_API_MEMORY:-1Gi}"
 api_request_timeout_seconds="${JINA_API_REQUEST_TIMEOUT_SECONDS:-3600}"
-context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-3720000}"
+context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-7800000}"
 context_completion_timeout_ms="${JINA_CONTEXT_COMPLETION_TIMEOUT_MS:-600000}"
-context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-4500000}"
+context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-9000000}"
 # Knowledge derivation runs one agent per build inside Daytona, and its context
-# window governs how long that run takes. A 64k window overran the 2400s Daytona
-# ceiling on the acceptance repository and failed the required derive stage, while
-# 16k completed the same stage in well under two minutes. Raise these only
-# alongside DAYTONA_RUN_TIMEOUT_SECONDS, and keep
-# CONTEXT_CODEX_EXECUTION_ATTEMPTS x DAYTONA_RUN_TIMEOUT_SECONDS below the
-# deploy-backend step timeout in cloudbuild.yaml, or a single retry outlives the
-# build that is waiting for it.
+# window governs how long that run takes. A 64k window overran the old 2400s
+# ceiling on the acceptance repository, while 16k completed the same stage in
+# well under two minutes under the catalog contract. Raise these only alongside
+# the derive budget below.
 context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-16000}"
 context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-12000}"
+# Wall clock one derive stage may use, across its repair run. A build may name
+# its own; this is the default when it does not. The deploy gate is NOT bound by
+# this value: it passes its own small budget below, so a slow repository costs
+# the gate coverage rather than holding up the release.
+context_derive_budget_seconds="${JINA_CONTEXT_DERIVE_BUDGET_SECONDS:-5400}"
+# The gate's own budget, kept well inside the deploy-backend step timeout. A
+# derivation that runs out publishes the pages it finished instead of failing,
+# so a small budget here is a coverage choice, not a flakiness risk.
+acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS:-900}"
 # The agent writes each document as it finishes it, so a finished document is
-# durable and the window bounds one document rather than the whole catalog. The
-# window stays at 16k here regardless: a deploy waits on the acceptance
-# derivation, and CONTEXT_CODEX_EXECUTION_ATTEMPTS x DAYTONA_RUN_TIMEOUT_SECONDS
-# already exceeds the 4200s deploy-backend step timeout, so raising either would
-# make a slow derivation fail the release rather than merely take longer. Raise
-# them for a real build, not for the gate.
+# durable and the window bounds one document rather than the whole catalog. A run
+# that reaches its budget now keeps the pages it already wrote, which is what
+# lets an ordinary build be given hours without a slow derivation failing it.
 context_derive_document_files="${JINA_CONTEXT_DERIVE_DOCUMENT_FILES:-true}"
 # Standard rather than the model's terse setting, which produced one-paragraph
 # documents on a task whose output is the document. A build may override it.
@@ -144,6 +147,26 @@ if (( context_api_timeout_ms <= api_request_timeout_seconds * 1000 )); then
 fi
 if (( context_worker_lease_ms <= context_api_timeout_ms + context_completion_timeout_ms )); then
   echo "JINA_CONTEXT_WORKER_LEASE_MS must exceed the combined context operation and completion timeouts" >&2
+  exit 2
+fi
+validate_positive_integer "JINA_CONTEXT_DERIVE_BUDGET_SECONDS" "${context_derive_budget_seconds}"
+validate_positive_integer "JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS" "${acceptance_derivation_budget_seconds}"
+# The derive budget is spent inside one context operation, so the operation
+# timeout has to outlast it or the stage is cut short by the wrong limit.
+if (( context_derive_budget_seconds * 1000 >= context_api_timeout_ms )); then
+  echo "JINA_CONTEXT_DERIVE_BUDGET_SECONDS must be below JINA_CONTEXT_API_TIMEOUT_MS" >&2
+  exit 2
+fi
+# 7200s is the ceiling the sandbox enforces; a larger value would be silently
+# clamped rather than honoured.
+if (( context_derive_budget_seconds > 7200 )); then
+  echo "JINA_CONTEXT_DERIVE_BUDGET_SECONDS must not exceed the 7200-second sandbox ceiling" >&2
+  exit 2
+fi
+# A release waits on the gate's derivation, so its budget must stay inside the
+# deploy-backend step timeout in cloudbuild.yaml.
+if (( acceptance_derivation_budget_seconds > 3000 )); then
+  echo "JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS must stay well inside the 4200s deploy-backend step" >&2
   exit 2
 fi
 if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ||
@@ -871,7 +894,7 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_DERIVE_DOCUMENT_FILES=${context_derive_document_files}~CONTEXT_DERIVE_DETAIL=${context_derive_detail}~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=${context_derive_budget_seconds}~CONTEXT_DERIVE_BUDGET_SECONDS=${context_derive_budget_seconds}~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_DERIVE_DOCUMENT_FILES=${context_derive_document_files}~CONTEXT_DERIVE_DETAIL=${context_derive_detail}~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${deploy_traffic_args[@]}" \
   --quiet
@@ -952,7 +975,7 @@ gcloud run jobs deploy jina-acceptance \
   --region="${GCP_REGION}" \
   --image="${worker_image}" \
   --service-account="${acceptance_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_TIMEOUT_MS=3000000" \
+  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${acceptance_derivation_budget_seconds}~ACCEPTANCE_TIMEOUT_MS=3000000" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest" \
   --args=dist/acceptance.js \
   --tasks=1 \

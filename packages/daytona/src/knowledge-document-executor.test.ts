@@ -11,6 +11,8 @@ import {
   findExistingCodex,
   isTransientKnowledgeGenerationFailure,
   keepsPartialCatalog,
+  MAX_RUN_BUDGET_SECONDS,
+  runBudgetSeconds,
   KNOWLEDGE_PROMPT_STDIN_REDIRECT
 } from "./knowledge-document-executor.js";
 
@@ -21,6 +23,15 @@ test("knowledge generation retry classification is bounded to transient failures
   assert.equal(isTransientKnowledgeGenerationFailure("stream disconnected while reconnecting"), true);
   assert.equal(isTransientKnowledgeGenerationFailure("output failed JSON schema validation"), false);
   assert.equal(isTransientKnowledgeGenerationFailure("permission denied"), false);
+  // Verbatim from the deploy this was found in: the sandbox SDK words a gateway
+  // failure this way, and the old pattern only matched the "http 502" wording.
+  assert.equal(isTransientKnowledgeGenerationFailure("Request failed with status code 502"), true);
+  assert.equal(isTransientKnowledgeGenerationFailure("Request failed with status code 429"), true);
+  // Also verbatim, and deliberately not transient: retrying a run that used its
+  // whole wall clock costs another full DAYTONA_RUN_TIMEOUT_SECONDS, and the
+  // pages it already wrote are kept instead.
+  assert.equal(isTransientKnowledgeGenerationFailure("command execution timeout"), false);
+  assert.equal(isTransientKnowledgeGenerationFailure("Request failed with status code 400"), false);
 });
 
 test("a run killed by its wall clock keeps the pages already written to disk", () => {
@@ -31,6 +42,29 @@ test("a run killed by its wall clock keeps the pages already written to disk", (
   // Nothing written means the run failed before producing anything, and an empty
   // catalog would publish as "no knowledge" instead of surfacing the failure.
   assert.equal(keepsPartialCatalog(0), false);
+});
+
+test("a run takes the budget it was handed, bounded by the sandbox ceiling", () => {
+  const previous = process.env.DAYTONA_RUN_TIMEOUT_SECONDS;
+  process.env.DAYTONA_RUN_TIMEOUT_SECONDS = "2400";
+  try {
+    // What the caller has left, not a fixed per-run value, so a repair run
+    // cannot restart the clock on a stage that is already nearly spent.
+    assert.equal(runBudgetSeconds({ budgetSeconds: 5400 }), 5400);
+    assert.equal(runBudgetSeconds({ budgetSeconds: 600 }), 600);
+    // No caller value falls back to the deployment default.
+    assert.equal(runBudgetSeconds({}), 2400);
+    // The ceiling binds whatever a build asked for.
+    assert.equal(runBudgetSeconds({ budgetSeconds: 99_999 }), MAX_RUN_BUDGET_SECONDS);
+    // Nonsense does not disable the timeout, which would hand the sandbox an
+    // unbounded run and hold the lease until it expired.
+    assert.equal(runBudgetSeconds({ budgetSeconds: 0 }), 2400);
+    assert.equal(runBudgetSeconds({ budgetSeconds: -1 }), 2400);
+    assert.equal(runBudgetSeconds({ budgetSeconds: Number.NaN }), 2400);
+  } finally {
+    if (previous === undefined) delete process.env.DAYTONA_RUN_TIMEOUT_SECONDS;
+    else process.env.DAYTONA_RUN_TIMEOUT_SECONDS = previous;
+  }
 });
 
 test("snapshot reuse accepts only an absolute working Codex path", async () => {

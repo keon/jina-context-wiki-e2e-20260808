@@ -38,6 +38,15 @@ export interface KnowledgeDocumentGenerationInput {
   workspace?: KnowledgeAgentWorkspace;
   /** Chosen when the build was requested, not read from the environment here. */
   detail?: DerivationDetail;
+  /**
+   * Wall clock this single run may use, in seconds.
+   *
+   * The caller passes what is left of the stage's budget rather than a fixed
+   * per-run value, because a run can be followed by a repair run and a
+   * per-run limit would let the stage take a multiple of the budget it was
+   * given. Absent, the executor falls back to its deployment default.
+   */
+  budgetSeconds?: number;
 }
 
 export interface KnowledgeDocumentGenerator {

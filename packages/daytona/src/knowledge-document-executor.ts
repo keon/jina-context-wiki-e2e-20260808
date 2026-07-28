@@ -322,16 +322,18 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       for (let attempt = 0; attempt < attempts; attempt += 1) {
         thrown = undefined;
         try {
-          run = await sandbox.process.executeCommand(
-            command,
-            WORK_DIR,
-            environment,
-            positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
-          );
+          run = await sandbox.process.executeCommand(command, WORK_DIR, environment, runBudgetSeconds(input));
         } catch (error) {
           thrown = error;
           run = undefined;
-          break;
+          // A gateway failure arrives by throw just as a bad exit code does, so
+          // it earns the same retry; a timeout does not classify as transient
+          // and so still ends the run here with its pages intact.
+          if (!isTransientKnowledgeGenerationFailure(error instanceof Error ? error.message : inspect(error))) break;
+          if (attempt + 1 >= attempts) break;
+          const delay = positiveInt(process.env.CONTEXT_CODEX_RETRY_DELAY_SECONDS, 10);
+          await sandbox.process.executeCommand(`sleep ${delay}`, WORK_DIR, undefined, delay + 5);
+          continue;
         }
         if (run.exitCode === 0 || !isTransientKnowledgeGenerationFailure(run.result)) break;
         if (attempt + 1 < attempts) {
@@ -398,6 +400,23 @@ export function keepsPartialCatalog(documentCount: number): boolean {
   return documentCount > 0;
 }
 
+/** The hard ceiling on one derivation run, whoever asked for it. */
+export const MAX_RUN_BUDGET_SECONDS = 2 * 60 * 60;
+
+/**
+ * How long this run may take.
+ *
+ * The caller passes what remains of the stage budget, so a run that follows a
+ * repair cannot restart the clock. The ceiling applies to the caller's value
+ * too: it bounds the sandbox regardless of what a build asked for.
+ */
+export function runBudgetSeconds(input: Pick<KnowledgeDocumentGenerationInput, "budgetSeconds">): number {
+  const requested = input.budgetSeconds;
+  const fallback = positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800);
+  const chosen = typeof requested === "number" && Number.isFinite(requested) && requested > 0 ? requested : fallback;
+  return Math.min(Math.floor(chosen), MAX_RUN_BUDGET_SECONDS);
+}
+
 export async function createRepositoryArchive(
   repositoryDirectory: string,
   commitSha: string
@@ -431,7 +450,12 @@ export async function createRepositoryArchive(
 }
 
 export function isTransientKnowledgeGenerationFailure(output: string): boolean {
-  return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|http (?:429|500|502|503|504)|rate limit|(?:daytona|sandbox).*(?:unavailable|failed|connection|timeout|timed out|gateway)|failed to .*sandbox)/i.test(
+  // "status code" is how the sandbox SDK words an upstream gateway failure, and
+  // the deploy that gated on this stage lost 695s to a 502 that read as
+  // permanent because only the "http 502" wording was recognised. A run that
+  // exceeds its own wall clock is deliberately absent: it is not transient, and
+  // retrying it costs another full DAYTONA_RUN_TIMEOUT_SECONDS.
+  return /(?:reconnecting|stream disconnected|internal server error|connection (?:reset|closed)|timed? out|(?:http|status code) (?:429|500|502|503|504)|rate limit|(?:daytona|sandbox).*(?:unavailable|failed|connection|timeout|timed out|gateway)|failed to .*sandbox)/i.test(
     output
   );
 }

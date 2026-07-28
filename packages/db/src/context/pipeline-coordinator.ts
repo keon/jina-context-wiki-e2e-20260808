@@ -59,6 +59,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     requestKey: string;
     createdAt: string;
     derivationDetail?: DerivationDetail;
+    derivationBudgetSeconds?: number;
   }): Promise<ContextBuild> {
     if (input.commitSha !== undefined && !isFullCommitSha(input.commitSha)) {
       throw new Error("commitSha must be a full Git SHA");
@@ -133,8 +134,12 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
             : // The derive stage is claimed long after the build was requested, so
               // how much to write has to travel with it rather than be read from
               // the environment at execution time.
-              stage.type === contextTaskTypes.deriveKnowledge && input.derivationDetail
-              ? { derivationDetail: input.derivationDetail }
+              stage.type === contextTaskTypes.deriveKnowledge &&
+                (input.derivationDetail || input.derivationBudgetSeconds)
+              ? {
+                  ...(input.derivationDetail ? { derivationDetail: input.derivationDetail } : {}),
+                  ...(input.derivationBudgetSeconds ? { derivationBudgetSeconds: input.derivationBudgetSeconds } : {})
+                }
               : {};
         await client.query(
           `insert into jina_context.pipeline_stages

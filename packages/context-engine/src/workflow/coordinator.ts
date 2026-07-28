@@ -55,6 +55,8 @@ export interface ContextPipelineCoordinator {
     createdAt: string;
     /** How much the deriving agent should write; carried to the derive stage. */
     derivationDetail?: DerivationDetail;
+    /** Wall clock the derive stage may use; carried the same way. */
+    derivationBudgetSeconds?: number;
   }): Promise<ContextBuild>;
   claim(input: {
     tenantId?: string;
@@ -107,6 +109,7 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     ref: string;
     commitSha?: string;
     derivationDetail?: DerivationDetail;
+    derivationBudgetSeconds?: number;
     githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
@@ -153,8 +156,11 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
           : // The derive stage is claimed long after the build was requested, so
             // the choice has to travel with it rather than being read from the
             // environment at execution time.
-            type === contextTaskTypes.deriveKnowledge && input.derivationDetail
-            ? { derivationDetail: input.derivationDetail }
+            type === contextTaskTypes.deriveKnowledge && (input.derivationDetail || input.derivationBudgetSeconds)
+            ? {
+                ...(input.derivationDetail ? { derivationDetail: input.derivationDetail } : {}),
+                ...(input.derivationBudgetSeconds ? { derivationBudgetSeconds: input.derivationBudgetSeconds } : {})
+              }
             : {}
     });
     const build: ContextBuild = {

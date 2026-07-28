@@ -31,6 +31,15 @@ export interface ProductionContextAcceptanceConfig {
   readonly repository?: string;
   readonly ref?: string;
   readonly githubInstallationId?: number;
+  /**
+   * Wall clock the gate's derive stage may use.
+   *
+   * A release waits on this build, so it gets a deliberately small budget while
+   * an ordinary build may ask for the two-hour ceiling. A derivation that runs
+   * out publishes the pages it finished rather than failing, so a small budget
+   * costs the gate coverage, not a pass.
+   */
+  readonly derivationBudgetSeconds?: number;
   readonly requestKey?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -112,6 +121,7 @@ export async function runProductionContextAcceptance(
       repository,
       ref,
       ...(config.githubInstallationId ? { githubInstallationId: config.githubInstallationId } : {}),
+      ...(config.derivationBudgetSeconds ? { derivationBudgetSeconds: config.derivationBudgetSeconds } : {}),
       requestKey: config.requestKey ?? `acceptance-${Date.now()}`
     })
   });
@@ -406,6 +416,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 async function main(): Promise<void> {
   const githubInstallationId = optionalPositiveInteger(process.env.ACCEPTANCE_GITHUB_INSTALLATION_ID);
+  const derivationBudgetSeconds = optionalPositiveInteger(process.env.ACCEPTANCE_DERIVATION_BUDGET_SECONDS);
   const workerHealthChecks = await configuredWorkerHealthChecks();
   const summary = await runProductionContextAcceptance({
     apiUrl: requiredEnv("JINA_API_URL"),
@@ -417,6 +428,7 @@ async function main(): Promise<void> {
     ...(process.env.ACCEPTANCE_REPOSITORY ? { repository: process.env.ACCEPTANCE_REPOSITORY } : {}),
     ...(process.env.ACCEPTANCE_REF ? { ref: process.env.ACCEPTANCE_REF } : {}),
     ...(githubInstallationId ? { githubInstallationId } : {}),
+    ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
     ...(process.env.ACCEPTANCE_REQUEST_KEY ? { requestKey: process.env.ACCEPTANCE_REQUEST_KEY } : {}),
     ...(process.env.ACCEPTANCE_TIMEOUT_MS ? { timeoutMs: Number(process.env.ACCEPTANCE_TIMEOUT_MS) } : {}),
     workerHealthChecks

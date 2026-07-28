@@ -117,6 +117,12 @@ const pollIntervalMs = positiveInt(process.env.WORKER_POLL_INTERVAL_MS, 2_000);
 const workerApiTimeoutMs = positiveInt(process.env.WORKER_API_TIMEOUT_MS, 30_000);
 const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 * 60_000);
 const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TIMEOUT_MS, 10 * 60_000);
+// The whole derive stage, across its repair run, when the build did not name its
+// own. Kept under CONTEXT_API_TIMEOUT_MS so the operation bounding this stage is
+// still the outer bound.
+const deriveBudgetSeconds = positiveInt(process.env.CONTEXT_DERIVE_BUDGET_SECONDS, 40 * 60);
+/** Below this a repair run cannot reach a first document, so it is not started. */
+const MIN_DERIVE_REPAIR_SECONDS = 300;
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const knowledgeGenerator = topics.includes("run-derive-knowledge")
@@ -383,6 +389,7 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
   const prepared = await internalApiJson<{
     readonly prompt: string;
     readonly detail?: DerivationDetail;
+    readonly budgetSeconds?: number;
     readonly checkpointId: string;
     readonly bundle: FocusBundle;
     readonly manifest: RefManifestEntry[];
@@ -399,11 +406,22 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
   const checkout = await checkoutRepository(repository, ref, commitSha, false);
   try {
     let diagnostics: readonly string[] = [];
+    // The budget belongs to the stage, not to one run: a failed run is followed
+    // by a repair run, and a per-run limit would let the stage take a multiple
+    // of what it was granted. Each run gets what is left, so the lease and the
+    // deploy step that wait on this stage bound it whatever happens inside.
+    const budgetSeconds = prepared.budgetSeconds ?? deriveBudgetSeconds;
+    const deadline = Date.now() + budgetSeconds * 1000;
     for (let attempt = 0; attempt < 2; attempt += 1) {
+      const remainingSeconds = Math.floor((deadline - Date.now()) / 1000);
+      // Too little left to reach a first document, so a repair run would only
+      // spend the rest of the lease restating the failure it already reported.
+      if (attempt > 0 && remainingSeconds < MIN_DERIVE_REPAIR_SECONDS) break;
       const rawOutput = await knowledgeGenerator.generate({
         prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
         bundle: prepared.bundle,
         repairErrors: [...diagnostics],
+        budgetSeconds: Math.max(remainingSeconds, MIN_DERIVE_REPAIR_SECONDS),
         ...(prepared.detail ? { detail: prepared.detail } : {}),
         workspace: {
           repositoryDirectory: checkout.directory,
