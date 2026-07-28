@@ -22,6 +22,16 @@ import type { KnowledgeGenerationOutput } from "../domain/knowledge.js";
 export interface MarkdownOutputProblem {
   readonly documentPath: string;
   readonly reason: MarkdownCatalogProblem["reason"] | "unknown-path" | "claim-absent" | "no-citable-evidence";
+  /**
+   * The link that could not be used, when the problem is about one.
+   *
+   * A page withheld for citing nothing usable is only actionable if the report
+   * says what it cited: three runbooks were dropped for twenty-four unknown
+   * paths, and without the paths there was no way to tell a manifest that was
+   * missing files from an agent that invented them.
+   */
+  readonly target?: string;
+  readonly claim?: string;
 }
 
 export interface MarkdownOutputConversion {
@@ -96,11 +106,21 @@ export function markdownCatalogToOutput(
     for (const link of parsed.evidenceLinks) {
       const blobSha = blobByPath.get(link.path);
       if (blobSha === undefined) {
-        problems.push({ documentPath: entry.documentPath, reason: "unknown-path" });
+        problems.push({
+          documentPath: entry.documentPath,
+          reason: "unknown-path",
+          target: `${link.path}#L${link.startLine}-L${link.endLine}`,
+          claim: link.claim.slice(0, 120)
+        });
         continue;
       }
       if (supports && !supports(link)) {
-        problems.push({ documentPath: entry.documentPath, reason: "claim-absent" });
+        problems.push({
+          documentPath: entry.documentPath,
+          reason: "claim-absent",
+          target: `${link.path}#L${link.startLine}-L${link.endLine}`,
+          claim: link.claim.slice(0, 120)
+        });
         continue;
       }
       const key = `${link.path}|${link.startLine}|${link.endLine}`;

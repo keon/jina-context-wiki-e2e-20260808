@@ -359,6 +359,9 @@ test("a page nothing supports is withheld rather than published unverifiable", (
     manifestFor(["packages/db/src/outbox.ts"])
   );
   assert.deepEqual(output.documents, []);
+  // A withheld page is only actionable if the report says what it cited, so the
+  // unusable link is named rather than merely counted.
+  assert.equal(problems.find((problem) => problem.reason === "unknown-path")?.target, "does/not/exist.ts#L1-L2");
   assert.deepEqual(problems.map((problem) => problem.reason).sort(), [
     "no-citable-evidence",
     "no-citable-evidence",
