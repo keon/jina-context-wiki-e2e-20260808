@@ -189,6 +189,19 @@ const API_TOKEN_USE_STAMP_MS = 60_000;
  */
 // Floor: below this no run reaches a first document. Ceiling: the sandbox
 // enforces the same two hours, and the worker lease must outlast it.
+/**
+ * How many prior documents travel to a derivation.
+ *
+ * Under the catalog contract every one of these was spent from the agent's
+ * context window, so fifty was a real ceiling. Under the file contract they are
+ * seeded onto disk and read only if the agent opens them, and a page that does
+ * not travel is a page that silently stops being carried forward -- so the limit
+ * that protected the window now just truncates the wiki.
+ */
+function priorKnowledgeLimit(): number {
+  return process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true" ? 1_000 : 50;
+}
+
 const MIN_DERIVATION_BUDGET_SECONDS = 300;
 const MAX_DERIVATION_BUDGET_SECONDS = 2 * 60 * 60;
 const MIN_API_TOKEN_MINUTES = 5;
@@ -998,7 +1011,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const bundle = await new EvidenceFocusSelector(contextStore).select(checkpointId);
       const [manifest, priorKnowledge] = await Promise.all([
         contextStore.listManifest(checkpointId),
-        selectPriorKnowledge(contextStore, bundle.checkpoint)
+        selectPriorKnowledge(contextStore, bundle.checkpoint, priorKnowledgeLimit())
       ]);
       json(response, 200, {
         checkpointId,

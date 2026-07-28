@@ -39,6 +39,8 @@ const MANIFEST_PATH = `${INPUT_DIR}/repository-manifest.json`;
 const PRIOR_KNOWLEDGE_PATH = `${INPUT_DIR}/prior-knowledge.json`;
 const OUTPUT_DIR = "/home/daytona/derive-output";
 const RETIRED_DIR = `${OUTPUT_DIR}/retired`;
+/** Where a retired page sits relative to the collected directory. */
+const RETIRED_PREFIX = "retired/";
 const OUTPUT_ARCHIVE_PATH = `${WORK_DIR}/derive-output.tar.gz`;
 /**
  * The agent's own event stream, kept inside the collected directory.
@@ -165,6 +167,7 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       // Every Markdown file under the output directory, at any depth, because the
       // agent chose the folder structure and the path is the document identity.
       const parsed: ParsedMarkdownDocument[] = [];
+      const retiredDocumentPaths: string[] = [];
       const walk = async (relative: string): Promise<void> => {
         for (const entry of await readdir(join(directory, relative), { withFileTypes: true })) {
           const child = relative ? `${relative}/${entry.name}` : entry.name;
@@ -173,6 +176,13 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
             continue;
           }
           if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md")) continue;
+          // A page under the retired directory is a deletion, not a document.
+          // Parsing it as one would republish the page it was meant to remove,
+          // under a logical ID naming the retired folder.
+          if (child === RETIRED_PREFIX || child.startsWith(RETIRED_PREFIX)) {
+            retiredDocumentPaths.push(documentPathFromFile(child.slice(RETIRED_PREFIX.length)));
+            continue;
+          }
           const text = await readFile(join(directory, child), "utf8");
           if (secrets.some((secret) => text.includes(secret))) {
             throw new Error("Codex knowledge generation output contained a protected credential");
@@ -185,7 +195,8 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         parsed,
         input.bundle.checkpoint.repository,
         input.workspace?.manifest ?? [],
-        checkpointClaimVerifier(input.workspace?.repositoryDirectory)
+        checkpointClaimVerifier(input.workspace?.repositoryDirectory),
+        retiredDocumentPaths
       );
       if (problems.length > 0) {
         // Reported rather than fatal: a wiki is useful with a page missing, and

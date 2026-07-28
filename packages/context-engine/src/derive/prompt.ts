@@ -90,6 +90,15 @@ export function buildKnowledgeFilePrompt(bundle: FocusBundle, repairErrors: read
     "The file path is the document's identity, so name files for their subject in lowercase with hyphens, ending in .md. `architecture.md` at the root is the one document describing the repository as a whole.",
     `${KNOWLEDGE_AGENT_OUTPUT_DIR} is the only path you may write to. Never write repository files.`,
 
+    // Without this the agent sees an empty-looking task and rewrites the whole
+    // wiki every time, which is the cost the file contract exists to avoid. The
+    // pages are already on disk; it has to be told they are its own.
+    `${KNOWLEDGE_AGENT_OUTPUT_DIR} already contains the wiki as it stood at the previous checkpoint. Read it first. Every file you leave alone is kept exactly as it is, so there is no need to rewrite a page that is still accurate, and no credit for doing so.`,
+    "Spend this run on what this checkpoint changed: the pages the change makes wrong, the pages it makes incomplete, and the subjects it introduces that have no page yet. Compare the repository against what the existing pages claim, and use the commit and issue evidence to see what moved.",
+    // Absence means "kept", so a deletion has to be said out loud.
+    `To delete a page, move it to ${KNOWLEDGE_AGENT_OUTPUT_DIR}/retired keeping its path, which records that its subject is gone rather than that you overlooked it. Delete a page only when its subject no longer exists, not when it merely needs updating.`,
+    "If the existing wiki is empty, this is a first build: map the repository from nothing.",
+
     "Start each file with a level-one heading, which is its title. The first paragraph is its summary, so make it a sentence somebody could read on its own.",
 
     "Cite evidence with ordinary Markdown links whose text is the claim and whose target is a repository path and line range: [lease expiry releases the row](packages/db/src/outbox.ts#L120-L128). The linked text must occur verbatim in those exact lines of that file at this checkpoint, because it is checked against the file. Cite only paths the manifest marks contentAvailable=true.",

@@ -329,6 +329,26 @@ test("an inline link becomes a citation, resolved through the checkpoint manifes
   assert.match(entry.bodyMarkdown, /^# Stalled publication/);
 });
 
+test("a page moved to retired is a deletion, not a document", () => {
+  const { output } = markdownCatalogToOutput(
+    [parseMarkdownDocument("architecture", "# Architecture\n\n[the outbox row](packages/db/src/outbox.ts#L2-L3)\n")],
+    "omxyz/jina",
+    manifestFor(["packages/db/src/outbox.ts"]),
+    undefined,
+    ["components/atlas-access-service"]
+  );
+  // Under the file contract an untouched page is carried forward, so a deletion
+  // has to be stated. It must not come back as a page named for the folder.
+  assert.deepEqual(
+    output.retiredDocuments?.map((entry) => entry.logicalId),
+    ["component:omxyz/jina:atlas-access-service"]
+  );
+  assert.deepEqual(
+    output.documents.map((entry) => entry.logicalId),
+    ["repository:omxyz/jina:architecture"]
+  );
+});
+
 test("a page nothing supports is withheld rather than published unverifiable", () => {
   const { output, problems } = markdownCatalogToOutput(
     [

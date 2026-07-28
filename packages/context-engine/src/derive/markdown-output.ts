@@ -69,7 +69,15 @@ export function markdownCatalogToOutput(
    * things and gets one wrong published nothing at all. Dropping keeps the eight
    * that hold, and a document left with no citation is withheld anyway.
    */
-  supports?: (link: MarkdownEvidenceLink) => boolean
+  supports?: (link: MarkdownEvidenceLink) => boolean,
+  /**
+   * Document paths the agent moved into the retired directory.
+   *
+   * Under the file contract an untouched page is carried forward, so deleting
+   * one has to be said out loud rather than shown by absence. These are the
+   * pages it said to drop.
+   */
+  retiredDocumentPaths: readonly string[] = []
 ): MarkdownOutputConversion {
   const blobByPath = new Map(
     manifest.filter((entry) => entry.contentAvailable).map((entry) => [entry.path, entry.blobSha])
@@ -151,5 +159,23 @@ export function markdownCatalogToOutput(
     });
   }
 
-  return { output: { documents: outputDocuments, retiredDocuments: [] }, problems };
+  // A retired page names a logical ID the same way a live one does; only its
+  // location differs, so it maps through the same rules rather than a second set.
+  const { entries: retiredEntries } = mapMarkdownCatalog(
+    retiredDocumentPaths.map((documentPath) => ({
+      documentPath,
+      title: documentPath,
+      summary: "",
+      bodyMarkdown: "",
+      evidenceLinks: [],
+      documentLinks: [],
+      diagnostics: { symptoms: [], causes: [], checks: [], fixes: [] }
+    })),
+    repository
+  );
+  const retiredDocuments = [...new Set(retiredEntries.map((entry) => entry.logicalId))].map((logicalId) => ({
+    logicalId,
+    reason: "retired by the derivation agent"
+  }));
+  return { output: { documents: outputDocuments, retiredDocuments }, problems };
 }
