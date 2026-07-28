@@ -5,13 +5,17 @@ import type { AddressInfo } from "node:net";
 import { test } from "node:test";
 
 test("context operation timeout still allows delayed terminal completion", async (context) => {
-  let claimCount = 0;
   let completion: Record<string, unknown> | undefined;
   const mock = createServer(async (request, response) => {
     const body = await readJson(request);
     if (request.url === "/internal/worker/claim") {
-      claimCount += 1;
-      if (claimCount > 1) {
+      // Redeliver until the work is actually completed, rather than counting
+      // attempts. The worker claims with a 40ms timeout, so on a loaded machine
+      // its first claim can time out after this server has already answered —
+      // and counting attempts would then retire the message the worker never
+      // received, leaving it idle until the test's own deadline. A real queue
+      // redelivers an unacknowledged lease; so does this one.
+      if (completion) {
         response.writeHead(204);
         response.end();
         return;
