@@ -38,6 +38,19 @@ const PRIOR_KNOWLEDGE_PATH = `${INPUT_DIR}/prior-knowledge.json`;
 const OUTPUT_DIR = "/home/daytona/derive-output";
 const RETIRED_DIR = `${OUTPUT_DIR}/retired`;
 const OUTPUT_ARCHIVE_PATH = `${WORK_DIR}/derive-output.tar.gz`;
+/**
+ * The agent's own event stream, kept inside the collected directory.
+ *
+ * Codex streams --json to stdout, which only ever existed in the command result;
+ * a run killed by its wall clock threw before that result existed, and the
+ * sandbox is deleted on the way out. So the one run that most needed explaining
+ * — 40 minutes, nothing published — left nothing to explain it with. Writing it
+ * under the output directory means it comes back with the pages, and a run that
+ * publishes nothing can still say what the agent was doing.
+ */
+const TRANSCRIPT_PATH = `${OUTPUT_DIR}/.derive-transcript.log`;
+/** Enough of the tail to show what the agent was doing when it was cut off. */
+const TRANSCRIPT_TAIL_BYTES = 20_000;
 
 /**
  * The file contract: the agent writes one document per file as it finishes it,
@@ -183,6 +196,41 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
     }
   }
 
+  /**
+   * What the agent left behind, for a run that published nothing.
+   *
+   * Best-effort and bounded: this runs on a failure path, so it must not turn a
+   * reportable failure into a different one.
+   */
+  private async describeOutputDirectory(sandbox: Sandbox, secrets: readonly string[]): Promise<string> {
+    try {
+      const listed = await sandbox.process.executeCommand(
+        `find ${shellQuote(OUTPUT_DIR)} -type f | head -50; echo '--'; find ${shellQuote(OUTPUT_DIR)} -type f | wc -l`,
+        WORK_DIR,
+        undefined,
+        60
+      );
+      return redact(truncate(listed.result ?? ""), secrets);
+    } catch (error) {
+      return `unreadable: ${redact(error instanceof Error ? error.message : inspect(error), secrets)}`;
+    }
+  }
+
+  /** The end of the agent's event stream, for a run that published nothing. */
+  private async readTranscriptTail(sandbox: Sandbox, secrets: readonly string[]): Promise<string> {
+    try {
+      const tail = await sandbox.process.executeCommand(
+        `tail -c 4000 ${shellQuote(TRANSCRIPT_PATH)}`,
+        WORK_DIR,
+        undefined,
+        60
+      );
+      return redact(truncate(tail.result ?? ""), secrets);
+    } catch (error) {
+      return `unreadable: ${redact(error instanceof Error ? error.message : inspect(error), secrets)}`;
+    }
+  }
+
   async generate(input: KnowledgeDocumentGenerationInput): Promise<unknown> {
     if (!input.workspace) throw new Error("checkpoint-pinned repository workspace is required for agentic derivation");
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
@@ -310,6 +358,12 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         )}`,
         KNOWLEDGE_PROMPT_STDIN_REDIRECT
       ].join(" ");
+      // Redirect to the transcript and echo its tail rather than piping, so the
+      // exit code stays Codex's own: `pipefail` is not available in the image's
+      // /bin/sh, and a pipe would report tee's success for a failed run.
+      const recordedCommand = files
+        ? `${command} > ${shellQuote(TRANSCRIPT_PATH)} 2>&1; rc=$?; tail -c ${TRANSCRIPT_TAIL_BYTES} ${shellQuote(TRANSCRIPT_PATH)}; exit $rc`
+        : command;
 
       const attempts = positiveInt(process.env.CONTEXT_CODEX_EXECUTION_ATTEMPTS, 2);
       let run: Awaited<ReturnType<Sandbox["process"]["executeCommand"]>> | undefined;
@@ -322,7 +376,7 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       for (let attempt = 0; attempt < attempts; attempt += 1) {
         thrown = undefined;
         try {
-          run = await sandbox.process.executeCommand(command, WORK_DIR, environment, runBudgetSeconds(input));
+          run = await sandbox.process.executeCommand(recordedCommand, WORK_DIR, environment, runBudgetSeconds(input));
         } catch (error) {
           thrown = error;
           run = undefined;
@@ -353,13 +407,33 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         // deadline, a folder does not. Salvaging is only honest while each page
         // is written whole, which is what the prompt requires; the last page may
         // be truncated, and the citation rule withholds it if it lost its links.
+        let salvageError: unknown;
         const salvaged = await this.collectDocumentFiles(sandbox, secrets, input).catch((error: unknown) => {
           if (!failure) throw error;
+          salvageError = error;
           return undefined;
         });
         if (!failure) return salvaged;
         const salvagedCount = salvaged?.documents.length ?? 0;
-        if (!keepsPartialCatalog(salvagedCount)) throw failure;
+        if (!keepsPartialCatalog(salvagedCount)) {
+          // "Nothing published" has three very different causes — the agent wrote
+          // no file, it wrote files that were all withheld, or the collection
+          // itself failed — and they were indistinguishable from the outside,
+          // which left the first real run of this contract undiagnosable.
+          console.warn("knowledge_generation_empty", {
+            reason: failure.message,
+            repository: input.bundle.checkpoint.repository,
+            ...(salvageError
+              ? {
+                  salvage: redact(salvageError instanceof Error ? salvageError.message : inspect(salvageError), secrets)
+                }
+              : {
+                  outputDirectory: await this.describeOutputDirectory(sandbox, secrets),
+                  transcript: await this.readTranscriptTail(sandbox, secrets)
+                })
+          });
+          throw failure;
+        }
         console.warn("knowledge_generation_truncated", {
           reason: failure.message,
           documents: salvagedCount,

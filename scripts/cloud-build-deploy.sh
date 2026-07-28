@@ -40,12 +40,16 @@ context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-7800000}"
 context_completion_timeout_ms="${JINA_CONTEXT_COMPLETION_TIMEOUT_MS:-600000}"
 context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-9000000}"
 # Knowledge derivation runs one agent per build inside Daytona, and its context
-# window governs how long that run takes. A 64k window overran the old 2400s
-# ceiling on the acceptance repository, while 16k completed the same stage in
-# well under two minutes under the catalog contract. Raise these only alongside
-# the derive budget below.
-context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-16000}"
-context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-12000}"
+# window governs how much it can hold while exploring. 16k was chosen because a
+# 64k window overran the old fixed 2400s ceiling and failed the release that was
+# waiting on it. Both halves of that reason are gone: the gate now spends its own
+# small budget rather than the build's, and a run that reaches its budget
+# publishes the pages it finished instead of failing. 16k then cost more than it
+# saved — a 40-minute run under the file contract published nothing at all, which
+# is what a window that compacts faster than the agent can finish a page looks
+# like from the outside.
+context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-64000}"
+context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-48000}"
 # Wall clock one derive stage may use, across its repair run. A build may name
 # its own; this is the default when it does not. The deploy gate is NOT bound by
 # this value: it passes its own small budget below, so a slow repository costs
