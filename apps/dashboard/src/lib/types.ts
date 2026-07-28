@@ -84,7 +84,14 @@ type KnowledgeDocumentKind =
   | "issue_explanation"
   | "ownership"
   | "runbook"
-  | "glossary";
+  | "glossary"
+  // A flow is a path through the system, a pattern a recurring shape worth
+  // recognising, and a topic a document whose folder the repository chose rather
+  // than this taxonomy — which is most of them once a repository organises its
+  // own wiki.
+  | "flow"
+  | "pattern"
+  | "topic";
 
 export interface ContextCitation {
   readonly id?: string;

@@ -1,3 +1,4 @@
+import type { DerivationDetail } from "./verbosity.js";
 import { fingerprint, normalizeIsoTime, stableId } from "../domain/fingerprint.js";
 import type { RefManifestEntry } from "../domain/evidence.js";
 import type {
@@ -7,7 +8,12 @@ import type {
   KnowledgeGenerationOutput
 } from "../domain/knowledge.js";
 import type { KnowledgeStore } from "../ports/knowledge-store.js";
-import { buildKnowledgePrompt, buildKnowledgeRepairPrompt, KNOWLEDGE_PROMPT_VERSION } from "./prompt.js";
+import {
+  buildKnowledgeFilePrompt,
+  buildKnowledgePrompt,
+  buildKnowledgeRepairPrompt,
+  KNOWLEDGE_PROMPT_VERSION
+} from "./prompt.js";
 import { type FocusBundle, EvidenceFocusSelector, selectPriorKnowledge } from "./selector.js";
 import { KNOWLEDGE_OUTPUT_SCHEMA_VERSION, parseKnowledgeGenerationOutput } from "./schema.js";
 import { KnowledgeOutputValidator, KnowledgeValidationError } from "./validator.js";
@@ -30,6 +36,8 @@ export interface KnowledgeDocumentGenerationInput {
   bundle: FocusBundle;
   repairErrors: string[];
   workspace?: KnowledgeAgentWorkspace;
+  /** Chosen when the build was requested, not read from the environment here. */
+  detail?: DerivationDetail;
 }
 
 export interface KnowledgeDocumentGenerator {
@@ -81,10 +89,7 @@ export class DeriveKnowledgeService {
     let validated: Awaited<ReturnType<KnowledgeOutputValidator["validate"]>> | undefined;
     for (let attempt = 0; attempt < maximumAttempts; attempt += 1) {
       const raw = await this.generator.generate({
-        prompt:
-          attempt === 0
-            ? buildKnowledgePrompt(bundle)
-            : buildKnowledgeRepairPrompt(buildKnowledgePrompt(bundle), diagnostics),
+        prompt: attempt === 0 ? derivePrompt(bundle) : buildKnowledgeRepairPrompt(derivePrompt(bundle), diagnostics),
         bundle,
         repairErrors: diagnostics
       });
@@ -92,7 +97,7 @@ export class DeriveKnowledgeService {
       try {
         const output: KnowledgeGenerationOutput = parseKnowledgeGenerationOutput(raw);
         const priorKnowledge = await selectPriorKnowledge(this.knowledgeStore, bundle.checkpoint);
-        validateIncrementalCatalog(output, priorKnowledge);
+        validateIncrementalCatalog(output, priorKnowledge, process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true");
         validated = await this.#validator.validate({
           output,
           checkpointId,
@@ -101,6 +106,9 @@ export class DeriveKnowledgeService {
           model: this.generator.model,
           promptVersion: KNOWLEDGE_PROMPT_VERSION,
           createdAt: normalizedCreatedAt,
+          // A Markdown document cites inline, so the trailing marker rule does
+          // not apply; every other check still runs.
+          inlineCitations: process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true",
           repairPresentationFields: repairPresentationFields || attempt > 0
         });
         diagnostics = [];
@@ -166,7 +174,8 @@ export class DeriveKnowledgeService {
 
 function validateIncrementalCatalog(
   output: KnowledgeGenerationOutput,
-  priorKnowledge: readonly PriorKnowledgeRevision[]
+  priorKnowledge: readonly PriorKnowledgeRevision[],
+  documentFileContract: boolean
 ): void {
   const priorIds = new Set(priorKnowledge.map((entry) => entry.revision.logicalId));
   const documentIds = new Set(output.documents.map((document) => document.logicalId));
@@ -178,10 +187,27 @@ function validateIncrementalCatalog(
     if (!priorIds.has(logicalId)) diagnostics.push(`retiredDocuments contains unknown prior logical ID ${logicalId}`);
     if (documentIds.has(logicalId)) diagnostics.push(`logical ID ${logicalId} is both emitted and retired`);
   }
-  for (const logicalId of priorIds) {
-    if (!documentIds.has(logicalId) && !retiredIds.has(logicalId)) {
-      diagnostics.push(`prior logical ID ${logicalId} was silently dropped; re-emit or retire it`);
+  // Under the catalog contract a prior document that is neither re-emitted nor
+  // retired has been dropped silently, and the build must fail. Under the file
+  // contract the prior catalog is seeded into the output directory, so a
+  // document the agent never opened is still on disk and carried forward — its
+  // absence from the returned set would mean the file was deleted, which the
+  // retired directory records explicitly. Requiring re-emission there would make
+  // every incremental build cost the whole catalog again, which is the thing the
+  // contract exists to avoid.
+  if (!documentFileContract) {
+    for (const logicalId of priorIds) {
+      if (!documentIds.has(logicalId) && !retiredIds.has(logicalId)) {
+        diagnostics.push(`prior logical ID ${logicalId} was silently dropped; re-emit or retire it`);
+      }
     }
   }
   if (diagnostics.length > 0) throw new KnowledgeValidationError(diagnostics);
+}
+
+/** The file contract when it is enabled, the catalog contract otherwise. */
+function derivePrompt(bundle: Parameters<typeof buildKnowledgePrompt>[0]): string {
+  return process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true"
+    ? buildKnowledgeFilePrompt(bundle)
+    : buildKnowledgePrompt(bundle);
 }

@@ -11,7 +11,18 @@ export const knowledgeDocumentKinds = [
   "issue_explanation",
   "ownership",
   "runbook",
-  "glossary"
+  "glossary",
+  // Maintenance-oriented kinds. A flow is a path through the system rather than
+  // a thing in it, and a pattern is a recurring shape worth recognising before
+  // repeating it — neither is expressible as a component or a feature without
+  // distorting both.
+  "flow",
+  "pattern",
+  // The kind for a document whose folder the repository chose rather than this
+  // taxonomy. A wiki's structure should fit the thing it documents — an editor
+  // has an extension host and a language server, a library has none of that —
+  // so an unrecognised folder is a legitimate topic, not an error.
+  "topic"
 ] as const;
 
 export type KnowledgeDocumentKind = (typeof knowledgeDocumentKinds)[number];
@@ -173,7 +184,10 @@ const logicalIdPatterns: Record<KnowledgeDocumentKind, RegExp> = {
   issue_explanation: /^issue:[a-z0-9_.-]+:[a-z0-9_.-]+\/[a-z0-9_.-]+#[1-9][0-9]*$/,
   ownership: /^ownership:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/@-]*$/,
   runbook: /^runbook:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/-]*$/,
-  glossary: /^glossary:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/-]*$/
+  glossary: /^glossary:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/-]*$/,
+  flow: /^flow:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/-]*$/,
+  pattern: /^pattern:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/-]*$/,
+  topic: /^topic:[a-z0-9_.-]+\/[a-z0-9_.-]+:[a-z0-9][a-z0-9_.:/-]*$/
 };
 
 export function validateLogicalId(kind: KnowledgeDocumentKind, logicalId: string, repository: string): void {

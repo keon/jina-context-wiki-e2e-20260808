@@ -16,9 +16,16 @@ import {
   StaticScopeAuthorizer,
   StoreScopeAuthorizer,
   assembleEvidencePack,
+  buildKnowledgeFilePrompt,
   buildKnowledgePrompt,
   buildKnowledgeRepairPrompt,
+  knowledgeDocumentJsonSchema,
+  parseKnowledgeDocumentFile,
   canonicalJson,
+  codexVerbosity,
+  derivationDetailLevels,
+  derivationDetailOrDefault,
+  isDerivationDetail,
   contextQueueTopics,
   contextTaskTypeDefinitions,
   contextTaskTypes,
@@ -2198,4 +2205,143 @@ test("memory API tokens resolve their own tenant and go invisible once revoked o
     undefined
   );
   assert.equal((await store.verifyApiToken("b".repeat(64)))?.tokenId, "atk_other");
+});
+
+test("the file contract asks for a maintenance wiki, written as it goes", () => {
+  const bundle = {
+    checkpoint: {
+      repository: "omxyz/jina",
+      ref: "main",
+      commitSha: "a".repeat(40),
+      sourceCompleteness: "complete" as const,
+      evidenceFingerprint: "f".repeat(64)
+    },
+    items: [],
+    omittedCount: 0,
+    truncatedEvidenceIds: []
+  };
+  const catalog = buildKnowledgePrompt(bundle as never);
+  const files = buildKnowledgeFilePrompt(bundle as never);
+
+  // The catalog contract makes the final message the work product, which is what
+  // makes compaction destructive: anything not yet emitted is lost.
+  assert.match(catalog, /Return only the schema-conforming final JSON/);
+  assert.match(catalog, /Re-emit every still-valid logical document/);
+
+  // The file contract makes each finished document durable instead.
+  assert.match(files, /Markdown file under/);
+  assert.match(files, /before moving to the next subject/);
+  assert.doesNotMatch(files, /Return only the schema-conforming final JSON/);
+  assert.doesNotMatch(files, /Re-emit every still-valid logical document/);
+  // The one write it may perform is scoped to the output directory.
+  assert.match(files, /is the only path you may write to\. Never write repository files\./);
+
+  // It asks for a maintenance aid rather than a description of the code.
+  assert.match(files, /helps somebody maintain this repository/);
+  assert.match(files, /what breaks if I change it/);
+  // And lets the repository choose its own structure rather than imposing one.
+  assert.match(files, /Choose the folder structure that fits this repository/);
+
+  // Both reference forms, and the rule that makes a claim checkable.
+  assert.match(files, /must occur verbatim in those exact lines/);
+  assert.match(files, /relative Markdown links/);
+  assert.match(files, /at least one evidence link, or it cannot be published/);
+  // The diagnostic sections retrieval depends on.
+  assert.match(files, /## Symptoms/);
+  assert.match(files, /## Fixes/);
+});
+
+test("the per-document schema is the catalog's own item schema, so the two cannot drift", () => {
+  const item = knowledgeGenerationJsonSchema.properties.documents.items as Record<string, unknown>;
+  for (const key of Object.keys(item)) {
+    assert.deepEqual(
+      (knowledgeDocumentJsonSchema as Record<string, unknown>)[key],
+      item[key],
+      `document schema diverged at ${key}`
+    );
+  }
+  // It stands alone, so it can be handed to --output-schema by itself.
+  assert.equal(knowledgeDocumentJsonSchema.$id, "knowledge-documents-v4-document");
+});
+
+test("a document file is parsed by the same validation the catalog uses", () => {
+  const document = {
+    logicalId: "component:omxyz/jina:api/server",
+    kind: "component",
+    title: "API server",
+    summary: "Serves the context routes.",
+    summaryCitationOrdinals: [1],
+    bodyMarkdown: "The server dispatches context routes. [cite:1]",
+    structuredSummary: {
+      facts: [],
+      questionsAnswered: [],
+      diagnostics: { symptoms: [], causes: [], checks: [], fixes: [] },
+      claimSubject: null,
+      claimValue: null,
+      claimCitationOrdinals: []
+    },
+    scope: { paths: ["apps/api/src/server.ts"], symbols: [], pullRequests: [], issues: [] },
+    confidence: 0.9,
+    citations: [
+      {
+        claim: "dispatches context routes",
+        sourceType: "blob",
+        sourceId: "b".repeat(40),
+        pathOrUrl: "apps/api/src/server.ts",
+        startLine: 1,
+        endLine: 2
+      }
+    ]
+  };
+  const parsed = parseKnowledgeDocumentFile(document, "file");
+  assert.equal(parsed.logicalId, "component:omxyz/jina:api/server");
+  assert.equal(parsed.kind, "component");
+  // A malformed file fails the same way a malformed catalog entry does.
+  assert.throws(() => parseKnowledgeDocumentFile({ ...document, citations: [] }, "file"), /at least one citation/);
+});
+
+test("derivation detail is named for the choice, not the model setting it maps to", () => {
+  assert.deepEqual([...derivationDetailLevels], ["concise", "standard", "thorough"]);
+  // The deployed default was the model's terse setting on a task whose output is
+  // the document, which is a direct cause of one-paragraph knowledge.
+  assert.equal(codexVerbosity("concise"), "low");
+  assert.equal(codexVerbosity("standard"), "medium");
+  assert.equal(codexVerbosity("thorough"), "high");
+
+  // Unknown input falls back rather than throwing: a build at the default detail
+  // beats no build, and the HTTP layer rejects a bad value before it reaches here.
+  assert.equal(derivationDetailOrDefault(undefined), "standard");
+  assert.equal(derivationDetailOrDefault("verbose"), "standard");
+  assert.equal(derivationDetailOrDefault("thorough"), "thorough");
+  assert.equal(derivationDetailOrDefault(undefined, "thorough"), "thorough");
+  assert.equal(isDerivationDetail("thorough"), true);
+  assert.equal(isDerivationDetail("high"), false);
+});
+
+test("a build carries its chosen detail to the derive stage, not to the others", async () => {
+  const coordinator = new MemoryContextPipelineCoordinator();
+  const build = await coordinator.createBuild({
+    tenantId: "tenant-detail",
+    repository: "omxyz/jina",
+    ref: "main",
+    requestKey: "rk-detail",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    derivationDetail: "thorough"
+  });
+  const derive = build.stages.find((stage) => stage.type === "derive-knowledge");
+  assert.equal(derive?.metadata.derivationDetail, "thorough");
+  // The choice belongs to the stage that acts on it; nothing else should carry it.
+  for (const stage of build.stages.filter((candidate) => candidate.type !== "derive-knowledge")) {
+    assert.equal(stage.metadata.derivationDetail, undefined);
+  }
+
+  // A build that does not choose carries nothing, so the deployment default applies.
+  const plain = await coordinator.createBuild({
+    tenantId: "tenant-detail",
+    repository: "omxyz/jina",
+    ref: "main",
+    requestKey: "rk-plain",
+    createdAt: "2026-01-01T00:00:00.000Z"
+  });
+  assert.equal(plain.stages.find((stage) => stage.type === "derive-knowledge")?.metadata.derivationDetail, undefined);
 });

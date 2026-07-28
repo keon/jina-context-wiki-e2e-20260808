@@ -131,6 +131,15 @@ export class KnowledgeOutputValidator {
     promptVersion: string;
     createdAt: string;
     repairPresentationFields?: boolean;
+    /**
+     * A Markdown document carries its citations as inline links, so the trailing
+     * `[cite:N]` marker rule does not apply to it. Every other check — that each
+     * citation resolves against the checkpoint, that its claim occurs verbatim in
+     * the range it names, that scope and identity are grounded — is unchanged,
+     * because those are what make a claim trustworthy rather than artifacts of
+     * the format that delivered it.
+     */
+    inlineCitations?: boolean;
   }): Promise<ValidatedKnowledge> {
     const checkpoint = await this.evidenceStore.getCheckpoint(input.checkpointId);
     if (checkpoint === undefined) throw new KnowledgeValidationError(["Unknown evidence checkpoint"]);
@@ -235,7 +244,7 @@ export class KnowledgeOutputValidator {
           `documents[${documentIndex}].structuredSummary.claimCitationOrdinals requires claimSubject and claimValue`
         );
       }
-      for (const block of materialBodyBlocks(document.bodyMarkdown)) {
+      for (const block of input.inlineCitations ? [] : materialBodyBlocks(document.bodyMarkdown)) {
         const ordinals = bodyCitationOrdinals(block);
         if (!ordinals) {
           diagnostics.push(

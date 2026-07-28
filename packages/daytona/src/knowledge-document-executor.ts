@@ -1,10 +1,19 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { Daytona, type Resources, type Sandbox } from "@daytona/sdk";
+import type { PriorKnowledgeRevision } from "@jina/context-engine";
 import {
+  kindDirectories,
+  documentPathFromFile,
+  markdownCatalogToOutput,
+  parseMarkdownDocument,
+  type ParsedMarkdownDocument,
+  codexVerbosity,
+  derivationDetailOrDefault,
+  knowledgeDocumentJsonSchema,
   knowledgeGenerationJsonSchema,
   serializeKnowledgeEvidence,
   type KnowledgeDocumentGenerationInput,
@@ -25,6 +34,37 @@ const REPOSITORY_ARCHIVE_PATH = `${WORK_DIR}/repository.tar.gz`;
 const EVIDENCE_PATH = `${INPUT_DIR}/evidence.json`;
 const MANIFEST_PATH = `${INPUT_DIR}/repository-manifest.json`;
 const PRIOR_KNOWLEDGE_PATH = `${INPUT_DIR}/prior-knowledge.json`;
+const OUTPUT_DIR = "/home/daytona/derive-output";
+const RETIRED_DIR = `${OUTPUT_DIR}/retired`;
+const OUTPUT_ARCHIVE_PATH = `${WORK_DIR}/derive-output.tar.gz`;
+
+/**
+ * The file contract: the agent writes one document per file as it finishes it,
+ * rather than holding the whole catalog in context for a single final message.
+ * Off by default so the catalog contract stays the shipped behaviour until this
+ * is measured against it.
+ */
+function documentFileContractEnabled(): boolean {
+  return process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true";
+}
+
+/**
+ * The path a prior document is seeded back to, so the agent finds it where it
+ * would have written it. The subject of a logical ID is a path already, and the
+ * kind names the folder it came from.
+ */
+export function documentFileName(logicalId: string): string {
+  const first = logicalId.indexOf(":");
+  const second = logicalId.indexOf(":", first + 1);
+  if (first < 0 || second < 0) return `${logicalId.replace(/[/:]/g, "-")}.md`;
+  const kind = logicalId.slice(0, first);
+  const subject = logicalId.slice(second + 1);
+  if (kind === "repository") return `${subject}.md`;
+  if (kind === "topic") return `${subject}.md`;
+  const directory =
+    kindDirectories[kind === "change" ? "change_summary" : kind === "issue" ? "issue_explanation" : kind];
+  return directory ? `${directory}/${subject}.md` : `${subject}.md`;
+}
 const execFileAsync = promisify(execFile);
 export const KNOWLEDGE_PROMPT_STDIN_REDIRECT = `< ${shellQuote(PROMPT_PATH)}`;
 export const AGENT_KNOWLEDGE_CODEX_ARGS = [
@@ -79,6 +119,69 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
     this.model = selectedModel(configuredProvider());
   }
 
+  /**
+   * Reads the catalog back from the output directory.
+   *
+   * The archive keeps this to one download regardless of document count, and the
+   * credential scan runs over every file rather than one message — the surface
+   * grew, so the check has to grow with it.
+   */
+  private async collectDocumentFiles(
+    sandbox: Sandbox,
+    secrets: readonly string[],
+    input: KnowledgeDocumentGenerationInput
+  ): Promise<unknown> {
+    const packed = await sandbox.process.executeCommand(
+      `tar -czf ${shellQuote(OUTPUT_ARCHIVE_PATH)} -C ${shellQuote(OUTPUT_DIR)} .`,
+      WORK_DIR,
+      undefined,
+      300
+    );
+    if (packed.exitCode !== 0) throw new Error(`Could not collect derived documents: ${packed.result}`);
+    const archive = await sandbox.fs.downloadFile(
+      OUTPUT_ARCHIVE_PATH,
+      positiveInt(process.env.DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS, 120)
+    );
+    const directory = await mkdtemp(join(tmpdir(), "jina-derive-output-"));
+    try {
+      await writeFile(join(directory, "output.tar.gz"), archive);
+      await execFileAsync("tar", ["-xzf", join(directory, "output.tar.gz"), "-C", directory]);
+      // Every Markdown file under the output directory, at any depth, because the
+      // agent chose the folder structure and the path is the document identity.
+      const parsed: ParsedMarkdownDocument[] = [];
+      const walk = async (relative: string): Promise<void> => {
+        for (const entry of await readdir(join(directory, relative), { withFileTypes: true })) {
+          const child = relative ? `${relative}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) {
+            await walk(child);
+            continue;
+          }
+          if (!entry.isFile() || !entry.name.toLowerCase().endsWith(".md")) continue;
+          const text = await readFile(join(directory, child), "utf8");
+          if (secrets.some((secret) => text.includes(secret))) {
+            throw new Error("Codex knowledge generation output contained a protected credential");
+          }
+          parsed.push(parseMarkdownDocument(documentPathFromFile(child), text));
+        }
+      };
+      await walk("");
+      const { output, problems } = markdownCatalogToOutput(
+        parsed,
+        input.bundle.checkpoint.repository,
+        input.workspace?.manifest ?? []
+      );
+      if (problems.length > 0) {
+        // Reported rather than fatal: a wiki is useful with a page missing, and
+        // refusing the whole catalog because one file could not be placed is the
+        // failure mode the file contract exists to avoid.
+        console.warn("knowledge_markdown_problems", { problems: problems.slice(0, 50) });
+      }
+      return output;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
   async generate(input: KnowledgeDocumentGenerationInput): Promise<unknown> {
     if (!input.workspace) throw new Error("checkpoint-pinned repository workspace is required for agentic derivation");
     const daytonaApiKey = requiredEnv("DAYTONA_API_KEY");
@@ -116,19 +219,41 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
             createOptions
           );
 
+      const files = documentFileContractEnabled();
       const codexBinary = await prepareCodex(sandbox, Boolean(snapshot));
       await Promise.all([
-        sandbox.fs.uploadFile(Buffer.from(JSON.stringify(knowledgeGenerationJsonSchema)), SCHEMA_PATH, 120),
+        sandbox.fs.uploadFile(
+          Buffer.from(JSON.stringify(files ? knowledgeDocumentJsonSchema : knowledgeGenerationJsonSchema)),
+          SCHEMA_PATH,
+          120
+        ),
         sandbox.fs.uploadFile(Buffer.from(input.prompt), PROMPT_PATH, 120),
         sandbox.fs.uploadFile(Buffer.from(serializeKnowledgeEvidence(input.bundle)), EVIDENCE_PATH, 120),
         sandbox.fs.uploadFile(Buffer.from(JSON.stringify(input.workspace.manifest)), MANIFEST_PATH, 120),
         sandbox.fs.uploadFile(Buffer.from(JSON.stringify(input.workspace.priorKnowledge)), PRIOR_KNOWLEDGE_PATH, 120),
+        // Seeding the prior catalog into the writable output directory is what
+        // replaces re-emission: a document the agent never opens is still there
+        // at the end, so an incremental build costs the change rather than the
+        // whole catalog.
+        ...(files
+          ? input.workspace.priorKnowledge.map((prior) =>
+              sandbox!.fs.uploadFile(
+                Buffer.from(priorDocumentMarkdown(prior)),
+                `${OUTPUT_DIR}/${documentFileName(prior.revision.logicalId)}`,
+                120
+              )
+            )
+          : []),
         sandbox.fs.uploadFile(archive.path, REPOSITORY_ARCHIVE_PATH, 300)
       ]);
       const extracted = await sandbox.process.executeCommand(
         [
           `mkdir -p ${shellQuote(SOURCE_DIR)} ${shellQuote(INPUT_DIR)}`,
+          ...(files ? [`mkdir -p ${shellQuote(RETIRED_DIR)}`] : []),
           `tar -xzf ${shellQuote(REPOSITORY_ARCHIVE_PATH)} -C ${shellQuote(SOURCE_DIR)}`,
+          // The checkout and the inputs stay read-only so citations cannot be
+          // invalidated by the agent that cites them; only the output directory
+          // is writable.
           `chmod -R a-w ${shellQuote(SOURCE_DIR)} ${shellQuote(INPUT_DIR)}`
         ].join(" && "),
         WORK_DIR,
@@ -160,17 +285,28 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         "--json",
         "--ephemeral",
         ...AGENT_KNOWLEDGE_CODEX_ARGS,
-        "--sandbox read-only",
+        files
+          ? `--sandbox workspace-write -c sandbox_workspace_write.writable_roots=[${shellQuote(`"${OUTPUT_DIR}"`)}]`
+          : "--sandbox read-only",
         `-c developer_instructions=${shellQuote(KNOWLEDGE_AGENT_DEVELOPER_INSTRUCTIONS)}`,
         `-C ${shellQuote(SOURCE_DIR)}`,
-        `--output-schema ${shellQuote(SCHEMA_PATH)}`,
+        // The result is the files, so the reply is unconstrained prose. Forcing a
+        // schema on it would make the agent try to return the catalog after all.
+        ...(files ? [] : [`--output-schema ${shellQuote(SCHEMA_PATH)}`]),
         `--output-last-message ${shellQuote(RESULT_PATH)}`,
         `-m ${shellQuote(this.model)}`,
         ...providerArguments,
         `-c model_context_window=${positiveInt(process.env.CONTEXT_CODEX_CONTEXT_TOKENS, 64_000)}`,
         `-c model_auto_compact_token_limit=${positiveInt(process.env.CONTEXT_CODEX_COMPACT_TOKENS, 48_000)}`,
         `-c model_reasoning_effort=${shellQuote(process.env.CONTEXT_CODEX_EFFORT?.trim() || "medium")}`,
-        "-c model_verbosity=low",
+        // The deployed default was the model's terse setting, on a task whose
+        // output is the document. Chosen per build, falling back to a deployment
+        // default, so it can be raised without a release.
+        `-c model_verbosity=${shellQuote(
+          codexVerbosity(
+            derivationDetailOrDefault(input.detail, derivationDetailOrDefault(process.env.CONTEXT_DERIVE_DETAIL))
+          )
+        )}`,
         KNOWLEDGE_PROMPT_STDIN_REDIRECT
       ].join(" ");
 
@@ -191,6 +327,9 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       }
       if (!run || run.exitCode !== 0) {
         throw new Error(`Codex knowledge generation failed: ${redact(truncate(run?.result ?? ""), secrets)}`);
+      }
+      if (files) {
+        return await this.collectDocumentFiles(sandbox, secrets, input);
       }
       const result = await sandbox.fs.downloadFile(
         RESULT_PATH,
@@ -351,4 +490,12 @@ function truncate(value: string, maximum = 2_000): string {
 
 function redact(value: string, secrets: readonly string[]): string {
   return secrets.reduce((result, secret) => result.replaceAll(secret, "***REDACTED***"), value);
+}
+
+/** The prior catalog rendered back into the file shape the agent reads and rewrites. */
+function priorDocumentMarkdown(prior: PriorKnowledgeRevision): string {
+  const revision = prior.revision as unknown as Record<string, unknown>;
+  // The stored body is the Markdown the agent wrote, so seeding it back is a
+  // copy rather than a reconstruction.
+  return typeof revision.bodyMarkdown === "string" ? revision.bodyMarkdown : "";
 }

@@ -49,6 +49,17 @@ context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-4500000}"
 # build that is waiting for it.
 context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-16000}"
 context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-12000}"
+# The agent writes each document as it finishes it, so a finished document is
+# durable and the window bounds one document rather than the whole catalog. The
+# window stays at 16k here regardless: a deploy waits on the acceptance
+# derivation, and CONTEXT_CODEX_EXECUTION_ATTEMPTS x DAYTONA_RUN_TIMEOUT_SECONDS
+# already exceeds the 4200s deploy-backend step timeout, so raising either would
+# make a slow derivation fail the release rather than merely take longer. Raise
+# them for a real build, not for the gate.
+context_derive_document_files="${JINA_CONTEXT_DERIVE_DOCUMENT_FILES:-true}"
+# Standard rather than the model's terse setting, which produced one-paragraph
+# documents on a task whose output is the document. A build may override it.
+context_derive_detail="${JINA_CONTEXT_DERIVE_DETAIL:-standard}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
 context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
@@ -189,7 +200,7 @@ raise SystemExit(1)
 '
 }
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}"
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_DERIVE_DOCUMENT_FILES=${context_derive_document_files}"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest"
 
 case "${tenancy_mode}" in
@@ -860,7 +871,7 @@ gcloud run deploy jina-context-worker \
   --min-instances=3 \
   --max-instances=3 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-ingest-evidence|run-derive-knowledge|run-index-context~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~DAYTONA_RUN_TIMEOUT_SECONDS=2400~CONTEXT_CODEX_PROVIDER=openrouter~CONTEXT_CODEX_MODEL=openai/gpt-5.4-mini~CONTEXT_CODEX_EFFORT=medium~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_DERIVE_DOCUMENT_FILES=${context_derive_document_files}~CONTEXT_DERIVE_DETAIL=${context_derive_detail}~CONTEXT_AGENT_ARCHIVE_MAX_BYTES=134217728" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,OPENROUTER_API_KEY=jina-openrouter-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${deploy_traffic_args[@]}" \
   --quiet

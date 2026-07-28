@@ -23,6 +23,10 @@ import {
   MemoryContextEngineStore,
   MemoryContextPipelineCoordinator,
   QueryContextService,
+  buildKnowledgeFilePrompt,
+  derivationDetailLevels,
+  derivationDetailOrDefault,
+  isDerivationDetail,
   buildKnowledgePrompt,
   contextQueueTopics,
   contextTaskTypeDefinitions,
@@ -648,6 +652,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repository = requiredRepositoryName(body.repository, "repository");
       await requireRepositoryAccess(principal, repository);
       const commitSha = optionalString(body.commitSha);
+      const derivationDetail =
+        body.derivationDetail === undefined ? undefined : requiredString(body.derivationDetail, "derivationDetail");
+      if (derivationDetail !== undefined && !isDerivationDetail(derivationDetail)) {
+        throw invalidRequest(`derivationDetail must be one of ${derivationDetailLevels.join(", ")}`);
+      }
       const requestedGithubInstallationId =
         body.githubInstallationId === undefined
           ? undefined
@@ -672,6 +681,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ref: optionalString(body.ref) ?? identity?.defaultBranch ?? "main",
         ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
         ...(githubInstallationId ? { githubInstallationId } : {}),
+        ...(derivationDetail ? { derivationDetail } : {}),
         requestKey: optionalString(body.requestKey) ?? randomUUID(),
         createdAt: nowIso()
       });
@@ -971,7 +981,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ]);
       json(response, 200, {
         checkpointId,
-        prompt: buildKnowledgePrompt(bundle),
+        detail: derivationDetailOrDefault(lease.stage.metadata.derivationDetail),
+        prompt:
+          process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true"
+            ? buildKnowledgeFilePrompt(bundle)
+            : buildKnowledgePrompt(bundle),
         bundle,
         manifest,
         priorKnowledge

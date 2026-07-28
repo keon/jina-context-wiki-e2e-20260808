@@ -1,3 +1,4 @@
+import type { DerivationDetail } from "../derive/verbosity.js";
 import { isFullCommitSha, newId, normalizeIsoTime, normalizeRepository, stableId } from "../domain/fingerprint.js";
 import type { ContextQueueTopic } from "./topics.js";
 import { contextQueueTopics } from "./topics.js";
@@ -52,6 +53,8 @@ export interface ContextPipelineCoordinator {
     githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
+    /** How much the deriving agent should write; carried to the derive stage. */
+    derivationDetail?: DerivationDetail;
   }): Promise<ContextBuild>;
   claim(input: {
     tenantId?: string;
@@ -103,6 +106,7 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     repository: string;
     ref: string;
     commitSha?: string;
+    derivationDetail?: DerivationDetail;
     githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
@@ -146,7 +150,12 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
               ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
               refSequence
             }
-          : {}
+          : // The derive stage is claimed long after the build was requested, so
+            // the choice has to travel with it rather than being read from the
+            // environment at execution time.
+            type === contextTaskTypes.deriveKnowledge && input.derivationDetail
+            ? { derivationDetail: input.derivationDetail }
+            : {}
     });
     const build: ContextBuild = {
       id,

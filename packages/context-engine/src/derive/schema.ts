@@ -176,6 +176,18 @@ function parseDocument(value: unknown, path: string): KnowledgeDocumentDraft {
   };
 }
 
+/**
+ * One document, parsed from its own file.
+ *
+ * The agentic file contract writes a document per file rather than a catalog in
+ * one message, so the same per-document validation runs against a file's
+ * contents. Nothing about what makes a document valid changes with the contract
+ * that delivered it.
+ */
+export function parseKnowledgeDocumentFile(value: unknown, path: string): KnowledgeDocumentDraft {
+  return parseDocument(value, path);
+}
+
 export function parseKnowledgeGenerationOutput(value: unknown): KnowledgeGenerationOutput {
   const input = object(value, "output");
   const prohibited = ["nodes", "edges", "predicates", "operations"];
@@ -373,3 +385,13 @@ export const knowledgeGenerationJsonSchema = {
     }
   }
 } as const;
+
+/**
+ * The document schema on its own, for `--output-schema` when the agent emits one
+ * document at a time. Derived from the catalog schema rather than restated, so
+ * the two cannot drift.
+ */
+export const knowledgeDocumentJsonSchema = {
+  $id: `${KNOWLEDGE_OUTPUT_SCHEMA_VERSION}-document`,
+  ...(knowledgeGenerationJsonSchema.properties.documents.items as Record<string, unknown>)
+};

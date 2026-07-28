@@ -16,6 +16,7 @@ import { DaytonaCodexKnowledgeDocumentGenerator } from "@jina/daytona";
 import { createGitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import type {
+  DerivationDetail,
   FocusBundle,
   GitChange,
   GitSnapshotMetadata,
@@ -381,6 +382,7 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
   if (!knowledgeGenerator) throw new Error("knowledge generator is not configured for this worker");
   const prepared = await internalApiJson<{
     readonly prompt: string;
+    readonly detail?: DerivationDetail;
     readonly checkpointId: string;
     readonly bundle: FocusBundle;
     readonly manifest: RefManifestEntry[];
@@ -402,6 +404,7 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
         prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
         bundle: prepared.bundle,
         repairErrors: [...diagnostics],
+        ...(prepared.detail ? { detail: prepared.detail } : {}),
         workspace: {
           repositoryDirectory: checkout.directory,
           manifest: prepared.manifest,
