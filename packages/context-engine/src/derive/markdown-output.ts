@@ -1,6 +1,6 @@
 import type { RefManifestEntry } from "../domain/evidence.js";
 import { mapMarkdownCatalog, type MarkdownCatalogProblem } from "./markdown-catalog.js";
-import type { MarkdownStatement, ParsedMarkdownDocument } from "./markdown-document.js";
+import type { MarkdownEvidenceLink, MarkdownStatement, ParsedMarkdownDocument } from "./markdown-document.js";
 import type { KnowledgeGenerationOutput } from "../domain/knowledge.js";
 
 /**
@@ -21,7 +21,7 @@ import type { KnowledgeGenerationOutput } from "../domain/knowledge.js";
 
 export interface MarkdownOutputProblem {
   readonly documentPath: string;
-  readonly reason: MarkdownCatalogProblem["reason"] | "unknown-path" | "no-citable-evidence";
+  readonly reason: MarkdownCatalogProblem["reason"] | "unknown-path" | "claim-absent" | "no-citable-evidence";
 }
 
 export interface MarkdownOutputConversion {
@@ -59,7 +59,17 @@ function statementsFor(
 export function markdownCatalogToOutput(
   documents: readonly ParsedMarkdownDocument[],
   repository: string,
-  manifest: readonly RefManifestEntry[]
+  manifest: readonly RefManifestEntry[],
+  /**
+   * Whether the checkpoint actually says what a link claims.
+   *
+   * Supplied where the checked-out files are readable. A link that fails is
+   * dropped rather than carried forward, because the host validator rejects the
+   * whole document over one unverifiable claim — so an agent that cites nine
+   * things and gets one wrong published nothing at all. Dropping keeps the eight
+   * that hold, and a document left with no citation is withheld anyway.
+   */
+  supports?: (link: MarkdownEvidenceLink) => boolean
 ): MarkdownOutputConversion {
   const blobByPath = new Map(
     manifest.filter((entry) => entry.contentAvailable).map((entry) => [entry.path, entry.blobSha])
@@ -79,6 +89,10 @@ export function markdownCatalogToOutput(
       const blobSha = blobByPath.get(link.path);
       if (blobSha === undefined) {
         problems.push({ documentPath: entry.documentPath, reason: "unknown-path" });
+        continue;
+      }
+      if (supports && !supports(link)) {
+        problems.push({ documentPath: entry.documentPath, reason: "claim-absent" });
         continue;
       }
       const key = `${link.path}|${link.startLine}|${link.endLine}`;

@@ -1,13 +1,15 @@
 import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { inspect, promisify } from "node:util";
 import { Daytona, type Resources, type Sandbox } from "@daytona/sdk";
 import type { PriorKnowledgeRevision } from "@jina/context-engine";
 import {
   kindDirectories,
   documentPathFromFile,
+  evidenceSupportsClaim,
   markdownCatalogToOutput,
   parseMarkdownDocument,
   type ParsedMarkdownDocument,
@@ -182,7 +184,8 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       const { output, problems } = markdownCatalogToOutput(
         parsed,
         input.bundle.checkpoint.repository,
-        input.workspace?.manifest ?? []
+        input.workspace?.manifest ?? [],
+        checkpointClaimVerifier(input.workspace?.repositoryDirectory)
       );
       if (problems.length > 0) {
         // Reported rather than fatal: a wiki is useful with a page missing, and
@@ -472,6 +475,46 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
  */
 export function keepsPartialCatalog(documentCount: number): boolean {
   return documentCount > 0;
+}
+
+/**
+ * Checks a link's claim against the checked-out file it names.
+ *
+ * The host validator rejects a whole document over one unverifiable claim, so an
+ * agent that cited nine things and got one wrong published nothing. Checking
+ * here, where the checkpoint is already on disk, lets the eight that hold be
+ * kept. Reads are cached because a page cites the same file repeatedly, and a
+ * file that cannot be read verifies nothing rather than everything.
+ */
+export function checkpointClaimVerifier(
+  repositoryDirectory: string | undefined
+): ((link: { path: string; startLine: number; endLine: number; claim: string }) => boolean) | undefined {
+  if (!repositoryDirectory) return undefined;
+  const lines = new Map<string, readonly string[] | undefined>();
+  return (link) => {
+    if (!lines.has(link.path)) {
+      // Paths come from an untrusted agent, so a link may not stay inside the
+      // checkout; one that escapes verifies nothing.
+      const resolved = resolvePath(repositoryDirectory, link.path);
+      const root = resolvePath(repositoryDirectory);
+      lines.set(
+        link.path,
+        resolved === root || resolved.startsWith(`${root}/`)
+          ? ((): readonly string[] | undefined => {
+              try {
+                return readFileSync(resolved, "utf8").split(/\r?\n/);
+              } catch {
+                return undefined;
+              }
+            })()
+          : undefined
+      );
+    }
+    const content = lines.get(link.path);
+    if (!content) return false;
+    if (link.startLine < 1 || link.endLine < link.startLine || link.endLine > content.length) return false;
+    return evidenceSupportsClaim(link.claim, content.slice(link.startLine - 1, link.endLine).join("\n"));
+  };
 }
 
 /** The hard ceiling on one derivation run, whoever asked for it. */

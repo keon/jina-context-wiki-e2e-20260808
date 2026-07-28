@@ -9,6 +9,7 @@ import {
   AGENT_KNOWLEDGE_CODEX_ARGS,
   createRepositoryArchive,
   findExistingCodex,
+  checkpointClaimVerifier,
   isTransientKnowledgeGenerationFailure,
   keepsPartialCatalog,
   MAX_RUN_BUDGET_SECONDS,
@@ -64,6 +65,30 @@ test("a run takes the budget it was handed, bounded by the sandbox ceiling", () 
   } finally {
     if (previous === undefined) delete process.env.DAYTONA_RUN_TIMEOUT_SECONDS;
     else process.env.DAYTONA_RUN_TIMEOUT_SECONDS = previous;
+  }
+});
+
+test("a claim the checkpoint does not make is dropped, not fatal", async () => {
+  const repository = await mkdtemp(join(tmpdir(), "jina-claim-verify-"));
+  try {
+    await writeFile(join(repository, "outbox.ts"), "line one\nlease expiry releases the row\nline three\n");
+    const verify = checkpointClaimVerifier(repository);
+    assert.ok(verify);
+    // The claim occurs verbatim in the range it names.
+    assert.equal(verify({ path: "outbox.ts", startLine: 2, endLine: 2, claim: "lease expiry releases the row" }), true);
+    // The production failure: a plausible claim the cited lines do not make.
+    assert.equal(
+      verify({ path: "outbox.ts", startLine: 1, endLine: 1, claim: "lease expiry releases the row" }),
+      false
+    );
+    // A range past the end of the file, and a file that is not there at all.
+    assert.equal(verify({ path: "outbox.ts", startLine: 1, endLine: 99, claim: "line one" }), false);
+    assert.equal(verify({ path: "absent.ts", startLine: 1, endLine: 1, claim: "line one" }), false);
+    // Paths come from an untrusted agent, so one that escapes the checkout must
+    // verify nothing rather than read the host filesystem.
+    assert.equal(verify({ path: "../../etc/passwd", startLine: 1, endLine: 1, claim: "root user entry" }), false);
+  } finally {
+    await rm(repository, { recursive: true, force: true });
   }
 });
 
