@@ -10,6 +10,7 @@ import {
   createRepositoryArchive,
   findExistingCodex,
   isTransientKnowledgeGenerationFailure,
+  keepsPartialCatalog,
   KNOWLEDGE_PROMPT_STDIN_REDIRECT
 } from "./knowledge-document-executor.js";
 
@@ -20,6 +21,16 @@ test("knowledge generation retry classification is bounded to transient failures
   assert.equal(isTransientKnowledgeGenerationFailure("stream disconnected while reconnecting"), true);
   assert.equal(isTransientKnowledgeGenerationFailure("output failed JSON schema validation"), false);
   assert.equal(isTransientKnowledgeGenerationFailure("permission denied"), false);
+});
+
+test("a run killed by its wall clock keeps the pages already written to disk", () => {
+  // The production failure this exists for: derivation ran the full
+  // DAYTONA_RUN_TIMEOUT_SECONDS and threw, discarding every finished page.
+  assert.equal(keepsPartialCatalog(1), true);
+  assert.equal(keepsPartialCatalog(12), true);
+  // Nothing written means the run failed before producing anything, and an empty
+  // catalog would publish as "no knowledge" instead of surfacing the failure.
+  assert.equal(keepsPartialCatalog(0), false);
 });
 
 test("snapshot reuse accepts only an absolute working Codex path", async () => {

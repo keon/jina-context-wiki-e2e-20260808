@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { promisify } from "node:util";
+import { inspect, promisify } from "node:util";
 import { Daytona, type Resources, type Sandbox } from "@daytona/sdk";
 import type { PriorKnowledgeRevision } from "@jina/context-engine";
 import {
@@ -17,7 +17,8 @@ import {
   knowledgeGenerationJsonSchema,
   serializeKnowledgeEvidence,
   type KnowledgeDocumentGenerationInput,
-  type KnowledgeDocumentGenerator
+  type KnowledgeDocumentGenerator,
+  type KnowledgeGenerationOutput
 } from "@jina/context-engine";
 
 const DEFAULT_IMAGE = "node:22-bookworm";
@@ -130,7 +131,7 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
     sandbox: Sandbox,
     secrets: readonly string[],
     input: KnowledgeDocumentGenerationInput
-  ): Promise<unknown> {
+  ): Promise<KnowledgeGenerationOutput> {
     const packed = await sandbox.process.executeCommand(
       `tar -czf ${shellQuote(OUTPUT_ARCHIVE_PATH)} -C ${shellQuote(OUTPUT_DIR)} .`,
       WORK_DIR,
@@ -312,25 +313,59 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
 
       const attempts = positiveInt(process.env.CONTEXT_CODEX_EXECUTION_ATTEMPTS, 2);
       let run: Awaited<ReturnType<Sandbox["process"]["executeCommand"]>> | undefined;
+      // The sandbox SDK reports a run that outlives DAYTONA_RUN_TIMEOUT_SECONDS by
+      // throwing, not by returning a non-zero exit code, which is how the
+      // production timeout arrived. Holding the error instead of letting it
+      // propagate is what lets the finished pages below be collected; it is
+      // rethrown unchanged if there is nothing to collect.
+      let thrown: unknown;
       for (let attempt = 0; attempt < attempts; attempt += 1) {
-        run = await sandbox.process.executeCommand(
-          command,
-          WORK_DIR,
-          environment,
-          positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
-        );
+        thrown = undefined;
+        try {
+          run = await sandbox.process.executeCommand(
+            command,
+            WORK_DIR,
+            environment,
+            positiveInt(process.env.DAYTONA_RUN_TIMEOUT_SECONDS, 1_800)
+          );
+        } catch (error) {
+          thrown = error;
+          run = undefined;
+          break;
+        }
         if (run.exitCode === 0 || !isTransientKnowledgeGenerationFailure(run.result)) break;
         if (attempt + 1 < attempts) {
           const delay = positiveInt(process.env.CONTEXT_CODEX_RETRY_DELAY_SECONDS, 10);
           await sandbox.process.executeCommand(`sleep ${delay}`, WORK_DIR, undefined, delay + 5);
         }
       }
-      if (!run || run.exitCode !== 0) {
-        throw new Error(`Codex knowledge generation failed: ${redact(truncate(run?.result ?? ""), secrets)}`);
-      }
+      const failure = thrown
+        ? new Error(redact(thrown instanceof Error ? thrown.message : inspect(thrown), secrets), { cause: thrown })
+        : !run || run.exitCode !== 0
+          ? new Error(`Codex knowledge generation failed: ${redact(truncate(run?.result ?? ""), secrets)}`)
+          : undefined;
       if (files) {
-        return await this.collectDocumentFiles(sandbox, secrets, input);
+        // A run that exhausts its wall clock has still left finished pages on
+        // disk, and discarding them is the failure mode the file contract was
+        // adopted to remove: the single-message contract lost everything at the
+        // deadline, a folder does not. Salvaging is only honest while each page
+        // is written whole, which is what the prompt requires; the last page may
+        // be truncated, and the citation rule withholds it if it lost its links.
+        const salvaged = await this.collectDocumentFiles(sandbox, secrets, input).catch((error: unknown) => {
+          if (!failure) throw error;
+          return undefined;
+        });
+        if (!failure) return salvaged;
+        const salvagedCount = salvaged?.documents.length ?? 0;
+        if (!keepsPartialCatalog(salvagedCount)) throw failure;
+        console.warn("knowledge_generation_truncated", {
+          reason: failure.message,
+          documents: salvagedCount,
+          repository: input.bundle.checkpoint.repository
+        });
+        return salvaged;
       }
+      if (failure) throw failure;
       const result = await sandbox.fs.downloadFile(
         RESULT_PATH,
         positiveInt(process.env.DAYTONA_RESULT_DOWNLOAD_TIMEOUT_SECONDS, 120)
@@ -348,6 +383,19 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       if (archive) await rm(archive.directory, { recursive: true, force: true }).catch(() => undefined);
     }
   }
+}
+
+/**
+ * Whether a run that failed still produced a catalog worth publishing.
+ *
+ * Only the file contract can answer yes: pages are finished one at a time onto
+ * disk, so a run killed by its wall clock leaves completed work behind. Zero
+ * documents means the failure happened before anything was written, and the
+ * original error is the honest result — publishing an empty catalog would read
+ * as "this repository has no knowledge" rather than "derivation failed".
+ */
+export function keepsPartialCatalog(documentCount: number): boolean {
+  return documentCount > 0;
 }
 
 export async function createRepositoryArchive(

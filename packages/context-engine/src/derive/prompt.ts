@@ -102,6 +102,11 @@ export function buildKnowledgeFilePrompt(bundle: FocusBundle, repairErrors: read
     "Write for somebody who knows how to program but not this repository. Preserve disagreements and unknowns instead of forcing certainty.",
 
     "Because each document is written and then forgotten, you may explore for as long as the repository needs. Prefer covering another area over lengthening a document you already wrote.",
+    // The run has a wall clock it can reach on a large repository. Whatever is on
+    // disk at that moment is kept, so the order pages are written in decides what
+    // survives: breadth-first and most-useful-first degrades into a smaller wiki,
+    // while depth-first on a minor corner degrades into a useless one.
+    "Work in descending order of usefulness, and finish each file completely before starting the next. Write `architecture.md` first, then the core flows, then everything else. Never leave a file half-written to go and explore; a partial run keeps the files already finished.",
     "When you have covered the repository, reply with a one-line summary of what you wrote. The files are the result; your reply is not.",
 
     `Repository: ${repository}`,
