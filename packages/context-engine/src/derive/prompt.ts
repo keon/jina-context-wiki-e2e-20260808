@@ -115,7 +115,16 @@ export function buildKnowledgeFilePrompt(bundle: FocusBundle, repairErrors: read
     // disk at that moment is kept, so the order pages are written in decides what
     // survives: breadth-first and most-useful-first degrades into a smaller wiki,
     // while depth-first on a minor corner degrades into a useless one.
-    "Work in descending order of usefulness, and finish each file completely before starting the next. Write `architecture.md` first, then the core flows, then everything else. Never leave a file half-written to go and explore; a partial run keeps the files already finished.",
+    "Work in descending order of usefulness. Write `architecture.md` first, yourself, before dispatching anything: it is the page a reader starts from, and it is what a run that ends early must not be missing.",
+    // One agent writing a wiki in sequence spends its whole budget on the first
+    // few pages. The pages are independent -- each is one subject, grounded in
+    // its own files -- so they are worth writing at the same time.
+    "Then survey the repository and split it into areas that do not overlap, and dispatch a subagent per area to write that area's pages. Give each subagent its area, the folder to write under, and every rule in this prompt about citations, structure, and finishing a file before starting the next. Run them in parallel; prefer several medium areas over one large one.",
+    "Never give two subagents the same file to write. Two agents writing one page produce a torn page, and the run keeps whatever is on disk.",
+    "As they finish, act as the master agent: read what they wrote, reconcile contradictions between areas, add the cross-links that only make sense once neighbouring pages exist, and write any page that spans areas and so belonged to none of them.",
+    // Progress is read off the directory while the run is going, so finishing
+    // pages steadily is what makes a build watchable rather than opaque.
+    "Have every agent write each file completely before starting the next, and never leave a file half-written to go and explore. Pages are collected while you work, so a finished page is kept even if the run is stopped, and each one appears to the people watching the build as soon as it lands.",
     "When you have covered the repository, reply with a one-line summary of what you wrote. The files are the result; your reply is not.",
 
     `Repository: ${repository}`,

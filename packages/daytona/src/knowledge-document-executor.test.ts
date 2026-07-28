@@ -118,9 +118,13 @@ test("agentic knowledge generation enables only read-only local shell exploratio
   assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--strict-config"));
   assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--skip-git-repo-check"));
   assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--enable shell_tool"));
+  // Subagents are enabled on purpose: pages are independent, and writing them
+  // one after another spends the budget on the first few. They inherit this
+  // sandbox, so the reach of the run is unchanged.
+  assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--enable multi_agent"));
+  assert.equal(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--disable multi_agent" as never), false);
   for (const feature of [
     "shell_snapshot",
-    "multi_agent",
     "apps",
     "browser_use",
     "computer_use",
