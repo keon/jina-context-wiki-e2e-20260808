@@ -73,6 +73,42 @@ export interface QueryMetrics {
   conflictCount: number;
 }
 
+/** A token as anyone but its holder sees it: never the secret, never its hash. */
+export interface ApiTokenRecord {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly principalId: string;
+  readonly name: string;
+  readonly scopes: readonly string[];
+  readonly createdAt: string;
+  readonly createdBy: string;
+  readonly expiresAt: string;
+  readonly lastUsedAt?: string;
+  readonly revokedAt?: string;
+  readonly revokedBy?: string;
+}
+
+export interface MintApiTokenInput {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly principalId: string;
+  readonly name: string;
+  readonly secretHash: string;
+  readonly scopes: readonly string[];
+  readonly createdAt: string;
+  readonly createdBy: string;
+  readonly expiresAt: string;
+}
+
+/** What verification resolves from a presented secret. Liveness is already decided. */
+export interface VerifiedApiToken {
+  readonly tokenId: string;
+  readonly tenantId: string;
+  readonly principalId: string;
+  readonly scopes: readonly string[];
+  readonly lastUsedAt?: string;
+}
+
 export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, ProjectionStore {
   runInTenantScope?<T>(tenantId: string, operation: () => Promise<T>): Promise<T>;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
@@ -103,6 +139,25 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
   }): Promise<RetrievalCandidate[]>;
   recordQueryRun(run: QueryRunTelemetry): Promise<void>;
   queryMetrics(tenantId: string): Promise<QueryMetrics>;
+  /**
+   * Per-principal API tokens. Optional so that a store predating them keeps
+   * satisfying this interface, and so that the absence of an implementation
+   * fails closed: a store that cannot verify a token never authenticates one.
+   *
+   * `verifyApiToken` is the one read in this interface that resolves its own
+   * tenant, so it must run outside any tenant scope; every other method here
+   * knows its tenant and takes it.
+   */
+  verifyApiToken?(secretHash: string): Promise<VerifiedApiToken | undefined>;
+  stampApiTokenUse?(tenantId: string, tokenId: string, usedAt: string): Promise<void>;
+  mintApiToken?(token: MintApiTokenInput): Promise<ApiTokenRecord>;
+  listApiTokens?(tenantId: string): Promise<ApiTokenRecord[]>;
+  revokeApiToken?(
+    tenantId: string,
+    tokenId: string,
+    revokedBy: string,
+    revokedAt: string
+  ): Promise<ApiTokenRecord | undefined>;
   eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }>;
   migrateTenantAliases(fromTenantId: string, toTenantId: string): Promise<void>;
   health(): Promise<{ ok: boolean; adapter: string }>;

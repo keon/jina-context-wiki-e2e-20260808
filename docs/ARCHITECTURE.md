@@ -344,7 +344,14 @@ while a moved ref produces a new isolated generation.
 Health, task definitions, and signed webhook intake are public. `INTERNAL_API_TOKEN`
 authorizes board, worker, administration, and
 `POST /internal/context/access/sync`. `CONTEXT_API_TOKEN` is a narrower server-side
-credential accepted only by `POST /context/query` and `POST /mcp`.
+credential accepted by `POST /context/query`, `POST /mcp`, and the read-only context
+projections.
+
+Per-principal tokens are a third credential kind. A `jina_atk_` bearer is verified against
+`jina_context.api_tokens` and carries its own tenant, principal and scopes, so a caller
+serving many tenants no longer needs a credential bound to one. Identity comes from the
+row; `x-jina-tenant-id` and `x-jina-principal-id` remain assertions that must agree with
+it. Scope grants route reach only — `requireTenantAdmin` still applies on top.
 
 In production the context credential is usable only when
 `JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID` server-side bind it to one

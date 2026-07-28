@@ -77,6 +77,25 @@ route is repository-filtered by that principal's access. Writes, administration,
 traffic, and metrics stay with `INTERNAL_API_TOKEN`, and the method is checked so a write
 cannot reach a read path.
 
+Per-principal tokens are issued rather than configured. A token is
+`jina_atk_<43 chars base64url>`, stored only as a SHA-256 hash in
+`jina_context.api_tokens`, and verified on every request by the `jina_context_tokens`
+capability role — the one role in this schema that reads across tenants, because
+verification resolves the tenant from the token it is looking up. Mint with
+`POST /internal/context/tokens` (body: `principalId`, `name`, `scopes`,
+`expiresInMinutes`, optionally `administrator: true`); the secret is returned once and is
+not retrievable afterwards. List with `GET /internal/context/tokens` and revoke with
+`POST /internal/context/tokens/{id}/revoke`, which takes effect immediately.
+
+Neither `INTERNAL_API_TOKEN` nor `CONTEXT_API_TOKEN` may begin with `jina_atk_`. The
+verification branch runs first and would shadow them; `createApiServer` refuses such a
+configuration at startup rather than at the first request.
+
+Deploying this needs the roles reinstalled, not just the schema applied: the table arrives
+with `CONTEXT_SCHEMA_SQL` at boot, but `jina_context_tokens` reaches the runtime login only
+when the migration runs with `--install-roles`. Until it does, every `jina_atk_` bearer is
+a 401 and nothing else changes.
+
 Every production API revision with a context credential must also set
 `JINA_CONTEXT_TENANT_ID` and `JINA_CONTEXT_PRINCIPAL_ID`. Those values
 server-side bind the query bearer and the access-synchronization mutation target to one

@@ -2134,3 +2134,68 @@ test("stable IDs and fingerprints ignore object key order", () => {
   }));
   assert.equal(fingerprint(largeValue), createHash("sha256").update(canonicalJson(largeValue)).digest("hex"));
 });
+
+test("memory API tokens resolve their own tenant and go invisible once revoked or expired", async () => {
+  const store = new MemoryContextEngineStore(new MemoryContextPipelineCoordinator());
+  const mint = (id: string, tenantId: string, secretHash: string, expiresAt: string) =>
+    store.mintApiToken({
+      id,
+      tenantId,
+      principalId: "user:alice@example.com",
+      name: id,
+      secretHash,
+      scopes: ["context:read"],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      createdBy: "svc:api",
+      expiresAt
+    });
+
+  const live = await mint("atk_live", "tenant-a", "a".repeat(64), "2999-01-01T00:00:00.000Z");
+  await mint("atk_other", "tenant-b", "b".repeat(64), "2999-01-01T00:00:00.000Z");
+  await mint("atk_expired", "tenant-a", "c".repeat(64), "2026-01-02T00:00:00.000Z");
+
+  // The secret never survives a mint or a list, so no read path can leak it.
+  assert.equal("secretHash" in live, false);
+  assert.deepEqual(
+    (await store.listApiTokens("tenant-a")).map((token) => "secretHash" in token),
+    [false, false]
+  );
+
+  // Verification resolves the tenant from the token rather than being told it.
+  assert.equal((await store.verifyApiToken("a".repeat(64)))?.tenantId, "tenant-a");
+  assert.equal((await store.verifyApiToken("b".repeat(64)))?.tenantId, "tenant-b");
+  assert.equal(await store.verifyApiToken("c".repeat(64)), undefined);
+  assert.equal(await store.verifyApiToken("d".repeat(64)), undefined);
+
+  // A duplicate secret cannot be minted twice, matching the unique index.
+  await assert.rejects(mint("atk_dup", "tenant-b", "a".repeat(64), "2999-01-01T00:00:00.000Z"), /Duplicate/);
+
+  await store.stampApiTokenUse("tenant-a", "atk_live", "2026-06-01T00:00:00.000Z");
+  assert.equal((await store.verifyApiToken("a".repeat(64)))?.lastUsedAt, "2026-06-01T00:00:00.000Z");
+
+  // Revocation takes effect immediately, and a second revocation preserves the
+  // first revoker rather than overwriting the audit trail.
+  const revoked = await store.revokeApiToken(
+    "tenant-a",
+    "atk_live",
+    "user:admin@example.com",
+    "2026-06-02T00:00:00.000Z"
+  );
+  assert.equal(revoked?.revokedBy, "user:admin@example.com");
+  assert.equal(await store.verifyApiToken("a".repeat(64)), undefined);
+  const again = await store.revokeApiToken(
+    "tenant-a",
+    "atk_live",
+    "user:someone@example.com",
+    "2026-06-03T00:00:00.000Z"
+  );
+  assert.equal(again?.revokedBy, "user:admin@example.com");
+  assert.equal(again?.revokedAt, "2026-06-02T00:00:00.000Z");
+
+  // A token belonging to another tenant is not revocable, and is not listed.
+  assert.equal(
+    await store.revokeApiToken("tenant-a", "atk_other", "user:admin@example.com", "2026-06-02T00:00:00.000Z"),
+    undefined
+  );
+  assert.equal((await store.verifyApiToken("b".repeat(64)))?.tokenId, "atk_other");
+});

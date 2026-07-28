@@ -16,7 +16,8 @@ import {
   type StructuralFact
 } from "@jina/context-engine";
 import { Pool } from "pg";
-import { ContextDatabase } from "./context/database.js";
+import { PostgresApiTokenRepository } from "./context/api-token-repository.js";
+import { ContextDatabase, contextSystemScope, contextTenantScope } from "./context/database.js";
 import { PostgresContextEmbeddingRepository } from "./context/embedding-repository.js";
 import { PostgresEvidenceRepository } from "./context/evidence-repository.js";
 import { PostgresContextOutboxRepository } from "./context/outbox-repository.js";
@@ -1928,6 +1929,193 @@ test(
       [omittedTenantId]
     );
     assert.equal(crossTenantRows.rows[0]?.count, "0");
+
+    // API tokens invert the usual tenant rule: verification resolves the tenant
+    // from the row, so the lookup runs at system scope and must see across
+    // tenants. That widening is the one thing this table could get catastrophically
+    // wrong, so both halves are asserted — what jina_context_tokens can see, and
+    // what nothing else can.
+    const insertToken = async (
+      tokenTenantId: string,
+      id: string,
+      secretHash: string,
+      createdAt: string,
+      expiresAt: string,
+      revokedAt: string | undefined
+    ): Promise<void> => {
+      await runtimeDatabase.queryAs(
+        "jina_context_tokens",
+        contextTenantScope(tokenTenantId),
+        `insert into jina_context.api_tokens
+           (id,tenant_id,principal_id,name,secret_hash,scopes,created_at,created_by,expires_at,revoked_at,revoked_by)
+         values ($1,$2,'user:tokens@example.com','integration',$3,array['context:read'],$4,'svc:api',$5,$6,$7)`,
+        [
+          id,
+          tokenTenantId,
+          secretHash,
+          createdAt,
+          expiresAt,
+          revokedAt ?? null,
+          revokedAt === undefined ? null : "user:revoker@example.com"
+        ]
+      );
+    };
+    const past = "2026-01-01T00:00:00.000Z";
+    const longAgo = "2025-01-01T00:00:00.000Z";
+    const future = "2999-01-01T00:00:00.000Z";
+    await insertToken(tenantId, "atk_live_primary", "a".repeat(64), past, future, undefined);
+    await insertToken(omittedTenantId, "atk_live_other", "b".repeat(64), past, future, undefined);
+    await insertToken(tenantId, "atk_revoked", "c".repeat(64), past, future, past);
+    await insertToken(tenantId, "atk_expired", "d".repeat(64), longAgo, past, undefined);
+
+    // Live rows for BOTH tenants resolve at system scope: that is what makes a
+    // token able to name its own tenant.
+    const verifiable = await runtimeDatabase.queryAs<{ id: string }>(
+      "jina_context_tokens",
+      contextSystemScope,
+      "select id from jina_context.api_tokens order by id"
+    );
+    assert.deepEqual(
+      verifiable.rows.map((row) => row.id),
+      ["atk_live_other", "atk_live_primary"]
+    );
+
+    // A revoked or expired token is invisible rather than merely rejected, so no
+    // bug in the verify path can resurrect one.
+    const revokedLookup = await runtimeDatabase.queryAs<{ id: string }>(
+      "jina_context_tokens",
+      contextSystemScope,
+      "select id from jina_context.api_tokens where secret_hash=any($1)",
+      [["c".repeat(64), "d".repeat(64)]]
+    );
+    assert.deepEqual(revokedLookup.rows, []);
+
+    // At tenant scope the standard policy governs, so the widening does not leak
+    // sideways into ordinary reads.
+    const tenantScoped = await runtimeDatabase.queryAs<{ id: string }>(
+      "jina_context_tokens",
+      contextTenantScope(tenantId),
+      "select id from jina_context.api_tokens order by id"
+    );
+    assert.deepEqual(
+      tenantScoped.rows.map((row) => row.id),
+      ["atk_expired", "atk_live_primary", "atk_revoked"]
+    );
+
+    // Containment comes from the GRANT list: another capability role is refused
+    // outright.
+    await assert.rejects(
+      runtimeDatabase.queryAs("jina_context_query", contextSystemScope, "select 1 from jina_context.api_tokens"),
+      /permission denied/
+    );
+
+    // And the blanket tenant-admin grant is real, so the property the containment
+    // argument actually rests on is that it reads nothing at system scope.
+    const adminAtSystemScope = await runtimeDatabase.queryAs<{ count: string }>(
+      "jina_context_tenant_admin",
+      contextSystemScope,
+      "select count(*)::text count from jina_context.api_tokens"
+    );
+    assert.equal(adminAtSystemScope.rows[0]?.count, "0");
+
+    // The scope enumeration lives in a NAMED constraint reasserted on every schema
+    // run, not only inside `create table if not exists`, so phase 2 can widen it on
+    // a database this has already touched. Asserting by name is what pins that.
+    await assert.rejects(
+      runtimeDatabase.queryAs(
+        "jina_context_tokens",
+        contextTenantScope(tenantId),
+        `insert into jina_context.api_tokens
+           (id,tenant_id,principal_id,name,secret_hash,scopes,created_at,created_by,expires_at)
+         values ('atk_bad_scope',$1,'user:tokens@example.com','integration',$2,
+                 array['context:usage'],$3,'svc:api',$4)`,
+        [tenantId, "e".repeat(64), past, future]
+      ),
+      /api_tokens_scopes_known/
+    );
+
+    // The other half of that constraint, asserted separately because it is easy to
+    // write in a form that never fires: `array_length('{}',1)` is NULL, not 0, and
+    // a CHECK evaluating to NULL is treated as satisfied, so a scopeless token
+    // would be accepted by a predicate that looks correct.
+    await assert.rejects(
+      runtimeDatabase.queryAs(
+        "jina_context_tokens",
+        contextTenantScope(tenantId),
+        `insert into jina_context.api_tokens
+           (id,tenant_id,principal_id,name,secret_hash,scopes,created_at,created_by,expires_at)
+         values ('atk_no_scope',$1,'user:tokens@example.com','integration',$2,
+                 array[]::text[],$3,'svc:api',$4)`,
+        [tenantId, "0".repeat(64), past, future]
+      ),
+      /api_tokens_scopes_known/
+    );
+
+    // The verification index is global across tenants, which is what makes a
+    // lookup one read — and therefore what stops the same secret being minted twice.
+    await assert.rejects(
+      insertToken(omittedTenantId, "atk_duplicate", "a".repeat(64), past, future, undefined),
+      /context_api_tokens_secret/
+    );
+
+    // The same properties through the repository the API will actually call,
+    // rather than through raw SQL.
+    const tokens = new PostgresApiTokenRepository(runtimeDatabase);
+    const minted = await tokens.mintApiToken({
+      id: "atk_minted",
+      tenantId,
+      principalId: "user:minted@example.com",
+      name: "integration mint",
+      secretHash: "f".repeat(64),
+      scopes: ["context:read", "context:query"],
+      createdAt: past,
+      createdBy: "svc:api",
+      expiresAt: future
+    });
+    assert.equal(minted.principalId, "user:minted@example.com");
+    assert.deepEqual([...minted.scopes], ["context:read", "context:query"]);
+    assert.equal("secretHash" in minted, false);
+
+    // Verification runs at system scope and must therefore work outside any
+    // tenant scope — and must keep working inside one, since request handling
+    // enters a tenant scope only after the principal is known.
+    const verified = await tokens.verifyApiToken("f".repeat(64));
+    assert.equal(verified?.tenantId, tenantId);
+    assert.equal(verified?.principalId, "user:minted@example.com");
+    assert.equal(await tokens.verifyApiToken("0".repeat(64)), undefined);
+
+    await tokens.stampApiTokenUse(tenantId, "atk_minted", past);
+    assert.ok((await tokens.verifyApiToken("f".repeat(64)))?.lastUsedAt);
+
+    // Listing is tenant-filtered and never surfaces a hash.
+    const listed = await tokens.listApiTokens(tenantId);
+    assert.deepEqual(listed.map((token) => token.id).sort(), [
+      "atk_expired",
+      "atk_live_primary",
+      "atk_minted",
+      "atk_revoked"
+    ]);
+    assert.equal(
+      listed.some((token) => "secretHash" in token),
+      false
+    );
+    assert.deepEqual(
+      (await tokens.listApiTokens(omittedTenantId)).map((token) => token.id),
+      ["atk_live_other"]
+    );
+
+    // Revocation is immediate, idempotent, and preserves the first revoker.
+    const revoked = await tokens.revokeApiToken(tenantId, "atk_minted", "user:admin@example.com", past);
+    assert.equal(revoked?.revokedBy, "user:admin@example.com");
+    assert.equal(await tokens.verifyApiToken("f".repeat(64)), undefined);
+    const revokedAgain = await tokens.revokeApiToken(tenantId, "atk_minted", "user:other@example.com", future);
+    assert.equal(revokedAgain?.revokedBy, "user:admin@example.com");
+
+    // A token in another tenant is invisible to revoke, so a caller cannot even
+    // learn that it exists.
+    assert.equal(await tokens.revokeApiToken(tenantId, "atk_live_other", "user:admin@example.com", past), undefined);
+    assert.equal((await tokens.verifyApiToken("b".repeat(64)))?.tokenId, "atk_live_other");
+
     await runtimeStore.close();
     await database.pool.query(`revoke ${CONTEXT_RUNTIME_ROLES.join(",")} from ${runtimeRole}`);
     await database.pool.query(`drop role ${runtimeRole}`);

@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
   applyCommand,
@@ -32,8 +32,10 @@ import {
   evidenceSourceTypes,
   fingerprint,
   isContextTaskType,
+  newId,
   selectPriorKnowledge,
   stableId,
+  type ApiTokenRecord,
   type ContextBuild,
   type ContextEngineStore,
   type ContextPipelineCoordinator,
@@ -43,7 +45,8 @@ import {
   type IngestEvidenceInput,
   type KnowledgeDocumentGenerator,
   type KnowledgeRevisionEvent,
-  type QueryContextRequest
+  type QueryContextRequest,
+  type VerifiedApiToken
 } from "@jina/context-engine";
 import type { ParsedGitHubWebhook } from "@jina/github";
 import { isContextTrigger } from "@jina/github";
@@ -145,6 +148,101 @@ interface Principal {
   readonly tenantId: string;
   readonly principalId: string;
   readonly forwarded: boolean;
+  /**
+   * Present only for an issued token. `exactOptionalPropertyTypes` is on, so the
+   * static-credential return sites keep working precisely because they omit these
+   * keys; nothing may ever assign `undefined` to them.
+   */
+  readonly scopes?: readonly ContextScope[];
+  readonly tokenId?: string;
+}
+
+type ContextScope = "context:query" | "context:read" | "context:build" | "context:admin";
+
+/**
+ * What `CONTEXT_API_TOKEN` reaches, stated as scopes. Reading is part of
+ * answering — a caller cannot ask about what it cannot find — so the read-only
+ * projections sit beside the query scope. Writes, administration and board
+ * traffic stay with the internal credential.
+ */
+const CONTEXT_CREDENTIAL_SCOPES: readonly ContextScope[] = ["context:query", "context:read"];
+
+const CONTEXT_SCOPES = ["context:query", "context:read", "context:build", "context:admin"] as const;
+
+function isContextScope(value: string): value is ContextScope {
+  return (CONTEXT_SCOPES as readonly string[]).includes(value);
+}
+
+const API_TOKEN_PATTERN = /^jina_atk_[A-Za-z0-9_-]{43}$/;
+
+/** Long enough that the write is rare, short enough to be useless to a reader. */
+const API_TOKEN_USE_STAMP_MS = 60_000;
+
+/**
+ * Minutes rather than days, because phase 4 delegates short-lived tokens per
+ * tenant and a one-day floor would mean a fleet of day-long bearer tokens held in
+ * a web tier's memory. Day-shaped lifetimes are a presentation choice.
+ */
+const MIN_API_TOKEN_MINUTES = 5;
+const MAX_API_TOKEN_MINUTES = 525_600;
+
+/**
+ * The privilege boundary of this phase. `isTenantAdmin` is a pure string test on
+ * the principal id, and a minted token's principal comes from a database row
+ * rather than a header — so it never passes through
+ * `normalizedForwardedPrincipal`, the only filter standing between a caller and
+ * administrator status today. Without these refusals a minter could issue a
+ * read-scoped token whose principal makes it a tenant administrator everywhere it
+ * reaches.
+ */
+function refusedTokenPrincipal(
+  principalId: string,
+  administrator: boolean,
+  config: ApiServerConfig
+): string | undefined {
+  const normalized = normalizedForwardedPrincipal(principalId);
+  // Normalization is checked first so every test below runs on the normalized
+  // string; otherwise `TENANT:…` or a leading space walks past a prefix test.
+  if (!normalized) return "principal must be a recognisable user, tenant or service principal";
+  if (normalized.startsWith("tenant:")) {
+    return "a tenant principal confers tenant administration and cannot be issued as a token";
+  }
+  if (normalized.startsWith("svc:")) {
+    return "a service principal names no accountable person and cannot be issued as a token";
+  }
+  if (isConfiguredTenantAdmin(normalized, config) && !administrator) {
+    return "this principal is a tenant administrator; pass administrator: true to issue it deliberately";
+  }
+  return undefined;
+}
+
+/**
+ * Whether a normalized principal is one the deployment has named an
+ * administrator. Deliberately wider than the privilege it guards: the configured
+ * list is raw trimmed env with no lowercasing, so a mixed-case entry confers
+ * nothing today, and treating it as administrative anyway is the safe direction —
+ * and keeps working on the day somebody corrects the entry.
+ */
+function isConfiguredTenantAdmin(normalizedPrincipalId: string, config: ApiServerConfig): boolean {
+  return (config.tenantAdminPrincipalIds ?? []).map((id) => id.trim().toLowerCase()).includes(normalizedPrincipalId);
+}
+
+function unsupportedApiTokenStore(): never {
+  throw new ApiError(501, "unsupported", "this deployment does not store API tokens");
+}
+
+/** Never the secret, never its hash: those exist only in the mint response. */
+function publicApiToken(token: ApiTokenRecord): Record<string, unknown> {
+  return {
+    id: token.id,
+    name: token.name,
+    principalId: token.principalId,
+    scopes: token.scopes,
+    createdAt: token.createdAt,
+    expiresAt: token.expiresAt,
+    ...(token.lastUsedAt ? { lastUsedAt: token.lastUsedAt } : {}),
+    ...(token.revokedAt ? { revokedAt: token.revokedAt } : {})
+  };
 }
 
 /** Creates the HTTP API without binding a port. */
@@ -153,11 +251,72 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   if (!Number.isSafeInteger(contextWorkerLeaseMs) || contextWorkerLeaseMs <= 0) {
     throw new Error("contextWorkerLeaseMs must be a positive safe integer");
   }
+  // A static secret shaped like an issued token would be shadowed by the token
+  // branch and could never authenticate, taking the deployment offline. Refuse at
+  // construction rather than at the first request.
+  for (const staticToken of [config.internalApiToken, config.contextApiToken]) {
+    if (staticToken?.startsWith("jina_atk_")) {
+      throw new Error("static API tokens must not use the jina_atk_ prefix reserved for issued tokens");
+    }
+  }
   const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
   const metrics = new MetricsRegistry();
   const startedAt = nowIso();
   const contextCoordinator = config.contextCoordinator ?? new MemoryContextPipelineCoordinator();
   const contextStore = config.contextStore ?? new MemoryContextEngineStore(contextCoordinator);
+
+  /**
+   * Resolves a presented secret to its principal, or `undefined`. Every failure —
+   * unknown hash, expired, revoked, a store that does not implement verification,
+   * or a lookup that throws — answers identically, so the response never says
+   * which tokens exist or why one stopped working.
+   */
+  async function verifyApiToken(token: string): Promise<Principal | undefined> {
+    if (!contextStore.verifyApiToken) return undefined;
+    const secretHash = createHash("sha256").update(token, "utf8").digest("hex");
+    let verified: VerifiedApiToken | undefined;
+    try {
+      verified = await contextStore.verifyApiToken(secretHash);
+    } catch (error: unknown) {
+      // Fail closed. A throw here is a database or role problem, not a credential
+      // problem, and 401 is the only answer that cannot accidentally admit
+      // anybody. Without this the rejection escapes into the request's catch and
+      // the caller gets a 500.
+      logger.warn("api token verification failed", {
+        event: "api.token.verify_failed",
+        ...errorLogFields(error)
+      });
+      return undefined;
+    }
+    if (!verified) return undefined;
+    stampApiTokenUse(verified);
+    return {
+      tenantId: verified.tenantId,
+      principalId: verified.principalId,
+      forwarded: true,
+      scopes: verified.scopes.filter(isContextScope),
+      tokenId: verified.tokenId
+    };
+  }
+
+  /**
+   * Coarsened to a minute and never awaited. Exact would be one UPDATE of a
+   * single hot row per request — lock contention and WAL churn proportional to
+   * traffic, on a path that must not be able to fail a request that has already
+   * authenticated.
+   */
+  function stampApiTokenUse(token: VerifiedApiToken): void {
+    if (token.lastUsedAt && Date.now() - Date.parse(token.lastUsedAt) < API_TOKEN_USE_STAMP_MS) return;
+    const stamped = contextStore.stampApiTokenUse?.(token.tenantId, token.tokenId, nowIso());
+    if (!stamped) return;
+    void stamped.catch((error: unknown) => {
+      logger.warn("api token last-used stamp failed", {
+        event: "api.token.stamp_failed",
+        tokenId: token.tokenId,
+        ...errorLogFields(error)
+      });
+    });
+  }
   let intakeState = createGitHubIntakeState();
   let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
@@ -290,11 +449,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     };
     response.once("finish", () => settle(false));
     response.once("close", () => settle(true));
-    const scopePrincipal = authenticatedPrincipal(request, config, pathname);
-    const routed =
-      scopePrincipal && scopePrincipal.tenantId !== "*" && contextStore.runInTenantScope
-        ? contextStore.runInTenantScope(scopePrincipal.tenantId, () => route(request, response))
-        : route(request, response);
+    // Resolved once and passed down. Two calls would mean two lookups, two
+    // last-used stamps, and — worse — two reads under different database scopes,
+    // since this one runs before any tenant scope is entered and the second would
+    // run inside it. The wrapping IIFE keeps `routed` a synchronously-produced
+    // promise, so the catch below stays the sole error-to-response path and now
+    // also covers a throw raised during verification.
+    const routed = (async () => {
+      const principal = await authenticatedPrincipal(request, config, pathname, verifyApiToken);
+      return principal && principal.tenantId !== "*" && contextStore.runInTenantScope
+        ? contextStore.runInTenantScope(principal.tenantId, () => route(request, response, principal))
+        : route(request, response, principal);
+    })();
     void routed.catch((error: unknown) => {
       if (response.destroyed || response.socket?.destroyed) return;
       const apiError = httpError(error);
@@ -313,7 +479,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
   });
 
-  async function route(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  async function route(
+    request: IncomingMessage,
+    response: ServerResponse,
+    principal: Principal | undefined
+  ): Promise<void> {
     await ready;
     const url = new URL(request.url ?? "/", "http://localhost");
     if (!isReadOnlyContextRoute(request.method, url.pathname) && !url.pathname.startsWith("/internal/")) {
@@ -362,7 +532,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
-    const principal = authenticatedPrincipal(request, config, url.pathname);
     if (!principal) {
       json(response, 401, { error: "unauthorized" });
       return;
@@ -372,9 +541,35 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 401, { error: "internal credential required" });
       return;
     }
+    // Only an issued token carries scopes; the static credentials keep the reach
+    // they had, decided during authentication. Placed after the `/internal/` gate,
+    // so a token on an internal path gets that gate's 401 — except access-sync,
+    // which the gate exempts and which therefore lands here and gets 403.
+    if (principal.scopes) {
+      const required = requiredScope(url.pathname, request.method ?? "GET");
+      if (required === "internal-only" || !principal.scopes.includes(required)) {
+        throw new ApiError(403, "insufficient_scope", "token scope does not permit this route");
+      }
+    }
 
     if (request.method === "POST" && url.pathname === "/internal/context/access/sync") {
       await synchronizeRepositoryAccess(request, response, principal);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/tokens") {
+      await mintApiToken(request, response);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/internal/context/tokens") {
+      await listApiTokens(request, response);
+      return;
+    }
+    if (
+      request.method === "POST" &&
+      url.pathname.startsWith("/internal/context/tokens/") &&
+      url.pathname.endsWith("/revoke")
+    ) {
+      await revokeApiToken(request, response, routeId(url.pathname, "/internal/context/tokens/", "/revoke"));
       return;
     }
     if (url.pathname === "/mcp") {
@@ -951,6 +1146,129 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { principalId: principal.principalId, repositoryCount: repositories.length, mode });
   }
 
+  /**
+   * The tenant a credential-management request acts for. Caller-selected, which
+   * is worth saying plainly: the internal credential has no tenant binding and can
+   * already act for any tenant on every other route, so this grants it no new
+   * reach. What is new is that it can issue a durable credential, and the controls
+   * for that are the principal refusals in `refusedTokenPrincipal`, `created_by`
+   * recording who minted it, and the `/internal/` gate ensuring a minted token can
+   * never itself mint.
+   */
+  function tokenRequestTenantId(request: IncomingMessage): string {
+    const tenantId = config.sharedIdentityResolver
+      ? normalizedTenantId(firstHeader(request.headers["x-jina-tenant-id"]))
+      : config.tenantId;
+    if (!tenantId) throw invalidRequest("x-jina-tenant-id is required");
+    return tenantId;
+  }
+
+  function tokenRequestActor(request: IncomingMessage): string {
+    return normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"])) ?? "svc:api";
+  }
+
+  /**
+   * Credential management needs a store that implements it. The port's methods
+   * are optional so that adding them broke no existing implementation, which
+   * means the endpoints have to say so rather than assume.
+   */
+  function requireApiTokenStore(): Required<
+    Pick<ContextEngineStore, "mintApiToken" | "listApiTokens" | "revokeApiToken">
+  > {
+    if (!contextStore.mintApiToken || !contextStore.listApiTokens || !contextStore.revokeApiToken) {
+      throw new ApiError(501, "unsupported", "this deployment does not store API tokens");
+    }
+    return {
+      mintApiToken: (token) => contextStore.mintApiToken?.(token) ?? unsupportedApiTokenStore(),
+      listApiTokens: (tenantId) => contextStore.listApiTokens?.(tenantId) ?? unsupportedApiTokenStore(),
+      revokeApiToken: (tenantId, tokenId, revokedBy, revokedAt) =>
+        contextStore.revokeApiToken?.(tenantId, tokenId, revokedBy, revokedAt) ?? unsupportedApiTokenStore()
+    };
+  }
+
+  async function mintApiToken(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const store = requireApiTokenStore();
+    const tenantId = tokenRequestTenantId(request);
+    const body = parseJsonObject(await readRawBody(request));
+    const principalId = requiredString(body.principalId, "principalId");
+    const name = requiredString(body.name, "name");
+    const administrator = body.administrator === true;
+    if (body.administrator !== undefined && typeof body.administrator !== "boolean") {
+      throw invalidRequest("administrator must be a boolean");
+    }
+    const refusal = refusedTokenPrincipal(principalId, administrator, config);
+    if (refusal) throw invalidRequest(refusal);
+    const principal = normalizedForwardedPrincipal(principalId)!;
+    if (!Array.isArray(body.scopes) || body.scopes.length === 0) {
+      throw invalidRequest("scopes must be a non-empty array");
+    }
+    const scopes = [...new Set(body.scopes.map((scope) => requiredString(scope, "scope")))];
+    for (const scope of scopes) {
+      if (!isContextScope(scope)) throw invalidRequest(`unsupported scope ${scope}`);
+    }
+    // A token carrying these on a non-administrator principal is issued dead: it
+    // reaches the route and is then refused by requireTenantAdmin. Refusing here
+    // makes that a mint-time error rather than a puzzle at first use.
+    //
+    // Gated on what the principal *is*, never on the body's `administrator` flag.
+    // That flag is the caller acknowledging it means to issue an administrator
+    // token; letting it also assert the fact would make it self-certifying, and a
+    // caller could mint an admin-scoped token for an ordinary principal by setting
+    // it.
+    if (
+      !isConfiguredTenantAdmin(principal, config) &&
+      scopes.some((scope) => scope === "context:build" || scope === "context:admin")
+    ) {
+      throw invalidRequest("context:build and context:admin require an administrator principal");
+    }
+    const expiresInMinutes = requiredPositiveInteger(body.expiresInMinutes, "expiresInMinutes");
+    if (expiresInMinutes < MIN_API_TOKEN_MINUTES || expiresInMinutes > MAX_API_TOKEN_MINUTES) {
+      throw invalidRequest(`expiresInMinutes must be between ${MIN_API_TOKEN_MINUTES} and ${MAX_API_TOKEN_MINUTES}`);
+    }
+    const secret = `jina_atk_${randomBytes(32).toString("base64url")}`;
+    const createdAt = nowIso();
+    const token = await store.mintApiToken({
+      id: newId("atk"),
+      tenantId,
+      principalId: principal,
+      name,
+      secretHash: createHash("sha256").update(secret, "utf8").digest("hex"),
+      scopes,
+      createdAt,
+      createdBy: tokenRequestActor(request),
+      expiresAt: new Date(Date.parse(createdAt) + expiresInMinutes * 60_000).toISOString()
+    });
+    // The only time the secret exists outside the caller's hands. `writeHead`
+    // merges headers already set on the response, so this survives `json`.
+    response.setHeader("cache-control", "no-store");
+    json(response, 201, { secret, token: publicApiToken(token) });
+  }
+
+  async function listApiTokens(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const store = requireApiTokenStore();
+    const tenantId = tokenRequestTenantId(request);
+    const now = Date.now();
+    const tokens = (await store.listApiTokens(tenantId))
+      .filter((token) => !token.revokedAt && Date.parse(token.expiresAt) > now)
+      .map(publicApiToken);
+    json(response, 200, { tokens });
+  }
+
+  async function revokeApiToken(
+    request: IncomingMessage,
+    response: ServerResponse,
+    tokenId: string | undefined
+  ): Promise<void> {
+    const store = requireApiTokenStore();
+    const tenantId = tokenRequestTenantId(request);
+    if (!tokenId) throw notFound("api token not found");
+    const revoked = await store.revokeApiToken(tenantId, tokenId, tokenRequestActor(request), nowIso());
+    // A token in another tenant is a 404 rather than an idempotent 200, which
+    // would confirm that it exists.
+    if (!revoked) throw notFound("api token not found");
+    json(response, 200, { token: publicApiToken(revoked) });
+  }
+
   async function queryContext(principal: Principal, requestValue: QueryContextRequest) {
     const normalizedRequest = {
       ...requestValue,
@@ -1376,11 +1694,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   return server;
 }
 
-function authenticatedPrincipal(
+async function authenticatedPrincipal(
   request: IncomingMessage,
   config: ApiServerConfig,
-  pathname: string
-): Principal | undefined {
+  pathname: string,
+  verifyApiToken: (token: string) => Promise<Principal | undefined>
+): Promise<Principal | undefined> {
+  const authorization = firstHeader(request.headers.authorization);
+  const presented = authorization?.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+  if (presented && API_TOKEN_PATTERN.test(presented)) {
+    // Terminal, and first in the function. A shape-matched token is never
+    // reinterpreted as a shared secret, so an issued token cannot fall through to
+    // a static path. It goes ahead of the dev branch too: that branch returns
+    // without reading any bearer and takes identity from unvalidated headers, so a
+    // token presented to a dev-enabled server would otherwise be ignored and the
+    // caller would be whoever the headers claim.
+    const principal = await verifyApiToken(presented);
+    return principal && assertedIdentity(request, config, principal);
+  }
   if (config.enableDevEndpoints) {
     return {
       tenantId: firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default",
@@ -1388,7 +1719,6 @@ function authenticatedPrincipal(
       forwarded: true
     };
   }
-  const authorization = firstHeader(request.headers.authorization);
   const internal = Boolean(config.internalApiToken && authorization === `Bearer ${config.internalApiToken}`);
   const context = Boolean(
     config.contextApiToken &&
@@ -1440,6 +1770,34 @@ function authenticatedPrincipal(
   return { tenantId, principalId: forwarded ?? "svc:api", forwarded: forwarded !== undefined };
 }
 
+/**
+ * The row is authoritative; a header only has to agree with it. Present and
+ * disagreeing is rejected rather than reinterpreted, which is what the two
+ * config-bound branches already do and what makes multi-tenant access safe:
+ * every token names its own tenant, so nothing trusts a caller's claim about
+ * which tenant it is acting for.
+ *
+ * The comparisons are deliberately the same ones those branches use, which makes
+ * them asymmetric: `normalizedForwardedPrincipal` lowercases, so the principal
+ * header is case-insensitive, while `contextCredentialTenantId` in fixed tenancy
+ * does not, so the tenant header is not.
+ */
+function assertedIdentity(
+  request: IncomingMessage,
+  config: ApiServerConfig,
+  principal: Principal
+): Principal | undefined {
+  const tenantHeader = firstHeader(request.headers["x-jina-tenant-id"]);
+  const principalHeader = firstHeader(request.headers["x-jina-principal-id"]);
+  if (tenantHeader !== undefined && contextCredentialTenantId(tenantHeader, config) !== principal.tenantId) {
+    return undefined;
+  }
+  if (principalHeader !== undefined && normalizedForwardedPrincipal(principalHeader) !== principal.principalId) {
+    return undefined;
+  }
+  return principal;
+}
+
 function requireBoundPrincipal(principal: Principal, config: ApiServerConfig): void {
   if (!config.enableDevEndpoints && !principal.forwarded) {
     throw new ApiError(401, "bound_principal_required", "a bound principal is required");
@@ -1453,24 +1811,48 @@ function hasInternalApiCredential(request: IncomingMessage, config: ApiServerCon
 }
 
 /**
- * Routes the narrow context credential may reach. Answering a question is
- * useless without the reads that let a caller find what to ask about, so the
- * read-only context projections are included. They are safe for this credential
- * for the same reasons the query route is: it is bound server-side to one tenant
- * and principal, and every one of these routes is repository-filtered by that
- * principal's access. Writes, administration, and board traffic stay with the
- * internal credential, so the method is checked rather than assumed.
+ * The scope a route demands, or `"internal-only"` for routes no issued token may
+ * reach. Never `undefined`: a lookup that answers `undefined` for a route it does
+ * not recognise is indistinguishable from one answering `undefined` for a route
+ * that needs no scope, and the second reading would silently open `/board`,
+ * `/events`, the `/internal/` namespace and every route added after this one. The
+ * map is exhaustive over what a token may reach; everything else, including the
+ * 404 fallback, is closed by construction until somebody opens it deliberately.
  */
-function isContextCredentialRoute(pathname: string, method: string): boolean {
-  if (method === "POST") return pathname === "/mcp" || pathname === "/context/query";
-  if (method !== "GET") return false;
-  return (
-    pathname === "/context/structure" ||
+function requiredScope(pathname: string, method: string): ContextScope | "internal-only" {
+  if (method === "POST") {
+    if (pathname === "/mcp" || pathname === "/context/query") return "context:query";
+    if (pathname === "/context/build" || pathname === "/context/rebuild") return "context:build";
+    if (pathname === "/context/erasure") return "context:admin";
+    if (pathname.startsWith("/context/knowledge/") && pathname.endsWith("/review")) return "context:admin";
+    return "internal-only";
+  }
+  if (method !== "GET") return "internal-only";
+  if (pathname === "/context/metrics") return "context:admin";
+  return pathname === "/context/structure" ||
     pathname === "/context/generations" ||
     pathname === "/context/documents" ||
     isSingleSegmentChildOf(pathname, "/context/generations") ||
     isSingleSegmentChildOf(pathname, "/context/documents")
-  );
+    ? "context:read"
+    : "internal-only";
+}
+
+/**
+ * Routes the narrow context credential may reach, now derived from the scope map
+ * rather than restated. The union of the query and read scopes is exactly the set
+ * this predicate admitted before, so its behaviour is unchanged.
+ *
+ * This stays a separate helper on purpose. For the static credential the route
+ * check is part of *authentication* — an out-of-scope path makes the credential
+ * not match at all, and the request is a 401, because the server genuinely cannot
+ * tell "wrong token" from "right token, wrong route". An issued token
+ * authenticates first and is refused on scope afterwards, which is a different
+ * fact and gets a 403.
+ */
+function isContextCredentialRoute(pathname: string, method: string): boolean {
+  const required = requiredScope(pathname, method);
+  return required !== "internal-only" && CONTEXT_CREDENTIAL_SCOPES.includes(required);
 }
 
 /** Matches `${parent}/{id}` without matching a deeper path such as `${parent}/{id}/review`. */
@@ -1889,6 +2271,7 @@ const METRICS_ROUTES = new Set([
   "/context/rebuild",
   "/context/erasure",
   "/internal/context/access/sync",
+  "/internal/context/tokens",
   "/internal/context/ingest",
   "/internal/context/derive/prepare",
   "/internal/context/derive/commit",
@@ -1905,6 +2288,7 @@ function metricsRoute(pathname: string): string {
   if (routeId(pathname, "/context/generations/")) return "/context/generations/:id";
   if (routeId(pathname, "/context/documents/")) return "/context/documents/:id";
   if (routeId(pathname, "/context/knowledge/", "/review")) return "/context/knowledge/:id/review";
+  if (routeId(pathname, "/internal/context/tokens/", "/revoke")) return "/internal/context/tokens/:id/revoke";
   return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
 }
 

@@ -205,7 +205,13 @@ The schema defines focused NOLOGIN roles:
 `jina_context_manifest`, `jina_context_knowledge_current`, `jina_context_lexical`,
 `jina_context_dense`, `jina_context_hierarchy`, `jina_context_structural`,
 `jina_context_identity`, `jina_context_acl`, `jina_context_retention`,
-`jina_context_query`, `jina_context_tenant_admin`, and `jina_context_admin`.
+`jina_context_query`, `jina_context_tokens`, `jina_context_tenant_admin`, and
+`jina_context_admin`.
+
+`jina_context_tokens` is the one capability that reads across tenants. It exists because
+verifying an API token resolves the tenant _from_ the token, so the lookup cannot already be
+tenant-scoped; its permissive policy is confined to system scope and to live rows, and its
+grants are `select,insert` plus `update` on three columns.
 
 Application logins must not own the schema. The migration principal owns schema changes
 and installs/grants the capability roles. The runtime login is `NOINHERIT`, so role

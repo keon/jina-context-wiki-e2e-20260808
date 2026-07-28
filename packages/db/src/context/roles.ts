@@ -12,6 +12,7 @@ export const CONTEXT_ROLES = [
   "jina_context_acl",
   "jina_context_retention",
   "jina_context_query",
+  "jina_context_tokens",
   "jina_context_tenant_admin",
   "jina_context_admin"
 ] as const;
@@ -82,7 +83,8 @@ const tenantScopedTables = [
   "identity_projection",
   "repository_acl_projection",
   "query_runs",
-  "retrieval_metrics"
+  "retrieval_metrics",
+  "api_tokens"
 ] as const;
 
 /**
@@ -277,6 +279,10 @@ grant select,insert on
   jina_context.retrieval_metrics
 to jina_context_query;
 
+grant select,insert on jina_context.api_tokens to jina_context_tokens;
+grant update (last_used_at,revoked_at,revoked_by) on jina_context.api_tokens
+  to jina_context_tokens;
+
 grant all privileges on all tables in schema jina_context to
   jina_context_tenant_admin,jina_context_admin;
 grant all privileges on all sequences in schema jina_context to
@@ -451,6 +457,22 @@ create policy context_answer_citations_tenant_scope on jina_context.answer_citat
       where run.id=answer_citations.query_run_id
         and ${tenantScopeSql("run.tenant_id")}
     )
+  );
+
+-- Verification resolves a token before any tenant is known, so it cannot run at
+-- tenant scope and the standard policy below cannot serve it: that policy's only
+-- cross-tenant escape names jina_context_admin, which the runtime login does not
+-- hold. This permissive policy adds exactly that one read. The '*' guard keeps it
+-- from widening reads at tenant scope, where the standard policy governs, and the
+-- liveness predicate makes a revoked or expired token invisible rather than
+-- merely rejected, so a bug in the verify path cannot resurrect one.
+drop policy if exists context_api_tokens_verify on jina_context.api_tokens;
+create policy context_api_tokens_verify on jina_context.api_tokens
+  for select to jina_context_tokens
+  using (
+    current_setting('jina.tenant_id',true)='*'
+    and revoked_at is null
+    and expires_at > now()
   );
 
 ${tenantScopedTables

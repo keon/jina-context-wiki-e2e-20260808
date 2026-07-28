@@ -1156,6 +1156,45 @@ create index if not exists context_retrieval_metrics_scope
   on jina_context.retrieval_metrics
   (tenant_id,repository,metric_name,recorded_at desc);
 
+create table if not exists jina_context.api_tokens (
+  id text not null check (id ~ '^atk_'),
+  tenant_id text not null,
+  principal_id text not null check (principal_id ~ '^(user|tenant|svc):'),
+  name text not null,
+  -- sha256 hex of the presented jina_atk_ string, never the secret. Plain
+  -- SHA-256 rather than a password hash is correct only while the body stays 256
+  -- bits of randomBytes with no user-chosen entropy: stretching buys nothing
+  -- against an unguessable secret and costs a KDF on every request. If this ever
+  -- becomes shorter or user-chosen, the hash must change with it.
+  secret_hash text not null check (secret_hash ~ '^[0-9a-f]{64}$'),
+  scopes text[] not null constraint api_tokens_scopes_known check (
+    cardinality(scopes) >= 1
+    and scopes <@ array['context:query','context:read','context:build','context:admin']::text[]
+  ),
+  created_at timestamptz not null,
+  created_by text not null,
+  expires_at timestamptz not null check (expires_at > created_at),
+  last_used_at timestamptz,
+  revoked_at timestamptz,
+  revoked_by text,
+  primary key (tenant_id,id),
+  check ((revoked_at is null) = (revoked_by is null))
+);
+-- The scope enumeration must be reasserted on every run: create table if not
+-- exists is skipped wholesale once the table exists, so editing the literal
+-- above does nothing to a database this has already touched.
+alter table jina_context.api_tokens
+  drop constraint if exists api_tokens_scopes_known;
+alter table jina_context.api_tokens
+  add constraint api_tokens_scopes_known check (
+    cardinality(scopes) >= 1
+    and scopes <@ array['context:query','context:read','context:build','context:admin']::text[]
+  );
+create unique index if not exists context_api_tokens_secret
+  on jina_context.api_tokens (secret_hash);
+create index if not exists context_api_tokens_tenant
+  on jina_context.api_tokens (tenant_id,created_at desc,id desc);
+
 create or replace view jina_context.current_refs as
 select distinct on (tenant_id,repository,ref_name)
   tenant_id,repository,ref_name,commit_sha,is_default,observed_at,id as observation_id

@@ -1,8 +1,11 @@
 # Per-principal API tokens
 
-Status: proposed. This describes a credential model that lets people query the API and MCP
-directly, meters what they use, and lets them issue their own tokens from the dashboard.
-Nothing here is implemented beyond the read-scope widening described under Phase 0.
+Status: phase 1 implemented. This describes a credential model that lets people query the
+API and MCP directly, meters what they use, and lets them issue their own tokens from the
+dashboard. The token model — mint, verify, scope-check, hash at rest, revoke — is built;
+usage metering, dashboard issuance and retiring the static context token are not.
+`docs/API_TOKENS_PLAN.md` is the authoritative plan and corrects this document in several
+places where implementation proved it wrong.
 
 ## Why the current model cannot do this
 
@@ -34,16 +37,27 @@ server-side. Authorization stops depending on who holds a shared secret.
 | `context:read`  | `GET /context/generations`, `GET /context/documents`, `GET /context/structure`, and a single generation or document by id |
 | `context:build` | `POST /context/build`, `POST /context/rebuild`                                                                            |
 | `context:admin` | `POST /context/erasure`, `POST /context/knowledge/{id}/review`, `GET /context/metrics`                                    |
+| `context:usage` | `GET /context/usage` (phase 2)                                                                                            |
+
+Scope grants route reach, not permission. `requireTenantAdmin` still applies on top, and it
+covers every route under `context:build` and `context:admin` — so a token carrying either on
+a principal that is not a tenant administrator reaches those routes and is refused there.
 
 Route authorization becomes a scope lookup rather than the current
 `isContextCredentialRoute` predicate.
 
 ### Identity comes from the token
 
-Never from headers. Headers remain assertions that must match the token, which is the rule
-established when caller-selected tenant and principal headers were removed from access
-synchronization. Preserving it is what makes multi-tenant access safe: each token names its
-own tenant, so nothing has to trust a caller's claim about which tenant it is acting for.
+Never from headers. Headers remain assertions that must match the token. Preserving that is
+what makes multi-tenant access safe: each token names its own tenant, so nothing has to
+trust a caller's claim about which tenant it is acting for.
+
+This continues a rule the config-bound credentials follow; it is not a universal one, and
+saying so matters to anyone reading the authentication function. Of the four branches that
+existed before tokens, only the two whose identity comes from server-side configuration —
+access synchronization and the context credential — assert headers. The dev branch asserts
+nothing, and the internal-credential path treats `x-jina-principal-id` as the _source_ of
+identity rather than a claim about it. The token branch adopts the config-bound rule.
 
 Repository filtering reuses what already exists — `permittedRepositories` for reads and
 `allowedKnowledgeRevisionIds` for knowledge — so a token sees exactly what its principal's
@@ -57,9 +71,14 @@ hash, so a disclosed database yields no working credential. Every token carries 
 recognizable prefix, both so it is greppable in logs and so it can later be registered for
 secret scanning.
 
-Scopes granted may not exceed the scopes of the identity requesting them. A non-administrator
-cannot mint `context:admin`; without that rule, self-service issuance is privilege escalation
-with extra steps.
+Scopes granted may not exceed the scopes of the identity requesting them — but only from
+phase 3, where the requesting identity is an authenticated session. Phase 1 has no such
+rule and cannot: its only minter holds the internal shared secret, which carries no scopes
+at all, so there is nothing to compare against. What phase 1 enforces instead is the
+principal: `tenant:` and `svc:` principals are refused outright, and a principal configured
+as a tenant administrator requires an explicit `administrator: true`. That is the real
+boundary, because tenant administration is derived from the principal id rather than from
+any scope.
 
 Expiry is required and bounded. Revocation takes effect immediately.
 
@@ -85,22 +104,28 @@ Four gaps stand between that and per-user usage:
 Adding `tokenId` closes the fourth and makes the rest a matter of writing one usage record
 per billable operation, keyed `(tenantId, principalId, tokenId, operation)`.
 
-| Operation          | Meter             | Rationale                                    |
-| ------------------ | ----------------- | -------------------------------------------- |
-| `build`, `rebuild` | credits, weighted | sandbox plus agentic derivation              |
-| `query`, `mcp`     | credits           | retrieval and synthesis model calls          |
-| reads              | count only        | cheap; for rate limiting rather than billing |
+| Operation      | Meter             | Rationale                                    |
+| -------------- | ----------------- | -------------------------------------------- |
+| `build`        | credits, weighted | sandbox plus agentic derivation              |
+| `rebuild`      | credits, lower    | inline reindex; no sandbox, no derivation    |
+| `query`, `mcp` | credits           | retrieval and synthesis model calls          |
+| reads          | count only        | cheap; for rate limiting rather than billing |
 
-The worker already knows the derivation's model consumption, so build cost can be recorded
-rather than estimated.
+Build cost has to be captured before it can be metered. An earlier version of this document
+said the worker already knows the derivation's model consumption and that build cost could
+therefore be recorded rather than estimated. It cannot: nothing on the context derivation
+path persists model token usage today. Making that true is work in its own right, and
+`docs/API_TOKENS_PLAN.md` traces the chain and lists what has to change.
 
 Billing stays where it is. This API exposes usage and Jina v1 polls it to meter credits.
 Polling avoids a dependency from this API onto v1, and a missed poll is recoverable where a
 dropped webhook silently under-bills.
 
 `GET /context/usage`, scoped by the caller's own token, is the self-service surface: a person
-sees their usage, a tenant administrator sees the tenant's. Same authorization rule as
-everything else.
+sees their usage, a tenant administrator sees the tenant's. It takes its own `context:usage`
+scope rather than riding on `context:read`, because `context:read` is exactly what the static
+context credential holds — mapping usage onto it would silently widen a shared secret to a
+billing surface.
 
 Quota enforcement checks remaining credits before an expensive operation and rejects with a
 distinct code. Cheap reads should stay available once credits are exhausted, so that someone
@@ -127,10 +152,13 @@ Issuance and revocation are recorded with their actor.
 
 ## Sequencing
 
-0. Widen the context credential to the read-only projections. Unblocks the v1 context page
-   and is a strict subset of `context:read`.
-1. Token model here: mint, verify, scope-check, hash at rest, revoke. Both static tokens keep
-   working, so nothing breaks.
+0. **Done.** Widen the context credential to the read-only projections. Unblocks the v1
+   context page and is a strict subset of `context:read`.
+1. **Done.** Token model here: mint, verify, scope-check, hash at rest, revoke. Both static
+   tokens keep working, so nothing breaks — the pre-existing static-token scope test passes
+   untouched, which is how that promise is checked. Planned in `docs/API_TOKENS_PLAN.md`,
+   which plans every phase through to completion and settles the token-format and narrowing
+   decisions below.
 2. Usage records keyed by `tokenId`, covering builds as well as queries. v1 polls and meters.
 3. Dashboard issuance and per-token usage on the existing Usage page.
 4. v1 moves to delegated per-tenant tokens; retire the static context token.
@@ -139,15 +167,17 @@ Metering is only trustworthy from step 1 onward. While a shared static secret is
 call attributes to the same principal, so usage reporting built before then describes a single
 synthetic user.
 
+## Decisions taken
+
+**Token format: opaque, stored hashed.** Revocation decided it. These credentials go to
+people, and "revoke this leaked token now" has to mean now, which a signed token with a
+lifetime cannot give. The cost is a lookup per request — and, as implementation showed, an
+asynchronous request entry point, which was most of phase 1's work.
+
+**Token narrowing: tenant-scoped only.** A token names one tenant and one principal.
+Restricting it further to specific repositories is additive later and nothing forecloses it.
+
 ## Open decisions
-
-**Token format.** Opaque and stored hashed gives immediate revocation at the cost of a lookup
-per request. Signed with a short lifetime verifies statelessly but can only be revoked by
-waiting for expiry; v1's existing MCP access token already uses that shape. Revocation
-latency is the deciding question, and it is hard to change after tokens are issued.
-
-**Token narrowing.** Whether a token may be restricted to specific repositories in addition to
-its tenant.
 
 **Credit weighting.** How many queries a build is worth. Cost data exists; the ratio is a
 pricing decision.

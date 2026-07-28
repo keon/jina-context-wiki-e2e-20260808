@@ -143,9 +143,12 @@ Both HTTP and MCP retrieval enforce repository access before candidate generatio
 require a bound principal. Principal access resolves to repository ACL fingerprints;
 PostgreSQL filters documents, fragments, exact entries, hierarchy rows, manifest rows,
 and current-knowledge rows before retrievers can create candidates. In production,
-`CONTEXT_API_TOKEN` reaches only these two query surfaces and is server-side bound by
-`JINA_CONTEXT_TENANT_ID` plus `JINA_CONTEXT_PRINCIPAL_ID`; callers cannot use identity
-headers to change that binding. Administrative routes require the internal credential.
+`CONTEXT_API_TOKEN` reaches these two query surfaces and the read-only context
+projections, and is server-side bound by `JINA_CONTEXT_TENANT_ID` plus
+`JINA_CONTEXT_PRINCIPAL_ID`; callers cannot use identity headers to change that binding.
+Administrative routes require the internal credential. Per-principal tokens
+(`jina_atk_…`) carry their own tenant, principal and scopes instead of being bound by
+configuration; see `docs/API_TOKENS.md`.
 Repository-access synchronization also requires that credential, but applies only to the
 same server-bound tenant and principal; caller headers cannot select another identity.
 

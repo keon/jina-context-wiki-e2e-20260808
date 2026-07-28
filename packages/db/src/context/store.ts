@@ -14,8 +14,11 @@ import {
   type KnowledgeDocumentRevision,
   type KnowledgeEvidenceCitation,
   type KnowledgeRevisionEvent,
+  type ApiTokenRecord,
+  type MintApiTokenInput,
   type ProjectionBacklog,
   type QueryPlan,
+  type VerifiedApiToken,
   type QueryRoute,
   type RetrievalCandidate,
   type QueryMetrics,
@@ -41,6 +44,7 @@ import {
 } from "./projection-input.js";
 import { PostgresProjectionRepository } from "./projection-repository.js";
 import { PostgresContextQueryRepository, type StoredRetrievalCandidate } from "./query-repository.js";
+import { PostgresApiTokenRepository } from "./api-token-repository.js";
 
 /**
  * Cohesive store façade for domain services. SQL remains split across the
@@ -54,6 +58,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   readonly knowledge: PostgresKnowledgeRepository;
   readonly projection: PostgresProjectionRepository;
   readonly query: PostgresContextQueryRepository;
+  readonly apiTokens: PostgresApiTokenRepository;
 
   constructor(config: PostgresContextDatabaseConfig | ContextDatabase) {
     this.database = config instanceof ContextDatabase ? config : new ContextDatabase(config);
@@ -61,6 +66,28 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     this.knowledge = new PostgresKnowledgeRepository(this.database);
     this.projection = new PostgresProjectionRepository(this.database);
     this.query = new PostgresContextQueryRepository(this.database);
+    this.apiTokens = new PostgresApiTokenRepository(this.database);
+  }
+
+  verifyApiToken(secretHash: string): Promise<VerifiedApiToken | undefined> {
+    return this.apiTokens.verifyApiToken(secretHash);
+  }
+  stampApiTokenUse(tenantId: string, tokenId: string, usedAt: string): Promise<void> {
+    return this.apiTokens.stampApiTokenUse(tenantId, tokenId, usedAt);
+  }
+  mintApiToken(token: MintApiTokenInput): Promise<ApiTokenRecord> {
+    return this.apiTokens.mintApiToken(token);
+  }
+  listApiTokens(tenantId: string): Promise<ApiTokenRecord[]> {
+    return this.apiTokens.listApiTokens(tenantId);
+  }
+  revokeApiToken(
+    tenantId: string,
+    tokenId: string,
+    revokedBy: string,
+    revokedAt: string
+  ): Promise<ApiTokenRecord | undefined> {
+    return this.apiTokens.revokeApiToken(tenantId, tokenId, revokedBy, revokedAt);
   }
 
   runInTenantScope<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {

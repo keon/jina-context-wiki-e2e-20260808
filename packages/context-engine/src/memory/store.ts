@@ -23,11 +23,14 @@ import {
 import type { GenerationProjection, IndexGeneration } from "../domain/projection.js";
 import { contextProjectionConsumers } from "../domain/projection.js";
 import type {
+  ApiTokenRecord,
   EraseEvidenceInput,
   FencedContextEngineStore,
+  MintApiTokenInput,
   ProjectionBacklog,
   QueryMetrics,
-  QueryRunTelemetry
+  QueryRunTelemetry,
+  VerifiedApiToken
 } from "../ports/context-engine-store.js";
 import type { KnowledgeCommit } from "../ports/knowledge-store.js";
 import type { ContextPipelineCoordinator, ContextWriteFence } from "../workflow/coordinator.js";
@@ -38,6 +41,12 @@ function scopeKey(tenantId: string, repository: string, ref: string): string {
 
 function copy<T>(value: T): T {
   return structuredClone(value);
+}
+
+/** Drops the hash on the way out, so no read path can return it by accident. */
+function publicApiToken(token: ApiTokenRecord & { readonly secretHash: string }): ApiTokenRecord {
+  const { secretHash: _secretHash, ...rest } = token;
+  return { ...rest, scopes: [...rest.scopes] };
 }
 
 export class MemoryContextEngineStore implements FencedContextEngineStore {
@@ -57,6 +66,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   readonly #projectionInputFrontiers = new Map<string, { sequence: number; eventId: string }>();
   readonly #erasures = new Set<string>();
   readonly #queryRuns: QueryRunTelemetry[] = [];
+  readonly #apiTokens = new Map<string, ApiTokenRecord & { readonly secretHash: string }>();
   #closed = false;
 
   constructor(
@@ -607,6 +617,78 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       citationFailureCount: runs.reduce((sum, run) => sum + run.citationFailureCount, 0),
       conflictCount: runs.reduce((sum, run) => sum + run.conflictCount, 0)
     };
+  }
+
+  /**
+   * Mirrors the Postgres policy rather than the table: a revoked or expired token
+   * is invisible here too, so a test cannot pass against memory and fail against
+   * a real database.
+   */
+  async verifyApiToken(secretHash: string): Promise<VerifiedApiToken | undefined> {
+    this.#assertOpen();
+    const now = Date.now();
+    for (const token of this.#apiTokens.values()) {
+      if (token.secretHash !== secretHash) continue;
+      if (token.revokedAt) return undefined;
+      if (Date.parse(token.expiresAt) <= now) return undefined;
+      return {
+        tokenId: token.id,
+        tenantId: token.tenantId,
+        principalId: token.principalId,
+        scopes: [...token.scopes],
+        ...(token.lastUsedAt ? { lastUsedAt: token.lastUsedAt } : {})
+      };
+    }
+    return undefined;
+  }
+
+  async stampApiTokenUse(tenantId: string, tokenId: string, usedAt: string): Promise<void> {
+    const token = this.#apiTokens.get(tokenId);
+    if (!token || token.tenantId !== tenantId) return;
+    this.#apiTokens.set(tokenId, { ...token, lastUsedAt: usedAt });
+  }
+
+  async mintApiToken(token: MintApiTokenInput): Promise<ApiTokenRecord> {
+    this.#assertOpen();
+    if (this.#apiTokens.has(token.id)) throw new Error(`Duplicate API token id ${token.id}`);
+    for (const existing of this.#apiTokens.values()) {
+      if (existing.secretHash === token.secretHash) throw new Error("Duplicate API token secret");
+    }
+    const stored = {
+      id: token.id,
+      tenantId: token.tenantId,
+      principalId: token.principalId,
+      name: token.name,
+      scopes: [...token.scopes],
+      createdAt: token.createdAt,
+      createdBy: token.createdBy,
+      expiresAt: token.expiresAt,
+      secretHash: token.secretHash
+    };
+    this.#apiTokens.set(token.id, stored);
+    return publicApiToken(stored);
+  }
+
+  async listApiTokens(tenantId: string): Promise<ApiTokenRecord[]> {
+    return [...this.#apiTokens.values()]
+      .filter((token) => token.tenantId === tenantId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))
+      .map(publicApiToken);
+  }
+
+  async revokeApiToken(
+    tenantId: string,
+    tokenId: string,
+    revokedBy: string,
+    revokedAt: string
+  ): Promise<ApiTokenRecord | undefined> {
+    const token = this.#apiTokens.get(tokenId);
+    if (!token || token.tenantId !== tenantId) return undefined;
+    // A second revocation keeps the first revoker rather than overwriting it.
+    if (token.revokedAt) return publicApiToken(token);
+    const revoked = { ...token, revokedAt, revokedBy };
+    this.#apiTokens.set(tokenId, revoked);
+    return publicApiToken(revoked);
   }
 
   async eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }> {
