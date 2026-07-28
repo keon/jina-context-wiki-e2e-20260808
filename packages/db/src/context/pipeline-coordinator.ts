@@ -1,3 +1,4 @@
+import type { DerivationDetail } from "@jina/context-engine";
 import { randomUUID } from "node:crypto";
 import {
   contextQueueTopics,
@@ -57,6 +58,7 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
     githubInstallationId?: number;
     requestKey: string;
     createdAt: string;
+    derivationDetail?: DerivationDetail;
   }): Promise<ContextBuild> {
     if (input.commitSha !== undefined && !isFullCommitSha(input.commitSha)) {
       throw new Error("commitSha must be a full Git SHA");
@@ -128,7 +130,12 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
                 ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
                 refSequence
               }
-            : {};
+            : // The derive stage is claimed long after the build was requested, so
+              // how much to write has to travel with it rather than be read from
+              // the environment at execution time.
+              stage.type === contextTaskTypes.deriveKnowledge && input.derivationDetail
+              ? { derivationDetail: input.derivationDetail }
+              : {};
         await client.query(
           `insert into jina_context.pipeline_stages
             (id,build_id,tenant_id,type,topic,required,status,attempt,metadata,created_at,updated_at)

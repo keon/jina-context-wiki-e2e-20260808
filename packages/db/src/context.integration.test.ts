@@ -174,9 +174,20 @@ test(
       commitSha,
       githubInstallationId: 140435029,
       requestKey: "integration-build-1",
-      createdAt
+      createdAt,
+      derivationDetail: "thorough"
     });
     assert.match(build.id, /^cb_/);
+    // The derive stage is claimed long after the build was requested, so the
+    // choice has to survive the round trip through Postgres. It was carried in
+    // the in-memory coordinator and dropped here, which no type caught: this
+    // class declares its own narrower parameter type, and a narrower method
+    // parameter is assignable to the interface.
+    assert.equal(
+      build.stages.find((stage) => stage.type === "derive-knowledge")?.metadata.derivationDetail,
+      "thorough"
+    );
+    assert.equal(build.stages.find((stage) => stage.type === "index-context")?.metadata.derivationDetail, undefined);
     assert.equal(build.refSequence, 1);
     assert.ok(build.stages.every((stage) => stage.id.startsWith("cs_")));
     assert.ok(build.stages.every((stage) => stage.required));
