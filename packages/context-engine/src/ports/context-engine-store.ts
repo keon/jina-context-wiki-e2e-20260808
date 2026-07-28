@@ -1,3 +1,4 @@
+import type { DerivationProgressPage, DerivationProgressSnapshot } from "../derive/progress.js";
 import type { EvidenceStore } from "./evidence-store.js";
 import type { KnowledgeStore } from "./knowledge-store.js";
 import type { ProjectionStore } from "./projection-store.js";
@@ -158,6 +159,25 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
     revokedBy: string,
     revokedAt: string
   ): Promise<ApiTokenRecord | undefined>;
+  /**
+   * Pages a derivation has finished, while its run is still going.
+   *
+   * Optional like the token methods: a store without it simply has no live view
+   * of a build, and derivation still works. Writing is the durable half --
+   * without it a stopped run loses everything the sandbox held -- and reading is
+   * what lets a build be watched rather than waited on.
+   */
+  recordDerivationProgress?(input: {
+    tenantId: string;
+    buildId: string;
+    stageId: string;
+    checkpointId: string;
+    pages: readonly DerivationProgressPage[];
+    at: string;
+  }): Promise<void>;
+  derivationProgress?(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot>;
+  derivationProgressPages?(tenantId: string, stageId: string): Promise<DerivationProgressPage[]>;
+  clearDerivationProgress?(tenantId: string, stageId: string): Promise<void>;
   eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }>;
   migrateTenantAliases(fromTenantId: string, toTenantId: string): Promise<void>;
   health(): Promise<{ ok: boolean; adapter: string }>;

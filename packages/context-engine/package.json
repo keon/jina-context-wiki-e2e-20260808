@@ -12,7 +12,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/context-engine.test.js dist/git-entry-ingest.test.js dist/derive/markdown-document.test.js"
+    "test": "pnpm build && node --test dist/context-engine.test.js dist/git-entry-ingest.test.js dist/derive/markdown-document.test.js dist/derive/progress.test.js"
   },
   "devDependencies": {
     "@types/node": "^26.1.1"

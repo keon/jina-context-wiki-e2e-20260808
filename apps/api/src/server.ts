@@ -747,6 +747,32 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    // What a build has written so far. Readable with the same scope as the
+    // finished catalog, because watching a build is a read of the tenant's own
+    // context rather than an administrative action.
+    if (request.method === "GET" && url.pathname.startsWith("/context/builds/") && url.pathname.endsWith("/progress")) {
+      const buildId = url.pathname.slice("/context/builds/".length, -"/progress".length);
+      if (!buildId) throw notFound("build not found");
+      const build = await contextCoordinator.get(buildId);
+      // A build id is opaque, so a miss and another tenant's build have to look
+      // the same from here.
+      if (!build || build.tenantId !== principal.tenantId) throw notFound("build not found");
+      await requireRepositoryAccess(principal, build.repository);
+      const progress = contextStore.derivationProgress
+        ? await contextStore.derivationProgress(principal.tenantId, buildId)
+        : { buildId, pages: [], updatedAt: undefined };
+      json(response, 200, {
+        buildId,
+        repository: build.repository,
+        ref: build.ref,
+        status: build.status,
+        stages: build.stages.map((stage: ContextPipelineStage) => ({ type: stage.type, status: stage.status })),
+        pages: progress.pages,
+        ...(progress.updatedAt ? { updatedAt: progress.updatedAt } : {})
+      });
+      return;
+    }
+
     if (request.method === "GET" && url.pathname.startsWith("/context/generations/")) {
       const generationId = routeId(url.pathname, "/context/generations/");
       if (!generationId) throw notFound("context generation not found");
@@ -1029,6 +1055,37 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    // Reported while the run is still going, so a build stopped part way keeps
+    // the pages it had already written and can be watched while it writes them.
+    if (request.method === "POST" && url.pathname === "/internal/context/derive/progress") {
+      const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
+      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
+      const checkpointId = requiredString(body.checkpointId, "checkpointId");
+      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
+      if (!contextStore.recordDerivationProgress) {
+        json(response, 200, { recorded: 0 });
+        return;
+      }
+      const pages = Array.isArray(body.pages) ? body.pages : [];
+      await contextStore.recordDerivationProgress({
+        tenantId: principal.tenantId,
+        buildId: lease.stage.buildId,
+        stageId: lease.stage.id,
+        checkpointId,
+        pages: pages.map((page) => {
+          const record = parseJsonObjectValue(page, "pages[]");
+          return {
+            documentPath: requiredString(record.documentPath, "pages[].documentPath"),
+            title: requiredString(record.title, "pages[].title"),
+            bodyMarkdown: requiredString(record.bodyMarkdown, "pages[].bodyMarkdown")
+          };
+        }),
+        at: nowIso()
+      });
+      json(response, 200, { recorded: pages.length });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/internal/context/derive/commit") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
       const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
@@ -2355,6 +2412,7 @@ const METRICS_ROUTES = new Set([
   "/internal/context/ingest",
   "/internal/context/derive/prepare",
   "/internal/context/derive/commit",
+  "/internal/context/derive/progress",
   "/internal/context/index",
   "/internal/context/outbox/drain",
   "/internal/worker/claim",
@@ -2365,6 +2423,7 @@ const METRICS_ROUTES = new Set([
 ]);
 
 function metricsRoute(pathname: string): string {
+  if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
   if (routeId(pathname, "/context/generations/")) return "/context/generations/:id";
   if (routeId(pathname, "/context/documents/")) return "/context/documents/:id";
   if (routeId(pathname, "/context/knowledge/", "/review")) return "/context/knowledge/:id/review";
@@ -2423,6 +2482,14 @@ function parseJsonValue(value: Uint8Array): unknown {
 
 function firstHeader(value: string | readonly string[] | undefined): string | undefined {
   return typeof value === "string" ? value : value?.[0];
+}
+
+/** An already-parsed JSON value that must be an object, for array members. */
+function parseJsonObjectValue(value: unknown, field: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw invalidRequest(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
 }
 
 function requiredString(value: unknown, field: string): string {

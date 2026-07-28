@@ -84,7 +84,8 @@ const tenantScopedTables = [
   "repository_acl_projection",
   "query_runs",
   "retrieval_metrics",
-  "api_tokens"
+  "api_tokens",
+  "derivation_progress"
 ] as const;
 
 /**
@@ -166,6 +167,12 @@ grant insert,select on
   jina_context.projection_input_events
 to jina_context_derive;
 grant select,insert,update on jina_context.outbox to jina_context_derive;
+-- Checkpointed while the run is still going, so the writer updates in place and
+-- clears its own rows once the pages are committed as revisions.
+grant select,insert,update,delete on jina_context.derivation_progress to jina_context_derive;
+-- Readable by the query role because watching a build happen is a read of the
+-- tenant's own context, not an administrative action.
+grant select on jina_context.derivation_progress to jina_context_query,jina_context_coordinator;
 
 grant select on
   jina_context.knowledge_documents,jina_context.knowledge_document_revisions,

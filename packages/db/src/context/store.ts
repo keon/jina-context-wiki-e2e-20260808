@@ -15,6 +15,8 @@ import {
   type KnowledgeEvidenceCitation,
   type KnowledgeRevisionEvent,
   type ApiTokenRecord,
+  type DerivationProgressPage,
+  type DerivationProgressSnapshot,
   type MintApiTokenInput,
   type ProjectionBacklog,
   type QueryPlan,
@@ -45,6 +47,7 @@ import {
 import { PostgresProjectionRepository } from "./projection-repository.js";
 import { PostgresContextQueryRepository, type StoredRetrievalCandidate } from "./query-repository.js";
 import { PostgresApiTokenRepository } from "./api-token-repository.js";
+import { PostgresDerivationProgressRepository } from "./derivation-progress-repository.js";
 
 /**
  * Cohesive store façade for domain services. SQL remains split across the
@@ -59,6 +62,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   readonly projection: PostgresProjectionRepository;
   readonly query: PostgresContextQueryRepository;
   readonly apiTokens: PostgresApiTokenRepository;
+  readonly derivationProgressStore: PostgresDerivationProgressRepository;
 
   constructor(config: PostgresContextDatabaseConfig | ContextDatabase) {
     this.database = config instanceof ContextDatabase ? config : new ContextDatabase(config);
@@ -67,6 +71,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     this.projection = new PostgresProjectionRepository(this.database);
     this.query = new PostgresContextQueryRepository(this.database);
     this.apiTokens = new PostgresApiTokenRepository(this.database);
+    this.derivationProgressStore = new PostgresDerivationProgressRepository(this.database);
   }
 
   verifyApiToken(secretHash: string): Promise<VerifiedApiToken | undefined> {
@@ -88,6 +93,26 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     revokedAt: string
   ): Promise<ApiTokenRecord | undefined> {
     return this.apiTokens.revokeApiToken(tenantId, tokenId, revokedBy, revokedAt);
+  }
+
+  recordDerivationProgress(input: {
+    tenantId: string;
+    buildId: string;
+    stageId: string;
+    checkpointId: string;
+    pages: readonly DerivationProgressPage[];
+    at: string;
+  }): Promise<void> {
+    return this.derivationProgressStore.record(input);
+  }
+  derivationProgress(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot> {
+    return this.derivationProgressStore.snapshot(tenantId, buildId);
+  }
+  derivationProgressPages(tenantId: string, stageId: string): Promise<DerivationProgressPage[]> {
+    return this.derivationProgressStore.pagesForStage(tenantId, stageId);
+  }
+  clearDerivationProgress(tenantId: string, stageId: string): Promise<void> {
+    return this.derivationProgressStore.clear(tenantId, stageId);
   }
 
   runInTenantScope<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {

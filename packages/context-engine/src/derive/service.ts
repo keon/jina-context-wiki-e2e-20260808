@@ -1,3 +1,4 @@
+import type { DerivationProgressPage } from "./progress.js";
 import type { DerivationDetail } from "./verbosity.js";
 import { fingerprint, normalizeIsoTime, stableId } from "../domain/fingerprint.js";
 import type { RefManifestEntry } from "../domain/evidence.js";
@@ -47,6 +48,15 @@ export interface KnowledgeDocumentGenerationInput {
    * given. Absent, the executor falls back to its deployment default.
    */
   budgetSeconds?: number;
+  /**
+   * Called with the pages finished so far, while the run is still going.
+   *
+   * A sandbox dies with its worker, so pages collected only at the end are lost
+   * whenever a run is stopped rather than finished. Reporting them as they
+   * appear is what makes a stopped build keep its work, and is the same signal
+   * somebody watching the build wants to see.
+   */
+  onProgress?: (pages: readonly DerivationProgressPage[]) => Promise<void>;
 }
 
 export interface KnowledgeDocumentGenerator {

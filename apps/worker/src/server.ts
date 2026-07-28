@@ -422,6 +422,16 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
         bundle: prepared.bundle,
         repairErrors: [...diagnostics],
         budgetSeconds: Math.max(remainingSeconds, MIN_DERIVE_REPAIR_SECONDS),
+        // Reported as pages appear rather than at the end, so a run stopped by a
+        // deploy or a lost lease keeps what it wrote and can be watched while it
+        // writes. Failures are swallowed: this observes a derivation, it must
+        // never be the reason one fails.
+        onProgress: async (pages) => {
+          await internalApiJson(
+            "/internal/context/derive/progress",
+            leaseBody(work, { checkpointId: work.task.metadata.checkpointId, pages })
+          ).catch(() => undefined);
+        },
         ...(prepared.detail ? { detail: prepared.detail } : {}),
         workspace: {
           repositoryDirectory: checkout.directory,

@@ -8,6 +8,7 @@ import {
   type StructuralFact
 } from "../domain/evidence.js";
 import { validateEvidenceRecord } from "../domain/evidence.js";
+import type { DerivationProgressPage, DerivationProgressSnapshot } from "../derive/progress.js";
 import { fingerprint, normalizeRepository, repositoryAclFingerprint, stableId } from "../domain/fingerprint.js";
 import type {
   DerivationRun,
@@ -689,6 +690,72 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     const revoked = { ...token, revokedAt, revokedBy };
     this.#apiTokens.set(tokenId, revoked);
     return publicApiToken(revoked);
+  }
+
+  // Keyed by stage so a rerun of the same build starts from its own progress
+  // rather than inheriting the last attempt's.
+  readonly #derivationProgress = new Map<string, Map<string, DerivationProgressPage & { at: string; first: string }>>();
+
+  async recordDerivationProgress(input: {
+    tenantId: string;
+    buildId: string;
+    stageId: string;
+    checkpointId: string;
+    pages: readonly DerivationProgressPage[];
+    at: string;
+  }): Promise<void> {
+    const key = `${input.tenantId}\u0000${input.stageId}`;
+    const existing =
+      this.#derivationProgress.get(key) ?? new Map<string, DerivationProgressPage & { at: string; first: string }>();
+    for (const page of input.pages) {
+      existing.set(page.documentPath, {
+        ...page,
+        at: input.at,
+        first: existing.get(page.documentPath)?.first ?? input.at
+      });
+    }
+    this.#derivationProgress.set(key, existing);
+    this.#progressBuilds.set(key, input.buildId);
+  }
+
+  readonly #progressBuilds = new Map<string, string>();
+
+  async derivationProgress(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot> {
+    const pages = [...this.#derivationProgress.entries()]
+      .filter(([key]) => key.startsWith(`${tenantId}\u0000`) && this.#progressBuilds.get(key) === buildId)
+      .flatMap(([, byPath]) => [...byPath.values()])
+      .sort(
+        (left, right) => left.first.localeCompare(right.first) || left.documentPath.localeCompare(right.documentPath)
+      );
+    const latest = pages.reduce<string | undefined>(
+      (newest, page) => (newest === undefined || page.at > newest ? page.at : newest),
+      undefined
+    );
+    return {
+      buildId,
+      pages: pages.map((page) => ({
+        documentPath: page.documentPath,
+        title: page.title,
+        bytes: Buffer.byteLength(page.bodyMarkdown, "utf8"),
+        firstSeenAt: page.first,
+        updatedAt: page.at
+      })),
+      ...(latest === undefined ? {} : { updatedAt: latest })
+    };
+  }
+
+  async derivationProgressPages(tenantId: string, stageId: string): Promise<DerivationProgressPage[]> {
+    const byPath = this.#derivationProgress.get(`${tenantId}\u0000${stageId}`);
+    return [...(byPath?.values() ?? [])].map((page) => ({
+      documentPath: page.documentPath,
+      title: page.title,
+      bodyMarkdown: page.bodyMarkdown
+    }));
+  }
+
+  async clearDerivationProgress(tenantId: string, stageId: string): Promise<void> {
+    this.#derivationProgress.delete(`${tenantId}\u0000${stageId}`);
+    this.#progressBuilds.delete(`${tenantId}\u0000${stageId}`);
   }
 
   async eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }> {

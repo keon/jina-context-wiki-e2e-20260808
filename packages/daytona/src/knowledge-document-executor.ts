@@ -18,6 +18,7 @@ import {
   knowledgeDocumentJsonSchema,
   knowledgeGenerationJsonSchema,
   serializeKnowledgeEvidence,
+  type DerivationProgressPage,
   type KnowledgeDocumentGenerationInput,
   type KnowledgeDocumentGenerator,
   type KnowledgeGenerationOutput
@@ -230,6 +231,65 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
     }
   }
 
+  /**
+   * Reports finished pages while the run is still going.
+   *
+   * The sandbox dies with its worker, so pages collected only at the end are
+   * lost whenever a run is stopped rather than finished, and until it finished
+   * there was nothing to watch. Polling the output directory turns both into the
+   * same cheap read. Failures here are swallowed: this observes a derivation, it
+   * must never be the reason one fails.
+   */
+  private startProgressReporting(sandbox: Sandbox, input: KnowledgeDocumentGenerationInput): { stop: () => void } {
+    const report = input.onProgress;
+    if (!report) return { stop: () => undefined };
+    const intervalMs = positiveInt(process.env.CONTEXT_DERIVE_PROGRESS_INTERVAL_SECONDS, 60) * 1_000;
+    let stopped = false;
+    const seen = new Map<string, number>();
+    const tick = async (): Promise<void> => {
+      // Only whole files, and only ones whose size settled since the last look,
+      // so a page still being written is not reported as finished.
+      const listed = await sandbox.process.executeCommand(
+        `find ${shellQuote(OUTPUT_DIR)} -name '*.md' -not -path '*/retired/*' -printf '%s\\t%p\\n' 2>/dev/null | head -200`,
+        WORK_DIR,
+        undefined,
+        60
+      );
+      if (listed.exitCode !== 0) return;
+      const pages: DerivationProgressPage[] = [];
+      for (const line of (listed.result ?? "").split("\n")) {
+        const [rawSize, path] = line.split("\t");
+        if (!path || !rawSize) continue;
+        const size = Number(rawSize);
+        if (!Number.isFinite(size) || size <= 0) continue;
+        if (seen.get(path) === size) continue;
+        seen.set(path, size);
+        const read = await sandbox.process.executeCommand(`cat ${shellQuote(path)}`, WORK_DIR, undefined, 60);
+        if (read.exitCode !== 0) continue;
+        const text = read.result ?? "";
+        const relative = path.startsWith(`${OUTPUT_DIR}/`) ? path.slice(OUTPUT_DIR.length + 1) : path;
+        pages.push({
+          documentPath: documentPathFromFile(relative),
+          title: /^#\s+(.+)$/m.exec(text)?.[1]?.trim() || relative,
+          bodyMarkdown: text
+        });
+      }
+      if (pages.length > 0 && !stopped) await report(pages);
+    };
+    const loop = setInterval(() => {
+      void tick().catch(() => undefined);
+    }, intervalMs);
+    // Node keeps the process alive for a pending timer, and this one outlives
+    // nothing worth waiting for.
+    loop.unref?.();
+    return {
+      stop: () => {
+        stopped = true;
+        clearInterval(loop);
+      }
+    };
+  }
+
   /** The end of the agent's event stream, for a run that published nothing. */
   private async readTranscriptTail(sandbox: Sandbox, secrets: readonly string[]): Promise<string> {
     try {
@@ -387,27 +447,32 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       // propagate is what lets the finished pages below be collected; it is
       // rethrown unchanged if there is nothing to collect.
       let thrown: unknown;
-      for (let attempt = 0; attempt < attempts; attempt += 1) {
-        thrown = undefined;
-        try {
-          run = await sandbox.process.executeCommand(recordedCommand, WORK_DIR, environment, runBudgetSeconds(input));
-        } catch (error) {
-          thrown = error;
-          run = undefined;
-          // A gateway failure arrives by throw just as a bad exit code does, so
-          // it earns the same retry; a timeout does not classify as transient
-          // and so still ends the run here with its pages intact.
-          if (!isTransientKnowledgeGenerationFailure(error instanceof Error ? error.message : inspect(error))) break;
-          if (attempt + 1 >= attempts) break;
-          const delay = positiveInt(process.env.CONTEXT_CODEX_RETRY_DELAY_SECONDS, 10);
-          await sandbox.process.executeCommand(`sleep ${delay}`, WORK_DIR, undefined, delay + 5);
-          continue;
+      const progress = this.startProgressReporting(sandbox, input);
+      try {
+        for (let attempt = 0; attempt < attempts; attempt += 1) {
+          thrown = undefined;
+          try {
+            run = await sandbox.process.executeCommand(recordedCommand, WORK_DIR, environment, runBudgetSeconds(input));
+          } catch (error) {
+            thrown = error;
+            run = undefined;
+            // A gateway failure arrives by throw just as a bad exit code does, so
+            // it earns the same retry; a timeout does not classify as transient
+            // and so still ends the run here with its pages intact.
+            if (!isTransientKnowledgeGenerationFailure(error instanceof Error ? error.message : inspect(error))) break;
+            if (attempt + 1 >= attempts) break;
+            const delay = positiveInt(process.env.CONTEXT_CODEX_RETRY_DELAY_SECONDS, 10);
+            await sandbox.process.executeCommand(`sleep ${delay}`, WORK_DIR, undefined, delay + 5);
+            continue;
+          }
+          if (run.exitCode === 0 || !isTransientKnowledgeGenerationFailure(run.result)) break;
+          if (attempt + 1 < attempts) {
+            const delay = positiveInt(process.env.CONTEXT_CODEX_RETRY_DELAY_SECONDS, 10);
+            await sandbox.process.executeCommand(`sleep ${delay}`, WORK_DIR, undefined, delay + 5);
+          }
         }
-        if (run.exitCode === 0 || !isTransientKnowledgeGenerationFailure(run.result)) break;
-        if (attempt + 1 < attempts) {
-          const delay = positiveInt(process.env.CONTEXT_CODEX_RETRY_DELAY_SECONDS, 10);
-          await sandbox.process.executeCommand(`sleep ${delay}`, WORK_DIR, undefined, delay + 5);
-        }
+      } finally {
+        progress.stop();
       }
       const failure = thrown
         ? new Error(redact(thrown instanceof Error ? thrown.message : inspect(thrown), secrets), { cause: thrown })

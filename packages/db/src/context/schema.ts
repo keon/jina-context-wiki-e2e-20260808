@@ -1156,6 +1156,29 @@ create index if not exists context_retrieval_metrics_scope
   on jina_context.retrieval_metrics
   (tenant_id,repository,metric_name,recorded_at desc);
 
+-- A derivation runs for up to two hours inside a sandbox that dies with the
+-- worker, and its pages were only ever collected at the end. A build stopped
+-- part way -- by a deploy, a crash, a lost lease -- threw away everything it had
+-- already written, and nobody watching could see it happening at all. Pages are
+-- checkpointed here as they are finished, so progress is durable and readable
+-- while the run is still going.
+create table if not exists jina_context.derivation_progress (
+  stage_id text not null references jina_context.pipeline_stages(id) on delete cascade,
+  tenant_id text not null,
+  build_id text not null references jina_context.pipeline_builds(id) on delete cascade,
+  checkpoint_id text not null,
+  -- The document path is the identity under the file contract, so it is the key.
+  document_path text not null,
+  title text not null,
+  body_markdown text not null,
+  bytes integer not null check (bytes >= 0),
+  first_seen_at timestamptz not null,
+  updated_at timestamptz not null,
+  primary key (stage_id,document_path)
+);
+create index if not exists context_derivation_progress_build
+  on jina_context.derivation_progress (tenant_id,build_id,updated_at desc);
+
 create table if not exists jina_context.api_tokens (
   id text not null check (id ~ '^atk_'),
   tenant_id text not null,
