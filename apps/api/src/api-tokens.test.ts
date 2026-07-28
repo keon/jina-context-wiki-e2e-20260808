@@ -30,7 +30,7 @@ function withServer(run: (context: ServerContext) => Promise<void>): Promise<voi
 }
 
 async function withServerConfig(
-  overrides: { tenantAdminPrincipalIds?: readonly string[] },
+  overrides: { tenantAdminPrincipalIds?: readonly string[]; tenantId?: string },
   run: (context: ServerContext) => Promise<void>
 ): Promise<void> {
   const coordinator = new MemoryContextPipelineCoordinator();
@@ -270,9 +270,18 @@ test("mint refuses every principal that would confer tenant administration", asy
 
     // The escalation needs no admin scope to work, so this is asserted directly
     // rather than inferred from a scope test.
+    // A tenant principal is opt-in, not forbidden — but without the opt-in it is
+    // refused, and even with it, only for the token's own tenant.
     await refused(
       { principalId: `tenant:${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}` },
-      /tenant principal confers tenant administration/
+      /pass administrator: true/
+    );
+    await refused(
+      {
+        principalId: `tenant:${"0".repeat(8)}-0000-4000-8000-${"0".repeat(12)}`,
+        administrator: true
+      },
+      /must name the tenant the token is issued for/
     );
     // In fixed tenancy `tenant:<name>` fails normalization rather than the
     // tenant rule, because the tenant pattern only admits a UUID. Both refuse;
@@ -462,4 +471,50 @@ test("a static credential shaped like an issued token is refused at construction
     () => createApiServer({ tenantId, enableDevEndpoints: false, contextApiToken: `jina_atk_${"a".repeat(43)}` }),
     /jina_atk_/
   );
+});
+
+test("a tenant principal is issuable for its own tenant, and is a tenant administrator", async () => {
+  // The shape production actually uses: shared-db tenancy, so tenant ids are
+  // UUIDs and `tenant:<uuid>` normalizes. This is the delegated token v1 holds
+  // to read a tenant's context on that tenant's behalf.
+  const uuidTenant = "11111111-1111-4111-8111-111111111111";
+  await withServerConfig({ tenantId: uuidTenant, tenantAdminPrincipalIds: [] }, async ({ request, mint, store }) => {
+    await store.replaceRepositoryAccess(uuidTenant, holder, [repository]);
+    const created = await mint({
+      principalId: `tenant:${uuidTenant}`,
+      name: "v1 delegated reader",
+      // `context:admin` is accepted here only because the principal really is an
+      // administrator — the same guard that refuses it on an ordinary principal.
+      scopes: ["context:read", "context:query", "context:admin"],
+      expiresInMinutes: 15,
+      administrator: true
+    });
+    const body = await created.text();
+    assert.equal(created.status, 201, body);
+    const secret = (JSON.parse(body) as { secret: string }).secret;
+
+    // It reads, and it is a tenant administrator — so it sees the tenant's
+    // repositories without needing ACL rows of its own, which is the whole reason
+    // v1 needs this principal rather than a `user:` one.
+    assert.equal((await request("/context/generations", bearer(secret))).status, 200);
+    // requireTenantAdmin admits it where an ordinary principal is refused, so the
+    // scope reaches the route and the role permits it.
+    assert.equal((await request("/context/metrics", bearer(secret))).status, 200);
+
+    // A minted tenant principal still cannot exceed its scopes.
+    const refusedRoute = await request("/board", bearer(secret));
+    assert.equal(refusedRoute.status, 403);
+    assert.equal(((await refusedRoute.json()) as { code?: string }).code, "insufficient_scope");
+
+    // And the headers v1 sends today must agree with the row rather than being
+    // ignored: this is the exact pair that 401s against the static credential.
+    const withHeaders = await request("/context/generations", {
+      headers: {
+        authorization: `Bearer ${secret}`,
+        "x-jina-tenant-id": uuidTenant,
+        "x-jina-principal-id": `tenant:${uuidTenant}`
+      }
+    });
+    assert.equal(withHeaders.status, 200);
+  });
 });

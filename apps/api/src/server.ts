@@ -198,6 +198,7 @@ const MAX_API_TOKEN_MINUTES = 525_600;
 function refusedTokenPrincipal(
   principalId: string,
   administrator: boolean,
+  tenantId: string,
   config: ApiServerConfig
 ): string | undefined {
   const normalized = normalizedForwardedPrincipal(principalId);
@@ -205,7 +206,23 @@ function refusedTokenPrincipal(
   // string; otherwise `TENANT:…` or a leading space walks past a prefix test.
   if (!normalized) return "principal must be a recognisable user, tenant or service principal";
   if (normalized.startsWith("tenant:")) {
-    return "a tenant principal confers tenant administration and cannot be issued as a token";
+    // A tenant principal is tenant administration by construction, so it is
+    // opt-in rather than forbidden — the same treatment a configured
+    // administrator gets, and for the same reason: the only caller here holds
+    // the internal credential, which already reaches every tenant on every other
+    // route, so this grants no new reach. What it does grant is something the
+    // shared static credential cannot: a credential that names one tenant and
+    // can be revoked. It is the honest shape for a caller that legitimately acts
+    // for a whole tenant, which is what a tenant's own operator console does.
+    if (!administrator) {
+      return "a tenant principal confers tenant administration; pass administrator: true to issue it deliberately";
+    }
+    // And only for its own tenant. Without this a mint into tenant A could name
+    // tenant B's principal, which reads nothing today but would quietly become a
+    // cross-tenant grant the moment anything resolved that principal.
+    if (normalized !== `tenant:${tenantId.toLowerCase()}`) {
+      return "a tenant principal must name the tenant the token is issued for";
+    }
   }
   if (normalized.startsWith("svc:")) {
     return "a service principal names no accountable person and cannot be issued as a token";
@@ -214,6 +231,18 @@ function refusedTokenPrincipal(
     return "this principal is a tenant administrator; pass administrator: true to issue it deliberately";
   }
   return undefined;
+}
+
+/**
+ * Whether a principal would satisfy `isTenantAdmin` for this tenant. Mirrors its
+ * two static rules deliberately: if these ever drift, mint starts issuing tokens
+ * whose privileges do not match what it thought it was granting.
+ */
+function isAdministrativePrincipal(normalizedPrincipalId: string, tenantId: string, config: ApiServerConfig): boolean {
+  return (
+    normalizedPrincipalId === `tenant:${tenantId.toLowerCase()}` ||
+    isConfiguredTenantAdmin(normalizedPrincipalId, config)
+  );
 }
 
 /**
@@ -1196,7 +1225,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (body.administrator !== undefined && typeof body.administrator !== "boolean") {
       throw invalidRequest("administrator must be a boolean");
     }
-    const refusal = refusedTokenPrincipal(principalId, administrator, config);
+    const refusal = refusedTokenPrincipal(principalId, administrator, tenantId, config);
     if (refusal) throw invalidRequest(refusal);
     const principal = normalizedForwardedPrincipal(principalId)!;
     if (!Array.isArray(body.scopes) || body.scopes.length === 0) {
@@ -1216,7 +1245,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // caller could mint an admin-scoped token for an ordinary principal by setting
     // it.
     if (
-      !isConfiguredTenantAdmin(principal, config) &&
+      !isAdministrativePrincipal(principal, tenantId, config) &&
       scopes.some((scope) => scope === "context:build" || scope === "context:admin")
     ) {
       throw invalidRequest("context:build and context:admin require an administrator principal");
