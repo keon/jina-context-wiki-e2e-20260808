@@ -132,17 +132,8 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   const checkpointId = string(ingested.body.checkpointId);
   await complete(ingest, record(ingested.body));
 
-  // A combined worker publishes the baseline before the required model work.
-  const baseline = await claim(coordinator, "run-index-context");
-  const indexed = await api("/internal/context/index", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({ ...leaseBody(baseline), checkpointId })
-  });
-  assert.equal(indexed.response.status, 200);
-  assert.equal(indexed.body.status, "published");
-  await complete(baseline, record(indexed.body));
-
+  // Derivation runs on the evidence ingestion wrote; indexing then makes the
+  // pages it produced fast to query, so it comes after them.
   const derived = await claim(coordinator, "run-derive-knowledge");
   const prepared = await api("/internal/context/derive/prepare", {
     method: "POST",
@@ -257,6 +248,18 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   assert.equal(committed.body.status, "succeeded");
   assert.match(string(committed.body.enrichedGenerationId), /^ig_/);
   await complete(derived, record(committed.body));
+
+  // Indexing is what makes the derived pages fast to query, so it is claimable
+  // only once they exist.
+  const baseline = await claim(coordinator, "run-index-context");
+  const indexed = await api("/internal/context/index", {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ ...leaseBody(baseline), checkpointId })
+  });
+  assert.equal(indexed.response.status, 200);
+  assert.equal(indexed.body.status, "published");
+  await complete(baseline, record(indexed.body));
 
   const finished = await coordinator.get(string(build.id));
   assert.equal(finished?.status, "succeeded");
@@ -503,15 +506,6 @@ test("incremental API and MCP build revises prior knowledge and adds commit, PR,
   const checkpointId = string(ingested.body.checkpointId);
   await complete(ingest, record(ingested.body));
 
-  const baseline = await claim(coordinator, "run-index-context");
-  const indexed = await api("/internal/context/index", {
-    method: "POST",
-    headers: internalHeaders(),
-    body: JSON.stringify({ ...leaseBody(baseline), checkpointId })
-  });
-  assert.equal(indexed.response.status, 200);
-  await complete(baseline, record(indexed.body));
-
   const derived = await claim(coordinator, "run-derive-knowledge");
   const prepared = await api("/internal/context/derive/prepare", {
     method: "POST",
@@ -657,6 +651,16 @@ test("incremental API and MCP build revises prior knowledge and adds commit, PR,
   assert.equal(committed.response.status, 200);
   assert.equal(committed.body.status, "succeeded", JSON.stringify(committed.body.diagnostics));
   await complete(derived, record(committed.body));
+
+  // Indexing follows derivation: it exists to make the new pages queryable.
+  const baseline = await claim(coordinator, "run-index-context");
+  const indexed = await api("/internal/context/index", {
+    method: "POST",
+    headers: internalHeaders(),
+    body: JSON.stringify({ ...leaseBody(baseline), checkpointId })
+  });
+  assert.equal(indexed.response.status, 200);
+  await complete(baseline, record(indexed.body));
   assert.equal((await coordinator.get(string(build.id)))?.status, "succeeded");
 
   const queried = await api("/context/query", {

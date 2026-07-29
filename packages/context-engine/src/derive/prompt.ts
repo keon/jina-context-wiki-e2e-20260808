@@ -97,6 +97,10 @@ export function buildKnowledgeFilePrompt(bundle: FocusBundle, repairErrors: read
     "Spend this run on what this checkpoint changed: the pages the change makes wrong, the pages it makes incomplete, and the subjects it introduces that have no page yet. Compare the repository against what the existing pages claim, and use the commit and issue evidence to see what moved.",
     // Absence means "kept", so a deletion has to be said out loud.
     `To delete a page, move it to ${KNOWLEDGE_AGENT_OUTPUT_DIR}/retired keeping its path, which records that its subject is gone rather than that you overlooked it. Delete a page only when its subject no longer exists, not when it merely needs updating.`,
+    // A rename is a delete of the old path, and the agent that reorganizes
+    // mid-run without knowing that leaves both files behind: one run shipped
+    // access-policy and policy/access-policy as two live pages of one subject.
+    "Renaming or moving a page is a delete of its old path: move the old file into retired/ in the same step you write the new one. Two live pages about one subject is always wrong, whichever folders they sit in.",
     "If the existing wiki is empty, this is a first build: map the repository from nothing.",
 
     "Start each file with a level-one heading, which is its title. The first paragraph is its summary, so make it a sentence somebody could read on its own.",
@@ -115,16 +119,11 @@ export function buildKnowledgeFilePrompt(bundle: FocusBundle, repairErrors: read
     // disk at that moment is kept, so the order pages are written in decides what
     // survives: breadth-first and most-useful-first degrades into a smaller wiki,
     // while depth-first on a minor corner degrades into a useless one.
-    "Work in descending order of usefulness. Write `architecture.md` first, yourself, before dispatching anything: it is the page a reader starts from, and it is what a run that ends early must not be missing.",
-    // One agent writing a wiki in sequence spends its whole budget on the first
-    // few pages. The pages are independent -- each is one subject, grounded in
-    // its own files -- so they are worth writing at the same time.
-    "Then survey the repository and split it into areas that do not overlap, and dispatch a subagent per area to write that area's pages. Give each subagent its area, the folder to write under, and every rule in this prompt about citations, structure, and finishing a file before starting the next. Run them in parallel; prefer several medium areas over one large one.",
-    "Never give two subagents the same file to write. Two agents writing one page produce a torn page, and the run keeps whatever is on disk.",
-    "As they finish, act as the master agent: read what they wrote, reconcile contradictions between areas, add the cross-links that only make sense once neighbouring pages exist, and write any page that spans areas and so belonged to none of them.",
+    "Work in descending order of usefulness, and finish each file completely before starting the next. Write `architecture.md` first, then the core flows, then everything else. Never leave a file half-written to go and explore.",
     // Progress is read off the directory while the run is going, so finishing
-    // pages steadily is what makes a build watchable rather than opaque.
-    "Have every agent write each file completely before starting the next, and never leave a file half-written to go and explore. Pages are collected while you work, so a finished page is kept even if the run is stopped, and each one appears to the people watching the build as soon as it lands.",
+    // pages steadily is what makes a build watchable rather than opaque, and
+    // what makes a run that is stopped keep the work it had done.
+    "Pages are collected while you work, so a finished page is kept even if the run is stopped, and each one appears to the people watching the build as soon as it lands. Keep going until you have covered the repository; a page you have not written yet is worth more than another paragraph on one you have.",
     "When you have covered the repository, reply with a one-line summary of what you wrote. The files are the result; your reply is not.",
 
     `Repository: ${repository}`,

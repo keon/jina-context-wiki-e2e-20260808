@@ -597,36 +597,53 @@ test(
 
     await assert.rejects(store.commitSnapshot(snapshot, ingestClaim.fence), /write fence is stale or invalid/);
 
-    const [indexClaim, prematureDeriveClaim] = await Promise.all([
-      coordinator.claim({
-        tenantId,
-        workerId: "integration-index",
-        topics: ["run-derive-knowledge", "run-index-context"],
-        now: at(2_000),
-        leaseExpiresAt: at(600_000)
-      }),
+    // ingest -> derive -> index: derivation is the claimable stage now, and
+    // indexing waits for the pages it exists to serve.
+    const [deriveClaim, prematureIndexClaim] = await Promise.all([
       coordinator.claim({
         tenantId,
         workerId: "integration-derive",
         topics: ["run-derive-knowledge", "run-index-context"],
         now: at(2_000),
         leaseExpiresAt: at(600_000)
+      }),
+      coordinator.claim({
+        tenantId,
+        workerId: "integration-index",
+        topics: ["run-index-context"],
+        now: at(2_000),
+        leaseExpiresAt: at(600_000)
       })
     ]);
-    assert.ok(indexClaim);
-    assert.equal(prematureDeriveClaim, undefined);
-    assert.equal(indexClaim.stage.topic, "run-index-context");
-    const renewedIndexFence = await coordinator.renew({
+    assert.ok(deriveClaim);
+    assert.equal(prematureIndexClaim, undefined);
+    assert.equal(deriveClaim.stage.topic, "run-derive-knowledge");
+    const renewedDeriveFence = await coordinator.renew({
       tenantId,
-      stageId: indexClaim.stage.id,
-      leaseId: indexClaim.fence.leaseId,
+      stageId: deriveClaim.stage.id,
+      leaseId: deriveClaim.fence.leaseId,
       now: at(2_500),
       leaseExpiresAt: at(900_000)
     });
-    assert.ok(renewedIndexFence);
-    assert.equal(renewedIndexFence.token, indexClaim.fence.token);
-    assert.notEqual(renewedIndexFence.leaseExpiresAt, indexClaim.fence.leaseExpiresAt);
-    const generation = await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_000), indexClaim.fence);
+    assert.ok(renewedDeriveFence);
+    assert.equal(renewedDeriveFence.token, deriveClaim.fence.token);
+    assert.notEqual(renewedDeriveFence.leaseExpiresAt, deriveClaim.fence.leaseExpiresAt);
+    // The required derivation fails, which fails the build and leaves the index
+    // stage blocked: there are no pages to serve. The generation below is
+    // produced through the indexing service directly, which needs no pipeline
+    // stage -- publishing is keyed to the checkpoint, not to the build.
+    assert.equal(
+      await coordinator.complete({
+        tenantId,
+        stageId: deriveClaim.stage.id,
+        fence: deriveClaim.fence,
+        outcome: "failed",
+        now: at(2_800),
+        error: "required fixture derivation failed"
+      }),
+      true
+    );
+    const generation = await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_000));
     assert.equal(generation.status, "published");
     const batchedProjectionRows = await database.pool.query<{
       manifest: string;
@@ -662,42 +679,7 @@ test(
     );
     assert.equal(crossBatchHierarchy.rows.length, 1);
     assert.equal(crossBatchHierarchy.rows[0]?.child_parent_id, crossBatchHierarchy.rows[0]?.parent_id);
-    assert.equal(
-      (await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_500), indexClaim.fence)).id,
-      generation.id
-    );
-    assert.equal(
-      await coordinator.complete({
-        tenantId,
-        stageId: indexClaim.stage.id,
-        fence: indexClaim.fence,
-        outcome: "succeeded",
-        now: at(4_000),
-        metadata: { generationId: generation.id }
-      }),
-      true
-    );
-
-    const deriveClaim = await coordinator.claim({
-      tenantId,
-      workerId: "integration-derive",
-      topics: ["run-derive-knowledge", "run-index-context"],
-      now: at(5_000),
-      leaseExpiresAt: at(600_000)
-    });
-    assert.ok(deriveClaim);
-    assert.equal(deriveClaim.stage.topic, "run-derive-knowledge");
-    assert.equal(
-      await coordinator.complete({
-        tenantId,
-        stageId: deriveClaim.stage.id,
-        fence: deriveClaim.fence,
-        outcome: "failed",
-        now: at(6_000),
-        error: "required fixture derivation failed"
-      }),
-      true
-    );
+    assert.equal((await new IndexContextService(store).index(snapshot.checkpoint.id, at(3_500))).id, generation.id);
 
     const releaseCommitSha = "e".repeat(40);
     const releaseCheckpoint = await new IngestEvidenceService(store).ingest({
@@ -1825,7 +1807,9 @@ test(
     const buildAfter = await coordinator.get(build.id);
     assert.equal(buildAfter?.status, "failed");
     assert.equal(buildAfter?.stages.find((stage) => stage.topic === "run-derive-knowledge")?.required, true);
-    assert.equal(buildAfter?.stages.find((stage) => stage.topic === "run-index-context")?.status, "succeeded");
+    // Blocked, not succeeded: the derivation it waits on failed, so under the
+    // new order indexing is never reached.
+    assert.equal(buildAfter?.stages.find((stage) => stage.topic === "run-index-context")?.status, "blocked");
     const forbidden = await database.pool.query<{ table_name: string }>(
       `select table_name from information_schema.tables
        where table_schema='jina_context'

@@ -747,6 +747,47 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    // Builds in flight, so a page can find one to watch. Progress was only
+    // reachable by id, which meant a build was watchable only by whoever had
+    // just started it -- a webhook build, or one started from another tab, was
+    // invisible while it ran.
+    if (request.method === "GET" && url.pathname === "/context/builds") {
+      const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
+      const activeOnly = url.searchParams.get("status") === "active";
+      const builds = (await contextCoordinator.list(principal.tenantId))
+        .filter((build) => !allowed || allowed.has(build.repository))
+        .filter((build) => !activeOnly || build.status === "active")
+        .slice(0, 50)
+        .map((build) => ({
+          id: build.id,
+          repository: build.repository,
+          ref: build.ref,
+          status: build.status,
+          stages: build.stages.map((stage) => ({ type: stage.type, status: stage.status })),
+          createdAt: build.createdAt
+        }));
+      json(response, 200, { builds });
+      return;
+    }
+
+    // One page's text before the build that wrote it has committed. Kept out of
+    // the listing, which is polled every few seconds, and fetched for a page
+    // somebody has actually opened.
+    if (request.method === "GET" && url.pathname.startsWith("/context/builds/") && url.pathname.endsWith("/page")) {
+      const buildId = url.pathname.slice("/context/builds/".length, -"/page".length);
+      const documentPath = url.searchParams.get("path");
+      if (!buildId || !documentPath) throw invalidRequest("path is required");
+      const build = await contextCoordinator.get(buildId);
+      if (!build || build.tenantId !== principal.tenantId) throw notFound("build not found");
+      await requireRepositoryAccess(principal, build.repository);
+      const page = contextStore.derivationProgressPage
+        ? await contextStore.derivationProgressPage(principal.tenantId, buildId, documentPath)
+        : undefined;
+      if (!page) throw notFound("page not found");
+      json(response, 200, { page });
+      return;
+    }
+
     // What a build has written so far. Readable with the same scope as the
     // finished catalog, because watching a build is a read of the tenant's own
     // context rather than an administrative action.
@@ -1039,8 +1080,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         contextStore.listManifest(checkpointId),
         selectPriorKnowledge(contextStore, bundle.checkpoint, priorKnowledgeLimit())
       ]);
+      // Pages a previous attempt of this same stage already finished. Stage ids
+      // survive redelivery, so a retry resumes from its own checkpoint instead
+      // of paying for the whole wiki again -- the loop lands, it does not
+      // restart.
+      const resumedPages = contextStore.derivationProgressPages
+        ? await contextStore.derivationProgressPages(principal.tenantId, lease.stage.id)
+        : [];
       json(response, 200, {
         checkpointId,
+        resumedPages,
         detail: derivationDetailOrDefault(lease.stage.metadata.derivationDetail),
         ...(typeof lease.stage.metadata.derivationBudgetSeconds === "number"
           ? { budgetSeconds: lease.stage.metadata.derivationBudgetSeconds }
@@ -1110,6 +1159,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       // The remote worker owns the single repair attempt. Each commit request
       // validates exactly one untrusted model output and records that attempt.
       const run = await service.derive(checkpointId, nowIso(), lease.fence, 1, repairPresentationFields);
+      // The checkpoint served its purpose the moment the pages exist as
+      // revisions; left behind, a later build of the same stage id would resume
+      // from a wiki that has since moved on.
+      if (run.status === "succeeded" && contextStore.clearDerivationProgress) {
+        await contextStore.clearDerivationProgress(principal.tenantId, lease.stage.id);
+      }
       const enrichedGeneration =
         run.status === "succeeded"
           ? await new IndexContextService(contextStore).index(checkpointId, nowIso(), lease.fence)
@@ -2423,6 +2478,7 @@ const METRICS_ROUTES = new Set([
 ]);
 
 function metricsRoute(pathname: string): string {
+  if (pathname === "/context/builds") return "/context/builds";
   if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
   if (routeId(pathname, "/context/generations/")) return "/context/generations/:id";
   if (routeId(pathname, "/context/documents/")) return "/context/documents/:id";

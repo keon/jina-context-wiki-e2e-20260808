@@ -30,6 +30,12 @@ export interface KnowledgeAgentWorkspace {
   repositoryDirectory: string;
   manifest: RefManifestEntry[];
   priorKnowledge: PriorKnowledgeRevision[];
+  /**
+   * Pages a previous attempt of this stage finished before it was stopped.
+   * Seeded over the prior catalog, because they are newer than it: a retry
+   * resumes the wiki rather than paying for it again.
+   */
+  resumedPages?: DerivationProgressPage[];
 }
 
 export interface KnowledgeDocumentGenerationInput {
@@ -117,7 +123,7 @@ export class DeriveKnowledgeService {
         const output: KnowledgeGenerationOutput = parseKnowledgeGenerationOutput(raw);
         const priorKnowledge = await selectPriorKnowledge(this.knowledgeStore, bundle.checkpoint);
         validateIncrementalCatalog(output, priorKnowledge, process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true");
-        validated = await this.#validator.validate({
+        validated = await this.#validateWithheldPerPage({
           output,
           checkpointId,
           generatorName: this.generator.name,
@@ -188,6 +194,56 @@ export class DeriveKnowledgeService {
       },
       fence
     );
+  }
+  /**
+   * Validation that withholds the failing page instead of the catalog.
+   *
+   * Every validator rule reports as documents[i]..., and throwing rejects the
+   * whole output -- which is how a twelve-page run published nothing because one
+   * page's identity suffix was unsupported, and an earlier run published
+   * nothing over two bad citations on one page. Under the file contract a page
+   * is an independent document; one that fails its checks should be withheld
+   * exactly as an uncitable page already is, not take the wiki down with it.
+   *
+   * Only under the file contract, and only while every diagnostic names a
+   * page: a catalog-level complaint still fails the run, and dropping the last
+   * page does too, so nothing publishable is never reported as published.
+   */
+  async #validateWithheldPerPage(
+    input: Parameters<KnowledgeOutputValidator["validate"]>[0]
+  ): Promise<Awaited<ReturnType<KnowledgeOutputValidator["validate"]>>> {
+    if (!input.inlineCitations) return this.#validator.validate(input);
+    let output = input.output;
+    const withheld: { logicalId: string; diagnostics: string[] }[] = [];
+    for (;;) {
+      try {
+        const result = await this.#validator.validate({ ...input, output });
+        if (withheld.length > 0) {
+          // Serialized flat: console's default depth prints diagnostics as
+          // "[Array]", which is the one part of this log anybody ever needs.
+          console.warn("knowledge_pages_withheld", JSON.stringify({ withheld: withheld.slice(0, 20) }));
+        }
+        return result;
+      } catch (error) {
+        if (!(error instanceof KnowledgeValidationError)) throw error;
+        const failing = new Map<number, string[]>();
+        let allPageScoped = true;
+        for (const diagnostic of error.diagnostics) {
+          const match = /^documents\[(\d+)\]/.exec(diagnostic);
+          if (!match) {
+            allPageScoped = false;
+            break;
+          }
+          const index = Number(match[1]);
+          failing.set(index, [...(failing.get(index) ?? []), diagnostic]);
+        }
+        if (!allPageScoped || failing.size === 0 || failing.size >= output.documents.length) throw error;
+        for (const [index, diagnostics] of failing) {
+          withheld.push({ logicalId: output.documents[index]?.logicalId ?? `documents[${index}]`, diagnostics });
+        }
+        output = { ...output, documents: output.documents.filter((_, index) => !failing.has(index)) };
+      }
+    }
   }
 }
 

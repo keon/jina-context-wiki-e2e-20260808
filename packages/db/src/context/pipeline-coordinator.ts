@@ -328,20 +328,24 @@ export class PostgresContextPipelineCoordinator implements ContextPipelineCoordi
       );
       const stage = result.rows[0];
       if (!stage) return false;
+      // ingest -> derive -> index. Indexing exists to make retrieval fast, and
+      // what a query retrieves is the derived pages, so it has to run after
+      // they exist. Derivation reads the checkpoint manifest, which ingestion
+      // writes with the evidence, so nothing it needs comes from indexing.
       if (stage.type === contextTaskTypes.ingestEvidence && input.outcome === "succeeded") {
         await client.query(
           `update jina_context.pipeline_stages
            set status='queued',metadata=metadata || $3::jsonb,updated_at=$2
            where build_id=$1 and type=$4 and status='blocked'`,
-          [stage.build_id, input.now, JSON.stringify(stage.metadata), contextTaskTypes.indexContext]
+          [stage.build_id, input.now, JSON.stringify(stage.metadata), contextTaskTypes.deriveKnowledge]
         );
       }
-      if (stage.type === contextTaskTypes.indexContext && input.outcome === "succeeded") {
+      if (stage.type === contextTaskTypes.deriveKnowledge && input.outcome === "succeeded") {
         await client.query(
           `update jina_context.pipeline_stages
            set status='queued',metadata=metadata || $3::jsonb,updated_at=$2
            where build_id=$1 and type=$4 and status='blocked'`,
-          [stage.build_id, input.now, JSON.stringify(stage.metadata), contextTaskTypes.deriveKnowledge]
+          [stage.build_id, input.now, JSON.stringify(stage.metadata), contextTaskTypes.indexContext]
         );
       }
       await updateBuildStatus(client, stage.build_id, input.now);

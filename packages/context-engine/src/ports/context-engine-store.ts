@@ -176,6 +176,11 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
     at: string;
   }): Promise<void>;
   derivationProgress?(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot>;
+  derivationProgressPage?(
+    tenantId: string,
+    buildId: string,
+    documentPath: string
+  ): Promise<DerivationProgressPage | undefined>;
   derivationProgressPages?(tenantId: string, stageId: string): Promise<DerivationProgressPage[]>;
   clearDerivationProgress?(tenantId: string, stageId: string): Promise<void>;
   eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }>;

@@ -10,6 +10,7 @@ import {
   createRepositoryArchive,
   findExistingCodex,
   checkpointClaimVerifier,
+  deadlineAwarePrompt,
   isTransientKnowledgeGenerationFailure,
   keepsPartialCatalog,
   MAX_RUN_BUDGET_SECONDS,
@@ -43,6 +44,16 @@ test("a run killed by its wall clock keeps the pages already written to disk", (
   // Nothing written means the run failed before producing anything, and an empty
   // catalog would publish as "no knowledge" instead of surfacing the failure.
   assert.equal(keepsPartialCatalog(0), false);
+});
+
+test("the prompt tells the agent when its run ends", () => {
+  const prompt = deadlineAwarePrompt({ prompt: "Write the wiki.", budgetSeconds: 1800 });
+  // The agent has a shell and can read a clock; what it lacked was being told
+  // there is one. The deadline is earlier than the kill so the file in hand can
+  // be finished rather than cut off mid-write and withheld.
+  assert.match(prompt, /terminated at \d{4}-\d{2}-\d{2}T/);
+  assert.match(prompt, /date -u/);
+  assert.ok(prompt.startsWith("Write the wiki."));
 });
 
 test("a run takes the budget it was handed, bounded by the sandbox ceiling", () => {
@@ -118,13 +129,9 @@ test("agentic knowledge generation enables only read-only local shell exploratio
   assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--strict-config"));
   assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--skip-git-repo-check"));
   assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--enable shell_tool"));
-  // Subagents are enabled on purpose: pages are independent, and writing them
-  // one after another spends the budget on the first few. They inherit this
-  // sandbox, so the reach of the run is unchanged.
-  assert.ok(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--enable multi_agent"));
-  assert.equal(AGENT_KNOWLEDGE_CODEX_ARGS.includes("--disable multi_agent" as never), false);
   for (const feature of [
     "shell_snapshot",
+    "multi_agent",
     "apps",
     "browser_use",
     "computer_use",

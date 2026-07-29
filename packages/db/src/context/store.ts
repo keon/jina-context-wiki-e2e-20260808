@@ -108,6 +108,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   derivationProgress(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot> {
     return this.derivationProgressStore.snapshot(tenantId, buildId);
   }
+  derivationProgressPage(
+    tenantId: string,
+    buildId: string,
+    documentPath: string
+  ): Promise<DerivationProgressPage | undefined> {
+    return this.derivationProgressStore.pageBody(tenantId, buildId, documentPath);
+  }
   derivationProgressPages(tenantId: string, stageId: string): Promise<DerivationProgressPage[]> {
     return this.derivationProgressStore.pagesForStage(tenantId, stageId);
   }

@@ -12,7 +12,7 @@ import {
   prepareDiff,
   type ReviewRequest
 } from "@jina/ai";
-import { DaytonaCodexKnowledgeDocumentGenerator } from "@jina/daytona";
+import { DaytonaCodexKnowledgeDocumentGenerator, LocalCodexKnowledgeDocumentGenerator } from "@jina/daytona";
 import { createGitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import type {
@@ -125,8 +125,13 @@ const deriveBudgetSeconds = positiveInt(process.env.CONTEXT_DERIVE_BUDGET_SECOND
 const MIN_DERIVE_REPAIR_SECONDS = 300;
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
+// The local executor runs Codex on this machine under its own OS sandbox, for
+// a developer's stack: no repository upload, no credential upload, no Daytona.
+// Chosen explicitly, never inferred, and not a production path.
 const knowledgeGenerator = topics.includes("run-derive-knowledge")
-  ? new DaytonaCodexKnowledgeDocumentGenerator()
+  ? process.env.CONTEXT_EXECUTOR === "local"
+    ? new LocalCodexKnowledgeDocumentGenerator()
+    : new DaytonaCodexKnowledgeDocumentGenerator()
   : undefined;
 let stopping = false;
 let active = false;
@@ -390,6 +395,7 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
     readonly prompt: string;
     readonly detail?: DerivationDetail;
     readonly budgetSeconds?: number;
+    readonly resumedPages?: { documentPath: string; title: string; bodyMarkdown: string }[];
     readonly checkpointId: string;
     readonly bundle: FocusBundle;
     readonly manifest: RefManifestEntry[];
@@ -436,7 +442,8 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
         workspace: {
           repositoryDirectory: checkout.directory,
           manifest: prepared.manifest,
-          priorKnowledge: prepared.priorKnowledge
+          priorKnowledge: prepared.priorKnowledge,
+          ...(prepared.resumedPages?.length ? { resumedPages: prepared.resumedPages } : {})
         }
       });
       const result = await internalApiJson<{

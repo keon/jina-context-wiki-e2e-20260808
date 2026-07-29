@@ -81,7 +81,8 @@ function logicalIdGroundingError(
   document: KnowledgeGenerationOutput["documents"][number],
   repository: string,
   commitSha: string,
-  resolved: readonly { claim: string; excerpt: string; record: EvidenceRecord }[]
+  resolved: readonly { claim: string; excerpt: string; record: EvidenceRecord }[],
+  pathDerivedIdentity: boolean
 ): string | undefined {
   const logicalId = document.logicalId.toLowerCase();
   const normalizedRepository = repository.toLowerCase();
@@ -113,7 +114,15 @@ function logicalIdGroundingError(
   if (!logicalId.startsWith(prefix)) return "repository identity does not match the checkpoint";
   const suffix = logicalId.slice(prefix.length);
   const segments = suffix.split(/[/:#@._-]+/).filter(Boolean);
-  if (segments.length === 0 || segments.some((segment) => !textSupportedByResolvedEvidence(segment, resolved))) {
+  if (segments.length === 0) return "identity suffix is not fully supported by resolved evidence";
+  // Under the catalog contract the model invented its subjects, and this check
+  // is what stopped an identity from floating free of any evidence. Under the
+  // file contract the host constructs the logicalId from the file's own path,
+  // so the check degenerates into requiring folder names to occur verbatim in
+  // cited source lines -- "core-flows" never will, and five grounded pages were
+  // withheld for it. The identity is anchored by construction there; the page's
+  // grounding is what the citation checks already enforce.
+  if (!pathDerivedIdentity && segments.some((segment) => !textSupportedByResolvedEvidence(segment, resolved))) {
     return "identity suffix is not fully supported by resolved evidence";
   }
   return undefined;
@@ -273,7 +282,13 @@ export class KnowledgeOutputValidator {
           break;
         }
       }
-      const logicalIdError = logicalIdGroundingError(document, checkpoint.repository, checkpoint.commitSha, resolved);
+      const logicalIdError = logicalIdGroundingError(
+        document,
+        checkpoint.repository,
+        checkpoint.commitSha,
+        resolved,
+        input.inlineCitations === true
+      );
       if (logicalIdError) {
         diagnostics.push(`documents[${documentIndex}].logicalId ${logicalIdError}`);
       }

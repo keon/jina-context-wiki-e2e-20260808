@@ -294,18 +294,22 @@ export class MemoryContextPipelineCoordinator implements ContextPipelineCoordina
     else stage.error = input.error;
     stage.metadata = { ...stage.metadata, ...input.metadata };
     delete stage.fence;
+    // ingest -> derive -> index. Indexing exists to make retrieval fast, and
+    // what a query retrieves is the derived pages, so it has to run after they
+    // exist. Derivation reads the checkpoint manifest, which ingestion writes
+    // with the evidence, so nothing it needs comes from indexing.
     if (stage.type === contextTaskTypes.ingestEvidence && input.outcome === "succeeded") {
-      const baseline = build.stages.find((candidate) => candidate.type === contextTaskTypes.indexContext);
-      if (baseline?.status === "blocked") {
-        baseline.status = "queued";
-        baseline.metadata = { ...baseline.metadata, ...stage.metadata };
-      }
-    }
-    if (stage.type === contextTaskTypes.indexContext && input.outcome === "succeeded") {
       const derivation = build.stages.find((candidate) => candidate.type === contextTaskTypes.deriveKnowledge);
       if (derivation?.status === "blocked") {
         derivation.status = "queued";
         derivation.metadata = { ...derivation.metadata, ...stage.metadata };
+      }
+    }
+    if (stage.type === contextTaskTypes.deriveKnowledge && input.outcome === "succeeded") {
+      const indexing = build.stages.find((candidate) => candidate.type === contextTaskTypes.indexContext);
+      if (indexing?.status === "blocked") {
+        indexing.status = "queued";
+        indexing.metadata = { ...indexing.metadata, ...stage.metadata };
       }
     }
     this.#updateBuildStatus(build, now);

@@ -551,9 +551,13 @@ create table if not exists jina_context.knowledge_documents (
   tenant_id text not null,
   repository text not null,
   logical_id text not null,
-  kind text not null check (kind in (
+  -- Named so it can be replaced when the kinds grow again. Adding a kind to the
+  -- domain without adding it here does not fail until an agent finally writes
+  -- one, and then it fails at commit, after the whole derivation has been paid
+  -- for: a thirty-minute run wrote ten pages and published none of them.
+  kind text not null constraint knowledge_documents_kind_known check (kind in (
     'architecture','component','feature','decision','change_summary','incident',
-    'issue_explanation','ownership','runbook','glossary'
+    'issue_explanation','ownership','runbook','glossary','flow','pattern','topic'
   )),
   subject jsonb not null,
   created_at timestamptz not null,
@@ -590,6 +594,19 @@ create table if not exists jina_context.knowledge_document_revisions (
   foreign key (tenant_id,repository,derivation_run_id)
     references jina_context.derivation_runs(tenant_id,repository,id)
 );
+-- The table is created once, so widening the set of kinds has to be stated as a
+-- change too: an existing database keeps whatever check it was built with, and a
+-- kind added only to the domain fails at commit, after a whole derivation has
+-- been paid for.
+alter table jina_context.knowledge_documents
+  drop constraint if exists knowledge_documents_kind_check;
+alter table jina_context.knowledge_documents
+  drop constraint if exists knowledge_documents_kind_known;
+alter table jina_context.knowledge_documents
+  add constraint knowledge_documents_kind_known check (kind in (
+    'architecture','component','feature','decision','change_summary','incident',
+    'issue_explanation','ownership','runbook','glossary','flow','pattern','topic'
+  ));
 alter table jina_context.knowledge_document_revisions
   drop constraint if exists knowledge_document_revisions_tenant_id_repository_logical_i_key;
 create index if not exists context_knowledge_revisions_logical_created

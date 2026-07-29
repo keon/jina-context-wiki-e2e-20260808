@@ -744,6 +744,19 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     };
   }
 
+  async derivationProgressPage(
+    tenantId: string,
+    buildId: string,
+    documentPath: string
+  ): Promise<DerivationProgressPage | undefined> {
+    for (const [key, byPath] of this.#derivationProgress.entries()) {
+      if (!key.startsWith(`${tenantId}\u0000`) || this.#progressBuilds.get(key) !== buildId) continue;
+      const page = byPath.get(documentPath);
+      if (page) return { documentPath: page.documentPath, title: page.title, bodyMarkdown: page.bodyMarkdown };
+    }
+    return undefined;
+  }
+
   async derivationProgressPages(tenantId: string, stageId: string): Promise<DerivationProgressPage[]> {
     const byPath = this.#derivationProgress.get(`${tenantId}\u0000${stageId}`);
     return [...(byPath?.values() ?? [])].map((page) => ({

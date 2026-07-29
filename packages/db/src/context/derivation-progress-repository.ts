@@ -99,6 +99,31 @@ export class PostgresDerivationProgressRepository {
   }
 
   /**
+   * One page's text, while the build that wrote it is still running.
+   *
+   * Fetched per page rather than included in the snapshot: the listing is
+   * polled every few seconds and the bodies would make that expensive, but a
+   * page somebody has actually opened is worth reading before it is published.
+   */
+  async pageBody(
+    tenantId: string,
+    buildId: string,
+    documentPath: string
+  ): Promise<{ documentPath: string; title: string; bodyMarkdown: string } | undefined> {
+    return this.database.transactionAs("jina_context_query", contextTenantScope(tenantId), async (client) => {
+      const { rows } = await client.query<{ document_path: string; title: string; body_markdown: string }>(
+        `select document_path,title,body_markdown
+           from jina_context.derivation_progress
+          where tenant_id=$1 and build_id=$2 and document_path=$3
+          limit 1`,
+        [tenantId, buildId, documentPath]
+      );
+      const row = rows[0];
+      return row ? { documentPath: row.document_path, title: row.title, bodyMarkdown: row.body_markdown } : undefined;
+    });
+  }
+
+  /**
    * The pages a stopped run had already written, so the next one resumes from
    * them instead of starting the wiki again.
    */

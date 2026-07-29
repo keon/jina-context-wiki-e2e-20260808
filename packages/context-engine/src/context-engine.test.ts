@@ -1741,7 +1741,7 @@ test("evidence packing enforces source boundaries and citation verification fail
   );
 });
 
-test("workflow names are clean and derivation is required after baseline indexing", async () => {
+test("workflow names are clean and indexing is required after derivation", async () => {
   assert.deepEqual(contextTaskTypes, {
     build: "build-context",
     ingestEvidence: "ingest-evidence",
@@ -1788,43 +1788,45 @@ test("workflow names are clean and derivation is required after baseline indexin
     }),
     true
   );
-  const [index, prematureDerive] = await Promise.all([
-    coordinator.claim({
-      tenantId,
-      workerId: "index-worker",
-      topics: [contextQueueTopics.indexContext],
-      now: "2026-07-26T12:00:03.000Z",
-      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-    }),
+  // Indexing is what makes the derived pages fast to query, so it waits for
+  // them; derivation only needs the checkpoint manifest, which ingestion wrote.
+  const [derive, prematureIndex] = await Promise.all([
     coordinator.claim({
       tenantId,
       workerId: "derive-worker",
       topics: [contextQueueTopics.deriveKnowledge],
       now: "2026-07-26T12:00:03.000Z",
       leaseExpiresAt: "2026-07-26T12:10:00.000Z"
+    }),
+    coordinator.claim({
+      tenantId,
+      workerId: "index-worker",
+      topics: [contextQueueTopics.indexContext],
+      now: "2026-07-26T12:00:03.000Z",
+      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
     })
   ]);
-  assert.ok(index);
-  assert.equal(prematureDerive, undefined);
-  await coordinator.complete({
-    tenantId,
-    stageId: index.stage.id,
-    fence: index.fence,
-    outcome: "succeeded",
-    now: "2026-07-26T12:00:04.000Z"
-  });
-  const derive = await coordinator.claim({
-    tenantId,
-    workerId: "worker",
-    topics: [contextQueueTopics.deriveKnowledge],
-    now: "2026-07-26T12:00:05.000Z",
-    leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-  });
   assert.ok(derive);
+  assert.equal(prematureIndex, undefined);
   await coordinator.complete({
     tenantId,
     stageId: derive.stage.id,
     fence: derive.fence,
+    outcome: "succeeded",
+    now: "2026-07-26T12:00:04.000Z"
+  });
+  const index = await coordinator.claim({
+    tenantId,
+    workerId: "worker",
+    topics: [contextQueueTopics.indexContext],
+    now: "2026-07-26T12:00:05.000Z",
+    leaseExpiresAt: "2026-07-26T12:10:00.000Z"
+  });
+  assert.ok(index);
+  await coordinator.complete({
+    tenantId,
+    stageId: index.stage.id,
+    fence: index.fence,
     outcome: "succeeded",
     now: "2026-07-26T12:00:06.000Z"
   });
@@ -1869,9 +1871,10 @@ test("a failed required derivation fails the context build", async () => {
       true
     );
   };
+  // Derivation runs second now, so a failure there means indexing is never
+  // reached: there are no pages to make queryable.
   await claimAndComplete(contextQueueTopics.ingestEvidence, "succeeded", 1);
-  await claimAndComplete(contextQueueTopics.indexContext, "succeeded", 3);
-  await claimAndComplete(contextQueueTopics.deriveKnowledge, "failed", 5);
+  await claimAndComplete(contextQueueTopics.deriveKnowledge, "failed", 3);
   const failed = await coordinator.get(build.id);
   assert.equal(failed?.status, "failed");
   assert.equal(failed?.stages.find((stage) => stage.type === "derive-knowledge")?.required, true);

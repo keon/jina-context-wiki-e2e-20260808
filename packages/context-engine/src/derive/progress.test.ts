@@ -50,6 +50,28 @@ test("a stopped run keeps the pages it had already written", async () => {
   assert.deepEqual((await store.derivationProgress(TENANT, "cb_1")).pages, []);
 });
 
+test("a page can be read before the build that wrote it has committed", async () => {
+  const store = new MemoryContextEngineStore();
+  await store.recordDerivationProgress({
+    tenantId: TENANT,
+    buildId: "cb_1",
+    stageId: "cs_1",
+    checkpointId: "ck_1",
+    pages: [{ documentPath: "flows/publish", title: "Publish", bodyMarkdown: "# Publish\n\nthe flow\n" }],
+    at: "2026-07-28T12:00:00.000Z"
+  });
+  // The listing is polled every few seconds and omits bodies, so a page somebody
+  // opened is fetched on its own rather than never being readable until commit.
+  const page = await store.derivationProgressPage(TENANT, "cb_1", "flows/publish");
+  assert.equal(page?.bodyMarkdown.includes("the flow"), true);
+  assert.equal(await store.derivationProgressPage(TENANT, "cb_1", "flows/absent"), undefined);
+  // Scoped like everything else: another tenant reads nothing.
+  assert.equal(
+    await store.derivationProgressPage("22222222-2222-4222-8222-222222222222", "cb_1", "flows/publish"),
+    undefined
+  );
+});
+
 test("one tenant cannot watch another tenant's build", async () => {
   const store = new MemoryContextEngineStore();
   await store.recordDerivationProgress({
