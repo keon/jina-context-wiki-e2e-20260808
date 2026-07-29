@@ -49,7 +49,8 @@ snapshot mutation, and lease/write fences prevent a stale worker from committing
 Ordinary task leases are 30 minutes. Context stages use a 75-minute lease so one
 60-minute Cloud Run request, the worker's 62-minute operation deadline, and a separate
 10-minute terminal-completion deadline remain ordered safely.
-Opened PRs create review and publication tasks. Opened issues create manual triage tasks.
+Opened PRs create a review workflow and one executable review pass. Opened issues create
+manual triage tasks.
 Signed branch pushes create a current-ref context build fenced by the event head SHA,
 deduplicate unchanged heads, and supersede stale ref work. Ingestion fetches the
 authoritative remote branch head and rejects the build if the ref has moved since the
@@ -81,7 +82,7 @@ successor after derivation:
    checkpoint-pinned, read-only repository plus separate immutable evidence, exact
    manifest, and prior-knowledge inputs. The agent explores the repository with read-only
    shell tools and organizes a complete subject-oriented catalog as
-   `knowledge-documents-v4`: immutable, versioned documents rather than graph nodes.
+   `knowledge-documents-v4`: immutable, versioned, evidence-backed documents.
    Commit evidence includes the checkpoint's changed paths, and bounded GitHub evidence
    includes PRs, issues, issue comments, PR review comments, and commit discussion
    comments. On an incremental build every prior logical document must be re-emitted
@@ -123,10 +124,8 @@ fingerprints, and index eligibility still rechecks every cached revision against
 target checkpoint.
 
 Dense retrieval is implemented behind a port but disabled until an approved embedding
-backend demonstrates an evaluation win. PageIndex is an optional hierarchy adapter; the
-Jina-owned heading-tree fallback is active, and no PageIndex client is wired into the
-deployed runtime. PageIndex stays off until it beats the fallback on long-document
-quality, latency, cost, ACL, and citation gates.
+backend demonstrates an evaluation win. The Jina-owned deterministic heading tree is the
+active hierarchy adapter.
 
 `POST /context/query` routes requests across exact, structured, structural, lexical,
 knowledge, temporal, hierarchy, and bounded long-context retrieval. Results identify the
@@ -163,8 +162,8 @@ run first under a separate migration login; the runtime login is `NOINHERIT` and
 context transaction explicitly activates its capability with `SET LOCAL ROLE`. Runtime
 membership excludes the wildcard `jina_context_admin` role; tenant administration uses a
 strictly RLS-scoped capability.
-The deployed API uses 2 vCPU, 2 GiB memory, concurrency 4, and a 60-minute Cloud Run
-request timeout. Context workers use a 62-minute operation timeout, a 10-minute terminal
+Cloud Run sizing is controlled by `cloudbuild.yaml` and validated by the deployment
+script. Context workers use a 62-minute operation timeout, a 10-minute terminal
 completion timeout, and the 75-minute context lease described above. Production
 acceptance exercises a real repository build, HTTP query, and MCP `query_context` call
 before a release passes.
@@ -196,14 +195,12 @@ packages/observability/ structured logging, traces, live metrics
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Context engine decision](docs/CONTEXT_ENGINE_DECISION.md)
-- [Context engine implementation record](docs/CONTEXT_ENGINE_IMPLEMENTATION_PLAN.md)
 - [Agentic knowledge derivation](docs/AGENTIC_DERIVATION.md)
-- [Context evaluation report and runbook](docs/CONTEXT_ENGINE_EVALUATION.md)
+- [Context engine evaluation](docs/CONTEXT_ENGINE_EVALUATION.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)
-- [Shared original Jina database](docs/SHARED_TENANCY.md)
+- [Shared database tenancy](docs/SHARED_TENANCY.md)
 - [GitHub App setup](docs/GITHUB_APP.md)
 - [Observability](docs/OBSERVABILITY.md)
-- [Archived prior design](docs/CONTEXT_GRAPH.md)
+- [Billing policy helper](docs/BILLING.md)

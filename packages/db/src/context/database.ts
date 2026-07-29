@@ -20,14 +20,6 @@ export function contextTenantScope(tenantId: string): ContextDatabaseScope {
   return { tenantIds: [tenantId] };
 }
 
-export function contextTenantsScope(tenantIds: readonly string[]): ContextDatabaseScope {
-  const normalized = [...new Set(tenantIds.map((tenantId) => tenantId.trim()))];
-  if (normalized.length === 0 || normalized.some((tenantId) => !tenantId || tenantId.includes("\u001f"))) {
-    throw new Error("Context database tenant scopes must be non-empty and must not contain control separators");
-  }
-  return { tenantIds: normalized };
-}
-
 export class ContextDatabase {
   readonly pool: Pool;
   private readonly manageSchema: boolean;
@@ -48,10 +40,6 @@ export class ContextDatabase {
 
   initialize(): Promise<void> {
     return (this.initialized ??= this.initializeOnce());
-  }
-
-  async transaction<T>(operation: (client: PoolClient) => Promise<T>): Promise<T> {
-    return this.transactionAs("jina_context_admin", contextSystemScope, operation);
   }
 
   runInTenantScope<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {
@@ -117,7 +105,7 @@ export function contextStableId(prefix: string, value: unknown): string {
   return `${prefix}_${contextDigest(value).slice(0, 32)}`;
 }
 
-export function canonicalJson(value: unknown): string {
+function canonicalJson(value: unknown): string {
   if (value === undefined) return "null";
   if (value === null || typeof value !== "object") return JSON.stringify(value);
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;

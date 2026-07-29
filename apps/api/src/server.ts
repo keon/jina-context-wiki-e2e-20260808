@@ -61,7 +61,6 @@ import {
   recordHttpRequest,
   requestTraceContext
 } from "@jina/observability";
-import { buildPublicationKey, upsertPublication, type PublicationRecord } from "@jina/publication";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
@@ -76,13 +75,7 @@ const MAX_CONTEXT_TARGET_LENGTH = 1_000;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 75 * 60 * 1000;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
-const WORKER_TOPICS = [
-  "run-review",
-  "run-research",
-  "run-publish",
-  "run-cleanup",
-  ...Object.values(contextQueueTopics)
-] as const;
+const WORKER_TOPICS = ["run-review", ...Object.values(contextQueueTopics)] as const;
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -129,7 +122,6 @@ interface SharedIdentityResolver {
 
 export interface ApiSnapshot {
   readonly intakeState: GitHubIntakeState;
-  readonly publications: readonly PublicationRecord[];
   readonly devDeliverySequence: number;
 }
 
@@ -368,7 +360,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
   }
   let intakeState = createGitHubIntakeState();
-  let publications: readonly PublicationRecord[] = [];
   let devDeliverySequence = 0;
   let restoredVersion = 0;
   let mutations = Promise.resolve();
@@ -391,12 +382,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   function restore(snapshot: ApiSnapshot): void {
     const current = sanitizeSnapshotForCurrentRuntime(snapshot);
     intakeState = current.intakeState;
-    publications = current.publications;
     devDeliverySequence = current.devDeliverySequence;
   }
 
   function snapshot(): ApiSnapshot {
-    return { intakeState, publications, devDeliverySequence };
+    return { intakeState, devDeliverySequence };
   }
 
   async function persist(deliveryId?: string): Promise<boolean> {
@@ -1542,7 +1532,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function boardView(principal: Principal) {
     const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
-    const base = tenantBoardView(intakeState, publications, principal.tenantId, allowed);
+    const base = tenantBoardView(intakeState, principal.tenantId, allowed);
     const builds = (await contextCoordinator.list(principal.tenantId)).filter(
       (build) => !allowed || allowed.has(build.repository)
     );
@@ -1796,13 +1786,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         },
         { actor: RUN_ACTOR, now }
       ).state;
-      if (outcome === "done" && message.topic === "run-publish") {
-        const repository = optionalString(task.metadata.repository) ?? "";
-        const pullRequestNumber = Number(task.metadata.pullRequestNumber ?? 0);
-        const headSha = optionalString(task.metadata.headSha) ?? "";
-        const key = buildPublicationKey(`${repository}#${pullRequestNumber}`, headSha, "summary");
-        publications = upsertPublication(publications, { key, headSha, target: "summary" }).records;
-      }
       board = applyCommand(
         board,
         { command: "TransitionTask", taskId: boardTaskId, toStatus: outcome },
@@ -2123,6 +2106,12 @@ function publicGeneration(generation: Awaited<ReturnType<ContextEngineStore["lis
     status: generation.status,
     derivedKnowledge: generation.capabilities.derivedKnowledge,
     projectors: generation.projectorStatuses,
+    projectorDetails: Object.entries(generation.projectorStatuses).map(([name, status]) => ({
+      name,
+      status,
+      checkpoint: generation.id,
+      version: generation.projectorVersions[name as keyof typeof generation.projectorVersions]
+    })),
     createdAt: generation.createdAt,
     ...(generation.publishedAt ? { publishedAt: generation.publishedAt } : {})
   };
@@ -2284,12 +2273,7 @@ function stageBoardTask(build: ContextBuild, stage: ContextPipelineStage): Board
   };
 }
 
-function tenantBoardView(
-  state: GitHubIntakeState,
-  records: readonly PublicationRecord[],
-  tenantId: string,
-  allowedRepositories?: ReadonlySet<string>
-) {
+function tenantBoardView(state: GitHubIntakeState, tenantId: string, allowedRepositories?: ReadonlySet<string>) {
   const taskIds = new Set(
     state.board.tasks
       .filter(
@@ -2300,29 +2284,21 @@ function tenantBoardView(
       )
       .map((task) => task.id)
   );
-  const pullRequests = state.pullRequests.filter(
-    (pullRequest) =>
-      pullRequest.tenantId === tenantId && (!allowedRepositories || allowedRepositories.has(pullRequest.repository))
-  );
   return {
     tasks: state.board.tasks.filter((task) => taskIds.has(task.id)),
     dependencies: state.board.dependencies.filter(
       (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
     ),
     outbox: state.board.outbox.filter((message) => taskIds.has(message.taskId)),
-    publications: records.filter((record) =>
-      pullRequests.some((pr) => record.key.startsWith(`pr:${pr.repository}#${pr.number}:`))
-    ),
-    pullRequests
+    pullRequests: state.pullRequests.filter(
+      (pullRequest) =>
+        pullRequest.tenantId === tenantId && (!allowedRepositories || allowedRepositories.has(pullRequest.repository))
+    )
   };
 }
 
-function completionEventType(topic: string): string {
-  if (topic === "run-review") return "review.completed";
-  if (topic === "run-research") return "context.collected";
-  if (topic === "run-publish") return "publish.completed";
-  if (topic === "run-cleanup") return "cleanup.completed";
-  return "worker.completed";
+function completionEventType(_topic: string): string {
+  return "review.completed";
 }
 
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
@@ -2627,7 +2603,6 @@ function isApiSnapshot(value: unknown): value is ApiSnapshot {
     Array.isArray(intake.board.events) &&
     Array.isArray(intake.board.outbox) &&
     Array.isArray(intake.pullRequests) &&
-    Array.isArray(value.publications) &&
     typeof value.devDeliverySequence === "number"
   );
 }

@@ -29,7 +29,7 @@ export interface SharedRepositoryIdentity {
   readonly defaultBranch?: string;
 }
 
-export interface SharedTenantGithubConnection {
+interface SharedTenantGithubConnection {
   readonly installationId: string;
   readonly login: string;
   readonly type: string;

@@ -7,14 +7,12 @@ export * from "./domain/query.js";
 export * from "./ports/context-engine-store.js";
 export * from "./ports/evidence-store.js";
 export * from "./ports/knowledge-store.js";
-export * from "./ports/outbox-store.js";
 export * from "./ports/projection-store.js";
 export * from "./ports/hierarchy.js";
 export * from "./ports/embeddings.js";
 export * from "./ports/synthesizer.js";
 
 export * from "./memory/store.js";
-export * from "./memory/outbox.js";
 
 export * from "./ingest/parser.js";
 export * from "./ingest/provider-normalizers.js";

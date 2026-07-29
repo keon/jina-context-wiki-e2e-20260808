@@ -9,7 +9,6 @@ import {
   IngestEvidenceService,
   KnowledgeOutputValidator,
   MemoryContextEngineStore,
-  MemoryContextOutbox,
   MemoryContextPipelineCoordinator,
   PageIndexHierarchyAdapter,
   QueryContextService,
@@ -2065,54 +2064,6 @@ test("workflow release requeues work and stale leases cannot commit", async () =
       ),
     /stale or invalid/
   );
-});
-
-test("outbox deliveries are independent per consumer and advance owned checkpoints", async () => {
-  const outbox = new MemoryContextOutbox();
-  const event = {
-    id: "event-1",
-    sequence: 1,
-    tenantId,
-    repository,
-    aggregateType: "evidence" as const,
-    aggregateId: "evidence-1",
-    eventType: "evidence.recorded",
-    payload: {},
-    consumers: ["manifest", "lexical"] as const,
-    occurredAt: createdAt
-  };
-  await outbox.append([{ ...event, consumers: [...event.consumers] }]);
-  await outbox.append([{ ...event, consumers: [...event.consumers] }]);
-  const manifest = await outbox.claim({
-    consumer: "manifest",
-    tenantId,
-    repository,
-    limit: 10,
-    now: "2026-07-26T12:00:01.000Z",
-    leaseExpiresAt: "2026-07-26T12:01:00.000Z"
-  });
-  assert.equal(manifest.length, 1);
-  assert.equal(
-    await outbox.acknowledge({
-      consumer: "manifest",
-      eventId: event.id,
-      leaseId: manifest[0]!.leaseId!,
-      processedAt: "2026-07-26T12:00:02.000Z",
-      projectorVersion: "1"
-    }),
-    true
-  );
-  assert.equal((await outbox.checkpoint("manifest", tenantId, repository))?.sequence, 1);
-  assert.equal(await outbox.checkpoint("lexical", tenantId, repository), undefined);
-  const lexical = await outbox.claim({
-    consumer: "lexical",
-    tenantId,
-    repository,
-    limit: 10,
-    now: "2026-07-26T12:00:03.000Z",
-    leaseExpiresAt: "2026-07-26T12:01:00.000Z"
-  });
-  assert.equal(lexical.length, 1);
 });
 
 test("repository access replacement, tenant access migration, health, and close are explicit", async () => {

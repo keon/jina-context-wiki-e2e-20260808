@@ -1414,8 +1414,7 @@ body {
   padding: 0 2px;
 }
 .page-filters select,
-.search-control,
-.demo-menu > summary {
+.search-control {
   min-height: 36px;
   border: 1px solid var(--border);
   border-radius: 6px;
@@ -1461,44 +1460,6 @@ body {
   border-color: #474747;
   box-shadow: 0 0 0 1px rgb(139 124 246 / 18%);
 }
-.demo-menu {
-  position: relative;
-  margin-left: auto;
-}
-.demo-menu > summary {
-  display: flex;
-  align-items: center;
-  padding: 0 11px;
-  cursor: pointer;
-  list-style: none;
-}
-.demo-actions {
-  position: absolute;
-  z-index: 12;
-  top: calc(100% + 6px);
-  right: 0;
-  display: grid;
-  width: 160px;
-  padding: 5px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-  background: #111;
-  box-shadow: 0 16px 48px rgb(0 0 0 / 55%);
-}
-.demo-actions button {
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  padding: 8px;
-  color: #aaa;
-  text-align: left;
-  font-size: 10px;
-}
-.demo-actions button:hover {
-  background: #1a1a1a;
-  color: #eee;
-}
-
 .columns {
   grid-template-columns: repeat(4, minmax(215px, 1fr));
   gap: 10px;

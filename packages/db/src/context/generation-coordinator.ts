@@ -431,7 +431,7 @@ function degradedCapabilities(generation: Pick<IndexGeneration, "capabilities">)
     .map(([capability]) => capability);
 }
 
-export async function loadGeneration(client: PoolClient, generationId: string): Promise<IndexGeneration | undefined> {
+async function loadGeneration(client: PoolClient, generationId: string): Promise<IndexGeneration | undefined> {
   const generation = await client.query<{
     id: string;
     tenant_id: string;

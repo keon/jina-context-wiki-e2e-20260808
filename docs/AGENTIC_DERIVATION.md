@@ -2,8 +2,7 @@
 
 `derive-knowledge` is the required interpretation stage between canonical evidence and
 the enriched context index. It uses Codex to inspect an exact repository checkpoint and
-organize evidence into durable, cited knowledge documents. It does not create graph nodes
-or model-proposed edges.
+organize evidence into durable, cited knowledge documents.
 
 The conceptual data flow is:
 

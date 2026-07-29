@@ -4,8 +4,8 @@ Status: phase 1 implemented. This describes a credential model that lets people 
 API and MCP directly, meters what they use, and lets them issue their own tokens from the
 dashboard. The token model — mint, verify, scope-check, hash at rest, revoke — is built;
 usage metering, dashboard issuance and retiring the static context token are not.
-`docs/API_TOKENS_PLAN.md` is the authoritative plan and corrects this document in several
-places where implementation proved it wrong.
+This document is the maintained design and roadmap; executable source and tests are
+authoritative for the implemented phase.
 
 ## Why the current model cannot do this
 
@@ -114,8 +114,8 @@ per billable operation, keyed `(tenantId, principalId, tokenId, operation)`.
 Build cost has to be captured before it can be metered. An earlier version of this document
 said the worker already knows the derivation's model consumption and that build cost could
 therefore be recorded rather than estimated. It cannot: nothing on the context derivation
-path persists model token usage today. Making that true is work in its own right, and
-`docs/API_TOKENS_PLAN.md` traces the chain and lists what has to change.
+path persists model token usage today. Phase 2 must extend the derivation executor result,
+carry usage through stage completion, and write it with the billable build operation.
 
 Billing stays where it is. This API exposes usage and Jina v1 polls it to meter credits.
 Polling avoids a dependency from this API onto v1, and a missed poll is recoverable where a
@@ -156,9 +156,7 @@ Issuance and revocation are recorded with their actor.
    context page and is a strict subset of `context:read`.
 1. **Done.** Token model here: mint, verify, scope-check, hash at rest, revoke. Both static
    tokens keep working, so nothing breaks — the pre-existing static-token scope test passes
-   untouched, which is how that promise is checked. Planned in `docs/API_TOKENS_PLAN.md`,
-   which plans every phase through to completion and settles the token-format and narrowing
-   decisions below.
+   untouched, which is how that promise is checked.
 2. Usage records keyed by `tokenId`, covering builds as well as queries. v1 polls and meters.
 3. Dashboard issuance and per-token usage on the existing Usage page.
 4. v1 moves to delegated per-tenant tokens; retire the static context token.

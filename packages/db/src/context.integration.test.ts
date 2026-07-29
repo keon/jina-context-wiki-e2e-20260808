@@ -20,7 +20,6 @@ import { PostgresApiTokenRepository } from "./context/api-token-repository.js";
 import { ContextDatabase, contextSystemScope, contextTenantScope } from "./context/database.js";
 import { PostgresContextEmbeddingRepository } from "./context/embedding-repository.js";
 import { PostgresEvidenceRepository } from "./context/evidence-repository.js";
-import { PostgresContextOutboxRepository } from "./context/outbox-repository.js";
 import { PostgresContextPipelineCoordinator } from "./context/pipeline-coordinator.js";
 import { PostgresContextQueryRepository } from "./context/query-repository.js";
 import { CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
@@ -44,7 +43,6 @@ test(
     const store = new PostgresContextEngineStore(database);
     const evidence = new PostgresEvidenceRepository(database);
     const coordinator = new PostgresContextPipelineCoordinator(database);
-    const outbox = new PostgresContextOutboxRepository(database);
     const query = new PostgresContextQueryRepository(database);
     const embeddings = new PostgresContextEmbeddingRepository(database);
 
@@ -545,43 +543,6 @@ test(
         `select count(*)::text as count from jina_context.${table}`
       );
       assert.ok(Number(canonical.rows[0]!.count) > 0, `${table} was not populated`);
-    }
-    const manifestDeliveries = await outbox.claim({
-      consumer: "manifest",
-      workerId: "manifest-projector",
-      now: at(500),
-      leaseExpiresAt: at(30_000),
-      tenantId,
-      repository
-    });
-    assert.ok(manifestDeliveries.length > 0);
-    assert.ok(manifestDeliveries.every((delivery) => delivery.consumer === "manifest"));
-    assert.equal(
-      await outbox.acknowledge(manifestDeliveries[0]!.deliveryId, manifestDeliveries[0]!.leaseId, at(600)),
-      true
-    );
-    const lexicalDeliveries = await outbox.claim({
-      consumer: "lexical",
-      workerId: "lexical-projector",
-      now: at(700),
-      leaseExpiresAt: at(30_000),
-      tenantId,
-      repository
-    });
-    assert.ok(lexicalDeliveries.length > 0);
-    assert.ok(lexicalDeliveries.every((delivery) => delivery.consumer === "lexical"));
-    for (const delivery of lexicalDeliveries) {
-      assert.equal(
-        await outbox.fail({
-          deliveryId: delivery.deliveryId,
-          leaseId: delivery.leaseId,
-          now: at(800),
-          retryAt: at(900),
-          error: "simulated projector restart"
-        }),
-        true
-      );
-      assert.equal(await outbox.acknowledge(delivery.deliveryId, delivery.leaseId, at(850)), false);
     }
     assert.equal(
       await coordinator.complete({
@@ -1329,8 +1290,11 @@ test(
     assert.equal(
       (
         await database.pool.query<{ commit_sha: string }>(
-          `select commit_sha from jina_context.current_refs
-           where tenant_id=$1 and repository=$2 and ref_name=$3`,
+          `select commit_sha
+           from jina_context.refs
+           where tenant_id=$1 and repository=$2 and ref_name=$3
+           order by ref_sequence desc,id desc
+           limit 1`,
           [tenantId, repository, ref]
         )
       ).rows[0]?.commit_sha,
@@ -1784,8 +1748,11 @@ test(
     assert.equal(
       (
         await database.pool.query<{ commit_sha: string }>(
-          `select commit_sha from jina_context.current_refs
-           where tenant_id=$1 and repository=$2 and ref_name=$3`,
+          `select commit_sha
+           from jina_context.refs
+           where tenant_id=$1 and repository=$2 and ref_name=$3
+           order by ref_sequence desc,id desc
+           limit 1`,
           [tenantId, repository, ref]
         )
       ).rows[0]?.commit_sha,

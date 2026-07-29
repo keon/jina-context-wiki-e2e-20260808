@@ -1,4 +1,4 @@
-export const CONTEXT_ROLES = [
+const CONTEXT_ROLES = [
   "jina_context_coordinator",
   "jina_context_ingest",
   "jina_context_derive",
@@ -271,12 +271,10 @@ to jina_context_retention;
 grant select,update,delete on jina_context.index_generations to jina_context_retention;
 
 grant select on
-  jina_context.current_refs,jina_context.current_repository_acl,jina_context.published_repository_acl,
-  jina_context.index_generations,jina_context.generation_projectors,
+  jina_context.current_repository_acl,jina_context.index_generations,jina_context.generation_projectors,
   jina_context.repository_acl_projection,jina_context.published_context_documents,
   jina_context.published_context_fragments,
   jina_context.published_structural_relations,jina_context.published_hierarchy_nodes,
-  jina_context.published_current_knowledge_revisions,
   jina_context.context_embeddings,jina_context.exact_index,jina_context.knowledge_documents,
   jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence
 to jina_context_query;

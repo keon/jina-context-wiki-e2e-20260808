@@ -9,7 +9,7 @@ import { EMPTY_BOARD_FILTERS, filterBoardTasks, partitionBoardTasks, uniqueValue
 import { usePoll } from "../lib/poll.ts";
 import type { BoardState, OverviewResponse } from "../lib/types.ts";
 
-const EMPTY_BOARD: BoardState = { tasks: [], dependencies: [], publications: [] };
+const EMPTY_BOARD: BoardState = { tasks: [], dependencies: [] };
 
 /** Reads the task selected via the URL hash: `#task=<encodeURIComponent id>`. */
 function taskIdFromHash(): string | null {
@@ -24,7 +24,7 @@ function taskIdFromHash(): string | null {
 }
 
 export default function BoardPage() {
-  const { data, refresh } = usePoll<OverviewResponse>("/api/overview");
+  const { data } = usePoll<OverviewResponse>("/api/overview");
   const board = data?.board ?? EMPTY_BOARD;
   const events = data?.events ?? [];
 
@@ -102,7 +102,7 @@ export default function BoardPage() {
             <p>Live operational work across repositories and workflows.</p>
           </div>
         </header>
-        <BoardToolbar filters={effectiveFilters} options={options} onFilterChange={setFilter} onRefresh={refresh} />
+        <BoardToolbar filters={effectiveFilters} options={options} onFilterChange={setFilter} />
         <BoardColumns tasks={visibleTasks} onOpenTask={openTask} />
       </section>
       <TaskDialog task={selectedTask} board={board} events={events} onOpenTask={openTask} onClose={closeTask} />

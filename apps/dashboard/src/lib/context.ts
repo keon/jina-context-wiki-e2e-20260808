@@ -51,6 +51,7 @@ export function generationForScope(
 
 export function projectorRows(generation: ContextGeneration | undefined): readonly ContextProjector[] {
   if (!generation) return [];
+  if (generation.projectorDetails) return generation.projectorDetails;
   const projectors = generation.projectors;
   if (Array.isArray(projectors)) return projectors as readonly ContextProjector[];
   return Object.entries(projectors as Readonly<Record<string, string>>).map(([name, status]) => ({ name, status }));

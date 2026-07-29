@@ -31,7 +31,7 @@ projector set.
 The agent-derived knowledge section reports immutable revision counts by document kind and
 shows each visible revision's repository, kind, logical document, commit, generator/model,
 review state, and confidence. It is an operational catalog of
-`knowledge-documents-v4`; it does not expose or imply a semantic graph.
+`knowledge-documents-v4`.
 
 ## Running
 

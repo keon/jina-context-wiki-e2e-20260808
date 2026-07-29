@@ -91,8 +91,7 @@ test("taskRelationships returns parent, child, and both dependency directions", 
     dependencies: [
       { taskId: "selected", dependsOnTaskId: "other", relationship: "blocks", required: true },
       { taskId: "other", dependsOnTaskId: "selected", relationship: "informs", required: false }
-    ],
-    publications: []
+    ]
   } as BoardState;
   assert.deepEqual(taskRelationships(selected, board), [
     { direction: "Parent", taskId: "parent", relationship: "parent" },

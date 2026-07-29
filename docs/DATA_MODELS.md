@@ -8,7 +8,7 @@ generic board types in `packages/board`.
 ## Runtime state
 
 - `jina_runtime.api_state` stores the versioned board snapshot, tracked pull requests,
-  publications, and delivery sequence.
+  and delivery sequence.
 - `jina_runtime.github_deliveries` uniquely records processed GitHub delivery IDs.
 
 The snapshot contains tasks, dependencies, task events, and durable deliveries. Every

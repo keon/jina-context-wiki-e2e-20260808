@@ -83,9 +83,6 @@ importers:
       '@jina/observability':
         specifier: workspace:*
         version: link:../../packages/observability
-      '@jina/publication':
-        specifier: workspace:*
-        version: link:../../packages/publication
       '@jina/review':
         specifier: workspace:*
         version: link:../../packages/review

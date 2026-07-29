@@ -36,27 +36,6 @@ export const taskTypeDefinitions: readonly TaskTypeDefinition[] = [
     description: "Runs one focused code-review pass and records findings against a pull-request revision."
   },
   {
-    type: "context",
-    kind: "dispatchable",
-    defaultAssigneeRole: "research_agent",
-    dispatchTopic: "run-research",
-    description: "Collects approved external context needed by another task."
-  },
-  {
-    type: "publish",
-    kind: "dispatchable",
-    defaultAssigneeRole: "publisher",
-    dispatchTopic: "run-publish",
-    description: "Publishes or records the final output produced by a completed workflow."
-  },
-  {
-    type: "cleanup",
-    kind: "dispatchable",
-    defaultAssigneeRole: "cleanup_worker",
-    dispatchTopic: "run-cleanup",
-    description: "Releases temporary resources after workflow execution."
-  },
-  {
     type: "issue_triage",
     kind: "manual",
     defaultAssigneeRole: "human",

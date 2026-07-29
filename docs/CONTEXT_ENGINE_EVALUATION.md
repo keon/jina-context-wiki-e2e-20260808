@@ -1,170 +1,71 @@
-# Context engine evaluation report and runbook
+# Context engine evaluation
 
-## Latest checked-in-fixture result
+The context evaluator is a reproducible quality gate for retrieval, citations, ACL
+isolation, conflicts, and repository-access revocation. It emits a
+`context-evaluation-report-v1` JSON report; this document intentionally does not record
+dated results or production release identifiers.
 
-- **Run:** 2026-07-26T09:27:12.330Z
-- **Command:** `pnpm evaluate:context`
-- **Fixture:** `packages/context-engine/evaluation/fixtures.v1.json`
-- **Fixture schema:** `context-evaluation-v1`
-- **Report schema:** `context-evaluation-report-v1`
+## Run the fixture
 
-| Gate                           | Full routed hybrid |     Requirement | Result |
-| ------------------------------ | -----------------: | --------------: | ------ |
-| Exact-query completeness       |              1.000 | 1.000 hard gate | pass   |
-| Citation anchor integrity      |              1.000 | 1.000 hard gate | pass   |
-| Evidence recall@20             |              1.000 |    target 0.900 | pass   |
-| Unauthorized citation count    |                  0 |     0 hard gate | pass   |
-| Labeled conflict failures      |                  0 |     0 hard gate | pass   |
-| Required source-kind failures  |                  0 |     0 hard gate | pass   |
-| Grounded knowledge citation    |               true |  true hard gate | pass   |
-| Repository revocation enforced |               true |  true hard gate | pass   |
-
-The evaluator's process exit threshold for recall is `0.90`, matching the architecture
-plan's initial target. It also exits nonzero for any ACL leak, labeled conflict mismatch,
-required source-kind mismatch, derived claim that is absent from its resolved excerpt, or
-post-run revocation failure. All gates pass in this PostgreSQL-adapter run.
-
-The v1 fixture now has 12 cases: exact symbol, exact path/list, structural call,
-architecture overview, derived knowledge, PR/change, incident status, ownership,
-long-document retrieval, a temporal window, a labeled conflict, and a negative private
-ACL case. The full routed variant finds all 12 expected source IDs, reports the labeled
-conflict, uses the required source kinds, and returns none of the private source IDs. The
-evaluator then revokes the principal's repository access and requires the next query to
-fail.
-
-All citations returned in this run resolve back through the active evidence checkpoint
-with matching source identity and content digest. Citation-selector and claim-grounding
-tests separately prove that line ranges/JSON pointers resolve exact excerpts and that a
-derived citation's normalized claim must occur verbatim in the selected excerpt rather
-than a nearby source location. Identity/scope tests likewise allow only that selected
-excerpt and intrinsic source ID/path—not unrelated record text or manifest membership
-alone. Same-commit checkpoint tests prove unchanged citation identity/digest can safely
-reuse cached knowledge while a changed mutable provider observation excludes stale
-PR/issue-derived revisions and lowers exact-checkpoint `derivedKnowledge` coverage.
-Production acceptance separately verifies HTTP and MCP anchors at a real repository
-commit. The release built from `050623ce17df30caf14fbc5e798baea6ff3fee30`
-passed that production acceptance gate.
-
-Agentic derivation has additional contract coverage outside this deterministic retrieval
-fixture. Tests exercise `knowledge-documents-v4`, cited summaries/body blocks/facts/
-questions/diagnostics, checkpoint commit changed paths, GitHub issue/PR/discussion
-comments, a checkpoint-pinned read-only Codex shell workspace, explicit prior-document
-re-emission or retirement, one repair then fail-closed behavior, and `diagnose` routing.
-API integration covers a full initialization followed by an incremental commit with new
-PR and issue evidence, then queries the resulting context through both HTTP and MCP.
-
-## Ablation results
-
-| Variant                 | Enabled | Evidence recall | Exact completeness | Citation integrity | ACL leaks |
-| ----------------------- | ------- | --------------: | -----------------: | -----------------: | --------: |
-| lexical only            | yes     |           0.917 |              1.000 |              1.000 |         0 |
-| lexical + structural    | yes     |           0.917 |              1.000 |              1.000 |         0 |
-| lexical + dense control | no      |           0.917 |              1.000 |              1.000 |         0 |
-| lexical + hierarchy     | yes     |           0.917 |              1.000 |              1.000 |         0 |
-| lexical + knowledge     | yes     |           0.917 |              1.000 |              1.000 |         0 |
-| full routed hybrid      | yes     |           1.000 |              1.000 |              1.000 |         0 |
-| full without reranking  | yes     |           1.000 |              1.000 |              1.000 |         0 |
-| routed long context     | yes     |           0.917 |              1.000 |              1.000 |         0 |
-
-The fixture contains an immutable derived knowledge revision cited to original README
-evidence. The knowledge route retrieves it for architecture/knowledge/long-document
-questions. The full and no-reranking variants remain equivalent because the implementation
-uses transparent deterministic fusion, not a separate learned reranker.
-
-The full routed variant's temporal case uses lexical plus structured retrieval and is the
-one expected-source distinction missed by the single-route controls. Exact cases use the
-exact retriever, structural call uses exact plus structural, change uses structured, and
-the conflict case returns both labeled sources plus one conflict group.
-
-## Optional capability decisions
-
-### Dense retrieval: disabled
-
-The embedding port, PostgreSQL storage lifecycle, ACL-filtered search adapter, and dense
-retriever exist. No approved embedding backend is configured for this evaluation. The
-`lexical_dense` row deliberately executes the lexical control and shows no incremental
-gain.
-
-Dense must remain disabled until an evaluation:
-
-1. configures the exact model, dimensions, contextualization, and projector version;
-2. backfills a disposable generation from immutable fragments;
-3. compares lexical+structural against lexical+structural+dense;
-4. demonstrates a predeclared material recall or answer-quality improvement;
-5. retains 100% ACL isolation and citation integrity;
-6. stays within indexing cost, query latency, and data-egress budgets.
-
-### PageIndex: fallback only
-
-The active hierarchy is Jina's deterministic heading/section-tree adapter. It preserves
-source spans and gives long documents a hierarchy route. PageIndex is a replaceable
-adapter behind the same port, not the canonical store or public contract. No PageIndex
-client or dependency is configured in the current runtime.
-
-PageIndex must remain disabled until an expanded long-document slice compares:
-
-- lexical only;
-- lexical plus deterministic hierarchy;
-- lexical plus PageIndex;
-- routed long-context with each hierarchy.
-
-The go/no-go decision must include recall, citation integrity, ACL isolation, node/span
-validation, indexing and query latency, cost, private-data egress, cancellation/timeout,
-and licensing. The current 12-case fixture is too small to make that decision.
-
-## Reproduce locally
+Run the in-memory adapter:
 
 ```sh
 pnpm install --frozen-lockfile
 pnpm evaluate:context
 ```
 
-Without `TEST_DATABASE_URL`, the command builds the packages, ingests the fixture into
-`MemoryContextEngineStore`, commits a cited derived knowledge revision, publishes a
-generation, runs every ablation, resolves returned anchors, checks revocation, and prints
-JSON to stdout.
-
-For the merge gate, use a disposable PostgreSQL database:
+Run the same cases through PostgreSQL using a disposable database:
 
 ```sh
 TEST_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/jina_test \
   pnpm evaluate:context
 ```
 
-That mode drops only the `jina_context` schema in the named disposable database, then
-repeats the same fixture and gates through `PostgresContextEngineStore`. It exercises
-actual SQL ACL filtering, generation hydration, knowledge projection, dedicated indexed
-retrieval primitives, and query telemetry construction. Telemetry persistence is covered
-separately by the PostgreSQL integration test, which asserts query-run, candidate,
-citation-anchor, and per-route metric rows. Never point this evaluator at production or a
-shared development database.
+PostgreSQL mode drops only the `jina_context` schema in the supplied database. Never
+point the evaluator at production or a shared development database.
 
-The evaluator exits nonzero if:
+The fixture is
+`packages/context-engine/evaluation/fixtures.v1.json`. The evaluator builds the context
+engine and database packages, ingests the fixture, commits cited knowledge, publishes an
+index generation, runs retrieval variants, resolves returned anchors, and verifies that
+access revocation takes effect.
 
-- full exact completeness is not `1`;
-- full citation integrity is not `1`;
-- full evidence recall is below the evaluator threshold;
-- an unauthorized source is cited;
-- a labeled conflict count differs;
-- a required source kind is missing; or
-- the persisted knowledge claim is absent from its exact resolved evidence excerpt; or
-- the principal can still query after repository access is revoked.
+The command exits nonzero when either the full routed or indexed-runtime variant:
 
-To retain an artifact without modifying the repository:
+- has exact-query completeness or citation integrity below `1`;
+- has evidence recall below `0.9`;
+- returns an unauthorized source;
+- misses a required source kind or labeled conflict;
+- returns a derived claim that is absent from its resolved evidence excerpt; or
+- remains queryable after repository access is revoked.
+
+To retain a report without changing the repository:
 
 ```sh
 pnpm evaluate:context > /tmp/context-evaluation-report.json
 ```
 
-Do not edit reported numbers by hand. Re-run after any change to evidence selection,
-fragmentation, planner routing, retrieval, fusion, hierarchy, citations, or the fixture.
+Re-run the evaluator after changing evidence selection, fragmentation, routing,
+retrieval, fusion, hierarchy, citations, ACL filtering, or fixtures. Do not edit report
+numbers by hand.
 
-## Evaluate a real question corpus
+## CI
 
-`pnpm evaluate:questions` checks each Markdown bullet question against a running
-`POST /context/query` API. Headings become report categories. Use it for the engineering
-questions agents actually need to answer, especially historical issues, root causes,
-regression detection, diagnosis, and evidence-backed fixes:
+`scripts/cloud-build-ci.sh` runs the evaluator against an ephemeral PostgreSQL 16
+database after typechecking, linting, and tests. Pull requests must not bypass this gate.
+
+When changing the fixture:
+
+1. version the fixture schema and report contract intentionally;
+2. keep stable case IDs where their meaning is unchanged;
+3. update expected source anchors and required source kinds;
+4. compare reports before and after the change; and
+5. change thresholds only in the evaluator and through review.
+
+## Real-question evaluation
+
+`pnpm evaluate:questions` sends Markdown bullet questions to a running
+`POST /context/query` API. Markdown headings become report categories.
 
 ```sh
 JINA_API_URL=https://api.example.com \
@@ -177,76 +78,34 @@ CONTEXT_QUESTION_MIN_ANSWERED_RATE=0.8 \
 pnpm evaluate:questions > /tmp/context-question-report.json
 ```
 
-For every question the report records `answered`, `partial`, `unanswered`, or `error`;
-answer text; citation source IDs; coverage and missing reasons; retrievers; trace ID; and
-latency. It also reports per-category totals and median/p95/maximum latency. The command
-fails for request errors or when the answered-or-partial rate is below
+Each row records answer status, citations, coverage gaps, retrievers, trace ID, and
+latency. The command fails on request errors or when the answered-or-partial rate is below
 `CONTEXT_QUESTION_MIN_ANSWERED_RATE`.
 
-This automated label is a coverage screen, not a semantic correctness grade: a response
-with citations is `answered` only when API coverage is complete, but causal,
-counterfactual, and fix-quality questions still need human or rubric grading. Keep the
-individual rows so failures can drive evidence intake, derivation prompts, document
-organization, and retrieval improvements. Never commit bearer tokens or reports that
-contain private answer text.
+This is a coverage screen, not a semantic correctness grade. Causal, counterfactual, and
+fix-quality questions still require human or rubric grading. Do not commit bearer tokens
+or reports containing private answer text.
 
-## CI use
+## Optional retrieval capabilities
 
-`scripts/cloud-build-ci.sh` runs `pnpm evaluate:context` with its ephemeral PostgreSQL 16
-`TEST_DATABASE_URL` after typecheck, lint, tests, and the clean-cutover vocabulary check.
-A pull request must not bypass this step.
+Dense retrieval remains disabled until an approved embedding backend demonstrates a
+material improvement over lexical and structural retrieval while preserving citation
+integrity, ACL isolation, latency, cost, and data-egress requirements.
 
-When changing the fixture schema:
+The active hierarchy is the deterministic Jina adapter. Any alternative hierarchy
+adapter must beat it on a sufficiently broad long-document fixture while preserving exact
+source spans, ACL filtering, cancellation, and citation validation.
 
-1. version the schema and fixture together;
-2. keep stable case IDs;
-3. document added/removed cases and expected source anchors;
-4. compare old/new reports rather than overwriting the baseline silently;
-5. update thresholds only through a reviewed architecture/evaluation decision.
+## Deployment acceptance
 
-## Production-shaped acceptance
+Fixture evaluation does not replace deployment acceptance. Every coordinated deployment
+runs `jina-acceptance` against a real repository and requires:
 
-The fixture evaluator is necessary but insufficient. Each deployment also executes the
-`jina-acceptance` Cloud Run job against a real repository. It must:
+- successful worker health and topic checks;
+- a completed context build at one full commit SHA;
+- a published enriched generation and nonempty knowledge catalog;
+- cited HTTP and MCP queries using the bound non-admin context identity; and
+- no remaining context outbox backlog.
 
-- use the internal credential and `mode:"merge"` to add the fixture without replacing the
-  bound non-admin query principal's existing repositories;
-- use a distinct tenant administrator to run `build-context` through strict
-  `ingest-evidence`, baseline `index-context`, then required `derive-knowledge`/enriched
-  publication ordering;
-- select a published enriched generation at one exact full commit SHA;
-- return a nonempty knowledge-document catalog;
-- query the HTTP API with the fixed-bound non-admin context bearer and verify original
-  evidence anchors;
-- connect with the MCP SDK using that same bearer, confirm `query_context` is the only
-  tool, call it, and verify the same commit and original anchors;
-- report no pending context outbox work;
-- confirm the retired public path is not served.
-
-Release evidence must record the build ID, stage IDs, repository/ref/commit, generation ID,
-document count, HTTP citation count, MCP citation count, duration, and outbox depth. It
-must also record the pre-cutover database backup ID and immutable image/source SHA.
-
-The shipped release passed this gate against a real repository through both HTTP and the
-MCP SDK. An additional isolated performance candidate used a larger PostgreSQL instance
-in the same region as the API and completed the Alliance repository build in 3 minutes
-54 seconds. That result demonstrates that database placement/capacity can remove the
-observed indexing bottleneck; it is not evidence that the existing shared production
-database was migrated or resized. Production still uses the shared database documented
-in [DEPLOYMENT.md](DEPLOYMENT.md).
-
-## Follow-up evaluation work
-
-Before calling the target evaluation set complete:
-
-- add positive and negative derived-knowledge cases for every remaining supported kind;
-- expand stale-source, multi-ref history, and erasure replay coverage beyond the current
-  temporal, conflict, private-ACL, and revocation cases;
-- expand long-document coverage enough to decide PageIndex;
-- add a real dense ablation before enabling embeddings;
-- measure structured and hybrid p95 against the plan's latency budgets;
-- add graded groundedness and citation-precision scoring beyond the enforced exact
-  citation-claim excerpt check.
-
-These gaps do not invalidate the exact/citation/ACL/conflict hard-gate result above, but
-they prevent using this small fixture as a broad product-quality claim.
+The release process and evidence to retain are documented in
+[DEPLOYMENT.md](DEPLOYMENT.md).

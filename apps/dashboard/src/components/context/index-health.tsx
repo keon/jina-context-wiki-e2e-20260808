@@ -16,12 +16,10 @@ export function IndexHealth({
 }) {
   const [pending, setPending] = useState(false);
   const [message, setMessage] = useState("");
-  const rows = useMemo(() => {
-    const byName = new Map(projectorRows(generation).map((projector) => [projector.name, projector]));
-    for (const projector of metrics?.projectors ?? [])
-      byName.set(projector.name, { ...byName.get(projector.name), ...projector });
-    return [...byName.values()].sort((left, right) => left.name.localeCompare(right.name));
-  }, [generation, metrics]);
+  const rows = useMemo(
+    () => [...projectorRows(generation)].sort((left, right) => left.name.localeCompare(right.name)),
+    [generation]
+  );
 
   const rebuild = async () => {
     setPending(true);

@@ -68,21 +68,6 @@ context_derive_document_files="${JINA_CONTEXT_DERIVE_DOCUMENT_FILES:-true}"
 # documents on a task whose output is the document. A build may override it.
 context_derive_detail="${JINA_CONTEXT_DERIVE_DETAIL:-standard}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
-context_cutover="${JINA_CONTEXT_CUTOVER:-false}"
-context_cutover_backup_id="${JINA_CONTEXT_CUTOVER_BACKUP_ID:-}"
-context_cutover_legacy_backup_id="${JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID:-}"
-legacy_cutover_tenant_ids="${JINA_LEGACY_CUTOVER_TENANT_IDS:-}"
-release_sha="${JINA_RELEASE_SHA:-}"
-build_commit_sha="${JINA_BUILD_COMMIT_SHA:-}"
-trusted_primary_cloud_sql_instance="jina-463721:us-east1:jina-db"
-trusted_legacy_graph_cloud_sql_instance="jina-v2:us-central1:jina-postgres"
-trusted_legacy_graph_db_name="jina"
-trusted_legacy_graph_db_user="jina_app"
-trusted_legacy_graph_db_pass_secret="jina-db-password:latest"
-cutover_primary_db_user="jina_cutover_auditor"
-cutover_primary_db_pass_secret="jina-primary-cutover-auditor-db-password:latest"
-cutover_legacy_graph_db_user="jina_cutover_auditor"
-cutover_legacy_graph_db_pass_secret="jina-legacy-cutover-auditor-db-password:latest"
 
 if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
   echo "Deployment must deploy images built by the current coordinated Cloud Build" >&2
@@ -178,54 +163,7 @@ if [[ "${db_pass_secret}" == *","* || "${db_pass_secret}" == *"~"* ||
   echo "Database password secrets must be Cloud Run secret specs without commas or tildes" >&2
   exit 2
 fi
-if [[ "${context_cutover}" != "true" && "${context_cutover}" != "false" ]]; then
-  echo "JINA_CONTEXT_CUTOVER must be true or false" >&2
-  exit 2
-fi
-deploy_traffic_args=()
-if [[ "${context_cutover}" == "false" ]]; then
-  deploy_traffic_args=(--no-traffic)
-fi
-
-legacy_api_env_value() {
-  local environment_name="$1"
-  LEGACY_API_DESCRIPTION="${legacy_api_description}" LEGACY_API_ENV_NAME="${environment_name}" python3 -c '
-import json
-import os
-
-description = json.loads(os.environ["LEGACY_API_DESCRIPTION"])
-name = os.environ["LEGACY_API_ENV_NAME"]
-for container in description.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
-    for entry in container.get("env", []):
-        if entry.get("name") == name:
-            print(entry.get("value", ""))
-            raise SystemExit(0)
-raise SystemExit(1)
-'
-}
-
-legacy_api_env_secret_spec() {
-  local environment_name="$1"
-  LEGACY_API_DESCRIPTION="${legacy_api_description}" LEGACY_API_ENV_NAME="${environment_name}" python3 -c '
-import json
-import os
-
-description = json.loads(os.environ["LEGACY_API_DESCRIPTION"])
-name = os.environ["LEGACY_API_ENV_NAME"]
-for container in description.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
-    for entry in container.get("env", []):
-        if entry.get("name") != name:
-            continue
-        reference = entry.get("valueFrom", {}).get("secretKeyRef", {})
-        secret_name = reference.get("name")
-        version = reference.get("key")
-        if not secret_name or not version:
-            raise SystemExit(1)
-        print(f"{secret_name}:{version}")
-        raise SystemExit(0)
-raise SystemExit(1)
-'
-}
+deploy_traffic_args=(--no-traffic)
 
 api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_DERIVE_DOCUMENT_FILES=${context_derive_document_files}"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest"
@@ -370,57 +308,6 @@ resolve_release_image() {
   printf '%s\n' "${digest_image}"
 }
 
-verify_cutover_backup() {
-  local metadata="$1"
-  local expected_description="$2"
-  local require_freshness="$3"
-  BACKUP_METADATA="${metadata}" \
-    EXPECTED_DESCRIPTION="${expected_description}" \
-    REQUIRE_FRESHNESS="${require_freshness}" \
-    python3 -c '
-import datetime
-import json
-import os
-
-metadata = json.loads(os.environ["BACKUP_METADATA"])
-if metadata.get("status") != "SUCCESSFUL":
-    raise SystemExit("backup status is not SUCCESSFUL")
-if metadata.get("description") != os.environ["EXPECTED_DESCRIPTION"]:
-    raise SystemExit("backup description is not bound to the exact release SHA")
-end_time = metadata.get("endTime")
-if not end_time:
-    raise SystemExit("backup has no completion time")
-completed = datetime.datetime.fromisoformat(end_time.replace("Z", "+00:00"))
-age = (datetime.datetime.now(datetime.timezone.utc) - completed).total_seconds()
-if age < -300:
-    raise SystemExit("backup completion time is in the future")
-if os.environ["REQUIRE_FRESHNESS"] == "true" and age > 21600:
-    raise SystemExit("backup completion must be within the last six hours")
-print(end_time)
-'
-}
-
-cutover_marker_fingerprint() {
-  CUTOVER_MARKER_INPUT="$1" python3 -c '
-import hashlib
-import os
-
-print(hashlib.sha256(os.environ["CUTOVER_MARKER_INPUT"].encode()).hexdigest()[:32])
-'
-}
-
-verify_cutover_marker() {
-  CUTOVER_MARKER_METADATA="$1" EXPECTED_CUTOVER_MARKER="$2" python3 -c '
-import json
-import os
-
-metadata = json.loads(os.environ["CUTOVER_MARKER_METADATA"])
-actual = metadata.get("metadata", {}).get("labels", {}).get("jina_cutover_marker")
-if actual != os.environ["EXPECTED_CUTOVER_MARKER"]:
-    raise SystemExit("cutover marker is absent or belongs to different release evidence")
-'
-}
-
 route_latest_revision() {
   local service="$1"
   local revision
@@ -496,7 +383,7 @@ restore_service_traffic() {
   echo "Restored ${service} traffic to ${assignments}" >&2
 }
 
-release_cutover_started="false"
+release_started="false"
 prior_api_traffic=""
 prior_context_worker_traffic=""
 prior_task_worker_traffic=""
@@ -510,16 +397,16 @@ rollback_failed_release() {
   local status=$?
   trap - EXIT
   # Restoring traffic assumes the previous revision can still serve the database.
-  # Once the migration has advanced the schema that is no longer true: the
-  # previous revision predates the context engine, so restoring it takes the API
-  # down instead of recovering it, and a traffic switch cannot undo a migration.
+  # Once the migration has advanced the schema that may no longer be true:
+  # restoring an incompatible revision can take the API down, and a traffic
+  # switch cannot undo a migration.
   # Leave the assignments alone and say what recovery actually requires.
   if [[ "${status}" -ne 0 && "${schema_migration_applied}" == "true" ]]; then
     cat >&2 <<'ROLLFORWARD'
 Release failed after the migration advanced the database schema.
 Cloud Run traffic has deliberately NOT been restored: the previous revision
-predates this schema and returns ok=false, so restoring it causes an outage
-rather than recovering from one.
+may not support this schema, so restoring it could cause an outage rather than
+recovering from one.
 Recover by rolling forward to the newest ready revision, for example:
   gcloud run services update-traffic jina-api --region=<region> --project=<project> \
     --to-revisions=<newest-ready-revision>=100
@@ -527,8 +414,7 @@ Then resolve the failure above and re-run the release.
 ROLLFORWARD
     exit "${status}"
   fi
-  if [[ "${status}" -ne 0 && "${release_cutover_started}" == "true" &&
-        "${context_cutover}" == "false" ]]; then
+  if [[ "${status}" -ne 0 && "${release_started}" == "true" ]]; then
     echo "Release failed; restoring the previous Cloud Run traffic assignments" >&2
     local rollback_status=0
     restore_service_traffic "jina-context-worker" "${prior_context_worker_traffic}" || rollback_status=$?
@@ -577,255 +463,6 @@ worker_image="$(resolve_release_image "${worker_image}")"
 dashboard_image="$(resolve_release_image "${dashboard_image}")"
 admin_image="$(resolve_release_image "${admin_image}")"
 
-service_snapshot_contains() {
-  local snapshot="$1"
-  local expected_name="$2"
-  local service_name
-  while IFS= read -r service_name; do
-    if [[ "${service_name}" == "${expected_name}" ]]; then
-      return 0
-    fi
-  done <<<"${snapshot}"
-  return 1
-}
-
-if ! service_list_snapshot="$(gcloud run services list \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --format='value(metadata.name)')"; then
-  echo "Unable to obtain an authoritative Cloud Run service inventory" >&2
-  exit 2
-fi
-
-legacy_worker="jina-context-graph-worker"
-legacy_worker_present="false"
-if service_snapshot_contains "${service_list_snapshot}" "${legacy_worker}"; then
-  legacy_worker_present="true"
-  if ! gcloud run services describe "${legacy_worker}" \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" >/dev/null; then
-    echo "Unable to verify the listed legacy context worker" >&2
-    exit 2
-  fi
-fi
-api_present="false"
-legacy_api_present="false"
-legacy_api_description=""
-if service_snapshot_contains "${service_list_snapshot}" "jina-api"; then
-  api_present="true"
-  if ! legacy_api_description="$(gcloud run services describe jina-api \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --format=json)"; then
-    echo "Unable to verify the listed API service" >&2
-    exit 2
-  fi
-  api_environment_names="$(LEGACY_API_DESCRIPTION="${legacy_api_description}" python3 -c '
-import json
-import os
-
-description = json.loads(os.environ["LEGACY_API_DESCRIPTION"])
-names = []
-for container in description.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []):
-    for entry in container.get("env", []):
-        name = entry.get("name")
-        if name:
-            names.append(name)
-print(";".join(names))
-')"
-  if [[ ";${api_environment_names};" == *";GRAPH_API_TOKEN;"* ||
-        ";${api_environment_names};" == *";GRAPH_DB_NAME;"* ]]; then
-    legacy_api_present="true"
-  fi
-fi
-if [[ "${context_cutover}" == "false" ]]; then
-  if [[ "${legacy_worker_present}" == "true" || "${legacy_api_present}" == "true" ]]; then
-    echo "Legacy context runtime is present; destructive cutover evidence is required before migration" >&2
-    exit 2
-  fi
-  if [[ "${api_present}" != "true" ]]; then
-    echo "No context-engine API exists; an interrupted first cutover must resume in destructive mode" >&2
-    exit 2
-  fi
-fi
-if [[ "${context_cutover}" == "true" ]]; then
-  if [[ "${api_present}" == "true" && "${legacy_api_present}" != "true" ]]; then
-    echo "A context-engine API already exists; rerun as a normal release with JINA_CONTEXT_CUTOVER=false" >&2
-    exit 2
-  fi
-  if [[ ! "${context_cutover_backup_id}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "JINA_CONTEXT_CUTOVER_BACKUP_ID must identify the verified pre-cutover backup" >&2
-    exit 2
-  fi
-  if [[ ! "${context_cutover_legacy_backup_id}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "JINA_CONTEXT_CUTOVER_LEGACY_BACKUP_ID must identify the verified legacy graph backup" >&2
-    exit 2
-  fi
-  if [[ ! "${release_sha}" =~ ^[0-9a-f]{40}$ ]]; then
-    echo "JINA_RELEASE_SHA must be the exact 40-character source SHA for a destructive cutover" >&2
-    exit 2
-  fi
-  if [[ "${build_commit_sha}" != "${release_sha}" ]]; then
-    echo "JINA_RELEASE_SHA must equal the connected-repository Cloud Build COMMIT_SHA" >&2
-    exit 2
-  fi
-  resolved_source_sha="$(gcloud builds describe "${CLOUD_BUILD_ID}" \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --format='value(sourceProvenance.resolvedGitSource.revision)')"
-  if [[ "${resolved_source_sha}" != "${release_sha}" ]]; then
-    echo "JINA_RELEASE_SHA must equal Cloud Build's resolved repository source revision" >&2
-    exit 2
-  fi
-  if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
-    echo "Destructive context cutover must deploy images built by the current coordinated Cloud Build" >&2
-    exit 2
-  fi
-  if [[ "${cloud_sql_instance}" != "${trusted_primary_cloud_sql_instance}" ||
-        "${db_name}" != "jina" ||
-        "${migration_db_user}" != "jina_app" ||
-        "${migration_db_pass_secret}" != "jina-primary-owner-db-password:latest" ]]; then
-    echo "Destructive cutover must use the trusted production primary database identity" >&2
-    exit 2
-  fi
-  require_secret "${trusted_legacy_graph_db_pass_secret}"
-  require_secret "${cutover_primary_db_pass_secret}"
-  require_secret "${cutover_legacy_graph_db_pass_secret}"
-  IFS='|' read -r -a cutover_tenants <<<"${legacy_cutover_tenant_ids}"
-  if (( ${#cutover_tenants[@]} == 0 )); then
-    echo "JINA_LEGACY_CUTOVER_TENANT_IDS must contain the complete active-tenant inventory" >&2
-    exit 2
-  fi
-  for tenant_id in "${cutover_tenants[@]}"; do
-    if [[ ! "${tenant_id}" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$ ]]; then
-      echo "JINA_LEGACY_CUTOVER_TENANT_IDS must be a pipe-delimited list of canonical UUIDs" >&2
-      exit 2
-    fi
-  done
-  if [[ "${legacy_api_present}" == "true" ]]; then
-    deployed_legacy_graph_socket="$(legacy_api_env_value GRAPH_INSTANCE_UNIX_SOCKET)"
-    deployed_legacy_graph_db_name="$(legacy_api_env_value GRAPH_DB_NAME)"
-    deployed_legacy_graph_db_user="$(legacy_api_env_value GRAPH_DB_USER)"
-    deployed_legacy_graph_db_pass_secret="$(legacy_api_env_secret_spec GRAPH_DB_PASS)"
-    if [[ "${deployed_legacy_graph_socket}" != "/cloudsql/${trusted_legacy_graph_cloud_sql_instance}" ||
-          "${deployed_legacy_graph_db_name}" != "${trusted_legacy_graph_db_name}" ||
-          "${deployed_legacy_graph_db_user}" != "${trusted_legacy_graph_db_user}" ||
-          "${deployed_legacy_graph_db_pass_secret}" != "${trusted_legacy_graph_db_pass_secret}" ]]; then
-      echo "Declared legacy graph database does not match the deployed legacy API" >&2
-      exit 2
-    fi
-  fi
-  database_project="${cloud_sql_instance%%:*}"
-  database_instance="${cloud_sql_instance##*:}"
-  legacy_database_project="${trusted_legacy_graph_cloud_sql_instance%%:*}"
-  legacy_database_instance="${trusted_legacy_graph_cloud_sql_instance##*:}"
-  cutover_marker="$(cutover_marker_fingerprint \
-    "${release_sha}|${cloud_sql_instance}|${context_cutover_backup_id}|${trusted_legacy_graph_cloud_sql_instance}|${context_cutover_legacy_backup_id}")"
-  backup_freshness_required="true"
-  if [[ "${legacy_api_present}" != "true" || "${legacy_worker_present}" != "true" ]]; then
-    backup_freshness_required="false"
-    if ! cutover_marker_metadata="$(gcloud run jobs describe jina-context-cutover-preflight \
-      --project="${GCP_PROJECT_ID}" \
-      --region="${GCP_REGION}" \
-      --format=json)"; then
-      echo "Interrupted cutover has no authoritative durable resume marker" >&2
-      exit 2
-    fi
-    if ! verify_cutover_marker "${cutover_marker_metadata}" "${cutover_marker}"; then
-      echo "Interrupted cutover marker does not match the requested release and backups" >&2
-      exit 2
-    fi
-  fi
-  primary_backup_metadata="$(gcloud sql backups describe "${context_cutover_backup_id}" \
-    --project="${database_project}" \
-    --instance="${database_instance}" \
-    --format=json)"
-  if ! primary_backup_completed_at="$(verify_cutover_backup \
-    "${primary_backup_metadata}" \
-    "pre-context-engine-primary-${release_sha}" \
-    "${backup_freshness_required}")"; then
-    echo "Primary backup ${context_cutover_backup_id} is not valid evidence for release ${release_sha}" >&2
-    exit 2
-  fi
-  legacy_backup_metadata="$(gcloud sql backups describe "${context_cutover_legacy_backup_id}" \
-    --project="${legacy_database_project}" \
-    --instance="${legacy_database_instance}" \
-    --format=json)"
-  if ! legacy_backup_completed_at="$(verify_cutover_backup \
-    "${legacy_backup_metadata}" \
-    "pre-context-engine-legacy-graph-${release_sha}" \
-    "${backup_freshness_required}")"; then
-    echo "Legacy graph backup ${context_cutover_legacy_backup_id} is not valid evidence for release ${release_sha}" >&2
-    exit 2
-  fi
-
-  # This non-serving job is also the durable resume marker. It is created
-  # before either legacy service is removed and is bound to the exact release,
-  # instances, and backup IDs through the verified label fingerprint.
-  gcloud run jobs deploy jina-context-cutover-preflight \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --image="${api_image}" \
-    --service-account="${migration_service_account}" \
-    --set-cloudsql-instances="${cloud_sql_instance},${trusted_legacy_graph_cloud_sql_instance}" \
-    --labels="jina_cutover_marker=${cutover_marker}" \
-    --set-env-vars="^~^INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${cutover_primary_db_user}~LEGACY_GRAPH_INSTANCE_UNIX_SOCKET=/cloudsql/${trusted_legacy_graph_cloud_sql_instance}~LEGACY_GRAPH_DB_NAME=${trusted_legacy_graph_db_name}~LEGACY_GRAPH_DB_USER=${cutover_legacy_graph_db_user}~JINA_LEGACY_CUTOVER_TENANT_IDS=${legacy_cutover_tenant_ids}" \
-    --set-secrets="DB_PASS=${cutover_primary_db_pass_secret},LEGACY_GRAPH_DB_PASS=${cutover_legacy_graph_db_pass_secret}" \
-    --args=dist/cutover-preflight.js \
-    --tasks=1 \
-    --max-retries=0 \
-    --task-timeout=5m \
-    --quiet
-
-  cat <<CUTOVER
-Starting destructive context cutover
-Release SHA: ${release_sha}
-Verified primary backup: ${database_project}/${database_instance}/${context_cutover_backup_id}
-Verified legacy graph backup: ${legacy_database_project}/${legacy_database_instance}/${context_cutover_legacy_backup_id}
-Primary backup completed: ${primary_backup_completed_at}
-Legacy graph backup completed: ${legacy_backup_completed_at}
-Backup freshness required: ${backup_freshness_required}
-CUTOVER
-
-  # Stop every intake surface and then claims before auditing the durable queue. The
-  # database audit runs only after the old write path is absent, so no task can
-  # cross a preflight-to-shutdown race.
-  if [[ "${legacy_api_present}" == "true" ]]; then
-    gcloud run services delete jina-api \
-      --project="${GCP_PROJECT_ID}" \
-      --region="${GCP_REGION}" \
-      --quiet
-  fi
-  if [[ "${legacy_worker_present}" == "true" ]]; then
-    gcloud run services delete "${legacy_worker}" \
-      --project="${GCP_PROJECT_ID}" \
-      --region="${GCP_REGION}" \
-      --quiet
-  fi
-  if ! post_quiesce_service_snapshot="$(gcloud run services list \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --format='value(metadata.name)')"; then
-    echo "Unable to verify Cloud Run service absence after quiesce" >&2
-    exit 2
-  fi
-  if service_snapshot_contains "${post_quiesce_service_snapshot}" "${legacy_worker}"; then
-    echo "Legacy context worker still exists after quiesce" >&2
-    exit 2
-  fi
-  if service_snapshot_contains "${post_quiesce_service_snapshot}" "jina-api"; then
-    echo "API still exists after destructive quiesce" >&2
-    exit 2
-  fi
-  echo "Legacy context worker and API are absent; auditing the fenced durable queue"
-
-  gcloud run jobs execute jina-context-cutover-preflight \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --wait
-  echo "Fenced legacy queue has no active graph work; migration may start"
-fi
-
 # Apply owner-only DDL before any new runtime revision starts. Runtime services
 # intentionally run with JINA_DB_MANAGE_SCHEMA=false and use a different Google
 # identity that has no access to the migration-owner database secret.
@@ -851,14 +488,12 @@ gcloud run jobs execute jina-context-migrate \
 # failure must not restore the previous traffic assignments.
 schema_migration_applied="true"
 
-if [[ "${context_cutover}" == "false" ]]; then
-  prior_api_traffic="$(snapshot_service_traffic "jina-api")"
-  prior_context_worker_traffic="$(snapshot_service_traffic "jina-context-worker")"
-  prior_task_worker_traffic="$(snapshot_service_traffic "jina-task-worker")"
-  prior_dashboard_traffic="$(snapshot_service_traffic "jina-dashboard")"
-  prior_admin_traffic="$(snapshot_service_traffic "jina-admin")"
-fi
-release_cutover_started="true"
+prior_api_traffic="$(snapshot_service_traffic "jina-api")"
+prior_context_worker_traffic="$(snapshot_service_traffic "jina-context-worker")"
+prior_task_worker_traffic="$(snapshot_service_traffic "jina-task-worker")"
+prior_dashboard_traffic="$(snapshot_service_traffic "jina-dashboard")"
+prior_admin_traffic="$(snapshot_service_traffic "jina-admin")"
+release_started="true"
 
 gcloud run deploy jina-api \
   --project="${GCP_PROJECT_ID}" \
@@ -920,7 +555,7 @@ gcloud run deploy jina-task-worker \
   --min-instances=1 \
   --max-instances=1 \
   --no-cpu-throttling \
-  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-review|run-research|run-publish|run-cleanup~REVIEW_MODEL=gpt-5.6-sol" \
+  --set-env-vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${api_url}~WORKER_TOPICS=run-review~REVIEW_MODEL=gpt-5.6-sol" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${deploy_traffic_args[@]}" \
   --quiet
@@ -1019,7 +654,7 @@ if [[ "${acceptance_status}" -ne 0 ]]; then
   exit "${acceptance_status}"
 fi
 
-release_cutover_started="false"
+release_started="false"
 
 cat <<SUMMARY
 Cloud Build deployment complete

@@ -51,8 +51,6 @@ export function drainOneOutboxMessage(
     case "run-publish":
       next = runPublishTask(next, message.payload.taskId, clock());
       break;
-    case "run-cleanup":
-      break;
   }
 
   return { state: next, message };

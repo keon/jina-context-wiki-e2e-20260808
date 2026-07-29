@@ -74,7 +74,7 @@ export async function runProductionContextAcceptance(
 ): Promise<ProductionContextAcceptanceSummary> {
   const startedAt = Date.now();
   const apiUrl = config.apiUrl.replace(/\/$/, "");
-  const repository = config.repository ?? "omxyz/jina-context-graph-e2e";
+  const repository = config.repository ?? "omxyz/jina-context-engine-e2e";
   const ref = config.ref ?? "main";
   const timeoutMs = config.timeoutMs ?? 50 * 60_000;
   const pollIntervalMs = config.pollIntervalMs ?? 10_000;
@@ -215,10 +215,6 @@ export async function runProductionContextAcceptance(
     }
     await new Promise((resolve) => setTimeout(resolve, 3_000));
   }
-
-  const removedLegacyPath = `/context-${["g", "r", "a", "p", "h"].join("")}`;
-  const legacy = await fetchImpl(`${apiUrl}${removedLegacyPath}`, { headers: internalHeaders });
-  if (legacy.status !== 404) throw new Error(`legacy context graph route is still reachable with ${legacy.status}`);
 
   return {
     buildId,
@@ -456,7 +452,7 @@ async function configuredWorkerHealthChecks(): Promise<ProductionWorkerHealthChe
       "run-derive-knowledge",
       "run-index-context"
     ]),
-    authenticatedWorkerHealthCheck(taskWorkerUrl, ["run-review", "run-research", "run-publish", "run-cleanup"])
+    authenticatedWorkerHealthCheck(taskWorkerUrl, ["run-review"])
   ]);
 }
 

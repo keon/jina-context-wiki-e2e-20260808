@@ -1235,11 +1235,7 @@ create unique index if not exists context_api_tokens_secret
 create index if not exists context_api_tokens_tenant
   on jina_context.api_tokens (tenant_id,created_at desc,id desc);
 
-create or replace view jina_context.current_refs as
-select distinct on (tenant_id,repository,ref_name)
-  tenant_id,repository,ref_name,commit_sha,is_default,observed_at,id as observation_id
-from jina_context.refs
-order by tenant_id,repository,ref_name,ref_sequence desc,id desc;
+drop view if exists jina_context.current_refs;
 
 create or replace view jina_context.current_repository_acl as
 select tenant_id,repository,principal_id,permission,acl_fingerprint,observed_at
@@ -1281,19 +1277,8 @@ join jina_context.index_generations generation
   on generation.id=node.generation_id
 where generation.status='published';
 
-create or replace view jina_context.published_current_knowledge_revisions as
-select selection.*
-from jina_context.current_knowledge_revisions selection
-join jina_context.index_generations generation
-  on generation.id=selection.generation_id
-where generation.status='published';
-
-create or replace view jina_context.published_repository_acl as
-select acl.*
-from jina_context.repository_acl_projection acl
-join jina_context.index_generations generation
-  on generation.id=acl.generation_id
-where generation.status='published';
+drop view if exists jina_context.published_current_knowledge_revisions;
+drop view if exists jina_context.published_repository_acl;
 
 do $triggers$
 declare table_name text;

@@ -18,14 +18,12 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
     assert.equal(isAllowedDashboardApiRequest("GET", pathname, true), true, pathname);
   }
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/query", true), true);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/build", true), true);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/rebuild", true), true);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/erasure", true), true);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/knowledge/revision-1/review", true), true);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/build", true), false);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/erasure", true), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/internal/worker/claim", true), false);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/board", true), false);
-  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context-graph", true), false);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context-graph/ask", true), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/documents/revision-1/events", true), false);
   assert.equal(isAllowedDashboardApiRequest("DELETE", "/api/context/documents/revision-1", true), false);
 });

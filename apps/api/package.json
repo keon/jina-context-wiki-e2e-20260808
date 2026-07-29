@@ -16,7 +16,6 @@
     "@jina/db": "workspace:*",
     "@jina/github": "workspace:*",
     "@jina/observability": "workspace:*",
-    "@jina/publication": "workspace:*",
     "@jina/review": "workspace:*",
     "@jina/shared-kernel": "workspace:*",
     "@modelcontextprotocol/sdk": "^1.29.0",

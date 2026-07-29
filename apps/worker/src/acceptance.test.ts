@@ -42,7 +42,7 @@ test("blocked stage detection is scoped to repository and ref", () => {
   );
 });
 
-test("production acceptance creates, observes, queries, verifies MCP, and rejects the legacy route", async () => {
+test("production acceptance creates, observes, queries, and verifies MCP", async () => {
   let boardReads = 0;
   const requested: string[] = [];
   const requestedAuthorization: string[] = [];
@@ -67,7 +67,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
       return json({
         ok: true,
         workerId: "task-worker",
-        topics: ["run-review", "run-research", "run-publish", "run-cleanup"],
+        topics: ["run-review"],
         active: false,
         lastApiSuccessAt: new Date().toISOString(),
         consecutiveApiFailures: 0,
@@ -133,7 +133,6 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
       });
     }
     if (url.pathname === "/context/metrics") return json({ outboxDepthByConsumer: { lexical: 0 } });
-    if (url.pathname === "/context-graph") return json({ error: "not found" }, 404);
     return json({ error: "unexpected request" }, 500);
   };
 
@@ -156,7 +155,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
       {
         url: "https://task-worker.example.test",
         authorization: "Bearer task-worker-identity",
-        expectedTopics: ["run-review", "run-research", "run-publish", "run-cleanup"]
+        expectedTopics: ["run-review"]
       }
     ],
     fetchImpl,
@@ -184,8 +183,7 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     "GET /context/generations",
     "GET /context/documents",
     "POST /context/query",
-    "GET /context/metrics",
-    "GET /context-graph"
+    "GET /context/metrics"
   ]);
   assert.deepEqual(requestedAuthorization, [
     "Bearer context-worker-identity",
@@ -197,7 +195,6 @@ test("production acceptance creates, observes, queries, verifies MCP, and reject
     "Bearer internal",
     "Bearer internal",
     "Bearer context",
-    "Bearer internal",
     "Bearer internal"
   ]);
 });

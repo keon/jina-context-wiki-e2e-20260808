@@ -39,35 +39,6 @@ export const prReviewTaskTypeDependencies = [
     dependsOnTaskType: "review_pass",
     relationship: "blocks",
     required: true
-  },
-  {
-    workflow: "pr_review",
-    taskType: "pr_review",
-    dependsOnTaskType: "publish",
-    relationship: "blocks",
-    required: true
-  },
-  {
-    workflow: "pr_review",
-    taskType: "pr_review",
-    dependsOnTaskType: "publish",
-    relationship: "publishes",
-    required: true
-  },
-  {
-    workflow: "pr_review",
-    taskType: "publish",
-    dependsOnTaskType: "review_pass",
-    relationship: "blocks",
-    required: true
-  },
-  {
-    workflow: "pr_review",
-    taskType: "review_pass",
-    dependsOnTaskType: "context",
-    relationship: "context_for",
-    required: true,
-    condition: "when external context is requested"
   }
 ] as const;
 
@@ -84,19 +55,6 @@ export const prReviewTaskTypeTriggers = [
     taskType: "review_pass",
     source: "GitHub pull_request webhook",
     description: "Creates and queues the first executable review task."
-  },
-  {
-    workflow: "pr_review",
-    taskType: "publish",
-    source: "GitHub pull_request webhook",
-    description: "Creates the publish task in a waiting state; review_pass completion unblocks it."
-  },
-  {
-    workflow: "pr_review",
-    taskType: "context",
-    source: "review_pass context request",
-    description: "Creates a context task when the running review needs external information.",
-    condition: "when external context is requested"
   }
 ] as const;
 
@@ -119,6 +77,7 @@ export interface PrReviewInput {
   readonly senderLogin?: string;
   readonly senderAccountType?: string;
   readonly needsExternalContext?: boolean;
+  readonly includePublication?: boolean;
 }
 
 export interface PrReviewPlan {
@@ -135,6 +94,7 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
   const rootTaskId = entityId<"task">(`task_${subjectKey}:root`);
   const reviewTaskId = entityId<"task">(`task_${subjectKey}:review:general`);
   const publishTaskId = entityId<"task">(`task_${subjectKey}:publish`);
+  const includePublication = input.includePublication ?? true;
   const identityMetadata = {
     tenantId: input.tenantId,
     ...(input.workspaceLabel ? { workspaceLabel: input.workspaceLabel } : {}),
@@ -185,38 +145,52 @@ export function planPrReview(input: PrReviewInput): PrReviewPlan {
           needsExternalContext: input.needsExternalContext ?? true
         }
       },
-      {
-        id: publishTaskId,
-        type: "publish",
-        title: "Publish review feedback",
-        assigneeRole: "publisher",
-        dedupeKey: `${subjectKey}:publish`,
-        required: true,
-        dispatchTopic: "run-publish",
-        parentTaskId: rootTaskId,
-        metadata: {
-          ...identityMetadata,
-          pullRequestNumber: input.pullRequestNumber,
-          headSha: input.headSha
-        }
-      }
+      ...(includePublication
+        ? [
+            {
+              id: publishTaskId,
+              type: "publish" as const,
+              title: "Publish review feedback",
+              assigneeRole: "publisher" as const,
+              dedupeKey: `${subjectKey}:publish`,
+              required: true,
+              dispatchTopic: "run-publish" as const,
+              parentTaskId: rootTaskId,
+              metadata: {
+                ...identityMetadata,
+                pullRequestNumber: input.pullRequestNumber,
+                headSha: input.headSha
+              }
+            }
+          ]
+        : [])
     ],
-    dependencies: [
-      {
-        taskId: publishTaskId,
-        dependsOnTaskId: reviewTaskId,
-        relationship: "blocks",
-        required: true,
-        blocksParentCompletion: true
-      },
-      {
-        taskId: rootTaskId,
-        dependsOnTaskId: publishTaskId,
-        relationship: "publishes",
-        required: true,
-        blocksParentCompletion: true
-      }
-    ]
+    dependencies: includePublication
+      ? [
+          {
+            taskId: publishTaskId,
+            dependsOnTaskId: reviewTaskId,
+            relationship: "blocks",
+            required: true,
+            blocksParentCompletion: true
+          },
+          {
+            taskId: rootTaskId,
+            dependsOnTaskId: publishTaskId,
+            relationship: "publishes",
+            required: true,
+            blocksParentCompletion: true
+          }
+        ]
+      : [
+          {
+            taskId: rootTaskId,
+            dependsOnTaskId: reviewTaskId,
+            relationship: "blocks",
+            required: true,
+            blocksParentCompletion: true
+          }
+        ]
   };
 }
 

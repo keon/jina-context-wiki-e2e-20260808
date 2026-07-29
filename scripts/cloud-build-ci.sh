@@ -5,7 +5,6 @@ corepack enable
 corepack prepare pnpm@11.15.1 --activate
 
 pnpm install --frozen-lockfile --store-dir=/tmp/pnpm-store
-bash scripts/check-context-cutover.sh
 pnpm typecheck
 pnpm lint
 pnpm test

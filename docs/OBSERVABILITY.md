@@ -153,7 +153,7 @@ jsonPayload.repository="owner/repository"
 Each release must retain:
 
 - Cloud Build and immutable image SHA;
-- pre-cutover backup ID;
+- pre-deployment backup ID;
 - migration execution;
 - API and both worker health payloads;
 - acceptance build/stage IDs;

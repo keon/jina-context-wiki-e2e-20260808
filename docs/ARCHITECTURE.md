@@ -2,8 +2,8 @@
 
 This document describes the deployed runtime. Persisted structures are in
 [DATA_MODELS.md](DATA_MODELS.md), request flows in
-[SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md), and the rationale in
-[CONTEXT_ENGINE_DECISION.md](CONTEXT_ENGINE_DECISION.md).
+[SEQUENCE_DIAGRAM.md](SEQUENCE_DIAGRAM.md), and validation is in
+[CONTEXT_ENGINE_EVALUATION.md](CONTEXT_ENGINE_EVALUATION.md).
 
 ## Topology
 
@@ -12,7 +12,7 @@ database:
 
 - `jina-api` verifies GitHub webhooks, serves board and context APIs, serves stateless MCP,
   and owns worker lease/completion transactions.
-- `jina-task-worker` handles review, research, publication, and cleanup topics.
+- `jina-task-worker` handles pull-request review.
 - `jina-context-worker` handles `ingest-evidence`, baseline `index-context`, and required
   `derive-knowledge`/enriched publication in that strict queue order.
 - `jina-dashboard` serves the operator board and repository context workspace.
@@ -30,11 +30,11 @@ mutation lock, renew their leases, and complete through the API. Every internal 
 worker-stage mutation carries task, lease, attempt, and write-fence identity. An expired
 or replaced lease cannot commit.
 
-The production API is deployed with 2 vCPU, 2 GiB memory, concurrency 4, and the Cloud
-Run maximum 60-minute request timeout. A context worker allows 62 minutes for the
-operation request and 10 additional minutes for terminal completion; its 75-minute
-context-only lease exceeds those two worker deadlines combined. These longer values do
-not change ordinary task deadlines or leases.
+API sizing comes from the substitutions in `cloudbuild.yaml`; the deployment script
+enforces the Cloud Run maximum 60-minute request timeout. A context worker allows 62
+minutes for the operation request and 10 additional minutes for terminal completion; its
+75-minute context-only lease exceeds those two worker deadlines combined. These longer
+values do not change ordinary task deadlines or leases.
 
 ## Board and execution
 
@@ -302,7 +302,10 @@ POST /context/erasure
 
 Generation and document lists use opaque cursor pagination. The dashboard scope picker
 and tenant-admin listings follow cursors to exhaustion, with duplicate-cursor and page
-count guards, so older scopes and documents are not silently hidden. Metrics, rebuild,
+count guards, so older scopes and documents are not silently hidden. Generation summaries
+retain the projector status map and add generation-scoped `projectorDetails` with each
+projector's checkpoint and version; the dashboard does not merge those details with
+tenant-wide metrics from another repository. Metrics, rebuild,
 erasure, and knowledge review are tenant-administrator operations. Review also checks that the
 selected revision belongs to the principal's tenant; repository read access alone cannot
 append a review event. `POST /context/build` accepts optional `commitSha` and
@@ -388,9 +391,10 @@ declared capability with `SET LOCAL ROLE`.
 
 The Cloud Run migration job also has a dedicated Google identity,
 `jina-migration@jina-v2.iam.gserviceaccount.com`. Only that identity may access the
-migration-owner database secret. Network-facing API, workers, dashboard, admin, and
-acceptance run as `jina-runtime`, which must not have access to the owner secret; the
-migration identity is never assigned to those services.
+migration-owner database secret. API, context worker, task worker, dashboard, admin, and
+acceptance each run under the dedicated service account named in
+[DEPLOYMENT.md](DEPLOYMENT.md); none may access the owner secret. The migration identity
+is never assigned to those services.
 
 Repository credentials stay in the worker. Daytona isolates source inspection. Jina does
 not execute untrusted repository code or install its dependencies. Retrieved text and

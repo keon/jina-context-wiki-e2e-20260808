@@ -152,68 +152,6 @@ test("failed automated dependencies terminate their workflow without synthetic b
   );
 });
 
-test("reducer supersedes legacy recovery waitpoints after their parent terminates", () => {
-  const now = "2026-01-01T00:00:00.000Z";
-  const parentId = entityId<"task">("legacy-parent");
-  const failedId = entityId<"task">("legacy-failure");
-  const decisionId = entityId<"task">("legacy-decision");
-  let state = createEmptyBoardState();
-  for (const task of [
-    {
-      id: failedId,
-      type: "context",
-      kind: "dispatchable" as const,
-      title: "Context",
-      dedupeKey: "context",
-      dispatchTopic: "run-research"
-    },
-    {
-      id: parentId,
-      type: "review_pass",
-      kind: "dispatchable" as const,
-      title: "Review",
-      dedupeKey: "review",
-      dispatchTopic: "run-review"
-    },
-    {
-      id: decisionId,
-      type: "human_decision",
-      kind: "waitpoint" as const,
-      title: "Decide",
-      dedupeKey: "decision",
-      parentTaskId: parentId
-    }
-  ]) {
-    state = applyCommand(
-      state,
-      { command: "CreateTask", task: { ...task, assigneeRole: "test" } },
-      {
-        actor: { type: "system", id: "test" },
-        now
-      }
-    ).state;
-  }
-  state = applyCommand(
-    state,
-    {
-      command: "LinkTask",
-      dependency: {
-        taskId: parentId,
-        dependsOnTaskId: failedId,
-        relationship: "blocks",
-        required: true,
-        blocksParentCompletion: true
-      }
-    },
-    { actor: { type: "system", id: "test" }, now }
-  ).state;
-  state = transitionBoardTask(state, failedId, "failed", now);
-  state = reduceBoard(state, now);
-
-  assert.equal(findTask(state, parentId)?.status, "canceled");
-  assert.equal(findTask(state, decisionId)?.status, "superseded");
-});
-
 test("outbox leases are tenant-filterable and reclaimable after expiry", () => {
   const firstTask = entityId<"task">("task-a");
   const secondTask = entityId<"task">("task-b");

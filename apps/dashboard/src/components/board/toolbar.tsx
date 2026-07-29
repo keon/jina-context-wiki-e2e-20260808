@@ -1,6 +1,5 @@
 "use client";
 
-import { useRef } from "react";
 import type { BoardFilters } from "../../lib/board.ts";
 import { humanize } from "../../lib/format.ts";
 
@@ -41,26 +40,12 @@ function FilterSelect({
 export function BoardToolbar({
   filters,
   options,
-  onFilterChange,
-  onRefresh
+  onFilterChange
 }: {
   readonly filters: BoardFilters;
   readonly options: BoardFilterOptions;
   readonly onFilterChange: (field: keyof BoardFilters, value: string) => void;
-  readonly onRefresh: () => Promise<void>;
 }) {
-  const nextPr = useRef(100);
-  const nextIssue = useRef(200);
-
-  const postDemo = async (body: Readonly<Record<string, unknown>>) => {
-    await fetch("/api/dev/webhooks/github", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body)
-    });
-    await onRefresh();
-  };
-
   return (
     <div className="page-filters" id="toolbar">
       <label className="search-control">
@@ -105,44 +90,6 @@ export function BoardToolbar({
         values={options.status}
         onChange={(value) => onFilterChange("status", value)}
       />
-      <details className="demo-menu">
-        <summary>Demo events</summary>
-        <div className="demo-actions">
-          <button
-            type="button"
-            data-demo="pr"
-            onClick={() => {
-              const pullRequestNumber = ++nextPr.current;
-              void postDemo({ repository: "omlabs/example", pullRequestNumber, headSha: `sha-${pullRequestNumber}-1` });
-            }}
-          >
-            Open PR
-          </button>
-          <button
-            type="button"
-            data-demo="issue"
-            onClick={() => {
-              const issueNumber = ++nextIssue.current;
-              void postDemo({ repository: "omlabs/example", issueNumber, title: `Demo issue ${issueNumber}` });
-            }}
-          >
-            Open issue
-          </button>
-          <button
-            type="button"
-            data-demo="push"
-            onClick={() =>
-              void postDemo({
-                repository: "omlabs/example",
-                pullRequestNumber: 42,
-                headSha: `sha-42-${Date.now().toString(36)}`
-              })
-            }
-          >
-            Force-push PR #42
-          </button>
-        </div>
-      </details>
     </div>
   );
 }

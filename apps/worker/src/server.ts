@@ -32,7 +32,7 @@ import { parseGitTreeEntries } from "./git-tree.js";
 
 const execFileAsync = promisify(execFile);
 const CONTEXT_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"] as const;
-const SUPPORTED_TOPICS = ["run-review", "run-research", "run-publish", "run-cleanup", ...CONTEXT_TOPICS] as const;
+const SUPPORTED_TOPICS = ["run-review", ...CONTEXT_TOPICS] as const;
 type WorkerTopic = (typeof SUPPORTED_TOPICS)[number];
 type ContextWorkerTopic = (typeof CONTEXT_TOPICS)[number];
 
@@ -52,13 +52,6 @@ interface WorkMetadataByTopic {
     readonly repository: string;
     readonly pullRequestNumber: number;
   };
-  readonly "run-research": {
-    readonly tenantId: string;
-    readonly question?: string;
-    readonly sourceUrls?: readonly string[];
-  };
-  readonly "run-publish": Record<string, unknown> & { readonly tenantId: string };
-  readonly "run-cleanup": Record<string, unknown> & { readonly tenantId: string };
   readonly "run-ingest-evidence": RepositoryContextMetadata;
   readonly "run-derive-knowledge": RepositoryContextMetadata & {
     readonly checkpointId: string;
@@ -317,19 +310,6 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
       return { outcome: "done", result: await runIndexContext(work) };
     case "run-review":
       return { outcome: "done", result: await runReview(work) };
-    case "run-research":
-      return {
-        outcome: "done",
-        result: {
-          question: stringValue(work.task.metadata.question),
-          sources: stringArray(work.task.metadata.sourceUrls),
-          note: "Context request recorded for the review worker"
-        }
-      };
-    case "run-publish":
-      return { outcome: "done", result: { published: true, target: "summary" } };
-    case "run-cleanup":
-      return { outcome: "done", result: { cleaned: true } };
   }
 }
 
@@ -1146,7 +1126,7 @@ function extractOutputText(payload: Record<string, unknown>): string {
 }
 
 function configuredTopics(value: string | undefined): WorkerTopic[] {
-  const requested = (value ?? "run-review|run-research|run-publish|run-cleanup")
+  const requested = (value ?? "run-review")
     .split(/[|,]/)
     .map((topic) => topic.trim())
     .filter(Boolean);
@@ -1190,22 +1170,6 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       }
     };
   }
-  if (topic === "run-research") {
-    return {
-      topic,
-      message: { ...message, topic },
-      task: {
-        id: taskId,
-        metadata: {
-          tenantId: requiredString(metadata.tenantId, "task tenantId"),
-          ...(metadata.question === undefined ? {} : { question: requiredString(metadata.question, "task question") }),
-          ...(metadata.sourceUrls === undefined
-            ? {}
-            : { sourceUrls: requiredStringArray(metadata.sourceUrls, "task sourceUrls") })
-        }
-      }
-    };
-  }
   if (isContextTopic(topic)) {
     const common = repositoryMetadata(metadata);
     const contextMetadata =
@@ -1227,14 +1191,7 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       task: { id: taskId, metadata: contextMetadata }
     } as ClaimedWork;
   }
-  return {
-    topic,
-    message: { ...message, topic },
-    task: {
-      id: taskId,
-      metadata: { ...metadata, tenantId: requiredString(metadata.tenantId, "task tenantId") }
-    }
-  } as ClaimedWork;
+  throw new Error("unsupported claimed topic");
 }
 
 function repositoryMetadata(metadata: Record<string, unknown>): RepositoryContextMetadata {
@@ -1253,13 +1210,6 @@ function repositoryMetadata(metadata: Record<string, unknown>): RepositoryContex
 
 function isContextTopic(topic: string): topic is ContextWorkerTopic {
   return CONTEXT_TOPICS.includes(topic as ContextWorkerTopic);
-}
-
-function requiredStringArray(value: unknown, name: string): readonly string[] {
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw new Error(`${name} must be a string array`);
-  }
-  return value.map((item) => String(item).trim()).filter(Boolean);
 }
 
 function assertLeaseOwned(): void {
@@ -1323,10 +1273,6 @@ function requiredGitSha(value: unknown, name: string): string {
 function positiveInt(value: string | undefined, fallback: number): number {
   const parsed = value ? Number(value) : Number.NaN;
   return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
 function stringValue(value: unknown): string {

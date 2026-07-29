@@ -18,10 +18,8 @@ export function isAllowedDashboardApiRequest(
   const allowedLocalDemo = !hasInternalApiToken && method === "POST" && pathname === "/api/dev/webhooks/github";
   const allowedContextMutation =
     method === "POST" &&
-    (pathname === "/api/context/build" ||
-      pathname === "/api/context/query" ||
+    (pathname === "/api/context/query" ||
       pathname === "/api/context/rebuild" ||
-      pathname === "/api/context/erasure" ||
       /^\/api\/context\/knowledge\/[^/]+\/review$/.test(pathname));
 
   return allowedRead || allowedLocalDemo || allowedContextMutation;

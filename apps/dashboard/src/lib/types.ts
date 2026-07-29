@@ -31,7 +31,6 @@ interface BoardDependency {
 export interface BoardState {
   readonly tasks: readonly BoardTask[];
   readonly dependencies: readonly BoardDependency[];
-  readonly publications: readonly Readonly<Record<string, unknown>>[];
 }
 
 export interface BoardEvent {
@@ -118,6 +117,7 @@ export interface ContextGeneration {
   readonly status: string;
   readonly derivedKnowledge: "available" | "partial" | "unavailable";
   readonly projectors: Readonly<Record<string, string>> | readonly ContextProjector[];
+  readonly projectorDetails?: readonly ContextProjector[];
   readonly createdAt: string;
   readonly publishedAt?: string;
 }

@@ -79,8 +79,8 @@ export function ContextPage() {
         <section className="context-empty-state" aria-live="polite">
           <strong>No published context generation</strong>
           <p>
-            Run <code>ingest-evidence</code> and the baseline <code>index-context</code> stage for a repository.
-            Generated knowledge is optional and will enrich a later generation.
+            Run <code>ingest-evidence</code> and the baseline <code>index-context</code> stage for a repository. The
+            required <code>derive-knowledge</code> stage then publishes the enriched generation.
           </p>
         </section>
       )}
@@ -90,7 +90,8 @@ export function ContextPage() {
 
 function GenerationStrip({ generation }: { readonly generation: ContextGeneration }) {
   const projectors = projectorRows(generation);
-  const degraded = projectors.filter((projector) => projector.status === "failed");
+  const failed = projectors.filter((projector) => projector.status === "failed");
+  const ready = projectors.filter((projector) => projector.status === "ready");
   return (
     <section className="context-generation-strip" aria-label="Selected generation">
       <GenerationFact label="Generation" value={shortId(generation.id)} />
@@ -99,8 +100,8 @@ function GenerationStrip({ generation }: { readonly generation: ContextGeneratio
       <GenerationFact label="Knowledge" value={humanize(generation.derivedKnowledge)} />
       <GenerationFact
         label="Index state"
-        value={degraded.length === 0 ? `${projectors.length} projectors ready` : `${degraded.length} degraded`}
-        tone={degraded.length === 0 ? "good" : "warning"}
+        value={failed.length === 0 ? `${ready.length} projectors ready` : `${failed.length} failed`}
+        tone={failed.length === 0 ? "good" : "warning"}
       />
     </section>
   );

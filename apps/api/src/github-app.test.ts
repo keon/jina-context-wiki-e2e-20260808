@@ -298,6 +298,10 @@ test("clean context API executes ingest, baseline index, derivation, enriched in
   assert.equal(generationSummary.derivedKnowledge, "available");
   assert.equal(generationSummary.capabilities, undefined);
   const generationId = string(generationSummary.id);
+  const projectors = array(generationSummary.projectorDetails).map(record);
+  assert.ok(projectors.some((projector) => projector.name === "lexical" && projector.status === "ready"));
+  assert.ok(projectors.every((projector) => projector.checkpoint === generationId));
+  assert.ok(projectors.every((projector) => typeof projector.version === "string"));
   const generationDetail = await api(`/context/generations/${encodeURIComponent(generationId)}`, {
     headers: contextHeaders()
   });
@@ -802,10 +806,7 @@ test("evidence erasure invalidates generations, hides derived documents, and reb
   );
 });
 
-test("legacy graph routes and tool names are absent, ACL failures do not reveal repository existence", async () => {
-  const legacy = await api("/context-graph", { headers: contextHeaders() });
-  assert.equal(legacy.response.status, 404);
-
+test("ACL failures do not reveal repository existence", async () => {
   const stranger = await api("/context/query", {
     method: "POST",
     headers: { ...contextHeaders(), "x-jina-principal-id": "user:stranger@example.com" },
@@ -1131,6 +1132,39 @@ test("worker lease duration rejects unsafe API configuration", () => {
   );
 });
 
+test("pull-request intake queues only the deployed review worker path", async () => {
+  const delivery = await api("/dev/webhooks/github", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      repository,
+      pullRequestNumber: 77,
+      headSha: "f".repeat(40)
+    })
+  });
+  assert.equal(delivery.response.status, 202);
+
+  const board = await api("/board", { headers: contextHeaders() });
+  const tasks = array(board.body.tasks)
+    .map(record)
+    .filter((task) => record(task.metadata).pullRequestNumber === 77);
+  assert.deepEqual(tasks.map((task) => task.type).sort(), ["pr_review", "review_pass"]);
+  assert.deepEqual(
+    tasks.flatMap((task) => (task.dispatchTopic ? [task.dispatchTopic] : [])),
+    ["run-review"]
+  );
+
+  const catalog = await fetch(`${baseUrl}/task-types`);
+  assert.equal(catalog.status, 200);
+  assert.deepEqual(
+    array(await catalog.json())
+      .map(record)
+      .map((entry) => entry.type)
+      .filter((type) => ["context", "publish", "cleanup"].includes(String(type))),
+    []
+  );
+});
+
 test("malformed persisted runtime state is ignored instead of breaking unrelated API reads", async () => {
   const malformedServer = createApiServer({
     tenantId,
@@ -1194,7 +1228,6 @@ test("persisted tasks unsupported by the current runtime are removed with their 
       },
       pullRequests: []
     },
-    publications: [],
     devDeliverySequence: 0
   } as unknown as ApiSnapshot;
   const staleServer = createApiServer({

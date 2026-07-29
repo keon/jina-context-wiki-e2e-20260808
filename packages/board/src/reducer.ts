@@ -146,7 +146,6 @@ export function reduceBoard(state: BoardState, now: IsoTimestamp): BoardState {
   while (changed) {
     let step = blockWaitpointTasks(next, now);
     step = terminateFailedDependencyTasks(step, now);
-    step = supersedeOrphanedRecoveryTasks(step, now);
     step = completeReadyAggregateTasks(step, now);
     step = queueReadyDispatchableTasks(step, now);
     changed = step !== next;
@@ -363,19 +362,6 @@ function terminateFailedDependencyTasks(state: BoardState, now: IsoTimestamp): B
     next = transitionBoardTask(next, task.id, task.kind === "aggregate" ? "failed" : "canceled", now);
   }
 
-  return next;
-}
-
-/** Cleans up recovery waitpoints emitted by older reducer versions. */
-function supersedeOrphanedRecoveryTasks(state: BoardState, now: IsoTimestamp): BoardState {
-  let next = state;
-  for (const task of state.tasks) {
-    if (task.type !== "human_decision" || isTerminalTaskStatus(task.status) || !task.parentTaskId) continue;
-    const parent = findTask(next, task.parentTaskId);
-    if (parent && isTerminalTaskStatus(parent.status)) {
-      next = transitionBoardTask(next, task.id, "superseded", now);
-    }
-  }
   return next;
 }
 

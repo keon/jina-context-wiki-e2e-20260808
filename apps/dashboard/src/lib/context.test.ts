@@ -33,7 +33,8 @@ const generations: readonly ContextGeneration[] = [
     commitSha: "222",
     status: "published",
     derivedKnowledge: "available",
-    projectors: [{ name: "lexical", status: "ready" }],
+    projectors: { lexical: "ready" },
+    projectorDetails: [{ name: "lexical", status: "ready", checkpoint: "new", version: "lexical-v2" }],
     createdAt: "2026-01-02T00:00:00Z",
     publishedAt: "2026-01-02T00:00:01Z"
   },
@@ -57,6 +58,9 @@ test("context scope helpers choose the latest published generation", () => {
   assert.deepEqual(contextScopes(generations), [{ repository: "acme/payments", ref: "main" }]);
   assert.equal(generationForScope(generations, "acme/payments", "main")?.id, "new");
   assert.deepEqual(projectorRows(generations[0]), [{ name: "lexical", status: "ready" }]);
+  assert.deepEqual(projectorRows(generations[1]), [
+    { name: "lexical", status: "ready", checkpoint: "new", version: "lexical-v2" }
+  ]);
 });
 
 test("citation helpers preserve exact ranges and reject unsafe links", () => {
