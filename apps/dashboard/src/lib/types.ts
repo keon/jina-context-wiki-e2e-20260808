@@ -184,6 +184,10 @@ export interface ContextBuildSummary {
   readonly refSequence: number;
   readonly commitSha?: string;
   readonly trigger?: string;
+  readonly derivationBudgetSeconds?: number;
+  readonly derivationDeadlineAt?: string;
+  readonly derivationTokenBudget?: number;
+  readonly consumedModelTokens?: number;
   readonly status: "active" | "completed" | "failed";
   readonly failureCode?: string;
   readonly failureReason?: string;
@@ -201,6 +205,10 @@ export interface ContextBuildProgressResponse {
   readonly repository: string;
   readonly ref: string;
   readonly status: ContextBuildSummary["status"];
+  readonly derivationBudgetSeconds?: number;
+  readonly derivationDeadlineAt?: string;
+  readonly derivationTokenBudget?: number;
+  readonly consumedModelTokens?: number;
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly ContextBuildStage[];

@@ -95,6 +95,15 @@ and retry outcomes carry it whenever a runner completed. The API commits observe
 the tenant quota ledger idempotently per attempt and cancels reservations for failures
 before a completed model turn.
 
+The same immutable receipts enforce an independent per-build ceiling. New builds
+default to 8,000,000 input-plus-output tokens and a three-hour wall-clock budget;
+administrators may request lower values within the API bounds. Claim admission
+accounts for active 250,000-token task reservations so parallel workers cannot
+collectively over-admit the build. Exact usage replaces reservations on completion,
+and an overrun atomically fails the build before any further work can be claimed.
+Cached-input tokens remain a reported subset of input tokens and are not counted
+twice.
+
 `search_context` and `POST /context/search` do not reserve a model attempt or consume model
 quota. They perform bounded deterministic lexical scoring over the published PageIndex tree.
 Caller-controlled `x-request-id` remains the query-rate idempotency key, so retries consume
@@ -113,12 +122,12 @@ This is production quota accounting, not yet per-person billing:
 The remaining reporting design is one usage record per billable operation, keyed by
 `(tenantId, principalId, tokenId, operation)`, with an idempotency identity for replay.
 
-| Operation                 | Current accounting                                                     | Remaining product work                            |
-| ------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------- |
-| Board model task          | Exact tenant input/cached-input/output tokens and request count        | Attribute to initiating principal/token and price |
-| Build admission/artifacts | Tenant rate, concurrency, active-task, and artifact-storage quota      | Present a user-facing cost rollup                 |
-| `search_context` / MCP    | Tenant query-rate controls; deterministic search uses no model         | Attribute query count to principal/token          |
-| list/read/diff            | Read authorization and request controls; no derivation model is needed | Count only if product analytics require it        |
+| Operation                 | Current accounting                                                                                 | Remaining product work                            |
+| ------------------------- | -------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Board model task          | Exact tenant and per-build input/cached-input/output tokens, request count, and hard build ceiling | Attribute to initiating principal/token and price |
+| Build admission/artifacts | Tenant rate, concurrency, active-task, and artifact-storage quota                                  | Present a user-facing cost rollup                 |
+| `search_context` / MCP    | Tenant query-rate controls; deterministic search uses no model                                     | Attribute query count to principal/token          |
+| list/read/diff            | Read authorization and request controls; no derivation model is needed                             | Count only if product analytics require it        |
 
 Billing stays in Jina v1. The planned API exposes usage for v1 to poll rather than adding a
 dependency from this API onto v1; a missed poll is recoverable where a dropped webhook would

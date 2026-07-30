@@ -178,10 +178,20 @@ requirements_digest="$(
     "$REPO/services/pageindex-worker/requirements.txt"
 )"
 requirements_stamp="$PAGEINDEX_HOME/requirements.$requirements_digest"
-if [[ ! -f "$requirements_stamp" ]]; then
+install_pageindex_requirements() {
   "$CONTEXT_PAGEINDEX_PYTHON" -m pip install --disable-pip-version-check \
     -r "$REPO/services/pageindex-worker/requirements.txt" >/dev/null
   : > "$requirements_stamp"
+}
+if [[ ! -f "$requirements_stamp" ]]; then
+  install_pageindex_requirements
+fi
+if ! PAGEINDEX_SOURCE_ROOT="$PAGEINDEX_SOURCE_ROOT" \
+  "$CONTEXT_PAGEINDEX_PYTHON" "$CONTEXT_PAGEINDEX_WORKER" --probe >/dev/null 2>&1; then
+  # The digest stamp can outlive a recreated or externally modified virtual
+  # environment. Repair the actual interpreter once, then require the
+  # authoritative worker probe to pass.
+  install_pageindex_requirements
 fi
 PAGEINDEX_SOURCE_ROOT="$PAGEINDEX_SOURCE_ROOT" \
   "$CONTEXT_PAGEINDEX_PYTHON" "$CONTEXT_PAGEINDEX_WORKER" --probe >/dev/null

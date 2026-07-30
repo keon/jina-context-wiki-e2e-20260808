@@ -16,6 +16,8 @@ interface ResolvedContextBuildScope {
   readonly repository: string;
   readonly githubInstallationId?: number;
   readonly priorRelease?: ContextPriorReleaseSeed;
+  readonly derivationBudgetSeconds?: number;
+  readonly derivationTokenBudget?: number;
 }
 
 interface ManualContextBoardAdmission extends ResolvedContextBuildScope {
@@ -25,6 +27,7 @@ interface ManualContextBoardAdmission extends ResolvedContextBuildScope {
   readonly commitSha?: string;
   readonly derivationDetail?: DerivationDetail;
   readonly derivationBudgetSeconds?: number;
+  readonly derivationTokenBudget?: number;
   readonly now: string;
 }
 
@@ -148,6 +151,7 @@ function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextB
       ...(input.priorRelease ? { priorRelease: input.priorRelease } : {}),
       ...(input.derivationDetail ? { derivationDetail: input.derivationDetail } : {}),
       ...(input.derivationBudgetSeconds ? { derivationBudgetSeconds: input.derivationBudgetSeconds } : {}),
+      ...(input.derivationTokenBudget ? { derivationTokenBudget: input.derivationTokenBudget } : {}),
       trigger: "manual"
     };
   }
@@ -161,7 +165,9 @@ function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextB
     tenantId: input.tenantId,
     repository,
     ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
-    ...(input.priorRelease ? { priorRelease: input.priorRelease } : {})
+    ...(input.priorRelease ? { priorRelease: input.priorRelease } : {}),
+    ...(input.derivationBudgetSeconds ? { derivationBudgetSeconds: input.derivationBudgetSeconds } : {}),
+    ...(input.derivationTokenBudget ? { derivationTokenBudget: input.derivationTokenBudget } : {})
   };
   if (event.type === "push") {
     const headSha = event.headSha.toLowerCase();

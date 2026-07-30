@@ -16,6 +16,9 @@ operator gate: candidate URLs are not the GitHub App webhook target, and the dep
 service account does not receive a repository write credential. A dedicated
 `jina-context-production-trigger-acceptance` Cloud Run job is installed only after a
 successful cutover and verified control-artifact cleanup. Deployment does not execute it.
+The job is an auxiliary operator tool rather than part of release acceptance. If its
+post-cutover reconciliation fails, the coordinated release remains successful and the
+job can be repaired independently without repeating migration or traffic cutover.
 
 ## Contract
 

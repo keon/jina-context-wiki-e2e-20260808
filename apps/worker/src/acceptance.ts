@@ -80,6 +80,7 @@ export interface ProductionContextAcceptanceConfig {
    * bound must retain private page checkpoints without partially publishing.
    */
   readonly derivationBudgetSeconds?: number;
+  readonly derivationTokenBudget?: number;
   readonly requestKey?: string;
   readonly timeoutMs?: number;
   readonly pollIntervalMs?: number;
@@ -166,6 +167,7 @@ export async function runProductionContextAcceptance(
       ref,
       ...(config.githubInstallationId ? { githubInstallationId: config.githubInstallationId } : {}),
       ...(config.derivationBudgetSeconds ? { derivationBudgetSeconds: config.derivationBudgetSeconds } : {}),
+      ...(config.derivationTokenBudget ? { derivationTokenBudget: config.derivationTokenBudget } : {}),
       requestKey: config.requestKey ?? `acceptance-${Date.now()}`
     })
   });
@@ -231,7 +233,27 @@ export async function runProductionContextAcceptance(
     }
     await delay(pollIntervalMs);
   }
-  if (completedTasks.length === 0) throw new Error(`production context build ${buildId} timed out`);
+  if (completedTasks.length === 0) {
+    try {
+      const cancellation = await apiJson(
+        fetchImpl,
+        `${apiUrl}/internal/context/builds/${encodeURIComponent(buildId)}/cancel`,
+        {
+          method: "POST",
+          headers: internalHeaders,
+          body: JSON.stringify({ reason: "production acceptance timeout" })
+        }
+      );
+      if (cancellation.buildId !== buildId || cancellation.canceled !== true) {
+        throw new Error("API did not confirm the timed-out build as canceled");
+      }
+    } catch (error) {
+      throw new Error(`production context build ${buildId} timed out and cancellation failed: ${errorMessage(error)}`, {
+        cause: error
+      });
+    }
+    throw new Error(`production context build ${buildId} timed out and was canceled`);
+  }
 
   const blocked = blockedContextTaskIds(completedTasks, repository, ref);
   if (blocked.length) throw new Error(`production context workflow retains blocked stages: ${blocked.join(", ")}`);
@@ -1549,6 +1571,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 async function main(): Promise<void> {
   const githubInstallationId = optionalPositiveInteger(process.env.ACCEPTANCE_GITHUB_INSTALLATION_ID);
   const derivationBudgetSeconds = optionalPositiveInteger(process.env.ACCEPTANCE_DERIVATION_BUDGET_SECONDS);
+  const derivationTokenBudget = optionalPositiveInteger(process.env.ACCEPTANCE_DERIVATION_TOKEN_BUDGET);
   const workerHealthChecks = await configuredWorkerHealthChecks();
   const webSurfaceChecks = await configuredWebSurfaceChecks();
   const summary = await runProductionContextAcceptance({
@@ -1561,6 +1584,7 @@ async function main(): Promise<void> {
     ...(process.env.ACCEPTANCE_REF ? { ref: process.env.ACCEPTANCE_REF } : {}),
     ...(githubInstallationId ? { githubInstallationId } : {}),
     ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
+    ...(derivationTokenBudget ? { derivationTokenBudget } : {}),
     ...(process.env.ACCEPTANCE_REQUEST_KEY ? { requestKey: process.env.ACCEPTANCE_REQUEST_KEY } : {}),
     ...(process.env.ACCEPTANCE_TIMEOUT_MS ? { timeoutMs: Number(process.env.ACCEPTANCE_TIMEOUT_MS) } : {}),
     workerHealthChecks,

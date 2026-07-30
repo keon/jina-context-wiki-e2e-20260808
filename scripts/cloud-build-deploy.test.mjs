@@ -270,8 +270,17 @@ test("accepted cutover cleanup is verified and cannot invoke candidate rollback"
   assert.ok(deleteJob > destroyControl);
   assert.match(
     deployment,
-    /if \[\[ "\$\{status\}" -ne 0 && "\$\{accepted_cutover_complete\}" == "true" \]\]; then[\s\S]+?Production traffic and the accepted worker generation were[\s\S]+?deliberately left unchanged/
+    /if \[\[ "\$\{status\}" -ne 0 && "\$\{accepted_cutover_complete\}" == "true" \]\]; then[\s\S]+?report_accepted_release_failure/
   );
+  assert.match(
+    deployment,
+    /if \[\[ "\$\{post_cutover_cleanup_complete\}" == "true" \]\]; then[\s\S]+?no release-control cleanup or traffic rollback is required/
+  );
+  assert.match(
+    deployment,
+    /accepted_release_control_credential_destroyed[\s\S]+?Destroy release-control credential version/
+  );
+  assert.match(deployment, /accepted_release_control_job_deleted[\s\S]+?Remove release-control job/);
   assert.match(releaseCleanupLibrary, /for \(\(attempt = 1; attempt <= release_cleanup_attempts; attempt \+= 1\)\)/);
   assert.match(releaseCleanupLibrary, /gcloud run jobs list[\s\S]+?metadata\.name=\$\{release_control_job\}/);
   assert.match(releaseCleanupLibrary, /\[\[ "\$\{state\}" == "DESTROYED" \]\]/);
@@ -564,10 +573,15 @@ test("post-cutover trigger acceptance is deployed with a distinct least-scope fi
     assert.match(cloudBuild, new RegExp(`_${name}: "?${value}"?`));
   }
 
-  const cleanup = deployment.indexOf('if [[ "${post_cutover_cleanup_ok}" != "true" ]]');
+  const cleanup = deployment.indexOf(
+    'post_cutover_cleanup_complete="true"',
+    deployment.indexOf('accepted_cutover_complete="true"')
+  );
+  const jobReconciliation = deployment.indexOf("reconcile_trigger_acceptance_job_nonfatal", cleanup);
   const jobDeployment = deployment.indexOf('gcloud run jobs deploy "${trigger_acceptance_job}"');
   assert.ok(cleanup > 0);
-  assert.ok(jobDeployment > cleanup);
+  assert.ok(jobReconciliation > cleanup);
+  assert.ok(jobDeployment > 0);
   assert.doesNotMatch(deployment, /gcloud run jobs execute "\$\{trigger_acceptance_job\}"/);
   assert.doesNotMatch(deployment, /gcloud run jobs execute jina-context-production-trigger-acceptance/);
 
@@ -591,9 +605,13 @@ test("post-cutover trigger acceptance is deployed with a distinct least-scope fi
     "the operator command retains both repository and confirmation arguments"
   );
   assert.match(jobBlock, /--command=\/bin\/sh/);
-  assert.match(jobBlock, /--args="-c,\$\{trigger_acceptance_command\}"/);
+  assert.match(jobBlock, /--args="\^~\^-c~\$\{trigger_acceptance_command\}"/);
   assert.match(jobBlock, /--task-timeout=86400s/);
   assert.match(deployment, /stable_api_url="\$\(stable_service_url "jina-api"\)"/);
+  assert.match(
+    deployment,
+    /if reconcile_trigger_acceptance_job; then[\s\S]+?trigger_acceptance_job_status="ready"[\s\S]+?trigger_acceptance_job_status="failed-nonfatal"[\s\S]+?return 0/
+  );
   assert.match(
     deployment,
     /trigger_acceptance_service_account="jina-trigger-acceptance@\$\{GCP_PROJECT_ID\}\.iam\.gserviceaccount\.com"/

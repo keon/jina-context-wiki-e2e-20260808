@@ -161,6 +161,16 @@ explicit request adds exactly one fresh repair/challenge/evaluation round and
 keeps certification blocked on both successor gates; repository research and
 completed page branches do not restart.
 
+Every newly admitted build also carries two independent hard limits. Its absolute
+deadline is derived from the durable root task's `createdAt` plus
+`derivationBudgetSeconds`; claims, renewals, artifact-authority calls, and worker
+stage timers all honor that same boundary. Its `derivationTokenBudget` counts
+input plus output tokens from immutable completion receipts. Before a model lease
+is issued, the API reserves capacity for every active model task; exact completed
+usage replaces that reservation. Reaching either limit fails the root, retires all
+pending or leased descendant work, preserves completed private checkpoints, and
+never partially publishes a release.
+
 GitHub provider responses are allowlisted before they become observations. Repository,
 issue, pull-request, and comment evidence retains the fields needed for engineering
 research while operational response fields, clone URLs, nested credentials, and
@@ -254,6 +264,11 @@ POST /mcp
 
 Administrative build, rebuild, invalidation, erasure, token, metrics, and worker routes
 remain separate from retrieval.
+
+An internal administrator can cancel one exact build with
+`POST /internal/context/builds/:id/cancel`. Cancellation is idempotent, fences every
+descendant lease through the generic Board aggregate reconciliation, and releases
+the build's outstanding quota reservations.
 
 MCP exposes exactly:
 

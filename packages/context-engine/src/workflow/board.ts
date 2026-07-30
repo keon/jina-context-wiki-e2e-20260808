@@ -193,6 +193,7 @@ export interface ContextBuildScope {
   readonly githubInstallationId?: number;
   readonly derivationDetail?: DerivationDetail;
   readonly derivationBudgetSeconds?: number;
+  readonly derivationTokenBudget?: number;
   readonly trigger?: "push" | "pull_request" | "issue" | "manual";
   readonly priorRelease?: ContextPriorReleaseSeed;
 }
@@ -496,6 +497,7 @@ export function createContextBoardBuild(
       existing.metadata.githubInstallationId !== scope.githubInstallationId ||
       existing.metadata.derivationDetail !== scope.derivationDetail ||
       existing.metadata.derivationBudgetSeconds !== scope.derivationBudgetSeconds ||
+      existing.metadata.derivationTokenBudget !== scope.derivationTokenBudget ||
       existing.metadata.trigger !== scope.trigger ||
       fingerprint(existing.metadata.priorRelease ?? null) !== fingerprint(scope.priorRelease ?? null)
     ) {
@@ -1584,6 +1586,12 @@ function normalizeScope(input: ContextBuildScope): ContextBuildScope {
   ) {
     throw new Error("derivationBudgetSeconds must be a positive integer");
   }
+  if (
+    input.derivationTokenBudget !== undefined &&
+    (!Number.isSafeInteger(input.derivationTokenBudget) || input.derivationTokenBudget < 1)
+  ) {
+    throw new Error("derivationTokenBudget must be a positive integer");
+  }
   const repository = normalizeRepository(input.repository);
   const priorRelease = input.priorRelease === undefined ? undefined : parseContextPriorReleaseSeed(input.priorRelease);
   if (
@@ -1605,6 +1613,7 @@ function normalizeScope(input: ContextBuildScope): ContextBuildScope {
     ...(input.githubInstallationId ? { githubInstallationId: input.githubInstallationId } : {}),
     ...(input.derivationDetail ? { derivationDetail: input.derivationDetail } : {}),
     ...(input.derivationBudgetSeconds ? { derivationBudgetSeconds: input.derivationBudgetSeconds } : {}),
+    ...(input.derivationTokenBudget ? { derivationTokenBudget: input.derivationTokenBudget } : {}),
     ...(input.trigger ? { trigger: input.trigger } : {}),
     ...(priorRelease ? { priorRelease } : {})
   };
@@ -1623,6 +1632,7 @@ function scopeMetadata(scope: ContextBuildScope, buildTaskId: TaskId): Record<st
     ...(scope.githubInstallationId ? { githubInstallationId: scope.githubInstallationId } : {}),
     ...(scope.derivationDetail ? { derivationDetail: scope.derivationDetail } : {}),
     ...(scope.derivationBudgetSeconds ? { derivationBudgetSeconds: scope.derivationBudgetSeconds } : {}),
+    ...(scope.derivationTokenBudget ? { derivationTokenBudget: scope.derivationTokenBudget } : {}),
     ...(scope.trigger ? { trigger: scope.trigger } : {}),
     ...(scope.priorRelease ? { priorRelease: scope.priorRelease } : {})
   };
@@ -1646,6 +1656,7 @@ function childMetadata(
     ...(build.metadata.derivationBudgetSeconds
       ? { derivationBudgetSeconds: build.metadata.derivationBudgetSeconds }
       : {}),
+    ...(build.metadata.derivationTokenBudget ? { derivationTokenBudget: build.metadata.derivationTokenBudget } : {}),
     ...(build.metadata.priorRelease ? { priorRelease: build.metadata.priorRelease } : {}),
     ...metadata
   };

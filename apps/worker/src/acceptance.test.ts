@@ -59,6 +59,47 @@ test("production acceptance has stable coarse failure categories", () => {
   assert.equal(productionAcceptanceExitCode(new Error("invalid JSON")), 25);
 });
 
+test("production acceptance cancels its exact build when the polling deadline expires", async () => {
+  const requests: string[] = [];
+  const fetchImpl: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    requests.push(`${init?.method ?? "GET"} ${url.pathname}`);
+    if (url.pathname === "/internal/context/access/sync") return json({ accepted: true });
+    if (url.pathname === "/context/build") return json({ build: { id: "cb_timeout" } }, 202);
+    if (url.pathname === "/internal/context/builds/cb_timeout/cancel") {
+      assert.deepEqual(JSON.parse(String(init?.body)), { reason: "production acceptance timeout" });
+      return json({
+        accepted: true,
+        buildId: "cb_timeout",
+        status: "canceled",
+        canceled: true,
+        changed: true
+      });
+    }
+    return json({ error: "unexpected request" }, 500);
+  };
+
+  await assert.rejects(
+    runProductionContextAcceptance({
+      apiUrl: "https://api.example.test",
+      internalToken: "internal",
+      principalId: "user:reader@example.com",
+      adminPrincipalId: "user:admin@example.com",
+      repository: "omlabs/repo",
+      timeoutMs: 0,
+      pollIntervalMs: 0,
+      fetchImpl,
+      log: () => undefined
+    }),
+    /cb_timeout timed out and was canceled/
+  );
+  assert.deepEqual(requests, [
+    "POST /internal/context/access/sync",
+    "POST /context/build",
+    "POST /internal/context/builds/cb_timeout/cancel"
+  ]);
+});
+
 test("blocked task detection is dynamic and scoped to repository and ref", () => {
   assert.deepEqual(
     blockedContextTaskIds(

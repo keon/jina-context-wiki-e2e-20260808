@@ -278,6 +278,7 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET` | `jina-trigger-acceptance-github-app-private-key` | Secret containing the fixture-mutation App PEM key.                                                        |
 | `_JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID`        |                                      `150069172` | Fixture-only mutation App installation; must differ from the operational installation.                     |
 | `_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS`             |                                          `10800` | Three-hour agent-stage budget for the measured 2.5-hour full build.                                        |
+| `_JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET`               |                                        `8000000` | Hard input-plus-output model-token ceiling for the acceptance build.                                       |
 | `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                      |
 | `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                 |
 | `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                           `full` | `full` runs the release Context build; explicit `mechanical` gates only on candidate readiness.            |
@@ -704,7 +705,8 @@ The coordinated `cloudbuild.yaml` invocation above calls
 13. after that cleanup succeeds, deploys
     `jina-context-production-trigger-acceptance` against the stable API with its
     dedicated service account and split operational/fixture App credentials, but does
-    not execute it.
+    not execute it. This job is an auxiliary operator tool: a reconciliation failure is
+    reported separately and does not invalidate an already accepted, serving release.
 
 Foreground API, dashboard, and admin traffic stays on the prior release until cutover.
 Background worker traffic intentionally changes before schema mutation: it is placed on
@@ -717,8 +719,10 @@ through that destruction and the zero-lease proof. Secret destruction and contro
 deletion use bounded retries and explicit state/absence verification. If any fail-closed
 proof before lease release fails, the release extends its lease for twelve hours and
 leaves the drains paused for operator repair. Cleanup failure after an accepted cutover
-fails the build and reports the exact control artifacts for operator removal, but never invokes
-candidate cleanup or attempts a mixed-version rollback.
+fails the build and reports only the control artifacts whose absence was not verified,
+but never invokes candidate cleanup or attempts a mixed-version rollback. A failure
+after both cleanup proofs instead reports the exact later phase and explicitly states
+that no release-control repair is needed.
 
 `mechanical` is an operator override, not the default release policy. It still runs
 validation, Daytona preflight, backup, worker drain, lease fencing, migration, candidate
@@ -949,6 +953,8 @@ job: INTERNAL_API_TOKEN=<Secret Manager: internal credential>
 job: ACCEPTANCE_WEB_AUTH_PASSWORD=<Secret Manager: app-level password>
 job: ACCEPTANCE_GITHUB_INSTALLATION_ID=<fixture installation>
 job: ACCEPTANCE_REQUEST_KEY=deploy-<Cloud Build ID>
+job: ACCEPTANCE_DERIVATION_BUDGET_SECONDS=10800
+job: ACCEPTANCE_DERIVATION_TOKEN_BUDGET=8000000
 job: ACCEPTANCE_TIMEOUT_MS=10800000
 ```
 
@@ -973,6 +979,9 @@ prevented from receiving that static Context token.
    rejects failed or blocked work. Before querying the release, it requires the
    tenant-scoped worker-completion view to attest that every completed dispatchable
    Context task ran on the exact candidate Context-worker release and revision;
+   the polling timeout calls the internal exact-build cancellation route and
+   requires a confirmed canceled root, so a failed deployment gate cannot leave
+   model work running in the background;
 4. requires an immutable context release at one full commit SHA;
 5. mints an acceptance token whose `createdAt`/`expiresAt` interval is exactly five
    minutes, with exactly `context:read` and `context:query` scopes for the bound

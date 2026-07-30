@@ -150,6 +150,7 @@ interface ContextBoardDependencyResult {
 
 interface ContextBoardWorkerMetadata extends RepositoryContextMetadata {
   readonly contextBuildId: string;
+  readonly derivationDeadlineAt?: string;
   readonly dependencyResults: readonly ContextBoardDependencyResult[];
   readonly inputArtifact?: ContextArtifactRef;
   readonly planArtifact?: ContextArtifactRef;
@@ -447,6 +448,7 @@ async function execute(work: ClaimedWork): Promise<void> {
   const startedAt = Date.now();
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
+  const buildDeadlineTimer = scheduleBuildDeadline(work, lease.controller);
   const heartbeat = setInterval(() => {
     if (lease.renewalInFlight) return;
     lease.renewalInFlight = true;
@@ -489,6 +491,7 @@ async function execute(work: ClaimedWork): Promise<void> {
     }
   } finally {
     clearInterval(heartbeat);
+    if (buildDeadlineTimer) clearTimeout(buildDeadlineTimer);
   }
 
   try {
@@ -2981,7 +2984,17 @@ function requireBoardAgentStageRunner(): PortableContextBoardAgentStageRunner {
 }
 
 function stageBudgetSeconds(environmentName: string, fallback: number): number {
-  return positiveInt(process.env[environmentName], fallback);
+  const configured = positiveInt(process.env[environmentName], fallback);
+  const deadline =
+    activeWork && isContextTopic(activeWork.topic)
+      ? (activeWork.task.metadata as ContextBoardWorkerMetadata).derivationDeadlineAt
+      : undefined;
+  if (!deadline) return configured;
+  const remainingSeconds = Math.floor((Date.parse(deadline) - Date.now()) / 1_000);
+  if (!Number.isSafeInteger(remainingSeconds) || remainingSeconds < 1) {
+    throw new Error("Context build derivation deadline exceeded");
+  }
+  return Math.min(configured, remainingSeconds);
 }
 
 function parseEvidenceSnapshot(content: Uint8Array, metadata: RepositoryContextMetadata): IngestEvidenceInput {
@@ -3782,6 +3795,9 @@ function contextBoardMetadata(
   const base = {
     contextBuildId: requiredString(metadata.contextBuildId, "task contextBuildId"),
     dependencyResults,
+    ...(metadata.derivationDeadlineAt === undefined
+      ? {}
+      : { derivationDeadlineAt: requiredIsoTimestamp(metadata.derivationDeadlineAt, "task derivationDeadlineAt") }),
     ...(metadata.priorRelease === undefined
       ? {}
       : { priorRelease: parseContextPriorReleaseSeed(metadata.priorRelease) })
@@ -3849,6 +3865,30 @@ function contextBoardMetadata(
         planArtifact: parseArtifactRef(metadata.planArtifact, "task planArtifact")
       };
   }
+}
+
+function scheduleBuildDeadline(work: ClaimedWork, controller: AbortController): NodeJS.Timeout | undefined {
+  if (!isContextTopic(work.topic)) return undefined;
+  const deadline = (work.task.metadata as ContextBoardWorkerMetadata).derivationDeadlineAt;
+  if (!deadline) return undefined;
+  const remainingMs = Date.parse(deadline) - Date.now();
+  const abort = () => controller.abort(new Error("Context build derivation deadline exceeded"));
+  if (remainingMs <= 0) {
+    queueMicrotask(abort);
+    return undefined;
+  }
+  const timer = setTimeout(abort, remainingMs);
+  timer.unref();
+  return timer;
+}
+
+function requiredIsoTimestamp(value: unknown, field: string): string {
+  const timestamp = requiredString(value, field);
+  const parsed = Date.parse(timestamp);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString() !== timestamp) {
+    throw new Error(`${field} must be an ISO timestamp`);
+  }
+  return timestamp;
 }
 
 function parseContextBoardDependencyResults(value: unknown): ContextBoardDependencyResult[] {

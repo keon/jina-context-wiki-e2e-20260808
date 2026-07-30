@@ -50,6 +50,7 @@ context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-9000000}"
 context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-128000}"
 context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-96000}"
 acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS:-10800}"
+acceptance_derivation_token_budget="${JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET:-8000000}"
 acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
 deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-full}"
@@ -134,6 +135,15 @@ validate_secret_name() {
   fi
 }
 
+validate_tenant_id() {
+  local name="$1"
+  local value="$2"
+  if [[ ! "${value}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$ ]]; then
+    echo "${name} must contain only letters, numbers, dot, underscore, colon, or hyphen" >&2
+    exit 2
+  fi
+}
+
 validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
 validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
 validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
@@ -191,6 +201,7 @@ if (( context_worker_lease_ms <= context_api_timeout_ms + context_completion_tim
   exit 2
 fi
 validate_positive_integer "JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS" "${acceptance_derivation_budget_seconds}"
+validate_positive_integer "JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET" "${acceptance_derivation_token_budget}"
 if (( acceptance_timeout_ms < acceptance_derivation_budget_seconds * 1000 )); then
   echo "JINA_ACCEPTANCE_TIMEOUT_MS must cover JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS" >&2
   exit 2
@@ -293,6 +304,7 @@ api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook
 case "${tenancy_mode}" in
   fixed)
     : "${fixed_tenant_id:?JINA_FIXED_TENANT_ID is required in fixed mode}"
+    validate_tenant_id "JINA_FIXED_TENANT_ID" "${fixed_tenant_id}"
     api_env_vars+="~JINA_TENANT_ID=${fixed_tenant_id}~JINA_TENANT_ADMIN_PRINCIPALS=user:keon@omlabs.xyz~JINA_TENANT_ALIASES=github:unscoped,e2e-production,e2e"
     acceptance_tenant_id="${fixed_tenant_id}"
     acceptance_principal_id="user:keon@omlabs.xyz"
@@ -791,6 +803,11 @@ route_candidate_revision() {
 
 cutover_started="false"
 accepted_cutover_complete="false"
+accepted_release_control_credential_destroyed="false"
+accepted_release_control_job_deleted="false"
+post_cutover_cleanup_complete="false"
+post_cutover_phase="candidate"
+trigger_acceptance_job_status="not-attempted"
 worker_quiescence_started="false"
 board_leases_verified="false"
 release_lease_acquired="false"
@@ -855,19 +872,96 @@ destroy_deployment_release_credential_verified() {
   return 1
 }
 
+report_accepted_release_failure() {
+  if [[ "${post_cutover_cleanup_complete}" == "true" ]]; then
+    cat >&2 <<POSTCUTOVER
+The accepted coordinated release is serving and its database deployment lease
+was released. Its short-lived release-control credential and job were both
+verified absent. A later post-cutover step failed during ${post_cutover_phase};
+no release-control cleanup or traffic rollback is required. Production traffic
+and the accepted worker generation were deliberately left unchanged.
+POSTCUTOVER
+    return
+  fi
+
+  cat >&2 <<ROLLFORWARD
+The accepted coordinated release is serving and its database deployment lease
+was released, but verified cleanup of its short-lived release-control artifacts
+did not complete. Production traffic and the accepted worker generation were
+deliberately left unchanged. Complete only the outstanding cleanup below; do
+not roll back to mixed revisions.
+ROLLFORWARD
+  if [[ "${accepted_release_control_credential_destroyed}" != "true" ]]; then
+    echo "  Destroy release-control credential version ${deployment_release_secret_version}." >&2
+  fi
+  if [[ "${accepted_release_control_job_deleted}" != "true" ]]; then
+    echo "  Remove release-control job ${release_control_job}." >&2
+  fi
+}
+
+reconcile_trigger_acceptance_job() {
+  local stable_api_url
+  local trigger_acceptance_command
+
+  if ! stable_api_url="$(stable_service_url "jina-api")"; then
+    return 1
+  fi
+  if ! printf -v trigger_acceptance_command \
+    'exec node %q --api-url %q --tenant %q --principal %q --repository %q --installation-id %q --fixture-installation-id %q --confirm-repository %q --report %q' \
+    "${production_trigger_acceptance_path}" \
+    "${stable_api_url}" \
+    "${acceptance_tenant_id}" \
+    "${context_query_principal_id}" \
+    "${acceptance_repository}" \
+    "${acceptance_github_installation_id}" \
+    "${trigger_acceptance_github_installation_id}" \
+    "${acceptance_repository}" \
+    "/tmp/context-production-trigger-acceptance.json"; then
+    return 1
+  fi
+
+  # Use an alternate gcloud list delimiter. The command values are validated
+  # not to contain "~", so the shell command remains one container argument
+  # even when the same repository is intentionally present twice.
+  gcloud run jobs deploy "${trigger_acceptance_job}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --image="${worker_image}" \
+    --service-account="${trigger_acceptance_service_account}" \
+    --set-env-vars="JINA_TRIGGER_ACCEPTANCE_ALLOWED_REPOSITORY=${acceptance_repository}" \
+    --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_FIXTURE_APP_ID=${trigger_acceptance_github_app_id_secret}:latest,GITHUB_FIXTURE_APP_PRIVATE_KEY=${trigger_acceptance_github_app_private_key_secret}:latest" \
+    --command=/bin/sh \
+    --args="^~^-c~${trigger_acceptance_command}" \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=86400s \
+    --quiet
+}
+
+reconcile_trigger_acceptance_job_nonfatal() {
+  trigger_acceptance_job_status="reconciling"
+  if reconcile_trigger_acceptance_job; then
+    trigger_acceptance_job_status="ready"
+    return 0
+  fi
+
+  trigger_acceptance_job_status="failed-nonfatal"
+  cat >&2 <<'AUXILIARY'
+The accepted release is serving and release-control cleanup is verified, but
+the operator-run production trigger-acceptance job could not be reconciled.
+This auxiliary job is not part of release acceptance, so the release remains
+successful. Inspect or redeploy the job separately; do not roll back traffic or
+repeat database migration.
+AUXILIARY
+  return 0
+}
+
 rollback_failed_release() {
   local status=$?
   trap - EXIT
   if [[ "${status}" -ne 0 && "${accepted_cutover_complete}" == "true" ]]; then
     stop_release_renewal
-    cat >&2 <<ROLLFORWARD
-The accepted coordinated release is serving and its database deployment lease
-was released, but verified cleanup of the short-lived release-control artifacts
-did not complete. Production traffic and the accepted worker generation were
-deliberately left unchanged. Remove ${release_control_job} and destroy release-
-control credential version ${deployment_release_secret_version}; do not roll
-back to mixed revisions.
-ROLLFORWARD
+    report_accepted_release_failure
     exit "${status}"
   fi
   if [[ "${status}" -ne 0 && "${cutover_started}" == "true" ]]; then
@@ -1381,7 +1475,7 @@ if [[ "${deployment_acceptance_mode}" == "full" ]]; then
     --region="${GCP_REGION}" \
     --image="${worker_image}" \
     --service-account="${acceptance_service_account}" \
-    --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~ACCEPTANCE_CONTEXT_WORKER_REVISION=${context_candidate_revision}~ACCEPTANCE_TASK_WORKER_REVISION=${task_candidate_revision}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_CONTEXT_WORKER_AUDIENCE=${context_worker_audience}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TASK_WORKER_AUDIENCE=${task_worker_audience}~ACCEPTANCE_DASHBOARD_URL=${dashboard_url}~ACCEPTANCE_DASHBOARD_AUDIENCE=${dashboard_audience}~ACCEPTANCE_ADMIN_URL=${admin_url}~ACCEPTANCE_WEB_AUTH_USERNAME=omlabs~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REPOSITORY=${acceptance_repository}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${acceptance_derivation_budget_seconds}~ACCEPTANCE_TIMEOUT_MS=${acceptance_timeout_ms}" \
+    --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~ACCEPTANCE_CONTEXT_WORKER_REVISION=${context_candidate_revision}~ACCEPTANCE_TASK_WORKER_REVISION=${task_candidate_revision}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_CONTEXT_WORKER_AUDIENCE=${context_worker_audience}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TASK_WORKER_AUDIENCE=${task_worker_audience}~ACCEPTANCE_DASHBOARD_URL=${dashboard_url}~ACCEPTANCE_DASHBOARD_AUDIENCE=${dashboard_audience}~ACCEPTANCE_ADMIN_URL=${admin_url}~ACCEPTANCE_WEB_AUTH_USERNAME=omlabs~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REPOSITORY=${acceptance_repository}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${acceptance_derivation_budget_seconds}~ACCEPTANCE_DERIVATION_TOKEN_BUDGET=${acceptance_derivation_token_budget}~ACCEPTANCE_TIMEOUT_MS=${acceptance_timeout_ms}" \
     --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:latest" \
     --args=dist/acceptance.js \
     --tasks=1 \
@@ -1428,6 +1522,7 @@ fi
 # mode reached this point only after candidate readiness and worker-isolation
 # checks. Production traffic changes only to this Cloud Build's exact revisions.
 cutover_started="true"
+post_cutover_phase="cutover"
 for service in \
   "jina-api" \
   "jina-context-worker" \
@@ -1456,46 +1551,35 @@ cutover_started="false"
 worker_quiescence_started="false"
 board_leases_verified="false"
 accepted_cutover_complete="true"
+post_cutover_phase="release-control-cleanup"
 
 # The serving worker generation keeps its own numbered credential version.
 # The independent control credential and job must now both be verified gone.
 # A cleanup failure fails the build but never rolls an accepted
 # cutover back to a mixed set of revisions.
 post_cutover_cleanup_ok="true"
-destroy_deployment_release_credential_verified || post_cutover_cleanup_ok="false"
-delete_release_control_job_verified || post_cutover_cleanup_ok="false"
+if destroy_deployment_release_credential_verified; then
+  accepted_release_control_credential_destroyed="true"
+else
+  post_cutover_cleanup_ok="false"
+fi
+if delete_release_control_job_verified; then
+  accepted_release_control_job_deleted="true"
+else
+  post_cutover_cleanup_ok="false"
+fi
 if [[ "${post_cutover_cleanup_ok}" != "true" ]]; then
   exit 2
 fi
+post_cutover_cleanup_complete="true"
 
 # Install the destructive trigger acceptance as an explicit operator-run job
 # only after the coordinated candidate is accepted, serving, and its temporary
-# release-control artifacts are verified gone. Deployment never executes it.
-stable_api_url="$(stable_service_url "jina-api")"
-printf -v trigger_acceptance_command \
-  'exec node %q --api-url %q --tenant %q --principal %q --repository %q --installation-id %q --fixture-installation-id %q --confirm-repository %q --report %q' \
-  "${production_trigger_acceptance_path}" \
-  "${stable_api_url}" \
-  "${acceptance_tenant_id}" \
-  "${context_query_principal_id}" \
-  "${acceptance_repository}" \
-  "${acceptance_github_installation_id}" \
-  "${trigger_acceptance_github_installation_id}" \
-  "${acceptance_repository}" \
-  "/tmp/context-production-trigger-acceptance.json"
-gcloud run jobs deploy "${trigger_acceptance_job}" \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --image="${worker_image}" \
-  --service-account="${trigger_acceptance_service_account}" \
-  --set-env-vars="JINA_TRIGGER_ACCEPTANCE_ALLOWED_REPOSITORY=${acceptance_repository}" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_FIXTURE_APP_ID=${trigger_acceptance_github_app_id_secret}:latest,GITHUB_FIXTURE_APP_PRIVATE_KEY=${trigger_acceptance_github_app_private_key_secret}:latest" \
-  --command=/bin/sh \
-  --args="-c,${trigger_acceptance_command}" \
-  --tasks=1 \
-  --max-retries=0 \
-  --task-timeout=86400s \
-  --quiet
+# release-control artifacts are verified gone. Deployment never executes it,
+# and reconciliation failure cannot invalidate the already accepted release.
+post_cutover_phase="auxiliary-trigger-acceptance"
+reconcile_trigger_acceptance_job_nonfatal
+post_cutover_phase="summary"
 
 cat <<SUMMARY
 Cloud Build deployment complete
@@ -1515,5 +1599,6 @@ Candidate tag: ${release_tag}
 Pre-deployment backup: ${context_backup_id}
 Context reset mode: ${context_reset_mode}
 Deployment acceptance mode: ${deployment_acceptance_mode}
-Production trigger acceptance job: ${trigger_acceptance_job} (deployed, not executed)
+Production trigger acceptance job: ${trigger_acceptance_job} (${trigger_acceptance_job_status}, not executed)
 SUMMARY
+post_cutover_phase="complete"

@@ -156,6 +156,7 @@ export default async function ContextAdminPage({
                 <th>Ref / sequence</th>
                 <th>Commit</th>
                 <th>Status</th>
+                <th>Build limits</th>
                 <th>Stages</th>
                 <th>Checkpoints</th>
                 <th>Build ID</th>
@@ -188,6 +189,22 @@ export default async function ContextAdminPage({
                     <td>
                       {build.status}
                       {buildFailure ? <span className="failure-detail">{buildFailure}</span> : null}
+                    </td>
+                    <td>
+                      {build.derivationTokenBudget !== undefined ? (
+                        <>
+                          {compactNumber(progress?.consumedModelTokens ?? build.consumedModelTokens ?? 0)} /{" "}
+                          {compactNumber(build.derivationTokenBudget)} tokens
+                        </>
+                      ) : (
+                        "not recorded"
+                      )}
+                      {build.derivationDeadlineAt ? (
+                        <>
+                          <br />
+                          <span className="muted">deadline {formatTimestamp(build.derivationDeadlineAt)}</span>
+                        </>
+                      ) : null}
                     </td>
                     <td>
                       {done}/{stages.length} complete
@@ -319,6 +336,10 @@ function Stat({ label, value }: { readonly label: string; readonly value: number
 
 function shortRef(ref: string): string {
   return ref.replace(/^refs\/heads\//, "") || ref;
+}
+
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }
 
 function formatTimestamp(iso: string): string {

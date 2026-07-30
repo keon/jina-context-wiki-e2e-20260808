@@ -24,6 +24,9 @@ export function BuildCheckpoints({
     status === "completed" && release && build.commitSha === release.commitSha ? release : undefined;
   const invalidPages = pages.filter((page) => page.validationStatus === "invalid").length;
   const buildFailure = contextFailureText(currentProgress ?? build);
+  const tokenBudget = currentProgress?.derivationTokenBudget ?? build.derivationTokenBudget;
+  const consumedTokens = currentProgress?.consumedModelTokens ?? build.consumedModelTokens;
+  const deadline = currentProgress?.derivationDeadlineAt ?? build.derivationDeadlineAt;
   return (
     <section className="context-operations-panel" aria-label="Context build checkpoints">
       <header className="context-panel-heading">
@@ -43,6 +46,10 @@ export function BuildCheckpoints({
         ) : null}
         {" · "}
         updated {formatTime(currentProgress?.updatedAt ?? build.updatedAt)}
+        {tokenBudget !== undefined && consumedTokens !== undefined
+          ? ` · ${compactNumber(consumedTokens)} / ${compactNumber(tokenBudget)} model tokens`
+          : ""}
+        {deadline ? ` · deadline ${formatTime(deadline)}` : ""}
       </p>
       <p className={`context-alert ${status === "failed" || invalidPages > 0 ? "danger" : ""}`}>
         {status === "failed" && buildFailure
@@ -84,4 +91,8 @@ export function BuildCheckpoints({
       </div>
     </section>
   );
+}
+
+function compactNumber(value: number): string {
+  return new Intl.NumberFormat("en", { notation: "compact", maximumFractionDigits: 1 }).format(value);
 }

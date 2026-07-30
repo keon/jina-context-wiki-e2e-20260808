@@ -70,7 +70,7 @@ import {
   type Logger
 } from "@jina/observability";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
-import { entityId, nowIso } from "@jina/shared-kernel";
+import { entityId, nowIso, type IsoTimestamp } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { admitContextBoardBuild } from "./context-board-admission.js";
 import {
@@ -258,6 +258,10 @@ const MIN_DERIVATION_BUDGET_SECONDS = 300;
 // ceiling; keeping the API at the old two-hour limit would reject the
 // coordinated deployment gate before any work was admitted.
 const MAX_DERIVATION_BUDGET_SECONDS = 3 * 60 * 60;
+const DEFAULT_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
+const MIN_DERIVATION_TOKEN_BUDGET = DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
+const MAX_DERIVATION_TOKEN_BUDGET = 50_000_000;
+const DEFAULT_DERIVATION_TOKEN_BUDGET = 8_000_000;
 const MIN_API_TOKEN_MINUTES = 5;
 const MAX_API_TOKEN_MINUTES = 525_600;
 
@@ -825,7 +829,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       // can ask for the ceiling.
       const derivationBudgetSeconds =
         body.derivationBudgetSeconds === undefined
-          ? undefined
+          ? DEFAULT_DERIVATION_BUDGET_SECONDS
           : requiredPositiveInteger(body.derivationBudgetSeconds, "derivationBudgetSeconds");
       if (
         derivationBudgetSeconds !== undefined &&
@@ -834,6 +838,15 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ) {
         throw invalidRequest(
           `derivationBudgetSeconds must be between ${MIN_DERIVATION_BUDGET_SECONDS} and ${MAX_DERIVATION_BUDGET_SECONDS}`
+        );
+      }
+      const derivationTokenBudget =
+        body.derivationTokenBudget === undefined
+          ? DEFAULT_DERIVATION_TOKEN_BUDGET
+          : requiredPositiveInteger(body.derivationTokenBudget, "derivationTokenBudget");
+      if (derivationTokenBudget < MIN_DERIVATION_TOKEN_BUDGET || derivationTokenBudget > MAX_DERIVATION_TOKEN_BUDGET) {
+        throw invalidRequest(
+          `derivationTokenBudget must be between ${MIN_DERIVATION_TOKEN_BUDGET} and ${MAX_DERIVATION_TOKEN_BUDGET}`
         );
       }
       const requestedGithubInstallationId =
@@ -872,7 +885,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
           ...(githubInstallationId ? { githubInstallationId } : {}),
           ...(derivationDetail ? { derivationDetail } : {}),
-          ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
+          derivationBudgetSeconds,
+          derivationTokenBudget,
           requestKey: optionalString(body.requestKey) ?? randomUUID(),
           now: nowIso()
         });
@@ -1378,6 +1392,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         repository,
         ref: requiredString(build.metadata.ref, "build ref"),
         status: publicContextBuildStatus(build.status),
+        ...(typeof build.metadata.derivationBudgetSeconds === "number"
+          ? {
+              derivationBudgetSeconds: build.metadata.derivationBudgetSeconds,
+              derivationDeadlineAt: contextBuildDeadlineAt(build)
+            }
+          : {}),
+        ...(typeof build.metadata.derivationTokenBudget === "number"
+          ? {
+              derivationTokenBudget: build.metadata.derivationTokenBudget,
+              consumedModelTokens: contextBuildConsumedModelTokens(intakeState.board, build.id)
+            }
+          : {}),
         ...publicContextBuildFailure(intakeState.board, build),
         stages: publicContextBoardStages(intakeState.board, build.id),
         pages: publicContextBoardCheckpointPages(intakeState.board, build.id),
@@ -1433,6 +1459,51 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const repository = requiredRepositoryName(build.metadata.repository, "repository");
       await requireRepositoryAccess(principal, repository);
       json(response, 200, contextWorkerCompletionAttestation(intakeState.board, build));
+      return;
+    }
+
+    const cancelContextBuildId = routeId(url.pathname, "/internal/context/builds/", "/cancel");
+    if (request.method === "POST" && cancelContextBuildId) {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      const reason = (optionalString(body.reason) ?? "authorized operator cancellation").slice(0, 2_000);
+      await reload();
+      const visibleBuild = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, cancelContextBuildId);
+      if (!visibleBuild) throw notFound("build not found");
+      await requireRepositoryAccess(principal, requiredRepositoryName(visibleBuild.metadata.repository, "repository"));
+      const canceled = await mutate(async () => {
+        const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, cancelContextBuildId);
+        if (!build) return undefined;
+        if (isTerminalTaskStatus(build.status)) {
+          return { status: build.status, changed: false };
+        }
+        const at = nowIso();
+        intakeState = {
+          ...intakeState,
+          board: terminateContextBuild(intakeState.board, build, "canceled", "build_canceled", reason, at)
+        };
+        return { status: "canceled" as const, changed: true };
+      });
+      if (!canceled) throw new ApiError(409, "conflict", "context build cancellation raced another update");
+      if (config.contextQuotaService && isTerminalTaskStatus(canceled.status)) {
+        await settleTerminalReconciledModelQuotas(
+          config.contextQuotaService,
+          intakeState.board,
+          principal.tenantId,
+          cancelContextBuildId
+        );
+        await config.contextQuotaService.completeBuild({
+          tenantId: principal.tenantId,
+          buildId: cancelContextBuildId
+        });
+      }
+      json(response, 200, {
+        accepted: true,
+        buildId: cancelContextBuildId,
+        status: canceled.status,
+        canceled: canceled.status === "canceled",
+        changed: canceled.changed
+      });
       return;
     }
 
@@ -1713,6 +1784,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           repository: contextRepository,
           ...(priorRelease ? { priorRelease } : {}),
           ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
+          derivationBudgetSeconds: DEFAULT_DERIVATION_BUDGET_SECONDS,
+          derivationTokenBudget: DEFAULT_DERIVATION_TOKEN_BUDGET,
           deliveryId,
           event: webhook.event,
           ...((identity?.defaultBranch ?? webhook.repositoryDefaultBranch)
@@ -2072,6 +2145,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     requireWorkerServiceForTopics(workerRelease, topics);
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
     let quotaModelTask: { readonly tenantId: string; readonly taskId: string } | undefined;
+    const terminatedBuilds = new Map<string, string>();
     let claimed;
     try {
       claimed = await mutate(
@@ -2086,10 +2160,42 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const candidate = findOutboxMessage(intakeState.board, messageId);
             const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
             if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
-            const candidateUsesModel = Boolean(config.contextQuotaService) && CONTEXT_MODEL_TOPICS.has(candidate.topic);
+            const candidateUsesModel = CONTEXT_MODEL_TOPICS.has(candidate.topic);
             const candidateTenantId = requiredString(candidateTask.metadata.tenantId, "task tenantId");
 
             const now = nowIso();
+            const candidateBuildId =
+              isContextBoardTaskType(candidateTask.type) && typeof candidateTask.metadata.contextBuildId === "string"
+                ? candidateTask.metadata.contextBuildId
+                : undefined;
+            const candidateBuild = candidateBuildId
+              ? findTask(intakeState.board, entityId<"task">(candidateBuildId))
+              : undefined;
+            if (candidateBuild?.type === contextBoardTaskTypes.build && !isTerminalTaskStatus(candidateBuild.status)) {
+              const limitFailure = contextBuildLimitFailure(
+                intakeState.board,
+                candidateBuild,
+                now,
+                candidateUsesModel ? DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens : 0
+              );
+              if (limitFailure) {
+                intakeState = {
+                  ...intakeState,
+                  board: terminateContextBuild(
+                    intakeState.board,
+                    candidateBuild,
+                    "failed",
+                    limitFailure,
+                    limitFailure === "build_time_budget_exceeded"
+                      ? "derivation deadline reached before the next stage could start"
+                      : "model-token budget cannot reserve the next model-backed stage",
+                    now
+                  )
+                };
+                terminatedBuilds.set(candidateBuild.id, candidateTenantId);
+                continue;
+              }
+            }
             const leaseId = randomUUID();
             const writeFenceToken = randomUUID();
             const initiallyLeased = leaseNextOutboxMessage(intakeState.board, {
@@ -2147,6 +2253,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             }
             const claimedTask = findTask(board, task.id);
             if (!claimedTask) throw new Error("newly claimed worker task disappeared");
+            const claimedBuildId =
+              isContextBoardTaskType(claimedTask.type) && typeof claimedTask.metadata.contextBuildId === "string"
+                ? claimedTask.metadata.contextBuildId
+                : undefined;
+            const claimedBuild = claimedBuildId ? findTask(board, entityId<"task">(claimedBuildId)) : undefined;
             intakeState = { ...intakeState, board };
             return {
               message: { ...leasedMessage, attempt: leasedMessage.payload.attempt },
@@ -2155,6 +2266,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                     ...claimedTask,
                     metadata: {
                       ...claimedTask.metadata,
+                      ...(claimedBuild?.type === contextBoardTaskTypes.build &&
+                      typeof claimedBuild.metadata.derivationBudgetSeconds === "number"
+                        ? { derivationDeadlineAt: contextBuildDeadlineAt(claimedBuild) }
+                        : {}),
                       dependencyResults: contextBoardDependencyResults(board, claimedTask.id)
                     }
                   }
@@ -2176,6 +2291,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!claimed && quotaModelTask && config.contextQuotaService) {
       await config.contextQuotaService.cancelModelTask(quotaModelTask).catch(() => undefined);
     }
+    if (config.contextQuotaService) {
+      for (const [buildId, buildTenantId] of terminatedBuilds) {
+        await settleTerminalReconciledModelQuotas(
+          config.contextQuotaService,
+          intakeState.board,
+          buildTenantId,
+          buildId
+        );
+        await config.contextQuotaService.completeBuild({ tenantId: buildTenantId, buildId });
+      }
+    }
     json(response, claimed ? 200 : 204, claimed ?? {});
   }
 
@@ -2195,9 +2321,33 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           task.metadata.tenantId !== tenantId ||
           message?.payload.attempt !== requiredPositiveInteger(body.attempt, "attempt")
         ) {
-          return false;
+          return { accepted: false };
         }
         const now = nowIso();
+        const buildId =
+          isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+            ? task.metadata.contextBuildId
+            : undefined;
+        const build = buildId ? findTask(intakeState.board, entityId<"task">(buildId)) : undefined;
+        if (build?.type === contextBoardTaskTypes.build && !isTerminalTaskStatus(build.status)) {
+          const limitFailure = contextBuildLimitFailure(intakeState.board, build, now);
+          if (limitFailure) {
+            intakeState = {
+              ...intakeState,
+              board: terminateContextBuild(
+                intakeState.board,
+                build,
+                "failed",
+                limitFailure,
+                limitFailure === "build_time_budget_exceeded"
+                  ? "derivation deadline reached while a stage was running"
+                  : "model-token budget was exhausted while stages were running",
+                now
+              )
+            };
+            return { accepted: false, terminatedBuildId: build.id };
+          }
+        }
         const board = renewOutboxLease(
           intakeState.board,
           id,
@@ -2209,14 +2359,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               (message && CONTEXT_BOARD_TOPICS.has(message.topic) ? contextWorkerLeaseMs : WORKER_LEASE_MS)
           ).toISOString()
         );
-        if (!board) return false;
+        if (!board) return { accepted: false };
         intakeState = { ...intakeState, board };
-        return true;
+        return { accepted: true };
       },
       undefined,
       workerRelease
     );
-    if (!renewed) throw staleLease();
+    if (renewed?.terminatedBuildId && config.contextQuotaService) {
+      await settleTerminalReconciledModelQuotas(
+        config.contextQuotaService,
+        intakeState.board,
+        tenantId,
+        renewed.terminatedBuildId
+      );
+      await config.contextQuotaService.completeBuild({ tenantId, buildId: renewed.terminatedBuildId });
+    }
+    if (!renewed?.accepted) throw staleLease();
     if (config.contextQuotaService) {
       const message = findOutboxMessage(intakeState.board, id);
       if (message && CONTEXT_MODEL_TOPICS.has(message.topic)) {
@@ -2406,7 +2565,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           const modelTaskId = CONTEXT_MODEL_TOPICS.has(message.topic)
             ? contextModelQuotaTaskId(task.id, message.payload.attempt)
             : undefined;
-          const retryState = retried.replay
+          let retryState = retried.replay
             ? retried.state
             : applyCommand(
                 retried.state,
@@ -2427,7 +2586,23 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
               ? task.metadata.contextBuildId
               : undefined;
-          const build = buildId ? findTask(retryState, entityId<"task">(buildId)) : undefined;
+          let build = buildId ? findTask(retryState, entityId<"task">(buildId)) : undefined;
+          if (!retried.replay && build?.type === contextBoardTaskTypes.build && !isTerminalTaskStatus(build.status)) {
+            const limitFailure = contextBuildLimitFailure(retryState, build, now);
+            if (limitFailure) {
+              retryState = terminateContextBuild(
+                retryState,
+                build,
+                "failed",
+                limitFailure,
+                limitFailure === "build_time_budget_exceeded"
+                  ? "derivation deadline reached before a retried stage completed"
+                  : "model-token usage exceeded the build budget",
+                now
+              );
+              build = findTask(retryState, build.id);
+            }
+          }
           intakeState = { ...intakeState, board: retryState };
           return {
             accepted: true,
@@ -2576,12 +2751,28 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         if (postCompletion) {
           board = finalizeContextBoardTaskResult(board, postCompletion, now);
         }
-        const reduced = reduceBoard(board, now);
+        let reduced = reduceBoard(board, now);
         const buildId =
           isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
             ? task.metadata.contextBuildId
             : undefined;
-        const build = buildId ? findTask(reduced, entityId<"task">(buildId)) : undefined;
+        let build = buildId ? findTask(reduced, entityId<"task">(buildId)) : undefined;
+        if (build?.type === contextBoardTaskTypes.build && !isTerminalTaskStatus(build.status)) {
+          const limitFailure = contextBuildLimitFailure(reduced, build, now);
+          if (limitFailure) {
+            reduced = terminateContextBuild(
+              reduced,
+              build,
+              "failed",
+              limitFailure,
+              limitFailure === "build_time_budget_exceeded"
+                ? "derivation deadline reached before the stage completion committed"
+                : "model-token usage exceeded the build budget",
+              now
+            );
+            build = findTask(reduced, build.id);
+          }
+        }
         const modelTaskId = messageIsModel ? contextModelQuotaTaskId(task.id, message.payload.attempt) : undefined;
         intakeState = { ...intakeState, board: reduced };
         return {
@@ -2658,8 +2849,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (
       !build ||
       build.type !== contextBoardTaskTypes.build ||
+      isTerminalTaskStatus(build.status) ||
       build.metadata.tenantId !== tenantId ||
-      build.metadata.repository !== task.metadata.repository
+      build.metadata.repository !== task.metadata.repository ||
+      (typeof build.metadata.derivationBudgetSeconds === "number" && nowIso() >= contextBuildDeadlineAt(build))
     ) {
       throw staleLease();
     }
@@ -2906,6 +3099,18 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
     refSequence: requiredPositiveInteger(task.metadata.refSequence, "context build refSequence"),
     ...(typeof task.metadata.commitSha === "string" ? { commitSha: task.metadata.commitSha } : {}),
     ...(typeof task.metadata.trigger === "string" ? { trigger: task.metadata.trigger } : {}),
+    ...(typeof task.metadata.derivationBudgetSeconds === "number"
+      ? {
+          derivationBudgetSeconds: task.metadata.derivationBudgetSeconds,
+          derivationDeadlineAt: contextBuildDeadlineAt(task)
+        }
+      : {}),
+    ...(typeof task.metadata.derivationTokenBudget === "number"
+      ? {
+          derivationTokenBudget: task.metadata.derivationTokenBudget,
+          consumedModelTokens: contextBuildConsumedModelTokens(state, task.id)
+        }
+      : {}),
     ...publicContextBuildFailure(state, task),
     createdAt: task.createdAt,
     updatedAt: task.updatedAt
@@ -2958,6 +3163,9 @@ const PUBLIC_CONTEXT_FAILURE_REASONS = {
   worker_execution: "The worker failed before producing a valid stage result.",
   bounded_page_repair_exhausted: "Citation support remained incomplete after the bounded page-repair policy.",
   bounded_gate_repair_exhausted: "Source or maintenance gaps remained after the bounded repair policy.",
+  build_time_budget_exceeded: "This Context build reached its wall-clock limit.",
+  build_token_budget_exceeded: "This Context build reached its model-token limit.",
+  build_canceled: "This Context build was canceled by an authorized operator.",
   stage_failed: "This stage failed before producing a valid checkpoint.",
   build_failed: "This Context build stopped after a stage failure."
 } as const;
@@ -3032,6 +3240,106 @@ function publicContextFailure(code: PublicContextFailureCode): {
     // explicit contract even if a future catalog entry is accidentally verbose.
     failureReason: PUBLIC_CONTEXT_FAILURE_REASONS[code].slice(0, 240)
   };
+}
+
+type ContextBuildLimitFailure = "build_time_budget_exceeded" | "build_token_budget_exceeded";
+
+function contextBuildDeadlineAt(build: BoardTask): string {
+  const budgetSeconds = requiredPositiveInteger(build.metadata.derivationBudgetSeconds, "derivationBudgetSeconds");
+  const createdAt = Date.parse(build.createdAt);
+  if (!Number.isFinite(createdAt)) throw new Error("context build createdAt is invalid");
+  return new Date(createdAt + budgetSeconds * 1_000).toISOString();
+}
+
+function contextBuildConsumedModelTokens(state: BoardState, buildId: string): number {
+  let total = 0;
+  for (const event of state.events) {
+    if (
+      (event.type !== "task.worker_completion_recorded" && event.type !== "task.model_usage_recorded") ||
+      event.payload?.modelUsageObserved !== true ||
+      !event.taskId
+    ) {
+      continue;
+    }
+    const task = findTask(state, event.taskId);
+    if (!task || task.metadata.contextBuildId !== buildId) continue;
+    const inputTokens = event.payload.modelInputTokens;
+    const outputTokens = event.payload.modelOutputTokens;
+    const increment =
+      typeof inputTokens === "number" && typeof outputTokens === "number" ? inputTokens + outputTokens : NaN;
+    if (
+      typeof inputTokens !== "number" ||
+      !Number.isSafeInteger(inputTokens) ||
+      inputTokens < 0 ||
+      typeof outputTokens !== "number" ||
+      !Number.isSafeInteger(outputTokens) ||
+      outputTokens < 0 ||
+      !Number.isSafeInteger(increment) ||
+      total > Number.MAX_SAFE_INTEGER - increment
+    ) {
+      throw new Error("context model usage receipt is invalid");
+    }
+    total += increment;
+  }
+  return total;
+}
+
+function contextBuildActiveModelReservations(state: BoardState, buildId: string): number {
+  const active = state.outbox.filter((message) => {
+    if (message.status !== "leased" || !CONTEXT_MODEL_TOPICS.has(message.topic)) return false;
+    const task = findTask(state, message.taskId);
+    return task?.metadata.contextBuildId === buildId;
+  }).length;
+  return active * DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
+}
+
+function contextBuildLimitFailure(
+  state: BoardState,
+  build: BoardTask,
+  at: IsoTimestamp,
+  additionalReservedTokens = 0
+): ContextBuildLimitFailure | undefined {
+  if (typeof build.metadata.derivationBudgetSeconds === "number" && at >= contextBuildDeadlineAt(build)) {
+    return "build_time_budget_exceeded";
+  }
+  if (typeof build.metadata.derivationTokenBudget !== "number") return undefined;
+  const tokenBudget = requiredPositiveInteger(build.metadata.derivationTokenBudget, "derivationTokenBudget");
+  const projected =
+    contextBuildConsumedModelTokens(state, build.id) +
+    contextBuildActiveModelReservations(state, build.id) +
+    additionalReservedTokens;
+  return projected > tokenBudget ? "build_token_budget_exceeded" : undefined;
+}
+
+function terminateContextBuild(
+  state: BoardState,
+  build: BoardTask,
+  status: "failed" | "canceled",
+  failureCategory: ContextBuildLimitFailure | "build_canceled",
+  reason: string,
+  at: IsoTimestamp
+): BoardState {
+  if (isTerminalTaskStatus(build.status)) return state;
+  let next = applyCommand(
+    state,
+    {
+      command: "CommentTask",
+      taskId: build.id,
+      eventType: `context.${failureCategory}.failed`,
+      payload: { failureCategory, reason: reason.slice(0, 2_000) }
+    },
+    { actor: { type: "system", id: "context-build-control" }, now: at }
+  ).state;
+  const transitioned = applyCommand(
+    next,
+    { command: "TransitionTask", taskId: build.id, toStatus: status },
+    { actor: { type: "system", id: "context-build-control" }, now: at }
+  );
+  if (!transitioned.accepted) {
+    throw new Error(`context build ${status} transition was rejected: ${transitioned.rejection?.reason ?? "unknown"}`);
+  }
+  next = reduceBoard(transitioned.state, at);
+  return next;
 }
 
 function contextBoardBuildForPrincipal(state: BoardState, tenantId: string, buildId: string): BoardTask | undefined {
@@ -3624,7 +3932,10 @@ function modelUsageReceipt(
   return modelUsage
     ? {
         modelUsageObserved: true,
-        modelUsageDigest: modelUsageDigest(modelUsage)
+        modelUsageDigest: modelUsageDigest(modelUsage),
+        modelInputTokens: modelUsage.inputTokens,
+        modelCachedInputTokens: modelUsage.cachedInputTokens,
+        modelOutputTokens: modelUsage.outputTokens
       }
     : { modelUsageObserved: false };
 }
@@ -3816,6 +4127,7 @@ const METRICS_ROUTES = new Set([
   "/internal/context/access/sync",
   "/internal/context/tokens",
   "/internal/context/builds/:id/worker-completions",
+  "/internal/context/builds/:id/cancel",
   "/internal/context/board/artifacts",
   "/internal/context/board/publish",
   "/internal/context/board/pageindex/attach",
@@ -3834,6 +4146,9 @@ function metricsRoute(pathname: string): string {
   if (contextTaskRetryRoute(pathname)) return "/context/builds/:id/tasks/:taskId/retry";
   if (routeId(pathname, "/internal/context/builds/", "/worker-completions")) {
     return "/internal/context/builds/:id/worker-completions";
+  }
+  if (routeId(pathname, "/internal/context/builds/", "/cancel")) {
+    return "/internal/context/builds/:id/cancel";
   }
   if (routeId(pathname, "/internal/context/tokens/", "/revoke")) return "/internal/context/tokens/:id/revoke";
   return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";

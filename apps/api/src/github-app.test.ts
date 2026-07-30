@@ -93,6 +93,18 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(overBudget.response.status, 400);
   assert.match(JSON.stringify(overBudget.body), /between 300 and 10800/);
 
+  const overTokenBudget = await api("/context/build", {
+    method: "POST",
+    headers: contextHeaders(),
+    body: JSON.stringify({
+      repository: mixedCaseRepository,
+      derivationTokenBudget: 50_000_001,
+      requestKey: "over-token-budget-build"
+    })
+  });
+  assert.equal(overTokenBudget.response.status, 400);
+  assert.match(JSON.stringify(overTokenBudget.body), /between 250000 and 50000000/);
+
   const created = await api("/context/build", {
     method: "POST",
     headers: contextHeaders(),
@@ -113,6 +125,10 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(build.commitSha, commitSha);
   assert.equal(build.refSequence, 1);
   assert.equal(build.status, "triage");
+  assert.equal(build.derivationBudgetSeconds, 10_800);
+  assert.equal(build.derivationTokenBudget, 8_000_000);
+  assert.equal(build.consumedModelTokens, 0);
+  assert.equal(typeof build.derivationDeadlineAt, "string");
   assert.equal("stages" in build, false);
 
   const duplicate = await api("/context/build", {
@@ -136,6 +152,8 @@ test("manual Context admission creates a resumable board build and exposes only 
   });
   assert.equal(initialProgress.response.status, 200);
   assert.equal(initialProgress.body.status, "active");
+  assert.equal(initialProgress.body.derivationTokenBudget, 8_000_000);
+  assert.equal(initialProgress.body.consumedModelTokens, 0);
   assert.deepEqual(
     array(initialProgress.body.stages).map((stage) => record(stage).type),
     ["snapshot-context-input"]

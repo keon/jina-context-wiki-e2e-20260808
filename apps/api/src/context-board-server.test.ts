@@ -15,6 +15,7 @@ import {
   addContextResearchWork,
   boardContextPublicationInputDigest,
   boardContextReleaseId,
+  contextArtifactKey,
   contextBoardTaskTypes,
   contextBoardTopics,
   contextPublicSnapshotDigest,
@@ -573,6 +574,183 @@ test("generic worker completion atomically expands a context board graph and ret
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(artifactRoot, { recursive: true, force: true });
+  }
+});
+
+test("Context builds enforce wall-clock and token ceilings and support idempotent operator cancellation", async () => {
+  const tenantId = "tenant-budget";
+  const repository = "omxyz/budget-fixture";
+  const principalId = "user:budget-admin@example.com";
+  const internalApiToken = "context-budget-test-token";
+  const current = new Date().toISOString();
+  const expired = createContextBoardBuild(createEmptyBoardState(), {
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "budget:expired",
+    derivationBudgetSeconds: 300,
+    derivationTokenBudget: 8_000_000,
+    now: "2020-01-01T00:00:00.000Z"
+  });
+  const tokenLimited = createContextBoardBuild(expired.state, {
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 2,
+    requestKey: "budget:tokens",
+    derivationBudgetSeconds: 10_800,
+    derivationTokenBudget: 250_000,
+    now: current
+  });
+  let board = transitionBoardTask(tokenLimited.state, tokenLimited.snapshotTaskId, "in_progress", current);
+  const tokenSnapshotMessage = board.outbox.find((message) => message.taskId === tokenLimited.snapshotTaskId);
+  assert.ok(tokenSnapshotMessage);
+  board = markOutboxDispatched(board, tokenSnapshotMessage.id, current);
+  board = transitionBoardTask(board, tokenLimited.snapshotTaskId, "done", current);
+  const snapshotContent = Buffer.from("{}", "utf8");
+  const snapshotArtifact: ContextArtifactRef = {
+    uri: "memory://budget-snapshot",
+    key: contextArtifactKey({
+      tenantId,
+      repository,
+      buildId: tokenLimited.buildTaskId,
+      kind: "evidence-snapshot",
+      name: "snapshot.json",
+      contentType: "application/json",
+      content: snapshotContent
+    }),
+    contentType: "application/json",
+    bytes: snapshotContent.byteLength,
+    sha256: createHash("sha256").update(snapshotContent).digest("hex")
+  };
+  const researchPlan = addContextResearchPlan(board, {
+    buildTaskId: tokenLimited.buildTaskId,
+    snapshotTaskId: tokenLimited.snapshotTaskId,
+    snapshot: snapshotArtifact,
+    now: current
+  });
+  const cancelable = createContextBoardBuild(researchPlan.state, {
+    tenantId,
+    repository,
+    ref: "feature",
+    refSequence: 1,
+    requestKey: "budget:cancel",
+    derivationBudgetSeconds: 10_800,
+    derivationTokenBudget: 8_000_000,
+    now: current
+  });
+  const stateStore = mutableStateStore({
+    intakeState: { board: cancelable.state, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const contextStore = new MemoryContextEngineStore();
+  await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+  const quotaService = new ContextQuotaService({
+    store: new InMemoryContextQuotaStore(),
+    defaults: {
+      queryRequestsPerWindow: 1_000,
+      buildRequestsPerWindow: 1_000,
+      maxActiveBuilds: 10,
+      maxActiveModelTasks: 10
+    }
+  });
+  for (const buildId of [expired.buildTaskId, tokenLimited.buildTaskId, cancelable.buildTaskId]) {
+    await quotaService.admitBuild({ tenantId, buildId });
+  }
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextStore,
+    internalApiToken,
+    contextQuotaService: quotaService,
+    tenantAdminPrincipalIds: [principalId]
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const adminHeaders = {
+    ...devHeaders(tenantId, principalId),
+    authorization: `Bearer ${internalApiToken}`
+  };
+
+  try {
+    const expiredClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ workerId: "budget-test", topics: [contextBoardTopics.snapshot] })
+    });
+    assert.equal(expiredClaim.status, 200);
+    const firstSnapshotClaim = (await expiredClaim.json()) as TestClaim;
+    assert.equal(firstSnapshotClaim.task.id, cancelable.snapshotTaskId);
+    const releaseCancelableSnapshot = await fetch(`${baseUrl}/internal/worker/release`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ ...leaseFromClaim(firstSnapshotClaim), reason: "budget test ordering" })
+    });
+    assert.equal(releaseCancelableSnapshot.status, 200);
+
+    const expiredProgress = await fetch(
+      `${baseUrl}/context/builds/${encodeURIComponent(expired.buildTaskId)}/progress`,
+      { headers: devHeaders(tenantId, principalId) }
+    );
+    assert.equal(expiredProgress.status, 200);
+    const expiredBody = (await expiredProgress.json()) as Record<string, unknown>;
+    assert.equal(expiredBody.status, "failed");
+    assert.equal(expiredBody.failureCode, "build_time_budget_exceeded");
+
+    const modelClaim = await claimContextTask(baseUrl, internalApiToken, contextBoardTopics.researchPlan);
+    assert.equal(modelClaim.task.id, researchPlan.taskId);
+    assert.equal(typeof (modelClaim.task.metadata as Record<string, unknown>)?.derivationDeadlineAt, "string");
+    const overBudgetCompletion = await workerComplete(baseUrl, internalApiToken, {
+      ...leaseFromClaim(modelClaim),
+      outcome: "retry",
+      reason: "model provider unavailable",
+      failureCategory: "model",
+      modelUsage: {
+        inputTokens: 300_000,
+        cachedInputTokens: 100_000,
+        outputTokens: 1
+      }
+    });
+    assert.equal(overBudgetCompletion.status, 200, await overBudgetCompletion.text());
+
+    const tokenProgress = await fetch(
+      `${baseUrl}/context/builds/${encodeURIComponent(tokenLimited.buildTaskId)}/progress`,
+      { headers: devHeaders(tenantId, principalId) }
+    );
+    assert.equal(tokenProgress.status, 200);
+    const tokenBody = (await tokenProgress.json()) as Record<string, unknown>;
+    assert.equal(tokenBody.status, "failed");
+    assert.equal(tokenBody.failureCode, "build_token_budget_exceeded");
+    assert.equal(tokenBody.consumedModelTokens, 300_001);
+
+    for (const changed of [true, false]) {
+      const cancellation = await fetch(
+        `${baseUrl}/internal/context/builds/${encodeURIComponent(cancelable.buildTaskId)}/cancel`,
+        {
+          method: "POST",
+          headers: adminHeaders,
+          body: JSON.stringify({ reason: "acceptance timeout" })
+        }
+      );
+      assert.equal(cancellation.status, 200);
+      assert.deepEqual(await cancellation.json(), {
+        accepted: true,
+        buildId: cancelable.buildTaskId,
+        status: "canceled",
+        canceled: true,
+        changed
+      });
+    }
+    const canceledProgress = await fetch(
+      `${baseUrl}/context/builds/${encodeURIComponent(cancelable.buildTaskId)}/progress`,
+      { headers: devHeaders(tenantId, principalId) }
+    );
+    assert.equal(canceledProgress.status, 200);
+    assert.equal((await canceledProgress.json()).failureCode, "build_canceled");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
 
