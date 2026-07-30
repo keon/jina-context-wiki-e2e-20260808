@@ -45,6 +45,8 @@ const RETIRED_DIR = `${OUTPUT_DIR}/retired`;
 /** Where a retired page sits relative to the collected directory. */
 const RETIRED_PREFIX = "retired/";
 const OUTPUT_ARCHIVE_PATH = `${WORK_DIR}/derive-output.tar.gz`;
+const RUN_EXIT_PATH = `${WORK_DIR}/run-exit-code`;
+const RUN_PID_PATH = `${WORK_DIR}/run-pid`;
 /**
  * The agent's own event stream, kept inside the collected directory.
  *
@@ -157,8 +159,12 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
     secrets: readonly string[],
     input: KnowledgeDocumentGenerationInput
   ): Promise<{ output: KnowledgeGenerationOutput; problems: readonly MarkdownOutputProblem[] }> {
+    // The transcript lives in this directory and is still being written when a
+    // timed-out run is salvaged; tar refuses a file that changes under it, and
+    // that refusal once cost every page of an hour-long run. It is excluded
+    // here and read separately by the tail readers that want it.
     const packed = await sandbox.process.executeCommand(
-      `tar -czf ${shellQuote(OUTPUT_ARCHIVE_PATH)} -C ${shellQuote(OUTPUT_DIR)} .`,
+      `tar -czf ${shellQuote(OUTPUT_ARCHIVE_PATH)} -C ${shellQuote(OUTPUT_DIR)} --exclude='./.derive-transcript.log' .`,
       WORK_DIR,
       undefined,
       300
@@ -235,6 +241,54 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       return redact(truncate(listed.result ?? ""), secrets);
     } catch (error) {
       return `unreadable: ${redact(error instanceof Error ? error.message : inspect(error), secrets)}`;
+    }
+  }
+
+  /**
+   * Starts the run in the sandbox's background and waits by polling.
+   *
+   * Each poll is its own short HTTP call, so the wall the run can hit is the
+   * budget rather than whichever gateway between here and the sandbox gives up
+   * first. At the deadline the process is killed and the caller sees the same
+   * timeout shape the awaited path produced, with the pages on disk intact.
+   */
+  private async runDetached(
+    sandbox: Sandbox,
+    startCommand: string,
+    environment: Record<string, string> | undefined,
+    budgetSeconds: number,
+    secrets: readonly string[]
+  ): Promise<{ exitCode: number; result: string }> {
+    const started = await sandbox.process.executeCommand(startCommand, WORK_DIR, environment, 60);
+    if (started.exitCode !== 0) {
+      return { exitCode: started.exitCode, result: `could not start detached run: ${started.result ?? ""}` };
+    }
+    const deadline = Date.now() + budgetSeconds * 1000;
+    const pollSeconds = positiveInt(process.env.DAYTONA_DETACHED_POLL_SECONDS, 30);
+    for (;;) {
+      const probe = await sandbox.process
+        .executeCommand(`cat ${shellQuote(RUN_EXIT_PATH)} 2>/dev/null || echo running`, WORK_DIR, undefined, 60)
+        .catch(() => undefined);
+      const text = (probe?.result ?? "").trim();
+      if (probe && text !== "running" && text !== "") {
+        const exitCode = Number(text);
+        const tail = await sandbox.process
+          .executeCommand(`tail -c ${TRANSCRIPT_TAIL_BYTES} ${shellQuote(TRANSCRIPT_PATH)}`, WORK_DIR, undefined, 60)
+          .catch(() => undefined);
+        return {
+          exitCode: Number.isSafeInteger(exitCode) ? exitCode : 1,
+          result: redact(truncate(tail?.result ?? ""), secrets)
+        };
+      }
+      if (Date.now() >= deadline) {
+        await sandbox.process
+          .executeCommand(`kill -9 $(cat ${shellQuote(RUN_PID_PATH)}) 2>/dev/null || true`, WORK_DIR, undefined, 60)
+          .catch(() => undefined);
+        // The same wording the awaited path surfaced for a timeout, so the
+        // transient classifier and every log reader treat both alike.
+        return { exitCode: 124, result: "command execution timeout" };
+      }
+      await new Promise((resolve) => setTimeout(resolve, pollSeconds * 1000));
     }
   }
 
@@ -580,6 +634,14 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
       const recordedCommand = files
         ? `${command} > ${shellQuote(TRANSCRIPT_PATH)} 2>&1; rc=$?; tail -c ${TRANSCRIPT_TAIL_BYTES} ${shellQuote(TRANSCRIPT_PATH)}; exit $rc`
         : command;
+      // Detached rather than awaited: Daytona's gateway cuts a single HTTP wait
+      // at about an hour whatever timeout is requested, and a ninety-minute run
+      // died to that with the agent still working -- a 504 page where its result
+      // should have been. The run is started in the background and watched with
+      // cheap short calls, so no single request outlives anybody's proxy.
+      const detachedStart = `rm -f ${shellQuote(RUN_EXIT_PATH)}; nohup sh -c ${shellQuote(
+        `${command} > ${shellQuote(TRANSCRIPT_PATH)} 2>&1; echo $? > ${shellQuote(RUN_EXIT_PATH)}`
+      )} >/dev/null 2>&1 & echo $! > ${shellQuote(RUN_PID_PATH)}`;
 
       const attempts = positiveInt(process.env.CONTEXT_CODEX_EXECUTION_ATTEMPTS, 2);
       let run: Awaited<ReturnType<Sandbox["process"]["executeCommand"]>> | undefined;
@@ -594,7 +656,9 @@ export class DaytonaCodexKnowledgeDocumentGenerator implements KnowledgeDocument
         for (let attempt = 0; attempt < attempts; attempt += 1) {
           thrown = undefined;
           try {
-            run = await sandbox.process.executeCommand(recordedCommand, WORK_DIR, environment, runBudgetSeconds(input));
+            run = files
+              ? await this.runDetached(sandbox, detachedStart, environment, runBudgetSeconds(input), secrets)
+              : await sandbox.process.executeCommand(recordedCommand, WORK_DIR, environment, runBudgetSeconds(input));
           } catch (error) {
             thrown = error;
             run = undefined;
