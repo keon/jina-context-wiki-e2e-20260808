@@ -1472,6 +1472,17 @@ fi
 # only after the coordinated candidate is accepted, serving, and its temporary
 # release-control artifacts are verified gone. Deployment never executes it.
 stable_api_url="$(stable_service_url "jina-api")"
+printf -v trigger_acceptance_command \
+  'exec node %q --api-url %q --tenant %q --principal %q --repository %q --installation-id %q --fixture-installation-id %q --confirm-repository %q --report %q' \
+  "${production_trigger_acceptance_path}" \
+  "${stable_api_url}" \
+  "${acceptance_tenant_id}" \
+  "${context_query_principal_id}" \
+  "${acceptance_repository}" \
+  "${acceptance_github_installation_id}" \
+  "${trigger_acceptance_github_installation_id}" \
+  "${acceptance_repository}" \
+  "/tmp/context-production-trigger-acceptance.json"
 gcloud run jobs deploy "${trigger_acceptance_job}" \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -1479,8 +1490,8 @@ gcloud run jobs deploy "${trigger_acceptance_job}" \
   --service-account="${trigger_acceptance_service_account}" \
   --set-env-vars="JINA_TRIGGER_ACCEPTANCE_ALLOWED_REPOSITORY=${acceptance_repository}" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_FIXTURE_APP_ID=${trigger_acceptance_github_app_id_secret}:latest,GITHUB_FIXTURE_APP_PRIVATE_KEY=${trigger_acceptance_github_app_private_key_secret}:latest" \
-  --command=node \
-  --args="${production_trigger_acceptance_path},--api-url,${stable_api_url},--tenant,${acceptance_tenant_id},--principal,${context_query_principal_id},--repository,${acceptance_repository},--installation-id,${acceptance_github_installation_id},--fixture-installation-id,${trigger_acceptance_github_installation_id},--confirm-repository,${acceptance_repository},--report,/tmp/context-production-trigger-acceptance.json" \
+  --command=/bin/sh \
+  --args="-c,${trigger_acceptance_command}" \
   --tasks=1 \
   --max-retries=0 \
   --task-timeout=86400s \

@@ -582,10 +582,16 @@ test("post-cutover trigger acceptance is deployed with a distinct least-scope fi
     jobBlock,
     /GITHUB_FIXTURE_APP_PRIVATE_KEY=\$\{trigger_acceptance_github_app_private_key_secret\}:latest/
   );
-  assert.match(jobBlock, /--installation-id,\$\{acceptance_github_installation_id\}/);
-  assert.match(jobBlock, /--fixture-installation-id,\$\{trigger_acceptance_github_installation_id\}/);
-  assert.match(jobBlock, /--repository,\$\{acceptance_repository\}/);
-  assert.match(jobBlock, /--confirm-repository,\$\{acceptance_repository\}/);
+  assert.match(deployment, /--installation-id %q --fixture-installation-id %q --confirm-repository %q/);
+  assert.match(deployment, /"\$\{acceptance_github_installation_id\}"/);
+  assert.match(deployment, /"\$\{trigger_acceptance_github_installation_id\}"/);
+  assert.equal(
+    [...deployment.matchAll(/^[ \t]*"\$\{acceptance_repository\}"[ \t]*\\$/gm)].length,
+    2,
+    "the operator command retains both repository and confirmation arguments"
+  );
+  assert.match(jobBlock, /--command=\/bin\/sh/);
+  assert.match(jobBlock, /--args="-c,\$\{trigger_acceptance_command\}"/);
   assert.match(jobBlock, /--task-timeout=86400s/);
   assert.match(deployment, /stable_api_url="\$\(stable_service_url "jina-api"\)"/);
   assert.match(
