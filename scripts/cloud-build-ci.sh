@@ -8,7 +8,6 @@ pnpm install --frozen-lockfile --store-dir=/tmp/pnpm-store
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm evaluate:context
 pnpm audit --prod --audit-level=high
 
 # Cloud Build deploys these exact-SHA Cloud Run bundles with the backend and

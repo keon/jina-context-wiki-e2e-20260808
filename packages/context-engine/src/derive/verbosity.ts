@@ -13,32 +13,6 @@ export const derivationDetailLevels = ["concise", "standard", "thorough"] as con
 
 export type DerivationDetail = (typeof derivationDetailLevels)[number];
 
-export const defaultDerivationDetail: DerivationDetail = "standard";
-
 export function isDerivationDetail(value: unknown): value is DerivationDetail {
   return typeof value === "string" && (derivationDetailLevels as readonly string[]).includes(value);
-}
-
-/**
- * Accepts what a caller supplied, falling back rather than throwing: a build is
- * more useful at the default detail than not at all, and the HTTP layer rejects
- * an unsupported value before it reaches here.
- */
-export function derivationDetailOrDefault(
-  value: unknown,
-  fallback: DerivationDetail = defaultDerivationDetail
-): DerivationDetail {
-  return isDerivationDetail(value) ? value : fallback;
-}
-
-/** The Codex `model_verbosity` scale. */
-export function codexVerbosity(detail: DerivationDetail): "low" | "medium" | "high" {
-  switch (detail) {
-    case "concise":
-      return "low";
-    case "thorough":
-      return "high";
-    default:
-      return "medium";
-  }
 }

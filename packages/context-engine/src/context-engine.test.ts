@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
-  DeriveKnowledgeService,
-  EvidenceFocusSelector,
   FallbackHierarchyIndexer,
   IndexContextService,
   IngestEvidenceService,
@@ -14,35 +12,23 @@ import {
   StaticScopeAuthorizer,
   StoreScopeAuthorizer,
   assembleEvidencePack,
-  buildKnowledgeFilePrompt,
-  buildKnowledgePrompt,
-  buildKnowledgeRepairPrompt,
-  knowledgeDocumentJsonSchema,
-  parseKnowledgeDocumentFile,
   canonicalJson,
-  codexVerbosity,
   derivationDetailLevels,
-  derivationDetailOrDefault,
   isDerivationDetail,
   createKnowledgeCitation,
   createKnowledgeRevision,
   detectSourceConflicts,
   fingerprint,
   fuseRetrievalCandidates,
-  knowledgeGenerationJsonSchema,
   markdownCatalogToOutput,
   parseMarkdownDocument,
-  parseGeneratedKnowledgeDocuments,
   planContextQuery,
   repositoryAclFingerprint,
-  serializeKnowledgeEvidence,
-  selectPriorKnowledge,
   stableId,
   validateEvidenceAnchor,
   verifySynthesisCitations,
   type EvidenceAnchor,
   type HierarchyBuildInput,
-  type KnowledgeDocumentGenerator,
   type KnowledgeGenerationOutput,
   type RetrievalCandidate
 } from "./index.js";
@@ -99,51 +85,6 @@ async function ingestFixture(
         pathOrUrl: "https://example.test/acme/repo/issues/42",
         observedAt: createdAt,
         metadata: { claimSubject: "issue:42:state", claimValue: "open for retry" }
-      }
-    ]
-  });
-}
-
-async function ingestSameCommitProviderState(
-  store: MemoryContextEngineStore,
-  refSequence: number,
-  issueState: string,
-  observationFrontier: string,
-  observedAt: string
-) {
-  return new IngestEvidenceService(store).ingest({
-    tenantId,
-    repository,
-    ref: "main",
-    refSequence,
-    commitSha,
-    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
-    observationFrontier,
-    sourceComplete: true,
-    createdAt: observedAt,
-    files: [
-      {
-        path: "README.md",
-        blobSha: "c".repeat(40),
-        body: "# Repository\n\nThe billing module accepts payments.",
-        language: "markdown"
-      },
-      {
-        path: "src/billing.ts",
-        blobSha,
-        body: source,
-        language: "typescript"
-      }
-    ],
-    observations: [
-      {
-        sourceType: "issue",
-        sourceId: "issue-42",
-        title: "Issue #42",
-        payload: { number: 42, state: issueState, title: "Retry payments" },
-        pathOrUrl: "https://example.test/acme/repo/issues/42",
-        observedAt,
-        metadata: { claimSubject: "issue:42:state", claimValue: issueState }
       }
     ]
   });
@@ -266,31 +207,40 @@ function validOutput(): KnowledgeGenerationOutput {
   };
 }
 
-class SequenceGenerator implements KnowledgeDocumentGenerator {
-  readonly name = "fixture-generator";
-  readonly version = "1";
-  readonly model = "fixture-model";
-  calls = 0;
-
-  constructor(private readonly outputs: unknown[]) {}
-
-  async generate(): Promise<unknown> {
-    const output = this.outputs[Math.min(this.calls, this.outputs.length - 1)];
-    this.calls += 1;
-    return output;
-  }
-}
-
 async function deriveFixture(store: MemoryContextEngineStore, checkpointId: string) {
-  const generator = new SequenceGenerator([validOutput()]);
-  const run = await new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    generator,
-    store,
-    new KnowledgeOutputValidator(store)
-  ).derive(checkpointId, "2026-07-26T12:01:00.000Z");
-  assert.equal(run.status, "succeeded", run.diagnostics.join("; "));
-  return run;
+  const checkpoint = await store.getCheckpoint(checkpointId);
+  assert.ok(checkpoint);
+  const validated = await new KnowledgeOutputValidator(store).validate({
+    output: validOutput(),
+    checkpointId,
+    generatorName: "fixture-generator",
+    generatorVersion: "1",
+    model: "fixture-model",
+    promptVersion: "fixture-prompt",
+    createdAt: "2026-07-26T12:01:00.000Z"
+  });
+  return store.commitKnowledge({
+    run: {
+      id: stableId("dr", { checkpointId, fixture: true }),
+      tenantId: checkpoint.tenantId,
+      repository: checkpoint.repository,
+      checkpointId,
+      cacheKey: fingerprint({ checkpointId, fixture: true }),
+      focusFingerprint: checkpoint.evidenceFingerprint,
+      generatorName: "fixture-generator",
+      generatorVersion: "1",
+      model: "fixture-model",
+      promptVersion: "fixture-prompt",
+      schemaVersion: "fixture-schema",
+      rawOutputs: [],
+      status: "succeeded",
+      diagnostics: [],
+      revisionIds: validated.revisions.map((revision) => revision.id),
+      createdAt: "2026-07-26T12:01:00.000Z"
+    },
+    revisions: validated.revisions,
+    citations: validated.citations
+  });
 }
 
 test("evidence anchors enforce digest, commit, path, and range invariants", () => {
@@ -422,33 +372,6 @@ test("provider JSON pointers resolve against immutable raw observations", async 
   );
 });
 
-test("generated document parsing rejects relation-shaped and malformed output", () => {
-  assert.deepEqual(parseGeneratedKnowledgeDocuments(validOutput()), validOutput());
-  const mixedCase = structuredClone(validOutput());
-  mixedCase.documents[0]!.logicalId = "Component:Acme/Repo:Billing";
-  assert.equal(parseGeneratedKnowledgeDocuments(mixedCase).documents[0]?.logicalId, "component:acme/repo:billing");
-  assert.throws(() => parseGeneratedKnowledgeDocuments({ documents: [], nodes: [] }), /nodes is prohibited/);
-  assert.throws(() => parseGeneratedKnowledgeDocuments({ documents: [{ kind: "component" }] }), /citations|logicalId/);
-  assert.deepEqual(knowledgeGenerationJsonSchema.required, ["documents", "retiredDocuments"]);
-  const documentSchema = knowledgeGenerationJsonSchema.properties.documents.items;
-  assert.deepEqual(documentSchema.required, [
-    "logicalId",
-    "kind",
-    "title",
-    "summary",
-    "summaryCitationOrdinals",
-    "bodyMarkdown",
-    "structuredSummary",
-    "scope",
-    "confidence",
-    "citations"
-  ]);
-  assert.ok("properties" in documentSchema);
-  assert.ok("properties" in documentSchema.properties.structuredSummary);
-  assert.ok("properties" in documentSchema.properties.scope);
-  assert.ok("properties" in documentSchema.properties.citations.items);
-});
-
 test("knowledge revision identity is canonical across logical-id casing", () => {
   const base = {
     tenantId,
@@ -484,184 +407,6 @@ test("knowledge revision identity is canonical across logical-id casing", () => 
   }
 });
 
-test("derivation repairs once, validates source ranges, and caches immutable input", async () => {
-  const store = new MemoryContextEngineStore();
-  const checkpoint = await ingestFixture(store);
-  const bundle = await new EvidenceFocusSelector(store).select(checkpoint.id);
-  const prompt = buildKnowledgePrompt(bundle);
-  assert.match(prompt, /repository:acme\/repo:architecture/);
-  assert.match(prompt, /change:acme\/repo:a{40}/);
-  assert.match(prompt, /issue:<provider>:acme\/repo#<cited-number>/);
-  assert.match(prompt, /<kind>:acme\/repo:<evidence-backed-slug>/);
-  assert.match(prompt, /read-only shell tools/);
-  const serializedEvidence = serializeKnowledgeEvidence(bundle);
-  assert.match(serializedEvidence, /numberedBody/);
-  assert.match(serializedEvidence, /3\|export function handlePayment/);
-  const repairPrompt = buildKnowledgeRepairPrompt(prompt, ["documents[0].summary is unsupported"]);
-  assert.match(repairPrompt, /corrected complete catalog/);
-  assert.match(repairPrompt, /documents\[0\]\.summary is unsupported/);
-  const generator = new SequenceGenerator([{ documents: [{ invalid: true }] }, validOutput()]);
-  const service = new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    generator,
-    store,
-    new KnowledgeOutputValidator(store)
-  );
-  const run = await service.derive(checkpoint.id, "2026-07-26T12:01:00.000Z");
-  assert.equal(run.status, "succeeded", run.diagnostics.join("; "));
-  assert.equal(generator.calls, 2);
-  assert.equal(run.rawOutputs.length, 2);
-  const cached = await service.derive(checkpoint.id, "2026-07-26T13:00:00.000Z");
-  assert.equal(cached.id, run.id);
-  assert.equal(generator.calls, 2);
-  const revision = await store.getRevision(run.revisionIds[0]!);
-  assert.ok(revision);
-  assert.equal(revision.scope.commitSha, commitSha);
-  assert.equal((await store.listCitations(revision.id))[0]?.anchor.contentDigest, fingerprint(source));
-});
-
-test("incremental derivation receives prior knowledge and can re-emit it with a newly observed issue", async () => {
-  const store = new MemoryContextEngineStore();
-  const initial = await ingestFixture(store);
-  await deriveFixture(store, initial.id);
-  const nextCommitSha = "f".repeat(40);
-  const nextCreatedAt = "2026-07-26T12:05:00.000Z";
-  const incremental = await new IngestEvidenceService(store).ingest({
-    tenantId,
-    repository,
-    ref: "main",
-    refSequence: 2,
-    commitSha: nextCommitSha,
-    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
-    observationFrontier: "github:101",
-    sourceComplete: true,
-    createdAt: nextCreatedAt,
-    files: [
-      {
-        path: "README.md",
-        blobSha: "c".repeat(40),
-        body: "# Repository\n\nThe billing module accepts payments.",
-        language: "markdown"
-      },
-      { path: "src/billing.ts", blobSha, body: source, language: "typescript" }
-    ],
-    observations: [
-      {
-        sourceType: "issue",
-        sourceId: "issue-42",
-        title: "Issue #42",
-        payload: { number: 42, state: "open for retry", title: "Retry payments" },
-        pathOrUrl: "https://example.test/acme/repo/issues/42",
-        observedAt: nextCreatedAt,
-        metadata: { claimSubject: "issue:42:state", claimValue: "open for retry" }
-      },
-      {
-        sourceType: "issue",
-        sourceId: "issue-43",
-        title: "Issue #43",
-        payload: {
-          number: 43,
-          state: "open",
-          title: "Duplicate payment retry",
-          body: "Concurrent retries can submit a payment twice."
-        },
-        pathOrUrl: "https://example.test/acme/repo/issues/43",
-        observedAt: nextCreatedAt,
-        metadata: { claimSubject: "issue:43:state", claimValue: "open" }
-      }
-    ]
-  });
-  const prior = await selectPriorKnowledge(store, incremental);
-  assert.deepEqual(prior.map((entry) => entry.revision.logicalId).sort(), [
-    "component:acme/repo:billing",
-    "issue:github:acme/repo#42"
-  ]);
-  assert.ok(prior.every((entry) => entry.citations.length > 0));
-
-  const output = validOutput();
-  output.documents.push({
-    logicalId: "issue:github:acme/repo#43",
-    kind: "issue_explanation",
-    title: "Duplicate payment retry",
-    summary: "Concurrent retries can submit a payment twice.",
-    summaryCitationOrdinals: [1],
-    bodyMarkdown: "Concurrent retries can submit a payment twice. [cite:1]",
-    structuredSummary: {
-      facts: [
-        {
-          text: "Concurrent retries can submit a payment twice.",
-          citationOrdinals: [1],
-          confidence: 1
-        }
-      ],
-      questionsAnswered: [
-        {
-          text: "Issue #43 records duplicate payment submission under concurrent retry.",
-          citationOrdinals: [1],
-          confidence: 0.95
-        }
-      ],
-      diagnostics: {
-        symptoms: [
-          {
-            text: "A payment is submitted twice.",
-            citationOrdinals: [1],
-            confidence: 0.9
-          }
-        ],
-        causes: [
-          {
-            text: "Concurrent retries are the reported trigger.",
-            citationOrdinals: [1],
-            confidence: 0.85
-          }
-        ],
-        checks: [],
-        fixes: []
-      },
-      claimCitationOrdinals: []
-    },
-    scope: {
-      paths: [],
-      symbols: [],
-      pullRequests: [],
-      issues: ["43"]
-    },
-    confidence: 0.9,
-    citations: [
-      {
-        claim: "Concurrent retries can submit a payment twice.",
-        sourceType: "issue",
-        sourceId: "issue-43",
-        pathOrUrl: "https://example.test/acme/repo/issues/43",
-        jsonPointer: "/body"
-      }
-    ]
-  });
-  const incomplete = structuredClone(output);
-  incomplete.documents = [incomplete.documents.at(-1)!];
-  const incompleteGenerator = new SequenceGenerator([incomplete, incomplete]);
-  const incompleteRun = await new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    incompleteGenerator,
-    store,
-    new KnowledgeOutputValidator(store)
-  ).derive(incremental.id, nextCreatedAt);
-  assert.equal(incompleteRun.status, "failed");
-  assert.ok(incompleteRun.diagnostics.some((diagnostic) => diagnostic.includes("silently dropped")));
-  const validated = await new KnowledgeOutputValidator(store).validate({
-    output,
-    checkpointId: incremental.id,
-    generatorName: "fixture-generator",
-    generatorVersion: "2",
-    model: "fixture-model",
-    promptVersion: "agentic-cited-knowledge-v1",
-    createdAt: nextCreatedAt
-  });
-  assert.equal(validated.revisions.length, 3);
-  assert.ok(validated.revisions.some((revision) => revision.logicalId === "issue:github:acme/repo#43"));
-});
-
 test("checkpoint commit evidence includes changed paths for issue inference", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await new IngestEvidenceService(store).ingest({
@@ -690,23 +435,6 @@ test("checkpoint commit evidence includes changed paths for issue inference", as
   assert.match(commit.body, /src\/billing\.ts/);
   assert.equal(commit.anchor.pathOrUrl, `https://github.com/${repository}/commit/${commitSha}`);
   assert.deepEqual(commit.metadata.changedPaths, ["src/billing.ts"]);
-});
-
-test("derivation fails closed after one repair and writes no revision", async () => {
-  const store = new MemoryContextEngineStore();
-  const checkpoint = await ingestFixture(store);
-  const mutated = validOutput();
-  mutated.documents[0]!.citations[0]!.endLine = 99;
-  const generator = new SequenceGenerator([mutated, mutated]);
-  const run = await new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    generator,
-    store,
-    new KnowledgeOutputValidator(store)
-  ).derive(checkpoint.id, "2026-07-26T12:01:00.000Z");
-  assert.equal(run.status, "failed");
-  assert.equal(generator.calls, 2);
-  assert.deepEqual(await store.listRevisions(tenantId, repository), []);
 });
 
 test("derived prose is accepted with explicit citation mappings while source claims remain exact", async () => {
@@ -1131,109 +859,6 @@ test("eligible knowledge is selected within ref and commit before logical-id rec
   );
   assert.equal(
     (await new IndexContextService(store).index(devCheckpoint.id, "2026-07-26T12:05:00.000Z")).capabilities
-      .derivedKnowledge,
-    "available"
-  );
-  const nextMainCheckpoint = await new IngestEvidenceService(store).ingest({
-    tenantId,
-    repository,
-    ref: "main",
-    refSequence: 2,
-    commitSha: "f".repeat(40),
-    aclFingerprint: repositoryAclFingerprint(tenantId, repository),
-    observationFrontier: "github:main-next",
-    sourceComplete: true,
-    createdAt: "2026-07-26T12:06:00.000Z",
-    files: [
-      {
-        path: "src/billing.ts",
-        blobSha: "a".repeat(40),
-        body: "export function handlePayment() { return 'main-next'; }",
-        language: "typescript"
-      }
-    ],
-    observations: []
-  });
-  assert.deepEqual(
-    (await selectPriorKnowledge(store, nextMainCheckpoint)).map((entry) => entry.revision.id),
-    [mainRevision.id]
-  );
-});
-
-test("knowledge reuse requires every citation digest to exist in the current checkpoint", async () => {
-  const store = new MemoryContextEngineStore();
-  const first = await ingestSameCommitProviderState(store, 1, "open for retry", "github:100", createdAt);
-  const firstGenerator = new SequenceGenerator([validOutput()]);
-  const firstRun = await new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    firstGenerator,
-    store,
-    new KnowledgeOutputValidator(store)
-  ).derive(first.id, "2026-07-26T12:01:00.000Z");
-  assert.equal(firstRun.status, "succeeded");
-  assert.equal(firstGenerator.calls, 1);
-
-  const changed = await ingestSameCommitProviderState(
-    store,
-    2,
-    "closed after retry",
-    "github:101",
-    "2026-07-26T12:02:00.000Z"
-  );
-  assert.deepEqual((await selectPriorKnowledge(store, changed)).map((entry) => entry.revision.logicalId).sort(), [
-    "component:acme/repo:billing",
-    "issue:github:acme/repo#42"
-  ]);
-  const beforeRederive = await new IndexContextService(store).index(changed.id, "2026-07-26T12:03:00.000Z");
-  const beforeProjection = await store.getGeneration(beforeRederive.id);
-  assert.ok(beforeProjection?.currentKnowledge.some((selection) => selection.logicalId.includes("component:")));
-  assert.ok(!beforeProjection?.currentKnowledge.some((selection) => selection.logicalId.includes("issue:")));
-
-  const changedOutput = structuredClone(validOutput());
-  const issueDocument = changedOutput.documents[1]!;
-  issueDocument.title = "closed after retry";
-  issueDocument.summary = "closed after retry";
-  issueDocument.bodyMarkdown = "closed after retry [cite:1]";
-  issueDocument.structuredSummary = citedStructuredSummary(
-    "closed after retry",
-    "closed after retry",
-    "closed after retry"
-  );
-  issueDocument.citations[0]!.claim = "closed after retry";
-  const changedGenerator = new SequenceGenerator([changedOutput]);
-  const changedRun = await new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    changedGenerator,
-    store,
-    new KnowledgeOutputValidator(store)
-  ).derive(changed.id, "2026-07-26T12:04:00.000Z");
-  assert.equal(changedRun.status, "succeeded", changedRun.diagnostics.join("; "));
-  const enriched = await new IndexContextService(store).index(changed.id, "2026-07-26T12:05:00.000Z");
-  assert.ok(
-    (await store.getGeneration(enriched.id))?.currentKnowledge.some(
-      (selection) => selection.logicalId === "issue:github:acme/repo#42"
-    )
-  );
-
-  const identical = await ingestSameCommitProviderState(
-    store,
-    3,
-    "closed after retry",
-    "github:102",
-    "2026-07-26T12:02:00.000Z"
-  );
-  assert.equal(identical.evidenceFingerprint, changed.evidenceFingerprint);
-  const cacheOnlyGenerator = new SequenceGenerator([]);
-  const cached = await new DeriveKnowledgeService(
-    new EvidenceFocusSelector(store),
-    cacheOnlyGenerator,
-    store,
-    new KnowledgeOutputValidator(store)
-  ).derive(identical.id, "2026-07-26T12:06:00.000Z");
-  assert.equal(cached.id, changedRun.id);
-  assert.equal(cacheOnlyGenerator.calls, 0);
-  assert.equal(
-    (await new IndexContextService(store).index(identical.id, "2026-07-26T12:07:00.000Z")).capabilities
       .derivedKnowledge,
     "available"
   );
@@ -1919,145 +1544,8 @@ test("memory API tokens resolve their own tenant and go invisible once revoked o
   assert.equal((await store.verifyApiToken("b".repeat(64)))?.tokenId, "atk_other");
 });
 
-test("the file contract asks for maintenance context, written as it goes", () => {
-  const bundle = {
-    checkpoint: {
-      repository: "omxyz/jina",
-      ref: "main",
-      commitSha: "a".repeat(40),
-      sourceCompleteness: "complete" as const,
-      evidenceFingerprint: "f".repeat(64)
-    },
-    items: [],
-    omittedCount: 0,
-    truncatedEvidenceIds: []
-  };
-  const catalog = buildKnowledgePrompt(bundle as never);
-  const files = buildKnowledgeFilePrompt(bundle as never);
-
-  // The catalog contract makes the final message the work product, which is what
-  // makes compaction destructive: anything not yet emitted is lost.
-  assert.match(catalog, /Return only the schema-conforming final JSON/);
-  assert.match(catalog, /Re-emit every still-valid logical document/);
-
-  // The file contract makes each finished document durable instead.
-  assert.match(files, /Markdown engineering documents under/);
-  assert.match(files, /Write complete Markdown/);
-  assert.doesNotMatch(files, /Return only the schema-conforming final JSON/);
-  assert.doesNotMatch(files, /Re-emit every still-valid logical document/);
-  // Publishable documents and internal checkpoints have separate writable roots.
-  assert.match(files, /is public and may contain only context documents/);
-  assert.match(files, /is private control-plane state/);
-  assert.match(files, /Never modify repository files or write anywhere else/);
-
-  // It asks for a maintenance aid rather than a description of the code.
-  assert.match(files, /helps coding and review agents maintain this repository/);
-  assert.match(files, /change it without breaking it/);
-  assert.match(files, /engineering documentation/);
-  assert.match(files, /not as a research log, agent report, source-tree inventory/);
-  assert.match(files, /Merge related subjects when separate short pages would be less useful/);
-  assert.match(files, /never force empty or irrelevant sections/);
-  assert.doesNotMatch(files, /minimum document count/);
-  // The agent owns the research and collaboration workflow.
-  assert.match(files, /Own the workflow/);
-  assert.match(files, /independent source-aware research worker/);
-  assert.match(files, /runtime may divide this loop into independently executed Codex/);
-  assert.match(files, /independent context-only critic/);
-  assert.match(files, /Work as a goal-verification loop/);
-  assert.match(files, /complete plan must account for captured history/);
-  assert.match(files, /version-4 object/);
-  assert.match(files, /realistic maintenance questions/);
-  assert.match(files, /do not use one umbrella question/);
-  assert.match(files, /invent representative repository-specific tasks/);
-  assert.match(files, /exact public pages it actually used/);
-  assert.match(files, /every complete public page was actually used by a passing critic task/);
-  assert.match(files, /Use Mermaid diagrams when they materially clarify/);
-  assert.match(files, /critic begins context-only/);
-  assert.match(files, /Citation-valid does not mean deep enough/);
-  assert.match(files, /latest completed context-only result for every required question passes/);
-  assert.match(files, /every complete item is mapped from covered subjects/);
-
-  // Both reference forms, plus separate structural and semantic checks.
-  assert.match(files, /Keep visible labels natural and descriptive/);
-  assert.match(files, /standalone lead and every substantive section need a core evidence anchor/);
-  assert.match(files, /one decisive link per substantive section/);
-  assert.match(files, /Do not cite every sentence, supporting detail, or table row/);
-  assert.match(files, /at most 120 lines/);
-  assert.match(files, /relative Markdown links/);
-  assert.match(files, /Unsupported core claims do not belong in the context/);
-  // Engineering structure is chosen dynamically rather than forced by template.
-  assert.doesNotMatch(files, /## Symptoms/);
-  assert.doesNotMatch(files, /## Fixes/);
-
-  const triggered = buildKnowledgeFilePrompt(bundle as never, [], ["pull:7:" + "a".repeat(40), "issue:2"]);
-  assert.match(triggered, /This build was requested by pull:7:/);
-  assert.match(triggered, /inspect the captured record and current implementation/);
-  assert.match(triggered, /Treat that as provenance, not proof/);
-});
-
-test("the per-document schema is the catalog's own item schema, so the two cannot drift", () => {
-  const item = knowledgeGenerationJsonSchema.properties.documents.items as Record<string, unknown>;
-  for (const key of Object.keys(item)) {
-    assert.deepEqual(
-      (knowledgeDocumentJsonSchema as Record<string, unknown>)[key],
-      item[key],
-      `document schema diverged at ${key}`
-    );
-  }
-  // It stands alone, so it can be handed to --output-schema by itself.
-  assert.equal(knowledgeDocumentJsonSchema.$id, "knowledge-documents-v4-document");
-});
-
-test("a document file is parsed by the same validation the catalog uses", () => {
-  const document = {
-    logicalId: "component:omxyz/jina:api/server",
-    kind: "component",
-    title: "API server",
-    summary: "Serves the context routes.",
-    summaryCitationOrdinals: [1],
-    bodyMarkdown: "The server dispatches context routes. [cite:1]",
-    structuredSummary: {
-      facts: [],
-      questionsAnswered: [],
-      diagnostics: { symptoms: [], causes: [], checks: [], fixes: [] },
-      claimSubject: null,
-      claimValue: null,
-      claimCitationOrdinals: []
-    },
-    scope: { paths: ["apps/api/src/server.ts"], symbols: [], pullRequests: [], issues: [] },
-    confidence: 0.9,
-    citations: [
-      {
-        claim: "dispatches context routes",
-        sourceType: "blob",
-        sourceId: "b".repeat(40),
-        pathOrUrl: "apps/api/src/server.ts",
-        startLine: 1,
-        endLine: 2
-      }
-    ]
-  };
-  const parsed = parseKnowledgeDocumentFile(document, "file");
-  assert.equal(parsed.logicalId, "component:omxyz/jina:api/server");
-  assert.equal(parsed.kind, "component");
-  // A malformed file fails the same way a malformed catalog entry does.
-  assert.throws(() => parseKnowledgeDocumentFile({ ...document, citations: [] }, "file"), /at least one citation/);
-});
-
 test("derivation detail is named for the choice, not the model setting it maps to", () => {
   assert.deepEqual([...derivationDetailLevels], ["concise", "standard", "thorough"]);
-  // The deployed default was the model's terse setting on a task whose output is
-  // the document, which is a direct cause of one-paragraph knowledge.
-  assert.equal(codexVerbosity("concise"), "low");
-  assert.equal(codexVerbosity("standard"), "medium");
-  assert.equal(codexVerbosity("thorough"), "high");
-
-  // Unknown input falls back rather than throwing: a build at the default detail
-  // beats no build, and the HTTP layer rejects a bad value before it reaches here.
-  assert.equal(derivationDetailOrDefault(undefined), "standard");
-  assert.equal(derivationDetailOrDefault("verbose"), "standard");
-  assert.equal(derivationDetailOrDefault("thorough"), "thorough");
-  assert.equal(derivationDetailOrDefault(undefined, "thorough"), "thorough");
   assert.equal(isDerivationDetail("thorough"), true);
   assert.equal(isDerivationDetail("high"), false);
 });

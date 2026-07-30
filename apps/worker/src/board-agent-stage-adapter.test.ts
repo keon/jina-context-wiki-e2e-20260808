@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { REVIEW_FINDINGS_SCHEMA } from "@jina/ai";
-import { knowledgeDocumentJsonSchema, knowledgeGenerationJsonSchema } from "@jina/context-engine";
 import {
   CITATION_AUDIT_STAGE_SCHEMA,
   CRITIC_STAGE_SCHEMA,
@@ -33,8 +32,6 @@ test("all production Codex response schemas recursively require every declared s
     SOURCE_CHALLENGE_STAGE_SCHEMA,
     CITATION_AUDIT_STAGE_SCHEMA,
     CRITIC_STAGE_SCHEMA,
-    knowledgeGenerationJsonSchema,
-    knowledgeDocumentJsonSchema,
     REVIEW_FINDINGS_SCHEMA
   };
   const violations: string[] = [];

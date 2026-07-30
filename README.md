@@ -11,7 +11,6 @@ retrieval telemetry.
 ```sh
 pnpm install
 pnpm check
-pnpm evaluate:context
 pnpm dev
 ```
 
@@ -61,27 +60,23 @@ repository test execution are not shipped.
 
 ## Repository context
 
-The context engine runs `ingest-evidence` → required `derive-knowledge` →
-`index-context`:
+The generic Board orchestrates the complete Context workflow:
 
 1. Ingestion captures an immutable repository/GitHub snapshot, exact manifest, provider
    frontier, ACL state, and citation evidence. It no longer builds a parser graph or a
    raw-source search corpus.
-2. Codex incrementally creates repository-specific Markdown context from the checkpoint
-   and prior release. The lead agent discovers maintenance questions, chooses the
-   document organization, delegates bounded research when useful, and runs a
-   context-only critic before declaring those questions answerable. Every repository
-   link and natural GitHub URL is resolved by the host to an immutable blob range or
-   provider JSON pointer. A page with any invalid evidence link is withheld.
-3. Each finished page is stored as a digest-addressed, validated checkpoint. Valid pages
-   can publish a partial immutable release while the run continues, and a retry resumes
-   from the last valid pages.
+2. Codex creates repository-specific Markdown context from the checkpoint and prior
+   release. Dynamic research, planning, specialist writing, source challenge, and
+   context-only criticism run as durable Board tasks.
+3. Each finished page and gate result is stored as a digest-addressed checkpoint. Retries
+   resume from valid work, while the previously published release remains current until
+   the complete successor passes certification and publishes atomically.
 4. Only citation-valid derived context enters exact, lexical, and hierarchy projections.
    Raw source and provider observations remain evidence and can never be returned as
    context.
 5. The hierarchy uses the self-hosted, pinned open-source PageIndex Markdown builder.
-   Natural-language retrieval uses PageIndex-style model tree selection through the
-   local Codex session, with deterministic derived-text fallback.
+   Querying uses bounded deterministic lexical scoring over that derived-context tree;
+   it never invokes a model or generates an answer.
 
 `POST /context/search` returns selected context excerpts and original-evidence citations;
 it does not synthesize an answer. `GET /context/releases`, `/context/list`,
@@ -140,7 +135,7 @@ packages/board/       generic tasks, dependencies, commands, reducer
 packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations
 packages/github/      webhook verification and parsing
-packages/daytona/     local and isolated context-document executors
+packages/daytona/     isolated Board-stage context workers
 packages/ai/          review harnesses and model clients
 packages/observability/ structured logging, traces, live metrics
 ```
@@ -149,14 +144,9 @@ packages/observability/ structured logging, traces, live metrics
 
 - [Architecture](docs/ARCHITECTURE.md)
 - [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
-- [Context orchestration comparison](docs/CONTEXT_ORCHESTRATION_COMPARISON.md)
-- [Context v2 implementation plan](docs/CONTEXT_V2_IMPLEMENTATION_PLAN.md)
-- [Context v2 continuation runbook](docs/CONTEXT_V2_CONTINUATION_RUNBOOK.md)
 - [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
-- [Representative repository E2E](docs/REPRESENTATIVE_REPOSITORY_E2E.md)
 - [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)
 - [Exhausted-page remediation](docs/CONTEXT_PAGE_REMEDIATION.md)
-- [Context engine evaluation](docs/CONTEXT_ENGINE_EVALUATION.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)
 - [Deployment](docs/DEPLOYMENT.md)

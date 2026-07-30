@@ -138,10 +138,10 @@ const PROOF_GROUPS = Object.freeze({
   },
   quality: {
     command: process.execPath,
-    args: ["--test", "scripts/context-quality-benchmark.test.mjs", "scripts/context-board-quality.test.mjs"],
+    args: ["--test", "scripts/context-board-quality.test.mjs"],
     tests: [
-      "fails when public Markdown changes after citation audit",
-      "fails when exact citation-audit result bytes no longer match the checkpoint and certification",
+      "fails hard when the latest critic stops using a published page",
+      "rejects private orchestration files linked from a public page",
       "rejects a PageIndex tree that no longer represents the certified release"
     ]
   },

@@ -1,6 +1,11 @@
 # Billing policy helper
 
-Jina does not enforce hosted billing or persist usage. The only implemented billing behavior is the pure calculation in `packages/policy/src/billing-policy.ts`; the deterministic workflow simulation tests it, and the local review CLI reports provider usage and a managed-cost equivalent.
+Jina does not convert operational usage into hosted charges. Context persists
+tenant quota and model-token accounting for admission and observability, while
+the billing helper remains a separate pure calculation in
+`packages/policy/src/billing-policy.ts`. The deterministic workflow simulation
+tests it, and the local review CLI reports provider usage and a managed-cost
+equivalent.
 
 The calculation is:
 

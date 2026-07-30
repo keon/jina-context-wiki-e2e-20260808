@@ -12,7 +12,7 @@
     "build": "tsc -b",
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
-    "test": "pnpm build && node --test dist/context-engine.test.js dist/git-entry-ingest.test.js dist/derive/markdown-document.test.js dist/derive/progress.test.js dist/context/catalog.test.js dist/context/codex-tree-selector.test.js dist/ports/artifact-store.test.js dist/workflow/board.test.js dist/workflow/incremental.test.js"
+    "test": "pnpm build && node --test dist/context-engine.test.js dist/git-entry-ingest.test.js dist/derive/markdown-document.test.js dist/derive/progress.test.js dist/context/catalog.test.js dist/ports/artifact-store.test.js dist/workflow/board.test.js dist/workflow/incremental.test.js"
   },
   "dependencies": {
     "@jina/board": "workspace:*",

@@ -67,24 +67,6 @@ export interface ContextSearchSelection {
   readonly rationale?: string;
 }
 
-export interface ContextSelectorModelUsage {
-  readonly inputTokens: number;
-  readonly cachedInputTokens: number;
-  readonly outputTokens: number;
-}
-
-export interface ContextTreeSelectorResult {
-  readonly selection?: ContextSearchSelection;
-  readonly modelUsageObserved: boolean;
-  readonly modelUsage?: ContextSelectorModelUsage;
-  readonly degradedReason?: string;
-}
-
-export interface ContextTreeSelector {
-  readonly name: string;
-  select(input: ContextSearchSelectionInput): Promise<ContextTreeSelectorResult>;
-}
-
 export interface ContextSearchResult {
   readonly documentId: string;
   readonly logicalId: string;
@@ -113,7 +95,6 @@ export interface ContextSearchExecution {
     readonly configured: boolean;
     readonly attempted: boolean;
     readonly modelUsageObserved: boolean;
-    readonly modelUsage?: ContextSelectorModelUsage;
   };
 }
 

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  alignMarkdownEvidenceTargets,
   documentPathFromFile,
   markdownEvidenceSections,
   normalizeMarkdownEvidenceTargets,
@@ -705,36 +704,6 @@ test("declarative premises cannot hide inside a trailing question", () => {
       { text: "how should retries, failures", classification: "non_factual" },
       { text: "recovery change?", classification: "non_factual" }
     ]
-  );
-});
-
-test("aligns an exact claim to its smallest nearby source range without weakening verification", () => {
-  const source = [
-    "[Same-origin proxy in front of the Jina API](apps/dashboard/src/route.ts#L4)",
-    "[a claim absent from source](apps/dashboard/src/route.ts#L1)"
-  ].join("\n");
-  const aligned = alignMarkdownEvidenceTargets(
-    source,
-    new Map([
-      [
-        "apps/dashboard/src/route.ts",
-        [
-          "import type { Request } from 'next';",
-          "",
-          "/**",
-          " * Same-origin proxy in front of the Jina API, preserving the",
-          " * deployment boundary.",
-          " */"
-        ].join("\n")
-      ]
-    ])
-  );
-  assert.equal(
-    aligned,
-    [
-      "[Same-origin proxy in front of the Jina API](apps/dashboard/src/route.ts#L4)",
-      "[a claim absent from source](apps/dashboard/src/route.ts#L1)"
-    ].join("\n")
   );
 });
 

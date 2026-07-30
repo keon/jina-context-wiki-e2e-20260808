@@ -168,7 +168,7 @@ Each release must retain:
 - certified repository/ref/commit and release ID;
 - HTTP and real MCP citation counts;
 - final outbox depth;
-- evaluation report produced by `pnpm evaluate:context`;
+- Board artifact-quality report produced by `pnpm evaluate:context-board-quality`;
 - per-question coverage report produced by `pnpm evaluate:questions` for the maintained
   engineering-question corpus.
 

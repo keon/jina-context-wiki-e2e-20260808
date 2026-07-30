@@ -285,18 +285,7 @@ edits, and close events do not schedule builds.
 Focused tests cover Board graph expansion, retry/fencing, page audit and repair, global
 challenge/evaluation and repair, certification, atomic publication, PageIndex
 attachment, trigger policy, tenant tokens and ACLs, the five HTTP retrieval routes, the
-exact four MCP tools, dashboard/admin consumption, and the root acceptance harnesses.
+exact four MCP tools, dashboard/admin consumption, and the retained acceptance harnesses.
 
-The historical filesystem E2E remains useful contract evidence:
-
-```sh
-PAGEINDEX_SOURCE_ROOT=/absolute/path/to/PageIndex \
-CONTEXT_PAGEINDEX_PYTHON=/absolute/path/to/python \
-CONTEXT_PAGEINDEX_WORKER="$PWD/services/pageindex-worker/worker.py" \
-pnpm test:context-local-e2e
-```
-
-It is not proof of Board-native Jina completion or production readiness. Final evidence
-must include retained Jina cold, interrupted/resumed, commit, PR, issue, and no-op comment
-runs; representative repositories; PageIndex and retrieval reports; all API/MCP/UI
-surfaces; Daytona; GCS; production reset; and deployed acceptance.
+Production acceptance uses the Board-native deployment and surface harnesses described
+in `DEPLOYMENT.md`; no separate filesystem derivation runtime is retained.

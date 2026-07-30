@@ -801,7 +801,7 @@ run_release_control() {
 }
 
 start_release_renewal() {
-  local deployment_pid="${BASHPID}"
+  local deployment_pid="$$"
   (
     while sleep 300; do
       if ! run_release_control "release-renew"; then
@@ -1096,20 +1096,31 @@ run_release_control "schema-inspect"
 cloud_sql_project="${cloud_sql_instance%%:*}"
 cloud_sql_instance_id="${cloud_sql_instance##*:}"
 backup_description="pre-context-${CLOUD_BUILD_ID}"
-if ! context_backup_id="$(gcloud sql backups create \
+context_backup_id="$(gcloud sql backups list \
+  --project="${cloud_sql_project}" \
+  --instance="${cloud_sql_instance_id}" \
+  --filter="description=${backup_description}" \
+  --format='value(id)')"
+if [[ -z "${context_backup_id}" ]]; then
+  if ! gcloud sql backups create \
+      --project="${cloud_sql_project}" \
+      --instance="${cloud_sql_instance_id}" \
+      --description="${backup_description}" \
+      --quiet; then
+    echo "Unable to create the coordinated Cloud SQL backup for ${cloud_sql_instance}." >&2
+    echo "${build_service_account} requires the least-privilege" >&2
+    echo "projects/${cloud_sql_project}/roles/jinaContextBackupOperator binding." >&2
+    echo "See \"Platform bootstrap prerequisites\" in docs/DEPLOYMENT.md." >&2
+    exit 2
+  fi
+  context_backup_id="$(gcloud sql backups list \
     --project="${cloud_sql_project}" \
     --instance="${cloud_sql_instance_id}" \
-    --description="${backup_description}" \
-    --format='value(id)' \
-    --quiet)"; then
-  echo "Unable to create the coordinated Cloud SQL backup for ${cloud_sql_instance}." >&2
-  echo "${build_service_account} requires the least-privilege" >&2
-  echo "projects/${cloud_sql_project}/roles/jinaContextBackupOperator binding." >&2
-  echo "See \"Platform bootstrap prerequisites\" in docs/DEPLOYMENT.md." >&2
-  exit 2
+    --filter="description=${backup_description}" \
+    --format='value(id)')"
 fi
 if [[ ! "${context_backup_id}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Cloud SQL backup did not return a valid backup ID" >&2
+  echo "Cloud SQL backup lookup did not return exactly one valid backup ID" >&2
   exit 2
 fi
 context_backup_status="$(gcloud sql backups describe "${context_backup_id}" \

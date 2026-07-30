@@ -5,7 +5,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join, posix } from "node:path";
 import { gunzipSync } from "node:zlib";
 import { Daytona, type Resources } from "@daytona/sdk";
-import { KNOWLEDGE_AGENT_STAGE_DEVELOPER_INSTRUCTIONS } from "./knowledge-document-executor.js";
+import { KNOWLEDGE_AGENT_STAGE_DEVELOPER_INSTRUCTIONS } from "./agent-stage-contract.js";
 
 const MAX_STAGE_ID_BYTES = 120;
 const MAX_PROMPT_BYTES = 1024 * 1024;

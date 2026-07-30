@@ -153,6 +153,7 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.ok(backup > renewal);
   assert.ok(quiescence > backup);
   assert.ok(release > quiescence);
+  assert.doesNotMatch(deployment, /BASHPID/);
   assert.match(
     productionPreflight,
     /coordinated release \$\{row\.lease_release_id\} already holds the deployment lease/
@@ -414,14 +415,18 @@ test("acceptance can be claimed only by the exact coordinated candidate worker r
 });
 
 test("deployment verifies a primary backup before migration and one-time reset", () => {
-  const backup = deployment.indexOf("gcloud sql backups create");
+  const lookup = deployment.indexOf("gcloud sql backups list");
+  const backup = deployment.indexOf("gcloud sql backups create", lookup);
   const status = deployment.indexOf('context_backup_status="$(gcloud sql backups describe');
   const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
   const reset = deployment.indexOf("gcloud run jobs deploy jina-context-legacy-reset");
-  assert.ok(backup > 0);
+  assert.ok(lookup > 0);
+  assert.ok(backup > lookup);
   assert.ok(status > backup);
   assert.ok(migration > status);
   assert.ok(reset > migration);
+  assert.match(deployment, /if \[\[ -z "\$\{context_backup_id\}" \]\]; then/);
+  assert.match(deployment, /--filter="description=\$\{backup_description\}"/);
   assert.match(deployment, /JINA_CONTEXT_RESET_BACKUP_ID=\$\{context_backup_id\}/);
   assert.match(deployment, /context_backup_status.*SUCCESSFUL/s);
   assert.match(deployment, /roles\/jinaContextBackupOperator binding/);

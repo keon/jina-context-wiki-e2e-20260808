@@ -2,10 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
-import {
-  AGENT_KNOWLEDGE_CODEX_ARGS,
-  KNOWLEDGE_AGENT_STAGE_DEVELOPER_INSTRUCTIONS
-} from "./knowledge-document-executor.js";
+import { AGENT_KNOWLEDGE_CODEX_ARGS, KNOWLEDGE_AGENT_STAGE_DEVELOPER_INSTRUCTIONS } from "./agent-stage-contract.js";
 
 export interface LocalAgentStageInput {
   readonly id: string;

@@ -885,58 +885,6 @@ function normalizedRepositoryWorkspacePath(value: string): string {
   return path;
 }
 
-function normalizedEvidenceText(value: string): string {
-  return value.toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-/**
- * Moves a repository citation to the smallest nearby range that contains its
- * exact visible claim. This is a deterministic repair for reports that record
- * the beginning of a definition or comment instead of the claim's precise line.
- * It never changes the claim or path and leaves unsupported links untouched for
- * the normal fail-closed verifier.
- */
-export function alignMarkdownEvidenceTargets(source: string, contentByPath: ReadonlyMap<string, string>): string {
-  return normalizeMarkdownEvidenceTargets(source).replace(LINK_PATTERN, (whole, label: string, target: string) => {
-    if (/^https:\/\/github\.com\//i.test(target)) return whole;
-    const hash = target.indexOf("#");
-    const range = hash < 0 ? null : LINE_RANGE_PATTERN.exec(target.slice(hash));
-    if (!range) return whole;
-    const path = target.slice(0, hash);
-    const content = contentByPath.get(path);
-    const claim = normalizedEvidenceText(label);
-    if (!content || claim.length < 8) return whole;
-    const lines = content.split(/\r?\n/);
-    const originalStart = Number(range[1]);
-    const originalEnd = range[2] === undefined ? originalStart : Number(range[2]);
-    const originalExcerpt = lines.slice(originalStart - 1, originalEnd).join("\n");
-    if (normalizedEvidenceText(originalExcerpt).includes(claim)) return whole;
-
-    const candidates: { startLine: number; endLine: number }[] = [];
-    // Exact source phrases used as labels normally span a comment or one
-    // expression. A twelve-line bound avoids "repairing" a vague claim by
-    // attaching it to a distant occurrence inside a broad construct.
-    for (let start = 0; start < lines.length; start += 1) {
-      let window = "";
-      for (let end = start; end < Math.min(lines.length, start + 12); end += 1) {
-        window = `${window} ${lines[end] ?? ""}`;
-        if (normalizedEvidenceText(window).includes(claim)) {
-          candidates.push({ startLine: start + 1, endLine: end + 1 });
-          break;
-        }
-      }
-    }
-    const best = candidates.sort(
-      (left, right) =>
-        left.endLine - left.startLine - (right.endLine - right.startLine) ||
-        Math.abs(left.startLine - originalStart) - Math.abs(right.startLine - originalStart) ||
-        left.startLine - right.startLine
-    )[0];
-    if (!best) return whole;
-    return `[${label}](${path}#L${best.startLine}${best.endLine === best.startLine ? "" : `-L${best.endLine}`})`;
-  });
-}
-
 function isDocumentTarget(target: string): boolean {
   return target.endsWith(".md") || target.includes(".md#");
 }

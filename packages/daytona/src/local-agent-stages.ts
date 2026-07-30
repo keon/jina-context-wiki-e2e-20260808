@@ -6,7 +6,7 @@ import {
   type ContextSubjectKind,
   type ContextSubjectSignalSource
 } from "@jina/context-engine";
-import type { AgentStageReceipt } from "./knowledge-document-executor.js";
+import type { AgentStageReceipt } from "./agent-stage-contract.js";
 
 export interface ResearchAssignment {
   readonly id: string;
@@ -2093,28 +2093,6 @@ export function documentationWriterPrompt(input: {
   ].join("\n\n");
 }
 
-export function draftingStagePrompt(input: {
-  readonly basePrompt: string;
-  readonly researchPlanPath: string;
-  readonly documentationPlanPath?: string;
-  readonly workerReportPaths: readonly string[];
-  readonly receiptPath: string;
-}): string {
-  return [
-    input.basePrompt,
-    "This is the catalog-integration stage of a host-orchestrated agent workflow.",
-    `A research lead already chose dynamic assignments in ${input.researchPlanPath}. Independent Codex researchers completed the reports at:\n${input.workerReportPaths.map((path) => `- ${path}`).join("\n")}`,
-    input.documentationPlanPath
-      ? `A separate publication architect designed the complete hierarchy at ${input.documentationPlanPath}, and host-scheduled specialist writers already wrote every assigned public page. That outline is binding for this integration stage: preserve every page ID, path, title, purpose, and maintenance question; create one plan item per planned page and bidirectional question mappings. Map each deterministic area to the page IDs whose coverageAreas include it—never assign every area to architecture as a placeholder. Derive each subject's current-source signal from an exact manifest path actually cited by that page, never a generic package.json signal. Declare only requiredEvidence categories that a valid link in that same page proves; do not copy a uniform code/tests/documentation list across pages. Do not merge, retire, or replace specialist pages with summaries, and do not edit public Markdown during plan integration.`
-      : "",
-    `Their host receipts are in ${input.receiptPath}. Read the reports before deciding the public hierarchy, and verify important findings against source. Use the exact research worker IDs from the receipts in the durable plan; do not invent workers.`,
-    "Integrate the repository-wide draft and write a truthful version-4 plan. Record completed research workers, but do not fabricate a critic or review: no context-only critic has run yet. Leave the phase reviewing (or partial if the draft has known blocking gaps). Do not call native collaboration tools; the host launches independent stages and records their completion.",
-    "Aim for DeepWiki/Code Wiki class engineering usefulness: a navigable overview, subject-oriented depth for all major systems, exact source citations, repository-specific maintenance tasks, relevant diagrams, cross-links, tests and failure behavior, and history only when it explains the current system. Do not optimize for brevity or a small page count."
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
 export function sourceChallengeStagePrompt(input: {
   readonly workerId: string;
   readonly repository: string;
@@ -2241,34 +2219,6 @@ export function contextGapRepairPrompt(input: {
     `Source challenge result:\n${JSON.stringify(input.sourceChallenge, null, 2)}`,
     `Context-only task evaluation result:\n${JSON.stringify(input.taskEvaluation, null, 2)}`
   ].join("\n\n");
-}
-
-export function criticIntegrationPrompt(input: {
-  readonly basePrompt: string;
-  readonly criticResultPath: string;
-  readonly receiptPath: string;
-  readonly sourceChallengeResultPath?: string;
-  readonly citationAuditResultPath?: string;
-  readonly finalPass: boolean;
-}): string {
-  return [
-    input.basePrompt,
-    "This is a source-aware repair and integration stage in a host-orchestrated agent workflow.",
-    `Read the completed context-only critic result at ${input.criticResultPath} and the verified agent receipts at ${input.receiptPath}. Incorporate that review and critic worker exactly into the durable plan; do not change its verdicts or claim a worker that lacks a receipt.`,
-    input.sourceChallengeResultPath
-      ? `An independent source-aware challenger completed ${input.sourceChallengeResultPath}. Record its worker exactly as a completed research worker. Every added task with material=true must become a required durable maintenance question with the same ID and wording under its named subject. Promote every material omitted subject with its exact ID and kind. Use the critic's actual pageIds—not any planned expected mapping—to map an answered challenged task. If a material challenged task remains unanswered, keep it open with a blocking gap and do not declare the plan complete.`
-      : "",
-    input.citationAuditResultPath
-      ? `The independent source-aware citation auditor completed ${input.citationAuditResultPath}. Record its worker exactly as a completed research worker. Do not change its verdicts, expose its internal citation IDs in public Markdown, or treat an unsupported result as certified.`
-      : "",
-    "Verify every material critic finding against source. Repair public documents for supported gaps, deepen shallow answers, split umbrella maintenance questions, add missing subjects, and update page/question mappings. Preserve accurate pages and stable IDs. Mark addressed gaps resolved with a concrete resolution, but remember that repairing a failed task does not turn the existing critic verdict into a pass; a later independent critic must retest it.",
-    input.finalPass
-      ? "Every latest critic result passed. The reviewed public snapshot is now frozen: do not edit, rewrite, rename, add, retire, or relink any public Markdown page. Incorporate the worker, review, and result into private plan state only. Set complete only if every host-verifiable invariant is true; otherwise preserve honest partial progress."
-      : "Keep the phase reviewing or partial after material repairs so the host can run a fresh context-only critic. Do not fabricate that later review.",
-    "Do not call native collaboration tools; the host launches independent stages and records their completion."
-  ]
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 export function stageReceiptsJson(receipts: readonly AgentStageReceipt[]): string {

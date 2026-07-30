@@ -561,7 +561,6 @@ node --test scripts/cloud-build-deploy.test.mjs
 pnpm typecheck
 pnpm lint
 pnpm test
-pnpm evaluate:context
 pnpm audit --prod --audit-level=high
 pnpm --filter @jina/dashboard build
 pnpm --filter @jina/admin build
@@ -631,9 +630,10 @@ Run limits one environment-variable value to 32 KB, while this audited program i
 
 ## Pre-deployment backup
 
-The coordinated deploy creates an on-demand primary backup after all non-mutating
-preflights and before owner DDL. It captures the returned backup ID, describes that
-exact backup, and proceeds only when Cloud SQL reports `SUCCESSFUL`. The deployer
+The coordinated deploy reuses a successful backup from the same release attempt or
+creates an on-demand primary backup after all non-mutating preflights and before owner
+DDL. It looks up the exact backup by the unique coordinated release description,
+describes that backup ID, and proceeds only when Cloud SQL reports `SUCCESSFUL`. The deployer
 therefore needs the `jinaContextBackupOperator` binding documented in
 [Platform bootstrap prerequisites](#platform-bootstrap-prerequisites). To inspect the
 resulting release backup as an operator:
@@ -991,11 +991,13 @@ context availability, `23` for HTTP/MCP retrieval or citation failures, `24` for
 and `25` for transport or unexpected failures. Inspect the job execution logs before
 retrying with a new request key.
 
-For release-candidate quality checks beyond the deployment smoke query, run the checked-in
-fixture evaluator and the real-question corpus evaluator:
+For release-candidate quality checks beyond the deployment smoke query, run the
+Board-artifact evaluator and the real-question corpus evaluator:
 
 ```sh
-pnpm evaluate:context
+pnpm evaluate:context-board-quality -- \
+  --artifact-root /absolute/path/to/context-artifacts \
+  --build task_context_build_id
 
 JINA_API_URL="${JINA_API_URL}" \
 JINA_CONTEXT_REPOSITORY=owner/repository \
@@ -1010,7 +1012,7 @@ The question file uses Markdown headings plus bullet queries. The JSON report re
 retrieved/no-context/error results, selected logical documents, original citation source
 IDs, immutable release, deterministic retrieval method, and latency. Do not put the report or a
 query token in repository source. See [AGENTIC_DERIVATION.md](AGENTIC_DERIVATION.md) and
-[CONTEXT_ENGINE_EVALUATION.md](CONTEXT_ENGINE_EVALUATION.md).
+[CONTEXT_QUALITY_BENCHMARK.md](CONTEXT_QUALITY_BENCHMARK.md).
 
 Release evidence also records the build ID, stage IDs, repository/ref/commit,
 `refSequence`, release ID and projection-input fingerprint, document/citation counts,

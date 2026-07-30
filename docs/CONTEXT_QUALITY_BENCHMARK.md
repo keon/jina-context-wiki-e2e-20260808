@@ -108,7 +108,7 @@ Artifact inspection can prove that plan and page checkpoints exist. It cannot by
 ## Deterministic evaluator
 
 The production Board workflow is evaluated from its immutable artifact store,
-not by copying published Markdown back into the legacy derive-run layout. Give
+not by reconstructing a separate local run layout. Give
 the evaluator the local artifact-store root and the exact Board context-build
 ID:
 
@@ -161,67 +161,29 @@ The filesystem evaluator proves retained-artifact consistency. It does not
 replace the PostgreSQL publication-transaction test, the worker lease/fencing
 tests, a real interruption/resume test, or API/MCP retrieval tests.
 
-The earlier derive-run evaluator remains useful for the pre-Board repository
-harness and retained comparison fixtures.
+Passing the Board evaluator is necessary but not sufficient for a parity claim.
+Final acceptance also requires representative end-to-end runs, a real
+interruption/resume test, retrieval through API and MCP, and human inspection
+that the maintenance questions are material rather than trivial. Production
+acceptance samples immutable Board-owned document titles and requires exact
+title queries to retrieve every owning document.
 
-Run the evaluator against a retained run directory containing `derive-output/`,
-`derive-state/plan.json`, and the private audit artifacts:
+## Live retrieval coverage
 
-```bash
-pnpm evaluate:context-quality /path/to/run
+`pnpm evaluate:questions` sends Markdown bullet queries to a running
+`POST /context/search` API. Headings become report categories. Each result records
+the immutable release, selected context documents, citations, deterministic
+retrieval method, and latency; the endpoint must never return a generated answer.
+
+```sh
+JINA_API_URL=https://api.example.com \
+JINA_CONTEXT_REPOSITORY=owner/repository \
+CONTEXT_QUESTION_FILE=/absolute/path/questions.md \
+CONTEXT_API_TOKEN='<bound query token>' \
+CONTEXT_QUESTION_MIN_RETRIEVED_RATE=0.8 \
+pnpm evaluate:questions > /tmp/context-question-report.json
 ```
 
-To evaluate incremental freshness, provide the current artifact first and the previous artifact second:
-
-```bash
-pnpm evaluate:context-quality /path/to/current-run /path/to/previous-run
-```
-
-Environment equivalents are `CONTEXT_BENCHMARK_DIR`, `CONTEXT_BENCHMARK_PLAN`, `CONTEXT_BENCHMARK_PREVIOUS_DIR`, and `CONTEXT_BENCHMARK_PREVIOUS_PLAN`.
-
-The evaluator can still inspect a direct `derive-output/` folder and use its
-`.context-plan.json`. It cannot honestly prove parity from public files alone:
-unless that folder has its original sibling `derive-state/agent-stages/` audit
-and certification files, it reports the missing private evidence and exits
-nonzero. This preserves convenient artifact inspection without treating the
-absence of a source-aware audit as a pass.
-
-The evaluator reports:
-
-- the latest critic verdict for every maintenance question;
-- required-question pass rate and complete-page task coverage;
-- exact source-link coverage, range precision, and distinct source paths;
-- total, supported, and unsupported citation counts, exact audit coverage, and
-  per-page input/audit/support coverage;
-- public-snapshot, input, audit-output, checkpoint, and final-certification
-  digest consistency;
-- heading hierarchy, architecture reachability, context crosslinks, and broken links;
-- Mermaid usage without treating diagram count as a target;
-- provider/history applicability and coverage;
-- blocking gaps and durable checkpoint presence;
-- optional incremental commit and document comparison.
-
-It exits nonzero for hard contract failures: an incomplete or unsupported plan,
-a required task without a latest pass, an untested complete page, a missing or
-ungrounded output document, a broken context link, an open blocking gap, missing
-required provider evidence, a missing/tampered/stale/incomplete citation audit,
-any unsupported public citation, a certification that does not bind that audit,
-or a supplied incremental comparison that did not advance.
-
-Passing this evaluator is necessary but not sufficient for a parity claim. Final
-acceptance also requires representative end-to-end runs, the host's checkpoint
-source-byte validation, a real interrupted/resumed run, retrieval tests through
-the API and MCP surfaces, and human inspection that task questions are material
-rather than trivial.
-
-For a retained run, the retrieval benchmark checks that each answered required maintenance
-question retrieves at least one of the pages the context-only critic used. The production
-acceptance additionally samples immutable Board-owned document titles and requires exact
-title queries to retrieve every owning document:
-
-```bash
-CONTEXT_DERIVE_DIR=/path/to/run \
-CONTEXT_PAGEINDEX_WORKER=/path/to/services/pageindex-worker/worker.py \
-CONTEXT_PAGEINDEX_PYTHON=/path/to/python \
-pnpm evaluate:context-retrieval
-```
+This is a retrieval-coverage screen, not an answer-quality grade. The calling
+coding or review agent remains responsible for reasoning over the returned
+context.
