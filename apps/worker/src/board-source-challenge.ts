@@ -18,3 +18,16 @@ export function parseBoardSourceChallengeStageResult(
     existingSubjectIds: researchPlan.assignments.map((assignment) => assignment.id)
   });
 }
+
+export async function parseBoardSourceChallengeStageResultWithRepair(
+  value: unknown,
+  expected: Parameters<typeof parseBoardSourceChallengeStageResult>[1],
+  repair: (diagnostic: string, previousResult: unknown) => Promise<unknown>
+): Promise<ReturnType<typeof parseBoardSourceChallengeStageResult>> {
+  try {
+    return parseBoardSourceChallengeStageResult(value, expected);
+  } catch (error) {
+    const diagnostic = error instanceof Error ? error.message : String(error);
+    return parseBoardSourceChallengeStageResult(await repair(diagnostic, value), expected);
+  }
+}

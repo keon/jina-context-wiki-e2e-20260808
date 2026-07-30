@@ -19,7 +19,8 @@ import {
   researchWorkerPrompt,
   researchPlannerRepairPrompt,
   sourceChallengePromotionDiagnostics,
-  sourceChallengeStagePrompt
+  sourceChallengeStagePrompt,
+  sourceChallengeValidationRepairPrompt
 } from "./local-agent-stages.js";
 
 test("citation repairs stay page-scoped and request minimal edits", () => {
@@ -128,6 +129,23 @@ test("source challengers must return public manifest paths instead of checkout a
   assert.match(prompt, /only when the public Context cannot already support that maintenance work/);
   assert.match(prompt, /repository lacks a proposed implementation or focused regression test/);
   assert.match(prompt, /Judge documentation sufficiency/);
+});
+
+test("source challenge validation repair is bounded to the rejected structured result", () => {
+  const prompt = sourceChallengeValidationRepairPrompt({
+    workerId: "source-challenge-3",
+    repositoryDirectory: "/checkpoint/repository",
+    evidencePath: "/checkpoint/evidence.json",
+    repositoryPaths: ["src/server.ts"],
+    diagnostic: "evidence reference is not a checkpoint repository path: access-service.md",
+    previousResult: { worker: { id: "source-challenge-3" } }
+  });
+
+  assert.match(prompt, /Preserve every valid field and change only what deterministic validation rejected/);
+  assert.match(prompt, /Generated Context page paths are not repository evidence/);
+  assert.match(prompt, /src\/server\.ts/);
+  assert.match(prompt, /access-service\.md/);
+  assert.match(prompt, /source-challenge-3/);
 });
 
 test("research plans retain typed relevance-scored provider history without reconstructed links", () => {

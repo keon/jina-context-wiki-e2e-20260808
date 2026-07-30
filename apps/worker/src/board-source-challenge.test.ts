@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { parseSourceChallengeStageResult } from "@jina/daytona";
-import { parseBoardSourceChallengeStageResult } from "./board-source-challenge.js";
+import {
+  parseBoardSourceChallengeStageResult,
+  parseBoardSourceChallengeStageResultWithRepair
+} from "./board-source-challenge.js";
 
 const researchPlan = {
   assignments: [{ id: "core-id-api-and-wire-format" }]
@@ -83,4 +86,50 @@ test("Board source-challenge parsing still rejects genuinely unknown subjects", 
       }),
     /names unknown subject invented-subject/
   );
+});
+
+test("Board source-challenge parsing gives one bounded repair attempt deterministic feedback", async () => {
+  const invalid = {
+    ...challenge,
+    addedTasks: [
+      {
+        ...challenge.addedTasks[0],
+        evidence: [
+          {
+            ...challenge.addedTasks[0]!.evidence[0],
+            reference: "access-service.md"
+          }
+        ]
+      }
+    ]
+  };
+  const diagnostics: string[] = [];
+  const result = await parseBoardSourceChallengeStageResultWithRepair(
+    invalid,
+    { ...expected, researchPlan },
+    async (diagnostic, previousResult) => {
+      diagnostics.push(diagnostic);
+      assert.equal(previousResult, invalid);
+      return challenge;
+    }
+  );
+
+  assert.equal(result.addedTasks[0]?.evidence[0]?.reference, "id.go");
+  assert.match(diagnostics[0] ?? "", /access-service\.md/);
+});
+
+test("Board source-challenge validation never retries a rejected correction", async () => {
+  let attempts = 0;
+  await assert.rejects(
+    parseBoardSourceChallengeStageResultWithRepair(
+      { ...challenge, worker: { ...challenge.worker, id: "wrong-worker" } },
+      { ...expected, researchPlan },
+      async () => {
+        attempts += 1;
+        return { ...challenge, worker: { ...challenge.worker, id: "still-wrong" } };
+      }
+    ),
+    /worker id/
+  );
+  assert.equal(attempts, 1);
 });

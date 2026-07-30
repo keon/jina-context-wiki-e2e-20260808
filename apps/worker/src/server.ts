@@ -36,6 +36,7 @@ import {
   researchPlannerPrompt,
   researchWorkerPrompt,
   sourceChallengeStagePrompt,
+  sourceChallengeValidationRepairPrompt,
   type BoardAgentModelUsage,
   type CitationAuditStageResult,
   type CitationAuditReference,
@@ -75,7 +76,7 @@ import {
   configuredPortableContextBoardAgentStageRunner,
   type PortableContextBoardAgentStageRunner
 } from "./board-agent-stage-adapter.js";
-import { parseBoardSourceChallengeStageResult } from "./board-source-challenge.js";
+import { parseBoardSourceChallengeStageResultWithRepair } from "./board-source-challenge.js";
 import { citationAuditDelta, retryCitationAuditValidation } from "./citation-audit-validation.js";
 import {
   assertNoGitHubOperationalCredentials,
@@ -1786,7 +1787,8 @@ async function runContextSourceChallenge(
   try {
     const evidencePath = join(stageRoot, "evidence.json");
     await writeFile(evidencePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
-    const output = await requireBoardAgentStageRunner().run({
+    const runner = requireBoardAgentStageRunner();
+    const stageInput = {
       id: workerId,
       prompt: sourceChallengeStagePrompt({
         workerId,
@@ -1806,15 +1808,34 @@ async function runContextSourceChallenge(
       additionalDirectories: [stageRoot],
       readOnly: true,
       budgetSeconds: stageBudgetSeconds("CONTEXT_SOURCE_CHALLENGE_SECONDS", 900)
-    });
-    const result = parseBoardSourceChallengeStageResult(output.parsed, {
-      workerId,
-      inputDigest,
-      publicSnapshotDigest,
-      existingTasks,
-      researchPlan,
-      repositoryPaths: repositoryInventory.paths
-    });
+    } as const;
+    const output = await runner.run(stageInput);
+    const result = await parseBoardSourceChallengeStageResultWithRepair(
+      output.parsed,
+      {
+        workerId,
+        inputDigest,
+        publicSnapshotDigest,
+        existingTasks,
+        researchPlan,
+        repositoryPaths: repositoryInventory.paths
+      },
+      async (diagnostic, previousResult) => {
+        const repaired = await runner.run({
+          ...stageInput,
+          id: `${workerId}-validation-repair`,
+          prompt: sourceChallengeValidationRepairPrompt({
+            workerId,
+            repositoryDirectory: checkout.directory,
+            evidencePath,
+            repositoryPaths: repositoryInventory.paths,
+            diagnostic,
+            previousResult
+          })
+        });
+        return repaired.parsed;
+      }
+    );
     const blockingTaskIds = new Set(result.addedTasks.filter((task) => task.material).map((task) => task.id));
     const blockingGapCount = blockingTaskIds.size;
     const verdict = blockingGapCount === 0 ? "pass" : "repair_required";
