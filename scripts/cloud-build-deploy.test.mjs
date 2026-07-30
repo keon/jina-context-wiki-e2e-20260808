@@ -213,17 +213,11 @@ test("owner migration and destructive reset are bound to the live coordinated de
   assert.match(productionPreflight, /if \(action !== "release-renew"\)/);
 });
 
-test("failed unaccepted candidates are paused, removed, fenced, and independently verified before lease release", () => {
+test("failed unaccepted candidates are paused, fenced, and independently verified before lease release", () => {
   const trap = deployment.indexOf("rollback_failed_release()");
   const pause = deployment.indexOf('run_release_control "worker-pause"', trap);
-  const contextDrain = deployment.indexOf(
-    'route_paused_worker_and_delete_prior_revisions \\\n      "jina-context-worker"',
-    pause
-  );
-  const taskDrain = deployment.indexOf(
-    'route_paused_worker_and_delete_prior_revisions \\\n      "jina-task-worker"',
-    contextDrain
-  );
+  const contextDrain = deployment.indexOf('route_paused_worker \\\n      "jina-context-worker"', pause);
+  const taskDrain = deployment.indexOf('route_paused_worker \\\n      "jina-task-worker"', contextDrain);
   const drain = deployment.indexOf('run_release_control "board-drain"', taskDrain);
   const verify = deployment.indexOf('run_release_control "board-verify"', drain);
   const destroyGeneration = deployment.indexOf("destroy_worker_release_credential_verified", verify);
@@ -243,8 +237,9 @@ test("failed unaccepted candidates are paused, removed, fenced, and independentl
   );
   assert.match(
     deployment,
-    /Unable to route \$\{service\} to paused drain \$\{drain_revision\}; no revisions were deleted/
+    /A failed candidate is the latest-created Cloud Run revision and cannot be[\s\S]+?generation[\s\S]+?credential is destroyed/
   );
+  assert.match(deployment, /paused worker traffic mismatch/);
 });
 
 test("release and worker credentials are independent and only the worker digest enters the generation gate", () => {

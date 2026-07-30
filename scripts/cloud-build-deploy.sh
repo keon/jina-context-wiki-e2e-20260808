@@ -671,20 +671,44 @@ wait_for_exact_worker_revisions() {
   return 2
 }
 
-route_paused_worker_and_delete_prior_revisions() {
+route_paused_worker() {
   local service="$1"
   local drain_revision="$2"
-  local revision cleanup_failed="false"
   if ! gcloud run services update-traffic "${service}" \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
     --clear-tags \
     --to-revisions="${drain_revision}=100" \
     --quiet >/dev/null; then
-    echo "Unable to route ${service} to paused drain ${drain_revision}; no revisions were deleted" >&2
+    echo "Unable to route ${service} to paused drain ${drain_revision}" >&2
     return 1
   fi
+  gcloud run services describe "${service}" \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --format=json |
+    DRAIN_REVISION="${drain_revision}" python3 -c '
+import json
+import os
+import sys
 
+traffic = json.load(sys.stdin).get("status", {}).get("traffic", [])
+serving = {
+    target.get("revisionName"): int(target.get("percent", 0))
+    for target in traffic
+    if target.get("revisionName") and int(target.get("percent", 0)) > 0
+}
+expected = {os.environ["DRAIN_REVISION"]: 100}
+if serving != expected:
+    raise SystemExit(f"paused worker traffic mismatch: expected {expected}, observed {serving}")
+'
+}
+
+route_paused_worker_and_delete_prior_revisions() {
+  local service="$1"
+  local drain_revision="$2"
+  local revision cleanup_failed="false"
+  route_paused_worker "${service}" "${drain_revision}" || return 1
   while IFS= read -r revision; do
     [[ -z "${revision}" || "${revision}" == "${drain_revision}" ]] && continue
     if [[ "${revision}" != "${service}-"* ]]; then
@@ -985,9 +1009,13 @@ ROLLFORWARD
   if [[ "${status}" -ne 0 && "${worker_quiescence_started}" == "true" ]]; then
     local cleanup_ok="true"
     run_release_control "worker-pause" >/dev/null 2>&1 || cleanup_ok="false"
-    route_paused_worker_and_delete_prior_revisions \
+    # A failed candidate is the latest-created Cloud Run revision and cannot be
+    # deleted directly. Route only to the paused drain here; the generation
+    # credential is destroyed below, and the next drain revision makes the
+    # retained 0%-traffic candidate eligible for normal revision cleanup.
+    route_paused_worker \
       "jina-context-worker" "${context_drain_revision}" >/dev/null 2>&1 || cleanup_ok="false"
-    route_paused_worker_and_delete_prior_revisions \
+    route_paused_worker \
       "jina-task-worker" "${task_drain_revision}" >/dev/null 2>&1 || cleanup_ok="false"
     run_release_control "board-drain" >/dev/null 2>&1 || cleanup_ok="false"
     run_release_control "board-verify" >/dev/null 2>&1 || cleanup_ok="false"
@@ -1019,8 +1047,8 @@ ROLLFORWARD
     cat >&2 <<ROLLFORWARD
 Candidate release failed after background-worker quiescence began.
 Fail-closed cleanup completed: ${cleanup_ok}
-Worker claims are disabled, candidate workers were removed, and the worker
-services were returned to the exact paused drain revisions:
+Worker claims are disabled, the unaccepted generation was invalidated, and the
+worker services were returned to the exact paused drain revisions:
   ${context_drain_revision}
   ${task_drain_revision}
 Board zero-lease verification completed:
