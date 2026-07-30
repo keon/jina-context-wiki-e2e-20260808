@@ -649,10 +649,27 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       await client.query(
         `update jina_context.outbox delivery
          set processed_at=clock_timestamp(),lease_id=null,lease_owner=null,lease_expires_at=null,
-             last_error='superseded by a newer admitted ref sequence'
+             last_error=case
+               when delivery.aggregate_type='access'
+                 then 'no evidence checkpoint exists for this repository; access is projected at first index'
+               else 'superseded by a newer admitted ref sequence'
+             end
          where delivery.tenant_id=$1 and delivery.processed_at is null
            and (
              (
+               -- An access event for a repository with no checkpoints has
+               -- nothing to project onto: the acl consumer updates existing
+               -- generations, and the first index of that repository reads the
+               -- current observations directly. Left pending, two such rows
+               -- held the release gate's backlog check at failure for a day.
+               delivery.aggregate_type='access'
+               and not exists (
+                 select 1 from jina_context.evidence_checkpoints checkpoint
+                 where checkpoint.tenant_id=delivery.tenant_id
+                   and checkpoint.repository=delivery.repository
+               )
+             )
+             or (
                delivery.aggregate_type='evidence'
                and exists (
                  select 1
