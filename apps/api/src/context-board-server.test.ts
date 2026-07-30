@@ -590,7 +590,7 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
     refSequence: 1,
     requestKey: "budget:expired",
     derivationBudgetSeconds: 300,
-    derivationTokenBudget: 8_000_000,
+    derivationTokenBudget: 12_000_000,
     now: "2020-01-01T00:00:00.000Z"
   });
   const tokenLimited = createContextBoardBuild(expired.state, {
@@ -637,7 +637,7 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
     refSequence: 1,
     requestKey: "budget:cancel",
     derivationBudgetSeconds: 10_800,
-    derivationTokenBudget: 8_000_000,
+    derivationTokenBudget: 12_000_000,
     now: current
   });
   const stateStore = mutableStateStore({
