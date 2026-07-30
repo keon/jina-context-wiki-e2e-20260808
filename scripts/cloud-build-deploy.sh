@@ -609,6 +609,22 @@ admin_url="$(gcloud run services describe jina-admin \
   --region="${GCP_REGION}" \
   --format='value(status.url)')"
 
+# Something outside this repository periodically rewrites the IAM policy on
+# these secrets to a fixed member list, and the acceptance job's accessor grant
+# was twice removed between a manual re-grant and the deploy that needed it,
+# failing the release at the job update. The deploy therefore restores the
+# grants it is about to depend on, idempotently; if the builder may not manage
+# secret IAM the attempt is logged and the deploy proceeds to fail exactly as
+# it does today, so this can only widen the paths to success.
+for acceptance_secret in jina-internal-api-token jina-context-api-token; do
+  gcloud secrets add-iam-policy-binding "${acceptance_secret}" \
+    --project="${GCP_PROJECT_ID}" \
+    --member="serviceAccount:${acceptance_service_account}" \
+    --role="roles/secretmanager.secretAccessor" \
+    --quiet >/dev/null 2>&1 \
+    || echo "WARNING: could not restore ${acceptance_secret} access for ${acceptance_service_account}; continuing"
+done
+
 gcloud run jobs deploy jina-acceptance \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
