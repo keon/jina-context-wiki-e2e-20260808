@@ -280,6 +280,7 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS`             |                                          `10800` | Three-hour agent-stage budget for the measured 2.5-hour full build.                                        |
 | `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                      |
 | `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                 |
+| `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                           `full` | `full` runs the release Context build; explicit `mechanical` gates only on candidate readiness.            |
 | `_JINA_CONTEXT_RESET_MODE`                               |                                       `disabled` | Set to `legacy-once` only for the audited first v2 transition.                                             |
 | `_JINA_CONFIRM_CONTEXT_RESET`                            |                                            empty | Must equal `delete-rebuildable-context` only with `legacy-once`.                                           |
 
@@ -686,17 +687,20 @@ The coordinated `cloudbuild.yaml` invocation above calls
     `--no-traffic` and exact revision suffixes, then proves that each worker service
     contains exactly its paused drain and its claim-enabled candidate, both use the
     coordinated image digest, and only the candidate targets the tagged candidate API;
-11. executes the full production acceptance job exclusively against the tagged candidate
-    API, workers, dashboard, and admin, requiring health attestations and Board completion
-    receipts naming the exact release and worker revision; an explicitly eligible
-    citation-quality page or repository-wide quality gate may resume from its
-    retained checkpoint, with at most four total acceptance recoveries, while
-    every other task or infrastructure failure remains terminal;
-12. only after acceptance succeeds, routes all five exact candidate revisions to 100%,
-    replaces every older traffic tag with the one accepted release tag, deletes both
-    paused drains, proves that each worker service contains only its accepted candidate
-    revision, releases the deployment lease, destroys the independent control credential,
-    and deletes and verifies absence of the short-lived control job.
+11. by default, executes the full production acceptance job exclusively against the
+    tagged candidate API, workers, dashboard, and admin, requiring health attestations
+    and Board completion receipts naming the exact release and worker revision; an
+    explicitly eligible citation-quality page or repository-wide quality gate may resume
+    from its retained checkpoint, with at most four total acceptance recoveries, while
+    every other task or infrastructure failure remains terminal. An operator may
+    explicitly set `_JINA_DEPLOYMENT_ACCEPTANCE_MODE=mechanical` to cut over after all
+    five candidates are ready and worker isolation is proven, deferring the expensive
+    full Context build to a later final verification release;
+12. only after the selected acceptance gate succeeds, routes all five exact candidate
+    revisions to 100%, replaces every older traffic tag with the one accepted release
+    tag, deletes both paused drains, proves that each worker service contains only its
+    accepted candidate revision, releases the deployment lease, destroys the independent
+    control credential, and deletes and verifies absence of the short-lived control job.
 13. after that cleanup succeeds, deploys
     `jina-context-production-trigger-acceptance` against the stable API with its
     dedicated service account and split operational/fixture App credentials, but does
@@ -715,6 +719,13 @@ proof before lease release fails, the release extends its lease for twelve hours
 leaves the drains paused for operator repair. Cleanup failure after an accepted cutover
 fails the build and reports the exact control artifacts for operator removal, but never invokes
 candidate cleanup or attempts a mixed-version rollback.
+
+`mechanical` is an operator override, not the default release policy. It still runs
+validation, Daytona preflight, backup, worker drain, lease fencing, migration, candidate
+health/readiness, worker-generation isolation, coordinated cutover, and control-artifact
+cleanup. It skips only `jina-acceptance`, so it does not claim that derived Context,
+retrieval, token isolation, or web rendering has passed end to end. Return to `full` for
+the single final production verification after implementation work is complete.
 Prior worker revisions are not rollback candidates.
 Once cutover begins there is likewise no supported mixed-version rollback; if a traffic
 update fails, finish routing the exact already-accepted revisions and repeat the

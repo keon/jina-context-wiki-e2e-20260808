@@ -52,6 +52,7 @@ context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-96000}"
 acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS:-10800}"
 acceptance_timeout_ms="${JINA_ACCEPTANCE_TIMEOUT_MS:-10800000}"
 acceptance_job_timeout_seconds="${JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS:-11700}"
+deployment_acceptance_mode="${JINA_DEPLOYMENT_ACCEPTANCE_MODE:-full}"
 context_worker_memory="${JINA_CONTEXT_WORKER_MEMORY:-1Gi}"
 context_artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-${GCP_PROJECT_ID}-jina-context-artifacts}"
 worker_release_secret="${JINA_WORKER_RELEASE_SECRET:-jina-worker-release-credential}"
@@ -86,6 +87,10 @@ production_trigger_acceptance_path="/opt/jina/context-production-trigger-e2e.mjs
 
 if [[ "${image_tag}" != "${CLOUD_BUILD_ID}" ]]; then
   echo "Deployment must deploy images built by the current coordinated Cloud Build" >&2
+  exit 2
+fi
+if [[ "${deployment_acceptance_mode}" != "full" && "${deployment_acceptance_mode}" != "mechanical" ]]; then
+  echo "JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full or mechanical" >&2
   exit 2
 fi
 if [[ ! "${image_tag}" =~ ^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$ ]]; then
@@ -1357,69 +1362,71 @@ gcloud run deploy jina-admin \
 wait_for_candidate_revision "jina-admin"
 admin_url="$(candidate_service_url "jina-admin")"
 
-# Something outside this repository periodically rewrites the IAM policy on
-# these secrets to a fixed member list, and the acceptance job's accessor grant
-# was twice removed between a manual re-grant and the deploy that needed it,
-# failing the release at the job update. The deploy therefore restores the
-# grants it is about to depend on, idempotently; if the builder may not manage
-# secret IAM the attempt is logged and the deploy proceeds to fail exactly as
-# it does today, so this can only widen the paths to success.
-for acceptance_secret in jina-internal-api-token jina-context-api-token; do
-  gcloud secrets add-iam-policy-binding "${acceptance_secret}" \
-    --project="${GCP_PROJECT_ID}" \
-    --member="serviceAccount:${acceptance_service_account}" \
-    --role="roles/secretmanager.secretAccessor" \
-    --quiet >/dev/null 2>&1 \
-    || echo "WARNING: could not restore ${acceptance_secret} access for ${acceptance_service_account}; continuing"
-done
+if [[ "${deployment_acceptance_mode}" == "full" ]]; then
+  # Something outside this repository periodically rewrites the IAM policy on
+  # these secrets to a fixed member list, and the acceptance job's accessor
+  # grant was twice removed between a manual re-grant and the deploy that
+  # needed it. Restore the grants immediately before full acceptance.
+  for acceptance_secret in jina-internal-api-token jina-context-api-token; do
+    gcloud secrets add-iam-policy-binding "${acceptance_secret}" \
+      --project="${GCP_PROJECT_ID}" \
+      --member="serviceAccount:${acceptance_service_account}" \
+      --role="roles/secretmanager.secretAccessor" \
+      --quiet >/dev/null 2>&1 \
+      || echo "WARNING: could not restore ${acceptance_secret} access for ${acceptance_service_account}; continuing"
+  done
 
-gcloud run jobs deploy jina-acceptance \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --image="${worker_image}" \
-  --service-account="${acceptance_service_account}" \
-  --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~ACCEPTANCE_CONTEXT_WORKER_REVISION=${context_candidate_revision}~ACCEPTANCE_TASK_WORKER_REVISION=${task_candidate_revision}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_CONTEXT_WORKER_AUDIENCE=${context_worker_audience}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TASK_WORKER_AUDIENCE=${task_worker_audience}~ACCEPTANCE_DASHBOARD_URL=${dashboard_url}~ACCEPTANCE_DASHBOARD_AUDIENCE=${dashboard_audience}~ACCEPTANCE_ADMIN_URL=${admin_url}~ACCEPTANCE_WEB_AUTH_USERNAME=omlabs~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REPOSITORY=${acceptance_repository}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${acceptance_derivation_budget_seconds}~ACCEPTANCE_TIMEOUT_MS=${acceptance_timeout_ms}" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:latest" \
-  --args=dist/acceptance.js \
-  --tasks=1 \
-  --max-retries=0 \
-  --task-timeout="${acceptance_job_timeout_seconds}s" \
-  --quiet
-
-acceptance_status=0
-gcloud run jobs execute jina-acceptance \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --wait || acceptance_status=$?
-
-execution_name="$(gcloud run jobs executions list \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --job=jina-acceptance \
-  --sort-by='~metadata.creationTimestamp' \
-  --limit=1 \
-  --format='value(metadata.name)')"
-
-if [[ -n "${execution_name}" ]]; then
-  gcloud run jobs executions describe "${execution_name}" \
+  gcloud run jobs deploy jina-acceptance \
     --project="${GCP_PROJECT_ID}" \
     --region="${GCP_REGION}" \
-    --format='yaml(metadata.name,status.startTime,status.completionTime,status.conditions,status.failedCount,status.succeededCount)' || true
-fi
+    --image="${worker_image}" \
+    --service-account="${acceptance_service_account}" \
+    --set-env-vars="^~^JINA_API_URL=${api_url}~ACCEPTANCE_WORKER_RELEASE_ID=${CLOUD_BUILD_ID}~ACCEPTANCE_CONTEXT_WORKER_REVISION=${context_candidate_revision}~ACCEPTANCE_TASK_WORKER_REVISION=${task_candidate_revision}~ACCEPTANCE_CONTEXT_WORKER_URL=${context_worker_url}~ACCEPTANCE_CONTEXT_WORKER_AUDIENCE=${context_worker_audience}~ACCEPTANCE_TASK_WORKER_URL=${task_worker_url}~ACCEPTANCE_TASK_WORKER_AUDIENCE=${task_worker_audience}~ACCEPTANCE_DASHBOARD_URL=${dashboard_url}~ACCEPTANCE_DASHBOARD_AUDIENCE=${dashboard_audience}~ACCEPTANCE_ADMIN_URL=${admin_url}~ACCEPTANCE_WEB_AUTH_USERNAME=omlabs~ACCEPTANCE_TENANT_ID=${acceptance_tenant_id}~ACCEPTANCE_PRINCIPAL_ID=${context_query_principal_id}~ACCEPTANCE_ADMIN_PRINCIPAL_ID=${acceptance_principal_id}~ACCEPTANCE_REPOSITORY=${acceptance_repository}~ACCEPTANCE_REQUEST_KEY=deploy-${CLOUD_BUILD_ID}~ACCEPTANCE_GITHUB_INSTALLATION_ID=${acceptance_github_installation_id}~ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${acceptance_derivation_budget_seconds}~ACCEPTANCE_TIMEOUT_MS=${acceptance_timeout_ms}" \
+    --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:latest" \
+    --args=dist/acceptance.js \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout="${acceptance_job_timeout_seconds}s" \
+    --quiet
 
-if [[ "${acceptance_status}" -ne 0 ]]; then
-  echo "Acceptance execution failed; Cloud Run job logs follow." >&2
-  gcloud logging read \
-    "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"jina-acceptance\" AND labels.\"run.googleapis.com/execution_name\"=\"${execution_name}\"" \
+  acceptance_status=0
+  gcloud run jobs execute jina-acceptance \
     --project="${GCP_PROJECT_ID}" \
-    --order=asc \
-    --format='value(timestamp,severity,textPayload,jsonPayload.message)' \
-    --limit=500 || true
-  exit "${acceptance_status}"
+    --region="${GCP_REGION}" \
+    --wait || acceptance_status=$?
+
+  execution_name="$(gcloud run jobs executions list \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --job=jina-acceptance \
+    --sort-by='~metadata.creationTimestamp' \
+    --limit=1 \
+    --format='value(metadata.name)')"
+
+  if [[ -n "${execution_name}" ]]; then
+    gcloud run jobs executions describe "${execution_name}" \
+      --project="${GCP_PROJECT_ID}" \
+      --region="${GCP_REGION}" \
+      --format='yaml(metadata.name,status.startTime,status.completionTime,status.conditions,status.failedCount,status.succeededCount)' || true
+  fi
+
+  if [[ "${acceptance_status}" -ne 0 ]]; then
+    echo "Acceptance execution failed; Cloud Run job logs follow." >&2
+    gcloud logging read \
+      "resource.type=\"cloud_run_job\" AND resource.labels.job_name=\"jina-acceptance\" AND labels.\"run.googleapis.com/execution_name\"=\"${execution_name}\"" \
+      --project="${GCP_PROJECT_ID}" \
+      --order=asc \
+      --format='value(timestamp,severity,textPayload,jsonPayload.message)' \
+      --limit=500 || true
+    exit "${acceptance_status}"
+  fi
+else
+  echo "Mechanical deployment mode: candidate readiness passed; full Context acceptance deferred"
 fi
 
-# Acceptance used only tagged candidate URLs. Production traffic changes now,
-# and only to the exact revisions identified by this Cloud Build ID.
+# Full acceptance, when selected, used only tagged candidate URLs. Mechanical
+# mode reached this point only after candidate readiness and worker-isolation
+# checks. Production traffic changes only to this Cloud Build's exact revisions.
 cutover_started="true"
 for service in \
   "jina-api" \
@@ -1496,5 +1503,6 @@ Context worker memory: ${context_worker_memory}
 Candidate tag: ${release_tag}
 Pre-deployment backup: ${context_backup_id}
 Context reset mode: ${context_reset_mode}
+Deployment acceptance mode: ${deployment_acceptance_mode}
 Production trigger acceptance job: ${trigger_acceptance_job} (deployed, not executed)
 SUMMARY

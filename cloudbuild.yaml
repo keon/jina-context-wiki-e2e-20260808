@@ -127,6 +127,7 @@ steps:
       - JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS}
       - JINA_ACCEPTANCE_TIMEOUT_MS=${_JINA_ACCEPTANCE_TIMEOUT_MS}
       - JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS=${_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS}
+      - JINA_DEPLOYMENT_ACCEPTANCE_MODE=${_JINA_DEPLOYMENT_ACCEPTANCE_MODE}
       - JINA_CONTEXT_RESET_MODE=${_JINA_CONTEXT_RESET_MODE}
       - JINA_CONFIRM_CONTEXT_RESET=${_JINA_CONFIRM_CONTEXT_RESET}
     timeout: 16200s
@@ -173,6 +174,10 @@ substitutions:
   _JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS: "10800"
   _JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"
   _JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"
+  # Full acceptance is the release default. An operator may explicitly select
+  # "mechanical" to gate cutover only on candidate readiness while deferring
+  # the expensive full Context build to a later final verification release.
+  _JINA_DEPLOYMENT_ACCEPTANCE_MODE: full
   # Normal releases accept only the current schema. The first Context v2
   # production transition must override both values explicitly:
   #   _JINA_CONTEXT_RESET_MODE=legacy-once

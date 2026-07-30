@@ -101,6 +101,17 @@ test("candidate revisions pass full acceptance before production traffic changes
   assert.doesNotMatch(deployment, /route_latest_revision/);
 });
 
+test("mechanical deployment is an explicit opt-in and full acceptance remains the default", () => {
+  assert.match(cloudBuild, /JINA_DEPLOYMENT_ACCEPTANCE_MODE=\$\{_JINA_DEPLOYMENT_ACCEPTANCE_MODE\}/);
+  assert.match(cloudBuild, /_JINA_DEPLOYMENT_ACCEPTANCE_MODE: full/);
+  assert.match(deployment, /deployment_acceptance_mode="\$\{JINA_DEPLOYMENT_ACCEPTANCE_MODE:-full\}"/);
+  assert.match(deployment, /JINA_DEPLOYMENT_ACCEPTANCE_MODE must be full or mechanical/);
+  assert.match(
+    deployment,
+    /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-acceptance[\s\S]+?else[\s\S]+?Mechanical deployment mode/
+  );
+});
+
 test("background workers are quiesced and Board leases are proven empty before schema mutation", () => {
   const daytona = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
   const quiescence = deployment.indexOf('worker_quiescence_started="true"', daytona);
