@@ -703,6 +703,9 @@ test("Daytona snapshot, Secret reference, and Codex toolchain are probed before 
   assert.match(productionPreflight, /command -v bwrap/);
   assert.match(productionPreflight, /sandbox_workspace_write\.writable_roots/);
   assert.match(productionPreflight, /jina-preflight-output\/tool-ok/);
+  assert.match(productionPreflight, /for attempt in 1 2 3/);
+  assert.match(productionPreflight, /sleep \$\(\(attempt \* 2\)\)/);
+  assert.match(productionPreflight, /test "\$probe_status" -eq 0/);
   assert.match(productionPreflight, /ephemeral: true/);
 });
 

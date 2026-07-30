@@ -148,8 +148,11 @@ async function preflightDaytona() {
           required: ["status"],
           additionalProperties: false
         })}' > /tmp/jina-preflight-schema.json`,
+        "probe_status=1",
+        "for attempt in 1 2 3; do",
+        "rm -f /tmp/jina-preflight-output/tool-ok /tmp/jina-preflight-result.json /tmp/jina-preflight-events.jsonl",
         [
-          "printf '%s\\n' 'Use the shell tool to write exactly TOOL_OK to /tmp/jina-preflight-output/tool-ok, verify the file, then return the JSON status AUTH_OK.' |",
+          "if printf '%s\\n' 'Use the shell tool to write exactly TOOL_OK to /tmp/jina-preflight-output/tool-ok, verify the file, then return the JSON status AUTH_OK.' |",
           "codex exec",
           "--json",
           "--ignore-user-config",
@@ -183,8 +186,11 @@ async function preflightDaytona() {
           "-c model_verbosity=low",
           "--output-schema /tmp/jina-preflight-schema.json",
           "--output-last-message /tmp/jina-preflight-result.json",
-          "> /tmp/jina-preflight-events.jsonl"
+          "> /tmp/jina-preflight-events.jsonl; then probe_status=0; break; fi"
         ].join(" "),
+        "sleep $((attempt * 2))",
+        "done",
+        'test "$probe_status" -eq 0',
         `node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync("/tmp/jina-preflight-result.json","utf8"));if(value.status!=="AUTH_OK"||Object.keys(value).length!==1)process.exit(1)'`,
         `test "$(cat /tmp/jina-preflight-output/tool-ok)" = "TOOL_OK"`,
         "rm -rf /tmp/jina-preflight-output /tmp/jina-preflight-schema.json /tmp/jina-preflight-result.json /tmp/jina-preflight-events.jsonl"
