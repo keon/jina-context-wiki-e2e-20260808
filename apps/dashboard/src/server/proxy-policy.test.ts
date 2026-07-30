@@ -8,22 +8,26 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
     "/api/events",
     "/api/overview",
     "/api/task-types",
-    "/api/context/generations",
-    "/api/context/generations/generation-1",
-    "/api/context/documents",
-    "/api/context/documents/revision-1",
     "/api/context/metrics",
-    "/api/context/structure"
+    "/api/context/releases",
+    "/api/context/list",
+    "/api/context/read",
+    "/api/context/diff",
+    "/api/context/builds",
+    "/api/context/builds/build-1/progress"
   ]) {
     assert.equal(isAllowedDashboardApiRequest("GET", pathname, true), true, pathname);
   }
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/query", true), true);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/rebuild", true), true);
-  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/knowledge/revision-1/review", true), true);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/search", true), true);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/rebuild", true), false);
+  assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/knowledge/revision-1/review", true), false);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/build", true), false);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/context/erasure", true), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/internal/worker/claim", true), false);
   assert.equal(isAllowedDashboardApiRequest("POST", "/api/board", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/generations", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/documents", true), false);
+  assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/structure", true), false);
   assert.equal(isAllowedDashboardApiRequest("GET", "/api/context/documents/revision-1/events", true), false);
   assert.equal(isAllowedDashboardApiRequest("DELETE", "/api/context/documents/revision-1", true), false);
 });

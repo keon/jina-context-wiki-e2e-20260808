@@ -19,7 +19,7 @@ export const knowledgeDocumentKinds = [
   "flow",
   "pattern",
   // The kind for a document whose folder the repository chose rather than this
-  // taxonomy. A wiki's structure should fit the thing it documents — an editor
+  // taxonomy. Context structure should fit the repository — an editor
   // has an extension host and a language server, a library has none of that —
   // so an unrecognised folder is a legitimate topic, not an error.
   "topic"
@@ -41,6 +41,10 @@ export interface KnowledgeEvidenceCitation {
   revisionId: string;
   ordinal: number;
   claim: string;
+  /** Stable identity of the rendered public Markdown link occurrence. */
+  citationId?: string;
+  /** Exact public assertion span certified against this immutable anchor. */
+  claimSpan?: string;
   anchor: EvidenceAnchor;
 }
 
@@ -104,6 +108,8 @@ export interface KnowledgeRevisionEvent {
 
 export interface KnowledgeDocumentDraftCitation {
   claim: string;
+  citationId?: string;
+  claimSpan?: string;
   sourceType: EvidenceAnchor["sourceType"];
   sourceId: string;
   pathOrUrl?: string;
@@ -153,6 +159,14 @@ export interface KnowledgeGenerationOutput {
     logicalId: string;
     reason: string;
   }[];
+  /**
+   * The lead agent's durable research plan.
+   *
+   * It is metadata about how the catalog was produced, not retrievable
+   * knowledge. The host uses it to distinguish complete coverage from a useful
+   * partial catalog without trusting the agent's final prose reply.
+   */
+  orchestration?: import("../derive/orchestration.js").ContextOrchestrationState;
 }
 
 export interface DerivationRun {
@@ -243,14 +257,27 @@ export function createKnowledgeCitation(
   revisionId: string,
   ordinal: number,
   claim: string,
-  anchor: EvidenceAnchor
+  anchor: EvidenceAnchor,
+  association?: {
+    readonly citationId: string;
+    readonly claimSpan: string;
+  }
 ): KnowledgeEvidenceCitation {
   if (claim.trim() === "") throw new Error("Citation claim is required");
+  if (association && (!/^cite_[0-9a-f]{20}$/.test(association.citationId) || association.claimSpan.trim() === "")) {
+    throw new Error("Citation public claim association is invalid");
+  }
   return {
-    id: stableId("kc", { revisionId, ordinal, claim, anchor }),
+    id: stableId("kc", { revisionId, ordinal, claim, association, anchor }),
     revisionId,
     ordinal,
     claim: claim.trim(),
+    ...(association
+      ? {
+          citationId: association.citationId,
+          claimSpan: association.claimSpan.trim()
+        }
+      : {}),
     anchor
   };
 }

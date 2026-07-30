@@ -10,6 +10,8 @@ import {
   type KnowledgeGenerationOutput
 } from "../domain/knowledge.js";
 import type { EvidenceStore } from "../ports/evidence-store.js";
+import { documentPathForLogicalId } from "./markdown-catalog.js";
+import { markdownEvidenceSections, parseMarkdownDocument } from "./markdown-document.js";
 
 export interface ValidatedKnowledge {
   revisions: KnowledgeDocumentRevision[];
@@ -177,8 +179,40 @@ export class KnowledgeOutputValidator {
         if (path.startsWith("/") || path.includes(".."))
           diagnostics.push(`documents[${documentIndex}] has invalid scope path`);
       }
-      const resolved: { claim: string; excerpt: string; anchor: EvidenceAnchor; record: EvidenceRecord }[] = [];
+      const parsedInlineDocument = input.inlineCitations
+        ? parseMarkdownDocument(
+            documentPathForLogicalId(document.logicalId, document.kind, checkpoint.repository) ?? document.logicalId,
+            document.bodyMarkdown
+          )
+        : undefined;
+      const publicLinkById = new Map(
+        (parsedInlineDocument?.evidenceLinks ?? []).map((link) => [link.citationId, link])
+      );
+      const ordinalByCitationId = new Map<string, number>();
+      const resolved: {
+        claim: string;
+        excerpt: string;
+        anchor: EvidenceAnchor;
+        record: EvidenceRecord;
+        citationId?: string;
+        claimSpan?: string;
+      }[] = [];
       for (const [citationIndex, citation] of document.citations.entries()) {
+        if (input.inlineCitations) {
+          const publicLink = citation.citationId ? publicLinkById.get(citation.citationId) : undefined;
+          if (
+            !citation.citationId ||
+            !citation.claimSpan ||
+            !publicLink ||
+            publicLink.claimSpan !== citation.claimSpan
+          ) {
+            diagnostics.push(
+              `documents[${documentIndex}].citations[${citationIndex}] is not bound to one rendered public claim`
+            );
+            continue;
+          }
+          ordinalByCitationId.set(citation.citationId, citationIndex + 1);
+        }
         const record = await this.evidenceStore.resolveAnchor(input.checkpointId, {
           tenantId: checkpoint.tenantId,
           repository: checkpoint.repository,
@@ -208,6 +242,8 @@ export class KnowledgeOutputValidator {
             claim: citation.claim,
             excerpt,
             record,
+            ...(citation.citationId === undefined ? {} : { citationId: citation.citationId }),
+            ...(citation.claimSpan === undefined ? {} : { claimSpan: citation.claimSpan }),
             anchor: {
               ...record.anchor,
               ...(citation.pathOrUrl === undefined && record.anchor.pathOrUrl === undefined
@@ -221,6 +257,38 @@ export class KnowledgeOutputValidator {
         }
       }
       if (resolved.length !== document.citations.length) continue;
+      if (parsedInlineDocument) {
+        for (const section of markdownEvidenceSections(
+          parsedInlineDocument.bodyMarkdown,
+          parsedInlineDocument.documentPath
+        )) {
+          if (section.substantiveClaimCount === 0) continue;
+          if (section.citationIds.some((citationId) => ordinalByCitationId.has(citationId))) continue;
+          diagnostics.push(
+            `documents[${documentIndex}] contains an ungrounded substantive section: ${section.heading.slice(0, 120)}`
+          );
+        }
+        const expectedSummaryOrdinals = [
+          ...new Set(
+            parsedInlineDocument.materialClaims
+              .filter((claim) => claim.summary && claim.classification === "material")
+              .flatMap((claim) => claim.citationIds)
+              .map((citationId) => ordinalByCitationId.get(citationId))
+              .filter((ordinal): ordinal is number => ordinal !== undefined)
+          )
+        ].sort((left, right) => left - right);
+        const actualSummaryOrdinals = [...new Set(document.summaryCitationOrdinals)].sort(
+          (left, right) => left - right
+        );
+        if (
+          expectedSummaryOrdinals.length === 0 ||
+          JSON.stringify(expectedSummaryOrdinals) !== JSON.stringify(actualSummaryOrdinals)
+        ) {
+          diagnostics.push(
+            `documents[${documentIndex}].summaryCitationOrdinals does not match its grounded lead claims`
+          );
+        }
+      }
       const summaryOrdinalError = citationOrdinalError(
         document.summaryCitationOrdinals,
         resolved.length,
@@ -326,7 +394,15 @@ export class KnowledgeOutputValidator {
       revisions.push(revision);
       citations.push(
         ...resolved.map((citation, ordinal) =>
-          createKnowledgeCitation(revision.id, ordinal, citation.claim, citation.anchor)
+          createKnowledgeCitation(
+            revision.id,
+            ordinal,
+            citation.claim,
+            citation.anchor,
+            citation.citationId && citation.claimSpan
+              ? { citationId: citation.citationId, claimSpan: citation.claimSpan }
+              : undefined
+          )
         )
       );
     }

@@ -1,0 +1,903 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import test from "node:test";
+
+const execFileAsync = promisify(execFile);
+const BOARD_TOPICS = [
+  "run-context-input-snapshot",
+  "run-context-research-plan",
+  "run-context-research",
+  "run-context-publication-plan",
+  "run-context-page-write",
+  "run-context-page-audit",
+  "run-context-page-repair",
+  "run-context-source-challenge",
+  "run-context-task-evaluation",
+  "run-context-gap-repair",
+  "run-context-certification",
+  "run-context-publication",
+  "run-context-pageindex"
+];
+const LEGACY_TOPICS = ["run-ingest-evidence", "run-derive-knowledge", "run-index-context"];
+
+const deployment = await readFile("scripts/cloud-build-deploy.sh", "utf8");
+const releaseCleanupLibrary = await readFile("scripts/cloud-release-cleanup-lib.sh", "utf8");
+const apiDockerfile = await readFile("apps/api/Dockerfile", "utf8");
+const workerDockerfile = await readFile("apps/worker/Dockerfile", "utf8");
+const pageIndexDockerfile = await readFile("services/pageindex-worker/Dockerfile", "utf8");
+const pageIndexWorker = await readFile("services/pageindex-worker/worker.py", "utf8");
+const cloudBuild = await readFile("cloudbuild.yaml", "utf8");
+const productionPreflight = await readFile("scripts/context-production-preflight.mjs", "utf8");
+const productionTriggerAcceptance = await readFile("scripts/context-production-trigger-e2e.mjs", "utf8");
+const apiServer = await readFile("apps/api/src/server.ts", "utf8");
+const workerServer = await readFile("apps/worker/src/server.ts", "utf8");
+const postgresStateStore = await readFile("packages/db/src/postgres-json-state-store.ts", "utf8");
+const databaseMigration = await readFile("packages/db/src/migrate.ts", "utf8");
+const deploymentDocs = await readFile("docs/DEPLOYMENT.md", "utf8");
+
+async function withFakeGcloud(source, callback) {
+  const directory = await mkdtemp(join(tmpdir(), "jina-deploy-gcloud-"));
+  const executable = join(directory, "gcloud");
+  await writeFile(executable, source);
+  await chmod(executable, 0o755);
+  try {
+    return await callback({
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      GCP_PROJECT_ID: "quality-project",
+      GCP_REGION: "us-central1",
+      CLOUD_BUILD_ID: "quality-build",
+      JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
+      JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
+test("production deployment shell is syntactically valid", async () => {
+  await execFileAsync("bash", ["-n", "scripts/cloud-build-deploy.sh"]);
+  await execFileAsync("bash", ["-n", "scripts/cloud-release-cleanup-lib.sh"]);
+  await execFileAsync(process.execPath, ["--check", "scripts/context-production-preflight.mjs"]);
+  await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
+});
+
+test("production jobs execute the image-baked preflight without an oversized environment variable", () => {
+  for (const dockerfile of [apiDockerfile, workerDockerfile]) {
+    assert.match(
+      dockerfile,
+      /COPY --chown=node:node scripts\/context-production-preflight\.mjs \/opt\/jina\/context-production-preflight\.mjs/
+    );
+  }
+  assert.match(
+    workerDockerfile,
+    /COPY --chown=node:node scripts\/context-production-trigger-e2e\.mjs \/opt\/jina\/context-production-trigger-e2e\.mjs/
+  );
+  assert.match(deployment, /production_preflight_path="\/opt\/jina\/context-production-preflight\.mjs"/);
+  assert.doesNotMatch(deployment, /JINA_PREFLIGHT_SOURCE_B64|preflight_program_b64|Buffer\.from\(.*base64/);
+  for (const action of ["daytona", "release-acquire", "schema-reset"]) {
+    assert.ok(deployment.includes(`--args="\${production_preflight_path},${action}"`), action);
+  }
+});
+
+test("candidate revisions pass full acceptance before production traffic changes", () => {
+  const acceptance = deployment.indexOf("gcloud run jobs execute jina-acceptance");
+  const cutover = deployment.indexOf('cutover_started="true"');
+  assert.ok(acceptance > 0);
+  assert.ok(cutover > acceptance);
+  assert.match(deployment, /--no-traffic/);
+  assert.match(deployment, /--tag="\$\{release_tag\}"/);
+  assert.match(deployment, /--revision-suffix="\$\{release_suffix\}"/);
+  assert.match(deployment, /candidate_service_url "jina-api"/);
+  assert.match(deployment, /route_candidate_revision "\$\{service\}"/);
+  assert.match(
+    deployment,
+    /route_candidate_revision\(\)[\s\S]+?--set-tags="\$\{release_tag\}=\$\{revision\}"[\s\S]+?--to-revisions="\$\{revision\}=100"/
+  );
+  assert.doesNotMatch(deployment, /route_latest_revision/);
+});
+
+test("background workers are quiesced and Board leases are proven empty before schema mutation", () => {
+  const daytona = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
+  const quiescence = deployment.indexOf('worker_quiescence_started="true"', daytona);
+  const contextDrain = deployment.indexOf(
+    'route_paused_worker_and_delete_prior_revisions "jina-context-worker"',
+    quiescence
+  );
+  const taskDrain = deployment.indexOf(
+    'route_paused_worker_and_delete_prior_revisions "jina-task-worker"',
+    contextDrain
+  );
+  const boardDrain = deployment.indexOf('run_release_control "board-drain"', taskDrain);
+  const boardVerify = deployment.indexOf('run_release_control "board-verify"', boardDrain);
+  const migration = deployment.indexOf("gcloud run jobs execute jina-context-migrate", boardVerify);
+
+  assert.ok(daytona > 0);
+  assert.ok(quiescence > daytona);
+  assert.ok(contextDrain > quiescence);
+  assert.ok(taskDrain > contextDrain);
+  assert.ok(boardDrain > taskDrain);
+  assert.ok(boardVerify > boardDrain);
+  assert.ok(migration > boardVerify);
+  assert.match(deployment, /JINA_WORKER_CLAIM_MODE=\$\{claim_mode\}/);
+  assert.match(deployment, /--clear-tags[\s\S]+?--to-revisions="\$\{drain_revision\}=100"/);
+  assert.match(deployment, /gcloud run revisions delete "\$\{revision\}"[\s\S]+?--no-async/);
+  assert.match(deployment, /wait_for_exact_worker_revisions "\$\{service\}" "\$\{drain_revision\}"/);
+});
+
+test("candidate traffic tags are short and validated against each live Cloud Run service identifier", () => {
+  assert.match(deployment, /short_release_id=.*cut -c1-16/);
+  assert.match(deployment, /release_tag="c-\$\{short_release_id\}"/);
+  assert.match(deployment, /tagged_label="\$\{release_tag\}---\$\{first_label\}"/);
+  assert.match(deployment, /if \(\( \$\{#tagged_label\} > 63 \)\)/);
+  const validation = deployment.indexOf(
+    "for service in jina-api jina-context-worker jina-task-worker jina-dashboard jina-admin"
+  );
+  const credentialVersion = deployment.indexOf("gcloud secrets versions add", validation);
+  assert.ok(validation > 0);
+  assert.ok(credentialVersion > validation);
+});
+
+test("coordinated releases hold one renewable durable lease and reject overlap before worker mutation", () => {
+  const acquire = deployment.indexOf('run_release_control "release-acquire"');
+  const renewal = deployment.indexOf("start_release_renewal", acquire);
+  const backup = deployment.indexOf("gcloud sql backups create", acquire);
+  const quiescence = deployment.indexOf('worker_quiescence_started="true"', acquire);
+  const release = deployment.indexOf('run_release_control "release-release"', quiescence);
+  assert.ok(acquire > 0);
+  assert.ok(renewal > acquire);
+  assert.ok(backup > renewal);
+  assert.ok(quiescence > backup);
+  assert.ok(release > quiescence);
+  assert.match(
+    productionPreflight,
+    /coordinated release \$\{row\.lease_release_id\} already holds the deployment lease/
+  );
+  assert.match(productionPreflight, /lease_expires_at=clock_timestamp\(\)\+\(\$1::text \|\| ' seconds'\)::interval/);
+  assert.match(productionPreflight, /pg_advisory_xact_lock\(hashtext\('jina_runtime\.release_control'\)\)/);
+  assert.match(productionPreflight, /revoke insert,update on jina_runtime\.api_state/);
+  assert.match(productionPreflight, /grant select,insert,update on jina_runtime\.api_state/);
+});
+
+test("schema and backup checks happen before quiescence and schema is rechecked under the release lease", () => {
+  const acquire = deployment.indexOf('run_release_control "release-acquire"');
+  const firstSchema = deployment.indexOf('run_release_control "schema-inspect"', acquire);
+  const backup = deployment.indexOf("gcloud sql backups create", firstSchema);
+  const quiescence = deployment.indexOf('worker_quiescence_started="true"', backup);
+  const secondSchema = deployment.indexOf('run_release_control "schema-inspect"', quiescence);
+  const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate", secondSchema);
+  assert.ok(firstSchema > acquire);
+  assert.ok(backup > firstSchema);
+  assert.ok(quiescence > backup);
+  assert.ok(secondSchema > quiescence);
+  assert.ok(migration > secondSchema);
+  assert.match(productionPreflight, /await assertDeploymentLease\(client\);[\s\S]+?await inspectSchemaDatabase/);
+});
+
+test("owner migration and destructive reset are bound to the live coordinated deployment lease", () => {
+  const migrationDeployment = deployment.match(
+    /gcloud run jobs deploy jina-context-migrate[\s\S]+?gcloud run jobs execute jina-context-migrate/
+  )?.[0];
+  const resetDeployment = deployment.match(
+    /gcloud run jobs deploy jina-context-legacy-reset[\s\S]+?gcloud run jobs execute jina-context-legacy-reset/
+  )?.[0];
+  assert.ok(migrationDeployment);
+  assert.ok(resetDeployment);
+  for (const job of [migrationDeployment, resetDeployment]) {
+    assert.match(job, /JINA_WORKER_RELEASE_ID=\$\{CLOUD_BUILD_ID\}/);
+    assert.match(
+      job,
+      /JINA_WORKER_RELEASE_CREDENTIAL=\$\{worker_release_secret\}:\$\{deployment_release_secret_version\}/
+    );
+  }
+  assert.match(databaseMigration, /pg_advisory_lock\(hashtext\('jina_runtime\.api_state'\)\)/);
+  assert.match(databaseMigration, /lease_credential_sha256=\$2/);
+  assert.match(databaseMigration, /lease_expires_at > clock_timestamp\(\)/);
+  assert.match(productionPreflight, /assertDeploymentLease\(client, true\)/);
+  assert.match(productionPreflight, /if \(action !== "release-renew"\)/);
+});
+
+test("failed unaccepted candidates are paused, removed, fenced, and independently verified before lease release", () => {
+  const trap = deployment.indexOf("rollback_failed_release()");
+  const pause = deployment.indexOf('run_release_control "worker-pause"', trap);
+  const contextDrain = deployment.indexOf(
+    'route_paused_worker_and_delete_prior_revisions \\\n      "jina-context-worker"',
+    pause
+  );
+  const taskDrain = deployment.indexOf(
+    'route_paused_worker_and_delete_prior_revisions \\\n      "jina-task-worker"',
+    contextDrain
+  );
+  const drain = deployment.indexOf('run_release_control "board-drain"', taskDrain);
+  const verify = deployment.indexOf('run_release_control "board-verify"', drain);
+  const destroyGeneration = deployment.indexOf("destroy_worker_release_credential_verified", verify);
+  const stopRenewal = deployment.indexOf("stop_release_renewal", destroyGeneration);
+  const release = deployment.indexOf('run_release_control "release-release"', stopRenewal);
+  assert.ok(pause > trap);
+  assert.ok(contextDrain > pause);
+  assert.ok(taskDrain > contextDrain);
+  assert.ok(drain > taskDrain);
+  assert.ok(verify > drain);
+  assert.ok(destroyGeneration > verify);
+  assert.ok(stopRenewal > destroyGeneration);
+  assert.ok(release > stopRenewal);
+  assert.match(
+    deployment,
+    /destroy_worker_release_credential_verified \|\| cleanup_ok="false"[\s\S]+?extend_release_lease_for_repair \|\| true[\s\S]+?stop_release_renewal/
+  );
+  assert.match(
+    deployment,
+    /Unable to route \$\{service\} to paused drain \$\{drain_revision\}; no revisions were deleted/
+  );
+});
+
+test("release and worker credentials are independent and only the worker digest enters the generation gate", () => {
+  assert.match(deployment, /deployment_release_credential=.*secrets\.token_urlsafe/);
+  assert.match(deployment, /worker_release_credential=.*secrets\.token_urlsafe/);
+  assert.match(deployment, /JINA_WORKER_GENERATION_CREDENTIAL_SHA256=\$\{worker_release_credential_sha256\}/);
+  assert.match(productionPreflight, /const workerCredentialSha256 = requiredWorkerGenerationCredentialSha256\(\)/);
+  assert.match(productionPreflight, /\[release\.releaseId, workerCredentialSha256, contextRevision, taskRevision\]/);
+  assert.match(
+    deployment,
+    /JINA_WORKER_RELEASE_CREDENTIAL=\$\{worker_release_secret\}:\$\{worker_release_secret_version\}/
+  );
+});
+
+test("accepted cutover cleanup is verified and cannot invoke candidate rollback", () => {
+  const release = deployment.lastIndexOf('run_release_control "release-release"');
+  const accepted = deployment.indexOf('accepted_cutover_complete="true"', release);
+  const destroyControl = deployment.indexOf("destroy_deployment_release_credential_verified", accepted);
+  const deleteJob = deployment.indexOf("delete_release_control_job_verified", destroyControl);
+  assert.ok(release > 0);
+  assert.ok(accepted > release);
+  assert.ok(destroyControl > accepted);
+  assert.ok(deleteJob > destroyControl);
+  assert.match(
+    deployment,
+    /if \[\[ "\$\{status\}" -ne 0 && "\$\{accepted_cutover_complete\}" == "true" \]\]; then[\s\S]+?Production traffic and the accepted worker generation were[\s\S]+?deliberately left unchanged/
+  );
+  assert.match(releaseCleanupLibrary, /for \(\(attempt = 1; attempt <= release_cleanup_attempts; attempt \+= 1\)\)/);
+  assert.match(releaseCleanupLibrary, /gcloud run jobs list[\s\S]+?metadata\.name=\$\{release_control_job\}/);
+  assert.match(releaseCleanupLibrary, /\[\[ "\$\{state\}" == "DESTROYED" \]\]/);
+});
+
+test("cleanup helpers retry transient fake-gcloud failures and verify final absence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jina-release-cleanup-"));
+  const executable = join(directory, "gcloud");
+  const stateDirectory = join(directory, "state");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env bash
+set -eu
+command="$1 $2 $3"
+if [[ "\${command}" == "run jobs delete" ]]; then
+  count_file="\${FAKE_STATE}/job-delete-count"
+  count=0
+  [[ ! -f "\${count_file}" ]] || count="$(cat "\${count_file}")"
+  count=$((count + 1))
+  printf '%s' "\${count}" >"\${count_file}"
+  if (( count == 1 )); then exit 1; fi
+  rm -f "\${FAKE_STATE}/job"
+  exit 0
+fi
+if [[ "\${command}" == "run jobs list" ]]; then
+  [[ ! -f "\${FAKE_STATE}/job" ]] || printf '%s\\n' "jina-context-release-test"
+  exit 0
+fi
+if [[ "\${command}" == "secrets versions destroy" ]]; then
+  count_file="\${FAKE_STATE}/secret-destroy-count"
+  count=0
+  [[ ! -f "\${count_file}" ]] || count="$(cat "\${count_file}")"
+  count=$((count + 1))
+  printf '%s' "\${count}" >"\${count_file}"
+  if (( count == 1 )); then exit 1; fi
+  printf '%s' "DESTROYED" >"\${FAKE_STATE}/secret-state"
+  exit 0
+fi
+if [[ "\${command}" == "secrets versions describe" ]]; then
+  cat "\${FAKE_STATE}/secret-state"
+  exit 0
+fi
+exit 97
+`
+  );
+  await chmod(executable, 0o755);
+  await execFileAsync("mkdir", ["-p", stateDirectory]);
+  await writeFile(join(stateDirectory, "job"), "present");
+  await writeFile(join(stateDirectory, "secret-state"), "ENABLED");
+  try {
+    await execFileAsync(
+      "bash",
+      [
+        "-c",
+        'source scripts/cloud-release-cleanup-lib.sh; delete_release_control_job_verified; destroy_release_secret_version_verified 7 "test credential"'
+      ],
+      {
+        env: {
+          ...process.env,
+          PATH: `${directory}:${process.env.PATH}`,
+          FAKE_STATE: stateDirectory,
+          GCP_PROJECT_ID: "quality-project",
+          GCP_REGION: "us-central1",
+          release_control_job: "jina-context-release-test",
+          worker_release_secret: "jina-worker-release-credential",
+          JINA_RELEASE_CLEANUP_RETRY_SECONDS: "0"
+        }
+      }
+    );
+    assert.equal(await readFile(join(stateDirectory, "job-delete-count"), "utf8"), "2");
+    assert.equal(await readFile(join(stateDirectory, "secret-destroy-count"), "utf8"), "2");
+    assert.equal(await readFile(join(stateDirectory, "secret-state"), "utf8"), "DESTROYED");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("secret cleanup fails closed when fake gcloud never verifies destruction", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jina-release-cleanup-fail-"));
+  const executable = join(directory, "gcloud");
+  await writeFile(
+    executable,
+    `#!/usr/bin/env bash
+if [[ "$1 $2 $3" == "secrets versions describe" ]]; then printf '%s\\n' ENABLED; exit 0; fi
+exit 1
+`
+  );
+  await chmod(executable, 0o755);
+  try {
+    await assert.rejects(
+      execFileAsync(
+        "bash",
+        [
+          "-c",
+          'source scripts/cloud-release-cleanup-lib.sh; destroy_release_secret_version_verified 9 "test credential"'
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${directory}:${process.env.PATH}`,
+            GCP_PROJECT_ID: "quality-project",
+            GCP_REGION: "us-central1",
+            worker_release_secret: "jina-worker-release-credential",
+            JINA_RELEASE_CLEANUP_ATTEMPTS: "2",
+            JINA_RELEASE_CLEANUP_RETRY_SECONDS: "0"
+          }
+        }
+      ),
+      /was not verified DESTROYED after 2 attempts/
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("production preflight fences the exact durable Board leases and independently verifies zero", () => {
+  assert.match(productionPreflight, /command === "board-drain"/);
+  assert.match(productionPreflight, /command === "board-verify"/);
+  assert.match(productionPreflight, /select pg_advisory_xact_lock\(hashtext\('jina_runtime\.api_state'\)\)/);
+  assert.match(productionPreflight, /select snapshot from jina_runtime\.api_state where id=1 for update/);
+  assert.match(productionPreflight, /fenceBoardSnapshot\(snapshot, board\.fenceOutboxLeases/);
+  assert.match(productionPreflight, /set snapshot=\$1::jsonb,version=version\+1,updated_at=clock_timestamp\(\)/);
+  assert.match(productionPreflight, /Board drain did not fence exactly the active lease inventory/);
+  assert.match(productionPreflight, /Board has \$\{leases\.length\} active leases after worker drain/);
+});
+
+test("acceptance can be claimed only by the exact coordinated candidate worker revisions", () => {
+  const isolation = deployment.indexOf("verify_candidate_worker_isolation \\");
+  const acceptance = deployment.indexOf("gcloud run jobs execute jina-acceptance");
+  const cutover = deployment.indexOf('cutover_started="true"');
+  const drainCleanup = deployment.indexOf('gcloud run revisions delete "${context_drain_revision}"', cutover);
+
+  assert.ok(isolation > 0);
+  assert.ok(acceptance > isolation);
+  assert.ok(cutover > acceptance);
+  assert.ok(drainCleanup > cutover);
+  assert.match(deployment, /EXPECTED_IMAGE="\$\{worker_image\}"/);
+  assert.match(deployment, /candidate_env\.get\("JINA_WORKER_CLAIM_MODE"\) != "enabled"/);
+  assert.match(deployment, /drain_env\.get\("JINA_WORKER_CLAIM_MODE"\) != "paused"/);
+  assert.match(deployment, /candidate_env\.get\("JINA_API_URL"\) != expected_api_url/);
+  assert.match(deployment, /candidate_env\.get\("JINA_WORKER_RELEASE_ID"\) != expected_release_id/);
+  assert.match(apiServer, /requireWorkerReleaseGate/);
+  assert.match(apiServer, /workerReleaseCredential/);
+  assert.match(workerServer, /workerReleaseRequestBody/);
+  assert.match(postgresStateStore, /from jina_runtime\.release_control/);
+  assert.match(postgresStateStore, /worker_claims_enabled/);
+  assert.match(
+    deployment,
+    /wait_for_exact_worker_revisions "jina-context-worker" "jina-context-worker-\$\{release_suffix\}"/
+  );
+  assert.match(deploymentDocs, /Prior\s+worker revisions are not rollback candidates/);
+});
+
+test("deployment verifies a primary backup before migration and one-time reset", () => {
+  const backup = deployment.indexOf("gcloud sql backups create");
+  const status = deployment.indexOf('context_backup_status="$(gcloud sql backups describe');
+  const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
+  const reset = deployment.indexOf("gcloud run jobs deploy jina-context-legacy-reset");
+  assert.ok(backup > 0);
+  assert.ok(status > backup);
+  assert.ok(migration > status);
+  assert.ok(reset > migration);
+  assert.match(deployment, /JINA_CONTEXT_RESET_BACKUP_ID=\$\{context_backup_id\}/);
+  assert.match(deployment, /context_backup_status.*SUCCESSFUL/s);
+  assert.match(deployment, /roles\/jinaContextBackupOperator binding/);
+});
+
+test("one-time production reset is schema-exact and preserves the generic task board", () => {
+  assert.match(productionPreflight, /assertExactSet\(tables, legacy, "one-time legacy Context schema"\)/);
+  assert.match(productionPreflight, /assertPreservedShapes/);
+  assert.match(productionPreflight, /preservedDigests/);
+  assert.match(productionPreflight, /drop table \$\{LEGACY_CONTEXT_TABLES/);
+  assert.doesNotMatch(productionPreflight, /drop table[^;]*cascade/i);
+  assert.doesNotMatch(productionPreflight, /truncate[^;]*jina_runtime\.api_state/i);
+  assert.doesNotMatch(productionPreflight, /delete[^;]*jina_runtime\.api_state/i);
+  assert.match(cloudBuild, /_JINA_CONTEXT_RESET_MODE: disabled[\s\S]+?_JINA_CONFIRM_CONTEXT_RESET: ""/);
+});
+
+test("artifact bucket is a precreated least-privilege platform prerequisite", () => {
+  const prerequisite = deployment.indexOf("require_artifact_bucket_prerequisites");
+  const backup = deployment.indexOf("gcloud sql backups create");
+  assert.ok(prerequisite > 0);
+  assert.ok(backup > prerequisite);
+  assert.match(deployment, /the deployment will not create it/);
+  assert.match(deployment, /unconditional bucket-scoped roles\/storage\.admin binding/);
+  assert.match(deployment, /public IAM principals are forbidden/);
+  assert.doesNotMatch(deployment, /gcloud storage buckets create/);
+  assert.doesNotMatch(deployment, /gcloud storage buckets update/);
+  assert.doesNotMatch(deployment, /--lifecycle-file/);
+  assert.doesNotMatch(deployment, /JINA_CONTEXT_ARTIFACT_RETENTION_DAYS/);
+  assert.match(deploymentDocs, /roles\/jinaContextBackupOperator/);
+  assert.match(deploymentDocs, /--uniform-bucket-level-access/);
+  assert.match(deploymentDocs, /--public-access-prevention/);
+  assert.match(deploymentDocs, /Never grant `roles\/storage\.admin`[\s\S]+at project scope/);
+});
+
+test("deployment fails clearly and before mutation when the artifact bucket is absent", async () => {
+  await withFakeGcloud("#!/usr/bin/env bash\nexit 1\n", async (env) => {
+    await assert.rejects(execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], { env }), (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /Artifact bucket gs:\/\/quality-project-jina-context-artifacts is missing/);
+      assert.match(error.stderr, /platform prerequisite; the deployment will not create it/);
+      assert.match(error.stderr, /roles\/storage\.admin[\s\S]+on that bucket only/);
+      assert.doesNotMatch(error.stderr, /Cloud SQL backup/);
+      return true;
+    });
+  });
+});
+
+test("deployment fails clearly without bucket-scoped build storage administration", async () => {
+  const fakeGcloud = `#!/usr/bin/env bash
+if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-CENTRAL1","location_type":"region","uniform_bucket_level_access":true}'
+  exit 0
+fi
+if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
+  printf '%s\\n' '{"bindings":[]}'
+  exit 0
+fi
+exit 97
+`;
+  await withFakeGcloud(fakeGcloud, async (env) => {
+    await assert.rejects(execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], { env }), (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /needs an unconditional bucket-scoped roles\/storage\.admin binding/);
+      assert.doesNotMatch(error.stderr, /Cloud SQL backup/);
+      return true;
+    });
+  });
+});
+
+test("deployment rejects blanket lifecycle rules on retained Context artifacts", async () => {
+  const fakeGcloud = `#!/usr/bin/env bash
+if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-CENTRAL1","location_type":"region","uniform_bucket_level_access":true,"lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":30}}]}}'
+  exit 0
+fi
+exit 97
+`;
+  await withFakeGcloud(fakeGcloud, async (env) => {
+    await assert.rejects(execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], { env }), (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /lifecycle rules must be absent; Context retention is reference-aware/);
+      assert.doesNotMatch(error.stderr, /Cloud SQL backup/);
+      return true;
+    });
+  });
+});
+
+test("deployment rejects public artifact-bucket principals", async () => {
+  const fakeGcloud = `#!/usr/bin/env bash
+if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-CENTRAL1","location_type":"region","uniform_bucket_level_access":true}'
+  exit 0
+fi
+if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
+  printf '%s\\n' '{"bindings":[{"role":"roles/storage.admin","members":["serviceAccount:jina-cloud-build-deployer@quality-project.iam.gserviceaccount.com"]},{"role":"roles/storage.objectViewer","members":["allUsers"]}]}'
+  exit 0
+fi
+exit 97
+`;
+  await withFakeGcloud(fakeGcloud, async (env) => {
+    await assert.rejects(execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], { env }), (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /public IAM principals are forbidden/);
+      assert.doesNotMatch(error.stderr, /Cloud SQL backup/);
+      return true;
+    });
+  });
+});
+
+test("production acceptance uses a registered fixture with a Cloud Build override", () => {
+  assert.match(cloudBuild, /_JINA_ACCEPTANCE_REPOSITORY: omxyz\/jina-context-graph-e2e/);
+  assert.match(cloudBuild, /JINA_ACCEPTANCE_REPOSITORY=\$\{_JINA_ACCEPTANCE_REPOSITORY\}/);
+  assert.match(deployment, /acceptance_repository="\$\{JINA_ACCEPTANCE_REPOSITORY:-omxyz\/jina-context-graph-e2e\}"/);
+  assert.match(deployment, /ACCEPTANCE_REPOSITORY=\$\{acceptance_repository\}/);
+});
+
+test("post-cutover trigger acceptance is deployed with a distinct least-scope fixture identity and never auto-runs", () => {
+  for (const [name, value] of [
+    ["JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET", "jina-trigger-acceptance-github-app-id"],
+    ["JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET", "jina-trigger-acceptance-github-app-private-key"],
+    ["JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID", "150069172"]
+  ]) {
+    assert.match(cloudBuild, new RegExp(`${name}=\\$\\{_${name}\\}`));
+    assert.match(cloudBuild, new RegExp(`_${name}: "?${value}"?`));
+  }
+
+  const cleanup = deployment.indexOf('if [[ "${post_cutover_cleanup_ok}" != "true" ]]');
+  const jobDeployment = deployment.indexOf('gcloud run jobs deploy "${trigger_acceptance_job}"');
+  assert.ok(cleanup > 0);
+  assert.ok(jobDeployment > cleanup);
+  assert.doesNotMatch(deployment, /gcloud run jobs execute "\$\{trigger_acceptance_job\}"/);
+  assert.doesNotMatch(deployment, /gcloud run jobs execute jina-context-production-trigger-acceptance/);
+
+  const jobBlock =
+    deployment.match(/gcloud run jobs deploy "\$\{trigger_acceptance_job\}"[\s\S]+?--quiet\n/)?.[0] ?? "";
+  assert.ok(jobBlock);
+  assert.match(jobBlock, /--service-account="\$\{trigger_acceptance_service_account\}"/);
+  assert.match(jobBlock, /GITHUB_APP_ID=jina-github-app-id:latest/);
+  assert.match(jobBlock, /GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest/);
+  assert.match(jobBlock, /GITHUB_FIXTURE_APP_ID=\$\{trigger_acceptance_github_app_id_secret\}:latest/);
+  assert.match(
+    jobBlock,
+    /GITHUB_FIXTURE_APP_PRIVATE_KEY=\$\{trigger_acceptance_github_app_private_key_secret\}:latest/
+  );
+  assert.match(jobBlock, /--installation-id,\$\{acceptance_github_installation_id\}/);
+  assert.match(jobBlock, /--fixture-installation-id,\$\{trigger_acceptance_github_installation_id\}/);
+  assert.match(jobBlock, /--repository,\$\{acceptance_repository\}/);
+  assert.match(jobBlock, /--confirm-repository,\$\{acceptance_repository\}/);
+  assert.match(jobBlock, /--task-timeout=86400s/);
+  assert.match(deployment, /stable_api_url="\$\(stable_service_url "jina-api"\)"/);
+  assert.match(
+    deployment,
+    /trigger_acceptance_service_account="jina-trigger-acceptance@\$\{GCP_PROJECT_ID\}\.iam\.gserviceaccount\.com"/
+  );
+  assert.match(productionTriggerAcceptance, /fixtureGithubAppId must differ from the operational githubAppId/);
+  assert.match(productionTriggerAcceptance, /fixtureInstallationId must differ from the operational installationId/);
+
+  const contextWorkerDeployments = [
+    ...deployment.matchAll(
+      /gcloud run deploy jina-context-worker[\s\S]+?wait_for_candidate_revision "jina-context-worker"[^\n]*\n/g
+    )
+  ].map((match) => match[0]);
+  assert.ok(contextWorkerDeployments.length >= 2);
+  for (const block of contextWorkerDeployments) {
+    assert.doesNotMatch(block, /GITHUB_FIXTURE_APP/);
+  }
+  const candidateAcceptance =
+    deployment.match(/gcloud run jobs deploy jina-acceptance[\s\S]+?acceptance_status=0/)?.[0] ?? "";
+  assert.doesNotMatch(candidateAcceptance, /GITHUB_FIXTURE_APP/);
+});
+
+test("deployment rejects shared trigger and operational fixture credentials before cloud mutation", async () => {
+  await withFakeGcloud("#!/usr/bin/env bash\nexit 97\n", async (env) => {
+    await assert.rejects(
+      execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+        env: {
+          ...env,
+          JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029",
+          JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
+        }
+      }),
+      (error) => {
+        assert.equal(error.code, 2);
+        assert.match(error.stderr, /installation IDs must differ/);
+        return true;
+      }
+    );
+    await assert.rejects(
+      execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+        env: {
+          ...env,
+          JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET: "jina-github-app-id"
+        }
+      }),
+      (error) => {
+        assert.equal(error.code, 2);
+        assert.match(error.stderr, /secrets must be distinct/);
+        return true;
+      }
+    );
+  });
+});
+
+test("deployment rejects an invalid acceptance repository before cloud mutation", async () => {
+  await withFakeGcloud("#!/usr/bin/env bash\nexit 97\n", async (env) => {
+    await assert.rejects(
+      execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+        env: { ...env, JINA_ACCEPTANCE_REPOSITORY: "omxyz/repository/extra" }
+      }),
+      (error) => {
+        assert.equal(error.code, 2);
+        assert.match(error.stderr, /JINA_ACCEPTANCE_REPOSITORY must be an owner\/repository name/);
+        return true;
+      }
+    );
+  });
+});
+
+test("production gate has a measured three-hour acceptance window", () => {
+  assert.match(cloudBuild, /_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS: "10800"/);
+  assert.match(cloudBuild, /_JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"/);
+  assert.match(cloudBuild, /_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"/);
+  assert.match(cloudBuild, /timeout: 21600s/);
+  assert.match(deployment, /ACCEPTANCE_TIMEOUT_MS=\$\{acceptance_timeout_ms\}/);
+  assert.match(deployment, /--task-timeout="\$\{acceptance_job_timeout_seconds\}s"/);
+});
+
+test("Daytona snapshot, Secret reference, and Codex toolchain are probed before Cloud SQL mutation", () => {
+  const preflight = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
+  const backup = deployment.indexOf("gcloud sql backups create");
+  const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
+  assert.ok(preflight > 0);
+  assert.ok(backup > preflight);
+  assert.ok(migration > backup);
+  assert.match(productionPreflight, /daytona\.snapshot\.get/);
+  assert.match(productionPreflight, /secrets: \{ \[secretEnvironment\]: secretName \}/);
+  assert.match(productionPreflight, /command -v codex >\/dev\/null/);
+  assert.match(productionPreflight, /-m gpt-5\.6-terra/);
+  assert.match(productionPreflight, /model_reasoning_effort=low/);
+  assert.match(productionPreflight, /model_provider="openai_direct"/);
+  assert.match(productionPreflight, /model_providers\.openai_direct\.env_key/);
+  assert.match(productionPreflight, /model_providers\.openai_direct\.wire_api="responses"/);
+  assert.match(productionPreflight, /AUTH_OK/);
+  assert.match(productionPreflight, /command -v bwrap/);
+  assert.match(productionPreflight, /sandbox_workspace_write\.writable_roots/);
+  assert.match(productionPreflight, /jina-preflight-output\/tool-ok/);
+  assert.match(productionPreflight, /ephemeral: true/);
+});
+
+test("production context worker claims exactly the Board topics", () => {
+  const configured = /^context_board_topics="([^"]+)"$/m.exec(deployment)?.[1]?.split("|") ?? [];
+
+  assert.deepEqual(configured, BOARD_TOPICS);
+  for (const topic of LEGACY_TOPICS) assert.doesNotMatch(deployment, new RegExp(topic));
+  assert.match(deployment, /WORKER_TOPICS=\$\{context_board_topics\}/);
+});
+
+test("production Board agents are Daytona-only and do not receive the host model key", () => {
+  assert.match(deployment, /CONTEXT_BOARD_EXECUTOR=daytona/);
+  assert.match(deployment, /CONTEXT_DAYTONA_MODEL_SECRET=/);
+  assert.match(deployment, /CONTEXT_DAYTONA_MODEL_SECRET_ENV=/);
+  assert.match(deployment, /CONTEXT_DAYTONA_MODEL_DOMAINS=/);
+  assert.match(deployment, /CONTEXT_DAYTONA_(?:SNAPSHOT|IMAGE)=/);
+  assert.match(
+    deployment,
+    /--set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=/
+  );
+
+  const workerDeployment =
+    deployment.match(
+      /gcloud run deploy jina-context-worker[\s\S]+?wait_for_candidate_revision "jina-context-worker"/
+    )?.[0] ?? "";
+  assert.ok(workerDeployment);
+  assert.doesNotMatch(workerDeployment, /OPENAI_API_KEY=jina-openai-api-key/);
+});
+
+test("production storage, quota database, and PageIndex dependencies are explicit", () => {
+  assert.match(deployment, /CONTEXT_GCS_BUCKET=\$\{context_artifact_bucket\}/);
+  assert.match(deployment, /--set-cloudsql-instances="\$\{cloud_sql_instance\}"/);
+  assert.match(deployment, /migrate\.js,--install-roles/);
+  assert.match(deployment, /CONTEXT_PAGEINDEX_PYTHON=\/opt\/pageindex-venv\/bin\/python/);
+  assert.match(deployment, /CONTEXT_PAGEINDEX_WORKER=\/opt\/pageindex-worker\/worker\.py/);
+  assert.match(deployment, /PAGEINDEX_SOURCE_ROOT=\/opt\/PageIndex/);
+
+  for (const dockerfile of [workerDockerfile, pageIndexDockerfile]) {
+    assert.match(dockerfile, /982514ab40fe42a169ea087c13819cf87c87724f/);
+    assert.match(dockerfile, /worker\.py --probe/);
+  }
+  assert.match(workerDockerfile, /COPY --from=pageindex --chown=node:node \/opt\/PageIndex \/opt\/PageIndex/);
+  assert.match(workerDockerfile, /COPY --from=pageindex --chown=node:node \/opt\/pageindex-venv \/opt\/pageindex-venv/);
+  assert.match(pageIndexWorker, /ADAPTER_VERSION = "982514ab40fe42a169ea087c13819cf87c87724f"/);
+  assert.match(pageIndexWorker, /SOURCE_PIN = ADAPTER_VERSION/);
+  assert.match(pageIndexWorker, /SOURCE_DIGEST = "[0-9a-f]{64}"/);
+  assert.match(pageIndexWorker, /"sourceDigest": verified_source_digest\(\)/);
+  assert.match(pageIndexWorker, /import_module\("page_index_md"\)/);
+  assert.doesNotMatch(pageIndexWorker, /import_module\("pageindex\.page_index_md"\)/);
+  assert.match(workerDockerfile, /apt-get install[^]*\btar\b/);
+  assert.doesNotMatch(apiDockerfile, /CODEX_BINARY|@openai\/codex/);
+  assert.doesNotMatch(deployment.match(/^api_env_vars=.*$/m)?.[0] ?? "", /CONTEXT_(?:TREE_SELECTOR|CODEX_)/);
+  assert.doesNotMatch(deployment.match(/^api_secrets=.*$/m)?.[0] ?? "", /OPENAI_API_KEY/);
+  assert.doesNotMatch(apiDockerfile, /PageIndex|pageindex-worker/);
+});
+
+test("production acceptance receives both web surfaces and only its bounded credentials", () => {
+  const acceptanceDeployment = deployment.match(
+    /gcloud run jobs deploy jina-acceptance[\s\S]+?acceptance_status=0/
+  )?.[0];
+  assert.ok(acceptanceDeployment);
+
+  assert.match(deployment, /ACCEPTANCE_DASHBOARD_URL=\$\{dashboard_url\}/);
+  assert.match(deployment, /ACCEPTANCE_DASHBOARD_AUDIENCE=\$\{dashboard_audience\}/);
+  assert.match(deployment, /ACCEPTANCE_ADMIN_URL=\$\{admin_url\}/);
+  assert.match(deployment, /ACCEPTANCE_CONTEXT_WORKER_AUDIENCE=\$\{context_worker_audience\}/);
+  assert.match(deployment, /ACCEPTANCE_TASK_WORKER_AUDIENCE=\$\{task_worker_audience\}/);
+  assert.match(deployment, /context_worker_url="\$\(candidate_service_url "jina-context-worker"\)"/);
+  assert.match(deployment, /task_worker_url="\$\(candidate_service_url "jina-task-worker"\)"/);
+  assert.match(deployment, /dashboard_url="\$\(candidate_service_url "jina-dashboard"\)"/);
+  assert.match(deployment, /dashboard_audience="\$\(stable_service_url "jina-dashboard"\)"/);
+  assert.match(deployment, /context_worker_audience="\$\(stable_service_url "jina-context-worker"\)"/);
+  assert.match(deployment, /task_worker_audience="\$\(stable_service_url "jina-task-worker"\)"/);
+  assert.match(
+    deployment,
+    /stable_service_url\(\)[\s\S]+?--format='value\(status\.url\)'[\s\S]+?printf '%s\\n' "\$\{url\}"/
+  );
+  assert.match(deployment, /ACCEPTANCE_WEB_AUTH_USERNAME=omlabs/);
+  assert.match(
+    acceptanceDeployment,
+    /INTERNAL_API_TOKEN=jina-internal-api-token:latest,ACCEPTANCE_WEB_AUTH_PASSWORD=jina-web-auth-password:latest/
+  );
+  assert.doesNotMatch(acceptanceDeployment, /CONTEXT_API_TOKEN/);
+  assert.match(deployment, /^api_secrets=.*CONTEXT_API_TOKEN=jina-context-api-token:latest/m);
+  assert.match(
+    deployment,
+    /gcloud run services add-iam-policy-binding jina-dashboard[\s\S]+?serviceAccount:\$\{acceptance_service_account\}[\s\S]+?roles\/run\.invoker/
+  );
+});
+
+test("coordinated Cloud Build requires Daytona sandbox and model Secret substitutions", () => {
+  for (const name of [
+    "JINA_CONTEXT_DAYTONA_SNAPSHOT",
+    "JINA_CONTEXT_DAYTONA_IMAGE",
+    "JINA_CONTEXT_DAYTONA_MODEL_SECRET",
+    "JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV",
+    "JINA_CONTEXT_DAYTONA_MODEL_DOMAINS"
+  ]) {
+    assert.match(cloudBuild, new RegExp(`${name}=\\$\\{_${name}\\}`));
+  }
+});
+
+test("deployment fails before cloud mutation without an explicit Daytona sandbox", async () => {
+  await assert.rejects(
+    execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_REGION: "us-central1",
+        CLOUD_BUILD_ID: "quality-build",
+        JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /Exactly one JINA_CONTEXT_DAYTONA_SNAPSHOT or JINA_CONTEXT_DAYTONA_IMAGE is required/);
+      assert.doesNotMatch(error.stderr, /gcloud/);
+      return true;
+    }
+  );
+});
+
+test("deployment fails before cloud mutation when both Daytona sandbox selectors are set", async () => {
+  await assert.rejects(
+    execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_REGION: "us-central1",
+        CLOUD_BUILD_ID: "quality-build",
+        JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
+        JINA_CONTEXT_DAYTONA_IMAGE: "registry.example/agent@sha256:abc",
+        JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /Exactly one JINA_CONTEXT_DAYTONA_SNAPSHOT or JINA_CONTEXT_DAYTONA_IMAGE is required/);
+      return true;
+    }
+  );
+});
+
+test("deployment fails before cloud mutation without a Daytona model Secret name", async () => {
+  await assert.rejects(
+    execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_REGION: "us-central1",
+        CLOUD_BUILD_ID: "quality-build",
+        JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
+        JINA_CONTEXT_DAYTONA_MODEL_SECRET: ""
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /JINA_CONTEXT_DAYTONA_MODEL_SECRET must name a Daytona organization Secret/);
+      assert.doesNotMatch(error.stderr, /gcloud/);
+      return true;
+    }
+  );
+});
+
+test("deployment rejects a mutable Daytona image before cloud mutation", async () => {
+  await assert.rejects(
+    execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_REGION: "us-central1",
+        CLOUD_BUILD_ID: "quality-build",
+        JINA_CONTEXT_DAYTONA_IMAGE: "registry.example/agent:latest",
+        JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /JINA_CONTEXT_DAYTONA_IMAGE must be pinned by sha256 digest/);
+      assert.doesNotMatch(error.stderr, /gcloud/);
+      return true;
+    }
+  );
+});
+
+test("deployment rejects a model credential in place of a Daytona Secret name", async () => {
+  const credentialValue = "sk-proj-private-model-credential";
+  await assert.rejects(
+    execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_REGION: "us-central1",
+        CLOUD_BUILD_ID: "quality-build",
+        JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
+        JINA_CONTEXT_DAYTONA_MODEL_SECRET: credentialValue
+      }
+    }),
+    (error) => {
+      assert.equal(error.code, 2);
+      assert.match(error.stderr, /must name a Daytona organization Secret/);
+      assert.doesNotMatch(error.stderr, new RegExp(credentialValue));
+      assert.doesNotMatch(error.stderr, /gcloud/);
+      return true;
+    }
+  );
+});
+
+test("deployment rejects an invalid Daytona network allowlist before cloud mutation", async () => {
+  await assert.rejects(
+    execFileAsync("bash", ["scripts/cloud-build-deploy.sh"], {
+      env: {
+        ...process.env,
+        GCP_PROJECT_ID: "quality-project",
+        GCP_REGION: "us-central1",
+        CLOUD_BUILD_ID: "quality-build",
+        JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
+        JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret",
+        JINA_CONTEXT_DAYTONA_MODEL_DOMAINS: "api.openai.com,https://example.com"
+      }
+    }),
+    (error) => {
+      assert.notEqual(error.code, 0);
+      assert.match(
+        error.stderr,
+        /JINA_CONTEXT_DAYTONA_MODEL_DOMAINS must contain 1\.\.8 valid comma-separated domains/
+      );
+      assert.doesNotMatch(error.stderr, /gcloud/);
+      return true;
+    }
+  );
+});

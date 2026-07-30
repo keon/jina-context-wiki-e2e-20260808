@@ -12,6 +12,7 @@ const CONTEXT_ROLES = [
   "jina_context_acl",
   "jina_context_retention",
   "jina_context_query",
+  "jina_context_quota",
   "jina_context_tokens",
   "jina_context_tenant_admin",
   "jina_context_admin"
@@ -42,8 +43,6 @@ const tenantScopeSql = (column = "tenant_id", allowAdminSystemScope = true) =>
 
 const tenantScopedTables = [
   "repositories",
-  "pipeline_builds",
-  "pipeline_stages",
   "observations",
   "evidence_records",
   "evidence_checkpoints",
@@ -73,6 +72,8 @@ const tenantScopedTables = [
   "erasure_filters",
   "audit_events",
   "index_generations",
+  "context_board_publications",
+  "current_context_board_releases",
   "ref_manifest",
   "current_knowledge_revisions",
   "context_documents",
@@ -84,8 +85,8 @@ const tenantScopedTables = [
   "repository_acl_projection",
   "query_runs",
   "retrieval_metrics",
-  "api_tokens",
-  "derivation_progress"
+  "context_quota_ledgers",
+  "api_tokens"
 ] as const;
 
 /**
@@ -111,9 +112,6 @@ revoke execute on all functions in schema jina_context from public;
 
 grant usage on schema jina_context to ${CONTEXT_ROLES.join(",")};
 
-grant select,insert,update on
-  jina_context.pipeline_builds,jina_context.pipeline_stages
-to jina_context_coordinator;
 grant select,insert,update on jina_context.repositories to jina_context_coordinator;
 grant select,insert,update on
   jina_context.index_generations,jina_context.generation_projectors,
@@ -123,11 +121,6 @@ grant select on
   jina_context.evidence_checkpoints,jina_context.repository_acl_observations,
   jina_context.projection_input_events
 to jina_context_coordinator;
-grant select on jina_context.pipeline_builds,jina_context.pipeline_stages to
-  jina_context_ingest,jina_context_derive,jina_context_manifest,jina_context_lexical,
-  jina_context_knowledge_current,jina_context_dense,jina_context_hierarchy,
-  jina_context_structural,jina_context_identity,
-  jina_context_acl,jina_context_retention;
 grant select on
   jina_context.evidence_checkpoints,jina_context.knowledge_document_revisions,
   jina_context.repository_acl_observations,jina_context.repository_acl_projection
@@ -167,13 +160,6 @@ grant insert,select on
   jina_context.projection_input_events
 to jina_context_derive;
 grant select,insert,update on jina_context.outbox to jina_context_derive;
--- Checkpointed while the run is still going, so the writer updates in place and
--- clears its own rows once the pages are committed as revisions.
-grant select,insert,update,delete on jina_context.derivation_progress to jina_context_derive;
--- Readable by the query role because watching a build happen is a read of the
--- tenant's own context, not an administrative action.
-grant select on jina_context.derivation_progress to jina_context_query,jina_context_coordinator;
-
 grant select on
   jina_context.knowledge_documents,jina_context.knowledge_document_revisions,
   jina_context.knowledge_revision_events,jina_context.index_generations,
@@ -272,6 +258,7 @@ grant select,update,delete on jina_context.index_generations to jina_context_ret
 
 grant select on
   jina_context.current_repository_acl,jina_context.index_generations,jina_context.generation_projectors,
+  jina_context.context_board_publications,jina_context.current_context_board_releases,
   jina_context.repository_acl_projection,jina_context.published_context_documents,
   jina_context.published_context_fragments,
   jina_context.published_structural_relations,jina_context.published_hierarchy_nodes,
@@ -283,6 +270,9 @@ grant select,insert on
   jina_context.retrieval_candidates,jina_context.answer_citations,
   jina_context.retrieval_metrics
 to jina_context_query;
+
+grant select,insert,update on jina_context.context_quota_ledgers
+  to jina_context_quota;
 
 grant select,insert on jina_context.api_tokens to jina_context_tokens;
 grant update (last_used_at,revoked_at,revoked_by) on jina_context.api_tokens

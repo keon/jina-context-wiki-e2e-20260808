@@ -107,14 +107,29 @@ steps:
       - JINA_MIGRATION_DB_USER=${_JINA_MIGRATION_DB_USER}
       - JINA_MIGRATION_DB_PASS_SECRET=${_JINA_MIGRATION_DB_PASS_SECRET}
       - JINA_FIXED_TENANT_ID=${_JINA_FIXED_TENANT_ID}
+      - JINA_ACCEPTANCE_REPOSITORY=${_JINA_ACCEPTANCE_REPOSITORY}
       - JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID}
+      - JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET=${_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET}
+      - JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET=${_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET}
+      - JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID=${_JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID}
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
       - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
       - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
       - JINA_API_CPU=${_JINA_API_CPU}
       - JINA_API_MEMORY=${_JINA_API_MEMORY}
       - JINA_CONTEXT_WORKER_MEMORY=${_JINA_CONTEXT_WORKER_MEMORY}
-    timeout: 4200s
+      - JINA_CONTEXT_DAYTONA_SNAPSHOT=${_JINA_CONTEXT_DAYTONA_SNAPSHOT}
+      - JINA_CONTEXT_DAYTONA_IMAGE=${_JINA_CONTEXT_DAYTONA_IMAGE}
+      - JINA_CONTEXT_DAYTONA_MODEL_SECRET=${_JINA_CONTEXT_DAYTONA_MODEL_SECRET}
+      - JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV=${_JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV}
+      - JINA_CONTEXT_DAYTONA_MODEL_DOMAINS=${_JINA_CONTEXT_DAYTONA_MODEL_DOMAINS}
+      - JINA_WORKER_RELEASE_SECRET=${_JINA_WORKER_RELEASE_SECRET}
+      - JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS=${_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS}
+      - JINA_ACCEPTANCE_TIMEOUT_MS=${_JINA_ACCEPTANCE_TIMEOUT_MS}
+      - JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS=${_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS}
+      - JINA_CONTEXT_RESET_MODE=${_JINA_CONTEXT_RESET_MODE}
+      - JINA_CONFIRM_CONTEXT_RESET=${_JINA_CONFIRM_CONTEXT_RESET}
+    timeout: 16200s
 
 substitutions:
   # Identity/control-plane and context schemas share the production database;
@@ -128,7 +143,11 @@ substitutions:
   _JINA_MIGRATION_DB_USER: jina_app
   _JINA_MIGRATION_DB_PASS_SECRET: jina-primary-owner-db-password:latest
   _JINA_FIXED_TENANT_ID: omlabs
+  _JINA_ACCEPTANCE_REPOSITORY: omxyz/jina-context-graph-e2e
   _JINA_ACCEPTANCE_GITHUB_INSTALLATION_ID: "140435029"
+  _JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_ID_SECRET: jina-trigger-acceptance-github-app-id
+  _JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET: jina-trigger-acceptance-github-app-private-key
+  _JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID: "150069172"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
   # start. The API owns three PostgreSQL pools whose configured maxima total 18
   # connections, so keep one instance until the pools share a bounded budget.
@@ -138,8 +157,31 @@ substitutions:
   _JINA_API_CPU: "1"
   _JINA_API_MEMORY: 1Gi
   _JINA_CONTEXT_WORKER_MEMORY: 1Gi
+  # The audited immutable Daytona snapshot contains the Codex CLI. Override it
+  # only with another validated immutable snapshot, or clear it and supply one
+  # digest-pinned image.
+  _JINA_CONTEXT_DAYTONA_SNAPSHOT: jina-context-board-codex-0-145-0-bwrap-v2
+  _JINA_CONTEXT_DAYTONA_IMAGE: ""
+  # This is the name of an existing Daytona organization Secret, not its value
+  # and not a Google Secret Manager version.
+  _JINA_CONTEXT_DAYTONA_MODEL_SECRET: jina-context-openai
+  _JINA_CONTEXT_DAYTONA_MODEL_SECRET_ENV: OPENAI_API_KEY
+  _JINA_CONTEXT_DAYTONA_MODEL_DOMAINS: api.openai.com
+  _JINA_WORKER_RELEASE_SECRET: jina-worker-release-credential
+  # A measured full Board run takes about 2.5 hours. The acceptance poll gets
+  # three hours, with a further fifteen-minute Cloud Run job envelope.
+  _JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS: "10800"
+  _JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"
+  _JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"
+  # Normal releases accept only the current schema. The first Context v2
+  # production transition must override both values explicitly:
+  #   _JINA_CONTEXT_RESET_MODE=legacy-once
+  #   _JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context
+  # The transition removes its legacy-table marker, so replay fails closed.
+  _JINA_CONTEXT_RESET_MODE: disabled
+  _JINA_CONFIRM_CONTEXT_RESET: ""
 
-timeout: 7200s
+timeout: 21600s
 serviceAccount: projects/jina-v2/serviceAccounts/jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com
 options:
   logging: CLOUD_LOGGING_ONLY

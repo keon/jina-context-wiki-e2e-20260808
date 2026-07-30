@@ -1,8 +1,13 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
 import { test } from "node:test";
-import { MemoryContextEngineStore, MemoryContextPipelineCoordinator } from "@jina/context-engine";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { MemoryContextEngineStore, type MintApiTokenInput } from "@jina/context-engine";
+import type { Logger, LogFields, LogSeverity, RequestTraceContext } from "@jina/observability";
 import { createApiServer } from "./server.js";
 
 const tenantId = "tenant-tokens";
@@ -12,6 +17,37 @@ const holder = "user:holder@example.com";
 const adminPrincipal = "user:admin@example.com";
 const internalToken = "internal-token-test";
 const contextToken = "context-token-test";
+const forbiddenRepository = "omlabs/other-private-repository";
+
+function captureLogger(entries: Record<string, unknown>[]): Logger {
+  const makeLogger = (bound: LogFields = {}): Logger => {
+    const logger: Logger = {
+      log(severity: LogSeverity, message: string, fields: LogFields = {}): void {
+        entries.push({ ...bound, ...fields, severity, message });
+      },
+      debug(message: string, fields?: LogFields): void {
+        logger.log("DEBUG", message, fields);
+      },
+      info(message: string, fields?: LogFields): void {
+        logger.log("INFO", message, fields);
+      },
+      warn(message: string, fields?: LogFields): void {
+        logger.log("WARNING", message, fields);
+      },
+      error(message: string, fields?: LogFields): void {
+        logger.log("ERROR", message, fields);
+      },
+      child(fields: LogFields): Logger {
+        return makeLogger({ ...bound, ...fields });
+      },
+      withTrace(_trace: RequestTraceContext): Logger {
+        return makeLogger(bound);
+      }
+    };
+    return logger;
+  };
+  return makeLogger();
+}
 
 /**
  * Every server here sets `enableDevEndpoints: false`. The dev branch returns
@@ -33,17 +69,14 @@ async function withServerConfig(
   overrides: { tenantAdminPrincipalIds?: readonly string[]; tenantId?: string },
   run: (context: ServerContext) => Promise<void>
 ): Promise<void> {
-  const coordinator = new MemoryContextPipelineCoordinator();
-  const store = new MemoryContextEngineStore(coordinator);
+  const store = new MemoryContextEngineStore();
   const server: Server = createApiServer({
     tenantId,
     enableDevEndpoints: false,
-    seedDemo: false,
     internalApiToken: internalToken,
     contextApiToken: contextToken,
     contextApiTenantId: tenantId,
     contextApiPrincipalId: holder,
-    contextCoordinator: coordinator,
     contextStore: store,
     tenantAdminPrincipalIds: [adminPrincipal],
     ...overrides
@@ -86,25 +119,60 @@ async function mintSecret(
 
 const bearer = (secret: string): RequestInit => ({ headers: { authorization: `Bearer ${secret}` } });
 
+async function mcpTool(
+  baseUrl: string,
+  secret: string,
+  name: "search_context" | "list_context" | "read_context" | "diff_context",
+  args: Record<string, unknown>
+) {
+  const client = new Client({ name: "api-token-adversary", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(new URL(`${baseUrl}/mcp`), {
+    requestInit: { headers: { authorization: `Bearer ${secret}` } }
+  });
+  try {
+    await client.connect(transport as unknown as Transport);
+    return await client.callTool({ name, arguments: args });
+  } finally {
+    await client.close();
+  }
+}
+
+function mcpRpc(baseUrl: string, secret: string, headers: Record<string, string> = {}): Promise<Response> {
+  return fetch(`${baseUrl}/mcp`, {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      authorization: `Bearer ${secret}`,
+      "content-type": "application/json",
+      ...headers
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: "token-adversary",
+      method: "tools/list",
+      params: {}
+    })
+  });
+}
+
 test("a minted token authenticates as its own row and every failure looks identical", async () => {
-  await withServer(async ({ store, request, mint }) => {
+  await withServer(async ({ baseUrl, store, request, mint }) => {
     const secret = await mintSecret(mint);
     assert.match(secret, /^jina_atk_[A-Za-z0-9_-]{43}$/);
 
-    assert.notEqual((await request("/context/generations", bearer(secret))).status, 401);
+    assert.notEqual((await request("/context/releases", bearer(secret))).status, 401);
 
     // Expired, revoked, unknown and malformed are one answer with one body, so
     // the response never says which tokens exist or why one stopped working.
     const unauthorized = { error: "unauthorized" };
     const listed = await store.listApiTokens(tenantId);
     await store.revokeApiToken(tenantId, listed[0]!.id, adminPrincipal, new Date().toISOString());
-    const revoked = await request("/context/generations", bearer(secret));
+    const revoked = await request("/context/releases", bearer(secret));
     assert.equal(revoked.status, 401);
     assert.deepEqual(await revoked.json(), unauthorized);
 
     // Expiry is minted through the store, because mint's own bounds forbid a
     // lifetime already in the past.
-    const { createHash } = await import("node:crypto");
     const expiredSecret = `jina_atk_${"x".repeat(43)}`;
     await store.mintApiToken({
       id: "atk_expired",
@@ -117,15 +185,16 @@ test("a minted token authenticates as its own row and every failure looks identi
       createdBy: "svc:api",
       expiresAt: "2026-01-02T00:00:00.000Z"
     });
-    const expired = await request("/context/generations", bearer(expiredSecret));
+    const expired = await request("/context/releases", bearer(expiredSecret));
     assert.equal(expired.status, 401);
     assert.deepEqual(await expired.json(), unauthorized);
+    assert.equal((await mcpRpc(baseUrl, expiredSecret)).status, 401);
 
-    const unknown = await request("/context/generations", bearer(`jina_atk_${"z".repeat(43)}`));
+    const unknown = await request("/context/releases", bearer(`jina_atk_${"z".repeat(43)}`));
     assert.equal(unknown.status, 401);
     assert.deepEqual(await unknown.json(), unauthorized);
 
-    const malformed = await request("/context/generations", bearer("jina_atk_short"));
+    const malformed = await request("/context/releases", bearer("jina_atk_short"));
     assert.equal(malformed.status, 401);
     assert.deepEqual(await malformed.json(), unauthorized);
   });
@@ -140,31 +209,24 @@ test("headers stay assertions, and the asymmetry between them is deliberate", as
 
     // Agreeing headers are accepted; disagreeing ones are rejected rather than
     // reinterpreted. This is the cross-tenant guard.
-    assert.notEqual((await request("/context/generations", withHeaders({ "x-jina-tenant-id": tenantId }))).status, 401);
-    assert.notEqual(
-      (await request("/context/generations", withHeaders({ "x-jina-principal-id": holder }))).status,
-      401
-    );
+    assert.notEqual((await request("/context/releases", withHeaders({ "x-jina-tenant-id": tenantId }))).status, 401);
+    assert.notEqual((await request("/context/releases", withHeaders({ "x-jina-principal-id": holder }))).status, 401);
+    assert.equal((await request("/context/releases", withHeaders({ "x-jina-tenant-id": otherTenantId }))).status, 401);
     assert.equal(
-      (await request("/context/generations", withHeaders({ "x-jina-tenant-id": otherTenantId }))).status,
-      401
-    );
-    assert.equal(
-      (await request("/context/generations", withHeaders({ "x-jina-principal-id": "user:someone@example.com" })))
-        .status,
+      (await request("/context/releases", withHeaders({ "x-jina-principal-id": "user:someone@example.com" }))).status,
       401
     );
     // A principal asserting tenant administration is refused like any other
     // disagreement, so the header cannot promote a token.
     assert.equal(
-      (await request("/context/generations", withHeaders({ "x-jina-principal-id": `tenant:${tenantId}` }))).status,
+      (await request("/context/releases", withHeaders({ "x-jina-principal-id": `tenant:${tenantId}` }))).status,
       401
     );
 
     // `normalizedForwardedPrincipal` lowercases the value, so the address is
     // case-insensitive...
     assert.notEqual(
-      (await request("/context/generations", withHeaders({ "x-jina-principal-id": "user:HOLDER@EXAMPLE.COM" }))).status,
+      (await request("/context/releases", withHeaders({ "x-jina-principal-id": "user:HOLDER@EXAMPLE.COM" }))).status,
       401
     );
     // ...but only after the scheme matches, and the `user:` pattern alone carries
@@ -172,16 +234,44 @@ test("headers stay assertions, and the asymmetry between them is deliberate", as
     // to undefined and is refused. Asserted because it is surprising enough that
     // somebody will otherwise "fix" it by accident.
     assert.equal(
-      (await request("/context/generations", withHeaders({ "x-jina-principal-id": "USER:holder@example.com" }))).status,
+      (await request("/context/releases", withHeaders({ "x-jina-principal-id": "USER:holder@example.com" }))).status,
       401
     );
     // ...while `contextCredentialTenantId` in fixed tenancy does not, so the
     // tenant header is not. This asserts a deliberate decision to compare tenants
     // exactly as the context credential already does, not a bug.
     assert.equal(
-      (await request("/context/generations", withHeaders({ "x-jina-tenant-id": tenantId.toUpperCase() }))).status,
+      (await request("/context/releases", withHeaders({ "x-jina-tenant-id": tenantId.toUpperCase() }))).status,
       401
     );
+  });
+});
+
+test("issued and static MCP credentials reject spoofed tenant and principal headers", async () => {
+  await withServer(async ({ baseUrl, mint }) => {
+    const issued = await mintSecret(mint);
+    for (const secret of [issued, contextToken]) {
+      assert.equal((await mcpRpc(baseUrl, secret, { "x-jina-tenant-id": otherTenantId })).status, 401);
+      assert.equal(
+        (
+          await mcpRpc(baseUrl, secret, {
+            "x-jina-principal-id": "user:attacker@example.com"
+          })
+        ).status,
+        401
+      );
+    }
+
+    assert.equal(
+      (
+        await mcpRpc(baseUrl, issued, {
+          "x-jina-tenant-id": tenantId,
+          "x-jina-principal-id": holder
+        })
+      ).status,
+      200
+    );
+    assert.equal((await mcpRpc(baseUrl, contextToken)).status, 200);
   });
 });
 
@@ -201,14 +291,12 @@ test("scope grants route reach and nothing more", async () => {
       assert.equal(((await response.json()) as { code?: string }).code, "insufficient_scope");
     };
 
-    assert.notEqual((await request("/context/generations", bearer(readSecret))).status, 401);
-    await insufficient(await request("/context/generations", bearer(querySecret)));
-    assert.notEqual((await request("/context/structure?repository=" + repository, bearer(readSecret))).status, 403);
+    assert.notEqual((await request("/context/releases", bearer(readSecret))).status, 401);
+    await insufficient(await request("/context/releases", bearer(querySecret)));
+    assert.notEqual((await request("/context/list?repository=" + repository, bearer(readSecret))).status, 403);
 
     const base = (await request("/health")).url.replace("/health", "");
     await insufficient(await post(`${base}/context/build`, readSecret));
-    await insufficient(await post(`${base}/context/rebuild`, readSecret));
-    await insufficient(await post(`${base}/context/erasure`, readSecret));
 
     // Board traffic maps to no scope at all, so a token is refused there even
     // though the routes are not internal.
@@ -231,11 +319,198 @@ test("scope grants route reach and nothing more", async () => {
   });
 });
 
+test("HTTP and MCP independently enforce read, query, build, and admin scopes", async () => {
+  await withServer(async ({ baseUrl, request, mint }) => {
+    const readSecret = await mintSecret(mint, { scopes: ["context:read"] });
+    const querySecret = await mintSecret(mint, { scopes: ["context:query"] });
+    const mintAdministrator = async (scope: "context:build" | "context:admin"): Promise<string> => {
+      const response = await mint({
+        principalId: adminPrincipal,
+        name: `${scope} token`,
+        scopes: [scope],
+        expiresInMinutes: 60,
+        administrator: true
+      });
+      const text = await response.text();
+      assert.equal(response.status, 201, text);
+      return (JSON.parse(text) as { secret: string }).secret;
+    };
+    const buildSecret = await mintAdministrator("context:build");
+    const adminSecret = await mintAdministrator("context:admin");
+    const post = (path: string, secret: string, body: Record<string, unknown>): Promise<Response> =>
+      fetch(`${baseUrl}${path}`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${secret}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(body)
+      });
+    const insufficient = async (response: Response): Promise<void> => {
+      assert.equal(response.status, 403);
+      assert.equal(((await response.json()) as { code?: string }).code, "insufficient_scope");
+    };
+
+    assert.equal((await request("/context/releases", bearer(readSecret))).status, 200);
+    await insufficient(await request("/context/releases", bearer(querySecret)));
+    await insufficient(await post("/context/search", readSecret, { repository, query: "architecture" }));
+    assert.notEqual((await post("/context/search", querySecret, { repository, query: "architecture" })).status, 403);
+
+    const build = await post("/context/build", buildSecret, {
+      repository,
+      ref: "main",
+      requestKey: "token-scope-build"
+    });
+    assert.equal(build.status, 202, await build.text());
+    await insufficient(await request("/context/metrics", bearer(buildSecret)));
+    await insufficient(await request("/context/releases", bearer(buildSecret)));
+
+    assert.equal((await request("/context/metrics", bearer(adminSecret))).status, 200);
+    await insufficient(
+      await post("/context/build", adminSecret, {
+        repository,
+        ref: "main",
+        requestKey: "admin-cannot-build"
+      })
+    );
+    await insufficient(await request("/context/releases", bearer(adminSecret)));
+
+    const querySearch = await mcpTool(baseUrl, querySecret, "search_context", {
+      repository,
+      query: "architecture"
+    });
+    assert.equal(querySearch.isError, true);
+    assert.match(JSON.stringify(querySearch), /context not found/i);
+    assert.doesNotMatch(JSON.stringify(querySearch), /scope does not permit/i);
+
+    const queryList = await mcpTool(baseUrl, querySecret, "list_context", { repository });
+    assert.equal(queryList.isError, true);
+    assert.match(JSON.stringify(queryList), /scope does not permit/i);
+
+    const readList = await mcpTool(baseUrl, readSecret, "list_context", { repository });
+    assert.equal(readList.isError, true);
+    assert.match(JSON.stringify(readList), /context not found/i);
+    assert.doesNotMatch(JSON.stringify(readList), /scope does not permit/i);
+
+    const readSearch = await mcpTool(baseUrl, readSecret, "search_context", {
+      repository,
+      query: "architecture"
+    });
+    assert.equal(readSearch.isError, true);
+    assert.match(JSON.stringify(readSearch), /scope does not permit/i);
+
+    for (const [name, args] of [
+      ["read_context", { repository, document: "architecture" }],
+      [
+        "diff_context",
+        {
+          repository,
+          fromReleaseId: "release-before",
+          toReleaseId: "release-after"
+        }
+      ]
+    ] as const) {
+      const queryDenied = await mcpTool(baseUrl, querySecret, name, args);
+      assert.equal(queryDenied.isError, true);
+      assert.match(JSON.stringify(queryDenied), /scope does not permit/i);
+
+      const readAdmitted = await mcpTool(baseUrl, readSecret, name, args);
+      assert.equal(readAdmitted.isError, true);
+      assert.match(JSON.stringify(readAdmitted), /context not found/i);
+      assert.doesNotMatch(JSON.stringify(readAdmitted), /scope does not permit/i);
+    }
+
+    for (const path of [
+      `/context/read?repository=${encodeURIComponent(repository)}&document=architecture`,
+      `/context/diff?repository=${encodeURIComponent(repository)}&fromReleaseId=release-before&toReleaseId=release-after`
+    ]) {
+      await insufficient(await request(path, bearer(querySecret)));
+      assert.notEqual((await request(path, bearer(readSecret))).status, 403);
+    }
+
+    assert.equal((await mcpRpc(baseUrl, buildSecret)).status, 403);
+    assert.equal((await mcpRpc(baseUrl, adminSecret)).status, 403);
+  });
+});
+
+test("HTTP and MCP expose the same repository ACL denial without cross-tenant oracles", async () => {
+  await withServer(async ({ baseUrl, request, mint }) => {
+    const readSecret = await mintSecret(mint, { scopes: ["context:read"] });
+    const querySecret = await mintSecret(mint, { scopes: ["context:query"] });
+    const nonexistentRepository = "omlabs/repository-that-does-not-exist";
+
+    const httpRead = await request(
+      `/context/list?repository=${encodeURIComponent(forbiddenRepository)}`,
+      bearer(readSecret)
+    );
+    assert.equal(httpRead.status, 404);
+    const httpReadBody: unknown = await httpRead.json();
+    assert.deepEqual(httpReadBody, {
+      accepted: false,
+      code: "not_found",
+      error: "repository context not found"
+    });
+    const httpNonexistent = await request(
+      `/context/list?repository=${encodeURIComponent(nonexistentRepository)}`,
+      bearer(readSecret)
+    );
+    assert.equal(httpNonexistent.status, httpRead.status);
+    assert.deepEqual(await httpNonexistent.json(), httpReadBody);
+
+    const mcpRead = await mcpTool(baseUrl, readSecret, "list_context", {
+      repository: forbiddenRepository
+    });
+    assert.equal(mcpRead.isError, true);
+    assert.match(JSON.stringify(mcpRead), /repository context not found/i);
+    const mcpNonexistent = await mcpTool(baseUrl, readSecret, "list_context", {
+      repository: nonexistentRepository
+    });
+    assert.deepEqual(mcpNonexistent, mcpRead);
+
+    const httpQuery = await fetch(`${baseUrl}/context/search`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${querySecret}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ repository: forbiddenRepository, query: "secret project" })
+    });
+    assert.equal(httpQuery.status, 404);
+    assert.equal(((await httpQuery.json()) as { error: string }).error, "repository context not found");
+    const mcpQuery = await mcpTool(baseUrl, querySecret, "search_context", {
+      repository: forbiddenRepository,
+      query: "secret project"
+    });
+    assert.equal(mcpQuery.isError, true);
+    assert.match(JSON.stringify(mcpQuery), /repository context not found/i);
+
+    for (const secret of [readSecret, querySecret]) {
+      const wrongTenantMcp = await mcpRpc(baseUrl, secret, {
+        "x-jina-tenant-id": otherTenantId
+      });
+      const unknownMcp = await mcpRpc(baseUrl, `jina_atk_${"u".repeat(43)}`);
+      assert.equal(wrongTenantMcp.status, 401);
+      assert.equal(unknownMcp.status, wrongTenantMcp.status);
+      assert.deepEqual(await unknownMcp.json(), await wrongTenantMcp.json());
+    }
+
+    const wrongTenantHttp = await request("/context/releases", {
+      headers: {
+        authorization: `Bearer ${readSecret}`,
+        "x-jina-tenant-id": otherTenantId
+      }
+    });
+    const unknownHttp = await request("/context/releases", bearer(`jina_atk_${"u".repeat(43)}`));
+    assert.equal(wrongTenantHttp.status, 401);
+    assert.equal(unknownHttp.status, wrongTenantHttp.status);
+    assert.deepEqual(await unknownHttp.json(), await wrongTenantHttp.json());
+  });
+});
+
 test("scope is not role: an admin-scoped token on an ordinary principal is still refused", async () => {
   await withServer(async ({ store, request }) => {
     // Minted through the store directly, because mint itself refuses this pairing.
     const secret = `jina_atk_${"y".repeat(43)}`;
-    const { createHash } = await import("node:crypto");
     await store.mintApiToken({
       id: "atk_admin_scope",
       tenantId,
@@ -382,15 +657,48 @@ test("the secret exists exactly once, and issuance is deliberately not idempoten
   });
 });
 
+test("the internal credential owns token audit attribution", async () => {
+  await withServer(async ({ store, request, mint }) => {
+    const created = await mint(
+      {
+        principalId: holder,
+        name: "bound audit actor",
+        scopes: ["context:read"],
+        expiresInMinutes: 60
+      },
+      { "x-jina-principal-id": "user:forged-auditor@example.com" }
+    );
+    const text = await created.text();
+    assert.equal(created.status, 201, text);
+    const tokenId = (JSON.parse(text) as { token: { id: string } }).token.id;
+    const stored = (await store.listApiTokens(tenantId)).find((token) => token.id === tokenId);
+    assert.equal(stored?.createdBy, "svc:api");
+
+    const revoked = await request(`/internal/context/tokens/${encodeURIComponent(tokenId)}/revoke`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalToken}`,
+        "x-jina-principal-id": "user:another-forged-auditor@example.com"
+      }
+    });
+    assert.equal(revoked.status, 200);
+    const after = (await store.listApiTokens(tenantId)).find((token) => token.id === tokenId);
+    assert.equal(after?.revokedBy, "svc:api");
+  });
+});
+
 test("revocation is immediate, idempotent, and blind to other tenants", async () => {
-  await withServer(async ({ request, mint }) => {
-    const secret = await mintSecret(mint);
+  await withServer(async ({ baseUrl, request, mint }) => {
+    const secret = await mintSecret(mint, {
+      scopes: ["context:read", "context:query"]
+    });
     const listed = await request("/internal/context/tokens", {
       headers: { authorization: `Bearer ${internalToken}` }
     });
     const tokenId = ((await listed.json()) as { tokens: { id: string }[] }).tokens[0]!.id;
 
-    assert.notEqual((await request("/context/generations", bearer(secret))).status, 401);
+    assert.notEqual((await request("/context/releases", bearer(secret))).status, 401);
+    assert.equal((await mcpRpc(baseUrl, secret)).status, 200);
     const revoke = (id: string): Promise<Response> =>
       request(`/internal/context/tokens/${encodeURIComponent(id)}/revoke`, {
         method: "POST",
@@ -399,7 +707,11 @@ test("revocation is immediate, idempotent, and blind to other tenants", async ()
 
     const revoked = await revoke(tokenId);
     assert.equal(revoked.status, 200);
-    assert.equal((await request("/context/generations", bearer(secret))).status, 401);
+    const revokedBody = (await revoked.json()) as { token: Record<string, unknown> & { revokedAt: string } };
+    assert.equal("secret" in revokedBody.token, false);
+    assert.equal("secretHash" in revokedBody.token, false);
+    assert.equal((await request("/context/releases", bearer(secret))).status, 401);
+    assert.equal((await mcpRpc(baseUrl, secret)).status, 401);
 
     // Revoking twice is a 200 that reports the original revocation rather than
     // overwriting the audit trail.
@@ -407,7 +719,7 @@ test("revocation is immediate, idempotent, and blind to other tenants", async ()
     assert.equal(twice.status, 200);
     assert.equal(
       ((await twice.json()) as { token: { revokedAt: string } }).token.revokedAt,
-      ((await revoked.json()) as { token: { revokedAt: string } }).token.revokedAt
+      revokedBody.token.revokedAt
     );
 
     // An unknown id is a 404 rather than an idempotent 200, which would confirm
@@ -422,41 +734,136 @@ test("revocation is immediate, idempotent, and blind to other tenants", async ()
   });
 });
 
+test("an issued token revoked while retrieval is in flight cannot emit its result", async () => {
+  await withServer(async ({ store, request, mint }) => {
+    const secret = await mintSecret(mint, { scopes: ["context:read"] });
+    const listed = await request("/internal/context/tokens", {
+      headers: { authorization: `Bearer ${internalToken}` }
+    });
+    const tokenId = ((await listed.json()) as { tokens: { id: string }[] }).tokens[0]!.id;
+
+    let retrievalStarted!: () => void;
+    let allowRetrieval!: () => void;
+    const started = new Promise<void>((resolve) => {
+      retrievalStarted = resolve;
+    });
+    const allowed = new Promise<void>((resolve) => {
+      allowRetrieval = resolve;
+    });
+    const originalListGenerations = store.listGenerations.bind(store);
+    store.listGenerations = async (...args) => {
+      retrievalStarted();
+      await allowed;
+      return originalListGenerations(...args);
+    };
+
+    const inFlight = request(`/context/releases?repository=${encodeURIComponent(repository)}`, bearer(secret));
+    await started;
+    const revoked = await request(`/internal/context/tokens/${encodeURIComponent(tokenId)}/revoke`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${internalToken}` }
+    });
+    assert.equal(revoked.status, 200);
+    allowRetrieval();
+
+    const response = await inFlight;
+    assert.equal(response.status, 401);
+    assert.equal(((await response.json()) as { code: string }).code, "unauthorized");
+  });
+});
+
 test("a failing token store leaves the static credentials working and never returns 500", async () => {
-  const coordinator = new MemoryContextPipelineCoordinator();
-  const store = new MemoryContextEngineStore(coordinator);
+  const store = new MemoryContextEngineStore();
   // The verification read is the one store call on the request path with no
   // handler try of its own, so without the closure's catch this is a 500.
   store.verifyApiToken = () => Promise.reject(new Error("relation does not exist"));
   const server = createApiServer({
     tenantId,
     enableDevEndpoints: false,
-    seedDemo: false,
     internalApiToken: internalToken,
     contextApiToken: contextToken,
     contextApiTenantId: tenantId,
     contextApiPrincipalId: holder,
-    contextCoordinator: coordinator,
     contextStore: store
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   try {
     await store.replaceRepositoryAccess(tenantId, holder, [repository]);
-    const token = await fetch(`${baseUrl}/context/generations`, {
+    const token = await fetch(`${baseUrl}/context/releases`, {
       headers: { authorization: `Bearer jina_atk_${"q".repeat(43)}` }
     });
     assert.equal(token.status, 401);
     assert.deepEqual(await token.json(), { error: "unauthorized" });
 
     assert.notEqual(
-      (await fetch(`${baseUrl}/context/generations`, { headers: { authorization: `Bearer ${contextToken}` } })).status,
+      (await fetch(`${baseUrl}/context/releases`, { headers: { authorization: `Bearer ${contextToken}` } })).status,
       401
     );
     assert.notEqual(
       (await fetch(`${baseUrl}/board`, { headers: { authorization: `Bearer ${internalToken}` } })).status,
       401
     );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("token store failures cannot put bearer secrets or hashes in responses or logs", async () => {
+  const store = new MemoryContextEngineStore();
+  const entries: Record<string, unknown>[] = [];
+  const bearerSecret = `jina_atk_${"q".repeat(43)}`;
+  const bearerHash = createHash("sha256").update(bearerSecret, "utf8").digest("hex");
+  let mintedHash: string | undefined;
+  store.verifyApiToken = (secretHash: string) => {
+    assert.equal(secretHash, bearerHash);
+    return Promise.reject(new Error(`driver leaked bearer=${bearerSecret} bind=${secretHash}`));
+  };
+  store.mintApiToken = (input: MintApiTokenInput) => {
+    mintedHash = input.secretHash;
+    return Promise.reject(new Error(`driver leaked insert bind=${input.secretHash}`));
+  };
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: false,
+    internalApiToken: internalToken,
+    contextApiToken: contextToken,
+    contextApiTenantId: tenantId,
+    contextApiPrincipalId: holder,
+    contextStore: store,
+    logger: captureLogger(entries)
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const verify = await fetch(`${baseUrl}/context/releases`, bearer(bearerSecret));
+    assert.equal(verify.status, 401);
+    assert.deepEqual(await verify.json(), { error: "unauthorized" });
+
+    const mint = await fetch(`${baseUrl}/internal/context/tokens`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        principalId: holder,
+        name: "must not leak",
+        scopes: ["context:read"],
+        expiresInMinutes: 60
+      })
+    });
+    assert.equal(mint.status, 500);
+    const mintResponse = await mint.text();
+    assert.doesNotMatch(mintResponse, /jina_atk_|secretHash|bearer|bind=/);
+    assert.ok(mintedHash);
+
+    const logs = JSON.stringify(entries);
+    assert.doesNotMatch(logs, new RegExp(bearerSecret));
+    assert.doesNotMatch(logs, new RegExp(bearerHash));
+    assert.doesNotMatch(logs, new RegExp(mintedHash));
+    assert.doesNotMatch(logs, /authorization|secretHash|bind=/i);
+    assert.match(logs, /api\.token\.verify_failed/);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
@@ -470,6 +877,26 @@ test("a static credential shaped like an issued token is refused at construction
   assert.throws(
     () => createApiServer({ tenantId, enableDevEndpoints: false, contextApiToken: `jina_atk_${"a".repeat(43)}` }),
     /jina_atk_/
+  );
+  assert.throws(
+    () =>
+      createApiServer({
+        tenantId,
+        enableDevEndpoints: false,
+        internalApiToken: "shared-secret",
+        contextApiToken: "shared-secret"
+      }),
+    /must be distinct/
+  );
+  assert.throws(
+    () =>
+      createApiServer({
+        tenantId,
+        enableDevEndpoints: false,
+        internalApiToken: internalToken,
+        internalApiPrincipalId: "forged"
+      }),
+    /internalApiPrincipalId/
   );
 });
 
@@ -496,7 +923,7 @@ test("a tenant principal is issuable for its own tenant, and is a tenant adminis
     // It reads, and it is a tenant administrator — so it sees the tenant's
     // repositories without needing ACL rows of its own, which is the whole reason
     // v1 needs this principal rather than a `user:` one.
-    assert.equal((await request("/context/generations", bearer(secret))).status, 200);
+    assert.equal((await request("/context/releases", bearer(secret))).status, 200);
     // requireTenantAdmin admits it where an ordinary principal is refused, so the
     // scope reaches the route and the role permits it.
     assert.equal((await request("/context/metrics", bearer(secret))).status, 200);
@@ -508,7 +935,7 @@ test("a tenant principal is issuable for its own tenant, and is a tenant adminis
 
     // And the headers v1 sends today must agree with the row rather than being
     // ignored: this is the exact pair that 401s against the static credential.
-    const withHeaders = await request("/context/generations", {
+    const withHeaders = await request("/context/releases", {
       headers: {
         authorization: `Bearer ${secret}`,
         "x-jina-tenant-id": uuidTenant,

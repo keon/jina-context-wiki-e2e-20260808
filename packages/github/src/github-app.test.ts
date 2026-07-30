@@ -6,7 +6,9 @@ import { createGitHubInstallationAccessToken } from "./github-app.js";
 test("mints a GitHub App installation token with a verifiable short-lived JWT", async () => {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   let authorization = "";
+  let requestBody: unknown;
   const access = await createGitHubInstallationAccessToken(42, {
+    repository: "octocat/hello-world",
     env: {
       GITHUB_APP_ID: "12345",
       GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
@@ -16,14 +18,32 @@ test("mints a GitHub App installation token with a verifiable short-lived JWT", 
       assert.equal(String(input), "https://github.example/api/app/installations/42/access_tokens");
       assert.equal(init?.method, "POST");
       authorization = new Headers(init?.headers).get("authorization") ?? "";
+      assert.equal(new Headers(init?.headers).get("content-type"), "application/json");
+      requestBody = JSON.parse(String(init?.body));
       return Response.json({
         token: "installation-token",
         expires_at: "2026-07-22T23:00:00Z",
-        permissions: { contents: "read", pull_requests: "read" }
+        repository_selection: "selected",
+        permissions: {
+          contents: "read",
+          issues: "read",
+          pull_requests: "read",
+          metadata: "read"
+        },
+        repositories: [{ id: 1, full_name: "octocat/Hello-World" }]
       });
     }
   });
 
+  assert.deepEqual(requestBody, {
+    repositories: ["hello-world"],
+    permissions: {
+      contents: "read",
+      issues: "read",
+      pull_requests: "read",
+      metadata: "read"
+    }
+  });
   const jwt = authorization.replace(/^Bearer /, "");
   const [header, payload, signature] = jwt.split(".");
   assert.ok(header && payload && signature);
@@ -39,7 +59,12 @@ test("mints a GitHub App installation token with a verifiable short-lived JWT", 
   assert.deepEqual(access, {
     token: "installation-token",
     expiresAt: "2026-07-22T23:00:00Z",
-    permissions: { contents: "read", pull_requests: "read" }
+    permissions: {
+      contents: "read",
+      issues: "read",
+      pull_requests: "read",
+      metadata: "read"
+    }
   });
 });
 
@@ -47,12 +72,70 @@ test("fails closed when the installation token response has no credential", asyn
   const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   await assert.rejects(
     createGitHubInstallationAccessToken(42, {
+      repository: "octocat/hello-world",
       env: {
         GITHUB_APP_ID: "12345",
         GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString()
       },
-      fetchImpl: async () => Response.json({ expires_at: "2026-07-22T23:00:00Z" })
+      fetchImpl: async () =>
+        Response.json({
+          expires_at: "2026-07-22T23:00:00Z",
+          repository_selection: "selected",
+          permissions: {
+            contents: "read",
+            issues: "read",
+            pull_requests: "read",
+            metadata: "read"
+          },
+          repositories: [{ id: 1, full_name: "octocat/hello-world" }]
+        })
     }),
     /did not include a token/
+  );
+});
+
+test("fails closed when GitHub returns broader permissions or a different repository", async () => {
+  const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const env = {
+    GITHUB_APP_ID: "12345",
+    GITHUB_APP_PRIVATE_KEY: privateKey.export({ type: "pkcs8", format: "pem" }).toString()
+  };
+  await assert.rejects(
+    createGitHubInstallationAccessToken(42, {
+      repository: "octocat/hello-world",
+      env,
+      fetchImpl: async () =>
+        Response.json({
+          token: "installation-token",
+          repository_selection: "selected",
+          permissions: {
+            contents: "write",
+            issues: "read",
+            pull_requests: "read",
+            metadata: "read"
+          },
+          repositories: [{ id: 1, full_name: "octocat/hello-world" }]
+        })
+    }),
+    /exact read-only permissions/
+  );
+  await assert.rejects(
+    createGitHubInstallationAccessToken(42, {
+      repository: "octocat/hello-world",
+      env,
+      fetchImpl: async () =>
+        Response.json({
+          token: "installation-token",
+          repository_selection: "selected",
+          permissions: {
+            contents: "read",
+            issues: "read",
+            pull_requests: "read",
+            metadata: "read"
+          },
+          repositories: [{ id: 2, full_name: "octocat/other" }]
+        })
+    }),
+    /did not match/
   );
 });

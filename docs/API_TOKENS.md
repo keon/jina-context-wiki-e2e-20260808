@@ -1,28 +1,28 @@
 # Per-principal API tokens
 
-Status: phase 1 implemented. This describes a credential model that lets people query the
-API and MCP directly, meters what they use, and lets them issue their own tokens from the
-dashboard. The token model — mint, verify, scope-check, hash at rest, revoke — is built;
-usage metering, dashboard issuance and retiring the static context token are not.
-This document is the maintained design and roadmap; executable source and tests are
-authoritative for the implemented phase.
+Status: token authentication is implemented. Exact Board build-model accounting and
+model-free query-rate accounting are implemented at the tenant quota boundary.
+Per-principal/per-token usage reporting, dashboard self-service issuance, and retirement of
+the static context credential are not implemented. This document separates those facts
+from the remaining product roadmap; executable source and tests remain authoritative.
 
-## Why the current model cannot do this
+## Why the static credentials are not the end-state
 
-Two static secrets carry all authority, and neither names who is calling.
+Two static credentials remain for service compatibility, but they are no longer the only
+authentication mechanism.
 
 `INTERNAL_API_TOKEN` reaches everything, so it cannot be given to anyone. `CONTEXT_API_TOKEN`
 is narrow, but it is bound server-side to a single tenant and principal, so it cannot serve a
-second tenant. Identity arrives with the credential rather than inside it, which is why a
-multi-tenant caller has no way to act for the tenant it is serving without holding a
-credential that can act for every tenant.
+second tenant. Opaque `jina_atk_…` tokens solve direct multi-tenant API/MCP authentication by
+resolving their tenant, principal, token ID, scopes, expiry, and revocation state server-side.
 
-Three consequences follow, and they are the same defect seen from different angles:
+The remaining limitations belong to the static path and the unfinished reporting surface:
 
-- a person cannot be given a credential, because any credential is either omnipotent or
-  belongs to one fixed identity;
-- usage cannot be attributed, because every call from a given holder looks identical;
-- Jina v1 cannot read on behalf of its tenants, which is how this surfaced in production.
+- neither static credential can safely serve as a personal, multi-tenant credential;
+- calls made with one static credential cannot be attributed to distinct people or tokens;
+- Jina v1 still needs delegated per-tenant tokens before the static context credential can be
+  retired; and
+- there is no `GET /context/usage` or dashboard workflow that exposes per-token consumption.
 
 ## The model
 
@@ -31,20 +31,20 @@ server-side. Authorization stops depending on who holds a shared secret.
 
 ### Scopes
 
-| Scope           | Routes                                                                                                                    |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `context:query` | `POST /context/query`, `POST /mcp`                                                                                        |
-| `context:read`  | `GET /context/generations`, `GET /context/documents`, `GET /context/structure`, and a single generation or document by id |
-| `context:build` | `POST /context/build`, `POST /context/rebuild`                                                                            |
-| `context:admin` | `POST /context/erasure`, `POST /context/knowledge/{id}/review`, `GET /context/metrics`                                    |
-| `context:usage` | `GET /context/usage` (phase 2)                                                                                            |
+| Scope           | Routes                                                                                 |
+| --------------- | -------------------------------------------------------------------------------------- |
+| `context:query` | `POST /context/search`, `POST /mcp`                                                    |
+| `context:read`  | `GET /context/releases`, `/context/list`, `/context/read`, `/context/diff`             |
+| `context:build` | `POST /context/build`, `POST /context/rebuild`                                         |
+| `context:admin` | `POST /context/erasure`, `POST /context/knowledge/{id}/review`, `GET /context/metrics` |
+| `context:usage` | Reserved for a future self-service usage route                                         |
 
 Scope grants route reach, not permission. `requireTenantAdmin` still applies on top, and it
 covers every route under `context:build` and `context:admin` — so a token carrying either on
 a principal that is not a tenant administrator reaches those routes and is refused there.
 
-Route authorization becomes a scope lookup rather than the current
-`isContextCredentialRoute` predicate.
+Opaque-token route authorization is a scope lookup. The static context credential retains
+its deliberately narrow route predicate during migration.
 
 ### Identity comes from the token
 
@@ -56,8 +56,10 @@ This continues a rule the config-bound credentials follow; it is not a universal
 saying so matters to anyone reading the authentication function. Of the four branches that
 existed before tokens, only the two whose identity comes from server-side configuration —
 access synchronization and the context credential — assert headers. The dev branch asserts
-nothing, and the internal-credential path treats `x-jina-principal-id` as the _source_ of
-identity rather than a claim about it. The token branch adopts the config-bound rule.
+nothing. The internal credential may still select a tenant for privileged service
+operations, but durable token issuance and revocation attribution is bound to
+`JINA_INTERNAL_PRINCIPAL_ID` (default `svc:api`) and never to a request header. The token
+branch adopts the config-bound rule.
 
 Repository filtering reuses what already exists — `permittedRepositories` for reads and
 `allowedKnowledgeRevisionIds` for knowledge — so a token sees exactly what its principal's
@@ -65,71 +67,74 @@ ACL allows, and tenant administrators keep the access they have today.
 
 ### Issuance
 
-A token is minted for a principal by a caller holding the internal credential, which is how
-the dashboard and Jina v1 both obtain them. The secret is returned once and stored only as a
-hash, so a disclosed database yields no working credential. Every token carries a
+A token is minted for a principal by a caller holding the internal credential. This is the
+mechanism the dashboard and Jina v1 can use once their delegated issuance flows are
+implemented. The secret is returned once and stored only as a hash, so a disclosed database
+yields no working credential. Every token carries a
 recognizable prefix, both so it is greppable in logs and so it can later be registered for
 secret scanning.
 
-Scopes granted may not exceed the scopes of the identity requesting them — but only from
-phase 3, where the requesting identity is an authenticated session. Phase 1 has no such
-rule and cannot: its only minter holds the internal shared secret, which carries no scopes
-at all, so there is nothing to compare against. What phase 1 enforces instead is the
-principal: `tenant:` and `svc:` principals are refused outright, and a principal configured
-as a tenant administrator requires an explicit `administrator: true`. That is the real
-boundary, because tenant administration is derived from the principal id rather than from
-any scope.
+Scopes granted may not exceed the scopes of the identity requesting them — but only after
+self-service issuance is backed by an authenticated session. The current internal minter has
+no such rule and cannot: its only minter holds the internal shared secret, which carries no
+scopes at all, so there is nothing to compare against. What the current API enforces instead
+is the principal: `tenant:` and `svc:` principals are refused outright, and a principal
+configured as a tenant administrator requires an explicit `administrator: true`. That is the
+real boundary, because tenant administration is derived from the principal id rather than
+from any scope.
 
 Expiry is required and bounded. Revocation takes effect immediately.
 
-## Usage
+## Usage and model accounting
 
-Most of this already exists. `QueryRunTelemetry` records `tenantId`, `repository`,
-`principalFingerprint`, `taskKind`, `routes`, `durationMs`, and citation and conflict counts
-per query, and Jina v1 already meters a `jina_credits` feature with monthly plan allowances.
-The work is connecting them, not building a meter.
+The Board build path captures exact Codex turn usage. Local and Daytona runners parse
+`turn.completed.usage`, retain only input, cached-input, and output token counts, and do not
+retain the transcript as usage evidence. A Board worker aggregates every model call
+performed under one lease. Successful Board completion always carries exact usage; failed
+and retry outcomes carry it whenever a runner completed. The API commits observed counts to
+the tenant quota ledger idempotently per attempt and cancels reservations for failures
+before a completed model turn.
 
-Four gaps stand between that and per-user usage:
+`search_context` and `POST /context/search` do not reserve a model attempt or consume model
+quota. They perform bounded deterministic lexical scoring over the published PageIndex tree.
+Caller-controlled `x-request-id` remains the query-rate idempotency key, so retries consume
+one query-rate operation. Public search results contain only derived Context and
+citations—never accounting metadata or a generated answer.
 
-1. `principalFingerprint` is hashed, which suits analytics but cannot be joined back to a
-   person for billing or for showing someone their own usage. A resolvable principal
-   reference is needed alongside it.
-2. Metrics aggregate per tenant only, with no per-principal or per-token rollup.
-3. Only queries are recorded. Builds are not, and a build runs a sandbox plus an agentic
-   derivation — the dominant cost by a wide margin. Metering queries while builds run free
-   meters the cheap operation.
-4. There is no token dimension, so a leaked or runaway token cannot be identified and revoked
-   on its own.
+This is production quota accounting, not yet per-person billing:
 
-Adding `tokenId` closes the fourth and makes the rest a matter of writing one usage record
-per billable operation, keyed `(tenantId, principalId, tokenId, operation)`.
+- the ledger is tenant scoped rather than keyed by API token;
+- token records track `lastUsedAt`, not consumption by operation;
+- query telemetry records a non-resolvable principal fingerprint rather than a token ID;
+- build-model invocations that never emit valid completed usage cannot be recorded as exact
+  token usage and therefore cancel their reservation; and
+- there is no self-service usage API.
 
-| Operation      | Meter             | Rationale                                    |
-| -------------- | ----------------- | -------------------------------------------- |
-| `build`        | credits, weighted | sandbox plus agentic derivation              |
-| `rebuild`      | credits, lower    | inline reindex; no sandbox, no derivation    |
-| `query`, `mcp` | credits           | retrieval and synthesis model calls          |
-| reads          | count only        | cheap; for rate limiting rather than billing |
+The remaining reporting design is one usage record per billable operation, keyed by
+`(tenantId, principalId, tokenId, operation)`, with an idempotency identity for replay.
 
-Build cost has to be captured before it can be metered. An earlier version of this document
-said the worker already knows the derivation's model consumption and that build cost could
-therefore be recorded rather than estimated. It cannot: nothing on the context derivation
-path persists model token usage today. Phase 2 must extend the derivation executor result,
-carry usage through stage completion, and write it with the billable build operation.
+| Operation                 | Current accounting                                                     | Remaining product work                            |
+| ------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------- |
+| Board model task          | Exact tenant input/cached-input/output tokens and request count        | Attribute to initiating principal/token and price |
+| Build admission/artifacts | Tenant rate, concurrency, active-task, and artifact-storage quota      | Present a user-facing cost rollup                 |
+| `search_context` / MCP    | Tenant query-rate controls; deterministic search uses no model         | Attribute query count to principal/token          |
+| list/read/diff            | Read authorization and request controls; no derivation model is needed | Count only if product analytics require it        |
 
-Billing stays where it is. This API exposes usage and Jina v1 polls it to meter credits.
-Polling avoids a dependency from this API onto v1, and a missed poll is recoverable where a
-dropped webhook silently under-bills.
+Billing stays in Jina v1. The planned API exposes usage for v1 to poll rather than adding a
+dependency from this API onto v1; a missed poll is recoverable where a dropped webhook would
+silently under-bill.
 
-`GET /context/usage`, scoped by the caller's own token, is the self-service surface: a person
+The planned `GET /context/usage`, scoped by the caller's own token, is the self-service surface: a person
 sees their usage, a tenant administrator sees the tenant's. It takes its own `context:usage`
 scope rather than riding on `context:read`, because `context:read` is exactly what the static
 context credential holds — mapping usage onto it would silently widen a shared secret to a
 billing surface.
 
-Quota enforcement checks remaining credits before an expensive operation and rejects with a
-distinct code. Cheap reads should stay available once credits are exhausted, so that someone
-who is blocked can still see why.
+Current quota enforcement checks tenant build/query rates, concurrency, active builds and
+model tasks, artifact bytes, monthly model requests, and monthly model tokens before
+expensive work. Pricing credits and the exhausted-credit product policy remain separate
+decisions. Cheap reads should stay available once credits are exhausted, so that someone who
+is blocked can still inspect state.
 
 ## Dashboard issuance
 
@@ -157,13 +162,17 @@ Issuance and revocation are recorded with their actor.
 1. **Done.** Token model here: mint, verify, scope-check, hash at rest, revoke. Both static
    tokens keep working, so nothing breaks — the pre-existing static-token scope test passes
    untouched, which is how that promise is checked.
-2. Usage records keyed by `tokenId`, covering builds as well as queries. v1 polls and meters.
-3. Dashboard issuance and per-token usage on the existing Usage page.
-4. v1 moves to delegated per-tenant tokens; retire the static context token.
+2. **Done at the tenant quota boundary.** Exact Board build-model usage and model-free
+   query-rate usage are persisted idempotently and exposed in administrator quota metrics.
+3. Add usage records keyed by `tokenId`, covering builds, deterministic search, and MCP.
+   Expose `GET /context/usage`; v1 polls and meters.
+4. Add dashboard issuance and per-token usage on the existing Usage page.
+5. Move v1 to delegated per-tenant tokens and retire the static context token.
 
-Metering is only trustworthy from step 1 onward. While a shared static secret is in use every
-call attributes to the same principal, so usage reporting built before then describes a single
-synthetic user.
+Tenant model accounting is trustworthy for Board build-model attempts whenever Codex emits
+valid `turn.completed.usage`; public Context searches never contribute model usage.
+Per-principal reporting is not trustworthy until step 3, and a shared static secret will
+continue to describe a single synthetic caller.
 
 ## Decisions taken
 

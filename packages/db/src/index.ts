@@ -1,6 +1,9 @@
-export { PostgresJsonStateStore } from "./postgres-json-state-store.js";
-export type { PostgresJsonStateStoreConfig } from "./postgres-json-state-store.js";
+export { PostgresJsonStateStore, WorkerReleaseRejectedError } from "./postgres-json-state-store.js";
+export type { PostgresJsonStateStoreConfig, WorkerReleaseGuard } from "./postgres-json-state-store.js";
 export { PostgresSharedIdentityStore } from "./postgres-shared-identity-store.js";
 export { ContextDatabase } from "./context/database.js";
-export { PostgresContextPipelineCoordinator } from "./context/pipeline-coordinator.js";
 export { PostgresContextEngineStore } from "./context/store.js";
+export { ContextQuotaStoreError, PostgresContextQuotaStore } from "./context/context-quota-store.js";
+export { GcsContextArtifactStore } from "./context/gcs-artifact-store.js";
+export { PostgresBoardContextPublicationRepository } from "./context/board-publication-repository.js";
+export { PostgresBoardPageIndexAttachmentRepository } from "./context/board-pageindex-attachment-repository.js";

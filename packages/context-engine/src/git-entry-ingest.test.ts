@@ -3,12 +3,11 @@ import test from "node:test";
 import { repositoryAclFingerprint } from "./domain/fingerprint.js";
 import { IngestEvidenceService } from "./ingest/pipeline.js";
 import { MemoryContextEngineStore } from "./memory/store.js";
-import { MemoryContextPipelineCoordinator } from "./workflow/coordinator.js";
 
 test("ingestion preserves special Git entries without indexing symlink targets as source", async () => {
   const tenantId = "tenant-special-git";
   const repository = "acme/special-git";
-  const store = new MemoryContextEngineStore(new MemoryContextPipelineCoordinator());
+  const store = new MemoryContextEngineStore();
   const checkpoint = await new IngestEvidenceService(store).ingest({
     tenantId,
     repository,

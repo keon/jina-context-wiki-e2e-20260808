@@ -9,6 +9,8 @@ import {
 } from "../domain/evidence.js";
 import { validateEvidenceRecord } from "../domain/evidence.js";
 import type { DerivationProgressPage, DerivationProgressSnapshot } from "../derive/progress.js";
+import { derivationProgressDocumentPath } from "../derive/progress.js";
+import type { ContextOrchestrationState } from "../derive/orchestration.js";
 import { fingerprint, normalizeRepository, repositoryAclFingerprint, stableId } from "../domain/fingerprint.js";
 import type {
   DerivationRun,
@@ -25,8 +27,8 @@ import type { GenerationProjection, IndexGeneration } from "../domain/projection
 import { contextProjectionConsumers } from "../domain/projection.js";
 import type {
   ApiTokenRecord,
+  ContextEngineStore,
   EraseEvidenceInput,
-  FencedContextEngineStore,
   MintApiTokenInput,
   ProjectionBacklog,
   QueryMetrics,
@@ -34,7 +36,6 @@ import type {
   VerifiedApiToken
 } from "../ports/context-engine-store.js";
 import type { KnowledgeCommit } from "../ports/knowledge-store.js";
-import type { ContextPipelineCoordinator, ContextWriteFence } from "../workflow/coordinator.js";
 
 function scopeKey(tenantId: string, repository: string, ref: string): string {
   return `${tenantId}\u0000${repository}\u0000${ref}`;
@@ -50,8 +51,7 @@ function publicApiToken(token: ApiTokenRecord & { readonly secretHash: string })
   return { ...rest, scopes: [...rest.scopes] };
 }
 
-export class MemoryContextEngineStore implements FencedContextEngineStore {
-  readonly enforcesWriteFences = true as const;
+export class MemoryContextEngineStore implements ContextEngineStore {
   readonly #checkpoints = new Map<string, EvidenceCheckpoint>();
   readonly #snapshots = new Map<string, EvidenceSnapshot>();
   readonly #latestCheckpoints = new Map<string, string>();
@@ -70,10 +70,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   readonly #apiTokens = new Map<string, ApiTokenRecord & { readonly secretHash: string }>();
   #closed = false;
 
-  constructor(
-    private readonly fenceValidator?: Pick<ContextPipelineCoordinator, "latestRefSequence" | "validateWriteFence">,
-    private readonly now: () => string = () => new Date().toISOString()
-  ) {}
+  constructor(private readonly now: () => string = () => new Date().toISOString()) {}
 
   runInTenantScope<T>(_tenantId: string, operation: () => Promise<T>): Promise<T> {
     return operation();
@@ -83,9 +80,8 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     if (this.#closed) throw new Error("Context engine store is closed");
   }
 
-  async commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
+  async commitSnapshot(snapshot: EvidenceSnapshot): Promise<EvidenceCheckpoint> {
     this.#assertOpen();
-    await this.#assertFence(snapshot.checkpoint.tenantId, fence);
     const existing = this.#checkpoints.get(snapshot.checkpoint.id);
     if (existing !== undefined) {
       if (existing.evidenceFingerprint !== snapshot.checkpoint.evidenceFingerprint) {
@@ -101,14 +97,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     const key = scopeKey(snapshot.checkpoint.tenantId, snapshot.checkpoint.repository, snapshot.checkpoint.ref);
     const latestId = this.#latestCheckpoints.get(key);
     const latest = latestId === undefined ? undefined : this.#checkpoints.get(latestId);
-    const latestAdmittedSequence = await this.latestAdmittedRefSequence(
-      snapshot.checkpoint.tenantId,
-      snapshot.checkpoint.repository,
-      snapshot.checkpoint.ref
-    );
-    const becameLatest =
-      snapshot.checkpoint.refSequence >= latestAdmittedSequence &&
-      (latest === undefined || snapshot.checkpoint.refSequence > latest.refSequence);
+    const becameLatest = latest === undefined || snapshot.checkpoint.refSequence > latest.refSequence;
     if (becameLatest) {
       this.#latestCheckpoints.set(key, snapshot.checkpoint.id);
       this.#advanceProjectionInput(
@@ -176,16 +165,11 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return value === undefined ? undefined : copy(value);
   }
 
-  async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
-    await this.#assertFence(input.run.tenantId, fence);
+  async commitKnowledge(input: KnowledgeCommit): Promise<DerivationRun> {
     const checkpoint = await this.getCheckpoint(input.run.checkpointId);
     if (!checkpoint) throw new Error(`Unknown evidence checkpoint ${input.run.checkpointId}`);
     const latestCheckpoint = await this.latestCheckpoint(checkpoint.tenantId, checkpoint.repository, checkpoint.ref);
-    if (
-      latestCheckpoint?.id !== checkpoint.id ||
-      checkpoint.refSequence <
-        (await this.latestAdmittedRefSequence(checkpoint.tenantId, checkpoint.repository, checkpoint.ref))
-    ) {
+    if (latestCheckpoint?.id !== checkpoint.id) {
       throw new Error(`Checkpoint ${checkpoint.id} is superseded for ${checkpoint.repository}@${checkpoint.ref}`);
     }
     const existing = this.#successfulRuns.get(input.run.cacheKey);
@@ -241,8 +225,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return copy(input.run);
   }
 
-  async recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void> {
-    await this.#assertFence(run.tenantId, fence);
+  async recordFailedRun(run: DerivationRun): Promise<void> {
     if (run.status !== "failed") throw new Error("recordFailedRun requires a failed run");
     this.#runs.set(run.id, copy(run));
   }
@@ -374,11 +357,10 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     return [...current.values()].map(copy);
   }
 
-  async publish(projection: GenerationProjection, fence?: ContextWriteFence): Promise<IndexGeneration> {
+  async publish(projection: GenerationProjection): Promise<IndexGeneration> {
     this.#assertOpen();
-    await this.#assertFence(projection.generation.tenantId, fence);
     const generation = projection.generation;
-    const required = ["manifest", "lexical", "structural", "identity", "acl", "retention"] as const;
+    const required = ["manifest", "lexical", "identity", "acl", "retention"] as const;
     if (generation.status !== "published" || generation.publishedAt === undefined) {
       throw new Error("Only a fully published generation may be stored");
     }
@@ -407,11 +389,7 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       );
     }
     const latestCheckpoint = await this.latestCheckpoint(generation.tenantId, generation.repository, generation.ref);
-    if (
-      latestCheckpoint?.id !== generation.checkpointId ||
-      latestCheckpoint.refSequence <
-        (await this.latestAdmittedRefSequence(generation.tenantId, generation.repository, generation.ref))
-    ) {
+    if (latestCheckpoint?.id !== generation.checkpointId) {
       throw new Error(
         `Checkpoint ${generation.checkpointId} is superseded for ${generation.repository}@${generation.ref}`
       );
@@ -422,16 +400,6 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
         throw new Error("Generation identity collision");
       }
       return copy(existing.generation);
-    }
-    for (const [id, prior] of this.#projections) {
-      if (
-        id !== generation.id &&
-        prior.generation.tenantId === generation.tenantId &&
-        prior.generation.repository === generation.repository &&
-        prior.generation.ref === generation.ref
-      ) {
-        this.#projections.delete(id);
-      }
     }
     this.#projections.set(generation.id, copy(projection));
     this.#latestGenerations.set(scopeKey(generation.tenantId, generation.repository, generation.ref), generation.id);
@@ -503,10 +471,20 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
   }
 
   async listGenerations(tenantId: string, repository: string): Promise<IndexGeneration[]> {
+    const currentIds = new Set(
+      [...this.#latestGenerations.entries()]
+        .filter(([key]) => key.startsWith(`${tenantId}\u0000${repository}\u0000`))
+        .map(([, id]) => id)
+    );
     return [...this.#projections.values()]
       .map((projection) => projection.generation)
       .filter((generation) => generation.tenantId === tenantId && generation.repository === repository)
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .sort(
+        (left, right) =>
+          Number(currentIds.has(right.id)) - Number(currentIds.has(left.id)) ||
+          right.createdAt.localeCompare(left.createdAt) ||
+          right.id.localeCompare(left.id)
+      )
       .map(copy);
   }
 
@@ -571,20 +549,6 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     });
   }
 
-  async latestAdmittedRefSequence(tenantId: string, repository: string, ref: string): Promise<number> {
-    const admitted =
-      (await this.fenceValidator?.latestRefSequence(tenantId, normalizeRepository(repository), ref)) ?? 0;
-    const committed = [...this.#checkpoints.values()]
-      .filter(
-        (checkpoint) =>
-          checkpoint.tenantId === tenantId &&
-          checkpoint.repository === normalizeRepository(repository) &&
-          checkpoint.ref === ref
-      )
-      .reduce((latest, checkpoint) => Math.max(latest, checkpoint.refSequence), 0);
-    return Math.max(admitted, committed);
-  }
-
   async listRepositories(tenantId: string): Promise<string[]> {
     const repositories = new Set<string>();
     for (const checkpoint of this.#checkpoints.values()) {
@@ -625,11 +589,12 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
    * is invisible here too, so a test cannot pass against memory and fail against
    * a real database.
    */
-  async verifyApiToken(secretHash: string): Promise<VerifiedApiToken | undefined> {
+  async verifyApiToken(secretHash: string, expectedTenantId?: string): Promise<VerifiedApiToken | undefined> {
     this.#assertOpen();
     const now = Date.now();
     for (const token of this.#apiTokens.values()) {
       if (token.secretHash !== secretHash) continue;
+      if (expectedTenantId !== undefined && token.tenantId !== expectedTenantId) return undefined;
       if (token.revokedAt) return undefined;
       if (Date.parse(token.expiresAt) <= now) return undefined;
       return {
@@ -694,7 +659,36 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
 
   // Keyed by stage so a rerun of the same build starts from its own progress
   // rather than inheriting the last attempt's.
-  readonly #derivationProgress = new Map<string, Map<string, DerivationProgressPage & { at: string; first: string }>>();
+  readonly #derivationProgress = new Map<
+    string,
+    Map<
+      string,
+      DerivationProgressPage & {
+        at: string;
+        first: string;
+        resumable?: DerivationProgressPage;
+      }
+    >
+  >();
+  readonly #derivationOrchestration = new Map<
+    string,
+    {
+      state: ContextOrchestrationState;
+      digest: string;
+      checkpointSequence: number;
+      at: string;
+    }
+  >();
+  readonly #derivationPrivateCheckpoints = new Map<
+    string,
+    {
+      artifact: import("../ports/artifact-store.js").ContextArtifactRef;
+      plaintextDigest: string;
+      bytes: number;
+      checkpointSequence: number;
+      at: string;
+    }
+  >();
 
   async recordDerivationProgress(input: {
     tenantId: string;
@@ -702,20 +696,65 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     stageId: string;
     checkpointId: string;
     pages: readonly DerivationProgressPage[];
+    orchestration?: ContextOrchestrationState;
     at: string;
   }): Promise<void> {
     const key = `${input.tenantId}\u0000${input.stageId}`;
     const existing =
-      this.#derivationProgress.get(key) ?? new Map<string, DerivationProgressPage & { at: string; first: string }>();
+      this.#derivationProgress.get(key) ??
+      new Map<
+        string,
+        DerivationProgressPage & {
+          at: string;
+          first: string;
+          resumable?: DerivationProgressPage;
+        }
+      >();
     for (const page of input.pages) {
-      existing.set(page.documentPath, {
+      const documentPath = derivationProgressDocumentPath(page.documentPath);
+      const prior = existing.get(documentPath);
+      const checkpointSequence =
+        prior !== undefined && prior.contentDigest === page.contentDigest
+          ? (prior.checkpointSequence ?? 1)
+          : (prior?.checkpointSequence ?? 0) + 1;
+      const current: DerivationProgressPage & {
+        at: string;
+        first: string;
+        resumable?: DerivationProgressPage;
+      } = {
         ...page,
+        documentPath,
         at: input.at,
-        first: existing.get(page.documentPath)?.first ?? input.at
-      });
+        first: prior?.first ?? input.at,
+        checkpointSequence
+      };
+      if (page.validationStatus !== "invalid") {
+        current.resumable = {
+          documentPath,
+          title: page.title,
+          bodyMarkdown: page.bodyMarkdown,
+          ...(page.contentDigest === undefined ? {} : { contentDigest: page.contentDigest }),
+          validationStatus: page.validationStatus ?? "pending",
+          diagnostics: page.diagnostics ?? [],
+          checkpointSequence
+        };
+      } else if (prior?.resumable) {
+        current.resumable = prior.resumable;
+      }
+      existing.set(documentPath, current);
     }
     this.#derivationProgress.set(key, existing);
     this.#progressBuilds.set(key, input.buildId);
+    if (input.orchestration) {
+      const digest = fingerprint(input.orchestration);
+      const prior = this.#derivationOrchestration.get(key);
+      this.#derivationOrchestration.set(key, {
+        state: copy(input.orchestration),
+        digest,
+        checkpointSequence: prior?.digest === digest ? prior.checkpointSequence : (prior?.checkpointSequence ?? 0) + 1,
+        at: input.at
+      });
+    }
   }
 
   readonly #progressBuilds = new Map<string, string>();
@@ -727,9 +766,12 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
       .sort(
         (left, right) => left.first.localeCompare(right.first) || left.documentPath.localeCompare(right.documentPath)
       );
+    const orchestration = [...this.#derivationOrchestration.entries()].find(
+      ([key]) => key.startsWith(`${tenantId}\u0000`) && this.#progressBuilds.get(key) === buildId
+    )?.[1];
     const latest = pages.reduce<string | undefined>(
       (newest, page) => (newest === undefined || page.at > newest ? page.at : newest),
-      undefined
+      orchestration?.at
     );
     return {
       buildId,
@@ -737,9 +779,23 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
         documentPath: page.documentPath,
         title: page.title,
         bytes: Buffer.byteLength(page.bodyMarkdown, "utf8"),
+        ...(page.contentDigest === undefined ? {} : { contentDigest: page.contentDigest }),
+        validationStatus: page.validationStatus ?? "pending",
+        diagnostics: page.diagnostics ?? [],
+        checkpointSequence: page.checkpointSequence ?? 1,
         firstSeenAt: page.first,
         updatedAt: page.at
       })),
+      ...(orchestration
+        ? {
+            orchestration: {
+              state: copy(orchestration.state),
+              contentDigest: orchestration.digest,
+              checkpointSequence: orchestration.checkpointSequence,
+              updatedAt: orchestration.at
+            }
+          }
+        : {}),
       ...(latest === undefined ? {} : { updatedAt: latest })
     };
   }
@@ -752,22 +808,75 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
     for (const [key, byPath] of this.#derivationProgress.entries()) {
       if (!key.startsWith(`${tenantId}\u0000`) || this.#progressBuilds.get(key) !== buildId) continue;
       const page = byPath.get(documentPath);
-      if (page) return { documentPath: page.documentPath, title: page.title, bodyMarkdown: page.bodyMarkdown };
+      if (page) {
+        return {
+          documentPath: page.documentPath,
+          title: page.title,
+          bodyMarkdown: page.bodyMarkdown,
+          ...(page.contentDigest === undefined ? {} : { contentDigest: page.contentDigest }),
+          validationStatus: page.validationStatus ?? "pending",
+          diagnostics: page.diagnostics ?? [],
+          checkpointSequence: page.checkpointSequence ?? 1
+        };
+      }
     }
     return undefined;
   }
 
   async derivationProgressPages(tenantId: string, stageId: string): Promise<DerivationProgressPage[]> {
     const byPath = this.#derivationProgress.get(`${tenantId}\u0000${stageId}`);
-    return [...(byPath?.values() ?? [])].map((page) => ({
-      documentPath: page.documentPath,
-      title: page.title,
-      bodyMarkdown: page.bodyMarkdown
-    }));
+    return [...(byPath?.values() ?? [])].flatMap((page) => (page.resumable ? [copy(page.resumable)] : []));
+  }
+
+  async derivationOrchestration(tenantId: string, stageId: string): Promise<ContextOrchestrationState | undefined> {
+    const value = this.#derivationOrchestration.get(`${tenantId}\u0000${stageId}`);
+    return value ? copy(value.state) : undefined;
+  }
+
+  async recordDerivationPrivateCheckpoint(input: {
+    tenantId: string;
+    buildId: string;
+    stageId: string;
+    checkpointId: string;
+    artifact: import("../ports/artifact-store.js").ContextArtifactRef;
+    plaintextDigest: string;
+    bytes: number;
+    at: string;
+  }): Promise<void> {
+    const key = `${input.tenantId}\u0000${input.stageId}`;
+    const prior = this.#derivationPrivateCheckpoints.get(key);
+    this.#derivationPrivateCheckpoints.set(key, {
+      artifact: copy(input.artifact),
+      plaintextDigest: input.plaintextDigest,
+      bytes: input.bytes,
+      checkpointSequence:
+        prior?.plaintextDigest === input.plaintextDigest
+          ? prior.checkpointSequence
+          : (prior?.checkpointSequence ?? 0) + 1,
+      at: input.at
+    });
+  }
+
+  async derivationPrivateCheckpoint(
+    tenantId: string,
+    stageId: string
+  ): Promise<import("../derive/progress.js").DerivationPrivateCheckpoint | undefined> {
+    const value = this.#derivationPrivateCheckpoints.get(`${tenantId}\u0000${stageId}`);
+    return value
+      ? {
+          artifact: copy(value.artifact),
+          plaintextDigest: value.plaintextDigest,
+          bytes: value.bytes,
+          checkpointSequence: value.checkpointSequence,
+          updatedAt: value.at
+        }
+      : undefined;
   }
 
   async clearDerivationProgress(tenantId: string, stageId: string): Promise<void> {
     this.#derivationProgress.delete(`${tenantId}\u0000${stageId}`);
+    this.#derivationOrchestration.delete(`${tenantId}\u0000${stageId}`);
+    this.#derivationPrivateCheckpoints.delete(`${tenantId}\u0000${stageId}`);
     this.#progressBuilds.delete(`${tenantId}\u0000${stageId}`);
   }
 
@@ -824,16 +933,6 @@ export class MemoryContextEngineStore implements FencedContextEngineStore {
 
   async close(): Promise<void> {
     this.#closed = true;
-  }
-
-  async #assertFence(tenantId: string, fence?: ContextWriteFence): Promise<void> {
-    if (fence === undefined) return;
-    if (
-      this.fenceValidator === undefined ||
-      !(await this.fenceValidator.validateWriteFence({ tenantId, fence, now: this.now() }))
-    ) {
-      throw new Error("Context write fence is stale or invalid");
-    }
   }
 
   #isErased(anchor: EvidenceAnchor): boolean {

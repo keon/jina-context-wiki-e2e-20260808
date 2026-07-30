@@ -8,7 +8,7 @@ export interface HttpRequestRecord {
   readonly metrics?: MetricsRegistry;
   readonly method: string;
   readonly path: string;
-  /** Low-cardinality route label for metrics, e.g. "/context/generations/:id". */
+  /** Low-cardinality route label for metrics, e.g. "/context/read". */
   readonly route: string;
   /** Final HTTP status; 0 means the request aborted before any status was sent. */
   readonly statusCode: number;

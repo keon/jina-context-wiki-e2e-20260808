@@ -52,7 +52,7 @@ export type GitHubReviewTriggerEvent = Extract<
 >;
 
 export type GitHubIssueTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "issue.opened" }>;
-export type GitHubContextTriggerEvent = Extract<GitHubWebhookEvent, { readonly type: "push" }>;
+export type GitHubContextTriggerEvent = GitHubWebhookEvent;
 
 export interface ParsedGitHubWebhook {
   readonly event: GitHubWebhookEvent;
@@ -60,6 +60,7 @@ export interface ParsedGitHubWebhook {
   readonly repositoryId?: number;
   readonly installationId?: number;
   readonly repositoryOwner?: GitHubWebhookAccount;
+  readonly repositoryDefaultBranch?: string;
   readonly sender?: GitHubWebhookAccount;
 }
 
@@ -79,7 +80,12 @@ export function isIssueTrigger(event: GitHubWebhookEvent): event is GitHubIssueT
 }
 
 export function isContextTrigger(event: GitHubWebhookEvent): event is GitHubContextTriggerEvent {
-  return event.type === "push" && !event.deleted && event.ref.startsWith("refs/heads/");
+  return (
+    (event.type === "push" && !event.deleted && event.ref.startsWith("refs/heads/")) ||
+    event.type === "pull_request.opened" ||
+    event.type === "pull_request.synchronize" ||
+    event.type === "issue.opened"
+  );
 }
 
 /** Verify the exact raw request bytes against GitHub's X-Hub-Signature-256 header. */
@@ -120,6 +126,7 @@ export function parseGitHubWebhook(eventName: string, rawBody: Uint8Array): Pars
   const common = {
     repository: repositoryFullName,
     ...optionalNumberProperty("repositoryId", repository.id),
+    ...optionalStringProperty("repositoryDefaultBranch", repository.default_branch),
     ...optionalNestedNumberProperty("installationId", root.installation, "id"),
     ...optionalAccountProperty("repositoryOwner", repository.owner),
     ...optionalAccountProperty("sender", root.sender)

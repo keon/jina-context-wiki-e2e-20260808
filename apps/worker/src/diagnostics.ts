@@ -9,6 +9,7 @@ export type WorkerFailureCategory =
   | "daytona"
   | "model"
   | "context_validation"
+  | "api_transport"
   | "lease"
   | "worker_execution";
 
@@ -27,8 +28,60 @@ export function workerFailureCategory(reason: string): WorkerFailureCategory {
   if (/github request|github response|github installation token/.test(value)) return "github_response";
   if (/clone|repository ref|prepared commit|git fetch|git checkout/.test(value)) return "git_checkout";
   if (/daytona|sandbox/.test(value)) return "daytona";
-  if (/openai|openrouter|codex|model_provider/.test(value)) return "model";
-  if (/evidence|citation|knowledge output|context result|schema|document/.test(value)) return "context_validation";
+  // The isolated board-agent process is the model transport boundary. A
+  // non-zero Codex exit or hard model wall-clock can be caused by transient
+  // provider capacity before the agent emits a result (and before there is
+  // any semantic output to validate). Classify that boundary before matching
+  // stage IDs such as "citation" or "context-..." as validation failures.
+  if (/board agent stage .* (?:exited with [1-9][0-9]*|exceeded its \d+s budget)/.test(value)) return "model";
+  if (
+    /evidence|citation|knowledge output|context result|schema|document|publication plan|research plan|maintenance question|research assignment|repository area|shallow|not valid json|invalid json|outside the repository|does not match/.test(
+      value
+    )
+  )
+    return "context_validation";
   if (/lease|completion/.test(value)) return "lease";
+  if (
+    /context api .*failed with (?:408|425|429|5\d\d)|\b(?:econnreset|econnrefused|etimedout|enotfound)\b|fetch failed|network error|socket hang up|connection reset|service unavailable|bad gateway|gateway timeout|operation was aborted|aborted due to timeout|request timed out/.test(
+      value
+    )
+  )
+    return "api_transport";
+  if (/openai|openrouter|codex|model_provider/.test(value)) return "model";
   return "worker_execution";
+}
+
+/** Conservative retry policy: unknown and semantic failures stay terminal. */
+export function isRetryableWorkerFailure(reason: string): boolean {
+  const category = workerFailureCategory(reason);
+  if (
+    category === "api_transport" ||
+    category === "daytona" ||
+    category === "github_rate_limit" ||
+    category === "github_timeout" ||
+    category === "model"
+  ) {
+    return true;
+  }
+  return (
+    category === "github_response" &&
+    /failed with (?:408|425|429|5\d\d)|timed out|timeout|fetch failed|network|connection|socket/i.test(reason)
+  );
+}
+
+export function shouldRetryWorkerFailure(
+  reason: string,
+  input: {
+    readonly attempt: number;
+    readonly maxAttempts: number;
+  }
+): boolean {
+  return (
+    Number.isSafeInteger(input.attempt) &&
+    Number.isSafeInteger(input.maxAttempts) &&
+    input.attempt > 0 &&
+    input.maxAttempts > 0 &&
+    input.attempt < input.maxAttempts &&
+    isRetryableWorkerFailure(reason)
+  );
 }

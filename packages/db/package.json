@@ -13,9 +13,11 @@
     "typecheck": "tsc -b",
     "lint": "eslint . --max-warnings 0",
     "migrate": "pnpm build && node dist/migrate.js",
-    "test": "pnpm build && node --test dist/*.test.js"
+    "reset-context": "pnpm build && node dist/reset-context-data.js",
+    "test": "pnpm build && node --test --test-concurrency=1 dist/*.test.js"
   },
   "dependencies": {
+    "@google-cloud/storage": "^7.21.0",
     "@jina/context-engine": "workspace:*",
     "pg": "^8.22.0"
   },

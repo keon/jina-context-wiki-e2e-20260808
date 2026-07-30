@@ -62,6 +62,12 @@ export async function hardenContextRuntimeRole(pool: Pool, runtimeUser: string):
              runtime_user
            );
          end if;
+         if to_regclass('jina_runtime.release_control') is not null then
+           execute format(
+             'grant select on jina_runtime.release_control to %I',
+             runtime_user
+           );
+         end if;
        end if;
 
        foreach relation_name in array array[

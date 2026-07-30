@@ -1,35 +1,48 @@
 import {
   ContextDatabase,
+  GcsContextArtifactStore,
+  PostgresBoardPageIndexAttachmentRepository,
+  PostgresBoardContextPublicationRepository,
+  PostgresContextQuotaStore,
   PostgresContextEngineStore,
-  PostgresContextPipelineCoordinator,
   PostgresJsonStateStore,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
-import {
-  MemoryContextEngineStore,
-  MemoryContextPipelineCoordinator,
-  type ContextEngineStore,
-  type ContextPipelineCoordinator
-} from "@jina/context-engine";
+import { FileContextArtifactStore, MemoryContextEngineStore, type ContextEngineStore } from "@jina/context-engine";
 import { createLogger, errorLogFields } from "@jina/observability";
 import { createApiServer } from "./server.js";
+import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
 import type { ApiSnapshot, ApiStateStore } from "./server.js";
 
 const port = Number(process.env.PORT ?? 4000);
 const enableDevEndpoints = process.env.JINA_ENABLE_DEV_ENDPOINTS === "true";
+const trustDevIdentityHeaders = booleanEnvironment("JINA_TRUST_DEV_IDENTITY_HEADERS", enableDevEndpoints);
+if (trustDevIdentityHeaders && !enableDevEndpoints) {
+  throw new Error("JINA_TRUST_DEV_IDENTITY_HEADERS requires JINA_ENABLE_DEV_ENDPOINTS=true");
+}
 if (enableDevEndpoints && process.env.K_SERVICE) {
   throw new Error("JINA_ENABLE_DEV_ENDPOINTS must not be enabled on Cloud Run");
 }
+const devContextMaxActiveBuilds = optionalPositiveIntegerEnv("JINA_DEV_CONTEXT_MAX_ACTIVE_BUILDS");
+if (devContextMaxActiveBuilds !== undefined && !enableDevEndpoints) {
+  throw new Error("JINA_DEV_CONTEXT_MAX_ACTIVE_BUILDS requires JINA_ENABLE_DEV_ENDPOINTS=true");
+}
 const tenancyMode = process.env.JINA_TENANCY_MODE?.trim() || "fixed";
+const requireWorkerReleaseGate = booleanEnvironment("JINA_REQUIRE_WORKER_RELEASE_GATE", false);
+if (requireWorkerReleaseGate && enableDevEndpoints) {
+  throw new Error("JINA_REQUIRE_WORKER_RELEASE_GATE must remain disabled for local development");
+}
 if (tenancyMode !== "fixed" && tenancyMode !== "shared-db") {
   throw new Error("JINA_TENANCY_MODE must be fixed or shared-db");
 }
-if (!enableDevEndpoints && (!process.env.INTERNAL_API_TOKEN || !process.env.CONTEXT_API_TOKEN)) {
-  throw new Error("INTERNAL_API_TOKEN and CONTEXT_API_TOKEN are required in production");
+if (!trustDevIdentityHeaders && (!process.env.INTERNAL_API_TOKEN || !process.env.CONTEXT_API_TOKEN)) {
+  throw new Error(
+    "INTERNAL_API_TOKEN and CONTEXT_API_TOKEN are required when development identity headers are not trusted"
+  );
 }
-if (!enableDevEndpoints && tenancyMode === "fixed" && !process.env.JINA_TENANT_ID) {
-  throw new Error("JINA_TENANT_ID is required in fixed tenancy mode");
+if (!trustDevIdentityHeaders && tenancyMode === "fixed" && !process.env.JINA_TENANT_ID) {
+  throw new Error("JINA_TENANT_ID is required in fixed tenancy mode when development identity headers are not trusted");
 }
 if (tenancyMode === "shared-db" && process.env.JINA_TENANT_ID) {
   throw new Error("JINA_TENANT_ID must be unset in shared-db tenancy mode");
@@ -44,23 +57,52 @@ const contextDatabase = postgresConfig
     })
   : undefined;
 const stateStore = createStateStore(postgresConfig);
-const contextCoordinator = createContextCoordinator(contextDatabase);
-const contextStore = createContextStore(contextDatabase, contextCoordinator);
+const contextStore = createContextStore(contextDatabase);
+const contextBoardPublicationTransaction = contextDatabase
+  ? new PostgresBoardContextPublicationRepository(contextDatabase)
+  : undefined;
+const contextBoardPageIndexAttachmentTransaction = contextDatabase
+  ? new PostgresBoardPageIndexAttachmentRepository(contextDatabase)
+  : undefined;
+const contextQuotaService = new ContextQuotaService({
+  store: contextDatabase ? new PostgresContextQuotaStore(contextDatabase) : new InMemoryContextQuotaStore(),
+  ...(devContextMaxActiveBuilds === undefined
+    ? {}
+    : {
+        defaults: {
+          maxActiveBuilds: devContextMaxActiveBuilds
+        }
+      })
+});
 const sharedIdentityResolver = tenancyMode === "shared-db" ? createSharedIdentityResolver(postgresConfig) : undefined;
 const contextWorkerLeaseMs = optionalPositiveIntegerEnv("CONTEXT_WORKER_LEASE_MS");
+const contextArtifactStore = process.env.CONTEXT_GCS_BUCKET
+  ? new GcsContextArtifactStore(process.env.CONTEXT_GCS_BUCKET, {
+      ...(process.env.GOOGLE_CLOUD_PROJECT ? { projectId: process.env.GOOGLE_CLOUD_PROJECT } : {}),
+      ...(process.env.GOOGLE_APPLICATION_CREDENTIALS ? { keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS } : {})
+    })
+  : enableDevEndpoints
+    ? new FileContextArtifactStore(process.env.CONTEXT_ARTIFACT_DIRECTORY?.trim() || ".jina/context-artifacts")
+    : undefined;
 
 const server = createApiServer({
   ...(process.env.GITHUB_WEBHOOK_SECRET ? { githubWebhookSecret: process.env.GITHUB_WEBHOOK_SECRET } : {}),
   ...(process.env.JINA_TENANT_ID ? { tenantId: process.env.JINA_TENANT_ID } : {}),
   tenantAliases: commaSeparatedEnv("JINA_TENANT_ALIASES"),
   enableDevEndpoints,
+  trustDevIdentityHeaders,
   simulateRuns: process.env.JINA_SIMULATE_RUNS === "true",
-  seedDemo: enableDevEndpoints && process.env.JINA_SEED_DEMO !== "false",
   ...(stateStore ? { stateStore } : {}),
   contextStore,
-  contextCoordinator,
+  ...(contextArtifactStore ? { contextArtifactStore } : {}),
+  ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
+  ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),
+  ...(contextBoardPageIndexAttachmentTransaction ? { contextBoardPageIndexAttachmentTransaction } : {}),
+  contextQuotaService,
   ...(sharedIdentityResolver ? { sharedIdentityResolver } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),
+  requireWorkerReleaseGate,
+  ...(process.env.JINA_INTERNAL_PRINCIPAL_ID ? { internalApiPrincipalId: process.env.JINA_INTERNAL_PRINCIPAL_ID } : {}),
   ...(process.env.CONTEXT_API_TOKEN ? { contextApiToken: process.env.CONTEXT_API_TOKEN } : {}),
   ...(process.env.JINA_CONTEXT_TENANT_ID ? { contextApiTenantId: process.env.JINA_CONTEXT_TENANT_ID } : {}),
   ...(process.env.JINA_CONTEXT_PRINCIPAL_ID ? { contextApiPrincipalId: process.env.JINA_CONTEXT_PRINCIPAL_ID } : {}),
@@ -76,12 +118,13 @@ server.listen(port, enableDevEndpoints ? "127.0.0.1" : "0.0.0.0", () => {
     event: "api.started",
     port,
     storage: stateStore ? "postgres" : "memory",
-    devEndpoints: enableDevEndpoints
+    devEndpoints: enableDevEndpoints,
+    trustDevIdentityHeaders
   });
   if (enableDevEndpoints) {
     console.log(`jina api server: http://localhost:${port}`);
-    console.log("  GET  /board  /events  /context/generations  /context/documents  /health");
-    console.log("  POST /context/build  /context/query  /mcp (query_context)");
+    console.log("  GET  /board  /events  /context/releases  /context/list  /context/read  /context/diff  /health");
+    console.log("  POST /context/build  /context/search  /mcp");
     console.log("  POST /webhooks/github  (signed GitHub App deliveries)");
     console.log("  POST /dev/webhooks/github  (unsigned local demo events)");
   }
@@ -107,15 +150,8 @@ function createStateStore(config: PostgresJsonStateStoreConfig | undefined): Api
   });
 }
 
-function createContextStore(
-  database: ContextDatabase | undefined,
-  coordinator: ContextPipelineCoordinator
-): ContextEngineStore {
-  return database ? new PostgresContextEngineStore(database) : new MemoryContextEngineStore(coordinator);
-}
-
-function createContextCoordinator(database: ContextDatabase | undefined): ContextPipelineCoordinator {
-  return database ? new PostgresContextPipelineCoordinator(database) : new MemoryContextPipelineCoordinator();
+function createContextStore(database: ContextDatabase | undefined): ContextEngineStore {
+  return database ? new PostgresContextEngineStore(database) : new MemoryContextEngineStore();
 }
 
 function createSharedIdentityResolver(config: PostgresJsonStateStoreConfig | undefined): PostgresSharedIdentityStore {
@@ -159,4 +195,12 @@ function optionalPositiveIntegerEnv(name: string): number | undefined {
     throw new Error(`${name} must be a positive safe integer`);
   }
   return value;
+}
+
+function booleanEnvironment(name: string, fallback: boolean): boolean {
+  const raw = process.env[name]?.trim();
+  if (raw === undefined || raw === "") return fallback;
+  if (raw === "true") return true;
+  if (raw === "false") return false;
+  throw new Error(`${name} must be true or false`);
 }

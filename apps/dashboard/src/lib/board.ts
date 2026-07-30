@@ -44,7 +44,24 @@ function contextBuildScope(metadata: Readonly<Record<string, unknown>>): string 
   return `${metadataText(metadata.tenantId)}:${metadataText(metadata.repository)}:${metadataText(metadata.ref)}`;
 }
 
-const contextTaskTypes = new Set(["build-context", "ingest-evidence", "derive-knowledge", "index-context"]);
+const contextTaskTypes = new Set([
+  "build-context",
+  "context-build-graph",
+  "snapshot-context-input",
+  "plan-context-research",
+  "research-context-subject",
+  "plan-context-publication",
+  "context-page",
+  "write-context-page",
+  "audit-context-page",
+  "repair-context-page",
+  "challenge-context-sources",
+  "evaluate-context-tasks",
+  "repair-context-gaps",
+  "certify-context-release",
+  "publish-context-release",
+  "index-context-release"
+]);
 
 /**
  * Splits tasks into the operational board and its history: superseded work,

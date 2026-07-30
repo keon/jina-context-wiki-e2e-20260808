@@ -2,6 +2,10 @@
   "$schema": "https://unpkg.com/knip@6/schema.json",
   "ignoreBinaries": ["codex"],
   "workspaces": {
+    ".": {
+      "entry": ["scripts/context-production-preflight.mjs"],
+      "ignoreDependencies": ["pg"]
+    },
     "apps/api": {
       "entry": ["src/dev-server.ts", "src/**/*.test.ts"]
     },
@@ -9,14 +13,10 @@
       "entry": ["src/server.ts", "src/acceptance.ts", "src/**/*.test.ts"]
     },
     "apps/workflows": {
-      "entry": [
-        "src/cli/review-pr.ts",
-        "src/simulations/pr-review-simulation.test.ts",
-        "src/simulations/pr-review-trace.ts"
-      ]
+      "entry": ["src/cli/review-pr.ts", "src/simulations/pr-review-trace.ts"]
     },
     "packages/db": {
-      "entry": ["src/migrate.ts", "src/**/*.test.ts"]
+      "entry": ["src/migrate.ts", "src/reset-context-data.ts", "src/**/*.test.ts"]
     }
   }
 }

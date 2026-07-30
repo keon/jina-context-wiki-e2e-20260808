@@ -38,6 +38,13 @@ export interface HierarchyBuildNode {
 export interface HierarchyBuildResult {
   adapterName: string;
   adapterVersion: string;
+  /**
+   * The immutable upstream source revision and verified source-byte digest
+   * used by a self-hosted adapter. Other hierarchy implementations may omit
+   * these attestations.
+   */
+  sourcePin?: string;
+  sourceDigest?: string;
   nodes: HierarchyBuildNode[];
   diagnostics: string[];
 }
@@ -68,6 +75,13 @@ export interface HierarchyRetriever {
 }
 
 export interface PageIndexClient {
-  probe(): Promise<{ available: boolean; reason?: string }>;
+  probe(): Promise<{
+    available: boolean;
+    reason?: string;
+    adapterName?: string;
+    adapterVersion?: string;
+    sourcePin?: string;
+    sourceDigest?: string;
+  }>;
   build(input: HierarchyBuildInput, signal: AbortSignal): Promise<HierarchyBuildResult>;
 }

@@ -1,4 +1,10 @@
-import type { DerivationProgressPage, DerivationProgressSnapshot } from "../derive/progress.js";
+import type {
+  DerivationPrivateCheckpoint,
+  DerivationProgressPage,
+  DerivationProgressSnapshot
+} from "../derive/progress.js";
+import type { ContextArtifactRef } from "./artifact-store.js";
+import type { ContextOrchestrationState } from "../derive/orchestration.js";
 import type { EvidenceStore } from "./evidence-store.js";
 import type { KnowledgeStore } from "./knowledge-store.js";
 import type { ProjectionStore } from "./projection-store.js";
@@ -117,7 +123,6 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]>;
   aclFingerprintsForPrincipal(tenantId: string, principalId: string, repository: string): Promise<string[]>;
   repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string>;
-  latestAdmittedRefSequence(tenantId: string, repository: string, ref: string): Promise<number>;
   projectionInputFingerprint(tenantId: string, repository: string): Promise<string>;
   listRepositories(tenantId: string): Promise<string[]>;
   projectionBacklog(tenantId: string): Promise<ProjectionBacklog>;
@@ -145,11 +150,12 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
    * satisfying this interface, and so that the absence of an implementation
    * fails closed: a store that cannot verify a token never authenticates one.
    *
-   * `verifyApiToken` is the one read in this interface that resolves its own
-   * tenant, so it must run outside any tenant scope; every other method here
-   * knows its tenant and takes it.
+   * The first `verifyApiToken` call resolves its own tenant and therefore omits
+   * `expectedTenantId`. A response-time revocation check already runs inside
+   * that tenant's scope and supplies it. Stores must reject a token from any
+   * other tenant in the latter form.
    */
-  verifyApiToken?(secretHash: string): Promise<VerifiedApiToken | undefined>;
+  verifyApiToken?(secretHash: string, expectedTenantId?: string): Promise<VerifiedApiToken | undefined>;
   stampApiTokenUse?(tenantId: string, tokenId: string, usedAt: string): Promise<void>;
   mintApiToken?(token: MintApiTokenInput): Promise<ApiTokenRecord>;
   listApiTokens?(tenantId: string): Promise<ApiTokenRecord[]>;
@@ -173,6 +179,7 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
     stageId: string;
     checkpointId: string;
     pages: readonly DerivationProgressPage[];
+    orchestration?: ContextOrchestrationState;
     at: string;
   }): Promise<void>;
   derivationProgress?(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot>;
@@ -182,13 +189,21 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
     documentPath: string
   ): Promise<DerivationProgressPage | undefined>;
   derivationProgressPages?(tenantId: string, stageId: string): Promise<DerivationProgressPage[]>;
+  derivationOrchestration?(tenantId: string, stageId: string): Promise<ContextOrchestrationState | undefined>;
+  recordDerivationPrivateCheckpoint?(input: {
+    tenantId: string;
+    buildId: string;
+    stageId: string;
+    checkpointId: string;
+    artifact: ContextArtifactRef;
+    plaintextDigest: string;
+    bytes: number;
+    at: string;
+  }): Promise<void>;
+  derivationPrivateCheckpoint?(tenantId: string, stageId: string): Promise<DerivationPrivateCheckpoint | undefined>;
   clearDerivationProgress?(tenantId: string, stageId: string): Promise<void>;
   eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }>;
   migrateTenantAliases(fromTenantId: string, toTenantId: string): Promise<void>;
   health(): Promise<{ ok: boolean; adapter: string }>;
   close(): Promise<void>;
-}
-
-export interface FencedContextEngineStore extends ContextEngineStore {
-  readonly enforcesWriteFences: true;
 }

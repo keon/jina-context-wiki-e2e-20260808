@@ -66,14 +66,19 @@ const checkpoint = await new IngestEvidenceService(store).ingest({
   createdAt: fixture.createdAt,
   sourceComplete: true
 });
-const readmeRecord = (await store.listEvidence(checkpoint.id)).find(
-  (record) => record.anchor.sourceId === "2222222222222222222222222222222222222222"
-);
-if (!readmeRecord) throw new Error("Evaluation README evidence was not ingested");
-const runbookRecord = (await store.listEvidence(checkpoint.id)).find(
-  (record) => record.anchor.sourceId === "5555555555555555555555555555555555555555"
-);
-if (!runbookRecord) throw new Error("Evaluation runbook evidence was not ingested");
+const evidenceRecords = await store.listEvidence(checkpoint.id);
+const evidenceRecord = (sourceId, label) => {
+  const record = evidenceRecords.find((candidate) => candidate.anchor.sourceId === sourceId);
+  if (!record) throw new Error(`Evaluation ${label} evidence was not ingested`);
+  return record;
+};
+const readmeRecord = evidenceRecord("2222222222222222222222222222222222222222", "README");
+const authRecord = evidenceRecord("3333333333333333333333333333333333333333", "auth");
+const codeownersRecord = evidenceRecord("4444444444444444444444444444444444444444", "CODEOWNERS");
+const runbookRecord = evidenceRecord("5555555555555555555555555555555555555555", "runbook");
+const pullRequestRecord = evidenceRecord("github:pull_request:42", "pull request");
+const issueRecord = evidenceRecord("github:issue:77", "issue");
+const staleIssueRecord = evidenceRecord("github:issue:77:stale", "stale issue");
 const knowledge = createKnowledgeRevision({
   logicalId: `component:${fixture.repository}:context-service`,
   tenantId: fixture.tenantId,
@@ -146,18 +151,136 @@ const knowledge = createKnowledgeRevision({
   confidence: 1,
   createdAt: fixture.createdAt
 });
-const knowledgeCitation = createKnowledgeCitation(
-  knowledge.id,
-  0,
-  "The service ingests immutable evidence",
-  readmeRecord.anchor
-);
-const runbookCitation = createKnowledgeCitation(
-  knowledge.id,
-  1,
-  "If context publication stalls, inspect the required projector barrier and outbox age.",
-  runbookRecord.anchor
-);
+const derivedRevision = (input) =>
+  createKnowledgeRevision({
+    logicalId: input.logicalId,
+    tenantId: fixture.tenantId,
+    repository: fixture.repository,
+    kind: input.kind,
+    title: input.title,
+    bodyMarkdown: input.bodyMarkdown,
+    summary: input.summary,
+    structuredSummary: {
+      facts: [{ text: input.summary, citationOrdinals: [1], confidence: 1 }],
+      questionsAnswered: [],
+      diagnostics: { symptoms: [], causes: [], checks: [], fixes: [] },
+      ...(input.claimSubject ? { claimSubject: input.claimSubject } : {}),
+      ...(input.claimValue ? { claimValue: input.claimValue } : {}),
+      claimCitationOrdinals: [1]
+    },
+    scope: {
+      ref: fixture.ref,
+      commitSha: fixture.commitSha,
+      paths: input.paths ?? [],
+      symbols: input.symbols ?? [],
+      pullRequests: input.pullRequests ?? [],
+      issues: input.issues ?? []
+    },
+    evidenceFingerprint: fingerprint(input.anchor),
+    generatorName: "evaluation",
+    generatorVersion: "v2",
+    model: "deterministic-evaluation",
+    promptVersion: "derived-only-v1",
+    confidence: 1,
+    createdAt: fixture.createdAt
+  });
+const authKnowledge = derivedRevision({
+  logicalId: `component:${fixture.repository}:authorization`,
+  kind: "component",
+  title: "Repository authorization flow",
+  bodyMarkdown:
+    "# Repository authorization flow\n\n`authorizeRepository` is defined in `src/auth.ts`. `createContext` calls `authorizeRepository` before it returns `ready` or `denied`.",
+  summary: "Repository authorization runs before context retrieval.",
+  paths: ["src/auth.ts"],
+  symbols: ["authorizeRepository", "createContext"],
+  anchor: authRecord.anchor
+});
+const ownershipKnowledge = derivedRevision({
+  logicalId: `topic:${fixture.repository}:ownership`,
+  kind: "topic",
+  title: "Authorization ownership",
+  bodyMarkdown: "# Authorization ownership\n\nAccording to CODEOWNERS, src/auth.ts is owned by `@acme/security`.",
+  summary: "CODEOWNERS assigns src/auth.ts to @acme/security.",
+  paths: ["CODEOWNERS", "src/auth.ts"],
+  anchor: codeownersRecord.anchor
+});
+const changeKnowledge = derivedRevision({
+  logicalId: `change:${fixture.repository}:${fixture.commitSha}`,
+  kind: "change_summary",
+  title: "PR #42 atomic context publication",
+  bodyMarkdown:
+    "# PR #42: atomic context publication\n\nRepository activity after 10:30 included PR #42, which changed publication to require every required projector before a generation becomes visible.",
+  summary: "Repository activity includes PR #42 making publication atomic across required projectors.",
+  pullRequests: ["42"],
+  anchor: pullRequestRecord.anchor
+});
+const issueKnowledge = derivedRevision({
+  logicalId: `topic:${fixture.repository}:issue-77-current`,
+  kind: "topic",
+  title: "Issue #77 current state",
+  bodyMarkdown: "# Issue #77 current state\n\nThe current provider record reports issue #77 as closed.",
+  summary: "Issue #77 is currently closed.",
+  issues: ["77"],
+  claimSubject: "issue:77:state",
+  claimValue: "closed",
+  anchor: issueRecord.anchor
+});
+const staleIssueKnowledge = derivedRevision({
+  logicalId: `topic:${fixture.repository}:issue-77-stale`,
+  kind: "topic",
+  title: "Issue #77 stale replica",
+  bodyMarkdown: "# Issue #77 stale replica\n\nA stale provider replica reports issue #77 as open.",
+  summary: "A stale replica reports issue #77 as open.",
+  issues: ["77"],
+  claimSubject: "issue:77:state",
+  claimValue: "open",
+  anchor: staleIssueRecord.anchor
+});
+const runbookKnowledge = derivedRevision({
+  logicalId: `runbook:${fixture.repository}:publication-stall`,
+  kind: "runbook",
+  title: "Publication stall runbook",
+  bodyMarkdown:
+    "# Publication stall runbook\n\nInspect the required projector barrier and outbox age when context publication stalls.\n\n" +
+    "Operational checkpoint: verify leases, generation identity, and source citations.\n\n".repeat(240),
+  summary: "Investigate stalled publication through projector, outbox, lease, and generation checkpoints.",
+  paths: ["docs/runbook.md"],
+  anchor: runbookRecord.anchor
+});
+const revisions = [
+  knowledge,
+  authKnowledge,
+  ownershipKnowledge,
+  changeKnowledge,
+  issueKnowledge,
+  staleIssueKnowledge,
+  runbookKnowledge
+];
+const citations = [
+  createKnowledgeCitation(knowledge.id, 0, "The service ingests immutable evidence", readmeRecord.anchor),
+  createKnowledgeCitation(
+    knowledge.id,
+    1,
+    "If context publication stalls, inspect the required projector barrier and outbox age.",
+    runbookRecord.anchor
+  ),
+  createKnowledgeCitation(authKnowledge.id, 0, "export function authorizeRepository", authRecord.anchor),
+  createKnowledgeCitation(ownershipKnowledge.id, 0, "src/auth.ts @acme/security", codeownersRecord.anchor),
+  createKnowledgeCitation(
+    changeKnowledge.id,
+    0,
+    "Changed publication to require every required projector before the generation becomes visible.",
+    pullRequestRecord.anchor
+  ),
+  createKnowledgeCitation(issueKnowledge.id, 0, "closed", issueRecord.anchor),
+  createKnowledgeCitation(staleIssueKnowledge.id, 0, "open", staleIssueRecord.anchor),
+  createKnowledgeCitation(
+    runbookKnowledge.id,
+    0,
+    "If context publication stalls, inspect the required projector barrier and outbox age.",
+    runbookRecord.anchor
+  )
+];
 await store.commitKnowledge({
   run: {
     id: "evaluation-derivation",
@@ -174,13 +297,15 @@ await store.commitKnowledge({
     rawOutputs: [],
     status: "succeeded",
     diagnostics: [],
-    revisionIds: [knowledge.id],
+    revisionIds: revisions.map((revision) => revision.id),
     createdAt: fixture.createdAt
   },
-  revisions: [knowledge],
-  citations: [knowledgeCitation, runbookCitation]
+  revisions,
+  citations
 });
-const persistedKnowledgeCitations = await store.listCitations(knowledge.id);
+const persistedKnowledgeCitations = (
+  await Promise.all(revisions.map((revision) => store.listCitations(revision.id)))
+).flat();
 const groundedKnowledgeCitation = (
   await Promise.all(
     persistedKnowledgeCitations.map(async (citation) => {
@@ -190,11 +315,30 @@ const groundedKnowledgeCitation = (
     })
   )
 ).every(Boolean);
-await new IndexContextService(store).index(checkpoint.id, fixture.createdAt);
+const benchmarkGeneration = await new IndexContextService(store).index(checkpoint.id, fixture.createdAt);
 
 const projectionStore = new Proxy(store, {
   get(target, property) {
     if (property === "latestAuthorizedGeneration" || property === "retrieveIndexed") return undefined;
+    const value = Reflect.get(target, property, target);
+    return typeof value === "function" ? value.bind(target) : value;
+  }
+});
+// This benchmark owns an exact immutable generation created above. Production
+// discovery intentionally exposes only Board releases after PageIndex
+// attachment, so pin the benchmark generation instead of manufacturing a
+// public Board pointer or weakening the public lookup fence.
+const indexedRuntimeStore = new Proxy(store, {
+  get(target, property) {
+    if (property === "latestAuthorizedGeneration") {
+      return async (tenantId, repository, ref, principalId) => {
+        const projection = await target.getAuthorizedGeneration(benchmarkGeneration.id, principalId);
+        const generation = projection?.generation;
+        return generation?.tenantId === tenantId && generation.repository === repository && generation.ref === ref
+          ? generation
+          : undefined;
+      };
+    }
     const value = Reflect.get(target, property, target);
     return typeof value === "function" ? value.bind(target) : value;
   }
@@ -211,7 +355,10 @@ const fullRetrievers = () => [
 ];
 const indexedRouteExpectations = {
   "exact-symbol": { route: "exact", explanation: "materialized exact-index term match" },
-  "structure-call": { route: "structural", explanation: "indexed structural relation" },
+  // Raw AST/call-graph projection is intentionally disabled: public Context
+  // contains derived documents, and identifiers within those documents are
+  // served by the exact index.
+  "structure-call": { route: "exact", explanation: "materialized exact-index term match" },
   "architecture-overview": { route: "hierarchy", explanation: "indexed hierarchy-node match" },
   "derived-knowledge": { route: "knowledge", explanation: "indexed knowledge retrieval" },
   "long-document": { route: "long_context", explanation: "indexed full-document long-context match" },
@@ -246,7 +393,7 @@ for (const [name, variant] of Object.entries(variants)) {
   const cases = [];
   for (const testCase of fixture.cases) {
     const service = new QueryContextService(
-      variant.indexed ? store : projectionStore,
+      variant.indexed ? indexedRuntimeStore : projectionStore,
       undefined,
       undefined,
       variant.retrievers

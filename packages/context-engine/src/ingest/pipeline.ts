@@ -3,8 +3,7 @@ import type {
   EvidenceRecord,
   EvidenceSnapshot,
   GitSnapshotMetadata,
-  RefManifestEntry,
-  StructuralFact
+  RefManifestEntry
 } from "../domain/evidence.js";
 import { createEvidenceRecord } from "../domain/evidence.js";
 import {
@@ -16,8 +15,6 @@ import {
   stableId
 } from "../domain/fingerprint.js";
 import type { EvidenceStore } from "../ports/evidence-store.js";
-import type { ContextWriteFence } from "../workflow/coordinator.js";
-import { DeterministicSourceParser, type SourceParser } from "./parser.js";
 import { normalizeProviderObservation, type ProviderObservationInput } from "./provider-normalizers.js";
 
 export interface IngestFile {
@@ -47,20 +44,13 @@ export interface IngestEvidenceInput {
   git?: GitSnapshotMetadata;
 }
 
-export const CONTEXT_ENGINE_PARSER_VERSION = "deterministic-source-v1";
+export const CONTEXT_ENGINE_PARSER_VERSION = "context-snapshot-v2";
 export const DERIVATION_GIT_COMMIT_EVIDENCE_LIMIT = 500;
 
 export class IngestEvidenceService {
-  readonly #parser: SourceParser;
+  constructor(private readonly store: EvidenceStore) {}
 
-  constructor(
-    private readonly store: EvidenceStore,
-    parser: SourceParser = new DeterministicSourceParser(CONTEXT_ENGINE_PARSER_VERSION)
-  ) {
-    this.#parser = parser;
-  }
-
-  async ingest(input: IngestEvidenceInput, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
+  async ingest(input: IngestEvidenceInput): Promise<EvidenceCheckpoint> {
     if (!isFullCommitSha(input.commitSha)) throw new Error("commitSha must be a full Git SHA");
     if (input.ref.trim() === "") throw new Error("ref is required");
     if (!Number.isSafeInteger(input.refSequence) || input.refSequence <= 0) {
@@ -76,7 +66,6 @@ export class IngestEvidenceService {
     }
     const records: EvidenceRecord[] = [];
     const manifest: RefManifestEntry[] = [];
-    const structuralFacts: StructuralFact[] = [];
     for (const file of files) {
       if (file.path.trim() === "" || file.path.startsWith("/") || file.path.includes("\u0000")) {
         throw new Error(`Invalid repository path: ${file.path}`);
@@ -138,21 +127,6 @@ export class IngestEvidenceService {
         ...(entryType === "file" ? {} : { entryType }),
         ...(file.linkTarget === undefined ? {} : { linkTarget: file.linkTarget })
       });
-      if (contentAvailable && this.#parser.supports(file.path, file.language)) {
-        structuralFacts.push(
-          ...this.#parser.analyze({
-            tenantId: input.tenantId,
-            repository,
-            ref: input.ref,
-            commitSha: input.commitSha,
-            path: file.path,
-            blobSha: file.blobSha,
-            contentDigest,
-            body: file.body,
-            ...(file.language === undefined ? {} : { language: file.language })
-          }).facts
-        );
-      }
     }
     const gitCommits = new Map<string, NonNullable<GitSnapshotMetadata["history"]>[number]>();
     if (input.git) {
@@ -174,7 +148,8 @@ export class IngestEvidenceService {
             sourceType: "commit",
             sourceId: commit.sha,
             contentDigest: fingerprint(body),
-            commitSha: input.commitSha
+            commitSha: input.commitSha,
+            pathOrUrl: `https://github.com/${repository}/commit/${commit.sha}`
           },
           ref: input.ref,
           title: `${commit.sha.slice(0, 12)} ${commit.message.split(/\r?\n/, 1)[0] || "Git commit"}`,
@@ -229,7 +204,7 @@ export class IngestEvidenceService {
         ref: input.ref,
         refSequence: input.refSequence,
         commitSha: input.commitSha,
-        parserVersion: this.#parser.version,
+        parserVersion: CONTEXT_ENGINE_PARSER_VERSION,
         sourceCompleteness: input.sourceComplete ? "complete" : "partial",
         observationFrontier: input.observationFrontier,
         evidenceFingerprint,
@@ -241,7 +216,7 @@ export class IngestEvidenceService {
       ref: input.ref,
       refSequence: input.refSequence,
       commitSha: input.commitSha,
-      parserVersion: this.#parser.version,
+      parserVersion: CONTEXT_ENGINE_PARSER_VERSION,
       sourceCompleteness: input.sourceComplete ? "complete" : "partial",
       observationFrontier: input.observationFrontier,
       evidenceFingerprint,
@@ -253,7 +228,7 @@ export class IngestEvidenceService {
       checkpoint,
       records,
       manifest,
-      structuralFacts,
+      structuralFacts: [],
       ...(input.git === undefined
         ? {}
         : {
@@ -278,7 +253,7 @@ export class IngestEvidenceService {
             }
           })
     };
-    return this.store.commitSnapshot(snapshot, fence);
+    return this.store.commitSnapshot(snapshot);
   }
 }
 

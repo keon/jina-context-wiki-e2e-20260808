@@ -9,7 +9,6 @@ import {
   IngestEvidenceService,
   KnowledgeOutputValidator,
   MemoryContextEngineStore,
-  MemoryContextPipelineCoordinator,
   PageIndexHierarchyAdapter,
   QueryContextService,
   StaticScopeAuthorizer,
@@ -25,15 +24,14 @@ import {
   derivationDetailLevels,
   derivationDetailOrDefault,
   isDerivationDetail,
-  contextQueueTopics,
-  contextTaskTypeDefinitions,
-  contextTaskTypes,
   createKnowledgeCitation,
   createKnowledgeRevision,
   detectSourceConflicts,
   fingerprint,
   fuseRetrievalCandidates,
   knowledgeGenerationJsonSchema,
+  markdownCatalogToOutput,
+  parseMarkdownDocument,
   parseGeneratedKnowledgeDocuments,
   planContextQuery,
   repositoryAclFingerprint,
@@ -315,7 +313,7 @@ test("evidence anchors enforce digest, commit, path, and range invariants", () =
   assert.throws(() => validateEvidenceAnchor({ ...anchor, startLine: 4, endLine: 2 }), /must not precede/);
 });
 
-test("ingestion is content-addressed, idempotent, and produces deterministic structure", async () => {
+test("thin ingestion is content-addressed, idempotent, and does not derive structure", async () => {
   const store = new MemoryContextEngineStore();
   const service = new IngestEvidenceService(store);
   const checkpoint = await ingestFixture(store);
@@ -332,7 +330,7 @@ test("ingestion is content-addressed, idempotent, and produces deterministic str
   assert.equal(repeated.id, checkpoint.id);
   assert.equal((await store.listManifest(checkpoint.id)).length, 2);
   const facts = await store.listStructuralFacts(checkpoint.id);
-  assert.ok(facts.some((fact) => fact.kind === "defines" && fact.to.endsWith("#handlePayment")));
+  assert.deepEqual(facts, []);
   assert.equal((await store.listEvidence(checkpoint.id)).length, 3);
   const partial = await service.ingest({
     tenantId,
@@ -690,6 +688,7 @@ test("checkpoint commit evidence includes changed paths for issue inference", as
   assert.ok(commit);
   assert.match(commit.body, /Prevent duplicate charge after retry/);
   assert.match(commit.body, /src\/billing\.ts/);
+  assert.equal(commit.anchor.pathOrUrl, `https://github.com/${repository}/commit/${commitSha}`);
   assert.deepEqual(commit.metadata.changedPaths, ["src/billing.ts"]);
 });
 
@@ -737,6 +736,56 @@ test("derived prose is accepted with explicit citation mappings while source cla
 
   output.documents[0]!.citations[0]!.claim = "Unsupported citation claim";
   await assert.rejects(() => validator.validate(input), /claim is not present in the cited evidence/);
+});
+
+test("inline Markdown validation retains the certified public claim association", async () => {
+  const store = new MemoryContextEngineStore();
+  const checkpoint = await ingestFixture(store);
+  const body =
+    "# Billing\n\nThe [billing module accepts payments](README.md#L3-L3) through the repository entry point.\n";
+  const conversion = markdownCatalogToOutput(
+    [parseMarkdownDocument("architecture", body)],
+    repository,
+    await store.listManifest(checkpoint.id),
+    () => "The billing module accepts payments.",
+    [],
+    [],
+    undefined,
+    { naturalEvidenceLabels: true }
+  );
+  assert.deepEqual(conversion.problems, []);
+  assert.deepEqual(conversion.output.documents[0]?.summaryCitationOrdinals, [1]);
+
+  const validated = await new KnowledgeOutputValidator(store).validate({
+    output: conversion.output,
+    checkpointId: checkpoint.id,
+    generatorName: "test",
+    generatorVersion: "1",
+    model: "test",
+    promptVersion: "1",
+    createdAt,
+    inlineCitations: true
+  });
+  const citation = validated.citations[0];
+  assert.match(citation?.citationId ?? "", /^cite_[a-f0-9]{20}$/);
+  assert.equal(citation?.claimSpan, "The billing module accepts payments through the repository entry point.");
+
+  const tampered = structuredClone(conversion.output);
+  tampered.documents[0]!.citations[0]!.claimSpan = "A different public assertion.";
+  await assert.rejects(
+    () =>
+      new KnowledgeOutputValidator(store).validate({
+        output: tampered,
+        checkpointId: checkpoint.id,
+        generatorName: "test",
+        generatorVersion: "1",
+        model: "test",
+        promptVersion: "1",
+        createdAt,
+        inlineCitations: true
+      }),
+    /not bound to one rendered public claim/
+  );
 });
 
 test("body paragraphs and structured statements require valid citation ordinals", async () => {
@@ -950,7 +999,7 @@ test("high-risk knowledge is excluded until an append-only review event exists",
   );
 });
 
-test("baseline and enriched indexes publish atomically and rebuild idempotently", async () => {
+test("derived-only indexes publish atomically and rebuild idempotently", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
   const service = new IndexContextService(store);
@@ -958,6 +1007,9 @@ test("baseline and enriched indexes publish atomically and rebuild idempotently"
   assert.equal(baseline.capabilities.derivedKnowledge, "unavailable");
   assert.equal(baseline.projectorStatuses.lexical, "ready");
   assert.equal(baseline.projectorStatuses.dense, "disabled");
+  const baselineProjection = await store.getGeneration(baseline.id);
+  assert.deepEqual(baselineProjection?.documents, []);
+  assert.deepEqual(baselineProjection?.fragments, []);
   await deriveFixture(store, checkpoint.id);
   const enriched = await service.index(checkpoint.id, "2026-07-26T12:02:00.000Z");
   assert.notEqual(enriched.id, baseline.id);
@@ -969,7 +1021,7 @@ test("baseline and enriched indexes publish atomically and rebuild idempotently"
   assert.ok(projection?.documents.some((document) => document.sourceKind === "knowledge"));
   assert.ok(projection?.fragments.length);
   assert.ok(projection?.exactIndex.some((entry) => entry.term === "handlepayment"));
-  assert.ok(projection?.structuralRelations.some((relation) => relation.to.endsWith("#handlePayment")));
+  assert.deepEqual(projection?.structuralRelations, []);
   assert.ok(projection?.hierarchyNodes.length);
 });
 
@@ -1243,7 +1295,7 @@ test("knowledge retries preserve canonical timestamps and reject all other immut
   );
 });
 
-test("query routes exact and structural work and return original evidence anchors", async () => {
+test("legacy query retrieval is derived-only and preserves supporting evidence anchors", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
   await deriveFixture(store, checkpoint.id);
@@ -1258,8 +1310,9 @@ test("query routes exact and structural work and return original evidence anchor
     targets: { symbols: ["handlePayment"] }
   });
   assert.equal(response.coverage.status, "complete");
-  assert.ok(response.coverage.retrieversUsed.includes("structural"));
+  assert.equal(response.coverage.retrieversUsed.includes("structural"), false);
   assert.ok(response.citations.length > 0);
+  assert.ok(response.citations.every((citation) => citation.sourceKind === "knowledge"));
   assert.ok(response.citations.some((citation) => citation.anchors.some((anchor) => anchor.sourceId === blobSha)));
   assert.equal(response.generation.commitSha, commitSha);
   assert.match(response.traceId, /^trace_/);
@@ -1367,7 +1420,7 @@ test("query revalidates repository access after evidence assembly and before ret
   );
 });
 
-test("explicit file targets exclude provider records that merely mention the path", async () => {
+test("explicit file targets cannot surface raw source or provider evidence", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await new IngestEvidenceService(store).ingest({
     tenantId,
@@ -1408,15 +1461,11 @@ test("explicit file targets exclude provider records that merely mention the pat
     question: "What is in the README file?",
     targets: { paths: ["README.md"] }
   });
-  assert.equal(response.coverage.status, "complete");
-  assert.ok(response.citations.length > 0);
-  assert.ok(response.citations.every((citation) => citation.sourceKind === "code"));
-  assert.ok(
-    response.citations.every((citation) => citation.anchors.some((anchor) => anchor.pathOrUrl === "README.md"))
-  );
+  assert.equal(response.coverage.status, "insufficient");
+  assert.deepEqual(response.citations, []);
 });
 
-test("ownership lookup includes CODEOWNERS while excluding provider chatter", async () => {
+test("ownership lookup does not expose CODEOWNERS until ownership is derived", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await new IngestEvidenceService(store).ingest({
     tenantId,
@@ -1462,10 +1511,8 @@ test("ownership lookup includes CODEOWNERS while excluding provider chatter", as
     question: "Who owns src/billing.ts?",
     targets: { paths: ["src/billing.ts"] }
   });
-  assert.ok(
-    response.citations.some((citation) => citation.anchors.some((anchor) => anchor.pathOrUrl === "CODEOWNERS"))
-  );
-  assert.ok(response.citations.every((citation) => citation.sourceKind === "code"));
+  assert.equal(response.coverage.status, "insufficient");
+  assert.deepEqual(response.citations, []);
 });
 
 test("query rejects repository access before retrieval", async () => {
@@ -1484,7 +1531,7 @@ test("query rejects repository access before retrieval", async () => {
   );
 });
 
-test("explicit time windows filter provider evidence across every retrieval route", async () => {
+test("provider evidence is never directly returned by retrieval regardless of time window", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
   await store.replaceRepositoryAccess(tenantId, "alice", [repository]);
@@ -1512,7 +1559,10 @@ test("explicit time windows filter provider evidence across every retrieval rout
     targets: { issues: ["42"] },
     timeWindow: { from: "2026-07-26T00:00:00.000Z" }
   });
-  assert.ok(current.citations.some((citation) => citation.anchors.some((anchor) => anchor.sourceId === "issue-42")));
+  assert.equal(
+    current.citations.some((citation) => citation.anchors.some((anchor) => anchor.sourceId === "issue-42")),
+    false
+  );
 });
 
 test("candidate-level ACL filtering excludes inaccessible source and structural facts", async () => {
@@ -1554,12 +1604,12 @@ test("candidate-level ACL filtering excludes inaccessible source and structural 
   );
 });
 
-test("fallback hierarchy is deterministic and external hierarchy anchors are validated", async () => {
+test("hierarchy indexes derived documents only and external hierarchy anchors are validated", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
   const first = await new IndexContextService(store, new FallbackHierarchyIndexer()).index(checkpoint.id, createdAt);
   const projection = await store.getGeneration(first.id);
-  assert.ok(projection?.hierarchyNodes.some((node) => node.title === "Repository"));
+  assert.deepEqual(projection?.hierarchyNodes, []);
   const client = {
     async probe() {
       return { available: true };
@@ -1740,232 +1790,6 @@ test("evidence packing enforces source boundaries and citation verification fail
   );
 });
 
-test("workflow names are clean and indexing is required after derivation", async () => {
-  assert.deepEqual(contextTaskTypes, {
-    build: "build-context",
-    ingestEvidence: "ingest-evidence",
-    deriveKnowledge: "derive-knowledge",
-    indexContext: "index-context"
-  });
-  assert.deepEqual(contextQueueTopics, {
-    ingestEvidence: "run-ingest-evidence",
-    deriveKnowledge: "run-derive-knowledge",
-    indexContext: "run-index-context"
-  });
-  assert.equal(contextTaskTypeDefinitions.length, 4);
-  const coordinator = new MemoryContextPipelineCoordinator();
-  const build = await coordinator.createBuild({
-    tenantId,
-    repository,
-    ref: "main",
-    commitSha,
-    githubInstallationId: 140435029,
-    requestKey: "build-1",
-    createdAt
-  });
-  assert.ok(build.stages.every((stage) => stage.required));
-  const ingest = await coordinator.claim({
-    tenantIds: [tenantId],
-    workerId: "worker",
-    topics: [contextQueueTopics.ingestEvidence],
-    now: "2026-07-26T12:00:01.000Z",
-    leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-  });
-  assert.ok(ingest);
-  assert.equal(build.refSequence, 1);
-  assert.equal(ingest.stage.metadata.refSequence, 1);
-  assert.equal(ingest.stage.metadata.commitSha, commitSha);
-  assert.equal(ingest.stage.metadata.githubInstallationId, 140435029);
-  assert.equal(
-    await coordinator.complete({
-      tenantId,
-      stageId: ingest.stage.id,
-      fence: ingest.fence,
-      outcome: "succeeded",
-      now: "2026-07-26T12:00:02.000Z",
-      metadata: { checkpointId: "checkpoint" }
-    }),
-    true
-  );
-  // Indexing is what makes the derived pages fast to query, so it waits for
-  // them; derivation only needs the checkpoint manifest, which ingestion wrote.
-  const [derive, prematureIndex] = await Promise.all([
-    coordinator.claim({
-      tenantId,
-      workerId: "derive-worker",
-      topics: [contextQueueTopics.deriveKnowledge],
-      now: "2026-07-26T12:00:03.000Z",
-      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-    }),
-    coordinator.claim({
-      tenantId,
-      workerId: "index-worker",
-      topics: [contextQueueTopics.indexContext],
-      now: "2026-07-26T12:00:03.000Z",
-      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-    })
-  ]);
-  assert.ok(derive);
-  assert.equal(prematureIndex, undefined);
-  await coordinator.complete({
-    tenantId,
-    stageId: derive.stage.id,
-    fence: derive.fence,
-    outcome: "succeeded",
-    now: "2026-07-26T12:00:04.000Z"
-  });
-  const index = await coordinator.claim({
-    tenantId,
-    workerId: "worker",
-    topics: [contextQueueTopics.indexContext],
-    now: "2026-07-26T12:00:05.000Z",
-    leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-  });
-  assert.ok(index);
-  await coordinator.complete({
-    tenantId,
-    stageId: index.stage.id,
-    fence: index.fence,
-    outcome: "succeeded",
-    now: "2026-07-26T12:00:06.000Z"
-  });
-  const updated = await coordinator.get(build.id);
-  assert.equal(updated?.stages.find((stage) => stage.type === "index-context")?.status, "succeeded");
-  assert.equal(updated?.status, "succeeded");
-});
-
-test("a failed required derivation fails the context build", async () => {
-  const coordinator = new MemoryContextPipelineCoordinator();
-  const build = await coordinator.createBuild({
-    tenantId,
-    repository,
-    ref: "main",
-    requestKey: "required-derivation-failure",
-    createdAt
-  });
-  const claimAndComplete = async (
-    topic: (typeof contextQueueTopics)[keyof typeof contextQueueTopics],
-    outcome: "succeeded" | "failed",
-    second: number
-  ) => {
-    const claimedAt = `2026-07-26T12:00:${String(second).padStart(2, "0")}.000Z`;
-    const completedAt = `2026-07-26T12:00:${String(second + 1).padStart(2, "0")}.000Z`;
-    const claim = await coordinator.claim({
-      tenantId,
-      workerId: "worker",
-      topics: [topic],
-      now: claimedAt,
-      leaseExpiresAt: "2026-07-26T12:10:00.000Z"
-    });
-    assert.ok(claim);
-    assert.equal(
-      await coordinator.complete({
-        tenantId,
-        stageId: claim.stage.id,
-        fence: claim.fence,
-        outcome,
-        now: completedAt,
-        ...(outcome === "failed" ? { error: "required derivation failed" } : {})
-      }),
-      true
-    );
-  };
-  // Derivation runs second now, so a failure there means indexing is never
-  // reached: there are no pages to make queryable.
-  await claimAndComplete(contextQueueTopics.ingestEvidence, "succeeded", 1);
-  await claimAndComplete(contextQueueTopics.deriveKnowledge, "failed", 3);
-  const failed = await coordinator.get(build.id);
-  assert.equal(failed?.status, "failed");
-  assert.equal(failed?.stages.find((stage) => stage.type === "derive-knowledge")?.required, true);
-});
-
-test("per-ref build sequence prevents delayed older pushes from becoming current", async () => {
-  const coordinator = new MemoryContextPipelineCoordinator();
-  const older = await coordinator.createBuild({
-    tenantId,
-    repository,
-    ref: "main",
-    commitSha: "1".repeat(40),
-    requestKey: "push-older",
-    createdAt: "2026-07-26T12:00:00.000Z"
-  });
-  const newer = await coordinator.createBuild({
-    tenantId,
-    repository,
-    ref: "main",
-    commitSha: "2".repeat(40),
-    requestKey: "push-newer",
-    createdAt: "2026-07-26T12:00:01.000Z"
-  });
-  assert.equal(older.refSequence, 1);
-  assert.equal(newer.refSequence, 2);
-
-  const store = new MemoryContextEngineStore(coordinator);
-  const initialFrontier = await store.projectionInputFingerprint(tenantId, repository);
-  const delayedOlderCheckpoint = await new IngestEvidenceService(store).ingest({
-    tenantId,
-    repository,
-    ref: "main",
-    refSequence: older.refSequence,
-    commitSha: "1".repeat(40),
-    aclFingerprint: "acl",
-    observationFrontier: "older-delayed",
-    sourceComplete: true,
-    createdAt: "2026-07-26T12:00:02.000Z",
-    files: []
-  });
-  assert.equal(await store.projectionInputFingerprint(tenantId, repository), initialFrontier);
-  assert.equal(await store.latestCheckpoint(tenantId, repository, "main"), undefined);
-  await assert.rejects(
-    new IndexContextService(store).index(delayedOlderCheckpoint.id, "2026-07-26T12:00:03.000Z"),
-    /superseded/
-  );
-  await assert.rejects(
-    store.commitKnowledge({
-      run: {
-        id: "stale-derive-run",
-        tenantId,
-        repository,
-        checkpointId: delayedOlderCheckpoint.id,
-        cacheKey: "stale-derive-cache",
-        focusFingerprint: "stale",
-        generatorName: "test",
-        generatorVersion: "1",
-        model: "test",
-        promptVersion: "1",
-        schemaVersion: "1",
-        rawOutputs: [],
-        status: "succeeded",
-        diagnostics: [],
-        revisionIds: [],
-        createdAt: "2026-07-26T12:00:03.000Z"
-      },
-      revisions: [],
-      citations: []
-    }),
-    /superseded/
-  );
-  assert.equal(await store.projectionInputFingerprint(tenantId, repository), initialFrontier);
-
-  const newerCheckpoint = await new IngestEvidenceService(store).ingest({
-    tenantId,
-    repository,
-    ref: "main",
-    refSequence: newer.refSequence,
-    commitSha: "2".repeat(40),
-    aclFingerprint: "acl",
-    observationFrontier: "newer",
-    sourceComplete: true,
-    createdAt: "2026-07-26T12:00:04.000Z",
-    files: []
-  });
-  assert.equal((await store.latestCheckpoint(tenantId, repository, "main"))?.id, newerCheckpoint.id);
-  assert.equal(
-    (await new IndexContextService(store).index(newerCheckpoint.id, "2026-07-26T12:00:06.000Z")).commitSha,
-    "2".repeat(40)
-  );
-});
-
 test("canonical input frontier rejects an index that races evidence erasure", async () => {
   const store = new MemoryContextEngineStore();
   const checkpoint = await ingestFixture(store);
@@ -1996,74 +1820,6 @@ test("canonical input frontier rejects an index that races evidence erasure", as
     /Canonical projection inputs changed/
   );
   assert.equal(await store.latestPublished(tenantId, repository, "main"), undefined);
-});
-
-test("workflow release requeues work and stale leases cannot commit", async () => {
-  const coordinator = new MemoryContextPipelineCoordinator();
-  await coordinator.createBuild({ tenantId, repository, ref: "main", requestKey: "fence", createdAt });
-  const claimed = await coordinator.claim({
-    tenantId,
-    workerId: "worker",
-    topics: [contextQueueTopics.ingestEvidence],
-    now: "2026-07-26T12:00:01.000Z",
-    leaseExpiresAt: "2026-07-26T12:00:10.000Z"
-  });
-  assert.ok(claimed);
-  assert.equal(
-    await coordinator.release({
-      tenantId,
-      stageId: claimed.stage.id,
-      leaseId: claimed.fence.leaseId,
-      now: "2026-07-26T12:00:02.000Z",
-      reason: "worker shutdown"
-    }),
-    true
-  );
-  const reclaimed = await coordinator.claim({
-    tenantId,
-    workerId: "new-worker",
-    topics: [contextQueueTopics.ingestEvidence],
-    now: "2026-07-26T12:00:03.000Z",
-    leaseExpiresAt: "2026-07-26T12:00:10.000Z"
-  });
-  assert.ok(reclaimed);
-  let now = "2026-07-26T12:00:04.000Z";
-  const store = new MemoryContextEngineStore(coordinator, () => now);
-  await new IngestEvidenceService(store).ingest(
-    {
-      tenantId,
-      repository,
-      ref: "main",
-      refSequence: 1,
-      commitSha,
-      aclFingerprint: "acl",
-      observationFrontier: "1",
-      sourceComplete: true,
-      createdAt,
-      files: []
-    },
-    reclaimed.fence
-  );
-  now = "2026-07-26T12:00:11.000Z";
-  await assert.rejects(
-    () =>
-      new IngestEvidenceService(store).ingest(
-        {
-          tenantId,
-          repository,
-          ref: "other",
-          refSequence: 1,
-          commitSha,
-          aclFingerprint: "acl",
-          observationFrontier: "2",
-          sourceComplete: true,
-          createdAt,
-          files: []
-        },
-        reclaimed.fence
-      ),
-    /stale or invalid/
-  );
 });
 
 test("repository access replacement, tenant access migration, health, and close are explicit", async () => {
@@ -2097,7 +1853,7 @@ test("stable IDs and fingerprints ignore object key order", () => {
 });
 
 test("memory API tokens resolve their own tenant and go invisible once revoked or expired", async () => {
-  const store = new MemoryContextEngineStore(new MemoryContextPipelineCoordinator());
+  const store = new MemoryContextEngineStore();
   const mint = (id: string, tenantId: string, secretHash: string, expiresAt: string) =>
     store.mintApiToken({
       id,
@@ -2125,6 +1881,8 @@ test("memory API tokens resolve their own tenant and go invisible once revoked o
   // Verification resolves the tenant from the token rather than being told it.
   assert.equal((await store.verifyApiToken("a".repeat(64)))?.tenantId, "tenant-a");
   assert.equal((await store.verifyApiToken("b".repeat(64)))?.tenantId, "tenant-b");
+  assert.equal((await store.verifyApiToken("a".repeat(64), "tenant-a"))?.tokenId, "atk_live");
+  assert.equal(await store.verifyApiToken("a".repeat(64), "tenant-b"), undefined);
   assert.equal(await store.verifyApiToken("c".repeat(64)), undefined);
   assert.equal(await store.verifyApiToken("d".repeat(64)), undefined);
 
@@ -2161,7 +1919,7 @@ test("memory API tokens resolve their own tenant and go invisible once revoked o
   assert.equal((await store.verifyApiToken("b".repeat(64)))?.tokenId, "atk_other");
 });
 
-test("the file contract asks for a maintenance wiki, written as it goes", () => {
+test("the file contract asks for maintenance context, written as it goes", () => {
   const bundle = {
     checkpoint: {
       repository: "omxyz/jina",
@@ -2183,26 +1941,58 @@ test("the file contract asks for a maintenance wiki, written as it goes", () => 
   assert.match(catalog, /Re-emit every still-valid logical document/);
 
   // The file contract makes each finished document durable instead.
-  assert.match(files, /Markdown file under/);
-  assert.match(files, /before moving to the next subject/);
+  assert.match(files, /Markdown engineering documents under/);
+  assert.match(files, /Write complete Markdown/);
   assert.doesNotMatch(files, /Return only the schema-conforming final JSON/);
   assert.doesNotMatch(files, /Re-emit every still-valid logical document/);
-  // The one write it may perform is scoped to the output directory.
-  assert.match(files, /is the only path you may write to\. Never write repository files\./);
+  // Publishable documents and internal checkpoints have separate writable roots.
+  assert.match(files, /is public and may contain only context documents/);
+  assert.match(files, /is private control-plane state/);
+  assert.match(files, /Never modify repository files or write anywhere else/);
 
   // It asks for a maintenance aid rather than a description of the code.
-  assert.match(files, /helps somebody maintain this repository/);
-  assert.match(files, /what breaks if I change it/);
-  // And lets the repository choose its own structure rather than imposing one.
-  assert.match(files, /Choose the folder structure that fits this repository/);
+  assert.match(files, /helps coding and review agents maintain this repository/);
+  assert.match(files, /change it without breaking it/);
+  assert.match(files, /engineering documentation/);
+  assert.match(files, /not as a research log, agent report, source-tree inventory/);
+  assert.match(files, /Merge related subjects when separate short pages would be less useful/);
+  assert.match(files, /never force empty or irrelevant sections/);
+  assert.doesNotMatch(files, /minimum document count/);
+  // The agent owns the research and collaboration workflow.
+  assert.match(files, /Own the workflow/);
+  assert.match(files, /independent source-aware research worker/);
+  assert.match(files, /runtime may divide this loop into independently executed Codex/);
+  assert.match(files, /independent context-only critic/);
+  assert.match(files, /Work as a goal-verification loop/);
+  assert.match(files, /complete plan must account for captured history/);
+  assert.match(files, /version-4 object/);
+  assert.match(files, /realistic maintenance questions/);
+  assert.match(files, /do not use one umbrella question/);
+  assert.match(files, /invent representative repository-specific tasks/);
+  assert.match(files, /exact public pages it actually used/);
+  assert.match(files, /every complete public page was actually used by a passing critic task/);
+  assert.match(files, /Use Mermaid diagrams when they materially clarify/);
+  assert.match(files, /critic begins context-only/);
+  assert.match(files, /Citation-valid does not mean deep enough/);
+  assert.match(files, /latest completed context-only result for every required question passes/);
+  assert.match(files, /every complete item is mapped from covered subjects/);
 
-  // Both reference forms, and the rule that makes a claim checkable.
-  assert.match(files, /must occur verbatim in those exact lines/);
+  // Both reference forms, plus separate structural and semantic checks.
+  assert.match(files, /Keep visible labels natural and descriptive/);
+  assert.match(files, /standalone lead and every substantive section need a core evidence anchor/);
+  assert.match(files, /one decisive link per substantive section/);
+  assert.match(files, /Do not cite every sentence, supporting detail, or table row/);
+  assert.match(files, /at most 120 lines/);
   assert.match(files, /relative Markdown links/);
-  assert.match(files, /at least one evidence link, or it cannot be published/);
-  // The diagnostic sections retrieval depends on.
-  assert.match(files, /## Symptoms/);
-  assert.match(files, /## Fixes/);
+  assert.match(files, /Unsupported core claims do not belong in the context/);
+  // Engineering structure is chosen dynamically rather than forced by template.
+  assert.doesNotMatch(files, /## Symptoms/);
+  assert.doesNotMatch(files, /## Fixes/);
+
+  const triggered = buildKnowledgeFilePrompt(bundle as never, [], ["pull:7:" + "a".repeat(40), "issue:2"]);
+  assert.match(triggered, /This build was requested by pull:7:/);
+  assert.match(triggered, /inspect the captured record and current implementation/);
+  assert.match(triggered, /Treat that as provenance, not proof/);
 });
 
 test("the per-document schema is the catalog's own item schema, so the two cannot drift", () => {
@@ -2270,32 +2060,4 @@ test("derivation detail is named for the choice, not the model setting it maps t
   assert.equal(derivationDetailOrDefault(undefined, "thorough"), "thorough");
   assert.equal(isDerivationDetail("thorough"), true);
   assert.equal(isDerivationDetail("high"), false);
-});
-
-test("a build carries its chosen detail to the derive stage, not to the others", async () => {
-  const coordinator = new MemoryContextPipelineCoordinator();
-  const build = await coordinator.createBuild({
-    tenantId: "tenant-detail",
-    repository: "omxyz/jina",
-    ref: "main",
-    requestKey: "rk-detail",
-    createdAt: "2026-01-01T00:00:00.000Z",
-    derivationDetail: "thorough"
-  });
-  const derive = build.stages.find((stage) => stage.type === "derive-knowledge");
-  assert.equal(derive?.metadata.derivationDetail, "thorough");
-  // The choice belongs to the stage that acts on it; nothing else should carry it.
-  for (const stage of build.stages.filter((candidate) => candidate.type !== "derive-knowledge")) {
-    assert.equal(stage.metadata.derivationDetail, undefined);
-  }
-
-  // A build that does not choose carries nothing, so the deployment default applies.
-  const plain = await coordinator.createBuild({
-    tenantId: "tenant-detail",
-    repository: "omxyz/jina",
-    ref: "main",
-    requestKey: "rk-plain",
-    createdAt: "2026-01-01T00:00:00.000Z"
-  });
-  assert.equal(plain.stages.find((stage) => stage.type === "derive-knowledge")?.metadata.derivationDetail, undefined);
 });

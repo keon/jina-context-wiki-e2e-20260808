@@ -1,9 +1,8 @@
 import type { GenerationProjection, IndexGeneration } from "../domain/projection.js";
-import type { ContextWriteFence } from "../workflow/coordinator.js";
 
 export interface ProjectionStore {
   readonly nativeExactIndex?: boolean;
-  publish(projection: GenerationProjection, fence?: ContextWriteFence): Promise<IndexGeneration>;
+  publish(projection: GenerationProjection): Promise<IndexGeneration>;
   getGeneration(generationId: string): Promise<GenerationProjection | undefined>;
   getScopedGeneration(
     tenantId: string,

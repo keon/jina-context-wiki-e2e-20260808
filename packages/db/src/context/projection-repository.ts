@@ -14,14 +14,12 @@ import type {
   StructuralRelation
 } from "@jina/context-engine";
 import { contextProjectionConsumers, EXACT_TERM_MAX_CHARACTERS } from "@jina/context-engine";
-import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, contextDigest, dateString } from "./database.js";
 import type { ContextDatabaseRole } from "./roles.js";
 import { PostgresGenerationCoordinator, requiredContextConsumers } from "./generation-coordinator.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
-import { assertContextWriteFence } from "./write-fence.js";
 
 // Body-bearing rows are intentionally smaller; metadata-only relations can amortize more round trips.
 // The byte target also bounds atypically large metadata/anchor payloads (except an indivisible single row).
@@ -50,7 +48,7 @@ interface GenerationRow {
 export class PostgresProjectionRepository implements ProjectionStore {
   constructor(private readonly database: ContextDatabase) {}
 
-  async publish(projection: GenerationProjection, fence?: ContextWriteFence): Promise<IndexGeneration> {
+  async publish(projection: GenerationProjection): Promise<IndexGeneration> {
     const generation = projection.generation;
     if (generation.status !== "published" || !generation.publishedAt) {
       throw new Error("Only a fully published generation may be persisted");
@@ -106,9 +104,9 @@ export class PostgresProjectionRepository implements ProjectionStore {
     if (!checkpoint) throw new Error("Projection scope does not match its evidence checkpoint");
 
     for (const consumer of contextProjectionConsumers) {
-      await runScopedProjector(this.database, projection, consumer, checkpoint.created_at, fence);
+      await runScopedProjector(this.database, projection, consumer, checkpoint.created_at);
     }
-    const published = await coordinator.publish(generation.id, publishedAt, fence);
+    const published = await coordinator.publish(generation.id, publishedAt);
     const generationEventId = generationPublishedEventId(generation);
     await enqueueGenerationPublishedEvent(this.database, generation, publishedAt, generationEventId);
     await acknowledgePostPublicationDeliveries(this.database, generation, publishedAt, generationEventId);
@@ -172,9 +170,16 @@ export class PostgresProjectionRepository implements ProjectionStore {
     const result = await this.database.queryAs<GenerationRow>(
       "jina_context_admin",
       { tenantIds: [tenantId] },
-      `select * from jina_context.index_generations
-       where tenant_id=$1 and repository=$2 and ref_name=$3 and status='published'
-       order by published_at desc,id desc limit 1`,
+      `select generation.*
+       from jina_context.current_context_board_releases current_release
+       join jina_context.index_generations generation
+         on generation.id=current_release.release_id
+        and generation.tenant_id=current_release.tenant_id
+        and generation.repository=current_release.repository
+        and generation.ref_name=current_release.ref_name
+       where current_release.tenant_id=$1 and current_release.repository=$2
+         and current_release.ref_name=$3 and generation.status='published'
+       limit 1`,
       [tenantId, repository, ref]
     );
     return result.rows[0] ? this.hydrate(result.rows[0]) : undefined;
@@ -185,9 +190,14 @@ export class PostgresProjectionRepository implements ProjectionStore {
     const result = await this.database.queryAs<GenerationRow>(
       "jina_context_admin",
       { tenantIds: [tenantId] },
-      `select * from jina_context.index_generations
-       where tenant_id=$1 and repository=$2 and status <> 'invalidated'
-       order by created_at desc,id desc`,
+      `select generation.*
+       from jina_context.index_generations generation
+       left join jina_context.current_context_board_releases current_release
+         on current_release.release_id=generation.id
+       where generation.tenant_id=$1 and generation.repository=$2
+         and generation.status <> 'invalidated'
+       order by (current_release.release_id is not null) desc,
+                generation.created_at desc,generation.id desc`,
       [tenantId, repository]
     );
     const generations: IndexGeneration[] = [];
@@ -396,15 +406,13 @@ async function runScopedProjector(
   database: ContextDatabase,
   projection: GenerationProjection,
   consumer: ContextProjectionConsumer,
-  processedThrough: Date,
-  fence?: ContextWriteFence
+  processedThrough: Date
 ): Promise<void> {
   const generation = projection.generation;
   const completedAt = generation.publishedAt;
   if (!completedAt) throw new Error(`Generation ${generation.id} has no completion time`);
   const status = generation.projectorStatuses[consumer];
   await database.transactionAs(projectorRoles[consumer], { tenantIds: [generation.tenantId] }, async (client) => {
-    await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
     const leaseId = randomUUID();
     const claimed = await client.query(
       `update jina_context.generation_projectors
@@ -499,7 +507,6 @@ async function runScopedProjector(
         ]
       );
     }
-    await assertContextWriteFence(client, generation.tenantId, ["run-index-context", "run-derive-knowledge"], fence);
   });
 }
 

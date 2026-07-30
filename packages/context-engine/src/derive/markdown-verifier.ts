@@ -4,13 +4,13 @@ import type { MarkdownEvidenceLink, ParsedMarkdownDocument } from "./markdown-do
 /**
  * Checks a Markdown catalog against the checkpoint it claims to describe.
  *
- * The format changed; what makes a claim trustworthy did not. An evidence link's
- * text must occur in the exact line range it points at, resolved from the
- * immutable checkpoint — the same containment check the JSON contract applied,
- * against the same evidence.
+ * This is the deterministic half of the Markdown evidence contract. It proves
+ * that a repository path and focused line range resolve against the immutable
+ * checkpoint. A bounded source-aware audit separately decides whether the
+ * surrounding claim span is actually supported by the resolved excerpt.
  *
  * The difference is what happens when it fails. The JSON contract rejected the
- * whole catalog, because a citation was structurally required. A wiki is useful
+ * whole catalog, because a citation was structurally required. Context is useful
  * with a broken link in it, so an unsupported reference is reported against the
  * document that carries it and the catalog still lands. Refusing to publish a
  * repository's knowledge because one line range moved is a worse outcome than
@@ -25,7 +25,7 @@ export interface MarkdownReferenceProblem {
 }
 
 export interface MarkdownVerification {
-  /** Evidence links whose claim was found in the range they cite. */
+  /** Evidence links whose immutable source location resolved. */
   readonly supported: number;
   readonly problems: readonly MarkdownReferenceProblem[];
   /** Verified links per document, for the share a reader can trust. */
@@ -45,9 +45,8 @@ function normalize(value: string): string {
 }
 
 /**
- * The same rule the JSON contract used: the claim must appear inside the cited
- * excerpt, whitespace and case insensitive, and be long enough that containment
- * means something. A three-character claim matches almost any file.
+ * Legacy exact-phrase helper retained for the JSON catalog and remote executor.
+ * Markdown claim semantics are checked by the source-aware audit instead.
  */
 export function evidenceSupportsClaim(claim: string, excerpt: string): boolean {
   const normalizedClaim = normalize(claim);
@@ -59,17 +58,33 @@ function verifyEvidenceLink(
   link: MarkdownEvidenceLink,
   inputs: MarkdownVerifierInputs
 ): MarkdownReferenceProblem | undefined {
+  if (link.providerUrl) {
+    return {
+      documentPath,
+      claim: link.claimSpan,
+      target: link.providerUrl,
+      reason: "unknown-path"
+    };
+  }
+  if (link.path === undefined || link.startLine === undefined || link.endLine === undefined) {
+    return { documentPath, claim: link.claimSpan, target: "(invalid evidence link)", reason: "invalid-range" };
+  }
   const target = `${link.path}#L${link.startLine}-L${link.endLine}`;
+  // A symbol name somewhere inside a thousand-line range technically passes a
+  // containment check but does not provide the concept-to-code navigation that
+  // makes generated repository documentation useful. Large constructs must be
+  // cited at the focused branch, invariant, or interface that supports the
+  // nearby claim.
+  if (link.endLine - link.startLine + 1 > 120) {
+    return { documentPath, claim: link.claimSpan, target, reason: "invalid-range" };
+  }
   const record = inputs.evidenceByPath.get(link.path);
   if (record === undefined) {
-    return { documentPath, claim: link.claim, target, reason: "unknown-path" };
+    return { documentPath, claim: link.claimSpan, target, reason: "unknown-path" };
   }
   const excerpt = evidenceExcerpt(record, { startLine: link.startLine, endLine: link.endLine });
   if (excerpt === undefined) {
-    return { documentPath, claim: link.claim, target, reason: "invalid-range" };
-  }
-  if (!evidenceSupportsClaim(link.claim, excerpt)) {
-    return { documentPath, claim: link.claim, target, reason: "claim-absent" };
+    return { documentPath, claim: link.claimSpan, target, reason: "invalid-range" };
   }
   return undefined;
 }

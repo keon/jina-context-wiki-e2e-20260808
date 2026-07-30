@@ -14,13 +14,13 @@ if (questions.length === 0) throw new Error("CONTEXT_QUESTION_FILE contains no M
 const results = await concurrentMap(questions, concurrency, async (entry) => {
   const started = performance.now();
   try {
-    const response = await fetch(`${apiUrl}/context/query`, {
+    const response = await fetch(`${apiUrl}/context/search`, {
       method: "POST",
       headers: requestHeaders(),
       body: JSON.stringify({
         repository,
         ref,
-        question: entry.question
+        query: entry.question
       }),
       signal: AbortSignal.timeout(timeoutMs)
     });
@@ -35,32 +35,30 @@ const results = await concurrentMap(questions, concurrency, async (entry) => {
         error: errorMessage(payload)
       };
     }
-    const citations = Array.isArray(payload.citations) ? payload.citations : [];
-    const coverage =
-      payload.coverage && typeof payload.coverage === "object" && typeof payload.coverage.status === "string"
-        ? payload.coverage.status
-        : "insufficient";
-    const result =
-      citations.length > 0 && coverage === "complete" ? "answered" : citations.length > 0 ? "partial" : "unanswered";
+    if ("answer" in payload) throw new Error("context search unexpectedly returned an answer");
+    const contextResults = Array.isArray(payload.results) ? payload.results : [];
+    const citations = contextResults.flatMap((result) => (Array.isArray(result?.citations) ? result.citations : []));
+    const result = contextResults.length > 0 && citations.length > 0 ? "retrieved" : "no_context";
     return {
       ...entry,
       result,
       latencyMs,
-      coverage,
-      answer: typeof payload.answer === "string" ? payload.answer : "",
+      releaseId: typeof payload.release?.id === "string" ? payload.release.id : undefined,
+      commitSha: typeof payload.release?.commitSha === "string" ? payload.release.commitSha : undefined,
+      contextCount: contextResults.length,
       citationCount: citations.length,
       citationSourceIds: [
         ...new Set(
-          citations.flatMap((citation) =>
-            Array.isArray(citation?.anchors)
-              ? citation.anchors.map((anchor) => anchor?.sourceId).filter((sourceId) => typeof sourceId === "string")
-              : []
-          )
+          citations.map((citation) => citation?.anchor?.sourceId).filter((sourceId) => typeof sourceId === "string")
         )
       ],
-      missing: Array.isArray(payload.coverage?.missing) ? payload.coverage.missing : [],
-      retrievers: Array.isArray(payload.coverage?.retrieversUsed) ? payload.coverage.retrieversUsed : [],
-      traceId: typeof payload.traceId === "string" ? payload.traceId : undefined
+      logicalIds: contextResults
+        .map((context) => context?.logicalId)
+        .filter((logicalId) => typeof logicalId === "string"),
+      retrievalMethod: typeof payload.retrieval?.method === "string" ? payload.retrieval.method : undefined,
+      selector: typeof payload.retrieval?.selector === "string" ? payload.retrieval.selector : undefined,
+      degradedReason:
+        typeof payload.retrieval?.degradedReason === "string" ? payload.retrieval.degradedReason : undefined
     };
   } catch (error) {
     return {
@@ -73,14 +71,14 @@ const results = await concurrentMap(questions, concurrency, async (entry) => {
 });
 
 const counts = Object.fromEntries(
-  ["answered", "partial", "unanswered", "error"].map((status) => [
+  ["retrieved", "no_context", "error"].map((status) => [
     status,
     results.filter((result) => result.result === status).length
   ])
 );
 const latencies = results.map((result) => result.latencyMs).sort((left, right) => left - right);
 const report = {
-  schemaVersion: "context-question-evaluation-v1",
+  schemaVersion: "context-search-evaluation-v1",
   generatedAt: new Date().toISOString(),
   apiUrl,
   repository,
@@ -88,7 +86,7 @@ const report = {
   questionFile,
   questionCount: results.length,
   counts,
-  answeredOrPartialRate: (counts.answered + counts.partial) / results.length,
+  retrievedRate: counts.retrieved / results.length,
   latencyMs: {
     median: percentile(latencies, 0.5),
     p95: percentile(latencies, 0.95),
@@ -99,9 +97,8 @@ const report = {
     return {
       category,
       questionCount: categoryResults.length,
-      answered: categoryResults.filter((result) => result.result === "answered").length,
-      partial: categoryResults.filter((result) => result.result === "partial").length,
-      unanswered: categoryResults.filter((result) => result.result === "unanswered").length,
+      retrieved: categoryResults.filter((result) => result.result === "retrieved").length,
+      noContext: categoryResults.filter((result) => result.result === "no_context").length,
       errors: categoryResults.filter((result) => result.result === "error").length
     };
   }),
@@ -109,11 +106,11 @@ const report = {
 };
 
 process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-const minimumRate = Number(process.env.CONTEXT_QUESTION_MIN_ANSWERED_RATE ?? "0");
+const minimumRate = Number(process.env.CONTEXT_QUESTION_MIN_RETRIEVED_RATE ?? "0");
 if (!Number.isFinite(minimumRate) || minimumRate < 0 || minimumRate > 1) {
-  throw new Error("CONTEXT_QUESTION_MIN_ANSWERED_RATE must be between 0 and 1");
+  throw new Error("CONTEXT_QUESTION_MIN_RETRIEVED_RATE must be between 0 and 1");
 }
-if (counts.error > 0 || report.answeredOrPartialRate < minimumRate) process.exitCode = 1;
+if (counts.error > 0 || report.retrievedRate < minimumRate) process.exitCode = 1;
 
 function parseQuestions(markdown) {
   const values = [];

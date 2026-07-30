@@ -1,271 +1,224 @@
 # Sequence diagrams
 
-These are the implemented context-engine and board flows. All context identities include
-tenant and repository scope even where the diagrams abbreviate them.
-
-## Signed push to authoritative-head build
+## GitHub trigger and branch policy
 
 ```mermaid
 sequenceDiagram
     participant GH as GitHub
-    participant API as jina-api
-    participant ID as Shared identity
-    participant DB as PostgreSQL
+    participant API as Jina API
+    participant B as Board
 
-    GH->>API: POST /webhooks/github (signed push, delivery ID, head SHA)
-    API->>API: Verify HMAC and parse unmodified body
-    API->>ID: Resolve installation/repository tenant
-    ID-->>API: Original tenant UUID
-    API->>DB: Lock board snapshot and dedupe delivery ID
-    API->>DB: Create build-context and three stages
-    Note over API,DB: Build metadata carries repository, ref, event head SHA, and installation ID
-    API-->>GH: 202 accepted
-```
-
-An unchanged head deduplicates. A moved ref supersedes active older work. The worker later
-fetches the authoritative remote branch head and requires it to equal the event SHA; a
-stale delivery fails rather than becoming the current ref generation.
-
-## Strict context stage sequence
-
-```mermaid
-flowchart LR
-    B["build-context"] --> I["ingest-evidence (required)"]
-    I --> X["index-context baseline (required)"]
-    X --> K["derive-knowledge (required; one repair)"]
-    K --> E["index-context enriched successor (required)"]
-    X --> D["baseline available for diagnosis/retry"]
-    E --> Q["query_context successful build"]
-```
-
-The coordinator queues only the next stage: ingestion first, baseline indexing second,
-and required derivation only after the baseline succeeds. This prevents independent
-workers from racing baseline projection inputs with a knowledge commit. The board can
-serve the baseline for diagnosis and retry without model output, but derivation failure
-fails the root build. Production acceptance waits for all three stages and requires the
-enriched successor so it exercises the complete release path.
-
-The semantic data flow is `ingest-evidence` → required `derive-knowledge` →
-`index-context`; the first index publication is the raw-evidence safety baseline and the
-second is the required enriched result.
-
-## Ingest immutable evidence
-
-```mermaid
-sequenceDiagram
-    participant W as jina-context-worker
-    participant API as jina-api
-    participant Git as Git/GitHub
-    participant CE as context-engine
-    participant DB as jina_context
-
-    W->>API: POST /internal/worker/claim (run-ingest-evidence)
-    API-->>W: task, lease, attempt, write-fence token
-    W->>Git: Mint installation token; full clone and paginated provider history/comments
-    W->>Git: Fetch refs/heads/ref to refs/remotes/origin/ref
-    W->>Git: Require event SHA == fetched head; detached checkout
-    W->>W: Persist commit history and head changed paths; enumerate full manifest
-    W->>W: Record Git/GitHub frontiers and omitted bodies as complete or partial
-    W->>API: POST /internal/context/ingest (lease + evidence input)
-    API->>API: Validate topic, lease, attempt, and fence
-    API->>CE: IngestEvidenceService.ingest
-    CE->>CE: Hash evidence and run deterministic parser
-    CE->>DB: Immutable evidence, Git objects, ACL observation, checkpoint, outbox
-    DB-->>CE: Evidence checkpoint and fingerprint
-    API-->>W: checkpoint ID, commit SHA, fingerprint
-    W->>API: Complete board stage with checkpoint metadata
-```
-
-Partial trees, a moved remote ref, and unverified commit identity fail closed. A reached Git/GitHub bound,
-unavailable optional provider source, or omitted body is committed truthfully as a
-`partial` checkpoint with a machine-readable frontier; query coverage then reports that
-partial state. Retries converge by immutable object and input fingerprints. The
-checkpoint advances the projection frontier only if its `refSequence` is at least the
-latest admitted sequence. A stale lease cannot commit.
-
-## Baseline and enriched generations
-
-```mermaid
-sequenceDiagram
-    participant IW as Index worker
-    participant KW as Knowledge worker
-    participant API as jina-api
-    participant DX as Daytona executor
-    participant DB as jina_context
-
-    IW->>API: POST /internal/context/index (checkpoint + fence)
-    API->>DB: Build manifest, documents/fragments, exact/lexical, structure, hierarchy, ACL
-    DB->>DB: Check required projector barrier
-    DB-->>API: Atomically published baseline generation
-    Note over API,KW: Baseline completion queues required derivation
-    KW->>API: POST /internal/context/derive/prepare
-    API->>DB: Select evidence bundle, exact manifest, and eligible prior revisions
-    API-->>KW: Agent prompt + evidence + manifest + prior knowledge
-    KW->>KW: Fetch exact checkpoint SHA and create Git archive
-    KW->>DX: Upload read-only checkpoint archive and derivation inputs
-    KW->>DX: Run Codex with read-only shell, no network/credentials, v4 schema
-    DX->>DX: Explore repository; organize full or incremental cited catalog
-    DX-->>KW: Untrusted documents + explicit retiredDocuments JSON
-    KW->>API: POST /internal/context/derive/commit (fence + raw output)
-    API->>DB: Resolve exact range/JSON excerpts and validate terminal source citations
-    API->>DB: Validate body/structured ordinals and citation claims verbatim
-    API->>DB: Require every prior logical ID to be re-emitted or explicitly retired
-    alt valid
-        DB->>DB: Under ref lock, reject if checkpoint is behind admitted/current sequence
-        DB->>DB: Append derivation run, revisions, evidence, events
-        DB->>DB: Publish enriched successor generation
-    else first result invalid
-        API-->>KW: Diagnostics for one bounded repair
-    else repaired result or executor fails
-        API-->>KW: Fail derivation stage and root build
+    GH->>API: Signed webhook
+    API->>API: Verify signature and delivery ID
+    alt Branch push with new head
+        API->>B: Build branch ref at event head SHA
+    else PR opened or synchronized
+        API->>B: Build pull/<number>/head at PR head SHA
+    else Issue opened
+        API->>B: Build repository default branch
+    else Comment, edit, review, label, close, or duplicate head
+        API-->>GH: Accepted, no context build
     end
 ```
 
-The baseline contains raw evidence as indexable context documents. Derived knowledge is
-also projected as indexable documents, but its answer citations expand through immutable
-revision evidence to original blobs, observations, commits, pull requests, or issues.
-The structured payload includes cited facts, questions answered, symptoms, likely causes,
-diagnostic checks, and evidence-backed fixes. On a later commit, PR, issue, or comment
-checkpoint, the prior catalog is an explicit input and silent logical-document drops fail
-validation.
-Only revisions whose every stored citation source identity and `contentDigest` exists in
-the exact evidence checkpoint can enter either generation; ref+commit equality alone is
-insufficient. Equivalent same-commit checkpoints safely reuse unchanged cited facts, but
-changed mutable provider evidence excludes stale PR/issue-derived facts.
-
-Each projector claims its own durable outbox delivery and lease. Publication acknowledges
-only deliveries for that consumer and exact tenant/repository/ref/commit checkpoint.
-`POST /internal/context/outbox/drain` finds pending checkpoints and replays this idempotent
-index path; it is not a metrics-only no-op.
-
-## HTTP query
+## Context build and resumable publication
 
 ```mermaid
 sequenceDiagram
-    participant C as Trusted client
-    participant API as jina-api
-    participant DB as jina_context
-    participant QE as Query engine
+    participant B as Board
+    participant W as Context worker
+    participant API as Jina API
+    participant PG as PostgreSQL
+    participant C as Codex
+    participant GCS as GCS
+    participant PI as Local PageIndex
 
-    C->>API: POST /context/query (fixed-bound context token, repository/ref/question)
-    API->>API: Default omitted ref to main
-    API->>DB: Resolve principal repository access and ACL fingerprints
-    DB-->>API: Authorized repository and exact fingerprint set
-    API->>DB: SQL-filter one published generation by those fingerprints
-    API->>QE: Plan task-specific routes
-    par deterministic routes
-        QE->>DB: Exact/structured/structural retrieval
-    and text routes
-        QE->>DB: Lexical/knowledge/temporal retrieval
-    and long-form routes
-        QE->>DB: Hierarchy and bounded long-context retrieval
+    B->>W: Lease snapshot-context-input
+    W->>W: Clone/fetch authoritative ref
+    W->>W: Verify exact expected head SHA
+    W->>W: Read manifest, files, Git history, PRs, issues
+    W->>API: Commit immutable input boundary
+    API->>GCS: Store evidence-snapshot artifact
+    API->>PG: Commit evidence checkpoint
+    W->>B: Complete snapshot task
+
+    B->>W: Lease research-plan task
+    W->>C: Discover bounded repository-specific research
+    C-->>W: Artifact-backed research work specifications
+    W->>B: Add research tasks and publication-plan join
+    par Independent research tasks
+        B->>W: Lease subject research
+        W->>C: Inspect checkpoint source and history
+        C-->>W: Evidence-grounded report
+        W->>GCS: Store immutable report
+        W->>B: Complete research task with artifact digest/reference
     end
-    DB-->>QE: Only authorized rows; candidates with original evidence anchors
-    QE->>QE: Deduplicate, fuse, detect conflicts, assess coverage
-    QE->>QE: Assemble evidence pack, synthesize, verify citations
-    QE->>DB: Persist bounded query telemetry
-    API->>DB: Reauthorize principal and exact ACL-fingerprint set
-    API-->>C: Answer, generation/ref/commit, citations, conflicts, coverage, trace ID
+
+    B->>W: Lease publication-plan task
+    W->>C: Synthesize engineering-documentation tree
+    C-->>W: Page work specifications and maintenance-task catalog
+    W->>B: Add one aggregate per page plus final gates
+
+    par Independent page aggregates
+        B->>W: Lease write-context-page
+        W->>C: Write one page from bounded evidence packets
+        C-->>W: Markdown page
+        W->>API: Validate identity, ranges, exact anchors, and structure
+        API->>GCS: Store immutable page checkpoint
+        W->>B: Complete writer task
+        B->>W: Lease independent audit-context-page
+        W->>C: Audit exact claim spans against supplied evidence
+        alt Unsupported claim
+            C-->>W: Citation findings
+            W->>GCS: Store audit artifact
+            W->>B: Add repair and replacement-audit tasks atomically
+        else Every claim supported
+            W->>B: Complete page audit
+        end
+    end
+
+    B->>W: Lease source challenge and context-only task evaluation
+    W->>GCS: Store digest-bound findings and attempts
+    B->>W: Lease certification for unchanged complete snapshot
+    B->>W: Lease fenced publish-context-release
+    W->>API: Submit certified bytes under task/attempt/lease/write fence
+    API->>PG: Atomically publish complete immutable release
+    API->>GCS: Store release bundle
+    B->>W: Lease index-context-release
+    W->>PI: Build hierarchy from published derived Markdown
+    PI-->>W: Deterministic nodes
+    W->>GCS: Store immutable PageIndex tree
+    W->>API: Attach tree under task/attempt/lease/write fence
+    API->>PG: Idempotently attach hierarchy to published release
+    W->>B: Complete PageIndex task
+    B->>B: Complete root build
 ```
 
-SQL filtering occurs while hydrating documents, fragments, exact entries, hierarchy,
-manifest, and current knowledge, before candidate creation. Structural relations survive
-only when every anchor belongs to the authorized document set. Dense retrieval joins only
-when a generation advertises an evaluated/available embedding capability; it is disabled
-in the current release. If the final authorization differs from the initial fingerprint
-set, the API drops the response.
+If a worker crashes, loses its lease, or reaches its time budget, its immutable
+checkpoints and verified sibling page tasks remain. The expired task is reclaimed with a
+new attempt and fence token; a digest-matching artifact is reused. No unaudited partial
+release becomes queryable.
 
-For `taskKind: diagnose`, the planner explicitly combines knowledge, structured provider
-state, and temporal history so symptoms, likely causes, checks, fixes, issues, pull
-requests, and recent changes can contribute to one cited answer.
-
-## Stateless MCP query
+## Incremental commit, PR, and issue
 
 ```mermaid
 sequenceDiagram
-    participant MC as MCP client
-    participant API as jina-context MCP server
-    participant QE as Query engine
+    participant GH as GitHub
+    participant API as Jina API
+    participant B as Board
+    participant W as Context worker
+    participant C as Codex
 
-    MC->>API: POST /mcp initialize (context token fixed to configured tenant/principal)
-    API-->>MC: Stateless Streamable HTTP response
-    MC->>API: tools/list
-    API-->>MC: query_context only
-    MC->>API: tools/call query_context (including taskKind diagnose)
-    API->>QE: Same QueryContextRequest as HTTP
-    QE-->>API: Storage-neutral cited response
-    API-->>MC: Text plus structuredContent
+    GH->>API: New commit, PR head, or opened issue
+    API->>B: Admit a newer ref-sequence build
+    B->>W: Snapshot exact commit and bounded provider history
+    W->>API: Resolve latest eligible release for the same ref
+    API-->>W: Prior derived pages and citations
+    B->>W: Lease bounded research/page tasks
+    W->>C: Prior context + current snapshot + changed history
+    C->>C: Investigate affected and newly discovered subjects
+    C-->>W: Research, page, audit, or repair artifact
+    W->>B: Complete task; expand or join the graph
+    B->>W: Certify, atomically publish, then index the complete successor
 ```
 
-MCP callers cannot select SQL, retrievers, generation internals, or mutation tools.
-Both public query transports reject bodies over 128 KiB. Each raw target category accepts
-at most 100 entries before deduplication; values are trimmed, empty strings discarded,
-accepted values deduplicated, and non-empty values limited to 1,000 characters.
-
-## Knowledge review
+## Deterministic search without answer generation
 
 ```mermaid
 sequenceDiagram
-    participant O as Tenant administrator
-    participant API as jina-api
-    participant DB as jina_context
+    participant A as Coding/review agent
+    participant API as Context API
+    participant PG as PostgreSQL
 
-    O->>API: POST /context/knowledge/:revisionId/review
-    API->>API: Require tenant-administrator identity
-    API->>DB: Verify revision tenant and repository scope
-    API->>DB: Append reviewed/rejected/invalidated event
-    API->>DB: Rebuild from latest matching evidence checkpoint
-    DB-->>API: Successor generation ID when applicable
-    API-->>O: Immutable event and generation
+    A->>API: POST /context/search
+    API->>PG: Resolve token, tenant, principal, repository ACL
+    API->>PG: Load authorized immutable release and compact tree
+    API->>API: Lexically score title/summary/document text
+    API->>PG: Hydrate selected derived documents/fragments/citations
+    API-->>A: Context excerpts + original evidence citations
+    Note over API,A: No model is invoked and no answer is synthesized
 ```
 
-The revision body and citations never change. Current selection is recomputed from the
-append-only event history. A repository reader who is not a tenant administrator cannot
-append review state.
+All four retrieval tools are model-free. The calling coding or review agent performs any
+reasoning over the returned cited context.
 
-## Erasure and rebuild
+## MCP
 
 ```mermaid
 sequenceDiagram
-    participant A as Tenant administrator
-    participant API as jina-api
-    participant DB as jina_context
+    participant A as Local agent
+    participant MCP as Jina MCP
+    participant API as Context handlers
 
-    A->>API: POST /context/erasure (repository, source type/ID, reason)
-    API->>DB: Append erasure filter and audit event
-    DB->>DB: Remove affected query projections and invalidate generations
-    API->>DB: Reindex latest checkpoint with filter applied
-    DB-->>API: New generation or awaiting-reingestion
-    API-->>A: Erased generation count and status
+    A->>MCP: initialize
+    A->>MCP: tools/list
+    MCP-->>A: search_context, list_context, read_context, diff_context
+    A->>MCP: tools/call search_context
+    MCP->>API: Authorized context search
+    API-->>MCP: Structured context pack
+    MCP-->>A: Text + structured content
 ```
 
-Reingestion checks the durable filter, so a rebuild cannot resurrect erased evidence,
-knowledge citations, or query-visible documents.
+The Streamable HTTP server is stateless per request. All tools are annotated read-only,
+idempotent, non-destructive, and closed-world.
 
-## Deployment acceptance
+## Tenant-scoped token
 
 ```mermaid
 sequenceDiagram
-    participant CB as Cloud Build
-    participant M as Migration owner job
-    participant CR as Cloud Run
-    participant A as Acceptance job
+    participant O as Tenant owner
+    participant API as Jina API
+    participant PG as PostgreSQL
+    participant A as Agent
 
-    CB->>M: Deploy/execute jina-context-migrate using audited image SHA
-    M->>M: Install roles; grant dormant memberships WITH INHERIT FALSE
-    M-->>CB: jina_context ready
-    CB->>CR: Deploy API and verify /health
-    CB->>CR: Deploy context worker and verify exact topics
-    CB->>CR: Deploy task worker and verify exact topics
-    CB->>CR: Deploy dashboard and admin from the same release build
-    CB->>A: Execute production fixture build
-    A->>CR: Internal-token ACL merge for non-admin query principal
-    A->>CR: Admin-principal build, generation, document, and backlog checks
-    A->>CR: Bound non-admin HTTP query and real MCP SDK query_context
-    A->>CR: Verify citations, commit, backlog, and removed route
-    A-->>CB: Pass/fail summary
+    O->>API: Mint token with principal, scopes, expiry
+    API->>PG: Store SHA-256 token hash and tenant/principal binding
+    API-->>O: Return plaintext token once
+    A->>API: Context request with Bearer jina_atk_...
+    API->>PG: Hash and verify live token row
+    PG-->>API: Tenant, principal, scopes
+    API->>PG: Check repository ACL and release authorization
+    API-->>A: Scoped context or uniform refusal
 ```
 
-The operator creates and records the restorable Cloud SQL backup before this sequence.
-Every context database transaction in the runtime explicitly activates its declared
-capability with `SET LOCAL ROLE`.
+## Invalidation, erasure, and rebuild
+
+```mermaid
+sequenceDiagram
+    participant O as Tenant owner
+    participant API as Jina API
+    participant PG as PostgreSQL
+
+    alt Reject or invalidate a context revision
+        O->>API: Append governance event
+        API->>PG: Record immutable event
+        API->>PG: Invalidate affected releases
+    else Erase source evidence
+        O->>API: Create erasure filter
+        API->>PG: Record audit and projection-input event
+        API->>PG: Invalidate affected releases
+    else Rebuild
+        O->>API: Rebuild latest checkpoint
+        API->>PG: Materialize a new derived-only release
+    end
+```
+
+## Production acceptance
+
+```mermaid
+sequenceDiagram
+    participant CI as Deployment job
+    participant API as Production API
+    participant W as Context worker
+    participant MCP as MCP client
+
+    CI->>API: Merge fixture repository into reader ACL
+    CI->>API: Start context build as tenant administrator
+    API->>W: Execute ingest, derive, and index
+    CI->>API: Wait for all required stages
+    CI->>API: List releases and context documents
+    CI->>API: Search with bound non-admin token
+    CI->>MCP: Verify exact four tools and call search_context
+    CI->>API: Require zero projection backlog
+    CI-->>CI: Pass release
+```

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { workerFailureCategory } from "./diagnostics.js";
+import { isRetryableWorkerFailure, shouldRetryWorkerFailure, workerFailureCategory } from "./diagnostics.js";
 
 test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("GitHub request failed with 401: Bad credentials"), "github_authentication");
@@ -15,7 +15,72 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("Unable to fetch prepared commit"), "git_checkout");
   assert.equal(workerFailureCategory("Daytona sandbox creation failed"), "daytona");
   assert.equal(workerFailureCategory("Codex context build failed"), "model");
+  assert.equal(
+    workerFailureCategory(
+      "board agent stage repair-context-projection-and-indexing-md-7 exited with 1: Reading prompt from stdin..."
+    ),
+    "model"
+  );
+  assert.equal(workerFailureCategory("board agent stage audit-citation-contract exceeded its 600s budget"), "model");
   assert.equal(workerFailureCategory("citation path is outside the checkout"), "context_validation");
+  assert.equal(
+    workerFailureCategory("research maintenance question is absent from the page plan"),
+    "context_validation"
+  );
+  assert.equal(
+    workerFailureCategory("Context API /internal/context/board/artifacts failed with 503: unavailable"),
+    "api_transport"
+  );
   assert.equal(workerFailureCategory("stale worker lease"), "lease");
   assert.equal(workerFailureCategory("unexpected failure with private details"), "worker_execution");
+});
+
+test("only transient provider, sandbox, model, and API transport failures retry", () => {
+  for (const reason of [
+    "Daytona sandbox creation failed",
+    "OpenAI model_provider temporarily unavailable",
+    "board agent stage repair-context-projection-and-indexing-md-7 exited with 1: Reading prompt from stdin...",
+    "board agent stage audit-citation-contract exceeded its 600s budget",
+    "GitHub request failed with 429: rate limit",
+    "GitHub request timed out",
+    "GitHub request failed with 503: service unavailable",
+    "Context API /internal/context/board/artifacts failed with 502: bad gateway",
+    "This operation was aborted",
+    "fetch failed: ECONNRESET"
+  ]) {
+    assert.equal(isRetryableWorkerFailure(reason), true, reason);
+  }
+  for (const reason of [
+    "citation path is outside the checkout",
+    "publication plan does not match repository subjects",
+    "research plan schema is invalid",
+    "GitHub request failed with 401: Bad credentials",
+    "GitHub request failed with 404: Not Found",
+    "Unable to fetch prepared commit",
+    "stale worker lease",
+    "unexpected failure with private details"
+  ]) {
+    assert.equal(isRetryableWorkerFailure(reason), false, reason);
+  }
+  assert.equal(
+    shouldRetryWorkerFailure("Daytona sandbox creation failed", {
+      attempt: 3,
+      maxAttempts: 4
+    }),
+    true
+  );
+  assert.equal(
+    shouldRetryWorkerFailure("Daytona sandbox creation failed", {
+      attempt: 4,
+      maxAttempts: 4
+    }),
+    false
+  );
+  assert.equal(
+    shouldRetryWorkerFailure("citation schema is invalid", {
+      attempt: 1,
+      maxAttempts: 4
+    }),
+    false
+  );
 });

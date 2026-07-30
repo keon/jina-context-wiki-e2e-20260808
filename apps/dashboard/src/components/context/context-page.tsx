@@ -1,27 +1,53 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { contextScopes, generationForScope, projectorRows, publishedGenerations } from "../../lib/context.ts";
 import { formatTime, humanize, shortId } from "../../lib/format.ts";
-import { useCursorPoll, usePoll } from "../../lib/poll.ts";
-import type { ContextGeneration, ContextGenerationsResponse, ContextMetricsResponse } from "../../lib/types.ts";
-import { IndexHealth } from "./index-health.tsx";
-import { KnowledgeCatalog } from "./knowledge-catalog.tsx";
-import { QueryWorkspace } from "./query-workspace.tsx";
-import { StructureBrowser } from "./structure-browser.tsx";
+import { usePoll } from "../../lib/poll.ts";
+import type { ContextBuildListResponse, ContextBuildSummary, ContextRelease } from "../../lib/types.ts";
+import { BuildCheckpoints } from "./build-checkpoints.tsx";
+import { ContextBrowser } from "./context-browser.tsx";
 
 export function ContextPage() {
-  const generationsResource = useCursorPoll<ContextGenerationsResponse>(
-    "/api/context/generations?limit=100",
-    "generations",
-    10_000
+  const releasesResource = usePoll<{ readonly releases: readonly ContextRelease[] }>("/api/context/releases", 10_000);
+  const buildsResource = usePoll<ContextBuildListResponse>("/api/context/builds", 5_000);
+  // Preserve API order: the authoritative current pointer leads historical
+  // releases even when an operator intentionally rolls back to an older one.
+  const releases = useMemo(() => releasesResource.data?.releases ?? [], [releasesResource.data]);
+  const builds = useMemo(
+    () =>
+      [...(buildsResource.data?.builds ?? [])].sort(
+        (left, right) => right.updatedAt.localeCompare(left.updatedAt) || left.id.localeCompare(right.id)
+      ),
+    [buildsResource.data]
   );
-  const metricsResource = usePoll<ContextMetricsResponse>("/api/context/metrics", 10_000);
-  const generations = useMemo(
-    () => publishedGenerations(generationsResource.data?.generations ?? []),
-    [generationsResource.data]
-  );
-  const scopes = useMemo(() => contextScopes(generations), [generations]);
+  const scopes = useMemo(() => {
+    const byKey = new Map<string, { repository: string; ref: string }>();
+    for (const item of [...releases, ...builds]) {
+      const key = `${item.repository}\0${item.ref}`;
+      if (!byKey.has(key)) byKey.set(key, { repository: item.repository, ref: item.ref });
+    }
+    return [...byKey.values()].sort((left, right) => {
+      const leftRelease = releases.find(
+        (candidate) => candidate.repository === left.repository && candidate.ref === left.ref
+      );
+      const rightRelease = releases.find(
+        (candidate) => candidate.repository === right.repository && candidate.ref === right.ref
+      );
+      const leftBuild = builds.find(
+        (candidate) => candidate.repository === left.repository && candidate.ref === left.ref
+      );
+      const rightBuild = builds.find(
+        (candidate) => candidate.repository === right.repository && candidate.ref === right.ref
+      );
+      const leftTime = leftRelease?.publishedAt ?? leftRelease?.createdAt ?? leftBuild?.updatedAt ?? "";
+      const rightTime = rightRelease?.publishedAt ?? rightRelease?.createdAt ?? rightBuild?.updatedAt ?? "";
+      return (
+        rightTime.localeCompare(leftTime) ||
+        left.repository.localeCompare(right.repository) ||
+        left.ref.localeCompare(right.ref)
+      );
+    });
+  }, [builds, releases]);
   const [scopeKey, setScopeKey] = useState("");
 
   useEffect(() => {
@@ -33,7 +59,11 @@ export function ContextPage() {
   }, [scopeKey, scopes]);
 
   const [repository = "", ref = ""] = scopeKey.split("\0");
-  const generation = generationForScope(generations, repository, ref);
+  const release = releases.find((candidate) => candidate.repository === repository && candidate.ref === ref);
+  const scopeReleases = releases.filter((candidate) => candidate.repository === repository && candidate.ref === ref);
+  const build = preferredBuild(
+    builds.filter((candidate) => candidate.repository === repository && candidate.ref === ref)
+  );
 
   return (
     <section id="context-page" className="context-page">
@@ -41,7 +71,7 @@ export function ContextPage() {
         <div>
           <span className="context-eyebrow">Repository context</span>
           <h1>Evidence-backed workspace</h1>
-          <p>Answers, source support, generated knowledge, and index state for one immutable repository view.</p>
+          <p>Derived context, verified source citations, and build checkpoints for one immutable repository view.</p>
         </div>
         <label className="context-scope-picker">
           <span>Repository and ref</span>
@@ -59,69 +89,70 @@ export function ContextPage() {
         </label>
       </header>
 
-      {generation ? (
+      {release ? (
         <>
-          <GenerationStrip generation={generation} />
-          <QueryWorkspace generation={generation} />
-          <section className="context-operations-grid">
-            <KnowledgeCatalog repository={repository} />
-            <IndexHealth
-              generation={generation}
-              metrics={metricsResource.data}
-              onRefresh={() => {
-                void Promise.all([generationsResource.refresh(), metricsResource.refresh()]);
-              }}
-            />
-            <StructureBrowser repository={repository} refName={ref} />
-          </section>
+          <ReleaseStrip release={release} />
+          {build ? <BuildCheckpoints build={build} release={release} /> : null}
+          <ContextBrowser release={release} releases={scopeReleases} />
         </>
       ) : (
-        <section className="context-empty-state" aria-live="polite">
-          <strong>No published context generation</strong>
-          <p>
-            Run <code>ingest-evidence</code> and the baseline <code>index-context</code> stage for a repository. The
-            required <code>derive-knowledge</code> stage then publishes the enriched generation.
-          </p>
-        </section>
+        <>
+          {build ? <BuildCheckpoints build={build} /> : null}
+          <section className="context-empty-state" aria-live="polite">
+            <strong>No published context release</strong>
+            <p>
+              Citation-valid pages remain private, resumable checkpoints until the entire catalog passes its source,
+              maintenance-task, and certification gates and publishes atomically.
+            </p>
+          </section>
+        </>
       )}
     </section>
   );
 }
 
-function GenerationStrip({ generation }: { readonly generation: ContextGeneration }) {
-  const projectors = projectorRows(generation);
-  const failed = projectors.filter((projector) => projector.status === "failed");
-  const ready = projectors.filter((projector) => projector.status === "ready");
+function ReleaseStrip({ release }: { readonly release: ContextRelease }) {
   return (
-    <section className="context-generation-strip" aria-label="Selected generation">
-      <GenerationFact label="Generation" value={shortId(generation.id)} />
-      <GenerationFact label="Commit" value={generation.commitSha.slice(0, 12)} mono />
-      <GenerationFact label="Published" value={formatTime(generation.publishedAt ?? generation.createdAt)} />
-      <GenerationFact label="Knowledge" value={humanize(generation.derivedKnowledge)} />
-      <GenerationFact
-        label="Index state"
-        value={failed.length === 0 ? `${ready.length} projectors ready` : `${failed.length} failed`}
-        tone={failed.length === 0 ? "good" : "warning"}
+    <section className="context-generation-strip" aria-label="Selected release">
+      <ReleaseFact label="Release" value={shortId(release.id)} title={release.id} />
+      <ReleaseFact label="Commit" value={release.commitSha.slice(0, 12)} mono />
+      <ReleaseFact label="Published" value={formatTime(release.publishedAt ?? release.createdAt)} />
+      <ReleaseFact label="Context" value={humanize(release.contextStatus)} />
+      <ReleaseFact
+        label="Publication"
+        value={release.completeness === "complete" ? "Certified complete" : "Partial"}
+        tone={release.completeness === "complete" ? "good" : "warning"}
       />
     </section>
   );
 }
 
-function GenerationFact({
+function ReleaseFact({
   label,
   value,
   mono = false,
-  tone
+  tone,
+  title
 }: {
   readonly label: string;
   readonly value: string;
   readonly mono?: boolean;
   readonly tone?: "good" | "warning";
+  readonly title?: string;
 }) {
   return (
     <div className="context-generation-fact">
       <span>{label}</span>
-      <strong className={`${mono ? "mono" : ""}${tone ? ` ${tone}` : ""}`}>{value}</strong>
+      <strong title={title} className={`${mono ? "mono" : ""}${tone ? ` ${tone}` : ""}`}>
+        {value}
+      </strong>
     </div>
   );
+}
+
+function preferredBuild(builds: readonly ContextBuildSummary[]): ContextBuildSummary | undefined {
+  return [...builds].sort((left, right) => {
+    const priority = (status: ContextBuildSummary["status"]) => (status === "active" ? 0 : status === "failed" ? 1 : 2);
+    return priority(left.status) - priority(right.status) || right.updatedAt.localeCompare(left.updatedAt);
+  })[0];
 }

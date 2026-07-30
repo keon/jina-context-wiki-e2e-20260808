@@ -64,8 +64,9 @@ When changing the fixture:
 
 ## Real-question evaluation
 
-`pnpm evaluate:questions` sends Markdown bullet questions to a running
-`POST /context/query` API. Markdown headings become report categories.
+`pnpm evaluate:questions` sends Markdown bullet queries to a running
+`POST /context/search` API. Markdown headings become report categories. The endpoint
+returns citation-grounded context packs and never generates an answer.
 
 ```sh
 JINA_API_URL=https://api.example.com \
@@ -74,27 +75,31 @@ JINA_CONTEXT_REF=main \
 CONTEXT_QUESTION_FILE=/absolute/path/questions.md \
 CONTEXT_API_TOKEN='<bound query token>' \
 CONTEXT_QUESTION_CONCURRENCY=4 \
-CONTEXT_QUESTION_MIN_ANSWERED_RATE=0.8 \
+CONTEXT_QUESTION_MIN_RETRIEVED_RATE=0.8 \
 pnpm evaluate:questions > /tmp/context-question-report.json
 ```
 
-Each row records answer status, citations, coverage gaps, retrievers, trace ID, and
-latency. The command fails on request errors or when the answered-or-partial rate is below
-`CONTEXT_QUESTION_MIN_ANSWERED_RATE`.
+Each row records whether context was retrieved, returned logical document IDs and
+citations, the deterministic lexical-tree method, the immutable release, and latency. The
+command fails on request errors or when the retrieved rate is below
+`CONTEXT_QUESTION_MIN_RETRIEVED_RATE`.
 
-This is a coverage screen, not a semantic correctness grade. Causal, counterfactual, and
-fix-quality questions still require human or rubric grading. Do not commit bearer tokens
-or reports containing private answer text.
+This is a retrieval-coverage screen, not an answer-quality grade. The calling coding or
+review agent remains responsible for reasoning over the returned context. Do not commit
+bearer tokens or reports containing private context.
 
 ## Optional retrieval capabilities
 
 Dense retrieval remains disabled until an approved embedding backend demonstrates a
-material improvement over lexical and structural retrieval while preserving citation
-integrity, ACL isolation, latency, cost, and data-egress requirements.
+material improvement over the production PageIndex lexical-tree scorer while preserving
+citation integrity, ACL isolation, latency, cost, and data-egress requirements.
 
-The active hierarchy is the deterministic Jina adapter. Any alternative hierarchy
-adapter must beat it on a sufficiently broad long-document fixture while preserving exact
-source spans, ACL filtering, cancellation, and citation validation.
+The active hierarchy is built locally from derived Markdown by the pinned PageIndex OSS
+worker. Query-time selection is deterministic and model-free; the historical Codex tree
+selector is retained only as an offline research comparator and is not wired into the API
+or MCP server. Any alternative adapter must beat the lexical scorer on a sufficiently
+broad repository fixture while preserving exact source anchors, ACL filtering,
+cancellation, and citation validation.
 
 ## Deployment acceptance
 
@@ -103,8 +108,8 @@ runs `jina-acceptance` against a real repository and requires:
 
 - successful worker health and topic checks;
 - a completed context build at one full commit SHA;
-- a published enriched generation and nonempty knowledge catalog;
-- cited HTTP and MCP queries using the bound non-admin context identity; and
+- an immutable context release and nonempty derived-context catalog;
+- cited HTTP and MCP searches using the bound non-admin context identity, with no answer;
 - no remaining context outbox backlog.
 
 The release process and evidence to retain are documented in

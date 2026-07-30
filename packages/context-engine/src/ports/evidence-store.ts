@@ -6,10 +6,8 @@ import type {
   RefManifestEntry,
   StructuralFact
 } from "../domain/evidence.js";
-import type { ContextWriteFence } from "../workflow/coordinator.js";
-
 export interface EvidenceStore {
-  commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint>;
+  commitSnapshot(snapshot: EvidenceSnapshot): Promise<EvidenceCheckpoint>;
   getCheckpoint(checkpointId: string): Promise<EvidenceCheckpoint | undefined>;
   latestCheckpoint(tenantId: string, repository: string, ref: string): Promise<EvidenceCheckpoint | undefined>;
   listEvidence(checkpointId: string): Promise<EvidenceRecord[]>;

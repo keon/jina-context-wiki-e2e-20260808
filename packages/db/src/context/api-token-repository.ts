@@ -32,11 +32,11 @@ export class PostgresApiTokenRepository {
   /**
    * Liveness is decided by the same database that evaluates the row policy, so a
    * skewed instance clock cannot accept an expired token and the two cannot
-   * disagree. This must not run inside a tenant scope: `transactionAs` lets an
-   * ambient scope override the requested system scope, and the read would then
-   * silently match nothing.
+   * disagree. Initial authentication omits `expectedTenantId` and must run at
+   * system scope. Response-time revalidation already runs under the resolved
+   * tenant and supplies it, so the query stays within that ambient scope.
    */
-  async verifyApiToken(secretHash: string): Promise<VerifiedApiToken | undefined> {
+  async verifyApiToken(secretHash: string, expectedTenantId?: string): Promise<VerifiedApiToken | undefined> {
     const result = await this.database.queryAs<{
       id: string;
       tenant_id: string;
@@ -45,11 +45,13 @@ export class PostgresApiTokenRepository {
       last_used_at: Date | null;
     }>(
       "jina_context_tokens",
-      contextSystemScope,
+      expectedTenantId === undefined ? contextSystemScope : contextTenantScope(expectedTenantId),
       `select id,tenant_id,principal_id,scopes,last_used_at
        from jina_context.api_tokens
-       where secret_hash=$1 and revoked_at is null and expires_at > now()`,
-      [secretHash]
+       where secret_hash=$1
+         and ($2::text is null or tenant_id=$2)
+         and revoked_at is null and expires_at > now()`,
+      [secretHash, expectedTenantId ?? null]
     );
     const row = result.rows[0];
     if (!row) return undefined;

@@ -6,7 +6,6 @@ import type {
   KnowledgeEvidenceCitation,
   KnowledgeRevisionEvent,
   KnowledgeStore,
-  ContextWriteFence,
   EvidenceRecord
 } from "@jina/context-engine";
 import { evidenceExcerpt, sameImmutableKnowledgeCitation, sameImmutableKnowledgeRevision } from "@jina/context-engine";
@@ -14,7 +13,6 @@ import type { PoolClient } from "pg";
 import { ContextDatabase, contextStableId, dateString } from "./database.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
 import { appendProjectionInputEvent, lockProjectionInput } from "./projection-input.js";
-import { assertContextWriteFence } from "./write-fence.js";
 
 interface DerivationRow {
   id: string;
@@ -61,6 +59,8 @@ interface CitationRow {
   ordinal: number;
   claim_role: string;
   claim_ids: string[];
+  public_citation_id: string | null;
+  public_claim_span: string | null;
   tenant_id: string;
   repository: string;
   source_type: KnowledgeEvidenceCitation["anchor"]["sourceType"];
@@ -101,7 +101,7 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
     return result.rows[0] ? this.hydrateRun(result.rows[0]) : undefined;
   }
 
-  async commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
+  async commitKnowledge(input: KnowledgeCommit): Promise<DerivationRun> {
     await this.database.transactionAs("jina_context_derive", { tenantIds: [input.run.tenantId] }, async (client) => {
       const canonicalRevisionCreatedAt = new Map<string, string>();
       const newlyInsertedRevisionIds = new Set<string>();
@@ -128,7 +128,6 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
           throw new Error(`Knowledge citation ordinals must be contiguous for ${revisionId}`);
         }
       }
-      await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, input.run.checkpointId);
       await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
         `context-generation-ref:${checkpoint.tenant_id}:${checkpoint.repository}:${checkpoint.ref_name}`
@@ -214,10 +213,10 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
         const anchor = citation.anchor;
         await client.query(
           `insert into jina_context.knowledge_revision_evidence
-            (tenant_id,repository,revision_id,ordinal,claim_role,claim_ids,source_type,
+            (tenant_id,repository,revision_id,ordinal,claim_role,claim_ids,public_citation_id,public_claim_span,source_type,
              source_id,content_digest,commit_sha,path_or_url,start_line,end_line,json_pointer,
              observed_at,anchor)
-           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb)
+           values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18::jsonb)
            on conflict (tenant_id,repository,revision_id,ordinal) do nothing`,
           [
             revision.tenantId,
@@ -226,6 +225,8 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
             citation.ordinal,
             citation.claim,
             [citation.id],
+            citation.citationId ?? null,
+            citation.claimSpan ?? null,
             anchor.sourceType,
             anchor.sourceId,
             anchor.contentDigest,
@@ -278,17 +279,14 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
         aggregateId: input.run.id,
         occurredAt: input.run.createdAt
       });
-      await assertContextWriteFence(client, input.run.tenantId, "run-derive-knowledge", fence);
     });
     return input.run;
   }
 
-  async recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void> {
+  async recordFailedRun(run: DerivationRun): Promise<void> {
     await this.database.transactionAs("jina_context_derive", { tenantIds: [run.tenantId] }, async (client) => {
-      await assertContextWriteFence(client, run.tenantId, "run-derive-knowledge", fence);
       const checkpoint = await requireCheckpoint(client, run.checkpointId);
       await insertDerivationRun(client, run, checkpoint);
-      await assertContextWriteFence(client, run.tenantId, "run-derive-knowledge", fence);
     });
   }
 
@@ -677,18 +675,9 @@ async function assertCheckpointCurrent(
   checkpoint: Awaited<ReturnType<typeof requireCheckpoint>>
 ): Promise<void> {
   const result = await client.query<{ ref_sequence: string }>(
-    `select greatest(
-       coalesce((
-         select max(ref_sequence)
-         from jina_context.pipeline_builds
-         where tenant_id=$1 and repository=$2 and ref_name=$3
-       ),0),
-       coalesce((
-         select max(ref_sequence)
-         from jina_context.evidence_checkpoints
-         where tenant_id=$1 and repository=$2 and ref_name=$3
-       ),0)
-     )::text ref_sequence`,
+    `select coalesce(max(ref_sequence),0)::text ref_sequence
+     from jina_context.evidence_checkpoints
+     where tenant_id=$1 and repository=$2 and ref_name=$3`,
     [checkpoint.tenant_id, checkpoint.repository, checkpoint.ref_name]
   );
   const checkpointSequence = Number(checkpoint.ref_sequence);
@@ -899,6 +888,12 @@ function citationFromRow(row: CitationRow): KnowledgeEvidenceCitation {
     revisionId: row.revision_id,
     ordinal: row.ordinal,
     claim: row.claim_role,
+    ...(row.public_citation_id && row.public_claim_span
+      ? {
+          citationId: row.public_citation_id,
+          claimSpan: row.public_claim_span
+        }
+      : {}),
     anchor: {
       tenantId: row.tenant_id,
       repository: row.repository,

@@ -31,74 +31,6 @@ create table if not exists jina_context.repositories (
   unique (tenant_id,provider,provider_repository_id)
 );
 
-create table if not exists jina_context.pipeline_builds (
-  id text primary key check (id ~ '^cb_'),
-  tenant_id text not null,
-  repository text not null,
-  ref_name text not null,
-  ref_sequence bigint not null check (ref_sequence > 0),
-  request_key text not null,
-  status text not null check (status in ('active','succeeded','degraded','failed')),
-  created_at timestamptz not null,
-  completed_at timestamptz,
-  foreign key (tenant_id,repository)
-    references jina_context.repositories(tenant_id,repository),
-  unique (tenant_id,request_key),
-  unique (tenant_id,repository,ref_name,ref_sequence),
-  check ((status='active') = (completed_at is null))
-);
-create index if not exists context_pipeline_builds_scope
-  on jina_context.pipeline_builds (tenant_id,repository,ref_name,ref_sequence desc,id desc);
-
-create table if not exists jina_context.pipeline_stages (
-  id text primary key check (id ~ '^cs_'),
-  build_id text not null references jina_context.pipeline_builds(id) on delete cascade,
-  tenant_id text not null,
-  type text not null check (type in ('ingest-evidence','derive-knowledge','index-context')),
-  topic text not null check (topic in ('run-ingest-evidence','run-derive-knowledge','run-index-context')),
-  required boolean not null,
-  status text not null check (status in ('blocked','queued','leased','succeeded','failed')),
-  attempt integer not null default 0 check (attempt >= 0),
-  metadata jsonb not null default '{}'::jsonb,
-  started_at timestamptz,
-  completed_at timestamptz,
-  error text,
-  lease_id text,
-  lease_owner text,
-  lease_expires_at timestamptz,
-  fence_token text,
-  created_at timestamptz not null,
-  updated_at timestamptz not null,
-  unique (build_id,type),
-  check (
-    (status='leased' and lease_id is not null and lease_owner is not null
-      and lease_expires_at is not null and fence_token is not null)
-    or
-    (status<>'leased' and lease_id is null and lease_owner is null
-      and lease_expires_at is null and fence_token is null)
-  )
-);
-create index if not exists context_pipeline_stages_claim
-  on jina_context.pipeline_stages (tenant_id,topic,status,created_at,id);
-
--- Knowledge derivation is a required pipeline outcome. Repair builds created
--- by the earlier optional-stage implementation and make prior derivation
--- failures unambiguously terminal.
-update jina_context.pipeline_stages
-set required=true,updated_at=greatest(updated_at,now())
-where type='derive-knowledge' and required=false;
-
-update jina_context.pipeline_builds build
-set status='failed',completed_at=coalesce(build.completed_at,now())
-where build.status='degraded'
-  and exists (
-    select 1
-    from jina_context.pipeline_stages stage
-    where stage.build_id=build.id
-      and stage.type='derive-knowledge'
-      and stage.status='failed'
-  );
-
 create table if not exists jina_context.observations (
   id text not null,
   tenant_id text not null,
@@ -640,6 +572,8 @@ create table if not exists jina_context.knowledge_revision_evidence (
   ordinal integer not null check (ordinal >= 0),
   claim_role text not null,
   claim_ids text[] not null default '{}',
+  public_citation_id text,
+  public_claim_span text,
   source_type text not null check (source_type in (
     'observation','blob','commit','pull_request','issue','document'
   )),
@@ -656,12 +590,26 @@ create table if not exists jina_context.knowledge_revision_evidence (
   foreign key (tenant_id,repository,revision_id)
     references jina_context.knowledge_document_revisions(tenant_id,repository,id),
   check (source_type <> 'knowledge_revision'),
+  check (
+    (public_citation_id is null and public_claim_span is null) or
+    (public_citation_id ~ '^cite_[0-9a-f]{20}$' and public_claim_span <> '')
+  ),
   check (commit_sha is null or commit_sha ~ '^[0-9a-f]{40,64}$'),
   check (
     (start_line is null and end_line is null) or
     (path_or_url is not null and start_line > 0 and end_line >= start_line)
   )
 );
+alter table jina_context.knowledge_revision_evidence
+  add column if not exists public_citation_id text,
+  add column if not exists public_claim_span text;
+alter table jina_context.knowledge_revision_evidence
+  drop constraint if exists knowledge_revision_evidence_public_claim_association;
+alter table jina_context.knowledge_revision_evidence
+  add constraint knowledge_revision_evidence_public_claim_association check (
+    (public_citation_id is null and public_claim_span is null) or
+    (public_citation_id ~ '^cite_[0-9a-f]{20}$' and public_claim_span <> '')
+  );
 create index if not exists context_knowledge_evidence_source
   on jina_context.knowledge_revision_evidence
   (tenant_id,repository,source_type,source_id);
@@ -805,13 +753,131 @@ create table if not exists jina_context.index_generations (
   check ((status='published') = (published_at is not null) or status='invalidated'),
   check (invalidated_at is null or status='invalidated')
 );
-create unique index if not exists context_generations_one_published_commit
-  on jina_context.index_generations (tenant_id,repository,ref_name,commit_sha)
-  where status='published';
+-- A single commit can have several immutable releases as valid pages arrive.
+-- Current is the newest published release, not a uniqueness constraint.
+drop index if exists jina_context.context_generations_one_published_commit;
 create index if not exists context_generations_published
   on jina_context.index_generations
   (tenant_id,repository,ref_name,published_at desc,id desc)
   where status='published';
+
+-- Board-native certification publication. The immutable row first binds a
+-- complete prepared projection to its GCS bundle and idempotency input.
+-- Prepared rows have no PageIndex fields, remain status='building' in
+-- index_generations, and are not query-visible. PageIndex attachment fills the
+-- one-time fields, publishes the generation, and advances the separate mutable
+-- current pointer in one fenced transaction.
+create table if not exists jina_context.context_board_publications (
+  release_id text primary key check (release_id ~ '^cr_[0-9a-f]{32}$'),
+  tenant_id text not null,
+  repository text not null,
+  ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
+  commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40}$'),
+  build_id text not null,
+  checkpoint_id text not null references jina_context.evidence_checkpoints(id),
+  idempotency_key text not null,
+  publication_input_digest text not null check (publication_input_digest ~ '^[0-9a-f]{64}$'),
+  public_snapshot_digest text not null check (public_snapshot_digest ~ '^[0-9a-f]{64}$'),
+  certification_artifact jsonb not null,
+  publication_plan_artifact jsonb not null,
+  release_artifact jsonb not null,
+  page_count integer not null check (page_count > 0),
+  pageindex_idempotency_key text,
+  pageindex_attachment_input_digest text
+    check (pageindex_attachment_input_digest ~ '^[0-9a-f]{64}$'),
+  pageindex_artifact jsonb,
+  pageindex_metadata jsonb,
+  pageindex_attached_at timestamptz,
+  published_at timestamptz not null,
+  foreign key (tenant_id,repository)
+    references jina_context.repositories(tenant_id,repository),
+  unique (tenant_id,idempotency_key),
+  unique (tenant_id,repository,ref_name,ref_sequence),
+  unique (tenant_id,repository,publication_input_digest)
+);
+alter table jina_context.context_board_publications
+  add column if not exists pageindex_idempotency_key text,
+  add column if not exists pageindex_attachment_input_digest text,
+  add column if not exists pageindex_artifact jsonb,
+  add column if not exists pageindex_metadata jsonb,
+  add column if not exists pageindex_attached_at timestamptz;
+alter table jina_context.context_board_publications
+  drop constraint if exists context_board_publications_pageindex_attachment_check;
+alter table jina_context.context_board_publications
+  add constraint context_board_publications_pageindex_attachment_check check (
+    (
+      pageindex_idempotency_key is null
+      and pageindex_attachment_input_digest is null
+      and pageindex_artifact is null
+      and pageindex_metadata is null
+      and pageindex_attached_at is null
+    ) or (
+      pageindex_idempotency_key is not null
+      and pageindex_attachment_input_digest ~ '^[0-9a-f]{64}$'
+      and pageindex_artifact is not null
+      and pageindex_metadata is not null
+      and pageindex_attached_at is not null
+    )
+  );
+create unique index if not exists context_board_publications_pageindex_idempotency
+  on jina_context.context_board_publications (tenant_id,pageindex_idempotency_key)
+  where pageindex_idempotency_key is not null;
+create index if not exists context_board_publications_scope
+  on jina_context.context_board_publications
+  (tenant_id,repository,ref_name,ref_sequence desc,release_id);
+
+create table if not exists jina_context.current_context_board_releases (
+  tenant_id text not null,
+  repository text not null,
+  ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
+  release_id text not null references jina_context.context_board_publications(release_id),
+  commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40}$'),
+  public_snapshot_digest text not null check (public_snapshot_digest ~ '^[0-9a-f]{64}$'),
+  advanced_at timestamptz not null,
+  primary key (tenant_id,repository,ref_name),
+  foreign key (tenant_id,repository)
+    references jina_context.repositories(tenant_id,repository)
+);
+
+-- Upgrade fence for databases written by the earlier two-step flow, which
+-- advanced current and marked the generation published before PageIndex.
+-- Unattached Board releases become prepared and disappear from public lookup.
+-- An older hierarchy-ready pointer is left untouched; if the removed release
+-- was the pointer, restore the newest attached release for that ref.
+delete from jina_context.current_context_board_releases current_release
+using jina_context.context_board_publications publication
+where publication.release_id=current_release.release_id
+  and publication.pageindex_attached_at is null;
+
+update jina_context.index_generations generation
+set status='building',published_at=null
+from jina_context.context_board_publications publication
+where publication.release_id=generation.id
+  and publication.pageindex_attached_at is null
+  and generation.status='published';
+
+insert into jina_context.current_context_board_releases
+  (tenant_id,repository,ref_name,ref_sequence,release_id,commit_sha,
+   public_snapshot_digest,advanced_at)
+select distinct on (publication.tenant_id,publication.repository,publication.ref_name)
+       publication.tenant_id,publication.repository,publication.ref_name,
+       publication.ref_sequence,publication.release_id,publication.commit_sha,
+       publication.public_snapshot_digest,publication.pageindex_attached_at
+from jina_context.context_board_publications publication
+join jina_context.index_generations generation
+  on generation.id=publication.release_id and generation.status='published'
+where publication.pageindex_attached_at is not null
+order by publication.tenant_id,publication.repository,publication.ref_name,
+         publication.ref_sequence desc,publication.release_id desc
+on conflict (tenant_id,repository,ref_name) do update
+  set ref_sequence=excluded.ref_sequence,
+      release_id=excluded.release_id,
+      commit_sha=excluded.commit_sha,
+      public_snapshot_digest=excluded.public_snapshot_digest,
+      advanced_at=excluded.advanced_at
+where jina_context.current_context_board_releases.ref_sequence < excluded.ref_sequence;
 
 create table if not exists jina_context.generation_projectors (
   generation_id text not null references jina_context.index_generations(id) on delete cascade,
@@ -1173,28 +1239,19 @@ create index if not exists context_retrieval_metrics_scope
   on jina_context.retrieval_metrics
   (tenant_id,repository,metric_name,recorded_at desc);
 
--- A derivation runs for up to two hours inside a sandbox that dies with the
--- worker, and its pages were only ever collected at the end. A build stopped
--- part way -- by a deploy, a crash, a lost lease -- threw away everything it had
--- already written, and nobody watching could see it happening at all. Pages are
--- checkpointed here as they are finished, so progress is durable and readable
--- while the run is still going.
-create table if not exists jina_context.derivation_progress (
-  stage_id text not null references jina_context.pipeline_stages(id) on delete cascade,
-  tenant_id text not null,
-  build_id text not null references jina_context.pipeline_builds(id) on delete cascade,
-  checkpoint_id text not null,
-  -- The document path is the identity under the file contract, so it is the key.
-  document_path text not null,
-  title text not null,
-  body_markdown text not null,
-  bytes integer not null check (bytes >= 0),
-  first_seen_at timestamptz not null,
-  updated_at timestamptz not null,
-  primary key (stage_id,document_path)
+-- Authoritative mutable quota state. The application serializes all mutations
+-- for one tenant under a transaction-scoped advisory lock; the row remains a
+-- compact implementation detail behind ContextQuotaStore.
+create table if not exists jina_context.context_quota_ledgers (
+  tenant_id text primary key,
+  version smallint not null default 1 check (version=1),
+  ledger jsonb not null check (
+    jsonb_typeof(ledger)='object'
+    and ledger @> jsonb_build_object('version',1,'tenantId',tenant_id)
+  ),
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
-create index if not exists context_derivation_progress_build
-  on jina_context.derivation_progress (tenant_id,build_id,updated_at desc);
 
 create table if not exists jina_context.api_tokens (
   id text not null check (id ~ '^atk_'),
@@ -1302,6 +1359,54 @@ begin
   end loop;
 end
 $triggers$;
+
+create or replace function jina_context.attach_context_board_pageindex_once()
+returns trigger
+language plpgsql
+as $pageindex_attachment$
+begin
+  if tg_op = 'UPDATE'
+     and old.pageindex_idempotency_key is null
+     and old.pageindex_attachment_input_digest is null
+     and old.pageindex_artifact is null
+     and old.pageindex_metadata is null
+     and old.pageindex_attached_at is null
+     and new.pageindex_idempotency_key is not null
+     and new.pageindex_attachment_input_digest is not null
+     and new.pageindex_artifact is not null
+     and new.pageindex_metadata is not null
+     and new.pageindex_attached_at is not null
+     and (
+       to_jsonb(old)
+         - 'pageindex_idempotency_key'
+         - 'pageindex_attachment_input_digest'
+         - 'pageindex_artifact'
+         - 'pageindex_metadata'
+         - 'pageindex_attached_at'
+     ) = (
+       to_jsonb(new)
+         - 'pageindex_idempotency_key'
+         - 'pageindex_attachment_input_digest'
+         - 'pageindex_artifact'
+         - 'pageindex_metadata'
+         - 'pageindex_attached_at'
+     )
+  then
+    return new;
+  end if;
+  raise exception using
+    errcode = '55000',
+    message = 'jina_context.context_board_publications is append-only after PageIndex attachment';
+end
+$pageindex_attachment$;
+
+drop trigger if exists reject_immutable_change
+  on jina_context.context_board_publications;
+drop trigger if exists attach_context_board_pageindex_once
+  on jina_context.context_board_publications;
+create trigger attach_context_board_pageindex_once
+  before update or delete on jina_context.context_board_publications
+  for each row execute function jina_context.attach_context_board_pageindex_once();
 
 revoke all on schema jina_context from public;
 revoke all on all tables in schema jina_context from public;

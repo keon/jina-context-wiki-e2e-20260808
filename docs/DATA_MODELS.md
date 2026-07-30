@@ -1,223 +1,242 @@
 # Data models
 
-This document summarizes deployed storage. Executable definitions are authoritative:
-`CONTEXT_SCHEMA_SQL` and `CONTEXT_PGVECTOR_SCHEMA_SQL` in
-`packages/db/src/context/schema.ts`, roles in `packages/db/src/context/roles.ts`, and
-generic board types in `packages/board`.
+This document describes the active Context v2 model. Executable definitions in
+`packages/board`, `apps/api/src/context-board-runtime.ts`,
+`packages/db/src/context/schema.ts`, and the domain types in
+`packages/context-engine/src` are authoritative.
 
-## Runtime state
+## Runtime workflow
 
-- `jina_runtime.api_state` stores the versioned board snapshot, tracked pull requests,
-  and delivery sequence.
-- `jina_runtime.github_deliveries` uniquely records processed GitHub delivery IDs.
+The durable task board records one `build-context` aggregate and its dynamic children.
+The root carries the tenant/repository/ref/request identity and monotonic `refSequence`.
+Dispatchable children carry only bounded orchestration metadata, content digests, and
+immutable artifact references. Research, page, audit, repair, challenge, critic,
+certification, publication, and PageIndex tasks are added as validated agent results
+discover work.
 
-The snapshot contains tasks, dependencies, task events, and durable deliveries. Every
-mutation is tenant-scoped and protected by a cross-instance transaction lock. Completion
-requires the current renewable lease.
+The fresh PostgreSQL schema does not contain the legacy `pipeline_builds`,
+`pipeline_stages`, `derivation_progress`, or `derivation_orchestration` tables. Their
+rebuildable data has no compatibility contract. The reviewed reset must still be run
+against the intended production database before rollout.
 
-A context build starts with only `ingest-evidence` queued; baseline `index-context` and
-`derive-knowledge` are blocked. Successful ingestion queues only baseline indexing, and
-successful baseline publication then queues required derivation/enriched publication.
-The derivation stage permits one repair. If the repaired result or executor fails, the
-root build fails even though the baseline generation remains available for diagnosis and
-retry.
-The store never exposes both projection-input-producing stages as simultaneously
-claimable work.
+For each tenant/repository/ref:
 
-`pipeline_builds.ref_sequence` is allocated monotonically under a
-tenant/repository/ref advisory lock at build request time. Canonical ref-sensitive
-evidence, knowledge, and generation transitions use the same lock key. The ingest stage
-and resulting checkpoint retain that immutable sequence. Current-ref selection orders by
-`ref_sequence`, not request timestamps, checkpoint creation time, or worker completion
-time.
+- sequences are allocated under an advisory lock;
+- only the newest admitted sequence may become current;
+- every worker claim is fenced by task ID, attempt, lease ID, expiry, and an unguessable
+  write-fence token;
+- a delayed older checkpoint cannot publish over a newer one; and
+- dependency-ready tasks are claimable concurrently.
 
-## Context schema
+Board rows never contain prompts, page bodies, evidence bundles, transcripts, reports,
+or audit payloads. Those values are immutable GCS objects under the same build scope.
+The dashboard projection removes active lease IDs and fence tokens.
 
-The context engine is normalized under `jina_context`.
+## Canonical context records
 
-| Plane                  | Tables                                                                                                                                                                                                                      |
-| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workflow               | `repositories`, `pipeline_builds`, `pipeline_stages`                                                                                                                                                                        |
-| Evidence               | `observations`, `evidence_records`, `evidence_checkpoints`, `evidence_checkpoint_records`, `evidence_checkpoint_manifest`, `refs`, `commits`, `commit_parents`, `trees`, `tree_entries`, `blobs`, `commit_changes`          |
-| Deterministic analysis | `blob_analyses`, `symbols`, `imports`, `structural_facts`, `evidence_checkpoint_structural_facts`, `entities`, `identities`                                                                                                 |
-| Knowledge              | `derivation_runs`, `knowledge_documents`, `knowledge_document_revisions`, `knowledge_revision_evidence`, `knowledge_revision_events`                                                                                        |
-| Governance             | `repository_acl_observations`, `erasure_filters`, `audit_events`, `projection_input_events`, `outbox`                                                                                                                       |
-| Generation control     | `index_generations`, `generation_projectors`, `projection_checkpoints`                                                                                                                                                      |
-| Projections            | `ref_manifest`, `current_knowledge_revisions`, `context_documents`, `context_fragments`, `exact_index`, `context_embeddings`, `hierarchy_nodes`, `structural_relations`, `identity_projection`, `repository_acl_projection` |
-| Query telemetry        | `query_runs`, `retrieval_candidates`, `answer_citations`, `retrieval_metrics`                                                                                                                                               |
+### Evidence
 
-### Evidence records and checkpoints
+`evidence_records` stores immutable citable bodies. An evidence anchor contains:
 
-Evidence records share an `EvidenceAnchor`: tenant, repository, source type and ID,
-content digest, and optional commit, path/range, JSON pointer, and observation time.
-Checkpoints bind one evidence selection to an exact repository/ref/commit and
-fingerprint. `source_completeness` is explicitly `complete` or `partial`; the
-`observation_frontier` records the bounded Git history, GitHub pagination outcome, and
-omitted bodies that led to that value. Git objects and content-addressed blobs remain
-reusable across checkpoints; the checkpoint membership tables preserve what was valid
-for that build. The unique tenant/repository/ref/`ref_sequence` key preserves admission
-order even when an older worker completes after a newer one.
+```text
+tenant + repository + source type + source ID + content digest
+```
 
-Recent Git commits are also normalized into citable evidence records for derivation. The
-checkpoint commit carries its changed paths. GitHub repository metadata, PRs, issues,
-issue comments, PR review comments, and commit discussion comments are immutable
-observations within a checkpoint; later provider updates produce new identities/digests
-rather than mutating prior evidence.
+It may also carry:
 
-Evidence records store base immutable bodies. Citation line ranges and JSON pointers are
-selectors over those bodies rather than separate record identities. Resolution validates
-the source identity and digest, then extracts exactly the requested inclusive lines or
-JSON value. Mixed line/JSON selectors and out-of-bounds selectors do not resolve.
+```text
+commit SHA + path/URL + line range + JSON pointer + observation time
+```
 
-### Knowledge revisions
+`evidence_checkpoints` binds a selected evidence set to an exact ref, commit,
+`ref_sequence`, provider frontier, ACL fingerprint, and explicit complete/partial source
+state.
 
-`knowledge_documents` provides a stable logical identity such as a repository
-architecture, component, decision, change, incident, ownership record, or runbook.
-`knowledge_document_revisions` stores immutable generated or human-authored bodies and
-metadata. `knowledge_revision_evidence` is the ordered set of original source anchors.
-Generated revisions use the `knowledge-documents-v4` contract: cited summary and body,
-cited structured facts and questions answered, cited diagnostic symptoms, causes, checks,
-and fixes, an optional conflict-comparable claim, scope, confidence, and ordered
-citations. `retiredDocuments` is a derivation result control rather than a mutable
-knowledge row. For an incremental run, the host compares it with the latest eligible
-prior revisions and rejects any prior logical ID that is neither re-emitted nor explicitly
-retired, any unknown retirement, or any logical ID that is both emitted and retired.
-Logical IDs are canonical lowercase and participate in stable revision identity only
-after grounding: repository and change-commit portions come from the checkpoint, while
-model-controlled subject and issue segments must be supported by resolved cited evidence.
-The revision's ref/commit scope is always copied from that checkpoint.
-State changes are append-only `knowledge_revision_events`; there is no mutable current
-flag on the revision. The current selection is a disposable generation projection.
-Selection requires every stored citation to match a record selected by the exact target
-checkpoint on source type/ID and `content_digest`, plus commit/path identity when present.
-Ref/commit equality alone is insufficient. Unchanged citation identities and digests may
-reuse a revision across equivalent same-commit checkpoints; changed mutable provider
-observations exclude stale PR/issue-derived revisions.
-Terminal events (`rejected`, `superseded`, `invalidated`, `redacted`, or `expired`)
-invalidate published generations for the revision's ref immediately.
+`evidence_checkpoint_records` and `evidence_checkpoint_manifest` record checkpoint
+membership. The manifest maps repository paths to Git blob SHAs, content digests, entry
+types, and content availability.
 
-### Indexable context
+Git objects and GitHub observations are normalized for storage and citation validation,
+but they do not form a public retrieval corpus.
 
-`context_documents` is a retrieval envelope over source code, provider evidence, or
-derived knowledge. It is not authoritative. `context_fragments` preserves exact source
-and character ranges. Context added to improve retrieval is separate from source text so
-it cannot be cited as source material.
+### Derived context
 
-Exact tokens and two generated `tsvector` forms preserve path/identifier and prose
-semantics. Structural relations come only from deterministic parser/provider facts.
-Hierarchy leaves map back to allowed source spans. Embeddings are optional and record
-model, dimensions, input fingerprint, and projector version.
+`derivation_runs` records the model, prompt/schema versions, cache identity, raw result,
+status, and diagnostics.
 
-### Generations
+`knowledge_documents` provides stable logical identities. Despite the historical table
+name, these rows are repository context documents. `knowledge_document_revisions` stores
+immutable Markdown revisions for one exact ref and commit.
+`knowledge_revision_evidence` stores each revision's ordered original-evidence citations.
 
-An `index_generation` is an atomic view for one tenant, repository, ref, and commit.
-Required projectors must be coherent before publication; optional projectors declare
-`ready`, `disabled`, `skipped`, or `failed`. A raw-evidence baseline generation can be
-published without model output, and successful derivation can publish an enriched
-successor.
+Every published revision has:
 
-The generation's `derivedKnowledge` capability state is computed from the exact
-checkpoint's citation-valid revision set. `available` means at least one eligible
-revision and complete eligible coverage of the logical IDs present for that checkpoint;
-`partial` means only some checkpoint-valid logical IDs remain eligible; `unavailable`
-means none do. Ref+commit-matching revisions with absent or changed citation evidence do
-not affect this flag.
+- a logical ID and kind;
+- title, summary, and Markdown body;
+- ref, commit, and grounded scope;
+- generator, model, prompt, and schema identity;
+- confidence and a body digest; and
+- at least one citation that resolves at its checkpoint.
 
-`projection_input_events` is the immutable repository-wide frontier for materialization
-inputs. It assigns a monotonic sequence to evidence checkpoint commits, successful
-knowledge runs, knowledge revision events, and erasures. `index_generations` persists the
-fingerprint of the latest sequence/event sampled before materialization. The indexer
-re-samples after materialization, and generation creation/publication lock and revalidate
-the same fingerprint plus the latest per-ref checkpoint before a generation can become
-visible.
+Generated context never cites another generated revision as evidence. Citations terminate
+at blobs, commits, issues, pull requests, documents, or immutable observations.
 
-Consumers use independent outbox deliveries and checkpoints. A slow optional consumer
-cannot acknowledge required projection work. Every delivery lease is consumer-owned, and
-each projector transaction activates only that consumer's capability role. Acknowledgement
-requires the exact unexpired lease. Scoped deliveries match tenant, repository, ref,
-commit, checkpoint/event, and consumer. Repository-global ACL/retention events use an
-all-current-refs barrier. Pending evidence and knowledge deliveries whose source
-checkpoint is below the newest admitted or committed sequence for that ref are marked
-processed with a terminal superseded reason, without waiting for a newer checkpoint or
-generation to publish. Rebuilds and the internal drain endpoint replay only current
-checkpoints into new idempotent generations and never expose partial rows.
+`knowledge_revision_events` is an append-only governance log. Rejection, invalidation,
+supersession, redaction, or erasure excludes a revision from later releases. Context body
+editing is not supported.
 
-## Database invariants
+### Derivation checkpoints
 
-- Repository-owned identities and foreign keys include tenant and repository scope.
-- A build/checkpoint with a lower `ref_sequence` cannot become current or publish over a
-  higher admitted sequence, regardless of completion timestamps. Such a checkpoint does
-  not advance the projection-input frontier, and knowledge commit rechecks the maximum
-  admitted/checkpoint sequence under the ref lock.
-- Pending evidence/knowledge outbox rows below that maximum sequence terminally
-  supersede. A failed newer ingest cannot leave obsolete older work counted forever in
-  backlog or selected for drain.
-- Projection input events are immutable and uniquely sequenced per repository. A
-  generation cannot publish when evidence, knowledge state, or erasure state changed
-  after its initial frontier sample.
-- Immutable evidence, revision, and citation tables deny runtime `UPDATE` and `DELETE`.
-- Full Git SHAs and source-specific evidence anchors are validated.
-- Line ranges require a path and valid positive bounds.
-- Line ranges and JSON pointers are selectors over the immutable base evidence body, not
-  alternate evidence-row identities; PostgreSQL validates the selector before storing it.
-- Knowledge citations terminate at evidence, never another generated revision. Citation
-  claims must occur verbatim after whitespace/case normalization in the exact selected
-  evidence excerpt. Identity and scope grounding can use only that excerpt and intrinsic
-  source identity; unrelated record text and manifest membership alone cannot support it.
-- Every non-heading generated body block ends in a citation marker. Summary, structured
-  fact/question, diagnostic symptom/cause/check/fix, and optional claim citation ordinals
-  must resolve into the same revision's ordered citation set.
-- An incremental derivation cannot silently delete prior knowledge; every latest eligible
-  logical document is re-emitted for the new checkpoint or named in the validated
-  retirement result.
-- Knowledge projection requires every citation's source identity and digest to be a
-  member of the exact generation checkpoint. Equivalent-evidence cache reuse is safe
-  because this membership is rechecked at indexing; mutable provider changes remove stale
-  derived facts.
-- ACL projection is generation-scoped. Principal permissions resolve to exact repository
-  ACL fingerprints, and SQL filters projection rows before candidate creation. The
-  repository access snapshot fingerprint is persisted with the generation, included in
-  generation identity/output fingerprints, and rechecked under the repository access lock
-  at ACL projection and publication. Query authorization consults current ACL state so a
-  revoked principal cannot use an older published ACL projection. Authorized hydration
-  reads the principal's current fingerprint set before and after loading, and query
-  response emission performs a final authorization/fingerprint equality check.
-- Every ACL transition has a monotonic observation version. Revoke/regrant cycles therefore
-  produce new immutable events and new generation identities rather than reusing old IDs.
-- Repository ACL replacement and merge synchronize under the same tenant/principal
-  advisory lock. Merge reads the current ACL and applies the union in one store
-  transaction, so concurrent merges cannot lose either grant set. Replacement remains an
-  intentional complete-set operation and applies in the lock's serial order.
-- Documents derived from multiple sources require every source ACL fingerprint in lexical,
-  hierarchy, and optional dense retrieval; wildcard fingerprints never bypass that rule.
-- Erasure filters are durable and checked during ingestion and rebuild.
-- Erasure invalidates every published repository generation in the same transaction as
-  its projection-input event. Terminal knowledge events do the same for their ref.
-- Exact, lexical, hierarchy, embedding, and relation projections are disposable.
-- Query telemetry stores bounded metadata and citation checks, not unrestricted source
-  text.
+Board tasks and immutable artifacts are the checkpoint model. One `context-page`
+aggregate owns a writer, source-aware audit, and bounded repair/audit successors. Board
+rows store status, dependencies, attempts, leases, fences, bounded digests, and artifact
+references. Page bodies, diagnostics, audit reports, research plans, publication plans,
+critic results, and repair drafts are immutable artifacts under the build scope.
+
+A valid page artifact is resumable but private. Replaying identical inputs and output
+digest is idempotent; a repair creates a new attempt/pass artifact instead of overwriting
+the previous bytes. Dependency results carry the latest-pass references forward.
+
+Research and publication plans contain evidence-backed subjects, maintenance questions,
+stable page IDs, deterministic repository-area coverage, and question-to-page mappings.
+Challenge and task-evaluation artifacts contain findings, pages actually used, and
+blocking gaps. The API validates every result envelope, artifact scope, and dependency
+reference before completing a Board task or expanding the graph. Independent artifact
+storage is intentional: plans, research, valid sibling pages, and audits survive worker
+or sandbox loss even when the build never publishes.
+
+## Immutable releases and disposable projections
+
+`index_generations` stores immutable release metadata: tenant, repository, ref, commit,
+checkpoint, publication state, capability state, input fingerprints, timestamps, and
+failure data.
+
+Verified page checkpoints may appear in build progress as they arrive, but they do not
+create queryable releases. Certification binds the complete unchanged public snapshot,
+and one fenced publication task atomically makes that release current. Current selection
+is the newest authorized completed release for a ref.
+
+Active derived-only projections are:
+
+| Projection                    | Purpose                                             |
+| ----------------------------- | --------------------------------------------------- |
+| `current_knowledge_revisions` | One eligible revision per logical context document  |
+| `context_documents`           | Derived document retrieval envelopes                |
+| `context_fragments`           | Chunked derived Markdown for lexical excerpt search |
+| `exact_index`                 | Exact titles, logical IDs, paths, and terms         |
+| `hierarchy_nodes`             | PageIndex-derived document/heading tree             |
+| `ref_manifest`                | Release-local citation/path metadata                |
+
+Dense retrieval and structural relations are disabled. The fresh schema contains only
+the active derived-context projections; no public API, MCP tool, index coordinator, or
+dashboard reads raw-source, provider, structural, dense, or answer-synthesis rows.
+
+## Artifact model
+
+Large immutable artifacts use a shared key function:
+
+```text
+context-v2/tenants/<tenant>/repositories/<repository>/builds/<build>/<kind>/<name>
+```
+
+Kinds include:
+
+- `evidence-snapshot`;
+- `derivation-checkpoint` (research, plan, page, audit, repair, challenge, critic, and
+  certification objects);
+- `context-release`; and
+- `pageindex-tree`.
+
+The filesystem implementation is for local development. The GCS implementation uses
+create-only object generation preconditions, CRC32C transport validation, SHA-256 object
+metadata, and optional generation-pinned reads.
+
+## API tokens and ACLs
+
+`api_tokens` stores:
+
+```text
+id
+tenant_id
+principal_id
+name
+secret_hash
+scopes
+created_at
+created_by
+expires_at
+last_used_at
+revoked_at
+revoked_by
+```
+
+The plaintext `jina_atk_…` token is returned only once. Verification hashes the presented
+token, resolves its tenant and principal from the row, rejects expired/revoked rows, and
+then enforces route scope and repository ACL.
+
+Repository access is represented by `repository_acl_observations` and disposable ACL
+projections. Every release persists the repository-access fingerprint used to build it.
+The fingerprint is rechecked during publication and authorization.
+
+## Invariants
+
+- Repository-owned keys and foreign keys include tenant scope.
+- Full commit SHAs and content digests are validated.
+- Evidence bodies are immutable.
+- Line ranges require a repository path and valid inclusive bounds.
+- JSON pointers are RFC 6901 selectors over captured provider JSON.
+- A citation claim must occur in its exact selected evidence.
+- A page with any invalid evidence link is withheld.
+- Raw evidence is never returned by public retrieval.
+- A current revision must match the target checkpoint's source identities and digests.
+- Required ACL fingerprints are checked before candidate generation and hydration.
+- Projection-input and repository-access fingerprints are rechecked under locks before
+  publication.
+- Erasure and terminal revision events invalidate affected releases.
+- Exact, lexical, hierarchy, and manifest projections are rebuildable.
+
+## Reset classes
+
+Preserved:
+
+- repository and tenant registrations;
+- GitHub repository mappings;
+- ACL observations and the source observations they reference;
+- API token hashes;
+- erasure filters; and
+- audit events; and
+- GitHub webhook delivery identity.
+
+Deleted and rebuilt:
+
+- persisted Board build/stage state;
+- evidence snapshots and Git materialization;
+- derivation progress, runs, revisions, and citations;
+- releases and projections;
+- outbox/checkpoint state; and
+- retrieval telemetry and quota ledgers.
+
+With database configuration present, the dry run reports the exact deletable
+row count for every target without mutating it. Without database configuration,
+it prints the static target list:
+
+```sh
+pnpm --filter @jina/db reset-context
+```
+
+Execution requires:
+
+```sh
+JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context \
+pnpm --filter @jina/db reset-context -- --execute
+```
 
 ## Capability roles
 
-The schema defines focused NOLOGIN roles:
+Focused roles include coordinator, ingest, derive, manifest, current-context, lexical,
+hierarchy, ACL, retention, query, token, and tenant-admin capabilities. The runtime login
+is `NOINHERIT` and is not a member of the wildcard administration role.
 
-`jina_context_coordinator`, `jina_context_ingest`, `jina_context_derive`,
-`jina_context_manifest`, `jina_context_knowledge_current`, `jina_context_lexical`,
-`jina_context_dense`, `jina_context_hierarchy`, `jina_context_structural`,
-`jina_context_identity`, `jina_context_acl`, `jina_context_retention`,
-`jina_context_query`, `jina_context_tokens`, `jina_context_tenant_admin`, and
-`jina_context_admin`.
-
-`jina_context_tokens` is the one capability that reads across tenants. It exists because
-verifying an API token resolves the tenant _from_ the token, so the lookup cannot already be
-tenant-scoped; its permissive policy is confined to system scope and to live rows, and its
-grants are `select,insert` plus `update` on three columns.
-
-Application logins must not own the schema. The migration principal owns schema changes
-and installs/grants the capability roles. The runtime login is `NOINHERIT`, so role
-membership supplies no ambient table access. Every adapter operation begins a transaction,
-executes `SET LOCAL ROLE <capability>`, and then performs only the reads/writes granted to
-that capability. The runtime login is never a member of `jina_context_admin`;
-tenant-administration transactions use `jina_context_tenant_admin` with ordinary strict
-tenant RLS, while the wildcard admin remains migration-only. Production runs migration
-and runtime services with separate database credentials.
+`jina_context_tokens` is the only capability permitted to resolve a token across tenants;
+that lookup is necessary because the token row itself identifies the tenant. Subsequent
+operations return to strict tenant and principal scope.

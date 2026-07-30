@@ -10,7 +10,7 @@ import type { ParsedMarkdownDocument } from "./markdown-document.js";
  *   runbooks/stalled-publication.md       ->  runbook:owner/repo:stalled-publication
  *   extensions/host/activation-events.md  ->  topic:owner/repo:extensions/host/activation-events
  *
- * A wiki's structure should fit the thing it documents. An editor has an
+ * Context structure should fit the repository. An editor has an
  * extension host and a language server; a library has neither, and a data
  * pipeline has stages instead. So folders are not a fixed taxonomy: a folder this
  * engine recognises tags its documents with that kind, because retrieval can use
@@ -48,6 +48,23 @@ export const kindDirectories: Readonly<Record<string, string>> = Object.fromEntr
   Object.entries(KIND_DIRECTORIES).map(([directory, kind]) => [kind, directory])
 );
 
+/** Reconstructs the public Markdown identity represented by a generated logical ID. */
+export function documentPathForLogicalId(
+  logicalId: string,
+  kind: KnowledgeDocumentKind,
+  repository: string
+): string | undefined {
+  if (kind === "architecture") return "architecture";
+  const prefix = kind === "change_summary" ? "change" : kind === "issue_explanation" ? "issue" : kind;
+  const marker = `${prefix}:${repository.toLowerCase()}:`;
+  const normalized = logicalId.toLowerCase();
+  if (!normalized.startsWith(marker)) return undefined;
+  const subject = normalized.slice(marker.length);
+  if (!subject) return undefined;
+  const directory = kindDirectories[kind];
+  return directory ? `${directory}/${subject}` : subject;
+}
+
 export interface MarkdownCatalogEntry {
   readonly logicalId: string;
   readonly kind: KnowledgeDocumentKind;
@@ -71,7 +88,7 @@ export interface MarkdownCatalogMapping {
  * The lead paragraph, which is what a listing shows.
  *
  * Taking it from the document rather than asking the author for a separate field
- * keeps the file plain: a wiki page's first paragraph is already its summary.
+ * keeps the file plain: a context document's first paragraph is already its summary.
  */
 export function leadParagraph(bodyMarkdown: string): string {
   for (const block of bodyMarkdown.split(/\n{2,}/)) {

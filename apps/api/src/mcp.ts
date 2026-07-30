@@ -5,158 +5,149 @@ import {
   type StreamableHTTPServerTransportOptions
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { QueryContextResponse } from "@jina/context-engine";
+import type { ContextCatalogService, ContextSearchResponse } from "@jina/context-engine";
 import * as z from "zod/v4";
 
-const taskKindSchema = z.enum(["lookup", "structure", "change", "intent", "overview", "status", "diagnose"]);
+type CatalogList = Awaited<ReturnType<ContextCatalogService["listContext"]>>;
+type CatalogRead = Awaited<ReturnType<ContextCatalogService["readContext"]>>;
+type CatalogDiff = Awaited<ReturnType<ContextCatalogService["diffContext"]>>;
 
-const citationSchema = z.object({
-  id: z.string(),
-  title: z.string(),
-  excerpt: z.string(),
-  anchors: z.array(
-    z.object({
-      tenantId: z.string(),
-      repository: z.string(),
-      sourceType: z.enum(["observation", "blob", "commit", "pull_request", "issue", "document"]),
-      sourceId: z.string(),
-      contentDigest: z.string(),
-      commitSha: z.string().optional(),
-      pathOrUrl: z.string().optional(),
-      startLine: z.number().int().positive().optional(),
-      endLine: z.number().int().positive().optional(),
-      jsonPointer: z.string().optional(),
-      observedAt: z.string().optional()
-    })
-  ),
-  authorityClass: z.string(),
-  sourceKind: z.enum(["code", "provider", "knowledge"]),
-  sourceId: z.string(),
-  sourceRevisionId: z.string().optional()
-});
-
-const queryContextResultSchema = {
-  answer: z.string(),
-  generation: z.object({
-    id: z.string(),
-    ref: z.string(),
-    commitSha: z.string(),
-    derivedKnowledge: z.enum(["available", "partial", "unavailable"])
-  }),
-  citations: z.array(citationSchema),
-  conflicts: z.array(
-    z.object({
-      subject: z.string(),
-      description: z.string(),
-      citationIds: z.array(z.string()),
-      resolution: z.enum(["unresolved", "authority_preferred", "newer_source_preferred"])
-    })
-  ),
-  ambiguities: z.array(z.string()),
-  coverage: z.object({
-    status: z.enum(["complete", "partial", "insufficient"]),
-    missing: z.array(z.string()),
-    retrieversUsed: z.array(z.string())
-  }),
-  traceId: z.string()
-};
-
-interface ContextMcpQuery {
-  readonly repository: string;
-  readonly question: string;
-  readonly ref?: string;
-  readonly taskKind?: "lookup" | "structure" | "change" | "intent" | "overview" | "status" | "diagnose";
-  readonly targets?: {
-    readonly paths?: readonly string[];
-    readonly symbols?: readonly string[];
-    readonly pullRequests?: readonly string[];
-    readonly issues?: readonly string[];
-  };
-  readonly timeWindow?: { readonly from?: string; readonly to?: string };
+export interface ContextMcpHandlers {
+  search(input: {
+    repository: string;
+    query: string;
+    ref?: string;
+    releaseId?: string;
+    limit?: number;
+  }): Promise<ContextSearchResponse>;
+  list(input: { repository: string; ref?: string; releaseId?: string }): Promise<CatalogList>;
+  read(input: { repository: string; document: string; ref?: string; releaseId?: string }): Promise<CatalogRead>;
+  diff(input: { repository: string; fromReleaseId: string; toReleaseId: string }): Promise<CatalogDiff>;
 }
 
-export type ContextQueryExecutor = (query: ContextMcpQuery) => Promise<QueryContextResponse>;
+const repository = z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina");
+const ref = z.string().trim().min(1).max(300).optional().describe("Branch or context preview ref");
+const releaseId = z.string().trim().min(1).max(300).optional().describe("Immutable context release ID");
 
-/** Creates Jina's storage-neutral, read-only repository-context MCP surface. */
-function createContextMcpServer(execute: ContextQueryExecutor): McpServer {
+/** Creates the context-pack MCP surface. None of these tools synthesizes an answer. */
+function createContextMcpServer(handlers: ContextMcpHandlers): McpServer {
   const server = new McpServer(
-    { name: "jina-context", version: "1.0.0" },
+    { name: "jina-context", version: "2.0.0" },
     {
       instructions:
-        "Use query_context for repository questions and incident diagnosis. Agent-derived knowledge includes cited symptoms, likely causes, checks, and fixes; answers preserve original evidence citations, material conflicts, and coverage gaps."
+        "Use search_context to retrieve citation-grounded derived context, list_context to browse its tree, read_context for a complete document, and diff_context to compare immutable releases. These tools return context packs for the calling agent; they do not answer questions."
     }
   );
+
   server.registerTool(
-    "query_context",
+    "search_context",
     {
-      title: "Query repository context",
+      title: "Search context",
       description:
-        "Answer or diagnose a repository question using routed exact, lexical, structural, temporal, and agent-derived knowledge retrieval with verified original-evidence citations.",
+        "Deterministically select relevant PageIndex-tree nodes with lexical scoring and return document excerpts with immutable evidence citations. No model is called and no answer is generated.",
       inputSchema: {
-        repository: z.string().trim().min(1).max(300).describe("Repository name, for example omlabs/jina"),
-        question: z.string().trim().min(1).max(4_000).describe("Natural-language repository question"),
-        ref: z.string().trim().min(1).max(300).optional().describe("Optional branch, tag, or ref"),
-        taskKind: taskKindSchema.optional().describe("Optional retrieval intent hint"),
-        targets: z
-          .object({
-            paths: z.array(z.string().trim().min(1).max(1_000)).max(100).optional(),
-            symbols: z.array(z.string().trim().min(1).max(1_000)).max(100).optional(),
-            pullRequests: z.array(z.string().trim().min(1).max(100)).max(100).optional(),
-            issues: z.array(z.string().trim().min(1).max(100)).max(100).optional()
-          })
-          .optional(),
-        timeWindow: z
-          .object({
-            from: z.iso.datetime().optional(),
-            to: z.iso.datetime().optional()
-          })
-          .optional()
+        repository,
+        query: z.string().trim().min(1).max(4_000),
+        ref,
+        releaseId,
+        limit: z.number().int().min(1).max(25).optional()
       },
-      outputSchema: queryContextResultSchema,
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false
-      }
+      annotations: readOnlyAnnotations
     },
-    async (input) => {
-      const targets = input.targets
-        ? {
-            ...(input.targets.paths ? { paths: input.targets.paths } : {}),
-            ...(input.targets.symbols ? { symbols: input.targets.symbols } : {}),
-            ...(input.targets.pullRequests ? { pullRequests: input.targets.pullRequests } : {}),
-            ...(input.targets.issues ? { issues: input.targets.issues } : {})
-          }
-        : undefined;
-      const timeWindow = input.timeWindow
-        ? {
-            ...(input.timeWindow.from ? { from: input.timeWindow.from } : {}),
-            ...(input.timeWindow.to ? { to: input.timeWindow.to } : {})
-          }
-        : undefined;
-      const result = await execute({
-        repository: input.repository,
-        question: input.question,
-        ...(input.ref ? { ref: input.ref } : {}),
-        ...(input.taskKind ? { taskKind: input.taskKind } : {}),
-        ...(targets ? { targets } : {}),
-        ...(timeWindow ? { timeWindow } : {})
-      });
-      return {
-        content: [{ type: "text", text: renderContextQueryResult(result) }],
-        structuredContent: { ...result }
-      };
-    }
+    async (input) =>
+      result(
+        await handlers.search({
+          repository: input.repository,
+          query: input.query,
+          ...(input.ref ? { ref: input.ref } : {}),
+          ...(input.releaseId ? { releaseId: input.releaseId } : {}),
+          ...(input.limit ? { limit: input.limit } : {})
+        }),
+        "context search"
+      )
   );
+
+  server.registerTool(
+    "list_context",
+    {
+      title: "List context",
+      description: "List derived context documents and their deterministic PageIndex-style hierarchy.",
+      inputSchema: { repository, ref, releaseId },
+      annotations: readOnlyAnnotations
+    },
+    async (input) =>
+      result(
+        await handlers.list({
+          repository: input.repository,
+          ...(input.ref ? { ref: input.ref } : {}),
+          ...(input.releaseId ? { releaseId: input.releaseId } : {})
+        }),
+        "context catalog"
+      )
+  );
+
+  server.registerTool(
+    "read_context",
+    {
+      title: "Read context",
+      description: "Read one complete derived context document with its immutable source citations.",
+      inputSchema: {
+        repository,
+        document: z.string().trim().min(1).max(1_000).describe("Document ID, logical ID, or revision ID"),
+        ref,
+        releaseId
+      },
+      annotations: readOnlyAnnotations
+    },
+    async (input) =>
+      result(
+        await handlers.read({
+          repository: input.repository,
+          document: input.document,
+          ...(input.ref ? { ref: input.ref } : {}),
+          ...(input.releaseId ? { releaseId: input.releaseId } : {})
+        }),
+        "context document"
+      )
+  );
+
+  server.registerTool(
+    "diff_context",
+    {
+      title: "Diff context",
+      description: "Compare two immutable context releases without using a model.",
+      inputSchema: {
+        repository,
+        fromReleaseId: z.string().trim().min(1).max(300),
+        toReleaseId: z.string().trim().min(1).max(300)
+      },
+      annotations: readOnlyAnnotations
+    },
+    async (input) => result(await handlers.diff(input), "context diff")
+  );
+
   return server;
+}
+
+const readOnlyAnnotations = {
+  readOnlyHint: true,
+  destructiveHint: false,
+  idempotentHint: true,
+  openWorldHint: false
+} as const;
+
+function result(value: unknown, label: string) {
+  return {
+    content: [{ type: "text" as const, text: `${label}:\n${JSON.stringify(value, null, 2)}` }],
+    structuredContent: value as Record<string, unknown>
+  };
 }
 
 /** Handles one stateless Streamable HTTP request. */
 export async function handleContextMcpRequest(
   request: IncomingMessage,
   response: ServerResponse,
-  execute: ContextQueryExecutor,
+  handlers: ContextMcpHandlers,
   parsedBody?: unknown
 ): Promise<void> {
   if (request.method !== "POST") {
@@ -171,7 +162,7 @@ export async function handleContextMcpRequest(
     return;
   }
 
-  const server = createContextMcpServer(execute);
+  const server = createContextMcpServer(handlers);
   const transportOptions = {
     sessionIdGenerator: undefined,
     enableJsonResponse: true
@@ -183,32 +174,4 @@ export async function handleContextMcpRequest(
     void server.close();
   });
   await transport.handleRequest(request, response, parsedBody);
-}
-
-function renderContextQueryResult(result: QueryContextResponse): string {
-  const evidence = result.citations.map((citation) => `- ${formatCitation(citation)}`);
-  const conflicts = result.conflicts.map((conflict) => `- ${conflict.subject}: ${conflict.description}`);
-  const gaps = result.coverage.missing.map((gap) => `- ${gap}`);
-  return [
-    result.answer,
-    "",
-    `Generation: ${result.generation.id} (${result.generation.ref}@${result.generation.commitSha})`,
-    ...(evidence.length ? ["", "Evidence:", ...evidence] : []),
-    ...(conflicts.length ? ["", "Conflicts:", ...conflicts] : []),
-    ...(gaps.length ? ["", "Coverage gaps:", ...gaps] : [])
-  ].join("\n");
-}
-
-function formatCitation(citation: QueryContextResponse["citations"][number]): string {
-  const anchor = citation.anchors[0];
-  if (!anchor) return `${citation.sourceKind}:${citation.sourceId}`;
-  const revision = anchor.commitSha ? `@${anchor.commitSha}` : "";
-  const location = anchor.pathOrUrl
-    ? ` ${anchor.pathOrUrl}${
-        anchor.startLine
-          ? `:${anchor.startLine}${anchor.endLine && anchor.endLine !== anchor.startLine ? `-${anchor.endLine}` : ""}`
-          : ""
-      }`
-    : "";
-  return `${anchor.repository}${revision}${location}; ${anchor.sourceType}:${anchor.sourceId}`;
 }

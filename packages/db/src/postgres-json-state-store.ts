@@ -11,6 +11,13 @@ export interface StateUpdate<T, R> {
   readonly result: R;
 }
 
+export interface WorkerReleaseGuard {
+  readonly releaseId: string;
+  readonly credentialSha256: string;
+  readonly service: "jina-context-worker" | "jina-task-worker";
+  readonly revision: string;
+}
+
 export interface StateUpdateResult<R> {
   readonly committed: boolean;
   readonly result?: R;
@@ -91,13 +98,32 @@ export class PostgresJsonStateStore<T> {
    */
   async update<R>(
     operation: (state: T | undefined) => Promise<StateUpdate<T, R>>,
-    deliveryId?: string
+    deliveryId?: string,
+    workerRelease?: WorkerReleaseGuard
   ): Promise<StateUpdateResult<R>> {
     await this.initialize();
     const client = await this.pool.connect();
     try {
       await client.query("begin");
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+
+      if (workerRelease) {
+        const expectedRevisionColumn =
+          workerRelease.service === "jina-context-worker" ? "context_worker_revision" : "task_worker_revision";
+        const accepted = await client.query(
+          `select 1
+           from jina_runtime.release_control
+           where id=1
+             and worker_claims_enabled
+             and worker_release_id=$1
+             and worker_credential_sha256=$2
+             and ${expectedRevisionColumn}=$3`,
+          [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+        );
+        if (accepted.rowCount !== 1) {
+          throw new WorkerReleaseRejectedError();
+        }
+      }
 
       if (deliveryId) {
         const delivery = await client.query(
@@ -202,6 +228,38 @@ export class PostgresJsonStateStore<T> {
         delivery_id text primary key,
         received_at timestamptz not null default now()
       );
+
+      create table if not exists jina_runtime.release_control (
+        id smallint primary key check (id = 1),
+        lease_release_id text,
+        lease_credential_sha256 text,
+        lease_expires_at timestamptz,
+        worker_claims_enabled boolean not null default false,
+        worker_release_id text,
+        worker_credential_sha256 text,
+        context_worker_revision text,
+        task_worker_revision text,
+        updated_at timestamptz not null default now(),
+        check (
+          (lease_release_id is null and lease_credential_sha256 is null and lease_expires_at is null)
+          or
+          (lease_release_id is not null and lease_credential_sha256 is not null and lease_expires_at is not null)
+        ),
+        check (
+          (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+             and context_worker_revision is null and task_worker_revision is null)
+          or
+          (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+             and context_worker_revision is not null and task_worker_revision is not null)
+        )
+      );
     `);
+  }
+}
+
+export class WorkerReleaseRejectedError extends Error {
+  constructor() {
+    super("worker release identity is not active");
+    this.name = "WorkerReleaseRejectedError";
   }
 }

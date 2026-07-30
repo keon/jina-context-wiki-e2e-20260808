@@ -1,0 +1,842 @@
+import { createRequire } from "node:module";
+import { createHash } from "node:crypto";
+import { realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const LEGACY_CONTEXT_TABLES = ["derivation_progress", "pipeline_builds", "pipeline_stages"];
+const TABLES_ADDED_AFTER_LEGACY = [
+  "context_board_publications",
+  "context_quota_ledgers",
+  "current_context_board_releases"
+];
+const CURRENT_CONTEXT_VIEWS = [
+  "current_repository_acl",
+  "published_context_documents",
+  "published_context_fragments",
+  "published_hierarchy_nodes",
+  "published_structural_relations"
+];
+const RESET_CONFIRMATION = "delete-rebuildable-context";
+const PRESERVED_COLUMNS = {
+  repositories: [
+    "tenant_id:text",
+    "repository:text",
+    "provider:text",
+    "provider_repository_id:text",
+    "default_ref:text",
+    "metadata:jsonb",
+    "created_at:timestamp with time zone",
+    "updated_at:timestamp with time zone"
+  ],
+  repository_acl_observations: [
+    "id:text",
+    "tenant_id:text",
+    "repository:text",
+    "principal_id:text",
+    "permission:text",
+    "acl_fingerprint:text",
+    "source_observation_id:text",
+    "observed_at:timestamp with time zone"
+  ],
+  erasure_filters: [
+    "id:text",
+    "tenant_id:text",
+    "repository:text",
+    "source_type:text",
+    "source_id:text",
+    "path_pattern:text",
+    "content_digest:text",
+    "reason:text",
+    "actor_id:text",
+    "created_at:timestamp with time zone"
+  ],
+  audit_events: [
+    "id:text",
+    "tenant_id:text",
+    "repository:text",
+    "sequence:bigint",
+    "actor_id:text",
+    "action:text",
+    "target_type:text",
+    "target_id:text",
+    "payload:jsonb",
+    "occurred_at:timestamp with time zone"
+  ],
+  api_tokens: [
+    "id:text",
+    "tenant_id:text",
+    "principal_id:text",
+    "name:text",
+    "secret_hash:text",
+    "scopes:ARRAY",
+    "created_at:timestamp with time zone",
+    "created_by:text",
+    "expires_at:timestamp with time zone",
+    "last_used_at:timestamp with time zone",
+    "revoked_at:timestamp with time zone",
+    "revoked_by:text"
+  ]
+};
+
+const command = process.argv.at(-1);
+if (command === "daytona") {
+  await preflightDaytona();
+} else if (command === "schema-inspect") {
+  await withDatabase((pool, reset) => inspectSchema(pool, reset));
+} else if (command === "schema-reset") {
+  await withDatabase((pool, reset) => resetLegacySchema(pool, reset));
+} else if (command === "board-drain") {
+  await withDatabase((pool) => drainBoardLeases(pool));
+} else if (command === "board-verify") {
+  await withDatabase((pool) => verifyBoardLeases(pool));
+} else if (["release-acquire", "release-renew", "worker-pause", "worker-enable", "release-release"].includes(command)) {
+  await withDatabase((pool) => updateReleaseControl(pool, command));
+} else {
+  throw new Error(
+    "Expected daytona, release-acquire, release-renew, worker-pause, worker-enable, release-release, " +
+      "board-drain, board-verify, schema-inspect, or schema-reset"
+  );
+}
+
+async function preflightDaytona() {
+  const apiKey = requiredEnv("DAYTONA_API_KEY");
+  const snapshot = optionalEnv("CONTEXT_DAYTONA_SNAPSHOT");
+  const image = optionalEnv("CONTEXT_DAYTONA_IMAGE");
+  if (Boolean(snapshot) === Boolean(image)) {
+    throw new Error("Daytona preflight requires exactly one snapshot or image");
+  }
+  const secretName = requiredEnv("CONTEXT_DAYTONA_MODEL_SECRET");
+  const secretEnvironment = requiredEnv("CONTEXT_DAYTONA_MODEL_SECRET_ENV");
+  const allowedDomains = requiredEnv("CONTEXT_DAYTONA_MODEL_DOMAINS");
+  const daytonaModulePath = process.env.CONTEXT_DAYTONA_MODULE_PATH ?? "/app/node_modules/@jina/daytona/dist/index.js";
+  const daytonaRequire = createRequire(realpathSync(daytonaModulePath));
+  const { Daytona } = await import(pathToFileURL(daytonaRequire.resolve("@daytona/sdk")).href);
+  const daytona = new Daytona({ apiKey });
+  let sandbox;
+  try {
+    if (snapshot) {
+      const snapshotRecord = await daytona.snapshot.get(snapshot);
+      if (snapshotRecord.name !== snapshot || snapshotRecord.state !== "active") {
+        throw new Error(`Daytona snapshot ${snapshot} is not active`);
+      }
+    }
+    sandbox = await daytona.create(
+      {
+        ...(snapshot ? { snapshot } : { image }),
+        language: "typescript",
+        envVars: { HOME: "/home/daytona", LANG: "C.UTF-8" },
+        secrets: { [secretEnvironment]: secretName },
+        labels: { "jina-purpose": "production-preflight" },
+        domainAllowList: allowedDomains,
+        public: false,
+        ephemeral: true,
+        ttlMinutes: 5
+      },
+      { timeout: 300 }
+    );
+    const probe = await sandbox.process.executeCommand(
+      [
+        "set -eu",
+        "command -v codex >/dev/null",
+        "command -v bwrap >/dev/null",
+        "codex --version",
+        "bwrap --version",
+        "mkdir -p /tmp/jina-preflight-output",
+        `printf '%s' '${JSON.stringify({
+          type: "object",
+          properties: { status: { type: "string", enum: ["AUTH_OK"] } },
+          required: ["status"],
+          additionalProperties: false
+        })}' > /tmp/jina-preflight-schema.json`,
+        [
+          "printf '%s\\n' 'Use the shell tool to write exactly TOOL_OK to /tmp/jina-preflight-output/tool-ok, verify the file, then return the JSON status AUTH_OK.' |",
+          "codex exec",
+          "--json",
+          "--ignore-user-config",
+          "--ignore-rules",
+          "--strict-config",
+          "--skip-git-repo-check",
+          "--enable shell_tool",
+          "--disable multi_agent",
+          "--disable shell_snapshot",
+          "--disable unified_exec",
+          "--disable responses_websockets",
+          "--disable responses_websockets_v2",
+          "--disable apps",
+          "--disable browser_use",
+          "--disable computer_use",
+          "--disable image_generation",
+          "--disable plugins",
+          "-c web_search=disabled",
+          "-c approval_policy=never",
+          "-c project_doc_max_bytes=0",
+          '-c model_provider="openai_direct"',
+          '-c model_providers.openai_direct.name="openai-direct"',
+          '-c model_providers.openai_direct.base_url="https://api.openai.com/v1"',
+          `-c model_providers.openai_direct.env_key="${secretEnvironment}"`,
+          '-c model_providers.openai_direct.wire_api="responses"',
+          "--sandbox workspace-write",
+          `-c 'sandbox_workspace_write.writable_roots=["/tmp/jina-preflight-output"]'`,
+          "-c sandbox_workspace_write.network_access=false",
+          "-m gpt-5.6-terra",
+          "-c model_reasoning_effort=low",
+          "-c model_verbosity=low",
+          "--output-schema /tmp/jina-preflight-schema.json",
+          "--output-last-message /tmp/jina-preflight-result.json",
+          "> /tmp/jina-preflight-events.jsonl"
+        ].join(" "),
+        `node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync("/tmp/jina-preflight-result.json","utf8"));if(value.status!=="AUTH_OK"||Object.keys(value).length!==1)process.exit(1)'`,
+        `test "$(cat /tmp/jina-preflight-output/tool-ok)" = "TOOL_OK"`,
+        "rm -rf /tmp/jina-preflight-output /tmp/jina-preflight-schema.json /tmp/jina-preflight-result.json /tmp/jina-preflight-events.jsonl"
+      ].join("\n"),
+      undefined,
+      { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" },
+      180
+    );
+    if (probe.exitCode !== 0 || !/^codex-cli [0-9]+\.[0-9]+\.[0-9]+/m.test(probe.result)) {
+      throw new Error(
+        `Daytona Codex toolchain or model authentication preflight failed (exit ${probe.exitCode}): ${sanitizedDiagnostic(
+          probe.result
+        )}`
+      );
+    }
+    console.log(`Daytona Codex/model preflight passed for ${snapshot ?? image}`);
+  } finally {
+    await sandbox?.delete(120, true).catch(() => undefined);
+    await daytona[Symbol.asyncDispose]();
+  }
+}
+
+async function withDatabase(operation) {
+  const modulePath = process.env.CONTEXT_RESET_MODULE_PATH ?? "/app/node_modules/@jina/db/dist/reset-context-data.js";
+  const realModulePath = realpathSync(modulePath);
+  const reset = await import(pathToFileURL(realModulePath).href);
+  const require = createRequire(realModulePath);
+  const { Pool } = require("pg");
+  const host = optionalEnv("INSTANCE_UNIX_SOCKET") ?? optionalEnv("DB_HOST");
+  const connectionString = optionalEnv("DATABASE_URL");
+  const pool = new Pool({
+    ...(connectionString
+      ? { connectionString }
+      : {
+          host: required("INSTANCE_UNIX_SOCKET or DB_HOST", host),
+          user: requiredEnv("DB_USER"),
+          password: requiredEnv("DB_PASS"),
+          database: requiredEnv("DB_NAME"),
+          ...(optionalEnv("DB_PORT") ? { port: Number(process.env.DB_PORT) } : {})
+        }),
+    application_name: "jina-context-production-transition",
+    max: 1
+  });
+  try {
+    await operation(pool, reset);
+  } finally {
+    await pool.end();
+  }
+}
+
+async function inspectSchema(pool, reset) {
+  if (optionalReleaseInput()) {
+    const client = await pool.connect();
+    try {
+      await client.query("begin");
+      await client.query("set local lock_timeout='60s'");
+      await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+      await assertDeploymentLease(client);
+      await inspectSchemaDatabase(client, reset);
+      await client.query("commit");
+    } catch (error) {
+      await client.query("rollback").catch(() => undefined);
+      throw error;
+    } finally {
+      client.release();
+    }
+    return;
+  }
+  await inspectSchemaDatabase(pool, reset);
+}
+
+async function inspectSchemaDatabase(database, reset) {
+  const mode = resetMode();
+  const tables = await contextTables(database);
+  const current = currentTables(reset);
+  const legacy = legacyLayout(current);
+  if (mode === "disabled") {
+    assertExactSet(tables, current, "current Context v2 schema");
+    assertExactSet(await contextViews(database), CURRENT_CONTEXT_VIEWS, "current Context v2 views");
+  } else {
+    assertExactSet(tables, legacy, "one-time legacy Context schema");
+    assertExactSet(await contextViews(database), CURRENT_CONTEXT_VIEWS, "one-time legacy Context views");
+  }
+  await assertPreservedShapes(database);
+  console.log(
+    JSON.stringify({
+      mode,
+      layout: mode === "disabled" ? "current" : "legacy-transition",
+      tableCount: tables.length
+    })
+  );
+}
+
+async function updateReleaseControl(pool, action) {
+  await ensureReleaseControlTable(pool);
+  const release = requiredReleaseInput();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local lock_timeout='60s'");
+    await client.query("set local statement_timeout='5min'");
+    // Gate changes take the Board lock first. Worker mutations take this same
+    // lock before reading release_control, so pausing/enabling a release cannot
+    // race a final claim/renew/complete transaction. Renewal is deliberately
+    // exempt: migration/reset hold the Board lock for their full critical
+    // section and must still be able to renew the deployment lease.
+    if (action !== "release-renew") {
+      await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+    }
+    await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.release_control'))");
+    const current = await client.query(
+      `select lease_release_id,lease_credential_sha256,lease_expires_at,worker_claims_enabled
+       from jina_runtime.release_control
+       where id=1
+       for update`
+    );
+    const row = current.rows[0];
+
+    if (action === "release-acquire") {
+      if (
+        row?.lease_expires_at &&
+        Date.parse(String(row.lease_expires_at)) > Date.now() &&
+        (row.lease_release_id !== release.releaseId || row.lease_credential_sha256 !== release.credentialSha256)
+      ) {
+        throw new Error(`coordinated release ${row.lease_release_id} already holds the deployment lease`);
+      }
+      await client.query(
+        `insert into jina_runtime.release_control
+           (id,lease_release_id,lease_credential_sha256,lease_expires_at)
+         values (1,$1,$2,clock_timestamp()+($3::text || ' seconds')::interval)
+         on conflict (id) do update
+           set lease_release_id=excluded.lease_release_id,
+               lease_credential_sha256=excluded.lease_credential_sha256,
+               lease_expires_at=excluded.lease_expires_at,
+               updated_at=clock_timestamp()`,
+        [release.releaseId, release.credentialSha256, release.leaseSeconds]
+      );
+    } else {
+      assertCurrentDeploymentLease(row, release);
+      if (action === "release-renew") {
+        await client.query(
+          `update jina_runtime.release_control
+           set lease_expires_at=clock_timestamp()+($1::text || ' seconds')::interval,
+               updated_at=clock_timestamp()
+           where id=1`,
+          [release.leaseSeconds]
+        );
+      } else if (action === "worker-pause") {
+        await client.query(
+          `update jina_runtime.release_control
+           set worker_claims_enabled=false,
+               worker_release_id=null,
+               worker_credential_sha256=null,
+               context_worker_revision=null,
+               task_worker_revision=null,
+               updated_at=clock_timestamp()
+           where id=1`
+        );
+        await client.query(
+          `revoke insert,update on jina_runtime.api_state from "${requiredRuntimeUser().replaceAll('"', '""')}"`
+        );
+      } else if (action === "worker-enable") {
+        const contextRevision = requiredWorkerRevision("JINA_CONTEXT_WORKER_REVISION", "jina-context-worker");
+        const taskRevision = requiredWorkerRevision("JINA_TASK_WORKER_REVISION", "jina-task-worker");
+        const workerCredentialSha256 = requiredWorkerGenerationCredentialSha256();
+        await client.query(
+          `update jina_runtime.release_control
+           set worker_claims_enabled=true,
+               worker_release_id=$1,
+               worker_credential_sha256=$2,
+               context_worker_revision=$3,
+               task_worker_revision=$4,
+               updated_at=clock_timestamp()
+           where id=1`,
+          [release.releaseId, workerCredentialSha256, contextRevision, taskRevision]
+        );
+        await client.query(
+          `grant select,insert,update on jina_runtime.api_state to "${requiredRuntimeUser().replaceAll('"', '""')}"`
+        );
+      } else if (action === "release-release") {
+        await client.query(
+          `update jina_runtime.release_control
+           set lease_release_id=null,
+               lease_credential_sha256=null,
+               lease_expires_at=null,
+               updated_at=clock_timestamp()
+           where id=1`
+        );
+      } else {
+        throw new Error(`unsupported release control action ${action}`);
+      }
+    }
+    await client.query("commit");
+    console.log(
+      JSON.stringify({
+        action,
+        releaseId: release.releaseId,
+        leaseSeconds: release.leaseSeconds,
+        workerClaimsEnabled: action === "worker-enable" ? true : action === "worker-pause" ? false : undefined
+      })
+    );
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function ensureReleaseControlTable(pool) {
+  await pool.query(`
+    create schema if not exists jina_runtime;
+    create table if not exists jina_runtime.release_control (
+      id smallint primary key check (id = 1),
+      lease_release_id text,
+      lease_credential_sha256 text,
+      lease_expires_at timestamptz,
+      worker_claims_enabled boolean not null default false,
+      worker_release_id text,
+      worker_credential_sha256 text,
+      context_worker_revision text,
+      task_worker_revision text,
+      updated_at timestamptz not null default now(),
+      check (
+        (lease_release_id is null and lease_credential_sha256 is null and lease_expires_at is null)
+        or
+        (lease_release_id is not null and lease_credential_sha256 is not null and lease_expires_at is not null)
+      ),
+      check (
+        (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+           and context_worker_revision is null and task_worker_revision is null)
+        or
+        (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+           and context_worker_revision is not null and task_worker_revision is not null)
+      )
+    )
+  `);
+  const runtimeUser = requiredRuntimeUser();
+  await pool.query(`grant select on jina_runtime.release_control to "${runtimeUser.replaceAll('"', '""')}"`);
+}
+
+function requiredRuntimeUser() {
+  const runtimeUser = requiredEnv("CONTEXT_RUNTIME_DB_USER");
+  if (!/^[a-zA-Z_][a-zA-Z0-9_-]{0,62}$/.test(runtimeUser)) {
+    throw new Error("CONTEXT_RUNTIME_DB_USER is not a safe PostgreSQL role name");
+  }
+  return runtimeUser;
+}
+
+function requiredReleaseInput() {
+  const releaseId = requiredEnv("JINA_WORKER_RELEASE_ID");
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(releaseId)) {
+    throw new Error("JINA_WORKER_RELEASE_ID is invalid");
+  }
+  const credential = requiredEnv("JINA_WORKER_RELEASE_CREDENTIAL");
+  if (credential.length < 32 || credential.length > 512) {
+    throw new Error("JINA_WORKER_RELEASE_CREDENTIAL must contain 32..512 characters");
+  }
+  const leaseSeconds = Number(process.env.JINA_DEPLOYMENT_LEASE_SECONDS ?? "1800");
+  if (!Number.isSafeInteger(leaseSeconds) || leaseSeconds < 300 || leaseSeconds > 43_200) {
+    throw new Error("JINA_DEPLOYMENT_LEASE_SECONDS must be an integer between 300 and 43200");
+  }
+  return {
+    releaseId,
+    credentialSha256: createHash("sha256").update(credential, "utf8").digest("hex"),
+    leaseSeconds
+  };
+}
+
+function requiredWorkerGenerationCredentialSha256() {
+  const digest = requiredEnv("JINA_WORKER_GENERATION_CREDENTIAL_SHA256");
+  if (!/^[0-9a-f]{64}$/.test(digest)) {
+    throw new Error("JINA_WORKER_GENERATION_CREDENTIAL_SHA256 must be a lowercase SHA-256 digest");
+  }
+  return digest;
+}
+
+function optionalReleaseInput() {
+  const releaseId = optionalEnv("JINA_WORKER_RELEASE_ID");
+  const credential = optionalEnv("JINA_WORKER_RELEASE_CREDENTIAL");
+  if (!releaseId && !credential) return undefined;
+  return requiredReleaseInput();
+}
+
+function assertCurrentDeploymentLease(row, release) {
+  if (
+    !row ||
+    row.lease_release_id !== release.releaseId ||
+    row.lease_credential_sha256 !== release.credentialSha256 ||
+    !row.lease_expires_at ||
+    Date.parse(String(row.lease_expires_at)) <= Date.now()
+  ) {
+    throw new Error(`coordinated release ${release.releaseId} does not hold a live deployment lease`);
+  }
+}
+
+async function assertDeploymentLease(database, required = false) {
+  const release = required ? requiredReleaseInput() : optionalReleaseInput();
+  if (!release) return;
+  const result = await database.query(
+    `select lease_release_id,lease_credential_sha256,lease_expires_at
+     from jina_runtime.release_control
+     where id=1`
+  );
+  assertCurrentDeploymentLease(result.rows[0], release);
+}
+
+function requiredWorkerRevision(name, service) {
+  const revision = requiredEnv(name);
+  if (!revision.startsWith(`${service}-`) || revision.length > 63) {
+    throw new Error(`${name} must be an exact ${service} revision name`);
+  }
+  return revision;
+}
+
+async function drainBoardLeases(pool) {
+  const boardModulePath = process.env.CONTEXT_BOARD_MODULE_PATH ?? "/app/node_modules/@jina/board/dist/index.js";
+  const board = await import(pathToFileURL(realpathSync(boardModulePath)).href);
+  if (typeof board.fenceOutboxLeases !== "function") {
+    throw new Error("The coordinated release image does not provide fenceOutboxLeases");
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local lock_timeout='60s'");
+    await client.query("set local statement_timeout='5min'");
+    await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+    await assertDeploymentLease(client, true);
+    await requireBoardStateTable(client);
+    const result = await client.query("select snapshot from jina_runtime.api_state where id=1 for update");
+    const snapshot = result.rows[0]?.snapshot;
+    if (snapshot === undefined) {
+      await client.query("commit");
+      console.log(JSON.stringify({ boardLeasesBefore: 0, boardLeasesAfter: 0, fencedMessageCount: 0 }));
+      return;
+    }
+
+    const drained = fenceBoardSnapshot(snapshot, board.fenceOutboxLeases, {
+      now: new Date().toISOString(),
+      actorId: `deployment:${requiredEnv("CLOUD_BUILD_ID")}`,
+      reason: "coordinated production release worker drain"
+    });
+    if (drained.fencedMessageIds.length > 0) {
+      await client.query(
+        `update jina_runtime.api_state
+         set snapshot=$1::jsonb,version=version+1,updated_at=clock_timestamp()
+         where id=1`,
+        [JSON.stringify(drained.snapshot)]
+      );
+    }
+
+    await client.query("commit");
+    console.log(
+      JSON.stringify({
+        boardLeasesBefore: drained.boardLeasesBefore,
+        boardLeasesAfter: 0,
+        fencedMessageCount: drained.fencedMessageIds.length
+      })
+    );
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function verifyBoardLeases(pool) {
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local lock_timeout='60s'");
+    await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+    await assertDeploymentLease(client, true);
+    await requireBoardStateTable(client);
+    const result = await client.query("select snapshot from jina_runtime.api_state where id=1 for update");
+    const snapshot = result.rows[0]?.snapshot;
+    const leases = snapshot === undefined ? [] : activeBoardLeaseInventory(snapshot);
+    if (leases.length > 0) {
+      throw new Error(`Board has ${leases.length} active leases after worker drain`);
+    }
+    await client.query("commit");
+    console.log(JSON.stringify({ boardLeases: 0, verified: true }));
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+async function requireBoardStateTable(database) {
+  const result = await database.query("select to_regclass('jina_runtime.api_state')::text relation");
+  if (result.rows[0]?.relation !== "jina_runtime.api_state") {
+    throw new Error("jina_runtime.api_state is missing; Board leases cannot be verified");
+  }
+}
+
+function activeBoardLeaseInventory(snapshot) {
+  const board = boardState(snapshot);
+  const leases = [];
+  for (const [index, message] of board.outbox.entries()) {
+    if (!isRecord(message)) throw new Error(`Board outbox message ${index} is malformed`);
+    if (message.status !== "leased") continue;
+    for (const field of ["id", "topic", "leaseId", "writeFenceToken", "leaseExpiresAt"]) {
+      if (typeof message[field] !== "string" || message[field].length === 0) {
+        throw new Error(`Leased Board outbox message ${index} has no ${field}`);
+      }
+    }
+    leases.push({ id: message.id, topic: message.topic });
+  }
+  return leases;
+}
+
+function fenceBoardSnapshot(snapshot, fenceOutboxLeases, input) {
+  if (typeof fenceOutboxLeases !== "function") {
+    throw new Error("fenceOutboxLeases must be a function");
+  }
+  const leases = activeBoardLeaseInventory(snapshot);
+  if (leases.length === 0) {
+    return { snapshot, boardLeasesBefore: 0, fencedMessageIds: [] };
+  }
+  const topics = [...new Set(leases.map((lease) => lease.topic))];
+  const fenced = fenceOutboxLeases(boardState(snapshot), { topics, ...input });
+  const nextSnapshot = {
+    ...snapshot,
+    intakeState: {
+      ...snapshot.intakeState,
+      board: fenced.state
+    }
+  };
+  const remaining = activeBoardLeaseInventory(nextSnapshot);
+  if (remaining.length > 0) {
+    throw new Error(`Board drain left ${remaining.length} active leases`);
+  }
+  if (fenced.releasedMessageIds.length !== leases.length) {
+    throw new Error("Board drain did not fence exactly the active lease inventory");
+  }
+  return {
+    snapshot: nextSnapshot,
+    boardLeasesBefore: leases.length,
+    fencedMessageIds: fenced.releasedMessageIds
+  };
+}
+
+function boardState(snapshot) {
+  if (!isRecord(snapshot) || !isRecord(snapshot.intakeState) || !isRecord(snapshot.intakeState.board)) {
+    throw new Error("jina_runtime.api_state does not contain the expected Board snapshot");
+  }
+  if (!Array.isArray(snapshot.intakeState.board.outbox)) {
+    throw new Error("Board snapshot has no outbox array");
+  }
+  return snapshot.intakeState.board;
+}
+
+function isRecord(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+async function resetLegacySchema(pool, reset) {
+  if (resetMode() !== "legacy-once") {
+    throw new Error("schema-reset is available only with JINA_CONTEXT_RESET_MODE=legacy-once");
+  }
+  if (process.env.JINA_CONFIRM_CONTEXT_RESET !== RESET_CONFIRMATION) {
+    throw new Error(`JINA_CONFIRM_CONTEXT_RESET=${RESET_CONFIRMATION} is required`);
+  }
+  if (!/^[1-9][0-9]*$/.test(requiredEnv("JINA_CONTEXT_RESET_BACKUP_ID"))) {
+    throw new Error("A verified Cloud SQL backup ID is required before schema-reset");
+  }
+
+  const current = currentTables(reset);
+  const expectedBefore = [...current, ...LEGACY_CONTEXT_TABLES].sort();
+  const client = await pool.connect();
+  try {
+    await client.query("begin");
+    await client.query("set local lock_timeout='60s'");
+    await client.query("set local statement_timeout='15min'");
+    await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+    await assertDeploymentLease(client, true);
+    await client.query("select pg_advisory_xact_lock(hashtext('jina-context-reset'))");
+    assertExactSet(await contextTables(client), expectedBefore, "post-migration legacy Context schema");
+    assertExactSet(await contextViews(client), CURRENT_CONTEXT_VIEWS, "post-migration Context views");
+    await assertPreservedShapes(client);
+    const preservedBefore = await preservedDigests(client);
+
+    await client.query(`
+      create temporary table context_reset_acl_observations
+        on commit drop
+        as select * from jina_context.repository_acl_observations;
+      create temporary table context_reset_acl_sources
+        on commit drop
+        as
+          select observation.*
+          from jina_context.observations observation
+          where exists (
+            select 1
+            from jina_context.repository_acl_observations acl
+            where acl.tenant_id=observation.tenant_id
+              and acl.repository=observation.repository
+              and acl.source_observation_id=observation.id
+          );
+    `);
+    await client.query(
+      `truncate ${reset.REBUILDABLE_CONTEXT_TABLES.map((table) => `jina_context.${table}`).join(
+        ","
+      )} restart identity cascade`
+    );
+    await client.query(`
+      insert into jina_context.observations
+        select * from context_reset_acl_sources;
+      insert into jina_context.repository_acl_observations
+        select * from context_reset_acl_observations;
+    `);
+    // No CASCADE: any unclassified dependency makes the whole transaction fail
+    // instead of silently deleting data outside the three audited legacy tables.
+    await client.query(`drop table ${LEGACY_CONTEXT_TABLES.map((table) => `jina_context.${table}`).join(",")}`);
+
+    assertExactSet(await contextTables(client), current, "reset Context v2 schema");
+    assertExactSet(await contextViews(client), CURRENT_CONTEXT_VIEWS, "reset Context v2 views");
+    const preservedAfter = await preservedDigests(client);
+    if (JSON.stringify(preservedAfter) !== JSON.stringify(preservedBefore)) {
+      throw new Error("Context reset changed preserved identity or control-plane rows");
+    }
+    // The reset is atomic, so loss of the renewable release lease can still
+    // fail closed here and roll every destructive statement back.
+    await assertDeploymentLease(client, true);
+    await client.query("commit");
+    console.log(
+      JSON.stringify({
+        mode: "legacy-once",
+        backupId: process.env.JINA_CONTEXT_RESET_BACKUP_ID,
+        droppedLegacyTables: LEGACY_CONTEXT_TABLES,
+        preservedTables: reset.PRESERVED_CONTEXT_TABLES
+      })
+    );
+  } catch (error) {
+    await client.query("rollback").catch(() => undefined);
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function currentTables(reset) {
+  return [...reset.REBUILDABLE_CONTEXT_TABLES, ...reset.PRESERVED_CONTEXT_TABLES].sort();
+}
+
+function legacyLayout(current) {
+  return [...current.filter((table) => !TABLES_ADDED_AFTER_LEGACY.includes(table)), ...LEGACY_CONTEXT_TABLES].sort();
+}
+
+async function contextTables(database) {
+  const result = await database.query(
+    `select table_name
+     from information_schema.tables
+     where table_schema='jina_context' and table_type='BASE TABLE'
+     order by table_name`
+  );
+  return result.rows.map((row) => row.table_name);
+}
+
+async function contextViews(database) {
+  const result = await database.query(
+    `select table_name
+     from information_schema.views
+     where table_schema='jina_context'
+     order by table_name`
+  );
+  return result.rows.map((row) => row.table_name);
+}
+
+async function assertPreservedShapes(database) {
+  const result = await database.query(
+    `select table_name,column_name,data_type
+     from information_schema.columns
+     where table_schema='jina_context' and table_name=any($1::text[])
+     order by table_name,ordinal_position`,
+    [Object.keys(PRESERVED_COLUMNS)]
+  );
+  const actual = Object.fromEntries(Object.keys(PRESERVED_COLUMNS).map((table) => [table, []]));
+  for (const row of result.rows) actual[row.table_name]?.push(`${row.column_name}:${row.data_type}`);
+  for (const [table, expected] of Object.entries(PRESERVED_COLUMNS)) {
+    if (JSON.stringify(actual[table]) !== JSON.stringify(expected)) {
+      throw new Error(`Preserved table jina_context.${table} has an unexpected shape`);
+    }
+  }
+}
+
+async function preservedDigests(database) {
+  const digests = {};
+  for (const table of Object.keys(PRESERVED_COLUMNS).sort()) {
+    const result = await database.query(
+      `select count(*)::text rows,
+              md5(coalesce(string_agg(to_jsonb(record)::text,E'\\n'
+                  order by to_jsonb(record)::text),'')) digest
+       from jina_context.${table} record`
+    );
+    digests[table] = result.rows[0];
+  }
+  const aclSources = await database.query(
+    `select count(*)::text rows,
+            md5(coalesce(string_agg(to_jsonb(observation)::text,E'\\n'
+                order by to_jsonb(observation)::text),'')) digest
+     from jina_context.observations observation
+     where exists (
+       select 1
+       from jina_context.repository_acl_observations acl
+       where acl.tenant_id=observation.tenant_id
+         and acl.repository=observation.repository
+         and acl.source_observation_id=observation.id
+     )`
+  );
+  digests.repository_acl_source_observations = aclSources.rows[0];
+  return digests;
+}
+
+function assertExactSet(actual, expected, label) {
+  const actualSorted = [...actual].sort();
+  const expectedSorted = [...expected].sort();
+  const missing = expectedSorted.filter((table) => !actualSorted.includes(table));
+  const extra = actualSorted.filter((table) => !expectedSorted.includes(table));
+  if (missing.length > 0 || extra.length > 0) {
+    throw new Error(`${label} mismatch; missing=[${missing.join(",")}], unexpected=[${extra.join(",")}]`);
+  }
+}
+
+function resetMode() {
+  const mode = process.env.JINA_CONTEXT_RESET_MODE ?? "disabled";
+  if (mode !== "disabled" && mode !== "legacy-once") {
+    throw new Error("JINA_CONTEXT_RESET_MODE must be disabled or legacy-once");
+  }
+  return mode;
+}
+
+function requiredEnv(name) {
+  return required(name, optionalEnv(name));
+}
+
+function required(name, value) {
+  if (!value) throw new Error(`${name} is required`);
+  return value;
+}
+
+function optionalEnv(name) {
+  const value = process.env[name]?.trim();
+  return value || undefined;
+}
+
+function sanitizedDiagnostic(value) {
+  return String(value || "(no diagnostic)")
+    .replace(/\b(?:sk|dtn_secret)[-_][A-Za-z0-9._-]{8,}\b/gi, "[credential-redacted]")
+    .replace(/\bBearer\s+\S+/gi, "Bearer [credential-redacted]")
+    .slice(-2_000);
+}

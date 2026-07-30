@@ -7,19 +7,20 @@ verifies the unmodified body with `X-Hub-Signature-256`, requires
 
 ## Current behavior
 
-| Event           | Action                  | Board result                                                                                                                                                                             |
-| --------------- | ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Push            | non-deleted branch head | Creates `build-context` with strict `ingest-evidence` → baseline `index-context` → required `derive-knowledge` with enriched publication; carries the event head SHA and installation ID |
-| Pull request    | `opened`                | Creates the review aggregate and one executable review pass                                                                                                                              |
-| Pull request    | `synchronize`           | Supersedes the prior head epoch and creates review work for the new head                                                                                                                 |
-| Issues          | `opened`                | Creates one manual `issue_triage` card                                                                                                                                                   |
-| Everything else | any                     | Acknowledged and ignored                                                                                                                                                                 |
+| Event           | Action                  | Board result                                                                                              |
+| --------------- | ----------------------- | --------------------------------------------------------------------------------------------------------- |
+| Push            | non-deleted branch head | Starts a Board Context build fenced to the exact branch head                                              |
+| Pull request    | `opened`                | Creates review work and a Board Context preview at `pull/<number>/head`                                   |
+| Pull request    | `synchronize`           | Supersedes the prior review/head epoch and starts a new preview at the new head                           |
+| Issues          | `opened`                | Creates manual triage and starts a Board Context build on the default branch so the new issue is evidence |
+| Everything else | any                     | Acknowledged and ignored; comments, edits, closes, labels, and reviews do not schedule Context builds     |
 
 An unchanged latest head deduplicates redelivery. A real ref transition supersedes active
 older context work, including a force-push back to a previously seen SHA. At ingestion,
 the event head is also compared with a freshly fetched authoritative remote branch head;
 a moved ref rejects the stale delivery instead of indexing its historical commit as
-current. Issue triage has no automatic runner and remains in `triage` until a user acts.
+current. Issue triage has no automatic runner and remains in `triage` until a user acts;
+the separate context build is automatic.
 
 ## Configure the server
 
@@ -43,7 +44,8 @@ for local testing.
 
 ## Register the GitHub App
 
-Create a private GitHub App under the account or organization that owns the repositories:
+Create a private GitHub App under the account or organization that owns the repositories.
+For normal Context repositories, grant:
 
 - Webhook URL: `https://<api-host>/webhooks/github`
 - Webhook secret: the exact `GITHUB_WEBHOOK_SECRET`
@@ -52,7 +54,19 @@ Create a private GitHub App under the account or organization that owns the repo
 - Repository permission: **Issues — Read-only**
 - Optional repository permission: **Deployments — Read-only**
 - Optional repository permission: **Actions — Read-only**
-- Subscribe to **Push**, **Pull request**, and **Issues**
+- Subscribe to **Push**, **Pull request**, **Issues**, and **Issue comments**
+
+Production trigger acceptance uses a second, isolated fixture-mutation App. That App
+needs **Contents**, **Pull requests**, and **Issues** write access so the operator
+harness can create and clean up its branch, marker commit, issue, comment, and unmerged
+PR. Disable its webhook and install it only on `omxyz/jina-context-graph-e2e`; never
+install it on an ordinary Context repository. The harness further downscopes every
+fixture-App installation token to that exact repository and permission set.
+
+The normal operational Context App remains installed on the fixture too. It keeps the
+read-only permissions and event subscriptions above, receives the fixture App's
+events, and is the only identity used to inventory and redeliver webhooks. Do not reuse
+the operational App ID, private key, or installation as the mutation identity.
 
 Install the App on every repository Jina should observe. In shared-database mode, webhook
 intake resolves the original tenant UUID from the installation/repository identity tables.
@@ -65,18 +79,32 @@ GITHUB_APP_ID=<numeric app ID>
 GITHUB_APP_PRIVATE_KEY=<PEM private key; literal \n escapes are accepted>
 ```
 
-When `ingest-evidence` starts, the worker exchanges a short-lived App JWT for an
-installation access token. It uses that token for both the exact Git checkout and bounded
+When `snapshot-context-input` starts, the worker exchanges a short-lived App JWT for an
+installation access token. Every mint includes the exact build repository and only
+**Contents**, **Pull requests**, **Issues**, and **Metadata** read access. The worker
+validates the returned repository list and exact permission map before using the token;
+a broad, mismatched, or underprivileged response fails closed. The fixture-mutation App
+credentials are never mounted into snapshot workers. The worker uses its scoped
+operational-App token for both the exact Git checkout and bounded
 GitHub REST pagination, keeps it only in the active lease, and never stores it in task or
 context data. Git uses a full blob-filtered clone rather than a shallow clone, explicitly
 fetches the branch to its remote-tracking ref, requires the fetched head to equal any
 event-supplied SHA, and checks out that fetched head detached. The worker persists bounded
 commit/parent history, including changed paths for the checkpoint commit, and paginates
 repository metadata, PRs, issues, issue comments, PR review comments, and commit
-discussion comments. These become citable inputs to the checkpoint-pinned
-`derive-knowledge` agent. Reaching a configured limit or receiving an optional-source
-403/404 records a `partial` checkpoint and exact omission reason. If an installation ID
-is present and token minting fails, ingestion fails closed.
+discussion comments. These become citable inputs to the checkpoint-pinned Board research,
+planning, page-writing, and audit tasks. Commit records have natural
+`https://github.com/<owner>/<repository>/commit/<sha>` citation targets even when no separate
+provider observation supplies one. Reaching a configured limit or receiving an
+optional-source 403/404 records a `partial` checkpoint and exact omission reason. If an
+installation ID is present and token minting fails, snapshotting fails closed.
+
+Comments are collected as evidence when a later supported trigger starts a snapshot. Their
+delivery events do not start a Context build by themselves.
+The Issue comments subscription is still required for production trigger acceptance:
+the gate audits the exact delivered event and proves that the API persisted it without
+admitting Board work. Without that subscription, absence of a build would not test the
+no-trigger contract.
 
 Trusted manual callers may include a positive `githubInstallationId` in
 `POST /context/build`. A build with no installation ID falls back to
@@ -125,12 +153,13 @@ curl -H "Authorization: Bearer ${INTERNAL_API_TOKEN}" \
   "${JINA_API_URL}/board"
 ```
 
-For a push, verify that the root and all three context stages refer to the expected
-repository/ref, that the ingest stage carries the expected GitHub installation ID, and
-that ingestion records the event's full head SHA only if it still matches the fetched
-remote head. A published generation returned by `/context/generations` must use that same
-commit. The knowledge catalog should include an agent-derived change summary cited to the
-checkpoint commit and changed paths when the evidence supports one.
+For a push, verify that the Board root, snapshot, dynamic agent tasks, certification,
+publication, and PageIndex tasks refer to the expected repository/ref; that the snapshot
+task carries the expected GitHub installation ID; and that it records the event's full head
+SHA only if it still matches the fetched remote head. An immutable release returned by
+`/context/releases` must use that same commit. The context catalog should include an
+agent-derived change summary cited to the checkpoint commit and changed paths when the
+evidence supports one.
 
 GitHub's App settings show delivery response status and support redelivery.
 
@@ -138,6 +167,12 @@ GitHub's App settings show delivery response status and support redelivery.
 
 `pnpm --filter @jina/api dev` can expose `POST /dev/webhooks/github` when
 `JINA_ENABLE_DEV_ENDPOINTS=true`. It is unsigned and must stay disabled in production.
+That flag does not need to weaken ordinary API authentication. Keep
+`JINA_TRUST_DEV_IDENTITY_HEADERS=false` (the development-server default) to require the
+configured bearer credentials on API, MCP, Board, and administration routes while still
+using the unsigned webhook fixture. Set it to `true` only for an explicitly isolated test
+that needs header-trusted identities; it is rejected unless development endpoints are also
+enabled, and Cloud Run rejects development endpoints entirely.
 
 Development without database variables uses memory stores. Production records the board
 snapshot in `jina_runtime.api_state`, delivery IDs in

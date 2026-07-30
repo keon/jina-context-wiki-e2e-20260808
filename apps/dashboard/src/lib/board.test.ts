@@ -30,8 +30,13 @@ test("partitionBoardTasks keeps only the latest context build request per scope"
     }),
     task({
       id: "old-stage",
-      type: "ingest-evidence",
+      type: "research-context-subject",
       metadata: { ...scope, requestKey: "old" }
+    }),
+    task({
+      id: "new-stage",
+      type: "write-context-page",
+      metadata: { ...scope, requestKey: "new" }
     }),
     task({ id: "plain" }),
     task({ id: "superseded", status: "superseded" })
@@ -39,7 +44,7 @@ test("partitionBoardTasks keeps only the latest context build request per scope"
   const { current, history } = partitionBoardTasks(tasks);
   assert.deepEqual(
     current.map((item) => item.id),
-    ["new-build", "plain"]
+    ["new-build", "new-stage", "plain"]
   );
   assert.deepEqual(
     history.map((item) => item.id),

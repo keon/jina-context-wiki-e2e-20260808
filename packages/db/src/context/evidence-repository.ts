@@ -8,13 +8,11 @@ import type {
   StructuralFact
 } from "@jina/context-engine";
 import { evidenceExcerpt } from "@jina/context-engine";
-import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, contextDigest, contextStableId, dateString } from "./database.js";
 import { enqueueContextEvent } from "./outbox-repository.js";
 import { appendProjectionInputEvent, lockProjectionInput } from "./projection-input.js";
-import { assertContextWriteFence } from "./write-fence.js";
 
 const SNAPSHOT_INSERT_CHUNK_SIZE = 2_000;
 const SNAPSHOT_INSERT_CHUNK_BYTE_TARGET = 4 * 1024 * 1024;
@@ -131,9 +129,8 @@ export interface RepositoryAclObservation {
 export class PostgresEvidenceRepository implements EvidenceStore {
   constructor(private readonly database: ContextDatabase) {}
 
-  async registerRepository(input: RepositoryRegistration, fence?: ContextWriteFence): Promise<void> {
+  async registerRepository(input: RepositoryRegistration): Promise<void> {
     await this.database.transactionAs("jina_context_ingest", { tenantIds: [input.tenantId] }, async (client) => {
-      await assertContextWriteFence(client, input.tenantId, "run-ingest-evidence", fence);
       await client.query(
         `insert into jina_context.repositories
         (tenant_id,repository,provider,provider_repository_id,default_ref,metadata,created_at,updated_at)
@@ -158,13 +155,11 @@ export class PostgresEvidenceRepository implements EvidenceStore {
           input.at
         ]
       );
-      await assertContextWriteFence(client, input.tenantId, "run-ingest-evidence", fence);
     });
   }
 
-  async appendObservation(observation: ProviderObservation, fence?: ContextWriteFence): Promise<void> {
+  async appendObservation(observation: ProviderObservation): Promise<void> {
     await this.database.transactionAs("jina_context_ingest", { tenantIds: [observation.tenantId] }, async (client) => {
-      await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
       await insertObservation(client, observation);
       await enqueueContextEvent(client, {
         id: contextStableId("event", { observation: observation.id }),
@@ -178,13 +173,11 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         consumers: ["retention"],
         occurredAt: observation.recordedAt
       });
-      await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
     });
   }
 
-  async appendRepositoryAcl(observation: RepositoryAclObservation, fence?: ContextWriteFence): Promise<void> {
+  async appendRepositoryAcl(observation: RepositoryAclObservation): Promise<void> {
     await this.database.transactionAs("jina_context_ingest", { tenantIds: [observation.tenantId] }, async (client) => {
-      await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
       await lockRepositoryAccess(client, observation.tenantId, observation.repository);
       await client.query(
         `insert into jina_context.repository_acl_observations
@@ -215,16 +208,14 @@ export class PostgresEvidenceRepository implements EvidenceStore {
         consumers: ["acl", "retention"],
         occurredAt: observation.observedAt
       });
-      await assertContextWriteFence(client, observation.tenantId, "run-ingest-evidence", fence);
     });
   }
 
-  async commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
+  async commitSnapshot(snapshot: EvidenceSnapshot): Promise<EvidenceCheckpoint> {
     await this.database.transactionAs(
       "jina_context_ingest",
       { tenantIds: [snapshot.checkpoint.tenantId] },
       async (client) => {
-        await assertContextWriteFence(client, snapshot.checkpoint.tenantId, "run-ingest-evidence", fence);
         await client.query("select pg_advisory_xact_lock(hashtextextended($1,0))", [
           `context-generation-ref:${snapshot.checkpoint.tenantId}:${snapshot.checkpoint.repository}:${snapshot.checkpoint.ref}`
         ]);
@@ -289,17 +280,7 @@ export class PostgresEvidenceRepository implements EvidenceStore {
          order by ref_sequence desc,id desc limit 1`,
           [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
         );
-        const admitted = await client.query<{ ref_sequence: string }>(
-          `select coalesce(max(ref_sequence),0)::text ref_sequence
-         from jina_context.pipeline_builds
-         where tenant_id=$1 and repository=$2 and ref_name=$3`,
-          [checkpoint.tenantId, checkpoint.repository, checkpoint.ref]
-        );
-        const latestAdmittedSequence = Number(admitted.rows[0]!.ref_sequence);
-        if (!Number.isSafeInteger(latestAdmittedSequence) || latestAdmittedSequence < 0) {
-          throw new Error(`Ref sequence exceeds the supported range for ${checkpoint.repository}@${checkpoint.ref}`);
-        }
-        if (latest.rows[0]?.id === checkpoint.id && checkpoint.refSequence >= latestAdmittedSequence) {
+        if (latest.rows[0]?.id === checkpoint.id) {
           await appendProjectionInputEvent(client, {
             tenantId: checkpoint.tenantId,
             repository: checkpoint.repository,
@@ -328,7 +309,6 @@ export class PostgresEvidenceRepository implements EvidenceStore {
             occurredAt: checkpoint.createdAt
           });
         }
-        await assertContextWriteFence(client, checkpoint.tenantId, "run-ingest-evidence", fence);
       }
     );
     return snapshot.checkpoint;

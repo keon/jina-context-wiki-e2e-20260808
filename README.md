@@ -3,8 +3,8 @@
 Jina is a tenant-scoped task board and repository context engine for software-work agents.
 Signed GitHub events create durable board workflows. Cloud Run workers perform pull-request
 review and build repository context at an exact commit. PostgreSQL stores board state,
-canonical evidence, immutable knowledge-document revisions, disposable indexes, ACLs, and
-query telemetry.
+canonical evidence, immutable derived-context revisions, disposable indexes, ACLs, and
+retrieval telemetry.
 
 ## Quick start
 
@@ -61,83 +61,37 @@ repository test execution are not shipped.
 
 ## Repository context
 
-The context engine's conceptual data flow is
-`ingest-evidence` → required `derive-knowledge` → `index-context`. The coordinator also
-publishes a raw-evidence `index-context` baseline before derivation, then an enriched
-successor after derivation:
+The context engine runs `ingest-evidence` → required `derive-knowledge` →
+`index-context`:
 
-1. `ingest-evidence` fetches the authoritative remote branch head, verifies any
-   event-supplied full SHA against it, checks it out detached, and stores immutable
-   provider observations, an exact tree, content-addressed blobs, bounded commit/parent
-   history, deterministic parser output, structural facts, and ACL observations. Git
-   uses a full blob-filtered clone rather than a shallow clone. Every checkpoint is
-   explicitly `complete` or `partial`; the observation frontier records Git/GitHub
-   limits and omitted file bodies instead of overstating coverage.
-2. `index-context` publishes the coherent raw-evidence baseline: indexable
-   context documents, fragments, exact and lexical indexes, deterministic structure, and
-   a deterministic long-document hierarchy. Projection consumers use independent leases
-   and scoped acknowledgements; rebuild/drain work replays pending checkpoints without
-   sharing a global processed bit.
-3. Only after baseline publication, required `derive-knowledge` gives Codex a
-   checkpoint-pinned, read-only repository plus separate immutable evidence, exact
-   manifest, and prior-knowledge inputs. The agent explores the repository with read-only
-   shell tools and organizes a complete subject-oriented catalog as
-   `knowledge-documents-v4`: immutable, versioned, evidence-backed documents.
-   Commit evidence includes the checkpoint's changed paths, and bounded GitHub evidence
-   includes PRs, issues, issue comments, PR review comments, and commit discussion
-   comments. On an incremental build every prior logical document must be re-emitted
-   with current citations or explicitly retired.
-   Documents carry cited summaries, facts, answered questions, and diagnostic symptoms,
-   likely causes, checks, and fixes. Host validation checks stable subject identity,
-   resolves each exact line range or JSON pointer against original evidence, validates
-   every body/structured citation ordinal, and requires the normalized citation claim to
-   occur verbatim in that selected excerpt before persistence.
-   Logical IDs are canonical lowercase; repository/commit portions come from the
-   checkpoint and every model-controlled subject segment must be supported by resolved
-   cited evidence. Identity and scope grounding sees only the exact selected
-   line-range/JSON-pointer excerpt plus intrinsic cited-source identity; unrelated record
-   text and a merely present manifest path do not count.
-   The untrusted Codex run ignores user configuration and repository instructions. Its
-   shell is read-only, has no inherited environment or login shell, and cannot use the
-   network, web search, repository credentials, unified execution, multi-agent, apps,
-   plugins, hooks, browser/computer/image tools, workspace dependencies, or skill MCP
-   dependency installation. It can return only the requested schema-constrained JSON.
-   Invalid output receives exactly one constrained repair. A successful commit publishes
-   the required enriched successor generation; a second invalid result or executor
-   failure fails the derivation stage and root build. Derived revisions are
-   eligible only when every stored citation's source identity and `contentDigest` exists
-   in that exact evidence checkpoint.
+1. Ingestion captures an immutable repository/GitHub snapshot, exact manifest, provider
+   frontier, ACL state, and citation evidence. It no longer builds a parser graph or a
+   raw-source search corpus.
+2. Codex incrementally creates repository-specific Markdown context from the checkpoint
+   and prior release. The lead agent discovers maintenance questions, chooses the
+   document organization, delegates bounded research when useful, and runs a
+   context-only critic before declaring those questions answerable. Every repository
+   link and natural GitHub URL is resolved by the host to an immutable blob range or
+   provider JSON pointer. A page with any invalid evidence link is withheld.
+3. Each finished page is stored as a digest-addressed, validated checkpoint. Valid pages
+   can publish a partial immutable release while the run continues, and a retry resumes
+   from the last valid pages.
+4. Only citation-valid derived context enters exact, lexical, and hierarchy projections.
+   Raw source and provider observations remain evidence and can never be returned as
+   context.
+5. The hierarchy uses the self-hosted, pinned open-source PageIndex Markdown builder.
+   Natural-language retrieval uses PageIndex-style model tree selection through the
+   local Codex session, with deterministic derived-text fallback.
 
-The baseline index does not depend on a model. Derived knowledge can enrich a later
-generation. If derivation fails, the already-published baseline remains queryable for
-diagnosis and retry, but the root build is failed rather than reported as degraded
-success. The coordinator queues only ingestion, then only baseline indexing, then
-required derivation/enriched publication. This prevents different context workers from
-racing projection-input changes against the baseline build.
-The generation's `derivedKnowledge` capability is computed only from logical IDs and
-eligible revisions whose citations are present in that exact checkpoint; matching
-repository/ref/commit history alone cannot make it report `available`. Unchanged cited
-facts can be reused across equivalent same-commit checkpoints, while changed mutable
-PR/issue evidence changes its identity or digest and excludes stale derived facts.
-Successful derivation runs are cache-reused only for the same immutable focus/evidence
-fingerprints, and index eligibility still rechecks every cached revision against the
-target checkpoint.
-
-Dense retrieval is implemented behind a port but disabled until an approved embedding
-backend demonstrates an evaluation win. The Jina-owned deterministic heading tree is the
-active hierarchy adapter.
-
-`POST /context/query` routes requests across exact, structured, structural, lexical,
-knowledge, temporal, hierarchy, and bounded long-context retrieval. Results identify the
-selected ref, commit, and generation and return original-evidence citations, conflicts,
-ambiguities, coverage, and a trace ID. Omitting `ref` selects `main`. Authorization and
-its exact ACL-fingerprint set are rechecked after retrieval and synthesis, so a concurrent
-revoke cannot release a response.
-The `diagnose` task kind routes agent-derived symptoms, causes, checks, and fixes together
-with structured issue/PR state and temporal change history.
+`POST /context/search` returns selected context excerpts and original-evidence citations;
+it does not synthesize an answer. `GET /context/releases`, `/context/list`,
+`/context/read`, and `/context/diff` browse immutable releases. Default-branch builds are
+canonical, PR heads publish to `pull/<number>/head`, and newly opened issues build against
+the default branch. Comments and edits do not schedule builds.
 
 Stateless Streamable HTTP MCP is served at `POST /mcp`. The `jina-context` server exposes
-exactly one read-only tool, `query_context`, with the same storage-neutral query contract.
+exactly four read-only tools: `search_context`, `list_context`, `read_context`, and
+`diff_context`.
 Both HTTP and MCP retrieval enforce repository access before candidate generation and
 require a bound principal. Principal access resolves to repository ACL fingerprints;
 PostgreSQL filters documents, fragments, exact entries, hierarchy rows, manifest rows,
@@ -151,10 +105,8 @@ configuration; see `docs/API_TOKENS.md`.
 Repository-access synchronization also requires that credential, but applies only to the
 same server-bound tenant and principal; caller headers cannot select another identity.
 
-Public HTTP and MCP query request bodies are capped at 128 KiB. Each raw target category
-accepts at most 100 entries; entries are trimmed, empty values are dropped, accepted
-values are deduplicated, and each non-empty value is at most 1,000 characters. The
-100-entry limit is checked before deduplication to prevent duplicate amplification.
+Public HTTP and MCP search request bodies are capped at 128 KiB. Search queries are
+bounded to 4,000 characters and 25 selected nodes.
 
 API, context worker, task worker, dashboard, and admin are built from the same source
 revision and deployed as one Cloud Run release. Database DDL and capability-role grants
@@ -165,15 +117,16 @@ strictly RLS-scoped capability.
 Cloud Run sizing is controlled by `cloudbuild.yaml` and validated by the deployment
 script. Context workers use a 62-minute operation timeout, a 10-minute terminal
 completion timeout, and the 75-minute context lease described above. Production
-acceptance exercises a real repository build, HTTP query, and MCP `query_context` call
+acceptance exercises a real repository build, HTTP search, and all four MCP context tools
 before a release passes.
 
 Webhook-triggered private-repository builds carry the GitHub installation ID and mint a
 short-lived, installation-scoped token for ingestion. Manual builds may pass
 `githubInstallationId`; builds without one can use `GITHUB_API_TOKEN` or
 `GITHUB_CLONE_TOKEN` as a read-only fallback. Public repositories need no token.
-Knowledge derivation requires `DAYTONA_API_KEY` and either `OPENAI_API_KEY` or
-`OPENROUTER_API_KEY`.
+Local derivation uses the signed-in Codex session by default. The remote sandbox requires
+`DAYTONA_API_KEY` plus an explicitly selected Codex session or API-key provider;
+production uses the API-key path and never copies a developer session.
 
 ## Repository layout
 
@@ -184,10 +137,10 @@ apps/dashboard/       operator board and context workspace
 apps/worker/          review and context-stage workers
 apps/workflows/       local review CLI and deterministic simulation
 packages/board/       generic tasks, dependencies, commands, reducer
-packages/context-engine/ evidence, knowledge, indexes, routed retrieval
+packages/context-engine/ evidence, derived context, releases, retrieval
 packages/db/          PostgreSQL stores, context adapters, migrations
 packages/github/      webhook verification and parsing
-packages/daytona/     isolated knowledge-document executor
+packages/daytona/     local and isolated context-document executors
 packages/ai/          review harnesses and model clients
 packages/observability/ structured logging, traces, live metrics
 ```
@@ -195,7 +148,14 @@ packages/observability/ structured logging, traces, live metrics
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md)
-- [Agentic knowledge derivation](docs/AGENTIC_DERIVATION.md)
+- [Agentic context derivation](docs/AGENTIC_DERIVATION.md)
+- [Context orchestration comparison](docs/CONTEXT_ORCHESTRATION_COMPARISON.md)
+- [Context v2 implementation plan](docs/CONTEXT_V2_IMPLEMENTATION_PLAN.md)
+- [Context v2 continuation runbook](docs/CONTEXT_V2_CONTINUATION_RUNBOOK.md)
+- [Context quality benchmark](docs/CONTEXT_QUALITY_BENCHMARK.md)
+- [Representative repository E2E](docs/REPRESENTATIVE_REPOSITORY_E2E.md)
+- [Daytona Board-stage acceptance](docs/CONTEXT_DAYTONA_BOARD_STAGE_ACCEPTANCE.md)
+- [Exhausted-page remediation](docs/CONTEXT_PAGE_REMEDIATION.md)
 - [Context engine evaluation](docs/CONTEXT_ENGINE_EVALUATION.md)
 - [Data models](docs/DATA_MODELS.md)
 - [Sequence diagrams](docs/SEQUENCE_DIAGRAM.md)

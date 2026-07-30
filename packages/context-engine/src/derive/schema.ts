@@ -7,6 +7,7 @@ import {
   type KnowledgeScope,
   type KnowledgeStructuredSummary
 } from "../domain/knowledge.js";
+import { parseContextOrchestrationState } from "./orchestration.js";
 
 export const KNOWLEDGE_OUTPUT_SCHEMA_VERSION = "knowledge-documents-v4";
 
@@ -64,13 +65,26 @@ function parseScope(value: unknown, path: string): Omit<KnowledgeScope, "ref" | 
 
 function parseCitation(value: unknown, path: string): KnowledgeDocumentDraftCitation {
   const input = object(value, path);
-  onlyKeys(input, ["claim", "sourceType", "sourceId", "pathOrUrl", "startLine", "endLine", "jsonPointer"], path);
+  onlyKeys(
+    input,
+    ["claim", "citationId", "claimSpan", "sourceType", "sourceId", "pathOrUrl", "startLine", "endLine", "jsonPointer"],
+    path
+  );
   const sourceType = string(input.sourceType, `${path}.sourceType`);
   if (!["observation", "blob", "commit", "pull_request", "issue", "document"].includes(sourceType)) {
     throw new Error(`${path}.sourceType is unsupported`);
   }
+  const citationId = optionalString(input.citationId, `${path}.citationId`);
+  const claimSpan = optionalString(input.claimSpan, `${path}.claimSpan`);
+  if ((citationId === undefined) !== (claimSpan === undefined)) {
+    throw new Error(`${path}.citationId and claimSpan must be paired`);
+  }
+  if (citationId !== undefined && !/^cite_[0-9a-f]{20}$/.test(citationId)) {
+    throw new Error(`${path}.citationId is invalid`);
+  }
   return {
     claim: string(input.claim, `${path}.claim`),
+    ...(citationId === undefined ? {} : { citationId, claimSpan: claimSpan! }),
     sourceType: sourceType as KnowledgeDocumentDraftCitation["sourceType"],
     sourceId: string(input.sourceId, `${path}.sourceId`),
     ...(optionalString(input.pathOrUrl, `${path}.pathOrUrl`) === undefined
@@ -194,7 +208,7 @@ export function parseKnowledgeGenerationOutput(value: unknown): KnowledgeGenerat
   for (const field of prohibited) {
     if (field in input) throw new Error(`output.${field} is prohibited`);
   }
-  onlyKeys(input, ["documents", "retiredDocuments"], "output");
+  onlyKeys(input, ["documents", "retiredDocuments", "orchestration"], "output");
   if (!Array.isArray(input.documents)) throw new Error("output.documents must be an array");
   if (input.documents.length === 0) throw new Error("output.documents must contain at least one document");
   if (input.documents.length > 50) throw new Error("output.documents exceeds the maximum of 50");
@@ -217,7 +231,8 @@ export function parseKnowledgeGenerationOutput(value: unknown): KnowledgeGenerat
         })();
   return {
     documents: input.documents.map((document, index) => parseDocument(document, `documents[${index}]`)),
-    ...(retiredDocuments ? { retiredDocuments } : {})
+    ...(retiredDocuments ? { retiredDocuments } : {}),
+    ...(input.orchestration === undefined ? {} : { orchestration: parseContextOrchestrationState(input.orchestration) })
   };
 }
 
@@ -325,6 +340,8 @@ export const knowledgeGenerationJsonSchema = {
               additionalProperties: false,
               properties: {
                 claim: { type: "string", minLength: 1 },
+                citationId: { type: ["string", "null"], pattern: "^cite_[0-9a-f]{20}$" },
+                claimSpan: { type: ["string", "null"], minLength: 1 },
                 sourceType: {
                   type: "string",
                   enum: ["observation", "blob", "commit", "pull_request", "issue", "document"]
@@ -335,7 +352,17 @@ export const knowledgeGenerationJsonSchema = {
                 endLine: { type: ["integer", "null"], minimum: 1 },
                 jsonPointer: { type: ["string", "null"], minLength: 1 }
               },
-              required: ["claim", "sourceType", "sourceId", "pathOrUrl", "startLine", "endLine", "jsonPointer"]
+              required: [
+                "claim",
+                "citationId",
+                "claimSpan",
+                "sourceType",
+                "sourceId",
+                "pathOrUrl",
+                "startLine",
+                "endLine",
+                "jsonPointer"
+              ]
             }
           }
         },

@@ -1,16 +1,13 @@
 import { randomUUID } from "node:crypto";
 import type { ContextProjectionConsumer, IndexGeneration, ProjectionCheckpoint } from "@jina/context-engine";
-import type { ContextWriteFence } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, dateString } from "./database.js";
 import { assertProjectionInputFingerprint, lockProjectionInput } from "./projection-input.js";
-import { assertContextWriteFence } from "./write-fence.js";
 
 export const requiredContextConsumers = [
   "manifest",
   "lexical",
-  "structural",
   "identity",
   "acl",
   "retention"
@@ -253,7 +250,7 @@ export class PostgresGenerationCoordinator {
     });
   }
 
-  async publish(generationId: string, publishedAt: string, fence?: ContextWriteFence): Promise<IndexGeneration> {
+  async publish(generationId: string, publishedAt: string): Promise<IndexGeneration> {
     return this.database.transactionAs("jina_context_admin", { system: true }, async (client) => {
       const target = await client.query<{
         tenant_id: string;
@@ -275,7 +272,6 @@ export class PostgresGenerationCoordinator {
       ]);
       await lockRepositoryAccess(client, scope.tenant_id, scope.repository);
       await lockProjectionInput(client, scope.tenant_id, scope.repository);
-      await assertContextWriteFence(client, scope.tenant_id, ["run-index-context", "run-derive-knowledge"], fence);
       await assertLatestCheckpoint(client, scope.tenant_id, scope.repository, scope.ref_name, scope.checkpoint_id);
       const expectedAccess = await client.query<{ acl_fingerprint: string }>(
         "select acl_fingerprint from jina_context.index_generations where id=$1 and status='building'",
@@ -308,13 +304,9 @@ export class PostgresGenerationCoordinator {
             .join(", ")}`
         );
       }
-      await client.query(
-        `update jina_context.index_generations
-         set status='invalidated',invalidated_at=$4
-         where tenant_id=$1 and repository=$2 and ref_name=$3
-           and status='published' and id <> $5`,
-        [scope.tenant_id, scope.repository, scope.ref_name, publishedAt, generationId]
-      );
+      // Published generations are immutable context releases. Keep prior
+      // releases addressable for diff_context and rollback; "current" is the
+      // newest published release for the ref, not the only surviving row.
       await client.query(
         `update jina_context.index_generations
          set status='published',published_at=$2
@@ -323,7 +315,6 @@ export class PostgresGenerationCoordinator {
       );
       const generation = await loadGeneration(client, generationId);
       if (!generation) throw new Error(`Generation ${generationId} disappeared during publication`);
-      await assertContextWriteFence(client, scope.tenant_id, ["run-index-context", "run-derive-knowledge"], fence);
       return generation;
     });
   }
@@ -405,23 +396,9 @@ async function assertLatestCheckpoint(
         `(observed latest ${observed?.id ?? "none"} at sequence ${observed?.ref_sequence ?? "none"})`
     );
   }
-  const admitted = await client.query<{ ref_sequence: string }>(
-    `select coalesce(max(ref_sequence),0)::text ref_sequence
-     from jina_context.pipeline_builds
-     where tenant_id=$1 and repository=$2 and ref_name=$3`,
-    [tenantId, repository, ref]
-  );
   const checkpointSequence = Number(latest.rows[0].ref_sequence);
-  const admittedSequence = Number(admitted.rows[0]!.ref_sequence);
-  if (
-    !Number.isSafeInteger(checkpointSequence) ||
-    !Number.isSafeInteger(admittedSequence) ||
-    checkpointSequence < admittedSequence
-  ) {
-    throw new Error(
-      `Checkpoint ${checkpointId} is superseded for ${repository}@${ref} ` +
-        `(checkpoint sequence ${latest.rows[0].ref_sequence}, admitted sequence ${admitted.rows[0]!.ref_sequence})`
-    );
+  if (!Number.isSafeInteger(checkpointSequence)) {
+    throw new Error(`Checkpoint ${checkpointId} has an unsupported ref sequence`);
   }
 }
 

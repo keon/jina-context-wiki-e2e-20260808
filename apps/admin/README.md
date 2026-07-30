@@ -1,8 +1,8 @@
 # @jina/admin
 
-Next.js tenant-administration app for repository context health. It lists published index
-generations across every repository in the tenant, summarizes knowledge documents and
-pending projections, and exposes exact ref/commit and projector state.
+Next.js tenant-administration app for repository context health. It lists immutable
+context releases across every repository in the tenant, summarizes derived context and
+pending publication work, and exposes exact ref/commit state.
 
 ## Tenant-wide access
 
@@ -23,15 +23,16 @@ The decision logic is in `lib/admin-auth.ts` and has unit tests.
 
 ## Page
 
-`/` shows tenant-wide generation, repository, current logical knowledge-document, and
-pending-projection counts. Operators can filter by repository and inspect each
-generation's ref, full commit identity, publication time, knowledge availability, and
-projector set.
+`/` shows tenant-wide release, repository, current logical context-document, pending
+publication, active-build, model-task, checkpoint, and hierarchy counts. Operators can
+filter by repository and inspect each release's ref, full commit identity, publication
+time, source completeness, and context availability.
 
-The agent-derived knowledge section reports immutable revision counts by document kind and
-shows each visible revision's repository, kind, logical document, commit, generator/model,
-review state, and confidence. It is an operational catalog of
-`knowledge-documents-v4`.
+The agent-derived context section reports document counts by kind and shows each current
+document's repository, logical ID, commit, citation count, and immutable release.
+The build section shows recent Board build state, retry counts, and private checkpoint
+validity without exposing worker inputs or artifact layout. The index section reports the
+latest immutable projector checkpoint, version, status, and backlog.
 
 ## Running
 
@@ -56,6 +57,6 @@ When `JINA_WEB_PRINCIPAL_ID` is a user principal, that principal must also be co
 as a tenant administrator by the API. The admin client fails before making a request when
 `INTERNAL_API_TOKEN` is configured without either principal-binding variable.
 
-The admin uses `/context/generations`, `/context/documents`, and `/context/metrics`.
-Metrics access is tenant-administrator only. Knowledge review is also tenant-admin-only;
-repository read access by itself cannot append a review event.
+The admin uses `/context/releases`, `/context/list`, `/context/builds`,
+`/context/builds/{id}/progress`, and `/context/metrics`. Metrics access is
+tenant-administrator only.

@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { InvalidGitHubWebhookPayloadError, parseGitHubWebhook, verifyGitHubWebhookSignature } from "./webhooks.js";
+import {
+  InvalidGitHubWebhookPayloadError,
+  isContextTrigger,
+  parseGitHubWebhook,
+  verifyGitHubWebhookSignature,
+  type GitHubWebhookEvent
+} from "./webhooks.js";
 
 test("verifies GitHub's published HMAC-SHA256 test vector", () => {
   const valid = verifyGitHubWebhookSignature(
@@ -59,7 +65,7 @@ test("parses a newly opened issue and ignores non-open actions", () => {
       html_url: "https://github.com/omlabs/example/issues/7",
       user: { id: 3, login: "hubot", type: "Bot" }
     },
-    repository: { id: 10, full_name: "omlabs/example" },
+    repository: { id: 10, full_name: "omlabs/example", default_branch: "trunk" },
     installation: { id: 99 },
     sender: { id: 3, login: "hubot", type: "Bot" }
   };
@@ -75,7 +81,9 @@ test("parses a newly opened issue and ignores non-open actions", () => {
     authorAccountType: "Bot"
   });
   assert.deepEqual(parsed?.sender, { id: 3, login: "hubot", accountType: "Bot" });
+  assert.equal(parsed?.repositoryDefaultBranch, "trunk");
   assert.equal(parseGitHubWebhook("issues", jsonBytes({ ...payload, action: "labeled" })), undefined);
+  assert.equal(parseGitHubWebhook("issue_comment", jsonBytes({ ...payload, action: "created" })), undefined);
   assert.equal(parseGitHubWebhook("ping", jsonBytes({ zen: "Keep it logically awesome." })), undefined);
 });
 
@@ -99,6 +107,65 @@ test("parses branch pushes for context build intake", () => {
     headSha: "b".repeat(40),
     deleted: false
   });
+});
+
+test("Context trigger policy admits only new issues, new PR heads, and branch-head commits", () => {
+  const sha = "b".repeat(40);
+  const admitted: readonly GitHubWebhookEvent[] = [
+    { type: "issue.opened", issueNumber: 7, title: "New issue" },
+    { type: "pull_request.opened", pullRequestNumber: 8, headSha: sha },
+    { type: "pull_request.synchronize", pullRequestNumber: 8, headSha: "c".repeat(40) },
+    { type: "push", ref: "refs/heads/main", headSha: sha, deleted: false }
+  ];
+  for (const event of admitted) assert.equal(isContextTrigger(event), true, event.type);
+
+  const ignored: readonly Extract<GitHubWebhookEvent, { readonly type: "push" }>[] = [
+    { type: "push", ref: "refs/heads/removed", headSha: "0".repeat(40), deleted: true },
+    { type: "push", ref: "refs/tags/v1.0.0", headSha: sha, deleted: false }
+  ];
+  for (const event of ignored) assert.equal(isContextTrigger(event), false, event.ref);
+
+  const repository = { full_name: "omlabs/example" };
+  for (const [eventName, payload] of [
+    ["issue_comment", { action: "created", repository }],
+    ["issues", { action: "edited", repository }],
+    ["issues", { action: "closed", repository }],
+    ["pull_request", { action: "edited", repository }],
+    ["pull_request", { action: "reopened", repository }],
+    ["pull_request_review", { action: "submitted", repository }],
+    ["pull_request_review_comment", { action: "created", repository }]
+  ] as const) {
+    assert.equal(parseGitHubWebhook(eventName, jsonBytes(payload)), undefined, `${eventName}/${payload.action}`);
+  }
+
+  // Unsupported event classes are discarded before their body is parsed, so
+  // an issue comment cannot reach Context admission even when malformed.
+  assert.equal(parseGitHubWebhook("issue_comment", Buffer.from("not json")), undefined);
+});
+
+test("parses a synchronized PR head as a new-commit Context trigger", () => {
+  const parsed = parseGitHubWebhook(
+    "pull_request",
+    jsonBytes({
+      action: "synchronize",
+      number: 42,
+      pull_request: {
+        number: 42,
+        title: "Advance the PR",
+        head: { sha: "d".repeat(40) }
+      },
+      repository: { id: 10, full_name: "omlabs/example" },
+      installation: { id: 99 }
+    })
+  );
+
+  assert.deepEqual(parsed?.event, {
+    type: "pull_request.synchronize",
+    pullRequestNumber: 42,
+    headSha: "d".repeat(40),
+    title: "Advance the PR"
+  });
+  assert.equal(parsed === undefined ? false : isContextTrigger(parsed.event), true);
 });
 
 test("rejects malformed actionable payloads", () => {

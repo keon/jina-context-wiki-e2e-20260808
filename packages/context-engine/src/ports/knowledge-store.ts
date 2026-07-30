@@ -4,8 +4,6 @@ import type {
   KnowledgeEvidenceCitation,
   KnowledgeRevisionEvent
 } from "../domain/knowledge.js";
-import type { ContextWriteFence } from "../workflow/coordinator.js";
-
 export interface KnowledgeCommit {
   run: DerivationRun;
   revisions: KnowledgeDocumentRevision[];
@@ -14,8 +12,8 @@ export interface KnowledgeCommit {
 
 export interface KnowledgeStore {
   findSuccessfulRun(cacheKey: string): Promise<DerivationRun | undefined>;
-  commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun>;
-  recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void>;
+  commitKnowledge(input: KnowledgeCommit): Promise<DerivationRun>;
+  recordFailedRun(run: DerivationRun): Promise<void>;
   getRun(runId: string): Promise<DerivationRun | undefined>;
   getRevision(revisionId: string): Promise<KnowledgeDocumentRevision | undefined>;
   getScopedRevision(

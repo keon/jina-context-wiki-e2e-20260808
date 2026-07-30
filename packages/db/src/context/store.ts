@@ -1,7 +1,6 @@
 import {
   contextProjectionConsumers,
   type ContextEngineStore,
-  type ContextWriteFence,
   type DerivationRun,
   type EraseEvidenceInput,
   type EvidenceAnchor,
@@ -15,8 +14,6 @@ import {
   type KnowledgeEvidenceCitation,
   type KnowledgeRevisionEvent,
   type ApiTokenRecord,
-  type DerivationProgressPage,
-  type DerivationProgressSnapshot,
   type MintApiTokenInput,
   type ProjectionBacklog,
   type QueryPlan,
@@ -47,14 +44,12 @@ import {
 import { PostgresProjectionRepository } from "./projection-repository.js";
 import { PostgresContextQueryRepository, type StoredRetrievalCandidate } from "./query-repository.js";
 import { PostgresApiTokenRepository } from "./api-token-repository.js";
-import { PostgresDerivationProgressRepository } from "./derivation-progress-repository.js";
 
 /**
  * Cohesive store façade for domain services. SQL remains split across the
  * evidence, knowledge, and projection repositories.
  */
 export class PostgresContextEngineStore implements ContextEngineStore {
-  readonly enforcesWriteFences = true as const;
   readonly nativeExactIndex = true as const;
   readonly database: ContextDatabase;
   readonly evidence: PostgresEvidenceRepository;
@@ -62,7 +57,6 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   readonly projection: PostgresProjectionRepository;
   readonly query: PostgresContextQueryRepository;
   readonly apiTokens: PostgresApiTokenRepository;
-  readonly derivationProgressStore: PostgresDerivationProgressRepository;
 
   constructor(config: PostgresContextDatabaseConfig | ContextDatabase) {
     this.database = config instanceof ContextDatabase ? config : new ContextDatabase(config);
@@ -71,11 +65,10 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     this.projection = new PostgresProjectionRepository(this.database);
     this.query = new PostgresContextQueryRepository(this.database);
     this.apiTokens = new PostgresApiTokenRepository(this.database);
-    this.derivationProgressStore = new PostgresDerivationProgressRepository(this.database);
   }
 
-  verifyApiToken(secretHash: string): Promise<VerifiedApiToken | undefined> {
-    return this.apiTokens.verifyApiToken(secretHash);
+  verifyApiToken(secretHash: string, expectedTenantId?: string): Promise<VerifiedApiToken | undefined> {
+    return this.apiTokens.verifyApiToken(secretHash, expectedTenantId);
   }
   stampApiTokenUse(tenantId: string, tokenId: string, usedAt: string): Promise<void> {
     return this.apiTokens.stampApiTokenUse(tenantId, tokenId, usedAt);
@@ -95,39 +88,12 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     return this.apiTokens.revokeApiToken(tenantId, tokenId, revokedBy, revokedAt);
   }
 
-  recordDerivationProgress(input: {
-    tenantId: string;
-    buildId: string;
-    stageId: string;
-    checkpointId: string;
-    pages: readonly DerivationProgressPage[];
-    at: string;
-  }): Promise<void> {
-    return this.derivationProgressStore.record(input);
-  }
-  derivationProgress(tenantId: string, buildId: string): Promise<DerivationProgressSnapshot> {
-    return this.derivationProgressStore.snapshot(tenantId, buildId);
-  }
-  derivationProgressPage(
-    tenantId: string,
-    buildId: string,
-    documentPath: string
-  ): Promise<DerivationProgressPage | undefined> {
-    return this.derivationProgressStore.pageBody(tenantId, buildId, documentPath);
-  }
-  derivationProgressPages(tenantId: string, stageId: string): Promise<DerivationProgressPage[]> {
-    return this.derivationProgressStore.pagesForStage(tenantId, stageId);
-  }
-  clearDerivationProgress(tenantId: string, stageId: string): Promise<void> {
-    return this.derivationProgressStore.clear(tenantId, stageId);
-  }
-
   runInTenantScope<T>(tenantId: string, operation: () => Promise<T>): Promise<T> {
     return this.database.runInTenantScope(tenantId, operation);
   }
 
-  commitSnapshot(snapshot: EvidenceSnapshot, fence?: ContextWriteFence): Promise<EvidenceCheckpoint> {
-    return this.evidence.commitSnapshot(snapshot, fence);
+  commitSnapshot(snapshot: EvidenceSnapshot): Promise<EvidenceCheckpoint> {
+    return this.evidence.commitSnapshot(snapshot);
   }
   getCheckpoint(checkpointId: string): Promise<EvidenceCheckpoint | undefined> {
     return this.evidence.getCheckpoint(checkpointId);
@@ -154,11 +120,11 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   findSuccessfulRun(cacheKey: string): Promise<DerivationRun | undefined> {
     return this.knowledge.findSuccessfulRun(cacheKey);
   }
-  commitKnowledge(input: KnowledgeCommit, fence?: ContextWriteFence): Promise<DerivationRun> {
-    return this.knowledge.commitKnowledge(input, fence);
+  commitKnowledge(input: KnowledgeCommit): Promise<DerivationRun> {
+    return this.knowledge.commitKnowledge(input);
   }
-  recordFailedRun(run: DerivationRun, fence?: ContextWriteFence): Promise<void> {
-    return this.knowledge.recordFailedRun(run, fence);
+  recordFailedRun(run: DerivationRun): Promise<void> {
+    return this.knowledge.recordFailedRun(run);
   }
   getRun(runId: string): Promise<DerivationRun | undefined> {
     return this.knowledge.getRun(runId);
@@ -200,8 +166,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     return this.knowledge.listCurrentEligibleRevisions(tenantId, repository, checkpointId);
   }
 
-  publish(projection: GenerationProjection, fence?: ContextWriteFence): Promise<IndexGeneration> {
-    return this.projection.publish(projection, fence);
+  publish(projection: GenerationProjection): Promise<IndexGeneration> {
+    return this.projection.publish(projection);
   }
   getGeneration(generationId: string): Promise<GenerationProjection | undefined> {
     return this.projection.getGeneration(generationId);
@@ -558,32 +524,6 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     });
   }
 
-  async latestAdmittedRefSequence(tenantId: string, repository: string, ref: string): Promise<number> {
-    await this.database.initialize();
-    const result = await this.database.queryAs<{ ref_sequence: string }>(
-      "jina_context_coordinator",
-      { tenantIds: [tenantId] },
-      `select greatest(
-         coalesce((
-           select max(ref_sequence)
-           from jina_context.pipeline_builds
-           where tenant_id=$1 and repository=$2 and ref_name=$3
-         ),0),
-         coalesce((
-           select max(ref_sequence)
-           from jina_context.evidence_checkpoints
-           where tenant_id=$1 and repository=$2 and ref_name=$3
-         ),0)
-       )::text ref_sequence`,
-      [tenantId, repository, ref]
-    );
-    const sequence = Number(result.rows[0]!.ref_sequence);
-    if (!Number.isSafeInteger(sequence) || sequence < 0) {
-      throw new Error(`Ref sequence exceeds the supported range for ${repository}@${ref}`);
-    }
-    return sequence;
-  }
-
   async projectionInputFingerprint(tenantId: string, repository: string): Promise<string> {
     await this.database.initialize();
     return this.database.transactionAs("jina_context_coordinator", { tenantIds: [tenantId] }, (client) =>
@@ -677,22 +617,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
                  where checkpoint.tenant_id=delivery.tenant_id
                    and checkpoint.repository=delivery.repository
                    and checkpoint.id=coalesce(delivery.payload->>'checkpointId',delivery.aggregate_id)
-                   and checkpoint.ref_sequence < greatest(
-                     coalesce((
-                       select max(build.ref_sequence)
-                       from jina_context.pipeline_builds build
-                       where build.tenant_id=checkpoint.tenant_id
-                         and build.repository=checkpoint.repository
-                         and build.ref_name=checkpoint.ref_name
-                     ),0),
-                     coalesce((
-                       select max(committed.ref_sequence)
-                       from jina_context.evidence_checkpoints committed
-                       where committed.tenant_id=checkpoint.tenant_id
-                         and committed.repository=checkpoint.repository
-                         and committed.ref_name=checkpoint.ref_name
-                     ),0)
-                   )
+                   and checkpoint.ref_sequence < coalesce((
+                     select max(committed.ref_sequence)
+                     from jina_context.evidence_checkpoints committed
+                     where committed.tenant_id=checkpoint.tenant_id
+                       and committed.repository=checkpoint.repository
+                       and committed.ref_name=checkpoint.ref_name
+                   ),0)
                )
              )
              or (
@@ -710,22 +641,13 @@ export class PostgresContextEngineStore implements ContextEngineStore {
                        and source_checkpoint.repository=revision.repository
                        and source_checkpoint.ref_name=revision.ref_name
                        and source_checkpoint.commit_sha=revision.commit_sha
-                   ),0) < greatest(
-                     coalesce((
-                       select max(build.ref_sequence)
-                       from jina_context.pipeline_builds build
-                       where build.tenant_id=revision.tenant_id
-                         and build.repository=revision.repository
-                         and build.ref_name=revision.ref_name
-                     ),0),
-                     coalesce((
-                       select max(committed.ref_sequence)
-                       from jina_context.evidence_checkpoints committed
-                       where committed.tenant_id=revision.tenant_id
-                         and committed.repository=revision.repository
-                         and committed.ref_name=revision.ref_name
-                     ),0)
-                   )
+                   ),0) < coalesce((
+                     select max(committed.ref_sequence)
+                     from jina_context.evidence_checkpoints committed
+                     where committed.tenant_id=revision.tenant_id
+                       and committed.repository=revision.repository
+                       and committed.ref_name=revision.ref_name
+                   ),0)
                )
              )
            )`,
@@ -874,9 +796,18 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       const invalidated = await client.query(
         `update jina_context.index_generations
          set status='invalidated',invalidated_at=$3
-         where tenant_id=$1 and repository=$2 and status='published'`,
+         where tenant_id=$1 and repository=$2 and status in ('building','published')
+         returning id`,
         [input.tenantId, input.repository, input.createdAt]
       );
+      if (invalidated.rowCount) {
+        await client.query(
+          `delete from jina_context.current_context_board_releases
+           where tenant_id=$1 and repository=$2
+             and release_id=any($3::text[])`,
+          [input.tenantId, input.repository, invalidated.rows.map((row: { id: string }) => row.id)]
+        );
+      }
       await enqueueContextEvent(client, {
         id: contextStableId("event", { erasureId: id }),
         sequence: 1,

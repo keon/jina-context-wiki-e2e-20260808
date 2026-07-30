@@ -39,13 +39,13 @@ For a repository context incident, correlate:
 GitHub delivery
   -> build-context root task
   -> stage task + lease + attempt/write fence
-  -> evidence checkpoint
-  -> derivation run
-  -> index generation
+  -> immutable input/research/page/audit artifact
+  -> certified release
+  -> PageIndex attachment
   -> query trace
 ```
 
-The API response exposes only the query `traceId`; authenticated task and generation
+The API response exposes only the query `traceId`; authenticated task and release
 views provide the remaining operational identities.
 
 ## Live metrics
@@ -76,41 +76,49 @@ Tenant administrators can call `GET /context/metrics`. The response is backed by
 storage and includes:
 
 - `outboxDepthByConsumer` and `oldestPendingAt`;
-- published generation count;
+- published context release count;
 - knowledge-document, fragment, hierarchy-node, and embedding counts;
 - projector name, status, version, checkpoint, and backlog;
 - query count, p95 duration, citation-verification failure count, and surfaced conflict
   count.
 
-`embeddingCount` remains zero while dense retrieval is disabled. A PageIndex-specific
-claim must not be inferred from `hierarchyNodeCount`; hierarchy nodes currently come from
-the deterministic fallback unless generation capability metadata says otherwise.
+`embeddingCount` remains zero while dense retrieval is disabled. Hierarchy nodes come
+from the pinned PageIndex OSS Markdown worker when it is healthy; projector status and
+release artifacts identify a fallback or failed hierarchy build.
 
 Query runs persist bounded telemetry: tenant/repository, principal and request
-fingerprints, selected generation, task kind, selected routes, coverage, degraded
-capabilities, duration, citation failures, and conflict count. Candidate and answer
-citation tables are bounded operational records and must follow retention policy.
+fingerprints, selected release, task kind, selected routes, coverage, degraded
+capabilities, duration, citation failures, and conflict count. Search telemetry records
+selection, not a model-written answer; bounded operational records follow retention
+policy.
 
 ## Required dashboards
 
 A production context dashboard should show:
 
-- stage throughput/failure and p95 duration by `ingest-evidence`, baseline
-  `index-context`, and `derive-knowledge`/enriched publication;
-- derivation input size, prior-document count, re-emitted/retired logical IDs, Codex
-  model/prompt/schema version, first-pass validation failures, repair outcome, and
-  fail-closed count;
+- stage throughput/failure and p95 duration for all thirteen Board topics:
+  `run-context-input-snapshot`, `run-context-research-plan`,
+  `run-context-research`, `run-context-publication-plan`,
+  `run-context-page-write`, `run-context-page-audit`,
+  `run-context-page-repair`, `run-context-source-challenge`,
+  `run-context-task-evaluation`, `run-context-gap-repair`,
+  `run-context-certification`, `run-context-publication`, and
+  `run-context-pageindex`;
+- snapshot size, prior-release inputs, Codex model/prompt/schema version, page-audit
+  failures, repair passes, and fail-closed count;
+- Board graph phase and checkpoint age, planned/completed subjects and pages, gate
+  outcomes, blocking gaps, attempt counts, and terminal failures;
 - lease loss and API polling failures;
-- repository/ref ingestion freshness and latest published generation age;
-- complete/partial checkpoint rate plus Git history count/root status, GitHub pagination
+- repository/ref ingestion freshness and latest published release age;
+- valid/pending/invalid private-checkpoint rate plus Git history count/root status, GitHub pagination
   completion/reason, and omitted-body count from the observation frontier;
 - outbox depth and oldest age by manifest, knowledge-current, lexical, dense, hierarchy,
   structural, identity, ACL, and retention consumer;
-- generation build time and degraded/disabled projector capabilities;
+- release build time and degraded/disabled projection capabilities;
 - query count and p95, route contribution, coverage status, conflict count, and citation
   verification failures;
-- `diagnose` query count, answered/partial/unanswered rate for the maintained real-question
-  corpus, and the missing evidence/retriever categories behind failures;
+- lexical-tree search count, retrieved/no-context rate for the maintained real-query
+  corpus, and exact-title acceptance hit rate;
 - Cloud Run request/instance health and Cloud SQL connections/latency.
 
 Do not combine all projector backlog into one number; ACL/retention lag is more severe
@@ -120,16 +128,16 @@ than an optional dense or hierarchy lag.
 
 Page immediately when:
 
-- an ACL or erasure projector is behind a query-serving generation;
+- an ACL or erasure projector is behind a query-serving release;
 - citation verification failure count becomes nonzero outside a short diagnostic window;
-- a required projector cannot publish or no generation exists for a current ref;
+- a required projector cannot publish or no release exists for a current ref;
 - authoritative-head/commit acceptance or MCP citation verification fails.
 
 Alert at an operational threshold when:
 
 - required outbox age exceeds the freshness SLO;
 - stage failure/repair rates change materially;
-- partial checkpoint rate or a repeated Git/GitHub/body-omission frontier regresses;
+- pending/invalid checkpoint rate or a repeated Git/GitHub/body-omission frontier regresses;
 - derivation latency/cost or validation failures move materially;
 - query p95 or insufficient coverage regresses;
 - rebuild fingerprints diverge for identical input;
@@ -141,7 +149,7 @@ Notification channels are configured in Cloud Monitoring, not in application sou
 
 ```text
 jsonPayload.event="stage.failed"
-jsonPayload.event="stage.completed" AND jsonPayload.topic="run-index-context"
+jsonPayload.event="stage.completed" AND jsonPayload.topic="run-context-pageindex"
 jsonPayload.event="http.request" AND severity>=ERROR
 jsonPayload.event="github.webhook"
 jsonPayload.taskId="<task id>"
@@ -157,7 +165,7 @@ Each release must retain:
 - migration execution;
 - API and both worker health payloads;
 - acceptance build/stage IDs;
-- certified repository/ref/commit and generation ID;
+- certified repository/ref/commit and release ID;
 - HTTP and real MCP citation counts;
 - final outbox depth;
 - evaluation report produced by `pnpm evaluate:context`;

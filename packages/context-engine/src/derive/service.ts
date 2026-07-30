@@ -1,4 +1,5 @@
 import type { DerivationProgressPage } from "./progress.js";
+import type { ContextOrchestrationState } from "./orchestration.js";
 import type { DerivationDetail } from "./verbosity.js";
 import { fingerprint, normalizeIsoTime, stableId } from "../domain/fingerprint.js";
 import type { RefManifestEntry } from "../domain/evidence.js";
@@ -18,7 +19,6 @@ import {
 import { type FocusBundle, EvidenceFocusSelector, selectPriorKnowledge } from "./selector.js";
 import { KNOWLEDGE_OUTPUT_SCHEMA_VERSION, parseKnowledgeGenerationOutput } from "./schema.js";
 import { KnowledgeOutputValidator, KnowledgeValidationError } from "./validator.js";
-import type { ContextWriteFence } from "../workflow/coordinator.js";
 
 export interface PriorKnowledgeRevision {
   revision: KnowledgeDocumentRevision;
@@ -33,9 +33,13 @@ export interface KnowledgeAgentWorkspace {
   /**
    * Pages a previous attempt of this stage finished before it was stopped.
    * Seeded over the prior catalog, because they are newer than it: a retry
-   * resumes the wiki rather than paying for it again.
+   * resumes the context set rather than paying for it again.
    */
   resumedPages?: DerivationProgressPage[];
+  /** The lead agent's last durable plan, restored before a retry starts. */
+  resumedOrchestration?: ContextOrchestrationState;
+  /** Encrypted-at-rest private stage archive, decrypted only by the internal API for this worker. */
+  resumedPrivateState?: Uint8Array;
 }
 
 export interface KnowledgeDocumentGenerationInput {
@@ -63,6 +67,10 @@ export interface KnowledgeDocumentGenerationInput {
    * somebody watching the build wants to see.
    */
   onProgress?: (pages: readonly DerivationProgressPage[]) => Promise<void>;
+  /** Called whenever the lead agent advances its durable research plan. */
+  onOrchestrationProgress?: (state: ContextOrchestrationState) => Promise<void>;
+  /** Opaque private stage archive; the internal API encrypts and tenant-binds it before storage. */
+  onPrivateCheckpoint?: (archive: Uint8Array) => Promise<void>;
 }
 
 export interface KnowledgeDocumentGenerator {
@@ -87,7 +95,6 @@ export class DeriveKnowledgeService {
   async derive(
     checkpointId: string,
     createdAt: string,
-    fence?: ContextWriteFence,
     maximumAttempts = 2,
     repairPresentationFields = false
   ): Promise<DerivationRun> {
@@ -165,7 +172,7 @@ export class DeriveKnowledgeService {
         revisionIds: [],
         createdAt: normalizedCreatedAt
       };
-      await this.knowledgeStore.recordFailedRun(failed, fence);
+      await this.knowledgeStore.recordFailedRun(failed);
       return failed;
     }
     const succeeded: DerivationRun = {
@@ -186,14 +193,11 @@ export class DeriveKnowledgeService {
       revisionIds: validated.revisions.map((revision) => revision.id),
       createdAt: normalizedCreatedAt
     };
-    return this.knowledgeStore.commitKnowledge(
-      {
-        run: succeeded,
-        revisions: validated.revisions,
-        citations: validated.citations
-      },
-      fence
-    );
+    return this.knowledgeStore.commitKnowledge({
+      run: succeeded,
+      revisions: validated.revisions,
+      citations: validated.citations
+    });
   }
   /**
    * Validation that withholds the failing page instead of the catalog.
@@ -203,7 +207,7 @@ export class DeriveKnowledgeService {
    * page's identity suffix was unsupported, and an earlier run published
    * nothing over two bad citations on one page. Under the file contract a page
    * is an independent document; one that fails its checks should be withheld
-   * exactly as an uncitable page already is, not take the wiki down with it.
+   * exactly as an uncitable page already is, not take the context set down with it.
    *
    * Only under the file contract, and only while every diagnostic names a
    * page: a catalog-level complaint still fails the run, and dropping the last

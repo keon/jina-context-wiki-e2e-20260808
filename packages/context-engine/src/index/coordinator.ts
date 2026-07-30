@@ -1,6 +1,5 @@
 import { fingerprint, normalizeIsoTime, stableId } from "../domain/fingerprint.js";
 import type {
-  ContextDocument,
   ContextProjectionConsumer,
   GenerationProjection,
   IndexGeneration,
@@ -15,10 +14,8 @@ import { CurrentKnowledgeProjector } from "./knowledge-current.js";
 import { LexicalProjector } from "./lexical.js";
 import { EXACT_PROJECTOR_VERSION, ExactProjector } from "./exact.js";
 import { ManifestProjector } from "./manifest.js";
-import { StructuralProjector } from "./structural.js";
-import type { ContextWriteFence } from "../workflow/coordinator.js";
 
-export const INDEX_COORDINATOR_VERSION = "context-index-v1";
+export const INDEX_COORDINATOR_VERSION = "context-release-v2";
 
 function versions(): Record<ContextProjectionConsumer, string> {
   return {
@@ -27,7 +24,7 @@ function versions(): Record<ContextProjectionConsumer, string> {
     lexical: "lexical-v2",
     dense: "disabled-v1",
     hierarchy: "hierarchy-v1",
-    structural: "structural-v1",
+    structural: "disabled-derived-only-v1",
     identity: "identity-v1",
     acl: "acl-v1",
     retention: "retention-v1"
@@ -47,13 +44,15 @@ export class IndexContextService {
     private readonly hierarchyIndexer: HierarchyIndexer = new FallbackHierarchyIndexer()
   ) {}
 
-  async index(checkpointId: string, createdAt: string, fence?: ContextWriteFence): Promise<IndexGeneration> {
+  async index(
+    checkpointId: string,
+    createdAt: string,
+    releaseMode: "complete" | "partial" = "complete"
+  ): Promise<IndexGeneration> {
     const checkpoint = await this.store.getCheckpoint(checkpointId);
     if (checkpoint === undefined) throw new Error("Unknown evidence checkpoint");
-    if (
-      checkpoint.refSequence <
-      (await this.store.latestAdmittedRefSequence(checkpoint.tenantId, checkpoint.repository, checkpoint.ref))
-    ) {
+    const latest = await this.store.latestCheckpoint(checkpoint.tenantId, checkpoint.repository, checkpoint.ref);
+    if (latest?.id !== checkpoint.id) {
       throw new Error(`Checkpoint ${checkpoint.id} is superseded for ${checkpoint.repository}@${checkpoint.ref}`);
     }
     const projectionInputFingerprint = await this.store.projectionInputFingerprint(
@@ -69,7 +68,6 @@ export class IndexContextService {
     );
     const evidence = await this.store.listEvidence(checkpointId);
     const manifest = await this.store.listManifest(checkpointId);
-    const structuralFacts = await this.store.listStructuralFacts(checkpointId);
     const scopedLogicalIds = new Set(
       (await this.store.listCheckpointRevisions(checkpoint.tenantId, checkpoint.repository, checkpointId)).map(
         (revision) => revision.logicalId
@@ -85,7 +83,6 @@ export class IndexContextService {
       revisionIds: eligibleRevisions.map((revision) => revision.id).sort(),
       evidenceIds: evidence.map((record) => record.id).sort(),
       manifest: manifest.map((entry) => [entry.path, entry.blobSha]).sort(),
-      structuralFactIds: structuralFacts.map((fact) => fact.id).sort(),
       repositoryAccessFingerprint,
       projectionInputFingerprint
     });
@@ -97,29 +94,6 @@ export class IndexContextService {
       manifest,
       evidence
     });
-    const providerDocuments: ContextDocument[] = evidence
-      .filter((record) => record.anchor.sourceType !== "blob")
-      .map((record) => ({
-        id: stableId("cd", { generationId, sourceId: record.id }),
-        generationId,
-        tenantId: checkpoint.tenantId,
-        repository: checkpoint.repository,
-        ref: checkpoint.ref,
-        commitSha: checkpoint.commitSha,
-        sourceKind: "provider",
-        sourceId: record.id,
-        title: record.title,
-        body: record.body,
-        contextualText: `${record.anchor.sourceType} ${record.title}`,
-        metadata: record.metadata,
-        authorityClass: record.authorityClass,
-        effectiveAclFingerprint: record.aclFingerprint,
-        sourceFingerprint: fingerprint({ anchor: record.anchor, body: record.body }),
-        anchors: [record.anchor],
-        projectorName: "manifest",
-        projectorVersion: "manifest-v1",
-        projectedAt
-      }));
     const citationMap = new Map<string, KnowledgeEvidenceCitation[]>();
     const aclMap = new Map<string, string>();
     for (const revision of eligibleRevisions) {
@@ -149,7 +123,11 @@ export class IndexContextService {
       citations: citationMap,
       aclFingerprints: aclMap
     });
-    const documents = [...manifestOutput.documents, ...providerDocuments, ...knowledge.documents];
+    // Raw repository files and provider observations are immutable evidence, not
+    // context. They remain available to citation validation through the
+    // checkpoint and manifest, but only citation-valid derived revisions enter
+    // any public retrieval projection.
+    const documents = knowledge.documents;
     const exactIndex = new ExactProjector().project(documents, this.store.nativeExactIndex ? ["metadata"] : undefined);
     const exactIndexInputFingerprint = fingerprint({
       projectorVersion: EXACT_PROJECTOR_VERSION,
@@ -163,7 +141,7 @@ export class IndexContextService {
         .sort((left, right) => left.id.localeCompare(right.id))
     });
     const fragments = new LexicalProjector().project(documents);
-    const structuralRelations = new StructuralProjector().project(generationId, structuralFacts);
+    const structuralRelations: GenerationProjection["structuralRelations"] = [];
     let hierarchyNodes: GenerationProjection["hierarchyNodes"] = [];
     let hierarchyStatus: ProjectorStatus = "disabled";
     const probe = await this.hierarchyIndexer.probe();
@@ -208,7 +186,7 @@ export class IndexContextService {
       lexical: "ready",
       dense: "disabled",
       hierarchy: hierarchyStatus,
-      structural: "ready",
+      structural: "skipped",
       identity: "ready",
       acl: "ready",
       retention: "ready"
@@ -281,9 +259,11 @@ export class IndexContextService {
         derivedKnowledge:
           eligibleRevisions.length === 0
             ? "unavailable"
-            : new Set(eligibleRevisions.map((revision) => revision.logicalId)).size === scopedLogicalIds.size
-              ? "available"
-              : "partial",
+            : releaseMode === "partial"
+              ? "partial"
+              : new Set(eligibleRevisions.map((revision) => revision.logicalId)).size === scopedLogicalIds.size
+                ? "available"
+                : "partial",
         dense: "disabled",
         hierarchy: hierarchyStatus === "ready" ? "available" : hierarchyStatus === "failed" ? "failed" : "disabled"
       },
@@ -291,18 +271,15 @@ export class IndexContextService {
       createdAt: projectedAt,
       publishedAt: projectedAt
     };
-    return this.store.publish(
-      {
-        generation,
-        manifest: projectionPayload.manifest,
-        currentKnowledge: projectionPayload.currentKnowledge,
-        documents: projectionPayload.documents,
-        fragments: projectionPayload.fragments,
-        exactIndex: projectionPayload.exactIndex,
-        hierarchyNodes: projectionPayload.hierarchyNodes,
-        structuralRelations: projectionPayload.structuralRelations
-      },
-      fence
-    );
+    return this.store.publish({
+      generation,
+      manifest: projectionPayload.manifest,
+      currentKnowledge: projectionPayload.currentKnowledge,
+      documents: projectionPayload.documents,
+      fragments: projectionPayload.fragments,
+      exactIndex: projectionPayload.exactIndex,
+      hierarchyNodes: projectionPayload.hierarchyNodes,
+      structuralRelations: projectionPayload.structuralRelations
+    });
   }
 }

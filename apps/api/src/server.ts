@@ -1,100 +1,163 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import {
+  BOARD_TASK_HARD_MAX_ATTEMPTS,
+  OperatorRetryRejectedError,
   applyCommand,
+  boardOperatorRetryEligibility,
   findOutboxMessage,
   findTask,
   leaseNextOutboxMessage,
   markOutboxDispatched,
   reduceBoard,
+  releaseOutboxLease,
+  retryFailedBoardTask,
+  retryFailedBoardTasks,
+  retryLeasedOutboxTask,
   renewOutboxLease,
+  isTerminalTaskStatus,
   taskTypeDefinitions,
   type BoardOutboxMessageId,
+  type BoardState,
   type BoardTask,
   type CommandActor,
   type TaskId
 } from "@jina/board";
 import {
-  DeriveKnowledgeService,
-  EvidenceFocusSelector,
-  IndexContextService,
-  IngestEvidenceService,
-  KnowledgeOutputValidator,
+  BoardContextPublicationError,
+  BoardPageIndexAttachmentError,
+  ContextCatalogService,
   MemoryContextEngineStore,
-  MemoryContextPipelineCoordinator,
-  QueryContextService,
-  buildKnowledgeFilePrompt,
   derivationDetailLevels,
-  derivationDetailOrDefault,
+  derivationProgressDocumentPath,
   isDerivationDetail,
-  buildKnowledgePrompt,
-  contextQueueTopics,
-  contextTaskTypeDefinitions,
-  contextTaskTypeDependencies,
-  contextTaskTypeTriggers,
-  contextTaskTypes,
-  evidenceSourceTypes,
-  fingerprint,
-  isContextTaskType,
+  contextBoardTaskTypeDefinitions,
+  contextBoardTaskTypes,
+  contextBoardTopics,
+  contextArtifactKinds,
+  contextArtifactKey,
+  contextArtifactScopePrefix,
+  boardPageIndexAttachmentInputDigest,
+  assertContextPriorReleaseMatches,
+  isContextArtifactKeyInScope,
+  parseCertifiedContextReleaseArtifact,
+  parseContextPriorReleaseSeed,
+  parseContextBoardTaskResult,
+  parseBoardPageIndexTreeArtifact,
+  isContextBoardTaskType,
+  MAX_CONTEXT_OPERATOR_REMEDIATION_PASS,
+  resumeContextGateExhaustion,
+  resumeContextPageExhaustion,
   newId,
-  selectPriorKnowledge,
-  stableId,
   type ApiTokenRecord,
-  type ContextBuild,
+  type ContextArtifactStore,
+  type ContextArtifactRef,
+  type ContextArtifactKind,
   type ContextEngineStore,
-  type ContextPipelineCoordinator,
-  type ContextPipelineStage,
-  type ContextQueueTopic,
-  type ContextWriteFence,
-  type IngestEvidenceInput,
-  type KnowledgeDocumentGenerator,
-  type KnowledgeRevisionEvent,
-  type QueryContextRequest,
+  type BoardContextPublicationTransactionPort,
+  type BoardContextReleaseSeedPort,
+  type BoardPageIndexAttachmentTransactionPort,
   type VerifiedApiToken
 } from "@jina/context-engine";
-import type { ParsedGitHubWebhook } from "@jina/github";
+import type { GitHubWebhookEvent, ParsedGitHubWebhook } from "@jina/github";
 import { isContextTrigger } from "@jina/github";
 import {
   createLogger,
   errorLogFields,
   MetricsRegistry,
   recordHttpRequest,
-  requestTraceContext
+  requestTraceContext,
+  type Logger
 } from "@jina/observability";
 import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/review";
 import { entityId, nowIso } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
+import { admitContextBoardBuild } from "./context-board-admission.js";
+import {
+  applyContextBoardTaskResult,
+  finalizeContextBoardTaskResult,
+  type ContextBoardPostCompletion
+} from "./context-board-runtime.js";
+import { ContextBoardPublicationService } from "./context-board-publication.js";
+import {
+  ContextQuotaExceededError,
+  ContextQuotaInvariantError,
+  DEFAULT_CONTEXT_QUOTA_LIMITS,
+  type ContextQuotaService
+} from "./context-quotas.js";
 import { handleContextMcpRequest } from "./mcp.js";
 import { handleGitHubWebhook } from "./routes/github-webhooks.js";
-import { buildTaskTypeCatalog, type TaskTypeTriggerRule } from "./task-type-catalog.js";
+import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
+const MAX_CONTEXT_BOARD_ARTIFACT_BYTES = 20 * 1024 * 1024;
 const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
-const MAX_CONTEXT_TARGETS_PER_KIND = 100;
-const MAX_CONTEXT_TARGET_LENGTH = 1_000;
+const MAX_CONTEXT_OPERATOR_RETRY_TASKS = 25;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 75 * 60 * 1000;
+const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
-const WORKER_TOPICS = ["run-review", ...Object.values(contextQueueTopics)] as const;
+const WORKER_TOPICS = ["run-review", ...Object.values(contextBoardTopics)] as const;
+const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextBoardTopics));
+const CONTEXT_MODEL_TOPICS = new Set<string>([
+  contextBoardTopics.researchPlan,
+  contextBoardTopics.research,
+  contextBoardTopics.publicationPlan,
+  contextBoardTopics.pageWrite,
+  contextBoardTopics.pageAudit,
+  contextBoardTopics.pageRepair,
+  contextBoardTopics.sourceChallenge,
+  contextBoardTopics.taskEvaluation,
+  contextBoardTopics.gapRepair
+]);
+const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
+  "api_transport",
+  "daytona",
+  "github_rate_limit",
+  "github_response",
+  "github_timeout",
+  "model"
+]);
+const RUNTIME_CONTEXT_TASK_TYPE_DEFINITIONS = contextBoardTaskTypeDefinitions;
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
   readonly tenantId?: string;
   readonly tenantAliases?: readonly string[];
   readonly enableDevEndpoints?: boolean;
+  /**
+   * Allows unauthenticated development requests to derive identity from
+   * x-jina-* headers. Defaults to true only when dev endpoints are enabled.
+   * Set false to expose unsigned dev webhooks while keeping normal auth.
+   */
+  readonly trustDevIdentityHeaders?: boolean;
   readonly simulateRuns?: boolean;
-  readonly seedDemo?: boolean;
   readonly stateStore?: ApiStateStore;
   readonly contextStore?: ContextEngineStore;
-  readonly contextCoordinator?: ContextPipelineCoordinator;
   readonly sharedIdentityResolver?: SharedIdentityResolver;
   readonly internalApiToken?: string;
+  /**
+   * Production-only generation fence. When enabled, every worker lease
+   * mutation must carry the exact release credential and Cloud Run revision
+   * selected in jina_runtime.release_control.
+   */
+  readonly requireWorkerReleaseGate?: boolean;
+  /** Audit actor bound to the internal credential; never taken from request headers. */
+  readonly internalApiPrincipalId?: string;
   readonly contextApiToken?: string;
   readonly contextApiTenantId?: string;
   readonly contextApiPrincipalId?: string;
   readonly tenantAdminPrincipalIds?: readonly string[];
   readonly mcpAllowedOrigins?: readonly string[];
   readonly contextWorkerLeaseMs?: number;
+  readonly contextBoardMaxAttempts?: number;
+  readonly contextArtifactStore?: ContextArtifactStore;
+  readonly contextBoardPublicationTransaction?: BoardContextPublicationTransactionPort;
+  readonly contextBoardReleaseSeedStore?: BoardContextReleaseSeedPort;
+  readonly contextBoardPageIndexAttachmentTransaction?: BoardPageIndexAttachmentTransactionPort;
+  readonly contextQuotaService?: ContextQuotaService;
+  /** Test/embedding override. Production uses the structured service logger. */
+  readonly logger?: Logger;
 }
 
 interface ResolvedRepositoryIdentity {
@@ -135,9 +198,17 @@ export interface ApiStateStore {
   save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean>;
   update<T>(
     operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
-    deliveryId?: string
+    deliveryId?: string,
+    workerRelease?: WorkerReleaseGuard
   ): Promise<{ readonly committed: boolean; readonly result?: T }>;
   close(): Promise<void>;
+}
+
+export interface WorkerReleaseGuard {
+  readonly releaseId: string;
+  readonly credentialSha256: string;
+  readonly service: "jina-context-worker" | "jina-task-worker";
+  readonly revision: string;
 }
 
 interface Principal {
@@ -181,21 +252,12 @@ const API_TOKEN_USE_STAMP_MS = 60_000;
  */
 // Floor: below this no run reaches a first document. Ceiling: the sandbox
 // enforces the same two hours, and the worker lease must outlast it.
-/**
- * How many prior documents travel to a derivation.
- *
- * Under the catalog contract every one of these was spent from the agent's
- * context window, so fifty was a real ceiling. Under the file contract they are
- * seeded onto disk and read only if the agent opens them, and a page that does
- * not travel is a page that silently stops being carried forward -- so the limit
- * that protected the window now just truncates the wiki.
- */
-function priorKnowledgeLimit(): number {
-  return process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true" ? 1_000 : 50;
-}
-
 const MIN_DERIVATION_BUDGET_SECONDS = 300;
-const MAX_DERIVATION_BUDGET_SECONDS = 2 * 60 * 60;
+// The retained Jina cold run demonstrated that a repository-sized Board build
+// needs a three-hour operational envelope. Production acceptance uses the same
+// ceiling; keeping the API at the old two-hour limit would reject the
+// coordinated deployment gate before any work was admitted.
+const MAX_DERIVATION_BUDGET_SECONDS = 3 * 60 * 60;
 const MIN_API_TOKEN_MINUTES = 5;
 const MAX_API_TOKEN_MINUTES = 525_600;
 
@@ -293,6 +355,18 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   if (!Number.isSafeInteger(contextWorkerLeaseMs) || contextWorkerLeaseMs <= 0) {
     throw new Error("contextWorkerLeaseMs must be a positive safe integer");
   }
+  const contextBoardMaxAttempts =
+    config.contextBoardMaxAttempts ??
+    (process.env.CONTEXT_BOARD_MAX_ATTEMPTS?.trim()
+      ? Number(process.env.CONTEXT_BOARD_MAX_ATTEMPTS)
+      : DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS);
+  if (
+    !Number.isSafeInteger(contextBoardMaxAttempts) ||
+    contextBoardMaxAttempts < 1 ||
+    contextBoardMaxAttempts > BOARD_TASK_HARD_MAX_ATTEMPTS
+  ) {
+    throw new Error(`contextBoardMaxAttempts must be between 1 and ${BOARD_TASK_HARD_MAX_ATTEMPTS}`);
+  }
   // A static secret shaped like an issued token would be shadowed by the token
   // branch and could never authenticate, taking the deployment offline. Refuse at
   // construction rather than at the first request.
@@ -301,32 +375,46 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       throw new Error("static API tokens must not use the jina_atk_ prefix reserved for issued tokens");
     }
   }
-  const logger = createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
+  if (config.internalApiToken && config.contextApiToken && config.internalApiToken === config.contextApiToken) {
+    throw new Error("internal and Context API tokens must be distinct");
+  }
+  if (config.internalApiPrincipalId && !normalizedForwardedPrincipal(config.internalApiPrincipalId)) {
+    throw new Error("internalApiPrincipalId must be a recognisable user, tenant or service principal");
+  }
+  if (config.requireWorkerReleaseGate && !config.stateStore) {
+    throw new Error("requireWorkerReleaseGate requires a durable stateStore");
+  }
+  const logger = config.logger ?? createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
   const metrics = new MetricsRegistry();
   const startedAt = nowIso();
-  const contextCoordinator = config.contextCoordinator ?? new MemoryContextPipelineCoordinator();
-  const contextStore = config.contextStore ?? new MemoryContextEngineStore(contextCoordinator);
+  const contextStore = config.contextStore ?? new MemoryContextEngineStore();
+  const contextCatalog = new ContextCatalogService(contextStore);
+  const contextBoardPublisher =
+    config.contextArtifactStore && config.contextBoardPublicationTransaction
+      ? new ContextBoardPublicationService(
+          config.contextArtifactStore,
+          config.contextBoardPublicationTransaction,
+          config.contextQuotaService
+        )
+      : undefined;
 
-  /**
-   * Resolves a presented secret to its principal, or `undefined`. Every failure —
-   * unknown hash, expired, revoked, a store that does not implement verification,
-   * or a lookup that throws — answers identically, so the response never says
-   * which tokens exist or why one stopped working.
-   */
-  async function verifyApiToken(token: string): Promise<Principal | undefined> {
+  async function verifyApiToken(token: string, expectedTenantId?: string): Promise<Principal | undefined> {
     if (!contextStore.verifyApiToken) return undefined;
     const secretHash = createHash("sha256").update(token, "utf8").digest("hex");
     let verified: VerifiedApiToken | undefined;
     try {
-      verified = await contextStore.verifyApiToken(secretHash);
+      verified = await contextStore.verifyApiToken(secretHash, expectedTenantId);
     } catch (error: unknown) {
       // Fail closed. A throw here is a database or role problem, not a credential
       // problem, and 401 is the only answer that cannot accidentally admit
       // anybody. Without this the rejection escapes into the request's catch and
       // the caller gets a 500.
+      // The token store receives a bearer-derived hash. A driver or adapter is
+      // allowed to include bind values in its error text, so this boundary must
+      // not forward the exception message/stack to durable logs.
       logger.warn("api token verification failed", {
         event: "api.token.verify_failed",
-        ...errorLogFields(error)
+        errorName: error instanceof Error ? error.name : "UnknownError"
       });
       return undefined;
     }
@@ -339,6 +427,38 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       scopes: verified.scopes.filter(isContextScope),
       tokenId: verified.tokenId
     };
+  }
+
+  /**
+   * Issued credentials are mutable authorization state. A long Context read
+   * must not keep the authority captured at request admission after its token
+   * is revoked. Re-read the exact bearer after the expensive retrieval and
+   * immediately before its result leaves the API process.
+   *
+   * Static deployment credentials are intentionally excluded: they are config
+   * state and cannot be revoked through the token repository.
+   */
+  async function resultAfterCredentialRevalidation<T>(
+    request: IncomingMessage,
+    principal: Principal,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const result = await operation();
+    if (!principal.tokenId) return result;
+    const authorization = firstHeader(request.headers.authorization);
+    const presented = authorization?.startsWith("Bearer ") ? authorization.slice(7) : undefined;
+    const current =
+      presented && API_TOKEN_PATTERN.test(presented) ? await verifyApiToken(presented, principal.tenantId) : undefined;
+    if (
+      !current ||
+      current.tokenId !== principal.tokenId ||
+      current.tenantId !== principal.tenantId ||
+      current.principalId !== principal.principalId ||
+      !assertedIdentity(request, config, current)
+    ) {
+      throw new ApiError(401, "unauthorized", "unauthorized");
+    }
+    return result;
   }
 
   /**
@@ -376,7 +496,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         await contextStore.migrateTenantAliases(alias, config.tenantId);
       }
     }
-    if (config.seedDemo) await seedDemoContext();
   }
 
   function restore(snapshot: ApiSnapshot): void {
@@ -411,18 +530,34 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (isApiSnapshot(stored)) restore(stored);
   }
 
-  function mutate<T>(operation: () => Promise<T>, deliveryId?: string): Promise<T | undefined> {
+  function mutate<T>(
+    operation: () => Promise<T>,
+    deliveryId?: string,
+    workerRelease?: WorkerReleaseGuard
+  ): Promise<T | undefined> {
     const result = mutations.then(async () => {
       if (!config.stateStore) {
         const value = await operation();
         await persist(deliveryId);
         return value;
       }
-      const updated = await config.stateStore.update(async (stored) => {
-        if (isApiSnapshot(stored)) restore(stored);
-        const value = await operation();
-        return { state: snapshot(), result: value };
-      }, deliveryId);
+      let updated: { readonly committed: boolean; readonly result?: T };
+      try {
+        updated = await config.stateStore.update(
+          async (stored) => {
+            if (isApiSnapshot(stored)) restore(stored);
+            const value = await operation();
+            return { state: snapshot(), result: value };
+          },
+          deliveryId,
+          workerRelease
+        );
+      } catch (error) {
+        if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
+          throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
+        }
+        throw error;
+      }
       if (!updated.committed) {
         await reload();
         return undefined;
@@ -434,34 +569,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       () => undefined
     );
     return result;
-  }
-
-  async function seedDemoContext(): Promise<void> {
-    const tenantId = config.tenantId ?? "default";
-    const repository = "omlabs/example";
-    const commitSha = "d".repeat(40);
-    const body = [
-      "# Demo repository",
-      "",
-      "The webhook service receives GitHub events and creates review tasks.",
-      "",
-      "Use handleWebhook to validate and normalize each delivery."
-    ].join("\n");
-    const checkpoint = await new IngestEvidenceService(contextStore).ingest({
-      tenantId,
-      repository,
-      ref: "main",
-      refSequence: 1,
-      commitSha,
-      files: [{ path: "README.md", blobSha: "b".repeat(40), body, language: "markdown" }],
-      observations: [],
-      aclFingerprint: createHash("sha256").update(`${tenantId}:${repository}`).digest("hex"),
-      observationFrontier: "dev-seed",
-      createdAt: "2026-07-26T00:00:00.000Z",
-      sourceComplete: true
-    });
-    await contextStore.replaceRepositoryAccess(tenantId, "svc:dev", [repository]);
-    await new IndexContextService(contextStore).index(checkpoint.id, "2026-07-26T00:00:01.000Z");
   }
 
   const server = createServer((request, response) => {
@@ -552,9 +659,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         request,
         response,
         buildTaskTypeCatalog(
-          [...taskTypeDefinitions, ...contextTaskTypeDefinitions],
-          [...prReviewTaskTypeDependencies, ...contextTaskTypeDependencies],
-          [...prReviewTaskTypeTriggers, ...contextTriggers()]
+          [...taskTypeDefinitions, ...RUNTIME_CONTEXT_TASK_TYPE_DEFINITIONS],
+          prReviewTaskTypeDependencies,
+          prReviewTaskTypeTriggers
         )
       );
       return;
@@ -587,7 +694,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // which the gate exempts and which therefore lands here and gets 403.
     if (principal.scopes) {
       const required = requiredScope(url.pathname, request.method ?? "GET");
-      if (required === "internal-only" || !principal.scopes.includes(required)) {
+      const allowed =
+        request.method === "POST" && url.pathname === "/mcp"
+          ? principal.scopes.includes("context:query") || principal.scopes.includes("context:read")
+          : required !== "internal-only" && principal.scopes.includes(required);
+      if (!allowed) {
         throw new ApiError(403, "insufficient_scope", "token scope does not permit this route");
       }
     }
@@ -614,6 +725,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (url.pathname === "/mcp") {
       requireBoundPrincipal(principal, config);
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
       const origin = firstHeader(request.headers.origin);
       if (origin && !(config.mcpAllowedOrigins ?? []).includes(origin)) {
         json(response, 403, { error: "forbidden" });
@@ -626,26 +741,67 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await handleContextMcpRequest(
         request,
         response,
-        async (query) =>
-          queryContext(principal, {
-            tenantId: principal.tenantId,
-            principalId: principal.principalId,
-            repository: query.repository,
-            question: query.question,
-            ...(query.ref ? { ref: query.ref } : {}),
-            ...(query.taskKind ? { taskKind: query.taskKind } : {}),
-            ...(query.targets
-              ? {
-                  targets: parseTargets({
-                    paths: query.targets.paths,
-                    symbols: query.targets.symbols,
-                    pullRequests: query.targets.pullRequests,
-                    issues: query.targets.issues
-                  })
-                }
-              : {}),
-            ...(query.timeWindow ? { timeWindow: query.timeWindow } : {})
-          }),
+        {
+          search: async (input) => {
+            requireIssuedTokenScope(principal, "context:query");
+            const repository = requiredRepositoryName(input.repository, "repository");
+            await requireRepositoryAccess(principal, repository);
+            return resultAfterCredentialRevalidation(request, principal, () =>
+              catalogCall(() =>
+                deterministicContextSearch({
+                  ...catalogAccess(principal, repository),
+                  query: input.query,
+                  ...(input.ref ? { ref: input.ref } : {}),
+                  ...(input.releaseId ? { releaseId: input.releaseId } : {}),
+                  ...(input.limit ? { limit: input.limit } : {})
+                })
+              )
+            );
+          },
+          list: async (input) => {
+            requireIssuedTokenScope(principal, "context:read");
+            const repository = requiredRepositoryName(input.repository, "repository");
+            await requireRepositoryAccess(principal, repository);
+            return resultAfterCredentialRevalidation(request, principal, () =>
+              catalogCall(() =>
+                contextCatalog.listContext({
+                  ...catalogAccess(principal, repository),
+                  ...(input.ref ? { ref: input.ref } : {}),
+                  ...(input.releaseId ? { releaseId: input.releaseId } : {})
+                })
+              )
+            );
+          },
+          read: async (input) => {
+            requireIssuedTokenScope(principal, "context:read");
+            const repository = requiredRepositoryName(input.repository, "repository");
+            await requireRepositoryAccess(principal, repository);
+            return resultAfterCredentialRevalidation(request, principal, () =>
+              catalogCall(() =>
+                contextCatalog.readContext({
+                  ...catalogAccess(principal, repository),
+                  document: input.document,
+                  ...(input.ref ? { ref: input.ref } : {}),
+                  ...(input.releaseId ? { releaseId: input.releaseId } : {})
+                })
+              )
+            );
+          },
+          diff: async (input) => {
+            requireIssuedTokenScope(principal, "context:read");
+            const repository = requiredRepositoryName(input.repository, "repository");
+            await requireRepositoryAccess(principal, repository);
+            return resultAfterCredentialRevalidation(request, principal, () =>
+              catalogCall(() =>
+                contextCatalog.diffContext({
+                  ...catalogAccess(principal, repository),
+                  fromReleaseId: input.fromReleaseId,
+                  toReleaseId: input.toReleaseId
+                })
+              )
+            );
+          }
+        },
         body
       );
       return;
@@ -698,43 +854,459 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? requiredPositiveInteger(Number(identity.githubInstallationId), "resolved githubInstallationId")
         : requestedGithubInstallationId;
       if (config.sharedIdentityResolver && !githubInstallationId) throw notFound("repository context not found");
-      const build = await contextCoordinator.createBuild({
+      const buildRepository = identity?.repository ?? repository;
+      const buildRef = optionalString(body.ref) ?? identity?.defaultBranch ?? "main";
+      let newlyReservedBuildId: string | undefined;
+      const admitted = await mutate(async () => {
+        const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
+          tenantId: principal.tenantId,
+          repository: buildRepository,
+          ref: buildRef
+        });
+        const admission = admitContextBoardBuild(intakeState.board, {
+          source: "manual",
+          tenantId: principal.tenantId,
+          repository: buildRepository,
+          ref: buildRef,
+          ...(priorRelease ? { priorRelease } : {}),
+          ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
+          ...(githubInstallationId ? { githubInstallationId } : {}),
+          ...(derivationDetail ? { derivationDetail } : {}),
+          ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
+          requestKey: optionalString(body.requestKey) ?? randomUUID(),
+          now: nowIso()
+        });
+        if (admission.outcome === "created" && config.contextQuotaService) {
+          await config.contextQuotaService.admitBuild({
+            tenantId: principal.tenantId,
+            buildId: admission.build.buildTaskId
+          });
+          newlyReservedBuildId = admission.build.buildTaskId;
+        }
+        intakeState = { ...intakeState, board: admission.state };
+        return admission;
+      });
+      if (!admitted) {
+        if (newlyReservedBuildId && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: newlyReservedBuildId })
+            .catch(() => undefined);
+        }
+        throw new ApiError(409, "conflict", "context build admission raced another update");
+      }
+      if (admitted.outcome === "ignored") throw new Error("manual context build admission was unexpectedly ignored");
+      json(response, admitted.outcome === "created" ? 202 : 200, {
+        build:
+          admitted.outcome === "created"
+            ? publicContextBoardBuild(admitted.state, admitted.build.buildTaskId)
+            : publicContextBoardBuild(admitted.state, admitted.existingBuildTaskId),
+        duplicate: admitted.outcome === "duplicate"
+      });
+      return;
+    }
+    const operatorBatchRetryBuildId = contextBuildRetryRoute(url.pathname);
+    if (request.method === "POST" && operatorBatchRetryBuildId) {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      const requestKey = requiredString(body.requestKey, "requestKey");
+      if (requestKey.length > 240 || !/^[a-zA-Z0-9._:@/-]+$/.test(requestKey)) {
+        throw invalidRequest("requestKey must be at most 240 safe identifier characters");
+      }
+      const reason = requiredString(body.reason, "reason");
+      if (reason.length > 2_000) throw invalidRequest("reason must be at most 2000 characters");
+      if (
+        !Array.isArray(body.taskIds) ||
+        body.taskIds.length === 0 ||
+        body.taskIds.length > MAX_CONTEXT_OPERATOR_RETRY_TASKS
+      ) {
+        throw invalidRequest(`taskIds must contain between 1 and ${MAX_CONTEXT_OPERATOR_RETRY_TASKS} task ids`);
+      }
+      const taskIds = body.taskIds.map((value, index) => {
+        const taskId = requiredString(value, `taskIds[${index}]`);
+        if (taskId.length > 512) throw invalidRequest(`taskIds[${index}] must be at most 512 characters`);
+        return entityId<"task">(taskId);
+      });
+      if (new Set(taskIds).size !== taskIds.length) {
+        throw invalidRequest("taskIds must not contain duplicates");
+      }
+
+      const buildTaskId = entityId<"task">(operatorBatchRetryBuildId) as TaskId;
+      const visibleBuild = contextBoardBuildForPrincipal(
+        intakeState.board,
+        principal.tenantId,
+        operatorBatchRetryBuildId
+      );
+      if (!visibleBuild) throw notFound("build not found");
+      const repository = requiredRepositoryName(visibleBuild.metadata.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const visibleTargets = taskIds.map((taskId) => {
+        const target = findTask(intakeState.board, taskId);
+        if (!target || target.metadata.contextBuildId !== visibleBuild.id || !isContextBoardTaskType(target.type)) {
+          throw notFound("build task not found");
+        }
+        assertContextOperatorRetrySafety(intakeState.board, visibleBuild, target);
+        return target;
+      });
+
+      let quotaResumed = false;
+      let retried;
+      try {
+        retried = await mutate(async () => {
+          const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, operatorBatchRetryBuildId);
+          if (!build) throw notFound("build not found");
+          const targets = taskIds.map((taskId) => {
+            const target = findTask(intakeState.board, taskId);
+            if (!target || target.metadata.contextBuildId !== build.id || !isContextBoardTaskType(target.type)) {
+              throw notFound("build task not found");
+            }
+            assertContextOperatorRetrySafety(intakeState.board, build, target);
+            return target;
+          });
+          const pageTargets = targets.filter((target) => target.type === contextBoardTaskTypes.page);
+          const gateTargets = targets.filter((target) => target.type === contextBoardTaskTypes.certification);
+          if (pageTargets.length > 0 && pageTargets.length !== targets.length) {
+            throw new OperatorRetryRejectedError(
+              "unsafe_graph_state",
+              "page-quality remediation cannot be combined with dispatchable task retry"
+            );
+          }
+          if (pageTargets.length > 1) {
+            throw new OperatorRetryRejectedError(
+              "unsafe_graph_state",
+              "page-quality remediations must be resumed one failed page at a time"
+            );
+          }
+          if (gateTargets.length > 0 && gateTargets.length !== targets.length) {
+            throw new OperatorRetryRejectedError(
+              "unsafe_graph_state",
+              "gate-quality remediation cannot be combined with another retry"
+            );
+          }
+          if (gateTargets.length > 1) {
+            throw new OperatorRetryRejectedError(
+              "unsafe_graph_state",
+              "gate-quality remediation requires exactly one certification target"
+            );
+          }
+          const result =
+            pageTargets.length === 1
+              ? (() => {
+                  const page = pageTargets[0]!;
+                  const recovered = resumeContextPageExhaustion(intakeState.board, {
+                    buildTaskId,
+                    pageTaskId: page.id,
+                    requestKey,
+                    actorId: principal.principalId,
+                    reason,
+                    now: nowIso()
+                  });
+                  const recoveryTaskIds = new Set([recovered.repairTaskId, recovered.auditTaskId]);
+                  return {
+                    state: recovered.state,
+                    replay: recovered.replay,
+                    reopenedTaskIds: recovered.reopenedTaskIds,
+                    nextMessages: recovered.state.outbox.filter(
+                      (message) => recoveryTaskIds.has(message.taskId) && message.status === "pending"
+                    )
+                  };
+                })()
+              : gateTargets.length === 1
+                ? (() => {
+                    const recovered = resumeContextGateExhaustion(intakeState.board, {
+                      buildTaskId,
+                      requestKey,
+                      actorId: principal.principalId,
+                      reason,
+                      now: nowIso()
+                    });
+                    const recoveryTaskIds = new Set([
+                      ...recovered.reopenedTaskIds,
+                      recovered.repairTaskId,
+                      recovered.sourceChallengeTaskId,
+                      recovered.taskEvaluationTaskId
+                    ]);
+                    return {
+                      state: recovered.state,
+                      replay: recovered.replay,
+                      reopenedTaskIds: recovered.reopenedTaskIds,
+                      nextMessages: recovered.state.outbox.filter(
+                        (message) => recoveryTaskIds.has(message.taskId) && message.status === "pending"
+                      )
+                    };
+                  })()
+                : retryFailedBoardTasks(intakeState.board, {
+                    buildTaskId,
+                    taskIds: targets.map((target) => target.id),
+                    requestKey,
+                    actorId: principal.principalId,
+                    reason,
+                    now: nowIso()
+                  });
+          if (!result.replay && config.contextQuotaService) {
+            const quota = await config.contextQuotaService.resumeBuild({
+              tenantId: principal.tenantId,
+              buildId: build.id
+            });
+            quotaResumed = quota.outcome === "admitted";
+          }
+          intakeState = { ...intakeState, board: result.state };
+          return result;
+        });
+      } catch (error) {
+        if (quotaResumed && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: visibleBuild.id })
+            .catch(() => undefined);
+        }
+        if (error instanceof OperatorRetryRejectedError) {
+          throw new ApiError(409, "operator_retry_rejected", error.message);
+        }
+        throw error;
+      }
+      if (!retried) {
+        if (quotaResumed && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: visibleBuild.id })
+            .catch(() => undefined);
+        }
+        throw new ApiError(409, "conflict", "operator retry raced another update");
+      }
+      if (config.contextQuotaService) {
+        await settleTerminalReconciledModelQuotas(
+          config.contextQuotaService,
+          intakeState.board,
+          principal.tenantId,
+          visibleBuild.id
+        );
+      }
+      json(response, retried.replay ? 200 : 202, {
+        accepted: true,
+        duplicate: retried.replay,
+        buildId: visibleBuild.id,
+        taskIds: visibleTargets.map((target) => target.id),
+        tasks: retried.nextMessages.map((message) => ({
+          taskId: message.taskId,
+          attempt: message.payload.attempt,
+          outboxMessageId: message.id
+        })),
+        reopenedTaskIds: retried.reopenedTaskIds
+      });
+      return;
+    }
+    const operatorRetryRoute = contextTaskRetryRoute(url.pathname);
+    if (request.method === "POST" && operatorRetryRoute) {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      const requestKey = requiredString(body.requestKey, "requestKey");
+      if (requestKey.length > 240 || !/^[a-zA-Z0-9._:@/-]+$/.test(requestKey)) {
+        throw invalidRequest("requestKey must be at most 240 safe identifier characters");
+      }
+      const reason = requiredString(body.reason, "reason");
+      if (reason.length > 2_000) throw invalidRequest("reason must be at most 2000 characters");
+
+      const buildTaskId = entityId<"task">(operatorRetryRoute.buildId) as TaskId;
+      const boardTaskId = entityId<"task">(operatorRetryRoute.taskId) as TaskId;
+      const visibleBuild = contextBoardBuildForPrincipal(
+        intakeState.board,
+        principal.tenantId,
+        operatorRetryRoute.buildId
+      );
+      if (!visibleBuild) throw notFound("build not found");
+      const repository = requiredRepositoryName(visibleBuild.metadata.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const visibleTarget = findTask(intakeState.board, boardTaskId);
+      if (
+        !visibleTarget ||
+        visibleTarget.metadata.contextBuildId !== visibleBuild.id ||
+        !isContextBoardTaskType(visibleTarget.type)
+      ) {
+        throw notFound("build task not found");
+      }
+      assertContextOperatorRetrySafety(intakeState.board, visibleBuild, visibleTarget);
+
+      let quotaResumed = false;
+      let retried;
+      try {
+        retried = await mutate(async () => {
+          const build = contextBoardBuildForPrincipal(
+            intakeState.board,
+            principal.tenantId,
+            operatorRetryRoute.buildId
+          );
+          const target = findTask(intakeState.board, boardTaskId);
+          if (
+            !build ||
+            !target ||
+            target.metadata.contextBuildId !== build.id ||
+            !isContextBoardTaskType(target.type)
+          ) {
+            throw notFound("build task not found");
+          }
+          assertContextOperatorRetrySafety(intakeState.board, build, target);
+          const result = retryFailedBoardTask(intakeState.board, {
+            buildTaskId,
+            taskId: boardTaskId,
+            requestKey,
+            actorId: principal.principalId,
+            reason,
+            now: nowIso()
+          });
+          if (!result.replay && config.contextQuotaService) {
+            const quota = await config.contextQuotaService.resumeBuild({
+              tenantId: principal.tenantId,
+              buildId: build.id
+            });
+            quotaResumed = quota.outcome === "admitted";
+          }
+          intakeState = { ...intakeState, board: result.state };
+          return result;
+        });
+      } catch (error) {
+        if (quotaResumed && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: visibleBuild.id })
+            .catch(() => undefined);
+        }
+        if (error instanceof OperatorRetryRejectedError) {
+          throw new ApiError(409, "operator_retry_rejected", error.message);
+        }
+        throw error;
+      }
+      if (!retried) {
+        if (quotaResumed && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: visibleBuild.id })
+            .catch(() => undefined);
+        }
+        throw new ApiError(409, "conflict", "operator retry raced another update");
+      }
+      if (config.contextQuotaService) {
+        await settleTerminalReconciledModelQuotas(
+          config.contextQuotaService,
+          intakeState.board,
+          principal.tenantId,
+          visibleBuild.id
+        );
+      }
+      json(response, retried.replay ? 200 : 202, {
+        accepted: true,
+        duplicate: retried.replay,
+        buildId: visibleBuild.id,
+        taskId: visibleTarget.id,
+        attempt: retried.nextMessage.payload.attempt,
+        outboxMessageId: retried.nextMessage.id,
+        reopenedTaskIds: retried.reopenedTaskIds
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/context/search") {
+      await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
-        repository: identity?.repository ?? repository,
-        ref: optionalString(body.ref) ?? identity?.defaultBranch ?? "main",
-        ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
-        ...(githubInstallationId ? { githubInstallationId } : {}),
-        ...(derivationDetail ? { derivationDetail } : {}),
-        ...(derivationBudgetSeconds ? { derivationBudgetSeconds } : {}),
-        requestKey: optionalString(body.requestKey) ?? randomUUID(),
-        createdAt: nowIso()
+        requestId: quotaRequestId(request)
       });
-      json(response, 202, { build });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context/query") {
       const body = parseJsonObject(await readRawBody(request, MAX_CONTEXT_QUERY_REQUEST_BYTES));
-      const requestValue = parseQueryContextRequest(body, principal);
-      json(response, 200, await queryContext(principal, requestValue));
+      const repository = requiredRepositoryName(body.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const query = requiredString(body.query, "query");
+      if (query.length > 4_000) throw invalidRequest("query must be at most 4000 characters");
+      const limit = body.limit === undefined ? undefined : requiredPositiveInteger(body.limit, "limit");
+      if (limit !== undefined && limit > 25) throw invalidRequest("limit must be at most 25");
+      const result = await resultAfterCredentialRevalidation(request, principal, () =>
+        catalogCall(() =>
+          deterministicContextSearch({
+            ...catalogAccess(principal, repository),
+            query,
+            ...(optionalString(body.ref) ? { ref: optionalString(body.ref)! } : {}),
+            ...(optionalString(body.releaseId) ? { releaseId: optionalString(body.releaseId)! } : {}),
+            ...(limit ? { limit } : {})
+          })
+        )
+      );
+      json(response, 200, result);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/generations") {
-      const repositories = await permittedRepositories(principal);
-      const requestedValue = url.searchParams.get("repository");
-      const requested = requestedValue === null ? undefined : requiredRepositoryName(requestedValue, "repository");
-      if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
-      const selected = requested ? [requested] : repositories;
-      const generations = (
-        await Promise.all(selected.map((repository) => contextStore.listGenerations(principal.tenantId, repository)))
-      )
-        .flat()
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-        .map(publicGeneration);
-      const page = paginateByCreatedAt(generations, url);
-      jsonCacheable(request, response, {
-        generations: page.items,
-        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
+    if (request.method === "GET" && url.pathname === "/context/releases") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
       });
+      const requestedRepository = optionalQuery(url, "repository");
+      const repositories = requestedRepository
+        ? [requiredRepositoryName(requestedRepository, "repository")]
+        : await permittedRepositories(principal);
+      if (requestedRepository) await requireRepositoryAccess(principal, repositories[0]!);
+      const releases = await resultAfterCredentialRevalidation(request, principal, async () => ({
+        // Each catalog preserves its authoritative current pointer before
+        // historical releases. A global timestamp sort would undo that after
+        // an intentional rollback to an older certified release.
+        releases: (
+          await Promise.all(
+            repositories.map((repository) => contextCatalog.listReleases(catalogAccess(principal, repository)))
+          )
+        ).flat()
+      }));
+      json(response, 200, releases);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/list") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      await requireRepositoryAccess(principal, repository);
+      const result = await resultAfterCredentialRevalidation(request, principal, () =>
+        catalogCall(() =>
+          contextCatalog.listContext({
+            ...catalogAccess(principal, repository),
+            ...(optionalQuery(url, "ref") ? { ref: optionalQuery(url, "ref")! } : {}),
+            ...(optionalQuery(url, "releaseId") ? { releaseId: optionalQuery(url, "releaseId")! } : {})
+          })
+        )
+      );
+      json(response, 200, result);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/read") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      await requireRepositoryAccess(principal, repository);
+      const document = requiredString(url.searchParams.get("document"), "document");
+      const result = await resultAfterCredentialRevalidation(request, principal, () =>
+        catalogCall(() =>
+          contextCatalog.readContext({
+            ...catalogAccess(principal, repository),
+            document,
+            ...(optionalQuery(url, "ref") ? { ref: optionalQuery(url, "ref")! } : {}),
+            ...(optionalQuery(url, "releaseId") ? { releaseId: optionalQuery(url, "releaseId")! } : {})
+          })
+        )
+      );
+      json(response, 200, result);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/diff") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      await requireRepositoryAccess(principal, repository);
+      const fromReleaseId = requiredString(url.searchParams.get("fromReleaseId"), "fromReleaseId");
+      const toReleaseId = requiredString(url.searchParams.get("toReleaseId"), "toReleaseId");
+      const result = await resultAfterCredentialRevalidation(request, principal, () =>
+        catalogCall(() =>
+          contextCatalog.diffContext({
+            ...catalogAccess(principal, repository),
+            fromReleaseId,
+            toReleaseId
+          })
+        )
+      );
+      json(response, 200, result);
       return;
     }
     // Builds in flight, so a page can find one to watch. Progress was only
@@ -742,19 +1314,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // just started it -- a webhook build, or one started from another tab, was
     // invisible while it ran.
     if (request.method === "GET" && url.pathname === "/context/builds") {
+      await reload();
       const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
       const activeOnly = url.searchParams.get("status") === "active";
-      const builds = (await contextCoordinator.list(principal.tenantId))
-        .filter((build) => !allowed || allowed.has(build.repository))
-        .filter((build) => !activeOnly || build.status === "active")
+      const builds = intakeState.board.tasks
+        .filter(
+          (task) =>
+            task.type === contextBoardTaskTypes.build &&
+            task.metadata.tenantId === principal.tenantId &&
+            typeof task.metadata.repository === "string" &&
+            (!allowed || allowed.has(task.metadata.repository))
+        )
+        .filter((task) => !activeOnly || !isTerminalTaskStatus(task.status))
+        .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id))
         .slice(0, 50)
-        .map((build) => ({
-          id: build.id,
-          repository: build.repository,
-          ref: build.ref,
-          status: build.status,
-          stages: build.stages.map((stage) => ({ type: stage.type, status: stage.status })),
-          createdAt: build.createdAt
+        .map((task) => ({
+          ...publicContextBoardBuild(intakeState.board, task.id),
+          status: publicContextBuildStatus(task.status),
+          stages: publicContextBoardStages(intakeState.board, task.id)
         }));
       json(response, 200, { builds });
       return;
@@ -765,14 +1342,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     // somebody has actually opened.
     if (request.method === "GET" && url.pathname.startsWith("/context/builds/") && url.pathname.endsWith("/page")) {
       const buildId = url.pathname.slice("/context/builds/".length, -"/page".length);
-      const documentPath = url.searchParams.get("path");
-      if (!buildId || !documentPath) throw invalidRequest("path is required");
-      const build = await contextCoordinator.get(buildId);
-      if (!build || build.tenantId !== principal.tenantId) throw notFound("build not found");
-      await requireRepositoryAccess(principal, build.repository);
-      const page = contextStore.derivationProgressPage
-        ? await contextStore.derivationProgressPage(principal.tenantId, buildId, documentPath)
-        : undefined;
+      const documentPath = requiredDerivationProgressDocumentPath(url.searchParams.get("path"), "path");
+      if (!buildId) throw invalidRequest("build id is required");
+      await reload();
+      const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, buildId);
+      if (!build) throw notFound("build not found");
+      const repository = requiredRepositoryName(build.metadata.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const page = await readContextBoardCheckpointPage(
+        intakeState.board,
+        build,
+        documentPath,
+        config.contextArtifactStore
+      );
       if (!page) throw notFound("page not found");
       json(response, 200, { page });
       return;
@@ -784,240 +1366,34 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (request.method === "GET" && url.pathname.startsWith("/context/builds/") && url.pathname.endsWith("/progress")) {
       const buildId = url.pathname.slice("/context/builds/".length, -"/progress".length);
       if (!buildId) throw notFound("build not found");
-      const build = await contextCoordinator.get(buildId);
+      await reload();
+      const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, buildId);
       // A build id is opaque, so a miss and another tenant's build have to look
       // the same from here.
-      if (!build || build.tenantId !== principal.tenantId) throw notFound("build not found");
-      await requireRepositoryAccess(principal, build.repository);
-      const progress = contextStore.derivationProgress
-        ? await contextStore.derivationProgress(principal.tenantId, buildId)
-        : { buildId, pages: [], updatedAt: undefined };
+      if (!build) throw notFound("build not found");
+      const repository = requiredRepositoryName(build.metadata.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
       json(response, 200, {
         buildId,
-        repository: build.repository,
-        ref: build.ref,
-        status: build.status,
-        stages: build.stages.map((stage: ContextPipelineStage) => ({ type: stage.type, status: stage.status })),
-        pages: progress.pages,
-        ...(progress.updatedAt ? { updatedAt: progress.updatedAt } : {})
+        repository,
+        ref: requiredString(build.metadata.ref, "build ref"),
+        status: publicContextBuildStatus(build.status),
+        ...publicContextBuildFailure(intakeState.board, build),
+        stages: publicContextBoardStages(intakeState.board, build.id),
+        pages: publicContextBoardCheckpointPages(intakeState.board, build.id),
+        ...(isTenantAdmin(principal)
+          ? {
+              retryEligibility: contextBoardOperatorRetryEligibility(intakeState.board, build, nowIso())
+            }
+          : {}),
+        updatedAt: build.updatedAt
       });
       return;
     }
 
-    if (request.method === "GET" && url.pathname.startsWith("/context/generations/")) {
-      const generationId = routeId(url.pathname, "/context/generations/");
-      if (!generationId) throw notFound("context generation not found");
-      const repositories = await permittedRepositories(principal);
-      let projection = await contextStore.getScopedGeneration(principal.tenantId, repositories, generationId);
-      if (
-        !projection ||
-        projection.generation.tenantId !== principal.tenantId ||
-        !repositories.includes(projection.generation.repository)
-      ) {
-        throw notFound("context generation not found");
-      }
-      if (!isTenantAdmin(principal)) {
-        projection = await contextStore.getAuthorizedGeneration(generationId, principal.principalId);
-        if (!projection) throw notFound("context generation not found");
-      }
-      json(response, 200, {
-        generation: {
-          ...publicGeneration(projection.generation),
-          capabilities: projection.generation.capabilities,
-          counts: {
-            manifest: projection.manifest.length,
-            knowledge: projection.currentKnowledge.length,
-            documents: projection.documents.length,
-            fragments: projection.fragments.length,
-            hierarchyNodes: projection.hierarchyNodes.length,
-            structuralRelations: projection.structuralRelations.length
-          }
-        }
-      });
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/context/documents") {
-      const repositories = await permittedRepositories(principal);
-      const requestedValue = url.searchParams.get("repository");
-      const requested = requestedValue === null ? undefined : requiredRepositoryName(requestedValue, "repository");
-      if (requested && !repositories.includes(requested)) throw notFound("repository context not found");
-      const selected = requested ? [requested] : repositories;
-      const revisions = (
-        await Promise.all(
-          selected.map(async (repository) => {
-            const revisions = await contextStore.listRevisions(principal.tenantId, repository);
-            if (isTenantAdmin(principal)) return revisions;
-            const allowed = await allowedKnowledgeRevisionIds(principal, repository);
-            return revisions.filter((revision) => allowed.has(revision.id));
-          })
-        )
-      )
-        .flat()
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-      const page = paginateByCreatedAt(revisions, url);
-      jsonCacheable(request, response, {
-        documents: await Promise.all(
-          page.items.map(async (revision) =>
-            publicKnowledgeSummary(revision, await contextStore.listRevisionEvents(revision.id))
-          )
-        ),
-        ...(page.nextCursor ? { nextCursor: page.nextCursor } : {})
-      });
-      return;
-    }
-    if (request.method === "GET" && url.pathname.startsWith("/context/documents/")) {
-      const revisionId = routeId(url.pathname, "/context/documents/");
-      if (!revisionId) throw notFound("knowledge document not found");
-      const repositories = await permittedRepositories(principal);
-      const revision = await contextStore.getScopedRevision(principal.tenantId, repositories, revisionId);
-      const revisionAllowed =
-        revision !== undefined &&
-        (isTenantAdmin(principal) ||
-          (await allowedKnowledgeRevisionIds(principal, revision.repository)).has(revision.id));
-      if (
-        !revision ||
-        revision.tenantId !== principal.tenantId ||
-        !repositories.includes(revision.repository) ||
-        !revisionAllowed
-      ) {
-        throw notFound("knowledge document not found");
-      }
-      const priorRevision = (await contextStore.listRevisions(revision.tenantId, revision.repository))
-        .filter((candidate) => candidate.logicalId === revision.logicalId && candidate.id !== revision.id)
-        .filter((candidate) => candidate.createdAt <= revision.createdAt)
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || right.id.localeCompare(left.id))[0];
-      json(response, 200, {
-        document: {
-          ...publicKnowledgeSummary(revision, await contextStore.listRevisionEvents(revision.id)),
-          bodyMarkdown: revision.bodyMarkdown,
-          structuredSummary: revision.structuredSummary,
-          scope: revision.scope,
-          citations: await contextStore.listCitations(revision.id),
-          events: await contextStore.listRevisionEvents(revision.id),
-          ...(priorRevision ? { priorRevisionId: priorRevision.id } : {})
-        }
-      });
-      return;
-    }
-    if (request.method === "GET" && url.pathname === "/context/structure") {
-      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
-      await requireRepositoryAccess(principal, repository);
-      const ref = url.searchParams.get("ref")?.trim() || "main";
-      const latest = (await contextStore.listGenerations(principal.tenantId, repository)).find(
-        (generation) => generation.status === "published" && generation.ref === ref
-      );
-      const projection =
-        latest === undefined
-          ? undefined
-          : isTenantAdmin(principal)
-            ? await contextStore.getGeneration(latest.id)
-            : await contextStore.getAuthorizedGeneration(latest.id, principal.principalId);
-      if (!projection) throw notFound("published context generation not found");
-      const path = url.searchParams.get("path")?.toLowerCase();
-      const symbol = url.searchParams.get("symbol")?.toLowerCase();
-      const relations = projection.structuralRelations.filter(
-        (relation) =>
-          (!path || `${relation.from}\n${relation.to}`.toLowerCase().includes(path)) &&
-          (!symbol || `${relation.from}\n${relation.to}`.toLowerCase().includes(symbol))
-      );
-      json(response, 200, { generationId: projection.generation.id, relations });
-      return;
-    }
     if (request.method === "GET" && url.pathname === "/context/metrics") {
       requireTenantAdmin(principal);
       json(response, 200, await contextMetrics(principal.tenantId));
-      return;
-    }
-    if (
-      request.method === "POST" &&
-      url.pathname.startsWith("/context/knowledge/") &&
-      url.pathname.endsWith("/review")
-    ) {
-      requireBoundPrincipal(principal, config);
-      requireTenantAdmin(principal);
-      const revisionId = routeId(url.pathname, "/context/knowledge/", "/review");
-      if (!revisionId) throw notFound("knowledge revision not found");
-      const repositories = await permittedRepositories(principal);
-      const revision = await contextStore.getScopedRevision(principal.tenantId, repositories, revisionId);
-      if (!revision || revision.tenantId !== principal.tenantId) throw notFound("knowledge revision not found");
-      await requireRepositoryAccess(principal, revision.repository);
-      const body = parseJsonObject(await readRawBody(request));
-      const action = requiredString(body.action, "action");
-      const type =
-        action === "accept"
-          ? "reviewed"
-          : action === "reject"
-            ? "rejected"
-            : action === "invalidate"
-              ? "invalidated"
-              : undefined;
-      if (!type) throw invalidRequest("action must be accept, reject, or invalidate");
-      const prior = await contextStore.listRevisionEvents(revisionId);
-      const event: KnowledgeRevisionEvent = {
-        id: stableId("ke", { revisionId, sequence: prior.length + 1, type, actorId: principal.principalId }),
-        revisionId,
-        sequence: prior.length + 1,
-        type,
-        actorId: principal.principalId,
-        reason: optionalString(body.reason) ?? (type === "reviewed" ? "reviewed" : "no reason supplied"),
-        createdAt: nowIso()
-      };
-      const storedEvent = await contextStore.appendRevisionEvent(event);
-      const checkpoint = await contextStore.latestCheckpoint(
-        principal.tenantId,
-        revision.repository,
-        revision.scope.ref
-      );
-      const generation =
-        checkpoint?.commitSha === revision.scope.commitSha
-          ? await new IndexContextService(contextStore).index(checkpoint.id, nowIso())
-          : undefined;
-      json(response, 200, {
-        event: storedEvent,
-        ...(generation ? { generationId: generation.id } : {})
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context/rebuild") {
-      requireTenantAdmin(principal);
-      const body = parseJsonObject(await readRawBody(request));
-      const repository = requiredRepositoryName(body.repository, "repository");
-      const ref = optionalString(body.ref) ?? "main";
-      const checkpoint = await contextStore.latestCheckpoint(principal.tenantId, repository, ref);
-      if (!checkpoint) throw notFound("evidence checkpoint not found");
-      const generation = await new IndexContextService(contextStore).index(checkpoint.id, nowIso());
-      json(response, 202, { generationId: generation.id, status: generation.status });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/context/erasure") {
-      requireTenantAdmin(principal);
-      const body = parseJsonObject(await readRawBody(request));
-      const repository = requiredRepositoryName(body.repository, "repository");
-      await requireRepositoryAccess(principal, repository);
-      const sourceType = requiredString(body.sourceType, "sourceType");
-      if (!evidenceSourceTypes.includes(sourceType as (typeof evidenceSourceTypes)[number])) {
-        throw invalidRequest("unsupported sourceType");
-      }
-      const erased = await contextStore.eraseEvidence({
-        tenantId: principal.tenantId,
-        repository,
-        sourceType: sourceType as (typeof evidenceSourceTypes)[number],
-        sourceId: requiredString(body.sourceId, "sourceId"),
-        actorId: principal.principalId,
-        reason: requiredString(body.reason, "reason"),
-        createdAt: nowIso()
-      });
-      const ref = optionalString(body.ref) ?? "main";
-      const checkpoint = await contextStore.latestCheckpoint(principal.tenantId, repository, ref);
-      const generation = checkpoint
-        ? await new IndexContextService(contextStore).index(checkpoint.id, nowIso())
-        : undefined;
-      json(response, 202, {
-        erasedGenerationCount: erased.erasedGenerationCount,
-        ...(generation
-          ? { generationId: generation.id, status: generation.status }
-          : { status: "awaiting-reingestion" })
-      });
       return;
     }
     if (request.method === "GET" && url.pathname === "/board") {
@@ -1028,9 +1404,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const board = await boardView(principal);
       jsonCacheable(request, response, {
         board,
-        events: intakeState.board.events.filter(
-          (event) => !event.taskId || board.tasks.some((task) => task.id === event.taskId)
-        )
+        events: intakeState.board.events
+          .filter((event) => !event.taskId || board.tasks.some((task) => task.id === event.taskId))
+          .map((event) => publicBoardEvent(intakeState.board, event))
       });
       return;
     }
@@ -1039,188 +1415,226 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       jsonCacheable(
         request,
         response,
-        intakeState.board.events.filter(
-          (event) => !event.taskId || board.tasks.some((task) => task.id === event.taskId)
-        )
+        intakeState.board.events
+          .filter((event) => !event.taskId || board.tasks.some((task) => task.id === event.taskId))
+          .map((event) => publicBoardEvent(intakeState.board, event))
       );
       return;
     }
 
-    if (request.method === "POST" && url.pathname === "/internal/context/ingest") {
-      const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.ingestEvidence);
-      const input = parseIngestInput(body.input, principal.tenantId, lease.build.repository, lease.build.ref);
-      if (input.refSequence !== lease.build.refSequence) throw staleLease();
-      const checkpoint = await new IngestEvidenceService(contextStore).ingest(input, lease.fence);
-      json(response, 200, {
-        effect: "changed",
-        checkpointId: checkpoint.id,
-        commitSha: checkpoint.commitSha,
-        evidenceFingerprint: checkpoint.evidenceFingerprint
-      });
+    const workerCompletionsBuildId = routeId(url.pathname, "/internal/context/builds/", "/worker-completions");
+    if (request.method === "GET" && workerCompletionsBuildId) {
+      // Internal reads are not covered by the generic public-read reload path.
+      // Refresh here so a release gate on another API instance observes the
+      // completion receipts committed by the worker-facing instance.
+      await reload();
+      const build = contextBoardBuildForPrincipal(intakeState.board, principal.tenantId, workerCompletionsBuildId);
+      if (!build) throw notFound("build not found");
+      const repository = requiredRepositoryName(build.metadata.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      json(response, 200, contextWorkerCompletionAttestation(intakeState.board, build));
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/context/derive/prepare") {
-      const body = parseJsonObject(await readRawBody(request));
-      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
-      const checkpointId = requiredString(body.checkpointId, "checkpointId");
-      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
-      const bundle = await new EvidenceFocusSelector(contextStore).select(checkpointId);
-      const [manifest, priorKnowledge] = await Promise.all([
-        contextStore.listManifest(checkpointId),
-        selectPriorKnowledge(contextStore, bundle.checkpoint, priorKnowledgeLimit())
-      ]);
-      // Pages a previous attempt of this same stage already finished. Stage ids
-      // survive redelivery, so a retry resumes from its own checkpoint instead
-      // of paying for the whole wiki again -- the loop lands, it does not
-      // restart.
-      const resumedPages = contextStore.derivationProgressPages
-        ? await contextStore.derivationProgressPages(principal.tenantId, lease.stage.id)
-        : [];
-      json(response, 200, {
-        checkpointId,
-        resumedPages,
-        detail: derivationDetailOrDefault(lease.stage.metadata.derivationDetail),
-        ...(typeof lease.stage.metadata.derivationBudgetSeconds === "number"
-          ? { budgetSeconds: lease.stage.metadata.derivationBudgetSeconds }
-          : {}),
-        prompt:
-          process.env.CONTEXT_DERIVE_DOCUMENT_FILES === "true"
-            ? buildKnowledgeFilePrompt(bundle)
-            : buildKnowledgePrompt(bundle),
-        bundle,
-        manifest,
-        priorKnowledge
-      });
-      return;
-    }
-    // Reported while the run is still going, so a build stopped part way keeps
-    // the pages it had already written and can be watched while it writes them.
-    if (request.method === "POST" && url.pathname === "/internal/context/derive/progress") {
+
+    if (request.method === "POST" && url.pathname === "/internal/context/board/artifacts") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
-      const checkpointId = requiredString(body.checkpointId, "checkpointId");
-      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
-      if (!contextStore.recordDerivationProgress) {
-        json(response, 200, { recorded: 0 });
-        return;
+      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
+      if (!config.contextQuotaService) throw new Error("context artifact quota storage is not configured");
+      if (lease.task.type === contextBoardTaskTypes.publication) {
+        throw invalidRequest("publication output is created only by the authoritative publish operation");
       }
-      const pages = Array.isArray(body.pages) ? body.pages : [];
-      await contextStore.recordDerivationProgress({
+      const kind = requiredString(body.kind, "kind");
+      if (!contextArtifactKinds.includes(kind as ContextArtifactKind)) {
+        throw invalidRequest("unsupported context artifact kind");
+      }
+      const expectedKind = contextBoardArtifactKind(lease.task.type);
+      if (kind !== expectedKind) throw invalidRequest(`task output must use artifact kind ${expectedKind}`);
+      const name = requiredString(body.name, "name");
+      if (!/^[a-z0-9][a-z0-9._-]{0,180}$/.test(name)) throw invalidRequest("artifact name is invalid");
+      const contentType = requiredString(body.contentType, "contentType");
+      if (contentType !== "application/json") {
+        throw invalidRequest("Context Board artifacts must use application/json");
+      }
+      const content = strictBase64(requiredString(body.contentBase64, "contentBase64"), "contentBase64");
+      if (content.byteLength > MAX_CONTEXT_BOARD_ARTIFACT_BYTES) {
+        throw new ApiError(413, "payload_too_large", "Context Board artifact is too large");
+      }
+      const quotaArtifactId = [
+        lease.buildTaskId,
+        lease.task.id,
+        lease.message.payload.attempt,
+        expectedKind,
+        name
+      ].join(":");
+      const quotaReservationId = `${quotaArtifactId}:${fingerprintBytes(content)}`;
+      await config.contextQuotaService.reserveArtifactStorage({
         tenantId: principal.tenantId,
-        buildId: lease.stage.buildId,
-        stageId: lease.stage.id,
-        checkpointId,
-        pages: pages.map((page) => {
-          const record = parseJsonObjectValue(page, "pages[]");
-          return {
-            documentPath: requiredString(record.documentPath, "pages[].documentPath"),
-            title: requiredString(record.title, "pages[].title"),
-            bodyMarkdown: requiredString(record.bodyMarkdown, "pages[].bodyMarkdown")
-          };
-        }),
-        at: nowIso()
+        reservationId: quotaReservationId,
+        artifactId: quotaArtifactId,
+        bytes: content.byteLength
       });
-      json(response, 200, { recorded: pages.length });
+      const write = {
+        tenantId: principal.tenantId,
+        repository: requiredRepositoryName(lease.task.metadata.repository, "repository"),
+        buildId: lease.buildTaskId,
+        kind: expectedKind,
+        name: `${lease.task.id}-attempt-${lease.message.payload.attempt}-${name}`,
+        contentType,
+        content
+      } as const;
+      const artifact = await config.contextArtifactStore.put(write);
+      if (
+        artifact.key !== contextArtifactKey(write) ||
+        artifact.contentType !== contentType ||
+        artifact.bytes !== content.byteLength ||
+        artifact.sha256 !== fingerprintBytes(content) ||
+        !artifact.uri.trim()
+      ) {
+        throw new Error("context artifact store returned a mismatched immutable reference");
+      }
+      await config.contextQuotaService.commitArtifactStorage({
+        tenantId: principal.tenantId,
+        reservationId: quotaReservationId,
+        artifactId: quotaArtifactId,
+        bytes: content.byteLength
+      });
+      json(response, 201, { artifact });
       return;
     }
-
-    // The pages this stage has checkpointed so far. The worker reads them back
-    // when the sandbox's directory cannot be trusted -- an agent that lost its
-    // context once deleted eleven finished pages and left a stub -- so the
-    // durable copy, not the disk, is what finally gets committed.
-    if (request.method === "POST" && url.pathname === "/internal/context/derive/checkpoint-pages") {
-      const body = parseJsonObject(await readRawBody(request));
-      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
-      const pages = contextStore.derivationProgressPages
-        ? await contextStore.derivationProgressPages(principal.tenantId, lease.stage.id)
-        : [];
-      json(response, 200, { pages });
-      return;
-    }
-
-    if (request.method === "POST" && url.pathname === "/internal/context/derive/commit") {
+    if (request.method === "POST" && url.pathname === "/internal/context/board/publish") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
-      const checkpointId = requiredString(body.checkpointId, "checkpointId");
-      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
-      const rawOutput = body.rawOutput;
-      const repairPresentationFields = body.repairPresentationFields === true;
-      const generator: KnowledgeDocumentGenerator = {
-        name: "daytona-codex",
-        version: "agentic-knowledge-documents-v2",
-        model: process.env.CONTEXT_CODEX_MODEL?.trim() || "openai/gpt-5.4-mini",
-        async generate() {
-          return rawOutput;
-        }
+      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      if (lease.task.type !== contextBoardTaskTypes.publication) {
+        throw invalidRequest("leased task is not a Context publication");
+      }
+      if (!contextBoardPublisher) {
+        throw new Error("board Context publication is not configured");
+      }
+      const certificationArtifact = parseContextArtifactRef(body.certificationArtifact);
+      assertBoardArtifactScope(lease.task, lease.buildTaskId, certificationArtifact);
+      const commitSha = requiredGitSha(lease.task.metadata.commitSha, "publication commitSha");
+      const messageId = requiredString(body.messageId, "messageId");
+      const result = await contextBoardPublisher.publish({
+        scope: {
+          tenantId: principal.tenantId,
+          repository: requiredRepositoryName(lease.task.metadata.repository, "repository"),
+          ref: requiredString(lease.task.metadata.ref, "publication ref"),
+          refSequence: requiredPositiveInteger(lease.task.metadata.refSequence, "publication refSequence"),
+          commitSha,
+          buildId: lease.buildTaskId
+        },
+        lease: {
+          taskId: lease.task.id,
+          messageId,
+          attempt: lease.message.payload.attempt,
+          leaseId: requiredString(body.leaseId, "leaseId"),
+          writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+          leaseExpiresAt: requiredString(lease.message.leaseExpiresAt, "publication leaseExpiresAt")
+        },
+        certificationArtifact,
+        idempotencyKey: `${lease.task.id}:${certificationArtifact.sha256}`,
+        publishedAt: lease.task.createdAt
+      });
+      json(response, 200, {
+        version: 1,
+        outputArtifact: result.releaseArtifact,
+        releaseId: result.releaseId,
+        publicSnapshotDigest: result.publicSnapshotDigest,
+        publicationInputDigest: result.publicationInputDigest,
+        refSequence: result.refSequence,
+        commitSha: result.commitSha,
+        publishedAt: result.publishedAt
+      });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/board/pageindex/attach") {
+      const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
+      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      if (lease.task.type !== contextBoardTaskTypes.pageIndex) {
+        throw invalidRequest("leased task is not a Context PageIndex attachment");
+      }
+      if (!config.contextArtifactStore || !config.contextBoardPageIndexAttachmentTransaction) {
+        throw new Error("board Context PageIndex attachment is not configured");
+      }
+      const treeArtifactRef = parseContextArtifactRef(body.treeArtifact);
+      assertBoardArtifactScope(lease.task, lease.buildTaskId, treeArtifactRef);
+      if (treeArtifactRef.contentType !== "application/json") {
+        throw invalidRequest("PageIndex tree artifact must be JSON");
+      }
+      const bytes = await config.contextArtifactStore.get(treeArtifactRef);
+      if (bytes.byteLength !== treeArtifactRef.bytes || fingerprintBytes(bytes) !== treeArtifactRef.sha256) {
+        throw invalidRequest("PageIndex tree bytes do not match their immutable artifact reference");
+      }
+      let treeValue: unknown;
+      try {
+        treeValue = JSON.parse(Buffer.from(bytes).toString("utf8")) as unknown;
+      } catch {
+        throw invalidRequest("PageIndex tree artifact is not valid JSON");
+      }
+      const treeArtifact = parseBoardPageIndexTreeArtifact(treeValue);
+      const releaseId = requiredString(body.releaseId, "releaseId");
+      const scope = {
+        tenantId: principal.tenantId,
+        repository: requiredRepositoryName(lease.task.metadata.repository, "repository"),
+        ref: requiredString(lease.task.metadata.ref, "PageIndex ref"),
+        refSequence: requiredPositiveInteger(lease.task.metadata.refSequence, "PageIndex refSequence"),
+        commitSha: requiredGitSha(lease.task.metadata.commitSha, "PageIndex commitSha"),
+        buildId: lease.buildTaskId
       };
-      const service = new DeriveKnowledgeService(
-        new EvidenceFocusSelector(contextStore),
-        generator,
-        contextStore,
-        new KnowledgeOutputValidator(contextStore)
-      );
-      // The remote worker owns the single repair attempt. Each commit request
-      // validates exactly one untrusted model output and records that attempt.
-      const run = await service.derive(checkpointId, nowIso(), lease.fence, 1, repairPresentationFields);
-      // The checkpoint served its purpose the moment the pages exist as
-      // revisions; left behind, a later build of the same stage id would resume
-      // from a wiki that has since moved on.
-      if (run.status === "succeeded" && contextStore.clearDerivationProgress) {
-        await contextStore.clearDerivationProgress(principal.tenantId, lease.stage.id);
-      }
-      const enrichedGeneration =
-        run.status === "succeeded"
-          ? await new IndexContextService(contextStore).index(checkpointId, nowIso(), lease.fence)
-          : undefined;
-      json(response, 200, {
-        status: run.status,
-        runId: run.id,
-        diagnostics: run.diagnostics,
-        revisionIds: run.revisionIds,
-        ...(enrichedGeneration ? { enrichedGenerationId: enrichedGeneration.id } : {})
+      const attachmentInputDigest = boardPageIndexAttachmentInputDigest({
+        scope,
+        releaseId,
+        treeArtifactRef,
+        treeDigest: treeArtifact.metrics.treeDigest,
+        buildDigest: treeArtifact.metrics.buildDigest
       });
+      const result = await config.contextBoardPageIndexAttachmentTransaction.attachPageIndexAtomically({
+        scope,
+        lease: {
+          taskId: lease.task.id,
+          messageId: requiredString(body.messageId, "messageId"),
+          attempt: lease.message.payload.attempt,
+          leaseId: requiredString(body.leaseId, "leaseId"),
+          writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+          leaseExpiresAt: requiredString(lease.message.leaseExpiresAt, "PageIndex leaseExpiresAt")
+        },
+        releaseId,
+        idempotencyKey: `${lease.task.id}:${treeArtifactRef.sha256}`,
+        attachmentInputDigest,
+        treeArtifactRef,
+        treeArtifact,
+        attachedAt: lease.task.createdAt
+      });
+      json(response, 200, { version: 1, outputArtifact: treeArtifactRef, ...result });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/context/index") {
+    if (request.method === "POST" && url.pathname === "/internal/context/board/artifacts/read") {
       const body = parseJsonObject(await readRawBody(request));
-      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.indexContext);
-      const checkpointId = requiredString(body.checkpointId, "checkpointId");
-      if (lease.stage.metadata.checkpointId !== checkpointId) throw staleLease();
-      const generation = await new IndexContextService(contextStore).index(checkpointId, nowIso(), lease.fence);
-      json(response, 200, {
-        effect: "changed",
-        generationId: generation.id,
-        commitSha: generation.commitSha,
-        status: generation.status,
-        capabilities: generation.capabilities
-      });
-      return;
-    }
-    if (request.method === "POST" && url.pathname === "/internal/context/outbox/drain") {
-      const body = parseJsonObject(await readRawBody(request));
-      const limit =
-        typeof body.limit === "number" && Number.isSafeInteger(body.limit)
-          ? Math.max(1, Math.min(body.limit, 100))
-          : 20;
-      const checkpoints = await contextStore.pendingProjectionCheckpoints(principal.tenantId, limit);
-      const processed: string[] = [];
-      for (const checkpointId of checkpoints) {
-        await new IndexContextService(contextStore).index(checkpointId, nowIso());
-        processed.push(checkpointId);
+      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
+      const artifact = parseContextArtifactRef(body.artifact);
+      const priorRelease = assertBoardArtifactReadable(lease.task, lease.buildTaskId, artifact);
+      const content = await config.contextArtifactStore.get(artifact);
+      if (content.byteLength !== artifact.bytes || fingerprintBytes(content) !== artifact.sha256) {
+        throw new Error("context artifact bytes do not match their reference");
       }
-      const backlog = await contextStore.projectionBacklog(principal.tenantId);
+      if (priorRelease) {
+        let releaseValue: unknown;
+        try {
+          releaseValue = JSON.parse(Buffer.from(content).toString("utf8")) as unknown;
+        } catch {
+          throw invalidRequest("prior Context release artifact is not valid JSON");
+        }
+        assertContextPriorReleaseMatches(priorRelease, parseCertifiedContextReleaseArtifact(releaseValue));
+      }
       json(response, 200, {
-        processedCheckpointCount: processed.length,
-        processedCheckpointIds: processed,
-        consumers: Object.entries(backlog).map(([consumer, value]) => ({
-          consumer,
-          pending: value.count,
-          ...(value.oldestAvailableAt ? { oldestAvailableAt: value.oldestAvailableAt } : {})
-        }))
+        artifact,
+        contentBase64: Buffer.from(content).toString("base64")
       });
       return;
     }
+
     if (request.method === "GET" && url.pathname === "/internal/observability") {
       json(response, 200, { service: process.env.K_SERVICE ?? "jina-api", startedAt, metrics: metrics.snapshot() });
       return;
@@ -1274,20 +1688,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function acceptParsedWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
     const identity = await resolveWebhookIdentity(webhook);
     const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
-    if (isContextTrigger(webhook.event)) {
-      const ref = webhook.event.ref.slice("refs/heads/".length);
-      const build = await contextCoordinator.createBuild({
-        tenantId,
-        repository: webhook.repository,
-        ref,
-        commitSha: webhook.event.headSha,
-        ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
-        requestKey: `push:${webhook.event.headSha}:delivery:${deliveryId}`,
-        createdAt: nowIso()
-      });
-      await persist(deliveryId);
-      return { outcome: "created", createdTaskIds: [build.id, ...build.stages.map((stage) => stage.id)] };
-    }
+    let newlyReservedBuildId: string | undefined;
     const result = await mutate(async () => {
       const accepted = ingestGitHubWebhook(intakeState, webhook, {
         deliveryId,
@@ -1296,8 +1697,57 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(identity ? { workspaceLabel: identity.githubAccountLogin, githubAccountId: identity.githubAccountId } : {})
       });
       intakeState = accepted.state;
-      return accepted;
+      const createdTaskIds = [...accepted.createdTaskIds];
+      let contextOutcome: "created" | "duplicate" | "ignored" = "ignored";
+      if (isContextTrigger(webhook.event)) {
+        const contextRepository = identity?.repository ?? webhook.repository;
+        const contextRef = contextTriggerRef(webhook.event, identity?.defaultBranch ?? webhook.repositoryDefaultBranch);
+        const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
+          tenantId,
+          repository: contextRepository,
+          ref: contextRef
+        });
+        const admission = admitContextBoardBuild(intakeState.board, {
+          source: "github",
+          tenantId,
+          repository: contextRepository,
+          ...(priorRelease ? { priorRelease } : {}),
+          ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
+          deliveryId,
+          event: webhook.event,
+          ...((identity?.defaultBranch ?? webhook.repositoryDefaultBranch)
+            ? { defaultBranch: identity?.defaultBranch ?? webhook.repositoryDefaultBranch }
+            : {}),
+          now: nowIso()
+        });
+        if (admission.outcome === "created" && config.contextQuotaService) {
+          await config.contextQuotaService.admitBuild({
+            tenantId,
+            buildId: admission.build.buildTaskId
+          });
+          newlyReservedBuildId = admission.build.buildTaskId;
+        }
+        intakeState = { ...intakeState, board: admission.state };
+        contextOutcome = admission.outcome;
+        if (admission.outcome === "created") {
+          createdTaskIds.push(admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId);
+        }
+      }
+      return {
+        outcome:
+          createdTaskIds.length > 0
+            ? ("created" as const)
+            : accepted.outcome === "duplicate" || contextOutcome === "duplicate"
+              ? ("duplicate" as const)
+              : ("ignored" as const),
+        createdTaskIds
+      };
     }, deliveryId);
+    if (!result && newlyReservedBuildId && config.contextQuotaService) {
+      await config.contextQuotaService
+        .completeBuild({ tenantId, buildId: newlyReservedBuildId })
+        .catch(() => undefined);
+    }
     return result ?? { outcome: "duplicate", createdTaskIds: [] };
   }
 
@@ -1359,8 +1809,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     return tenantId;
   }
 
-  function tokenRequestActor(request: IncomingMessage): string {
-    return normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"])) ?? "svc:api";
+  function tokenRequestActor(): string {
+    return normalizedForwardedPrincipal(config.internalApiPrincipalId) ?? "svc:api";
   }
 
   /**
@@ -1423,17 +1873,24 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     const secret = `jina_atk_${randomBytes(32).toString("base64url")}`;
     const createdAt = nowIso();
-    const token = await store.mintApiToken({
-      id: newId("atk"),
-      tenantId,
-      principalId: principal,
-      name,
-      secretHash: createHash("sha256").update(secret, "utf8").digest("hex"),
-      scopes,
-      createdAt,
-      createdBy: tokenRequestActor(request),
-      expiresAt: new Date(Date.parse(createdAt) + expiresInMinutes * 60_000).toISOString()
-    });
+    let token: ApiTokenRecord;
+    try {
+      token = await store.mintApiToken({
+        id: newId("atk"),
+        tenantId,
+        principalId: principal,
+        name,
+        secretHash: createHash("sha256").update(secret, "utf8").digest("hex"),
+        scopes,
+        createdAt,
+        createdBy: tokenRequestActor(),
+        expiresAt: new Date(Date.parse(createdAt) + expiresInMinutes * 60_000).toISOString()
+      });
+    } catch {
+      // The store has seen the hash at this point. Replace its exception before
+      // the request logger sees it, because adapters may include bind values.
+      throw new ApiError(500, "api_token_storage", "api token storage failed");
+    }
     // The only time the secret exists outside the caller's hands. `writeHead`
     // merges headers already set on the response, so this survives `json`.
     response.setHeader("cache-control", "no-store");
@@ -1458,46 +1915,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const store = requireApiTokenStore();
     const tenantId = tokenRequestTenantId(request);
     if (!tokenId) throw notFound("api token not found");
-    const revoked = await store.revokeApiToken(tenantId, tokenId, tokenRequestActor(request), nowIso());
+    const revoked = await store.revokeApiToken(tenantId, tokenId, tokenRequestActor(), nowIso());
     // A token in another tenant is a 404 rather than an idempotent 200, which
     // would confirm that it exists.
     if (!revoked) throw notFound("api token not found");
     json(response, 200, { token: publicApiToken(revoked) });
-  }
-
-  async function queryContext(principal: Principal, requestValue: QueryContextRequest) {
-    const normalizedRequest = {
-      ...requestValue,
-      repository: requiredRepositoryName(requestValue.repository, "repository")
-    };
-    const allowed = await permittedRepositories(principal);
-    if (!allowed.includes(normalizedRequest.repository)) throw notFound("repository context not found");
-    const startedAt = nowIso();
-    const started = Date.now();
-    const execution = await new QueryContextService(contextStore).queryWithTrace(normalizedRequest);
-    const result = execution.response;
-    const completedAt = nowIso();
-    await contextStore.recordQueryRun({
-      id: result.traceId,
-      tenantId: principal.tenantId,
-      repository: normalizedRequest.repository,
-      principalFingerprint: fingerprint({ tenantId: principal.tenantId, principalId: principal.principalId }),
-      generationId: result.generation.id,
-      requestFingerprint: fingerprint(normalizedRequest),
-      ...(normalizedRequest.taskKind ? { taskKind: normalizedRequest.taskKind } : {}),
-      routes: result.coverage.retrieversUsed,
-      coverageStatus: result.coverage.status,
-      degradedCapabilities: result.generation.derivedKnowledge === "unavailable" ? ["derivedKnowledge"] : [],
-      citationFailureCount: result.answer.startsWith("Synthesis failed citation verification") ? 1 : 0,
-      conflictCount: result.conflicts.length,
-      startedAt,
-      completedAt,
-      durationMs: Math.max(0, Date.now() - started),
-      candidates: execution.telemetry.candidates,
-      citations: execution.telemetry.citations,
-      routeMetrics: execution.telemetry.routeMetrics
-    });
-    return result;
   }
 
   async function contextMetrics(tenantId: string) {
@@ -1532,6 +1954,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       hierarchyNodeCount,
       embeddingCount: 0,
       query: await contextStore.queryMetrics(tenantId),
+      ...(config.contextQuotaService ? { quotas: await config.contextQuotaService.snapshot(tenantId) } : {}),
       projectors: latestGeneration
         ? Object.entries(latestGeneration.projectorStatuses).map(([name, status]) => ({
             name,
@@ -1546,11 +1969,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   async function boardView(principal: Principal) {
     const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
-    const base = tenantBoardView(intakeState, principal.tenantId, allowed);
-    const builds = (await contextCoordinator.list(principal.tenantId)).filter(
-      (build) => !allowed || allowed.has(build.repository)
-    );
-    return mergeContextBuilds(base, builds);
+    return tenantBoardView(intakeState, principal.tenantId, allowed);
   }
 
   async function permittedRepositories(principal: Principal): Promise<string[]> {
@@ -1559,27 +1978,43 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       : contextStore.repositoriesForPrincipal(principal.tenantId, principal.principalId);
   }
 
+  function catalogAccess(principal: Principal, repository: string) {
+    return {
+      tenantId: principal.tenantId,
+      principalId: principal.principalId,
+      repository,
+      tenantAdmin: isTenantAdmin(principal)
+    };
+  }
+
+  async function catalogCall<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        /context (?:document|release).*not found|published context release not found/.test(error.message)
+      ) {
+        throw notFound("context not found");
+      }
+      throw error;
+    }
+  }
+
+  async function deterministicContextSearch(
+    input: Parameters<ContextCatalogService["searchContext"]>[0]
+  ): Promise<Awaited<ReturnType<ContextCatalogService["searchContext"]>>> {
+    return contextCatalog.searchContext(input);
+  }
+
   async function requireRepositoryAccess(principal: Principal, repository: string): Promise<void> {
     if (isTenantAdmin(principal)) return;
     if (!(await permittedRepositories(principal)).includes(repository)) throw notFound("repository context not found");
   }
 
-  async function allowedKnowledgeRevisionIds(principal: Principal, repository: string): Promise<Set<string>> {
-    const generations = await contextStore.listGenerations(principal.tenantId, repository);
-    const allowed = new Set<string>();
-    for (const generation of generations) {
-      if (generation.status !== "published") continue;
-      const projection = await contextStore.getAuthorizedGeneration(generation.id, principal.principalId);
-      for (const document of projection?.documents ?? []) {
-        if (document.sourceRevisionId) allowed.add(document.sourceRevisionId);
-      }
-    }
-    return allowed;
-  }
-
   function isTenantAdmin(principal: Principal): boolean {
     return (
-      (Boolean(config.enableDevEndpoints) && principal.principalId.startsWith("svc:")) ||
+      (trustsDevIdentityHeaders(config) && principal.principalId.startsWith("svc:")) ||
       principal.principalId === `tenant:${principal.tenantId}` ||
       (config.tenantAdminPrincipalIds ?? []).includes(principal.principalId)
     );
@@ -1587,6 +2022,41 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
   function requireTenantAdmin(principal: Principal): void {
     if (!isTenantAdmin(principal)) throw new ApiError(403, "forbidden", "tenant administrator access required");
+  }
+
+  function workerReleaseGuard(body: Record<string, unknown>): WorkerReleaseGuard | undefined {
+    if (!config.requireWorkerReleaseGate) return undefined;
+    const releaseId = requiredString(body.workerReleaseId, "workerReleaseId");
+    const credential = requiredString(body.workerReleaseCredential, "workerReleaseCredential");
+    const service = requiredString(body.workerService, "workerService");
+    const revision = requiredString(body.workerRevision, "workerRevision");
+    if (service !== "jina-context-worker" && service !== "jina-task-worker") {
+      throw invalidRequest("workerService is not a production worker service");
+    }
+    if (!revision.startsWith(`${service}-`)) {
+      throw invalidRequest("workerRevision does not belong to workerService");
+    }
+    return {
+      releaseId,
+      credentialSha256: createHash("sha256").update(credential, "utf8").digest("hex"),
+      service,
+      revision
+    };
+  }
+
+  function requireWorkerServiceForTopics(
+    workerRelease: WorkerReleaseGuard | undefined,
+    topics: readonly string[]
+  ): void {
+    if (!workerRelease) return;
+    const expectedService = topics.every((topic) => topic === "run-review")
+      ? "jina-task-worker"
+      : topics.every((topic) => CONTEXT_BOARD_TOPICS.has(topic))
+        ? "jina-context-worker"
+        : undefined;
+    if (!expectedService || workerRelease.service !== expectedService) {
+      throw new ApiError(409, "worker_release_rejected", "worker service is not allowed to process these topics");
+    }
   }
 
   async function claimWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
@@ -1598,258 +2068,606 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const topics = body.topics.map((topic) => requiredString(topic, "topic"));
     const unsupported = topics.filter((topic) => !WORKER_TOPICS.includes(topic as (typeof WORKER_TOPICS)[number]));
     if (unsupported.length) throw invalidRequest(`unsupported worker topics: ${unsupported.join(", ")}`);
-    const contextTopics = topics.filter(isContextQueueTopic);
+    const workerRelease = workerReleaseGuard(body);
+    requireWorkerServiceForTopics(workerRelease, topics);
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
-    if (contextTopics.length) {
-      const claim = await contextCoordinator.claim({
-        tenantIds: claimTenantIds,
-        workerId,
-        topics: contextTopics,
-        now: nowIso(),
-        leaseExpiresAt: new Date(Date.now() + contextWorkerLeaseMs).toISOString()
-      });
-      if (claim) {
-        json(response, 200, {
-          message: {
-            id: claim.stage.id,
-            topic: claim.stage.topic,
-            leaseId: claim.fence.leaseId,
-            leaseExpiresAt: claim.fence.leaseExpiresAt,
-            attempt: claim.fence.attempt,
-            writeFenceToken: claim.fence.token
-          },
-          task: {
-            id: claim.stage.id,
-            metadata: {
-              tenantId: claim.build.tenantId,
-              repository: claim.build.repository,
-              ref: claim.build.ref,
-              refSequence: claim.build.refSequence,
-              ...claim.stage.metadata
+    let quotaModelTask: { readonly tenantId: string; readonly taskId: string } | undefined;
+    let claimed;
+    try {
+      claimed = await mutate(
+        async () => {
+          const candidateMessageIds = intakeState.board.outbox.flatMap((message) => {
+            const task = findTask(intakeState.board, message.taskId);
+            return task && claimTenantIds.includes(String(task.metadata.tenantId)) ? [message.id] : [];
+          });
+          const quotaDeniedTenantIds = new Set<string>();
+          let quotaDenial: ContextQuotaExceededError | undefined;
+          for (const messageId of candidateMessageIds) {
+            const candidate = findOutboxMessage(intakeState.board, messageId);
+            const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
+            if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
+            const candidateUsesModel = Boolean(config.contextQuotaService) && CONTEXT_MODEL_TOPICS.has(candidate.topic);
+            const candidateTenantId = requiredString(candidateTask.metadata.tenantId, "task tenantId");
+
+            const now = nowIso();
+            const leaseId = randomUUID();
+            const writeFenceToken = randomUUID();
+            const initiallyLeased = leaseNextOutboxMessage(intakeState.board, {
+              topics,
+              messageIds: [messageId],
+              leaseId,
+              writeFenceToken,
+              now,
+              expiresAt: new Date(Date.parse(now) + WORKER_LEASE_MS).toISOString()
+            });
+            if (!initiallyLeased) continue;
+            const leaseDurationMs = CONTEXT_BOARD_TOPICS.has(initiallyLeased.message.topic)
+              ? contextWorkerLeaseMs
+              : WORKER_LEASE_MS;
+            const leasedState = renewOutboxLease(
+              initiallyLeased.state,
+              initiallyLeased.message.id,
+              leaseId,
+              writeFenceToken,
+              now,
+              new Date(Date.parse(now) + leaseDurationMs).toISOString()
+            );
+            const leasedMessage = leasedState ? findOutboxMessage(leasedState, initiallyLeased.message.id) : undefined;
+            if (!leasedState || !leasedMessage) throw new Error("newly claimed worker lease could not be configured");
+            const task = findTask(leasedState, leasedMessage.taskId);
+            if (!task) throw new Error("newly claimed worker task disappeared");
+            if (candidateUsesModel && config.contextQuotaService) {
+              const candidateQuotaModelTask = {
+                tenantId: candidateTenantId,
+                taskId: contextModelQuotaTaskId(task.id, leasedMessage.payload.attempt)
+              };
+              try {
+                await config.contextQuotaService.startModelTask({
+                  ...candidateQuotaModelTask,
+                  reservedTokens: DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens,
+                  recordDenial: !quotaDeniedTenantIds.has(candidateTenantId)
+                });
+              } catch (error) {
+                if (error instanceof ContextQuotaExceededError) {
+                  quotaDeniedTenantIds.add(candidateTenantId);
+                  quotaDenial ??= error;
+                  continue;
+                }
+                throw error;
+              }
+              quotaModelTask = candidateQuotaModelTask;
             }
+            let board = leasedState;
+            if (task.status === "queued") {
+              board = applyCommand(
+                board,
+                { command: "TransitionTask", taskId: task.id, toStatus: "in_progress" },
+                { actor: { type: "run", id: workerId }, now }
+              ).state;
+            }
+            const claimedTask = findTask(board, task.id);
+            if (!claimedTask) throw new Error("newly claimed worker task disappeared");
+            intakeState = { ...intakeState, board };
+            return {
+              message: { ...leasedMessage, attempt: leasedMessage.payload.attempt },
+              task: isContextBoardTaskType(claimedTask.type)
+                ? {
+                    ...claimedTask,
+                    metadata: {
+                      ...claimedTask.metadata,
+                      dependencyResults: contextBoardDependencyResults(board, claimedTask.id)
+                    }
+                  }
+                : claimedTask
+            };
           }
-        });
-        return;
+          if (quotaDenial) throw quotaDenial;
+          return undefined;
+        },
+        undefined,
+        workerRelease
+      );
+    } catch (error) {
+      if (quotaModelTask && config.contextQuotaService) {
+        await config.contextQuotaService.cancelModelTask(quotaModelTask).catch(() => undefined);
       }
+      throw error;
     }
-    if (contextTopics.length === topics.length) {
-      json(response, 204, {});
-      return;
+    if (!claimed && quotaModelTask && config.contextQuotaService) {
+      await config.contextQuotaService.cancelModelTask(quotaModelTask).catch(() => undefined);
     }
-    const requested = topics.filter((topic) => !isContextQueueTopic(topic));
-    const claimed = await mutate(async () => {
-      const taskIds = intakeState.board.tasks
-        .filter((task) => claimTenantIds.includes(String(task.metadata.tenantId)))
-        .map((task) => task.id);
-      const now = nowIso();
-      const leaseId = randomUUID();
-      const leased = leaseNextOutboxMessage(intakeState.board, {
-        topics: requested,
-        taskIds,
-        leaseId,
-        now,
-        expiresAt: new Date(Date.now() + WORKER_LEASE_MS).toISOString()
-      });
-      if (!leased) return undefined;
-      const task = findTask(leased.state, leased.message.taskId);
-      if (!task) return undefined;
-      let board = leased.state;
-      if (task.status === "queued") {
-        board = applyCommand(
-          board,
-          { command: "TransitionTask", taskId: task.id, toStatus: "in_progress" },
-          { actor: { type: "run", id: workerId }, now }
-        ).state;
-      }
-      intakeState = { ...intakeState, board };
-      return { message: leased.message, task: findTask(board, task.id) };
-    });
     json(response, claimed ? 200 : 204, claimed ?? {});
   }
 
   async function renewWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
+    const workerRelease = workerReleaseGuard(body);
     const messageId = requiredString(body.messageId, "messageId");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    if (messageId.startsWith("cs_")) {
-      const located = await findBuildByStage(tenantId, messageId);
-      const activeFence = located?.stages.find((stage) => stage.id === messageId)?.fence;
-      if (
-        !activeFence ||
-        activeFence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
-        activeFence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
-      ) {
-        throw staleLease();
-      }
-      const renewed = await contextCoordinator.renew({
-        tenantId,
-        stageId: messageId,
-        leaseId,
-        now: nowIso(),
-        leaseExpiresAt: new Date(Date.now() + contextWorkerLeaseMs).toISOString()
-      });
-      if (!renewed) throw staleLease();
-      json(response, 200, { accepted: true });
-      return;
-    }
     const id = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
-    const renewed = await mutate(async () => {
-      const message = findOutboxMessage(intakeState.board, id);
-      const task = message ? findTask(intakeState.board, message.taskId) : undefined;
-      if (!task || task.metadata.tenantId !== tenantId) return false;
-      const now = nowIso();
-      const board = renewOutboxLease(
-        intakeState.board,
-        id,
-        leaseId,
-        now,
-        new Date(Date.now() + WORKER_LEASE_MS).toISOString()
-      );
-      if (!board) return false;
-      intakeState = { ...intakeState, board };
-      return true;
-    });
+    const renewed = await mutate(
+      async () => {
+        const message = findOutboxMessage(intakeState.board, id);
+        const task = message ? findTask(intakeState.board, message.taskId) : undefined;
+        if (message) requireWorkerServiceForTopics(workerRelease, [message.topic]);
+        if (
+          !task ||
+          task.metadata.tenantId !== tenantId ||
+          message?.payload.attempt !== requiredPositiveInteger(body.attempt, "attempt")
+        ) {
+          return false;
+        }
+        const now = nowIso();
+        const board = renewOutboxLease(
+          intakeState.board,
+          id,
+          leaseId,
+          requiredString(body.writeFenceToken, "writeFenceToken"),
+          now,
+          new Date(
+            Date.parse(now) +
+              (message && CONTEXT_BOARD_TOPICS.has(message.topic) ? contextWorkerLeaseMs : WORKER_LEASE_MS)
+          ).toISOString()
+        );
+        if (!board) return false;
+        intakeState = { ...intakeState, board };
+        return true;
+      },
+      undefined,
+      workerRelease
+    );
     if (!renewed) throw staleLease();
+    if (config.contextQuotaService) {
+      const message = findOutboxMessage(intakeState.board, id);
+      if (message && CONTEXT_MODEL_TOPICS.has(message.topic)) {
+        const task = findTask(intakeState.board, message.taskId);
+        if (task) {
+          await config.contextQuotaService.renewModelTask({
+            tenantId,
+            taskId: contextModelQuotaTaskId(task.id, message.payload.attempt)
+          });
+        }
+      }
+      if (message) {
+        const task = findTask(intakeState.board, message.taskId);
+        const buildId = task?.metadata.contextBuildId;
+        if (typeof buildId === "string") {
+          await config.contextQuotaService.renewBuild({ tenantId, buildId });
+        }
+      }
+    }
     json(response, 200, { accepted: true });
   }
 
   async function releaseWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
-    const stageId = requiredString(body.messageId, "messageId");
+    const workerRelease = workerReleaseGuard(body);
+    const messageId = entityId<"board_outbox_message">(
+      requiredString(body.messageId, "messageId")
+    ) as BoardOutboxMessageId;
+    const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
     const leaseId = requiredString(body.leaseId, "leaseId");
-    const build = await findBuildByStage(tenantId, stageId);
-    const fence = build?.stages.find((stage) => stage.id === stageId)?.fence;
-    if (
-      !fence ||
-      fence.leaseId !== leaseId ||
-      fence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
-      fence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
-    ) {
-      throw staleLease();
+    const released = await mutate(
+      async () => {
+        const message = findOutboxMessage(intakeState.board, messageId);
+        const task = findTask(intakeState.board, taskId);
+        if (message) requireWorkerServiceForTopics(workerRelease, [message.topic]);
+        const attempt = requiredPositiveInteger(body.attempt, "attempt");
+        const writeFenceToken = requiredString(body.writeFenceToken, "writeFenceToken");
+        const now = nowIso();
+        if (
+          !message ||
+          !task ||
+          message.taskId !== taskId ||
+          message.payload.attempt !== attempt ||
+          task.metadata.tenantId !== tenantId
+        ) {
+          return false;
+        }
+        let board = releaseOutboxLease(intakeState.board, messageId, leaseId, writeFenceToken, now);
+        if (!board) return false;
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId,
+            eventType: message.topic + ".released",
+            payload: { reason: optionalString(body.reason)?.slice(0, 2_000) ?? "worker release" }
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        intakeState = { ...intakeState, board };
+        return true;
+      },
+      undefined,
+      workerRelease
+    );
+    if (!released) throw staleLease();
+    if (config.contextQuotaService) {
+      const message = findOutboxMessage(intakeState.board, messageId);
+      if (message && CONTEXT_MODEL_TOPICS.has(message.topic)) {
+        await config.contextQuotaService.cancelModelTask({
+          tenantId,
+          taskId: contextModelQuotaTaskId(taskId, message.payload.attempt)
+        });
+      }
     }
-    const released = await contextCoordinator.release?.({
-      tenantId,
-      stageId,
-      leaseId,
-      now: nowIso(),
-      reason: optionalString(body.reason) ?? "worker release"
-    });
-    if (released === false) throw staleLease();
     json(response, 200, { accepted: true });
   }
 
   async function completeWork(request: IncomingMessage, response: ServerResponse, tenantId: string): Promise<void> {
     const body = parseJsonObject(await readRawBody(request));
+    const workerRelease = workerReleaseGuard(body);
     const messageId = requiredString(body.messageId, "messageId");
     const taskId = requiredString(body.taskId, "taskId");
     const leaseId = requiredString(body.leaseId, "leaseId");
+    const attempt = requiredPositiveInteger(body.attempt, "attempt");
+    const writeFenceToken = requiredString(body.writeFenceToken, "writeFenceToken");
     const outcome = body.outcome;
-    if (outcome !== "done" && outcome !== "failed") throw invalidRequest("outcome must be done or failed");
-    if (messageId.startsWith("cs_") || taskId.startsWith("cs_")) {
-      if (messageId !== taskId) throw staleLease();
-      const located = await findBuildByStage(tenantId, taskId);
-      const stage = located?.stages.find((candidate) => candidate.id === taskId);
-      if (
-        !stage?.fence ||
-        stage.fence.leaseId !== leaseId ||
-        stage.fence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
-        stage.fence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
-      ) {
-        throw staleLease();
-      }
-      const result = safeResultPayload(body.result);
-      const completed = await contextCoordinator.complete({
-        tenantId,
-        stageId: taskId,
-        fence: stage.fence,
-        outcome: outcome === "done" ? "succeeded" : "failed",
-        now: nowIso(),
-        ...(outcome === "done" ? { metadata: result } : { error: optionalString(body.reason) ?? "worker failed" })
-      });
-      if (!completed) throw staleLease();
-      json(response, 200, { accepted: true });
-      return;
+    if (outcome !== "done" && outcome !== "failed" && outcome !== "retry") {
+      throw invalidRequest("outcome must be done, failed, or retry");
     }
+    const failureReason =
+      outcome === "done"
+        ? undefined
+        : (optionalString(body.reason)?.slice(0, 2_000) ??
+          (outcome === "retry" ? "worker requested retry" : "worker failed"));
+    const failureCategory = outcome === "retry" ? workerFailureCategory(body.failureCategory) : undefined;
+    const retryable =
+      outcome === "retry" && failureCategory !== undefined && RETRYABLE_WORKER_FAILURE_CATEGORIES.has(failureCategory);
+    const terminalOutcome: "done" | "failed" = outcome === "done" ? "done" : "failed";
     const outboxId = entityId<"board_outbox_message">(messageId) as BoardOutboxMessageId;
     const boardTaskId = entityId<"task">(taskId) as TaskId;
-    const completed = await mutate(async () => {
-      const message = findOutboxMessage(intakeState.board, outboxId);
-      const task = findTask(intakeState.board, boardTaskId);
-      const now = nowIso();
+    const currentMessage = findOutboxMessage(intakeState.board, outboxId);
+    const currentTask = findTask(intakeState.board, boardTaskId);
+    const ownsCurrentLease =
+      currentMessage !== undefined &&
+      currentTask !== undefined &&
+      currentMessage.taskId === boardTaskId &&
+      currentMessage.status === "leased" &&
+      currentMessage.leaseId === leaseId &&
+      currentMessage.payload.attempt === attempt &&
+      currentMessage.writeFenceToken === writeFenceToken &&
+      currentTask.metadata.tenantId === tenantId;
+    const isModelCompletion = ownsCurrentLease && CONTEXT_MODEL_TOPICS.has(currentMessage.topic);
+    const modelUsage = body.modelUsage === undefined ? undefined : requiredModelUsage(body.modelUsage);
+    if (ownsCurrentLease && isModelCompletion && outcome === "done" && !modelUsage) {
+      throw invalidRequest("modelUsage is required for successful model-backed topics");
+    }
+    if (ownsCurrentLease && modelUsage && !isModelCompletion) {
+      throw invalidRequest("modelUsage is accepted only for model-backed topics");
+    }
+    const isCompletionReplay =
+      currentMessage !== undefined &&
+      currentTask !== undefined &&
+      currentMessage.taskId === boardTaskId &&
+      currentMessage.status === "dispatched" &&
+      currentMessage.dispatchedLeaseId === leaseId &&
+      currentMessage.payload.attempt === attempt &&
+      currentTask.metadata.tenantId === tenantId &&
+      currentTask.status === terminalOutcome;
+    let verifiedContextResult:
+      | {
+          readonly resultDigest: string;
+        }
+      | undefined;
+    if (
+      terminalOutcome === "done" &&
+      currentTask &&
+      isContextBoardTaskType(currentTask.type) &&
+      (ownsCurrentLease || isCompletionReplay)
+    ) {
+      const parsed = parseContextBoardTaskResult(intakeState.board, currentTask.id, body.result);
+      assertCurrentTaskOutputArtifact(
+        currentTask,
+        requiredString(currentTask.metadata.contextBuildId, "contextBuildId"),
+        attempt,
+        parsed.outputArtifact
+      );
+      if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
+      const content = await config.contextArtifactStore.get(parsed.outputArtifact);
       if (
-        !message ||
-        !task ||
-        message.taskId !== boardTaskId ||
-        message.status !== "leased" ||
-        message.leaseId !== leaseId ||
-        task.metadata.tenantId !== tenantId
+        content.byteLength !== parsed.outputArtifact.bytes ||
+        fingerprintBytes(content) !== parsed.outputArtifact.sha256
       ) {
-        return false;
+        throw invalidRequest("completion artifact bytes do not match their immutable reference");
       }
-      let board = markOutboxDispatched(intakeState.board, message.id, now);
-      board = applyCommand(
-        board,
-        {
-          command: "CommentTask",
-          taskId: boardTaskId,
-          eventType: outcome === "failed" ? `${message.topic}.failed` : completionEventType(message.topic),
-          payload:
-            outcome === "failed"
-              ? { reason: optionalString(body.reason)?.slice(0, 2_000) ?? "worker failed" }
-              : safeResultPayload(body.result)
-        },
-        { actor: RUN_ACTOR, now }
-      ).state;
-      board = applyCommand(
-        board,
-        { command: "TransitionTask", taskId: boardTaskId, toStatus: outcome },
-        { actor: RUN_ACTOR, now }
-      ).state;
-      intakeState = { ...intakeState, board: reduceBoard(board, now) };
-      return true;
-    });
+      verifiedContextResult = {
+        resultDigest: fingerprintBytes(Buffer.from(JSON.stringify(parsed), "utf8"))
+      };
+    }
+    const completed = await mutate(
+      async () => {
+        const message = findOutboxMessage(intakeState.board, outboxId);
+        const task = findTask(intakeState.board, boardTaskId);
+        if (message) requireWorkerServiceForTopics(workerRelease, [message.topic]);
+        const now = nowIso();
+        if (retryable && message && task && task.metadata.tenantId === tenantId) {
+          const retried = retryLeasedOutboxTask(intakeState.board, {
+            messageId: outboxId,
+            taskId: boardTaskId,
+            leaseId,
+            writeFenceToken,
+            attempt,
+            maxAttempts: contextBoardMaxAttempts,
+            now,
+            diagnostic: {
+              category: failureCategory,
+              reason: failureReason!
+            }
+          });
+          if (!retried) return undefined;
+          if (retried.replay) {
+            assertModelUsageReplay(
+              findModelUsageReceipt(retried.state, message.id, task.id, message.payload.attempt, "retry")?.payload,
+              modelUsage
+            );
+          }
+          const modelTaskId = CONTEXT_MODEL_TOPICS.has(message.topic)
+            ? contextModelQuotaTaskId(task.id, message.payload.attempt)
+            : undefined;
+          const retryState = retried.replay
+            ? retried.state
+            : applyCommand(
+                retried.state,
+                {
+                  command: "CommentTask",
+                  taskId: task.id,
+                  eventType: "task.model_usage_recorded",
+                  payload: {
+                    messageId: message.id,
+                    attempt: message.payload.attempt,
+                    outcome: "retry",
+                    ...modelUsageReceipt(modelUsage)
+                  }
+                },
+                { actor: RUN_ACTOR, now }
+              ).state;
+          const buildId =
+            isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+              ? task.metadata.contextBuildId
+              : undefined;
+          const build = buildId ? findTask(retryState, entityId<"task">(buildId)) : undefined;
+          intakeState = { ...intakeState, board: retryState };
+          return {
+            accepted: true,
+            replay: retried.replay,
+            ...(buildId ? { buildId } : {}),
+            buildTerminal: Boolean(retried.terminal && buildId && build && isTerminalTaskStatus(build.status)),
+            ...(modelTaskId ? { modelTaskId } : {})
+          };
+        }
+        const completionReceipt =
+          message !== undefined &&
+          task !== undefined &&
+          message.taskId === boardTaskId &&
+          message.status === "dispatched" &&
+          message.dispatchedLeaseId === leaseId &&
+          message.payload.attempt === attempt &&
+          task.metadata.tenantId === tenantId &&
+          task.status === terminalOutcome &&
+          findWorkerCompletionReceipt(intakeState.board, message.id, task.id, attempt, terminalOutcome);
+        if (completionReceipt) {
+          if (
+            workerRelease &&
+            (completionReceipt.payload?.workerReleaseId !== workerRelease.releaseId ||
+              completionReceipt.payload.workerService !== workerRelease.service ||
+              completionReceipt.payload.workerRevision !== workerRelease.revision)
+          ) {
+            throw new ApiError(
+              409,
+              "completion_replay_conflict",
+              "replayed worker completion changed its release identity"
+            );
+          }
+          const messageIsModel = CONTEXT_MODEL_TOPICS.has(message.topic);
+          if (messageIsModel && terminalOutcome === "done" && !modelUsage) {
+            throw invalidRequest("modelUsage is required for successful model-backed topics");
+          }
+          if (modelUsage && !messageIsModel) {
+            throw invalidRequest("modelUsage is accepted only for model-backed topics");
+          }
+          assertModelUsageReplay(completionReceipt.payload, modelUsage);
+          const modelTaskId = messageIsModel ? contextModelQuotaTaskId(task.id, message.payload.attempt) : undefined;
+          if (
+            isContextBoardTaskType(task.type) &&
+            completionReceipt.payload?.resultDigest !== verifiedContextResult?.resultDigest
+          ) {
+            throw new ApiError(409, "completion_replay_conflict", "replayed worker completion changed its result");
+          }
+          const buildId =
+            isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+              ? task.metadata.contextBuildId
+              : undefined;
+          const build = buildId ? findTask(intakeState.board, entityId<"task">(buildId)) : undefined;
+          return {
+            accepted: true,
+            replay: true,
+            ...(buildId ? { buildId } : {}),
+            buildTerminal: Boolean(build && isTerminalTaskStatus(build.status)),
+            ...(modelTaskId ? { modelTaskId } : {})
+          };
+        }
+        if (
+          !message ||
+          !task ||
+          message.taskId !== boardTaskId ||
+          message.status !== "leased" ||
+          message.leaseId !== leaseId ||
+          message.payload.attempt !== attempt ||
+          message.writeFenceToken !== writeFenceToken ||
+          task.metadata.tenantId !== tenantId
+        ) {
+          return undefined;
+        }
+        const messageIsModel = CONTEXT_MODEL_TOPICS.has(message.topic);
+        if (messageIsModel && terminalOutcome === "done" && !modelUsage) {
+          throw invalidRequest("modelUsage is required for successful model-backed topics");
+        }
+        if (modelUsage && !messageIsModel) {
+          throw invalidRequest("modelUsage is accepted only for model-backed topics");
+        }
+        let board = intakeState.board;
+        let completionPayload: Record<string, unknown>;
+        let postCompletion: ContextBoardPostCompletion | undefined;
+        if (terminalOutcome === "done" && isContextBoardTaskType(task.type)) {
+          const applied = applyContextBoardTaskResult(board, boardTaskId, body.result, now);
+          board = applied.state;
+          completionPayload = applied.result;
+          postCompletion = applied.postCompletion;
+        } else {
+          completionPayload =
+            terminalOutcome === "failed"
+              ? {
+                  reason: failureReason!,
+                  ...(failureCategory ? { failureCategory } : {})
+                }
+              : safeResultPayload(body.result);
+        }
+        board = markOutboxDispatched(board, message.id, now);
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: boardTaskId,
+            eventType: terminalOutcome === "failed" ? `${message.topic}.failed` : completionEventType(message.topic),
+            payload: completionPayload
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        board = applyCommand(
+          board,
+          {
+            command: "CommentTask",
+            taskId: boardTaskId,
+            eventType: "task.worker_completion_recorded",
+            payload: {
+              messageId: message.id,
+              attempt: message.payload.attempt,
+              outcome: terminalOutcome,
+              ...(workerRelease
+                ? {
+                    workerReleaseId: workerRelease.releaseId,
+                    workerService: workerRelease.service,
+                    workerRevision: workerRelease.revision
+                  }
+                : {}),
+              ...(verifiedContextResult ? { resultDigest: verifiedContextResult.resultDigest } : {}),
+              ...modelUsageReceipt(modelUsage)
+            }
+          },
+          { actor: RUN_ACTOR, now }
+        ).state;
+        const transitioned = applyCommand(
+          board,
+          {
+            command: "TransitionTask",
+            taskId: boardTaskId,
+            toStatus: terminalOutcome
+          },
+          { actor: RUN_ACTOR, now }
+        );
+        if (!transitioned.accepted) {
+          throw new Error(
+            `worker completion transition was rejected: ${transitioned.rejection?.reason ?? "unknown reason"}`
+          );
+        }
+        board = transitioned.state;
+        if (postCompletion) {
+          board = finalizeContextBoardTaskResult(board, postCompletion, now);
+        }
+        const reduced = reduceBoard(board, now);
+        const buildId =
+          isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+            ? task.metadata.contextBuildId
+            : undefined;
+        const build = buildId ? findTask(reduced, entityId<"task">(buildId)) : undefined;
+        const modelTaskId = messageIsModel ? contextModelQuotaTaskId(task.id, message.payload.attempt) : undefined;
+        intakeState = { ...intakeState, board: reduced };
+        return {
+          accepted: true,
+          ...(buildId ? { buildId } : {}),
+          buildTerminal: Boolean(buildId && build && isTerminalTaskStatus(build.status)),
+          ...(modelTaskId ? { modelTaskId } : {})
+        };
+      },
+      undefined,
+      workerRelease
+    );
     if (!completed) throw staleLease();
+    if ("modelTaskId" in completed && completed.modelTaskId && config.contextQuotaService) {
+      await settleContextModelQuota(config.contextQuotaService, {
+        tenantId,
+        taskId: completed.modelTaskId,
+        ...(modelUsage ? { modelUsage } : {})
+      });
+    }
+    if ("buildId" in completed && completed.buildId && config.contextQuotaService) {
+      await settleTerminalReconciledModelQuotas(
+        config.contextQuotaService,
+        intakeState.board,
+        tenantId,
+        completed.buildId
+      );
+    }
+    if (completed.buildTerminal && "buildId" in completed && completed.buildId) {
+      await config.contextQuotaService?.completeBuild({
+        tenantId,
+        buildId: completed.buildId
+      });
+    }
     json(response, 200, { accepted: true });
   }
 
-  async function requireLeasedContextStage(
+  async function requireLeasedContextBoardTask(
     tenantId: string,
-    body: Record<string, unknown>,
-    topic: ContextQueueTopic
-  ): Promise<{ build: ContextBuild; stage: ContextPipelineStage; fence: ContextWriteFence }> {
-    const taskId = requiredString(body.taskId, "taskId");
-    if (requiredString(body.messageId, "messageId") !== taskId) throw staleLease();
+    body: Record<string, unknown>
+  ): Promise<{
+    task: BoardTask;
+    message: BoardState["outbox"][number];
+    buildTaskId: string;
+  }> {
+    await reload();
+    const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
+    const messageId = entityId<"board_outbox_message">(
+      requiredString(body.messageId, "messageId")
+    ) as BoardOutboxMessageId;
+    const task = findTask(intakeState.board, taskId);
+    const message = findOutboxMessage(intakeState.board, messageId);
+    const attempt = requiredPositiveInteger(body.attempt, "attempt");
     const leaseId = requiredString(body.leaseId, "leaseId");
-    const build = await findBuildByStage(tenantId, taskId);
-    const stage = build?.stages.find((candidate) => candidate.id === taskId);
+    const writeFenceToken = requiredString(body.writeFenceToken, "writeFenceToken");
     if (
-      !build ||
-      !stage?.fence ||
-      stage.topic !== topic ||
-      stage.fence.leaseId !== leaseId ||
-      stage.fence.attempt !== requiredPositiveInteger(body.attempt, "attempt") ||
-      stage.fence.token !== requiredString(body.writeFenceToken, "writeFenceToken")
+      !task ||
+      !message ||
+      !isContextBoardTaskType(task.type) ||
+      task.kind !== "dispatchable" ||
+      task.metadata.tenantId !== tenantId ||
+      message.taskId !== task.id ||
+      message.status !== "leased" ||
+      message.payload.attempt !== attempt ||
+      message.leaseId !== leaseId ||
+      message.writeFenceToken !== writeFenceToken ||
+      !message.leaseExpiresAt ||
+      message.leaseExpiresAt <= nowIso()
     ) {
       throw staleLease();
     }
-    await requireFence(tenantId, stage.fence);
-    return { build, stage, fence: stage.fence };
-  }
-
-  async function requireFence(tenantId: string, fence: ContextWriteFence): Promise<void> {
-    if (!(await contextCoordinator.validateWriteFence({ tenantId, fence, now: nowIso() }))) throw staleLease();
-  }
-
-  async function findBuildByStage(tenantId: string, stageId: string): Promise<ContextBuild | undefined> {
-    return (await contextCoordinator.list(tenantId)).find((build) =>
-      build.stages.some((stage) => stage.id === stageId)
-    );
+    const buildTaskId = requiredString(task.metadata.contextBuildId, "contextBuildId");
+    const build = findTask(intakeState.board, entityId<"task">(buildTaskId));
+    if (
+      !build ||
+      build.type !== contextBoardTaskTypes.build ||
+      build.metadata.tenantId !== tenantId ||
+      build.metadata.repository !== task.metadata.repository
+    ) {
+      throw staleLease();
+    }
+    return { task, message, buildTaskId };
   }
 
   async function drainOneSimulatedRun(): Promise<void> {
-    const message = intakeState.board.outbox.find(
-      (candidate) => candidate.status === "pending" && !isContextQueueTopic(candidate.topic)
-    );
+    const message = intakeState.board.outbox.find((candidate) => candidate.status === "pending");
     if (!message) return;
     let board = markOutboxDispatched(intakeState.board, message.id, nowIso());
     const task = findTask(board, message.taskId);
@@ -1883,6 +2701,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   return server;
 }
 
+function optionalQuery(url: URL, name: string): string | undefined {
+  const value = url.searchParams.get(name)?.trim();
+  return value ? value : undefined;
+}
+
 async function authenticatedPrincipal(
   request: IncomingMessage,
   config: ApiServerConfig,
@@ -1901,7 +2724,7 @@ async function authenticatedPrincipal(
     const principal = await verifyApiToken(presented);
     return principal && assertedIdentity(request, config, principal);
   }
-  if (config.enableDevEndpoints) {
+  if (trustsDevIdentityHeaders(config)) {
     return {
       tenantId: firstHeader(request.headers["x-jina-tenant-id"]) ?? config.tenantId ?? "default",
       principalId: normalizedForwardedPrincipal(firstHeader(request.headers["x-jina-principal-id"])) ?? "svc:dev",
@@ -1988,15 +2811,30 @@ function assertedIdentity(
 }
 
 function requireBoundPrincipal(principal: Principal, config: ApiServerConfig): void {
-  if (!config.enableDevEndpoints && !principal.forwarded) {
+  if (!trustsDevIdentityHeaders(config) && !principal.forwarded) {
     throw new ApiError(401, "bound_principal_required", "a bound principal is required");
   }
+}
+
+function trustsDevIdentityHeaders(config: ApiServerConfig): boolean {
+  return Boolean(config.enableDevEndpoints && (config.trustDevIdentityHeaders ?? true));
 }
 
 function hasInternalApiCredential(request: IncomingMessage, config: ApiServerConfig): boolean {
   return Boolean(
     config.internalApiToken && firstHeader(request.headers.authorization) === `Bearer ${config.internalApiToken}`
   );
+}
+
+/**
+ * Static credentials have their fixed union decided during authentication.
+ * Issued tokens carry an explicit row-owned scope set, so each MCP tool applies
+ * the same query/read distinction as its HTTP counterpart.
+ */
+function requireIssuedTokenScope(principal: Principal, required: ContextScope): void {
+  if (principal.scopes && !principal.scopes.includes(required)) {
+    throw new ApiError(403, "insufficient_scope", "token scope does not permit this tool");
+  }
 }
 
 /**
@@ -2010,19 +2848,23 @@ function hasInternalApiCredential(request: IncomingMessage, config: ApiServerCon
  */
 function requiredScope(pathname: string, method: string): ContextScope | "internal-only" {
   if (method === "POST") {
-    if (pathname === "/mcp" || pathname === "/context/query") return "context:query";
-    if (pathname === "/context/build" || pathname === "/context/rebuild") return "context:build";
-    if (pathname === "/context/erasure") return "context:admin";
-    if (pathname.startsWith("/context/knowledge/") && pathname.endsWith("/review")) return "context:admin";
+    if (pathname === "/mcp" || pathname === "/context/search") return "context:query";
+    if (pathname === "/context/build") return "context:build";
+    if (contextBuildRetryRoute(pathname) || contextTaskRetryRoute(pathname)) return "context:admin";
     return "internal-only";
   }
   if (method !== "GET") return "internal-only";
   if (pathname === "/context/metrics") return "context:admin";
-  return pathname === "/context/structure" ||
-    pathname === "/context/generations" ||
-    pathname === "/context/documents" ||
-    isSingleSegmentChildOf(pathname, "/context/generations") ||
-    isSingleSegmentChildOf(pathname, "/context/documents")
+  if (
+    pathname === "/context/builds" ||
+    (pathname.startsWith("/context/builds/") && (pathname.endsWith("/progress") || pathname.endsWith("/page")))
+  ) {
+    return "context:read";
+  }
+  return pathname === "/context/releases" ||
+    pathname === "/context/list" ||
+    pathname === "/context/read" ||
+    pathname === "/context/diff"
     ? "context:read"
     : "internal-only";
 }
@@ -2044,247 +2886,629 @@ function isContextCredentialRoute(pathname: string, method: string): boolean {
   return required !== "internal-only" && CONTEXT_CREDENTIAL_SCOPES.includes(required);
 }
 
-/** Matches `${parent}/{id}` without matching a deeper path such as `${parent}/{id}/review`. */
-function isSingleSegmentChildOf(pathname: string, parent: string): boolean {
-  if (!pathname.startsWith(`${parent}/`)) return false;
-  const remainder = pathname.slice(parent.length + 1);
-  return remainder.length > 0 && !remainder.includes("/");
-}
-
 function contextCredentialTenantId(value: string | undefined, config: ApiServerConfig): string | undefined {
   if (config.sharedIdentityResolver) return normalizedTenantId(value);
   const normalized = value?.trim();
   return normalized !== "" && normalized === config.tenantId ? normalized : undefined;
 }
 
-function contextTriggers(): TaskTypeTriggerRule[] {
-  return contextTaskTypeTriggers.flatMap((trigger) =>
-    trigger.taskTypes.map((taskType) => ({
-      workflow: trigger.workflow,
-      taskType,
-      source: trigger.source,
-      description: `Creates ${taskType} work for the repository context workflow.`
-    }))
+function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
+  const task = findTask(state, buildTaskId);
+  if (!task || task.type !== contextBoardTaskTypes.build) {
+    throw new Error("admitted context board build disappeared");
+  }
+  return {
+    id: task.id,
+    status: task.status,
+    tenantId: requiredString(task.metadata.tenantId, "context build tenantId"),
+    repository: requiredRepositoryName(task.metadata.repository, "context build repository"),
+    ref: requiredString(task.metadata.ref, "context build ref"),
+    refSequence: requiredPositiveInteger(task.metadata.refSequence, "context build refSequence"),
+    ...(typeof task.metadata.commitSha === "string" ? { commitSha: task.metadata.commitSha } : {}),
+    ...(typeof task.metadata.trigger === "string" ? { trigger: task.metadata.trigger } : {}),
+    ...publicContextBuildFailure(state, task),
+    createdAt: task.createdAt,
+    updatedAt: task.updatedAt
+  };
+}
+
+function publicContextBuildStatus(status: BoardTask["status"]): "active" | "completed" | "failed" {
+  if (!isTerminalTaskStatus(status)) return "active";
+  return status === "done" ? "completed" : "failed";
+}
+
+function publicContextBoardStages(state: BoardState, buildTaskId: TaskId) {
+  return state.tasks
+    .filter(
+      (task) =>
+        task.id !== buildTaskId &&
+        task.metadata.contextBuildId === buildTaskId &&
+        task.type !== contextBoardTaskTypes.graph
+    )
+    .sort(
+      (left, right) =>
+        left.createdAt.localeCompare(right.createdAt) ||
+        left.type.localeCompare(right.type) ||
+        left.id.localeCompare(right.id)
+    )
+    .map((task) => ({
+      id: task.id,
+      type: task.type,
+      title: task.title,
+      status: task.status,
+      attempt: task.attempt,
+      ...publicContextTaskFailure(state, task),
+      updatedAt: task.updatedAt
+    }));
+}
+
+const PUBLIC_CONTEXT_FAILURE_REASONS = {
+  github_authentication: "GitHub authentication failed for this stage.",
+  github_forbidden: "GitHub refused access required by this stage.",
+  github_not_found: "A required GitHub repository or object was not found.",
+  github_rate_limit: "GitHub rate limiting prevented this stage from completing.",
+  github_timeout: "GitHub did not respond before this stage timed out.",
+  github_response: "GitHub returned a response this stage could not use.",
+  git_checkout: "The requested repository revision could not be prepared.",
+  daytona: "The isolated execution sandbox did not complete this stage.",
+  model: "The model provider did not complete this stage.",
+  context_validation: "Generated Context did not pass deterministic validation.",
+  api_transport: "The worker could not reach the Context API.",
+  lease: "The worker lost its fenced lease before completion.",
+  worker_execution: "The worker failed before producing a valid stage result.",
+  bounded_page_repair_exhausted: "Citation support remained incomplete after the bounded page-repair policy.",
+  bounded_gate_repair_exhausted: "Source or maintenance gaps remained after the bounded repair policy.",
+  stage_failed: "This stage failed before producing a valid checkpoint.",
+  build_failed: "This Context build stopped after a stage failure."
+} as const;
+
+type PublicContextFailureCode = keyof typeof PUBLIC_CONTEXT_FAILURE_REASONS;
+
+function publicContextBuildFailure(
+  state: BoardState,
+  build: BoardTask
+): { readonly failureCode?: PublicContextFailureCode; readonly failureReason?: string } {
+  if (build.status !== "failed" && build.status !== "canceled") return {};
+  const descendants = new Map(
+    state.tasks
+      .filter(
+        (task) => task.metadata.contextBuildId === build.id && (task.status === "failed" || task.status === "canceled")
+      )
+      .map((task) => [task.id, task])
+  );
+  for (const event of [...state.events].reverse()) {
+    const task = event.taskId ? descendants.get(event.taskId) : undefined;
+    if (!task) continue;
+    const failure = publicContextFailureFromEvent(event);
+    if (failure) return failure;
+  }
+  return publicContextFailure("build_failed");
+}
+
+function publicContextTaskFailure(
+  state: BoardState,
+  task: BoardTask
+): { readonly failureCode?: PublicContextFailureCode; readonly failureReason?: string } {
+  if (task.status !== "failed" && task.status !== "canceled") return {};
+  for (const event of [...state.events].reverse()) {
+    if (event.taskId !== task.id) continue;
+    const failure = publicContextFailureFromEvent(event);
+    if (failure) return failure;
+  }
+  return task.status === "failed" ? publicContextFailure("stage_failed") : {};
+}
+
+function publicContextFailureFromEvent(
+  event: BoardState["events"][number]
+): { readonly failureCode: PublicContextFailureCode; readonly failureReason: string } | undefined {
+  if (event.type === "context.page_repair_exhausted") {
+    return publicContextFailure("bounded_page_repair_exhausted");
+  }
+  if (event.type === "context.gate_repair_exhausted") {
+    return publicContextFailure("bounded_gate_repair_exhausted");
+  }
+  if (event.type === "task.retry_exhausted") {
+    return publicContextFailure(publicContextFailureCode(event.payload?.category));
+  }
+  if (event.type.endsWith(".failed")) {
+    return publicContextFailure(publicContextFailureCode(event.payload?.failureCategory));
+  }
+  return undefined;
+}
+
+function publicContextFailureCode(value: unknown): PublicContextFailureCode {
+  return typeof value === "string" && value in PUBLIC_CONTEXT_FAILURE_REASONS
+    ? (value as PublicContextFailureCode)
+    : "worker_execution";
+}
+
+function publicContextFailure(code: PublicContextFailureCode): {
+  readonly failureCode: PublicContextFailureCode;
+  readonly failureReason: string;
+} {
+  return {
+    failureCode: code,
+    // Public reasons come only from this fixed catalog. The bound remains an
+    // explicit contract even if a future catalog entry is accidentally verbose.
+    failureReason: PUBLIC_CONTEXT_FAILURE_REASONS[code].slice(0, 240)
+  };
+}
+
+function contextBoardBuildForPrincipal(state: BoardState, tenantId: string, buildId: string): BoardTask | undefined {
+  const task = state.tasks.find((candidate) => candidate.id === buildId);
+  return task?.type === contextBoardTaskTypes.build && task.metadata.tenantId === tenantId ? task : undefined;
+}
+
+function contextWorkerCompletionAttestation(state: BoardState, build: BoardTask) {
+  const workerTaskTypes = new Set(
+    contextBoardTaskTypeDefinitions
+      .filter((definition) => definition.kind === "dispatchable" && definition.dispatchTopic)
+      .map((definition) => definition.type)
+  );
+  const workerTasks = new Map(
+    state.tasks
+      .filter((task) => task.metadata.contextBuildId === build.id && workerTaskTypes.has(task.type))
+      .map((task) => [task.id, task])
+  );
+  const completions = state.events
+    .flatMap((event) => {
+      if (event.type !== "task.worker_completion_recorded" || !event.taskId || !event.payload) return [];
+      const task = workerTasks.get(event.taskId);
+      if (!task) return [];
+      const attempt = event.payload.attempt;
+      const outcome = event.payload.outcome;
+      if (!Number.isSafeInteger(attempt) || Number(attempt) < 1 || (outcome !== "done" && outcome !== "failed")) {
+        return [];
+      }
+      return [
+        {
+          taskId: task.id,
+          taskType: task.type,
+          attempt,
+          outcome,
+          ...(typeof event.payload.workerReleaseId === "string"
+            ? { workerReleaseId: event.payload.workerReleaseId }
+            : {}),
+          ...(typeof event.payload.workerService === "string" ? { workerService: event.payload.workerService } : {}),
+          ...(typeof event.payload.workerRevision === "string" ? { workerRevision: event.payload.workerRevision } : {})
+        }
+      ];
+    })
+    .sort((left, right) => left.taskId.localeCompare(right.taskId) || Number(left.attempt) - Number(right.attempt));
+  return {
+    buildId: build.id,
+    repository: requiredRepositoryName(build.metadata.repository, "repository"),
+    completions
+  };
+}
+
+function contextBoardOperatorRetryEligibility(state: BoardState, build: BoardTask, now: ReturnType<typeof nowIso>) {
+  const dispatchable = boardOperatorRetryEligibility(state, {
+    buildTaskId: build.id,
+    now
+  });
+  if (dispatchable.eligible) return dispatchable;
+  if (build.status !== "failed") return dispatchable;
+
+  const recoverablePages = state.tasks
+    .filter(
+      (task) =>
+        task.parentTaskId === build.id &&
+        task.type === contextBoardTaskTypes.page &&
+        task.status === "failed" &&
+        state.events.some((event) => event.taskId === task.id && event.type === "context.page_repair_exhausted")
+    )
+    .filter((page) => {
+      const latestPass = state.tasks
+        .filter(
+          (task) =>
+            task.parentTaskId === page.id &&
+            task.type === contextBoardTaskTypes.pageAudit &&
+            task.status === "done" &&
+            Number.isSafeInteger(task.metadata.pass)
+        )
+        .reduce((maximum, task) => Math.max(maximum, Number(task.metadata.pass)), 0);
+      return latestPass >= 1 && latestPass < MAX_CONTEXT_OPERATOR_REMEDIATION_PASS;
+    })
+    .sort((left, right) => left.id.localeCompare(right.id));
+  if (recoverablePages.length > 0) {
+    return {
+      eligible: true,
+      recoverableTaskIds: recoverablePages.map((page) => page.id),
+      blockers: [],
+      mode: "page_remediation" as const
+    };
+  }
+  const certification = state.tasks.find(
+    (task) =>
+      task.parentTaskId === build.id && task.type === contextBoardTaskTypes.certification && task.status === "canceled"
+  );
+  const exhaustion = certification
+    ? [...state.events]
+        .reverse()
+        .find((event) => event.taskId === certification.id && event.type === "context.gate_repair_exhausted")
+    : undefined;
+  const exhaustedPass = exhaustion?.payload?.pass;
+  if (
+    certification &&
+    Number.isSafeInteger(exhaustedPass) &&
+    Number(exhaustedPass) < MAX_CONTEXT_OPERATOR_REMEDIATION_PASS
+  ) {
+    return {
+      eligible: true,
+      recoverableTaskIds: [certification.id],
+      blockers: [],
+      mode: "gate_remediation" as const
+    };
+  }
+  return dispatchable;
+}
+
+function assertContextOperatorRetrySafety(state: BoardState, build: BoardTask, target: BoardTask): void {
+  const buildTasks = state.tasks.filter((task) => task.metadata.contextBuildId === build.id);
+  const publication = buildTasks.find((task) => task.type === contextBoardTaskTypes.publication);
+  const pageIndex = buildTasks.find((task) => task.type === contextBoardTaskTypes.pageIndex);
+  const hasNewerRefSequence = state.tasks.some(
+    (task) =>
+      task.type === contextBoardTaskTypes.build &&
+      task.id !== build.id &&
+      task.metadata.tenantId === build.metadata.tenantId &&
+      task.metadata.repository === build.metadata.repository &&
+      task.metadata.ref === build.metadata.ref &&
+      typeof task.metadata.refSequence === "number" &&
+      typeof build.metadata.refSequence === "number" &&
+      task.metadata.refSequence > build.metadata.refSequence
+  );
+
+  if (target.type === contextBoardTaskTypes.publication) {
+    if (publication?.id !== target.id || pageIndex?.status === "done" || hasNewerRefSequence) {
+      throw new ApiError(
+        409,
+        "operator_retry_unsafe",
+        "publication retry is stale or is not the build's stable publication task"
+      );
+    }
+    // The authoritative publication transaction uses the stable task id plus
+    // certification digest as its idempotency key and rejects a newer admitted
+    // ref sequence. Requeueing that exact task is therefore safe even if the
+    // previous transaction committed and only its response was lost.
+    return;
+  }
+
+  if (target.type === contextBoardTaskTypes.pageIndex) {
+    if (
+      pageIndex?.id !== target.id ||
+      publication?.status !== "done" ||
+      pageIndex.status === "done" ||
+      hasNewerRefSequence
+    ) {
+      throw new ApiError(
+        409,
+        "operator_retry_unsafe",
+        "PageIndex retry requires this build's current completed publication"
+      );
+    }
+    // Attachment is also an idempotent transaction and verifies the release,
+    // ref sequence, commit, immutable tree digest, and live Board lease.
+    return;
+  }
+
+  if (publication?.status === "done" || pageIndex?.status === "done") {
+    throw new ApiError(409, "operator_retry_unsafe", "published Context derivation tasks cannot be reopened");
+  }
+}
+
+function publicContextBoardCheckpointPages(state: BoardState, buildTaskId: TaskId) {
+  return state.tasks
+    .filter(
+      (task) =>
+        task.type === contextBoardTaskTypes.page &&
+        task.parentTaskId === buildTaskId &&
+        typeof task.metadata.documentPath === "string"
+    )
+    .sort((left, right) => String(left.metadata.documentPath).localeCompare(String(right.metadata.documentPath)))
+    .map((task) => {
+      const output = latestCompletedContextOutput(
+        state,
+        state.tasks.filter(
+          (candidate) =>
+            candidate.parentTaskId === task.id &&
+            (candidate.type === contextBoardTaskTypes.pageWrite || candidate.type === contextBoardTaskTypes.pageRepair)
+        )
+      );
+      const documentPath = String(task.metadata.documentPath);
+      return {
+        documentPath: documentPath.endsWith(".md") ? documentPath.slice(0, -3) : documentPath,
+        title: task.title.replace(/^Write /, ""),
+        bytes: output?.artifact.bytes ?? 0,
+        validationStatus:
+          task.status === "done"
+            ? ("valid" as const)
+            : task.status === "failed"
+              ? ("invalid" as const)
+              : ("pending" as const),
+        diagnostics: [] as string[],
+        checkpointSequence: output?.pass ?? 0,
+        updatedAt: task.updatedAt
+      };
+    });
+}
+
+async function readContextBoardCheckpointPage(
+  state: BoardState,
+  build: BoardTask,
+  requestedDocumentPath: string,
+  artifacts: ContextArtifactStore | undefined
+) {
+  if (!artifacts) return undefined;
+  const target = `${requestedDocumentPath}.md`;
+  const page = state.tasks.find(
+    (task) =>
+      task.type === contextBoardTaskTypes.page &&
+      task.parentTaskId === build.id &&
+      task.metadata.documentPath === target
+  );
+  const pageTasks = page
+    ? state.tasks.filter(
+        (task) =>
+          task.parentTaskId === page.id &&
+          (task.type === contextBoardTaskTypes.pageWrite || task.type === contextBoardTaskTypes.pageRepair)
+      )
+    : [];
+  const globalTasks = state.tasks.filter(
+    (task) => task.parentTaskId === build.id && task.type === contextBoardTaskTypes.gapRepair
+  );
+  const candidates = completedContextOutputs(state, [...pageTasks, ...globalTasks]);
+  for (const candidate of candidates) {
+    assertBoardArtifactScope(candidate.task, build.id, candidate.artifact);
+    const content = await artifacts.get(candidate.artifact);
+    if (content.byteLength !== candidate.artifact.bytes || fingerprintBytes(content) !== candidate.artifact.sha256) {
+      throw new Error("context checkpoint artifact bytes do not match their reference");
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(Buffer.from(content).toString("utf8")) as unknown;
+    } catch {
+      continue;
+    }
+    const container = isRecord(parsed) ? parsed : undefined;
+    const values: readonly unknown[] = container
+      ? Array.isArray(container.pages)
+        ? container.pages
+        : [container]
+      : [];
+    const found = values.find((value) => isRecord(value) && value.documentPath === target);
+    if (!isRecord(found) || typeof found.bodyMarkdown !== "string" || typeof found.title !== "string") {
+      continue;
+    }
+    return {
+      documentPath: requestedDocumentPath,
+      title: found.title,
+      bodyMarkdown: found.bodyMarkdown,
+      bytes: Buffer.byteLength(found.bodyMarkdown, "utf8"),
+      validationStatus: page?.status === "failed" ? ("invalid" as const) : ("valid" as const),
+      diagnostics: [] as string[],
+      checkpointSequence: candidate.pass,
+      updatedAt: candidate.task.updatedAt,
+      unpublished: true
+    };
+  }
+  return undefined;
+}
+
+function latestCompletedContextOutput(state: BoardState, tasks: readonly BoardTask[]) {
+  return completedContextOutputs(state, tasks)[0];
+}
+
+function completedContextOutputs(state: BoardState, tasks: readonly BoardTask[]) {
+  return tasks
+    .flatMap((task) => {
+      const event = [...state.events]
+        .reverse()
+        .find(
+          (candidate) =>
+            candidate.taskId === task.id &&
+            candidate.type.endsWith(".completed") &&
+            isRecord(candidate.payload?.outputArtifact)
+        );
+      if (!event?.payload) return [];
+      try {
+        return [
+          {
+            task,
+            artifact: parseContextArtifactRef(event.payload.outputArtifact),
+            pass: typeof task.metadata.pass === "number" ? task.metadata.pass : 0,
+            eventSequence: event.seq
+          }
+        ];
+      } catch {
+        return [];
+      }
+    })
+    .sort(
+      (left, right) =>
+        right.pass - left.pass ||
+        right.eventSequence - left.eventSequence ||
+        right.task.updatedAt.localeCompare(left.task.updatedAt)
+    );
+}
+
+function contextTriggerRef(event: GitHubWebhookEvent, defaultBranch?: string): string {
+  if (event.type === "push") return event.ref.slice("refs/heads/".length);
+  if (event.type === "pull_request.opened" || event.type === "pull_request.synchronize") {
+    return `pull/${event.pullRequestNumber}/head`;
+  }
+  const ref = defaultBranch?.trim();
+  if (!ref) throw invalidRequest("authoritative default branch is required for an issue-triggered context build");
+  return ref;
+}
+
+function contextBoardDependencyResults(state: BoardState, taskId: TaskId) {
+  const discovered = new Set<TaskId>();
+  const pending = state.dependencies
+    .filter((dependency) => dependency.taskId === taskId && dependency.required)
+    .map((dependency) => dependency.dependsOnTaskId);
+  while (pending.length > 0 && discovered.size < 256) {
+    const dependencyId = pending.shift()!;
+    if (discovered.has(dependencyId)) continue;
+    discovered.add(dependencyId);
+    pending.push(
+      ...state.dependencies
+        .filter((dependency) => dependency.taskId === dependencyId && dependency.required)
+        .map((dependency) => dependency.dependsOnTaskId)
+    );
+  }
+  return [...discovered].sort().flatMap((dependencyId) => {
+    const task = findTask(state, dependencyId);
+    if (!task || !isContextBoardTaskType(task.type)) return [];
+    const event = [...state.events]
+      .reverse()
+      .find(
+        (candidate) =>
+          candidate.taskId === dependencyId &&
+          candidate.type.endsWith(".completed") &&
+          candidate.payload?.version === 1 &&
+          candidate.payload.outputArtifact
+      );
+    return event
+      ? [
+          {
+            taskId: dependencyId,
+            taskType: task.type,
+            ...(typeof task.metadata.pass === "number" ? { pass: task.metadata.pass } : {}),
+            ...(typeof task.metadata.pageTaskId === "string" ? { pageTaskId: task.metadata.pageTaskId } : {}),
+            ...(typeof task.metadata.documentPath === "string" ? { documentPath: task.metadata.documentPath } : {}),
+            result: event.payload
+          }
+        ]
+      : [];
+  });
+}
+
+function contextBoardArtifactKind(taskType: string): ContextArtifactKind {
+  switch (taskType) {
+    case contextBoardTaskTypes.snapshot:
+      return "evidence-snapshot";
+    case contextBoardTaskTypes.researchPlan:
+      return "research-plan";
+    case contextBoardTaskTypes.research:
+      return "research-report";
+    case contextBoardTaskTypes.publicationPlan:
+      return "publication-plan";
+    case contextBoardTaskTypes.pageWrite:
+    case contextBoardTaskTypes.pageRepair:
+      return "context-page";
+    case contextBoardTaskTypes.gapRepair:
+      return "context-draft";
+    case contextBoardTaskTypes.pageAudit:
+      return "citation-audit";
+    case contextBoardTaskTypes.sourceChallenge:
+    case contextBoardTaskTypes.taskEvaluation:
+      return "gate-evaluation";
+    case contextBoardTaskTypes.certification:
+      return "certification";
+    case contextBoardTaskTypes.publication:
+      return "context-release";
+    case contextBoardTaskTypes.pageIndex:
+      return "pageindex-tree";
+    default:
+      throw new Error(`context board task ${taskType} does not produce an artifact`);
+  }
+}
+
+function parseContextArtifactRef(value: unknown): ContextArtifactRef {
+  const input = isRecord(value) ? value : undefined;
+  if (!input) throw invalidRequest("artifact must be an object");
+  const bytes = requiredPositiveIntegerOrZero(input.bytes, "artifact.bytes");
+  const sha256 = requiredString(input.sha256, "artifact.sha256");
+  if (!/^[0-9a-f]{64}$/.test(sha256)) throw invalidRequest("artifact.sha256 must be a SHA-256 digest");
+  const objectGeneration = optionalString(input.objectGeneration);
+  return {
+    uri: requiredString(input.uri, "artifact.uri"),
+    key: requiredString(input.key, "artifact.key"),
+    contentType: requiredString(input.contentType, "artifact.contentType"),
+    bytes,
+    sha256,
+    ...(objectGeneration ? { objectGeneration } : {})
+  };
+}
+
+function assertBoardArtifactScope(task: BoardTask, buildTaskId: string, artifact: ContextArtifactRef): void {
+  const repository = requiredRepositoryName(task.metadata.repository, "repository");
+  if (
+    artifact.contentType !== "application/json" ||
+    !isContextArtifactKeyInScope(artifact.key, {
+      tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+      repository,
+      buildId: buildTaskId
+    })
+  ) {
+    throw invalidRequest("artifact does not belong to the leased context build");
+  }
+}
+
+function assertBoardArtifactReadable(
+  task: BoardTask,
+  buildTaskId: string,
+  artifact: ContextArtifactRef
+): ReturnType<typeof parseContextPriorReleaseSeed> | undefined {
+  try {
+    assertBoardArtifactScope(task, buildTaskId, artifact);
+    return undefined;
+  } catch {
+    // The admission-bound prior release is the sole cross-build artifact read.
+  }
+  if (task.metadata.priorRelease === undefined) {
+    throw invalidRequest("artifact does not belong to the leased context build");
+  }
+  let priorRelease: ReturnType<typeof parseContextPriorReleaseSeed>;
+  try {
+    priorRelease = parseContextPriorReleaseSeed(task.metadata.priorRelease);
+  } catch {
+    throw invalidRequest("leased Context build has an invalid prior-release seed");
+  }
+  if (
+    priorRelease.tenantId !== task.metadata.tenantId ||
+    priorRelease.repository !== task.metadata.repository ||
+    priorRelease.ref !== task.metadata.ref ||
+    !sameArtifactIdentity(priorRelease.releaseArtifact, artifact)
+  ) {
+    throw invalidRequest("artifact is outside the leased Context build and its prior-release seed");
+  }
+  return priorRelease;
+}
+
+function sameArtifactIdentity(left: ContextArtifactRef, right: ContextArtifactRef): boolean {
+  return (
+    left.uri === right.uri &&
+    left.key === right.key &&
+    left.contentType === right.contentType &&
+    left.bytes === right.bytes &&
+    left.sha256 === right.sha256 &&
+    left.objectGeneration === right.objectGeneration
   );
 }
 
-function parseQueryContextRequest(body: Record<string, unknown>, principal: Principal): QueryContextRequest {
-  const taskKind = optionalString(body.taskKind);
-  const ref = optionalString(body.ref);
-  const from = isRecord(body.timeWindow) ? optionalIsoTime(body.timeWindow.from, "timeWindow.from") : undefined;
-  const to = isRecord(body.timeWindow) ? optionalIsoTime(body.timeWindow.to, "timeWindow.to") : undefined;
-  if (from && to && from > to) throw invalidRequest("timeWindow.from must not follow timeWindow.to");
-  if (taskKind && !["lookup", "structure", "change", "intent", "overview", "status", "diagnose"].includes(taskKind)) {
-    throw invalidRequest("unsupported taskKind");
+function assertCurrentTaskOutputArtifact(
+  task: BoardTask,
+  buildTaskId: string,
+  attempt: number,
+  artifact: ContextArtifactRef
+): void {
+  assertBoardArtifactScope(task, buildTaskId, artifact);
+  const prefix = `${contextArtifactScopePrefix({
+    tenantId: requiredString(task.metadata.tenantId, "tenantId"),
+    repository: requiredRepositoryName(task.metadata.repository, "repository"),
+    buildId: buildTaskId
+  })}/${contextBoardArtifactKind(task.type)}/`;
+  const relative = artifact.key.slice(prefix.length);
+  if (
+    !artifact.key.startsWith(prefix) ||
+    !/^[a-z0-9][a-z0-9._-]{0,480}$/.test(relative) ||
+    (task.type !== contextBoardTaskTypes.publication && !relative.startsWith(`${task.id}-attempt-${attempt}-`))
+  ) {
+    throw invalidRequest("completion artifact was not uploaded by the current task attempt");
   }
-  return {
-    tenantId: principal.tenantId,
-    principalId: principal.principalId,
-    repository: requiredRepositoryName(body.repository, "repository"),
-    question: boundedString(body.question, "question", 4_000),
-    ...(ref ? { ref } : {}),
-    ...(taskKind ? { taskKind: taskKind as NonNullable<QueryContextRequest["taskKind"]> } : {}),
-    ...(isRecord(body.targets) ? { targets: parseTargets(body.targets) } : {}),
-    ...(isRecord(body.timeWindow) ? { timeWindow: { ...(from ? { from } : {}), ...(to ? { to } : {}) } } : {})
-  };
-}
-
-function parseTargets(value: Record<string, unknown>): NonNullable<QueryContextRequest["targets"]> {
-  const paths = boundedStringArray(value.paths, "targets.paths");
-  const symbols = boundedStringArray(value.symbols, "targets.symbols");
-  const pullRequests = boundedStringArray(value.pullRequests, "targets.pullRequests");
-  const issues = boundedStringArray(value.issues, "targets.issues");
-  return {
-    ...(paths ? { paths } : {}),
-    ...(symbols ? { symbols } : {}),
-    ...(pullRequests ? { pullRequests } : {}),
-    ...(issues ? { issues } : {})
-  };
-}
-
-function parseIngestInput(value: unknown, tenantId: string, repository: string, ref: string): IngestEvidenceInput {
-  if (!isRecord(value) || !Array.isArray(value.files)) throw invalidRequest("input.files must be an array");
-  if (value.tenantId !== tenantId || value.repository !== repository || value.ref !== ref) {
-    throw invalidRequest("ingest input does not match leased stage scope");
-  }
-  return value as unknown as IngestEvidenceInput;
-}
-
-function publicGeneration(generation: Awaited<ReturnType<ContextEngineStore["listGenerations"]>>[number]) {
-  return {
-    id: generation.id,
-    tenantId: generation.tenantId,
-    repository: generation.repository,
-    ref: generation.ref,
-    commitSha: generation.commitSha,
-    status: generation.status,
-    derivedKnowledge: generation.capabilities.derivedKnowledge,
-    projectors: generation.projectorStatuses,
-    projectorDetails: Object.entries(generation.projectorStatuses).map(([name, status]) => ({
-      name,
-      status,
-      checkpoint: generation.id,
-      version: generation.projectorVersions[name as keyof typeof generation.projectorVersions]
-    })),
-    createdAt: generation.createdAt,
-    ...(generation.publishedAt ? { publishedAt: generation.publishedAt } : {})
-  };
-}
-
-function publicKnowledgeSummary(
-  revision: Awaited<ReturnType<ContextEngineStore["getRevision"]>> & {},
-  events: readonly KnowledgeRevisionEvent[]
-) {
-  if (!revision) throw new Error("revision is required");
-  const terminal = events.at(-1)?.type;
-  const reviewStatus =
-    terminal === "reviewed"
-      ? "reviewed"
-      : terminal === "rejected" || terminal === "invalidated" || terminal === "redacted"
-        ? terminal
-        : "generated";
-  return {
-    id: revision.id,
-    logicalId: revision.logicalId,
-    repository: revision.repository,
-    kind: revision.kind,
-    title: revision.title,
-    summary: revision.summary,
-    confidence: revision.confidence,
-    reviewStatus,
-    commitSha: revision.scope.commitSha,
-    generatorName: revision.generatorName,
-    generatorVersion: revision.generatorVersion,
-    model: revision.model,
-    promptVersion: revision.promptVersion,
-    createdAt: revision.createdAt
-  };
-}
-
-function mergeContextBuilds(board: ReturnType<typeof tenantBoardView>, builds: readonly ContextBuild[]) {
-  const contextTasks = builds.flatMap((build) => [
-    buildBoardTask(build),
-    ...build.stages.map((stage) => stageBoardTask(build, stage))
-  ]);
-  const contextTaskIds = new Set(contextTasks.map((task) => task.id));
-  return {
-    ...board,
-    tasks: [...board.tasks.filter((task) => !isContextTaskType(task.type)), ...contextTasks],
-    dependencies: [
-      ...board.dependencies.filter(
-        (dependency) => !contextTaskIds.has(dependency.taskId) && !contextTaskIds.has(dependency.dependsOnTaskId)
-      ),
-      ...builds.flatMap((build) => {
-        const ingest = build.stages.find((stage) => stage.type === contextTaskTypes.ingestEvidence)!;
-        return [
-          ...build.stages
-            .filter((stage) => stage.type !== contextTaskTypes.ingestEvidence)
-            .map((stage) => ({
-              taskId: entityId<"task">(stage.id),
-              dependsOnTaskId: entityId<"task">(ingest.id),
-              relationship: "blocks" as const,
-              required: true,
-              blocksParentCompletion: stage.required
-            })),
-          ...build.stages.map((stage) => ({
-            taskId: entityId<"task">(build.id),
-            dependsOnTaskId: entityId<"task">(stage.id),
-            relationship: "blocks" as const,
-            required: stage.required,
-            blocksParentCompletion: stage.required
-          }))
-        ];
-      })
-    ],
-    outbox: [
-      ...board.outbox.filter((message) => !contextTaskIds.has(message.taskId)),
-      ...builds.flatMap((build) =>
-        build.stages
-          .filter((stage) => stage.status !== "blocked")
-          .map((stage) => ({
-            id: entityId<"board_outbox_message">(stage.id),
-            taskId: entityId<"task">(stage.id),
-            topic: stage.topic,
-            idempotencyKey: `${stage.id}:${stage.attempt}`,
-            status:
-              stage.status === "queued"
-                ? ("pending" as const)
-                : stage.status === "leased"
-                  ? ("leased" as const)
-                  : ("dispatched" as const),
-            payload: { taskId: stage.id, attempt: stage.attempt },
-            createdAt: build.createdAt,
-            ...(stage.fence
-              ? {
-                  leaseId: stage.fence.leaseId,
-                  leasedAt: stage.startedAt ?? build.createdAt,
-                  leaseExpiresAt: stage.fence.leaseExpiresAt
-                }
-              : {}),
-            ...(["succeeded", "failed"].includes(stage.status)
-              ? { dispatchedAt: stage.completedAt ?? build.completedAt ?? build.createdAt }
-              : {})
-          }))
-      )
-    ]
-  };
-}
-
-function buildBoardTask(build: ContextBuild): BoardTask {
-  return {
-    id: entityId<"task">(build.id),
-    type: contextTaskTypes.build,
-    title: `Build context for ${build.repository}@${build.ref}`,
-    status: build.status === "active" ? "in_progress" : build.status === "failed" ? "failed" : "done",
-    assigneeRole: "system",
-    dedupeKey: `context:${build.tenantId}:${build.repository}:${build.ref}:${build.requestKey}`,
-    required: true,
-    attempt: 0,
-    metadata: {
-      tenantId: build.tenantId,
-      repository: build.repository,
-      ref: build.ref,
-      requestKey: build.requestKey,
-      ...(build.status === "degraded" ? { degraded: true } : {})
-    },
-    kind: "aggregate",
-    createdAt: build.createdAt,
-    updatedAt: build.completedAt ?? build.createdAt
-  };
-}
-
-function stageBoardTask(build: ContextBuild, stage: ContextPipelineStage): BoardTask {
-  return {
-    id: entityId<"task">(stage.id),
-    parentTaskId: entityId<"task">(build.id),
-    type: stage.type,
-    title: `${stage.type} for ${build.repository}@${build.ref}`,
-    status:
-      stage.status === "blocked"
-        ? "triage"
-        : stage.status === "queued"
-          ? "queued"
-          : stage.status === "leased"
-            ? "in_progress"
-            : stage.status === "succeeded"
-              ? "done"
-              : "failed",
-    assigneeRole: "context_worker",
-    dedupeKey: `context:${build.id}:${stage.type}`,
-    required: stage.required,
-    attempt: stage.attempt,
-    metadata: {
-      tenantId: build.tenantId,
-      repository: build.repository,
-      ref: build.ref,
-      ...stage.metadata,
-      ...(stage.error ? { error: stage.error } : {})
-    },
-    kind: "dispatchable",
-    dispatchTopic: stage.topic,
-    createdAt: build.createdAt,
-    updatedAt: stage.completedAt ?? stage.startedAt ?? build.createdAt
-  };
 }
 
 function tenantBoardView(state: GitHubIntakeState, tenantId: string, allowedRepositories?: ReadonlySet<string>) {
@@ -2299,11 +3523,11 @@ function tenantBoardView(state: GitHubIntakeState, tenantId: string, allowedRepo
       .map((task) => task.id)
   );
   return {
-    tasks: state.board.tasks.filter((task) => taskIds.has(task.id)),
+    tasks: state.board.tasks.filter((task) => taskIds.has(task.id)).map(publicBoardTask),
     dependencies: state.board.dependencies.filter(
       (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
     ),
-    outbox: state.board.outbox.filter((message) => taskIds.has(message.taskId)),
+    outbox: state.board.outbox.filter((message) => taskIds.has(message.taskId)).map(publicBoardOutboxMessage),
     pullRequests: state.pullRequests.filter(
       (pullRequest) =>
         pullRequest.tenantId === tenantId && (!allowedRepositories || allowedRepositories.has(pullRequest.repository))
@@ -2311,15 +3535,157 @@ function tenantBoardView(state: GitHubIntakeState, tenantId: string, allowedRepo
   };
 }
 
-function completionEventType(_topic: string): string {
-  return "review.completed";
+function publicBoardTask(task: BoardTask): BoardTask {
+  if (!isContextBoardTaskType(task.type)) return task;
+  const metadata = Object.fromEntries(
+    [
+      "tenantId",
+      "repository",
+      "ref",
+      "refSequence",
+      "commitSha",
+      "trigger",
+      "contextBuildId",
+      "documentPath",
+      "pageKey",
+      "pass"
+    ].flatMap((key) => (task.metadata[key] === undefined ? [] : [[key, task.metadata[key]]]))
+  );
+  return { ...task, metadata };
+}
+
+function publicBoardEvent(state: BoardState, event: BoardState["events"][number]) {
+  const task = event.taskId ? findTask(state, event.taskId) : undefined;
+  if (!task || !isContextBoardTaskType(task.type) || !event.payload) return event;
+  const payload = Object.fromEntries(
+    ["verdict", "unsupportedCitationCount", "blockingGapCount", "releaseId", "reason"].flatMap((key) => {
+      const value = event.payload?.[key];
+      if (value === undefined) return [];
+      return [[key, key === "reason" && typeof value === "string" ? value.slice(0, 500) : value]];
+    })
+  );
+  const { payload: _payload, ...withoutPayload } = event;
+  return Object.keys(payload).length > 0 ? { ...withoutPayload, payload } : withoutPayload;
+}
+
+function publicBoardOutboxMessage(message: BoardState["outbox"][number]) {
+  const {
+    leaseId: _leaseId,
+    writeFenceToken: _writeFenceToken,
+    dispatchedLeaseId: _dispatchedLeaseId,
+    ...publicMessage
+  } = message;
+  return publicMessage;
+}
+
+function findWorkerCompletionReceipt(
+  state: BoardState,
+  messageId: BoardOutboxMessageId,
+  taskId: TaskId,
+  attempt: number,
+  outcome: "done" | "failed"
+): BoardState["events"][number] | undefined {
+  return state.events.find(
+    (event) =>
+      event.taskId === taskId &&
+      event.type === "task.worker_completion_recorded" &&
+      event.payload?.messageId === messageId &&
+      event.payload.attempt === attempt &&
+      event.payload.outcome === outcome
+  );
+}
+
+function findModelUsageReceipt(
+  state: BoardState,
+  messageId: BoardOutboxMessageId,
+  taskId: TaskId,
+  attempt: number,
+  outcome: "retry"
+): BoardState["events"][number] | undefined {
+  return state.events.find(
+    (event) =>
+      event.taskId === taskId &&
+      event.type === "task.model_usage_recorded" &&
+      event.payload?.messageId === messageId &&
+      event.payload.attempt === attempt &&
+      event.payload.outcome === outcome
+  );
+}
+
+function modelUsageReceipt(
+  modelUsage:
+    | {
+        readonly inputTokens: number;
+        readonly cachedInputTokens: number;
+        readonly outputTokens: number;
+      }
+    | undefined
+): Readonly<Record<string, unknown>> {
+  return modelUsage
+    ? {
+        modelUsageObserved: true,
+        modelUsageDigest: modelUsageDigest(modelUsage)
+      }
+    : { modelUsageObserved: false };
+}
+
+function assertModelUsageReplay(
+  receipt: Readonly<Record<string, unknown>> | undefined,
+  modelUsage:
+    | {
+        readonly inputTokens: number;
+        readonly cachedInputTokens: number;
+        readonly outputTokens: number;
+      }
+    | undefined
+): void {
+  const expectedObserved = receipt?.modelUsageObserved;
+  const suppliedObserved = modelUsage !== undefined;
+  if (
+    typeof expectedObserved !== "boolean" ||
+    expectedObserved !== suppliedObserved ||
+    (modelUsage && receipt?.modelUsageDigest !== modelUsageDigest(modelUsage))
+  ) {
+    throw new ContextQuotaInvariantError(
+      "reservation_conflict",
+      "replayed worker completion changed the model usage settlement"
+    );
+  }
+}
+
+function modelUsageDigest(modelUsage: {
+  readonly inputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly outputTokens: number;
+}): string {
+  return createHash("sha256")
+    .update(`${modelUsage.inputTokens}:${modelUsage.cachedInputTokens}:${modelUsage.outputTokens}`, "utf8")
+    .digest("hex");
+}
+
+function workerFailureCategory(value: unknown): string {
+  if (value === undefined) return "worker_execution";
+  const category = requiredString(value, "failureCategory");
+  if (!/^[a-z][a-z0-9_]{0,63}$/.test(category)) {
+    throw invalidRequest("failureCategory must be a stable lowercase identifier");
+  }
+  return category;
+}
+
+function completionEventType(topic: string): string {
+  return topic === "run-review" ? "review.completed" : `${topic}.completed`;
 }
 
 function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
   const repository = requiredRepositoryName(body.repository, "repository");
+  const defaultBranch = optionalString(body.defaultBranch);
+  const common = {
+    repository,
+    ...(defaultBranch ? { repositoryDefaultBranch: defaultBranch } : {})
+  };
   if (body.ref !== undefined || body.push === true) {
     return {
-      repository,
+      ...common,
       event: {
         type: "push",
         ref: `refs/heads/${optionalString(body.ref) ?? "main"}`,
@@ -2330,7 +3696,7 @@ function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
   }
   if (body.issueNumber !== undefined) {
     return {
-      repository,
+      ...common,
       event: {
         type: "issue.opened",
         issueNumber: requiredPositiveInteger(body.issueNumber, "issueNumber"),
@@ -2339,7 +3705,7 @@ function parseDevWebhook(body: Record<string, unknown>): ParsedGitHubWebhook {
     };
   }
   return {
-    repository,
+    ...common,
     event: {
       type: "pull_request.opened",
       pullRequestNumber: requiredPositiveInteger(body.pullRequestNumber, "pullRequestNumber"),
@@ -2375,7 +3741,7 @@ function migrateSnapshotTenantAliases(
 
 function sanitizeSnapshotForCurrentRuntime(snapshot: ApiSnapshot): ApiSnapshot {
   const supportedTypes = new Set(
-    [...taskTypeDefinitions, ...contextTaskTypeDefinitions].map((definition) => definition.type)
+    [...taskTypeDefinitions, ...RUNTIME_CONTEXT_TASK_TYPE_DEFINITIONS].map((definition) => definition.type)
   );
   const tasks = snapshot.intakeState.board.tasks.filter((task) => supportedTypes.has(task.type));
   const taskIds = new Set(tasks.map((task) => task.id));
@@ -2415,10 +3781,6 @@ function safeResultPayload(value: unknown): Record<string, unknown> {
   );
 }
 
-function isContextQueueTopic(value: string): value is ContextQueueTopic {
-  return Object.values(contextQueueTopics).includes(value as ContextQueueTopic);
-}
-
 function normalizedTenantId(value: string | undefined): string | undefined {
   if (!value) return undefined;
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)
@@ -2445,22 +3807,19 @@ const METRICS_ROUTES = new Set([
   "/overview",
   "/events",
   "/context/build",
-  "/context/query",
-  "/context/generations",
-  "/context/documents",
-  "/context/structure",
+  "/context/search",
+  "/context/releases",
+  "/context/list",
+  "/context/read",
+  "/context/diff",
   "/context/metrics",
-  "/context/rebuild",
-  "/context/erasure",
   "/internal/context/access/sync",
   "/internal/context/tokens",
-  "/internal/context/ingest",
-  "/internal/context/derive/prepare",
-  "/internal/context/derive/commit",
-  "/internal/context/derive/progress",
-  "/internal/context/derive/checkpoint-pages",
-  "/internal/context/index",
-  "/internal/context/outbox/drain",
+  "/internal/context/builds/:id/worker-completions",
+  "/internal/context/board/artifacts",
+  "/internal/context/board/publish",
+  "/internal/context/board/pageindex/attach",
+  "/internal/context/board/artifacts/read",
   "/internal/worker/claim",
   "/internal/worker/renew",
   "/internal/worker/release",
@@ -2471,9 +3830,11 @@ const METRICS_ROUTES = new Set([
 function metricsRoute(pathname: string): string {
   if (pathname === "/context/builds") return "/context/builds";
   if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
-  if (routeId(pathname, "/context/generations/")) return "/context/generations/:id";
-  if (routeId(pathname, "/context/documents/")) return "/context/documents/:id";
-  if (routeId(pathname, "/context/knowledge/", "/review")) return "/context/knowledge/:id/review";
+  if (contextBuildRetryRoute(pathname)) return "/context/builds/:id/retry";
+  if (contextTaskRetryRoute(pathname)) return "/context/builds/:id/tasks/:taskId/retry";
+  if (routeId(pathname, "/internal/context/builds/", "/worker-completions")) {
+    return "/internal/context/builds/:id/worker-completions";
+  }
   if (routeId(pathname, "/internal/context/tokens/", "/revoke")) return "/internal/context/tokens/:id/revoke";
   return METRICS_ROUTES.has(pathname) ? pathname : "(unknown)";
 }
@@ -2486,7 +3847,7 @@ function isReadOnlyContextRoute(method: string | undefined, pathname: string): b
         pathname === "/healthz" ||
         pathname === "/task-types" ||
         pathname.startsWith("/context/"))) ||
-    (method === "POST" && (pathname === "/context/query" || pathname === "/mcp"))
+    (method === "POST" && (pathname === "/context/search" || pathname === "/mcp"))
   );
 }
 
@@ -2501,6 +3862,17 @@ function routeId(pathname: string, prefix: string, suffix = ""): string | undefi
   }
 }
 
+function contextTaskRetryRoute(pathname: string): { readonly buildId: string; readonly taskId: string } | undefined {
+  const match = /^\/context\/builds\/([^/]+)\/tasks\/([^/]+)\/retry$/.exec(pathname);
+  if (!match?.[1] || !match[2]) return undefined;
+  return { buildId: match[1], taskId: match[2] };
+}
+
+function contextBuildRetryRoute(pathname: string): string | undefined {
+  const match = /^\/context\/builds\/([^/]+)\/retry$/.exec(pathname);
+  return match?.[1];
+}
+
 async function readRawBody(request: IncomingMessage, maximumBytes = MAX_REQUEST_BYTES): Promise<Buffer> {
   const chunks: Buffer[] = [];
   let bytes = 0;
@@ -2511,6 +3883,23 @@ async function readRawBody(request: IncomingMessage, maximumBytes = MAX_REQUEST_
     chunks.push(buffer);
   }
   return Buffer.concat(chunks);
+}
+
+function strictBase64(value: string, name: string): Uint8Array {
+  // Avoid a repeated-group RegExp here. V8's RegExp engine can exhaust the
+  // JavaScript stack while validating the multi-megabyte snapshot artifacts
+  // accepted by this route. Decode and require an exact canonical round trip
+  // instead; Buffer's base64 decoder is iterative and the request is already
+  // bounded by MAX_REQUEST_BYTES.
+  const decoded = Buffer.from(value, "base64");
+  if (decoded.toString("base64") !== value) {
+    throw new ApiError(400, "invalid_request", `${name} must be canonical base64`);
+  }
+  return decoded;
+}
+
+function fingerprintBytes(value: Uint8Array): string {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 function parseJsonObject(value: Uint8Array): Record<string, unknown> {
@@ -2531,56 +3920,22 @@ function firstHeader(value: string | readonly string[] | undefined): string | un
   return typeof value === "string" ? value : value?.[0];
 }
 
-/** An already-parsed JSON value that must be an object, for array members. */
-function parseJsonObjectValue(value: unknown, field: string): Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    throw invalidRequest(`${field} must be an object`);
-  }
-  return value as Record<string, unknown>;
-}
-
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) throw invalidRequest(`${field} is required`);
   return value.trim();
 }
 
-function boundedString(value: unknown, field: string, maximum: number): string {
-  const text = requiredString(value, field);
-  if (text.length > maximum) throw invalidRequest(`${field} must not exceed ${maximum} characters`);
-  return text;
+function requiredDerivationProgressDocumentPath(value: unknown, field: string): string {
+  const candidate = requiredString(value, field);
+  try {
+    return derivationProgressDocumentPath(candidate);
+  } catch {
+    throw invalidRequest(`${field} must be a safe extensionless relative path`);
+  }
 }
 
 function optionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
-}
-
-function optionalIsoTime(value: unknown, field: string): string | undefined {
-  const text = optionalString(value);
-  if (!text) return undefined;
-  const parsed = new Date(text);
-  if (!Number.isFinite(parsed.getTime())) throw invalidRequest(`${field} must be an ISO-8601 timestamp`);
-  return parsed.toISOString();
-}
-
-function optionalStringArray(value: unknown, field: string): string[] {
-  if (value === undefined) return [];
-  if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
-    throw invalidRequest(`${field} must be an array of strings`);
-  }
-  return value.map((item) => String(item).trim()).filter(Boolean);
-}
-
-function boundedStringArray(value: unknown, field: string): string[] {
-  const values = optionalStringArray(value, field);
-  if (values.length > MAX_CONTEXT_TARGETS_PER_KIND) {
-    throw invalidRequest(`${field} must contain at most ${MAX_CONTEXT_TARGETS_PER_KIND} items`);
-  }
-  for (const item of values) {
-    if (item.length > MAX_CONTEXT_TARGET_LENGTH) {
-      throw invalidRequest(`${field} items must not exceed ${MAX_CONTEXT_TARGET_LENGTH} characters`);
-    }
-  }
-  return [...new Set(values)];
 }
 
 function requiredRepositoryName(value: unknown, field: string): string {
@@ -2602,6 +3957,34 @@ function requiredPositiveInteger(value: unknown, field: string): number {
     throw invalidRequest(`${field} must be a positive integer`);
   }
   return value;
+}
+
+function requiredPositiveIntegerOrZero(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw invalidRequest(`${field} must be a non-negative integer`);
+  }
+  return value;
+}
+
+function requiredModelUsage(value: unknown): {
+  readonly inputTokens: number;
+  readonly cachedInputTokens: number;
+  readonly outputTokens: number;
+} {
+  if (!isRecord(value)) {
+    throw invalidRequest("modelUsage is required for successful model-backed topics");
+  }
+  const allowed = new Set(["inputTokens", "cachedInputTokens", "outputTokens"]);
+  if (Object.keys(value).some((key) => !allowed.has(key))) {
+    throw invalidRequest("modelUsage contains unsupported fields");
+  }
+  const inputTokens = requiredPositiveIntegerOrZero(value.inputTokens, "modelUsage.inputTokens");
+  const cachedInputTokens = requiredPositiveIntegerOrZero(value.cachedInputTokens, "modelUsage.cachedInputTokens");
+  const outputTokens = requiredPositiveIntegerOrZero(value.outputTokens, "modelUsage.outputTokens");
+  if (cachedInputTokens > inputTokens) {
+    throw invalidRequest("modelUsage.cachedInputTokens cannot exceed inputTokens");
+  }
+  return { inputTokens, cachedInputTokens, outputTokens };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2630,51 +4013,6 @@ const JSON_HEADERS = {
     "content-type, authorization, x-jina-tenant-id, x-jina-principal-id, x-github-event, x-github-delivery, x-hub-signature-256",
   "access-control-allow-methods": "GET, POST, OPTIONS"
 } as const;
-
-function paginateByCreatedAt<T extends { id: string; createdAt: string }>(
-  values: readonly T[],
-  url: URL
-): { items: T[]; nextCursor?: string } {
-  const rawLimit = url.searchParams.get("limit");
-  const limit = rawLimit === null ? 100 : Number(rawLimit);
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
-    throw invalidRequest("limit must be an integer between 1 and 200");
-  }
-  const cursor = url.searchParams.get("cursor");
-  let start = 0;
-  if (cursor) {
-    const decoded = decodeCursor(cursor);
-    const located = values.findIndex((value) => value.id === decoded.id && value.createdAt === decoded.createdAt);
-    if (located < 0) throw invalidRequest("cursor is invalid for this result set");
-    start = located + 1;
-  }
-  const items = values.slice(start, start + limit);
-  const last = items.at(-1);
-  return {
-    items,
-    ...(last && start + items.length < values.length
-      ? { nextCursor: Buffer.from(JSON.stringify({ id: last.id, createdAt: last.createdAt })).toString("base64url") }
-      : {})
-  };
-}
-
-function decodeCursor(value: string): { id: string; createdAt: string } {
-  try {
-    const parsed: unknown = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
-    if (
-      !isRecord(parsed) ||
-      typeof parsed.id !== "string" ||
-      typeof parsed.createdAt !== "string" ||
-      !parsed.id ||
-      !parsed.createdAt
-    ) {
-      throw new Error("invalid cursor");
-    }
-    return { id: parsed.id, createdAt: parsed.createdAt };
-  } catch {
-    throw invalidRequest("cursor is invalid");
-  }
-}
 
 function json(response: ServerResponse, statusCode: number, payload: unknown): void {
   if (response.headersSent || response.destroyed) return;
@@ -2721,7 +4059,96 @@ function staleLease(): ApiError {
 
 function httpError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
+  if (error instanceof BoardContextPublicationError) {
+    const status = error.code === "invalid_publication" || error.code === "certification_mismatch" ? 400 : 409;
+    return new ApiError(status, error.code, error.message);
+  }
+  if (error instanceof BoardPageIndexAttachmentError) {
+    const status = error.code === "invalid_pageindex_attachment" ? 400 : 409;
+    return new ApiError(status, error.code, error.message);
+  }
+  if (error instanceof ContextQuotaExceededError) {
+    return new ApiError(429, error.code, error.message);
+  }
+  if (error instanceof ContextQuotaInvariantError) {
+    return new ApiError(409, error.code, error.message);
+  }
   return new ApiError(500, "internal_error", "internal server error", false);
+}
+
+function quotaRequestId(request: IncomingMessage): string {
+  const supplied = firstHeader(request.headers["x-request-id"])?.trim();
+  if (supplied && /^[a-zA-Z0-9._:@/-]{1,240}$/.test(supplied)) return supplied;
+  return randomUUID();
+}
+
+function contextModelQuotaTaskId(taskId: string, attempt: number): string {
+  return `${taskId}:attempt:${attempt}`;
+}
+
+async function settleContextModelQuota(
+  quota: ContextQuotaService,
+  input: {
+    readonly tenantId: string;
+    readonly taskId: string;
+    readonly modelUsage?: {
+      readonly inputTokens: number;
+      readonly cachedInputTokens: number;
+      readonly outputTokens: number;
+    };
+  }
+): Promise<void> {
+  if (input.modelUsage) {
+    await quota.finishModelTask({
+      tenantId: input.tenantId,
+      taskId: input.taskId,
+      ...input.modelUsage
+    });
+    return;
+  }
+  try {
+    await quota.cancelModelTask({
+      tenantId: input.tenantId,
+      taskId: input.taskId
+    });
+  } catch (error) {
+    // The Board receipt is the durable idempotency record. If the process died
+    // after releasing quota but before replying to the worker, replay observes
+    // no active reservation and is already settled.
+    if (error instanceof ContextQuotaInvariantError && error.reason === "reservation_not_found") return;
+    throw error;
+  }
+}
+
+async function settleTerminalReconciledModelQuotas(
+  quota: ContextQuotaService,
+  state: BoardState,
+  tenantId: string,
+  buildId: string
+): Promise<void> {
+  const messageIds = new Set<BoardOutboxMessageId>();
+  for (const event of state.events) {
+    if (
+      event.type !== "task.aggregate_terminal_outbox_retired" ||
+      event.payload?.previousStatus !== "leased" ||
+      typeof event.payload.messageId !== "string" ||
+      !event.taskId
+    ) {
+      continue;
+    }
+    const task = findTask(state, event.taskId);
+    if (task?.metadata.contextBuildId !== buildId || task.metadata.tenantId !== tenantId) continue;
+    messageIds.add(entityId<"board_outbox_message">(event.payload.messageId));
+  }
+
+  for (const messageId of messageIds) {
+    const message = findOutboxMessage(state, messageId);
+    if (!message || !CONTEXT_MODEL_TOPICS.has(message.topic)) continue;
+    await settleContextModelQuota(quota, {
+      tenantId,
+      taskId: contextModelQuotaTaskId(message.taskId, message.payload.attempt)
+    });
+  }
 }
 
 class DeliveryCache {

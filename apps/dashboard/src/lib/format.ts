@@ -39,7 +39,7 @@ const EVENT_LABELS: Readonly<Record<string, string>> = {
   "review.completed": "Review completed",
   "publish.completed": "Publication comment",
   "github.issue_opened": "GitHub issue received",
-  "context.generation_published": "Context generation published",
+  "context.generation_published": "Context release published",
   "context.build_failed": "Context build failed"
 };
 

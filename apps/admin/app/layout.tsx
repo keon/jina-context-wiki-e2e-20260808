@@ -5,7 +5,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Jina Admin — Repository Context",
-  description: "Administrative view of context index generations and knowledge health."
+  description: "Administrative view of immutable context releases and checkpoint health."
 };
 
 export default function RootLayout({ children }: { readonly children: ReactNode }) {

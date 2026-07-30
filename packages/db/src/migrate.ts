@@ -1,4 +1,5 @@
-import { Pool, type PoolConfig } from "pg";
+import { createHash } from "node:crypto";
+import { Pool, type PoolClient, type PoolConfig } from "pg";
 import { applySchema } from "./apply-schema.js";
 import { hardenContextRuntimeRole } from "./context/runtime-role.js";
 import { CONTEXT_ROLES_SQL, CONTEXT_RUNTIME_ROLES } from "./context/roles.js";
@@ -16,8 +17,16 @@ const config: PoolConfig = connectionString
       ...(process.env.DB_PORT ? { port: Number(process.env.DB_PORT) } : {})
     };
 
-const pool = new Pool({ ...config, application_name: "jina-context-migrate", max: 1 });
+const deploymentLease = deploymentLeaseInput(process.env);
+// A production migration keeps a second connection open solely to hold the
+// same Board advisory lock used by worker mutations and release-control
+// transitions. Schema application uses the other connection.
+const pool = new Pool({ ...config, application_name: "jina-context-migrate", max: deploymentLease ? 2 : 1 });
+let deploymentGuard: PoolClient | undefined;
 try {
+  if (deploymentLease) {
+    deploymentGuard = await acquireDeploymentGuard(pool, deploymentLease);
+  }
   await applySchema(pool, "jina_context.schema", CONTEXT_SCHEMA_SQL);
   if (process.argv.includes("--install-pgvector")) {
     await applySchema(pool, "jina_context.pgvector", CONTEXT_PGVECTOR_SCHEMA_SQL);
@@ -57,8 +66,71 @@ try {
       );
     }
   }
+  if (deploymentGuard && deploymentLease) {
+    await assertDeploymentLease(deploymentGuard, deploymentLease);
+  }
 } finally {
+  if (deploymentGuard) {
+    await deploymentGuard.query("select pg_advisory_unlock(hashtext('jina_runtime.api_state'))").catch(() => undefined);
+    deploymentGuard.release();
+  }
   await pool.end();
+}
+
+interface DeploymentLeaseInput {
+  readonly releaseId: string;
+  readonly credentialSha256: string;
+}
+
+function deploymentLeaseInput(environment: NodeJS.ProcessEnv): DeploymentLeaseInput | undefined {
+  const releaseId = environment.JINA_WORKER_RELEASE_ID?.trim();
+  const credential = environment.JINA_WORKER_RELEASE_CREDENTIAL?.trim();
+  if (!releaseId && !credential) return undefined;
+  if (!releaseId || !credential) {
+    throw new Error(
+      "JINA_WORKER_RELEASE_ID and JINA_WORKER_RELEASE_CREDENTIAL must be configured together for migration"
+    );
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(releaseId)) {
+    throw new Error("JINA_WORKER_RELEASE_ID is invalid");
+  }
+  if (credential.length < 32 || credential.length > 512) {
+    throw new Error("JINA_WORKER_RELEASE_CREDENTIAL must contain 32..512 characters");
+  }
+  return {
+    releaseId,
+    credentialSha256: createHash("sha256").update(credential, "utf8").digest("hex")
+  };
+}
+
+async function acquireDeploymentGuard(pool: Pool, lease: DeploymentLeaseInput): Promise<PoolClient> {
+  const client = await pool.connect();
+  try {
+    await client.query("set statement_timeout='60s'");
+    await client.query("select pg_advisory_lock(hashtext('jina_runtime.api_state'))");
+    await client.query("set statement_timeout=0");
+    await assertDeploymentLease(client, lease);
+    return client;
+  } catch (error) {
+    await client.query("select pg_advisory_unlock(hashtext('jina_runtime.api_state'))").catch(() => undefined);
+    client.release();
+    throw error;
+  }
+}
+
+async function assertDeploymentLease(client: PoolClient, lease: DeploymentLeaseInput): Promise<void> {
+  const active = await client.query(
+    `select 1
+     from jina_runtime.release_control
+     where id=1
+       and lease_release_id=$1
+       and lease_credential_sha256=$2
+       and lease_expires_at > clock_timestamp()`,
+    [lease.releaseId, lease.credentialSha256]
+  );
+  if (active.rowCount !== 1) {
+    throw new Error(`coordinated release ${lease.releaseId} does not hold a live deployment lease`);
+  }
 }
 
 function requiredRuntimeRoleName(value: string | undefined): string {

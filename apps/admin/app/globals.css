@@ -7,7 +7,6 @@
   --text-muted: #8b96a8;
   --accent: #5aa9ff;
   --accent-soft: rgba(90, 169, 255, 0.14);
-  --knowledge: #c792ea;
 }
 
 * {
@@ -165,6 +164,25 @@ code {
   color: var(--text-muted);
 }
 
+.failure-detail {
+  display: block;
+  max-width: 320px;
+  margin-top: 4px;
+  color: #e0a49f;
+  font-size: 11px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.failure-stage-list {
+  max-width: 420px;
+  margin: 7px 0 0;
+  padding-left: 16px;
+  color: #e0a49f;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .empty-state,
 .error-state {
   background: var(--panel);
@@ -237,4 +255,17 @@ section.listing {
 section.listing h3 {
   font-size: 15px;
   margin-bottom: 10px;
+}
+
+.context-admin-section {
+  margin-top: 28px;
+}
+
+.context-admin-section h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.context-admin-section > .muted {
+  margin: 0 0 12px;
 }

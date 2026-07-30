@@ -71,16 +71,21 @@ export class PostgresContextQueryRepository {
       "jina_context_query",
       { tenantIds: [tenantId] },
       `select generation.*
-       from jina_context.index_generations generation
-       where generation.tenant_id=$1 and generation.repository=$2
-         and generation.ref_name=$3 and generation.status='published'
+       from jina_context.current_context_board_releases current_release
+       join jina_context.index_generations generation
+         on generation.id=current_release.release_id
+        and generation.tenant_id=current_release.tenant_id
+        and generation.repository=current_release.repository
+        and generation.ref_name=current_release.ref_name
+       where current_release.tenant_id=$1 and current_release.repository=$2
+         and current_release.ref_name=$3 and generation.status='published'
          and exists (
            select 1 from jina_context.current_repository_acl acl
            where acl.tenant_id=generation.tenant_id and acl.repository=generation.repository
              and acl.principal_id=$4
              and acl.permission in ('read','write','admin')
          )
-       order by generation.published_at desc,generation.id desc limit 1`,
+       limit 1`,
       [tenantId, repository, ref, principalId]
     );
     const row = result.rows[0];

@@ -3,14 +3,19 @@ export * from "./domain/fingerprint.js";
 export * from "./domain/knowledge.js";
 export * from "./domain/projection.js";
 export * from "./domain/query.js";
+export * from "./context/catalog.js";
 
 export * from "./ports/context-engine-store.js";
+export * from "./ports/context-quota-store.js";
+export * from "./ports/artifact-store.js";
 export * from "./ports/evidence-store.js";
 export * from "./ports/knowledge-store.js";
 export * from "./ports/projection-store.js";
 export * from "./ports/hierarchy.js";
 export * from "./ports/embeddings.js";
 export * from "./ports/synthesizer.js";
+export * from "./publication/board-publication.js";
+export * from "./publication/board-pageindex-attachment.js";
 
 export * from "./memory/store.js";
 
@@ -31,6 +36,7 @@ export * from "./index/hierarchy.js";
 export * from "./index/knowledge-current.js";
 export * from "./index/lexical.js";
 export * from "./index/manifest.js";
+export * from "./index/pageindex-local-client.js";
 export * from "./index/structural.js";
 
 export * from "./query/citation-verifier.js";
@@ -46,12 +52,12 @@ export * from "./query/retrievers/dense.js";
 export * from "./query/retrievers/hierarchy.js";
 export * from "./query/retrievers/structural.js";
 
-export * from "./workflow/coordinator.js";
-export * from "./workflow/task-definition.js";
-export * from "./workflow/topics.js";
+export * from "./workflow/board.js";
+export * from "./workflow/incremental.js";
 export * from "./derive/verbosity.js";
 export * from "./derive/markdown-document.js";
 export * from "./derive/progress.js";
+export * from "./derive/orchestration.js";
 export * from "./derive/markdown-verifier.js";
 export * from "./derive/markdown-catalog.js";
 export * from "./derive/markdown-output.js";

@@ -2026,6 +2026,76 @@ body[data-page="context"] .app-header {
   gap: 12px;
 }
 
+.context-browser-grid {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(0, 2fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.context-tree-branch > button {
+  width: 100%;
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.7rem;
+  color: inherit;
+  text-align: left;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  cursor: pointer;
+}
+
+.context-tree-branch > button:hover,
+.context-tree-branch > button.active {
+  border-left-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.context-tree-branch small {
+  color: var(--muted);
+  line-height: 1.35;
+}
+
+.context-search-results {
+  display: grid;
+  gap: 0.65rem;
+  margin-top: 1rem;
+}
+
+.context-search-results article {
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.65rem;
+}
+
+.context-search-results article button {
+  border: 0;
+  padding: 0;
+  color: var(--accent);
+  background: transparent;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.context-search-results article p {
+  white-space: pre-wrap;
+}
+
+.context-markdown {
+  overflow: auto;
+  white-space: pre-wrap;
+  font: inherit;
+  line-height: 1.6;
+}
+
+@media (max-width: 900px) {
+  .context-browser-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 .context-page-header,
 .context-panel-heading {
   display: flex;
@@ -2816,6 +2886,19 @@ body[data-page="context"] .app-header {
   font-weight: 540;
 }
 
+.context-stage-details {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.context-failure-reason {
+  color: #bc7272;
+  font-size: 8px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
 .context-projector-row p {
   grid-column: 1 / -1;
   margin: -2px 0 7px;
@@ -3097,5 +3180,409 @@ body[data-page="context"] .app-header {
 
   .context-projector-row > :nth-child(3) {
     display: none;
+  }
+}
+
+/* Derived context is authored as Markdown. Keep its hierarchy and evidence
+   readable without allowing raw HTML from generated documents into the page. */
+.context-rendered-markdown {
+  min-width: 0;
+  margin-top: 14px;
+  border-top: 1px solid #222;
+  padding-top: 14px;
+  color: #b1b1b1;
+  font-size: 11px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+
+.context-rendered-markdown > :first-child {
+  margin-top: 0;
+}
+
+.context-rendered-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.context-rendered-markdown h1,
+.context-rendered-markdown h2,
+.context-rendered-markdown h3,
+.context-rendered-markdown h4,
+.context-rendered-markdown h5,
+.context-rendered-markdown h6 {
+  margin: 1.8em 0 0.65em;
+  color: #e0e0e0;
+  font-weight: 620;
+  line-height: 1.3;
+  letter-spacing: -0.015em;
+}
+
+.context-rendered-markdown h1 {
+  font-size: 19px;
+}
+
+.context-rendered-markdown h2 {
+  border-bottom: 1px solid #292929;
+  padding-bottom: 6px;
+  font-size: 15px;
+}
+
+.context-rendered-markdown h3 {
+  font-size: 13px;
+}
+
+.context-rendered-markdown h4,
+.context-rendered-markdown h5,
+.context-rendered-markdown h6 {
+  font-size: 11px;
+}
+
+.context-rendered-markdown p,
+.context-rendered-markdown ul,
+.context-rendered-markdown ol,
+.context-rendered-markdown blockquote,
+.context-rendered-markdown table,
+.context-rendered-markdown pre {
+  margin: 0.8em 0;
+}
+
+.context-rendered-markdown ul,
+.context-rendered-markdown ol {
+  padding-left: 22px;
+}
+
+.context-rendered-markdown li + li {
+  margin-top: 0.3em;
+}
+
+.context-rendered-markdown a,
+.context-relevant-sources a {
+  color: #a69cff;
+  text-decoration-color: rgb(166 156 255 / 45%);
+  text-underline-offset: 2px;
+}
+
+.context-rendered-markdown a:hover,
+.context-relevant-sources a:hover {
+  color: #c2bbff;
+  text-decoration-color: currentcolor;
+}
+
+.context-rendered-markdown blockquote {
+  border-left: 3px solid #4a436f;
+  padding: 2px 0 2px 13px;
+  color: #939393;
+}
+
+.context-rendered-markdown code,
+.context-relevant-sources code {
+  border: 1px solid #2b2b2b;
+  border-radius: 4px;
+  background: #101212;
+  padding: 0.12em 0.35em;
+  color: #c7c3e6;
+  font:
+    0.92em/1.5 ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+
+.context-rendered-markdown pre {
+  max-width: 100%;
+  overflow: auto;
+  border: 1px solid #292929;
+  border-radius: 7px;
+  background: #0b0d0d;
+  padding: 12px;
+}
+
+.context-rendered-markdown pre code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #bebebe;
+  font-size: 10px;
+  white-space: pre;
+}
+
+.context-rendered-markdown table {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
+.context-rendered-markdown th,
+.context-rendered-markdown td {
+  border: 1px solid #303030;
+  padding: 7px 9px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.context-rendered-markdown th {
+  background: #121414;
+  color: #d3d3d3;
+  font-weight: 620;
+}
+
+.context-rendered-markdown tr:nth-child(even) td {
+  background: rgb(255 255 255 / 1.5%);
+}
+
+.context-rendered-markdown hr {
+  margin: 20px 0;
+  border: 0;
+  border-top: 1px solid #2a2a2a;
+}
+
+.context-markdown-invalid-link {
+  color: #c58383;
+  text-decoration: line-through;
+  text-decoration-thickness: 1px;
+}
+
+.context-mermaid {
+  display: grid;
+  place-items: center;
+  min-height: 90px;
+  margin: 14px 0;
+  overflow-x: auto;
+  border: 1px solid #2d2d35;
+  border-radius: 8px;
+  background: #0c0d11;
+  padding: 14px;
+  color: #777;
+}
+
+.context-mermaid svg {
+  width: auto;
+  max-width: 100%;
+  height: auto;
+}
+
+.context-mermaid-error {
+  display: block;
+  border-color: #4c2b2b;
+}
+
+.context-mermaid-error figcaption {
+  color: #cf7373;
+  font-size: 9px;
+}
+
+.context-relevant-sources {
+  margin-top: 13px;
+  border: 1px solid #292929;
+  border-radius: 7px;
+  background: #0d0f0f;
+  padding: 10px 12px;
+}
+
+.context-relevant-sources h3 {
+  margin: 0 0 8px;
+  color: #aaa;
+  font-size: 9px;
+  font-weight: 620;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.context-relevant-sources ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+  gap: 6px 12px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.context-relevant-sources li {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.context-relevant-sources a {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.context-relevant-sources code {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+.context-relevant-sources span {
+  flex: none;
+  color: #666;
+  font-size: 8px;
+}
+
+.context-document-evidence > .context-citation {
+  border: 1px solid #262626;
+  border-radius: 6px;
+  background: #0e1010;
+  padding: 9px;
+}
+
+.context-document-evidence > h3 {
+  margin: 0 0 3px;
+  color: #aaa;
+  font-size: 9px;
+  font-weight: 620;
+}
+
+.context-document-evidence > .context-citation p {
+  margin: 4px 0 0;
+}
+
+.context-tool-contract {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #292929;
+  border-radius: 7px;
+  background: #0c0e0e;
+  padding: 10px 12px;
+}
+
+.context-tool-contract > div {
+  display: grid;
+  margin-right: auto;
+}
+
+.context-tool-contract strong {
+  color: #c6c6c6;
+  font-size: 10px;
+}
+
+.context-tool-contract code {
+  border: 1px solid #333044;
+  border-radius: 999px;
+  background: #14121e;
+  padding: 4px 8px;
+  color: #bcb4ed;
+  font:
+    8px ui-monospace,
+    SFMono-Regular,
+    Menlo,
+    monospace;
+}
+
+.context-tool-contract > span:last-child {
+  color: #777;
+  font-size: 8px;
+}
+
+.context-diff-panel {
+  overflow: hidden;
+}
+
+.context-diff-form {
+  display: flex;
+  align-items: end;
+  gap: 10px;
+  border-top: 1px solid #242424;
+  padding: 12px;
+}
+
+.context-diff-form label {
+  display: grid;
+  flex: 1;
+  gap: 5px;
+  color: #777;
+  font-size: 8px;
+}
+
+.context-diff-form select {
+  width: 100%;
+  border: 1px solid #333;
+  border-radius: 5px;
+  background: #101212;
+  padding: 7px 8px;
+  color: #bbb;
+  font-size: 9px;
+}
+
+.context-diff-results {
+  border-top: 1px solid #242424;
+}
+
+.context-diff-results > article {
+  display: grid;
+  grid-template-columns: 72px minmax(120px, 0.35fr) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 10px;
+  border-top: 1px solid #202020;
+  padding: 9px 12px;
+}
+
+.context-diff-results > article button {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #b8b0e7;
+  font-size: 9px;
+  font-weight: 620;
+  text-align: left;
+  cursor: pointer;
+}
+
+.context-diff-results > article strong {
+  color: #999;
+  font-size: 9px;
+}
+
+.context-diff-results > article p {
+  margin: 0;
+  color: #777;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+.context-status.active,
+.context-status.pending,
+.context-status.in_progress,
+.context-status.queued {
+  color: #aa9763;
+}
+
+.context-status.completed,
+.context-status.done,
+.context-status.valid,
+.context-status.added {
+  color: #70a887;
+}
+
+.context-status.changed {
+  color: #a89c70;
+}
+
+.context-status.removed,
+.context-status.invalid {
+  color: #bc7272;
+}
+
+@media (max-width: 720px) {
+  .context-diff-form {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .context-diff-results > article {
+    grid-template-columns: 70px minmax(0, 1fr);
+  }
+
+  .context-diff-results > article p {
+    grid-column: 1 / -1;
   }
 }
