@@ -1125,6 +1125,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
 
+    // The pages this stage has checkpointed so far. The worker reads them back
+    // when the sandbox's directory cannot be trusted -- an agent that lost its
+    // context once deleted eleven finished pages and left a stub -- so the
+    // durable copy, not the disk, is what finally gets committed.
+    if (request.method === "POST" && url.pathname === "/internal/context/derive/checkpoint-pages") {
+      const body = parseJsonObject(await readRawBody(request));
+      const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
+      const pages = contextStore.derivationProgressPages
+        ? await contextStore.derivationProgressPages(principal.tenantId, lease.stage.id)
+        : [];
+      json(response, 200, { pages });
+      return;
+    }
+
     if (request.method === "POST" && url.pathname === "/internal/context/derive/commit") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
       const lease = await requireLeasedContextStage(principal.tenantId, body, contextQueueTopics.deriveKnowledge);
@@ -2444,6 +2458,7 @@ const METRICS_ROUTES = new Set([
   "/internal/context/derive/prepare",
   "/internal/context/derive/commit",
   "/internal/context/derive/progress",
+  "/internal/context/derive/checkpoint-pages",
   "/internal/context/index",
   "/internal/context/outbox/drain",
   "/internal/worker/claim",

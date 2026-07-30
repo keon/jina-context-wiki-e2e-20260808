@@ -12,7 +12,11 @@ import {
   prepareDiff,
   type ReviewRequest
 } from "@jina/ai";
-import { DaytonaCodexKnowledgeDocumentGenerator, LocalCodexKnowledgeDocumentGenerator } from "@jina/daytona";
+import {
+  checkpointClaimVerifier,
+  DaytonaCodexKnowledgeDocumentGenerator,
+  LocalCodexKnowledgeDocumentGenerator
+} from "@jina/daytona";
 import { createGitHubInstallationAccessToken } from "@jina/github";
 import { createLogger, errorLogFields, generateTraceContext, MetricsRegistry } from "@jina/observability";
 import type {
@@ -25,7 +29,13 @@ import type {
   RefManifestEntry,
   ProviderObservationInput
 } from "@jina/context-engine";
-import { buildKnowledgeRepairPrompt, repositoryAclFingerprint } from "@jina/context-engine";
+import {
+  buildKnowledgeRepairPrompt,
+  mapMarkdownCatalog,
+  markdownCatalogToOutput,
+  parseMarkdownDocument,
+  repositoryAclFingerprint
+} from "@jina/context-engine";
 import { workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
@@ -403,29 +413,88 @@ async function runDeriveKnowledge(work: ClaimedWork<"run-derive-knowledge">): Pr
       // Too little left to reach a first document, so a repair run would only
       // spend the rest of the lease restating the failure it already reported.
       if (attempt > 0 && remainingSeconds < MIN_DERIVE_REPAIR_SECONDS) break;
-      const rawOutput = await knowledgeGenerator.generate({
-        prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
-        bundle: prepared.bundle,
-        repairErrors: [...diagnostics],
-        budgetSeconds: Math.max(remainingSeconds, MIN_DERIVE_REPAIR_SECONDS),
-        // Reported as pages appear rather than at the end, so a run stopped by a
-        // deploy or a lost lease keeps what it wrote and can be watched while it
-        // writes. Failures are swallowed: this observes a derivation, it must
-        // never be the reason one fails.
-        onProgress: async (pages) => {
-          await internalApiJson(
-            "/internal/context/derive/progress",
-            leaseBody(work, { checkpointId: work.task.metadata.checkpointId, pages })
-          ).catch(() => undefined);
-        },
-        ...(prepared.detail ? { detail: prepared.detail } : {}),
-        workspace: {
-          repositoryDirectory: checkout.directory,
-          manifest: prepared.manifest,
-          priorKnowledge: prepared.priorKnowledge,
-          ...(prepared.resumedPages?.length ? { resumedPages: prepared.resumedPages } : {})
+      // The checkpoint store is the durable copy of every page this stage has
+      // finished; the sandbox's directory is only where they were born. An
+      // agent that lost its context once deleted eleven finished pages in the
+      // final minutes of a run, so what gets committed is the union: whatever
+      // the run returned, plus any checkpointed page the run no longer has.
+      const resurrect = async (raw: unknown): Promise<unknown> => {
+        try {
+          const checkpointed = await internalApiJson<{
+            readonly pages: readonly { documentPath: string; title: string; bodyMarkdown: string }[];
+          }>(
+            "/internal/context/derive/checkpoint-pages",
+            leaseBody(work, { checkpointId: work.task.metadata.checkpointId })
+          );
+          if (!checkpointed.pages.length) return raw;
+          const output = raw as { documents?: { logicalId: string }[] } | undefined;
+          const have = new Set((output?.documents ?? []).map((document) => document.logicalId));
+          const missing = checkpointed.pages.filter((page) => {
+            const { entries } = mapMarkdownCatalog(
+              [parseMarkdownDocument(page.documentPath, page.bodyMarkdown)],
+              repository
+            );
+            return entries[0] !== undefined && !have.has(entries[0].logicalId);
+          });
+          if (!missing.length) return raw;
+          const revived = markdownCatalogToOutput(
+            missing.map((page) => parseMarkdownDocument(page.documentPath, page.bodyMarkdown)),
+            repository,
+            prepared.manifest,
+            checkpointClaimVerifier(checkout.directory)
+          );
+          logger.warn("derive pages resurrected from checkpoints", {
+            event: "derive.pages_resurrected",
+            repository,
+            resurrected: revived.output.documents.length,
+            returnedByRun: output?.documents?.length ?? 0
+          });
+          return {
+            ...(output ?? { retiredDocuments: [] }),
+            documents: [...(output?.documents ?? []), ...revived.output.documents]
+          };
+        } catch {
+          // Resurrection is a safety net over an already-produced result; a
+          // failure here must never replace that result with nothing.
+          return raw;
         }
-      });
+      };
+      const rawOutput = await resurrect(
+        await knowledgeGenerator
+          .generate({
+            prompt: attempt === 0 ? prepared.prompt : buildKnowledgeRepairPrompt(prepared.prompt, diagnostics),
+            bundle: prepared.bundle,
+            repairErrors: [...diagnostics],
+            budgetSeconds: Math.max(remainingSeconds, MIN_DERIVE_REPAIR_SECONDS),
+            // Reported as pages appear rather than at the end, so a run stopped by a
+            // deploy or a lost lease keeps what it wrote and can be watched while it
+            // writes. Failures are swallowed: this observes a derivation, it must
+            // never be the reason one fails.
+            onProgress: async (pages) => {
+              await internalApiJson(
+                "/internal/context/derive/progress",
+                leaseBody(work, { checkpointId: work.task.metadata.checkpointId, pages })
+              ).catch(() => undefined);
+            },
+            ...(prepared.detail ? { detail: prepared.detail } : {}),
+            workspace: {
+              repositoryDirectory: checkout.directory,
+              manifest: prepared.manifest,
+              priorKnowledge: prepared.priorKnowledge,
+              ...(prepared.resumedPages?.length ? { resumedPages: prepared.resumedPages } : {})
+            }
+          })
+          // A run that died with nothing on disk still has its checkpoints:
+          // resurrect from an empty catalog rather than letting the throw stand
+          // when there is durable work to commit.
+          .catch(async (error: unknown) => {
+            const revived = (await resurrect({ documents: [], retiredDocuments: [] })) as {
+              documents?: unknown[];
+            };
+            if (revived.documents?.length) return revived;
+            throw error;
+          })
+      );
       const result = await internalApiJson<{
         readonly status: "succeeded" | "failed";
         readonly diagnostics?: readonly string[];

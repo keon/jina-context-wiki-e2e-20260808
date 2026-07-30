@@ -101,6 +101,11 @@ export function buildKnowledgeFilePrompt(bundle: FocusBundle, repairErrors: read
     // mid-run without knowing that leaves both files behind: one run shipped
     // access-policy and policy/access-policy as two live pages of one subject.
     "Renaming or moving a page is a delete of its old path: move the old file into retired/ in the same step you write the new one. Two live pages about one subject is always wrong, whichever folders they sit in.",
+    // After compaction the agent has no memory of the pages it wrote, reads
+    // this prompt fresh, and once responded by clearing the directory and
+    // starting a stub -- eleven finished pages deleted in the final minutes of
+    // a ninety-minute run. Deletion is never the answer to disorientation.
+    `Never delete a file from ${KNOWLEDGE_AGENT_OUTPUT_DIR} except by moving it into retired/, and never empty or restart a page that already has content. If you find yourself unsure what has been done so far -- for instance after your context was compacted -- list the output directory and read what is there: it is your own finished work, and the run continues from it, never over it.`,
     "If the existing wiki is empty, this is a first build: map the repository from nothing.",
 
     "Start each file with a level-one heading, which is its title. The first paragraph is its summary, so make it a sentence somebody could read on its own.",
