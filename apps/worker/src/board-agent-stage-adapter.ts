@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import {
   createBoardAgentStageRunner,
   type BoardAgentModelUsage,
+  type DaytonaBoardAgentCredential,
   type BoardAgentStageResultEnvelope,
   type BoardAgentStageRunner
 } from "@jina/daytona";
@@ -28,8 +29,23 @@ const DEFAULT_MAX_ATTEMPTS = 4;
 const OPERATOR_RETRY_HARD_MAX_ATTEMPTS = 32;
 const MAX_DECLARED_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_TOTAL_DECLARED_FILE_BYTES = 64 * 1024 * 1024;
+const MAX_EXECUTION_PROFILE_BYTES = 64 * 1024;
 
 type WorkerEnvironment = Readonly<Record<string, string | undefined>>;
+type ContextProfileFetch = (input: string, init: RequestInit) => Promise<Response>;
+
+export interface BoardAgentExecutionConfiguration {
+  readonly credential: DaytonaBoardAgentCredential;
+  readonly model: string;
+  readonly effort: string;
+  readonly domains: readonly string[];
+}
+
+type BoardAgentRunnerFactory = (
+  environment: WorkerEnvironment,
+  protectedValues: readonly string[],
+  execution?: BoardAgentExecutionConfiguration
+) => BoardAgentStageRunner;
 
 export interface PortableAgentStageInput {
   readonly id: string;
@@ -76,6 +92,8 @@ export interface PortableContextBoardAgentStageRunner {
 export interface BoardAgentAttemptContext {
   readonly commitSha: string;
   readonly attempt: number;
+  readonly tenantId?: string;
+  readonly buildId?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -83,6 +101,9 @@ export interface PortableBoardAgentConfiguration {
   readonly environment?: WorkerEnvironment;
   readonly protectedValues?: readonly string[];
   readonly attemptContext: () => BoardAgentAttemptContext;
+  /** Deterministic seams for contract tests; production uses the global fetch and runner factory. */
+  readonly profileFetch?: ContextProfileFetch;
+  readonly runnerFactory?: BoardAgentRunnerFactory;
 }
 
 /**
@@ -94,10 +115,291 @@ export function configuredPortableContextBoardAgentStageRunner(
   configuration: PortableBoardAgentConfiguration
 ): PortableContextBoardAgentStageRunner {
   const environment = configuration.environment ?? process.env;
-  const runner = configuredBoardAgentRunner(environment, configuration.protectedValues ?? []);
+  const protectedValues = configuration.protectedValues ?? [];
+  const runnerFactory = configuration.runnerFactory ?? configuredBoardAgentRunner;
+  const managedRunner = runnerFactory(environment, protectedValues);
   return {
-    run: (input) => runPortableBoardAgentStage(runner, input, configuration.attemptContext(), environment)
+    async run(input) {
+      const attempt = configuration.attemptContext();
+      const profile = await resolveContextExecutionProfile(environment, attempt, configuration.profileFetch);
+      if (!profile) {
+        return runPortableBoardAgentStage(managedRunner, input, attempt, environment);
+      }
+      const profileManagedRunner = () =>
+        configuredManagedProfileRunner(environment, protectedValues, profile.effort, runnerFactory);
+      if (profile.credential.kind === "managed") {
+        return runPortableBoardAgentStage(profileManagedRunner(), input, attempt, environment);
+      }
+      if (profile.credential.kind === "unavailable") {
+        if (profile.fallback_policy === "managed") {
+          return runPortableBoardAgentStage(profileManagedRunner(), input, attempt, environment);
+        }
+        throw new Error(`context_provider_configuration: ${profile.credential.reason}`);
+      }
+      const credential: DaytonaBoardAgentCredential =
+        profile.credential.kind === "codex"
+          ? { kind: "codex", authJson: profile.credential.value }
+          : {
+              kind: "api-key",
+              environmentVariable: profile.credential.kind === "openrouter" ? "OPENROUTER_API_KEY" : "OPENAI_API_KEY",
+              value: profile.credential.value
+            };
+      const selectedRunner = runnerFactory(environment, protectedValues, {
+        credential,
+        model: profile.credential.kind === "openrouter" ? profile.model : profile.model.replace(/^openai\//, ""),
+        effort: profile.effort,
+        domains: profile.credential.kind === "openrouter" ? ["openrouter.ai"] : ["api.openai.com"]
+      });
+      try {
+        return await runPortableBoardAgentStage(selectedRunner, input, attempt, environment);
+      } catch (error) {
+        if (profile.fallback_policy !== "managed" || !providerExecutionFailure(error)) throw error;
+        console.warn("context_provider_fallback_started", {
+          tenant_id: attempt.tenantId,
+          build_id: attempt.buildId,
+          provider: profile.provider,
+          credential_kind: profile.credential.kind,
+          consumes_organization_credits: true
+        });
+        return runPortableBoardAgentStage(profileManagedRunner(), input, attempt, environment);
+      }
+    }
   };
+}
+
+function configuredManagedProfileRunner(
+  environment: WorkerEnvironment,
+  protectedValues: readonly string[],
+  effort: ContextExecutionProfile["effort"],
+  runnerFactory: BoardAgentRunnerFactory
+): BoardAgentStageRunner {
+  const environmentVariable = environment.CONTEXT_DAYTONA_MODEL_SECRET_ENV?.trim() || "OPENAI_API_KEY";
+  if (environmentVariable !== "OPENAI_API_KEY" && environmentVariable !== "OPENROUTER_API_KEY") {
+    throw new Error("CONTEXT_DAYTONA_MODEL_SECRET_ENV must be OPENAI_API_KEY or OPENROUTER_API_KEY");
+  }
+  const configuredModel = environment.CONTEXT_CODEX_MODEL?.trim() || "gpt-5.6-terra";
+  const managedModel =
+    environmentVariable === "OPENROUTER_API_KEY"
+      ? configuredModel.includes("/")
+        ? configuredModel
+        : `openai/${configuredModel}`
+      : configuredModel.replace(/^openai\//, "");
+  return runnerFactory(environment, protectedValues, {
+    credential: {
+      kind: "secret",
+      secret: { environmentVariable, secretName: requiredDaytonaModelSecretName(environment) }
+    },
+    model: managedModel,
+    effort,
+    domains: commaSeparated(
+      environment.CONTEXT_DAYTONA_MODEL_DOMAINS ??
+        (environmentVariable === "OPENROUTER_API_KEY" ? "openrouter.ai" : "api.openai.com")
+    )
+  });
+}
+
+export interface ContextExecutionProfile {
+  readonly provider: "codex" | "byok" | "managed";
+  readonly model: string;
+  readonly effort: "low" | "medium" | "high";
+  readonly fallback_policy: "fail_notify" | "managed";
+  readonly settings_revision: string;
+  readonly credential:
+    | { readonly kind: "managed" }
+    | { readonly kind: "unavailable"; readonly reason: string }
+    | { readonly kind: "openai" | "openrouter" | "codex"; readonly value: string; readonly revision: string };
+}
+
+export async function resolveContextExecutionProfile(
+  environment: WorkerEnvironment,
+  attempt: BoardAgentAttemptContext,
+  profileFetch: ContextProfileFetch = fetch
+): Promise<ContextExecutionProfile | undefined> {
+  const apiUrl = environment.JINA_V1_API_URL?.trim()?.replace(/\/+$/, "");
+  const token = environment.JINA_V1_INTERNAL_API_TOKEN?.trim();
+  if (!apiUrl && !token) return undefined;
+  if (!apiUrl || !token) throw new Error("JINA_V1_API_URL and JINA_V1_INTERNAL_API_TOKEN must be configured together");
+  if (!attempt.tenantId || !attempt.buildId) throw new Error("Context execution profile requires tenantId and buildId");
+  let endpoint: URL;
+  try {
+    endpoint = new URL(`${apiUrl}/internal/context/execution-profile`);
+  } catch {
+    throw new Error("JINA_V1_API_URL must be an absolute URL");
+  }
+  if (endpoint.protocol !== "https:") throw new Error("JINA_V1_API_URL must use HTTPS");
+  const timeout = AbortSignal.timeout(15_000);
+  const response = await profileFetch(endpoint.href, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({ tenant_id: attempt.tenantId, build_id: attempt.buildId }),
+    signal: attempt.signal ? AbortSignal.any([attempt.signal, timeout]) : timeout
+  });
+  if (!response.ok) {
+    throw new Error(`Context API execution-profile request failed with ${response.status}`);
+  }
+  return parseContextExecutionProfile(await boundedResponseJson(response, MAX_EXECUTION_PROFILE_BYTES));
+}
+
+async function boundedResponseJson(response: Response, maximumBytes: number): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) {
+    throw new Error("Context execution profile response exceeds its byte bound");
+  }
+  if (!response.body) throw new Error("Context execution profile response is empty");
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += chunk.value.byteLength;
+      if (received > maximumBytes) {
+        await reader.cancel();
+        throw new Error("Context execution profile response exceeds its byte bound");
+      }
+      chunks.push(chunk.value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (received < 1) throw new Error("Context execution profile response is empty");
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  let text: string;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Error("Context execution profile response is not valid UTF-8");
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error("Context execution profile response is not valid JSON");
+  }
+}
+
+function parseContextExecutionProfile(value: unknown): ContextExecutionProfile {
+  const profile = exactRecord(
+    value,
+    ["provider", "model", "effort", "fallback_policy", "credential", "settings_revision"],
+    "profile"
+  );
+  const provider = enumValue(profile.provider, ["codex", "byok", "managed"] as const, "provider");
+  const model = boundedString(profile.model, "model", 240);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(model)) {
+    throw new Error("Context execution profile model is invalid");
+  }
+  const effort = enumValue(profile.effort, ["low", "medium", "high"] as const, "effort");
+  const fallbackPolicy = enumValue(profile.fallback_policy, ["fail_notify", "managed"] as const, "fallback_policy");
+  const settingsRevision = boundedString(profile.settings_revision, "settings_revision", 240);
+  const credentialRecord = exactCredentialRecord(profile.credential);
+  const kind = enumValue(
+    credentialRecord.kind,
+    ["managed", "unavailable", "openai", "openrouter", "codex"] as const,
+    "credential.kind"
+  );
+  let credential: ContextExecutionProfile["credential"];
+  if (kind === "managed") {
+    credential = { kind };
+  } else if (kind === "unavailable") {
+    credential = { kind, reason: boundedString(credentialRecord.reason, "credential.reason", 1_000) };
+  } else {
+    const maximumCredentialBytes = kind === "codex" ? 32_768 : 8_192;
+    const credentialValue = boundedString(credentialRecord.value, "credential.value", maximumCredentialBytes);
+    if (kind === "codex") {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(credentialValue) as unknown;
+      } catch {
+        throw new Error("Context execution profile Codex credential is not valid JSON");
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Context execution profile Codex credential must be a JSON object");
+      }
+    }
+    credential = {
+      kind,
+      value: credentialValue,
+      revision: boundedString(credentialRecord.revision, "credential.revision", 240)
+    };
+  }
+  if (
+    (provider === "managed" && credential.kind !== "managed") ||
+    (provider === "codex" && credential.kind !== "codex" && credential.kind !== "unavailable") ||
+    (provider === "byok" &&
+      credential.kind !== "openai" &&
+      credential.kind !== "openrouter" &&
+      credential.kind !== "unavailable")
+  ) {
+    throw new Error("Context execution profile provider and credential are inconsistent");
+  }
+  if ((credential.kind === "openai" || credential.kind === "codex") && !model.startsWith("openai/")) {
+    throw new Error("Context execution profile credential cannot serve the selected model");
+  }
+  return {
+    provider,
+    model,
+    effort,
+    fallback_policy: fallbackPolicy,
+    credential,
+    settings_revision: settingsRevision
+  };
+}
+
+function exactCredentialRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Context execution profile credential must be an object");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.kind === "managed") return exactRecord(record, ["kind"], "credential");
+  if (record.kind === "unavailable") return exactRecord(record, ["kind", "reason"], "credential");
+  return exactRecord(record, ["kind", "value", "revision"], "credential");
+}
+
+function exactRecord(value: unknown, keys: readonly string[], name: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Context execution ${name} must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const actual = Object.keys(record).sort();
+  const expected = [...keys].sort();
+  if (actual.length !== expected.length || actual.some((key, index) => key !== expected[index])) {
+    throw new Error(`Context execution ${name} has unexpected fields`);
+  }
+  return record;
+}
+
+function enumValue<const T extends readonly string[]>(value: unknown, allowed: T, name: string): T[number] {
+  if (typeof value !== "string" || !allowed.includes(value)) {
+    throw new Error(`Context execution profile ${name} is invalid`);
+  }
+  return value;
+}
+
+function boundedString(value: unknown, name: string, maximumBytes: number): string {
+  if (
+    typeof value !== "string" ||
+    !value.trim() ||
+    value !== value.trim() ||
+    value.includes("\0") ||
+    Buffer.byteLength(value, "utf8") > maximumBytes
+  ) {
+    throw new Error(`Context execution profile ${name} is invalid`);
+  }
+  return value;
+}
+
+function providerExecutionFailure(error: unknown): boolean {
+  const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+  return /quota|rate.?limit|credit|unauthorized|authentication|api.?key|token_expired|invalid_grant|model|openai|openrouter|codex|provider|upstream|service unavailable|bad gateway|gateway timeout/i.test(
+    message.slice(0, 12_000)
+  );
 }
 
 /**
@@ -106,7 +408,8 @@ export function configuredPortableContextBoardAgentStageRunner(
  */
 export function configuredBoardAgentRunner(
   environment: WorkerEnvironment = process.env,
-  protectedValues: readonly string[] = []
+  protectedValues: readonly string[] = [],
+  execution?: BoardAgentExecutionConfiguration
 ): BoardAgentStageRunner {
   const mode = environment.CONTEXT_BOARD_EXECUTOR?.trim();
   if (environment.NODE_ENV === "production" && mode !== "daytona") {
@@ -148,13 +451,18 @@ export function configuredBoardAgentRunner(
     options: {
       daytonaApiKey: requiredEnvironment(environment, "DAYTONA_API_KEY"),
       ...(snapshot ? { snapshot } : { image: image! }),
-      modelSecret: {
-        environmentVariable,
-        secretName: requiredDaytonaModelSecretName(environment)
-      },
-      allowedDomains: commaSeparated(environment.CONTEXT_DAYTONA_MODEL_DOMAINS ?? "api.openai.com"),
-      model: (environment.CONTEXT_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
-      effort: environment.CONTEXT_CODEX_EFFORT?.trim() || "low",
+      ...(execution
+        ? { credential: execution.credential }
+        : {
+            modelSecret: {
+              environmentVariable,
+              secretName: requiredDaytonaModelSecretName(environment)
+            }
+          }),
+      allowedDomains:
+        execution?.domains ?? commaSeparated(environment.CONTEXT_DAYTONA_MODEL_DOMAINS ?? "api.openai.com"),
+      model: execution?.model ?? (environment.CONTEXT_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
+      effort: execution?.effort ?? (environment.CONTEXT_CODEX_EFFORT?.trim() || "low"),
       verbosity: environment.CONTEXT_CODEX_VERBOSITY?.trim() || "high",
       ...(environment.CODEX_BINARY?.trim() ? { binary: environment.CODEX_BINARY.trim() } : {}),
       protectedValues

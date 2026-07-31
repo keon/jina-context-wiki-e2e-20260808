@@ -53,6 +53,16 @@ export function workerFailureCategory(reason: string): WorkerFailureCategory {
 
 /** Conservative retry policy: unknown and semantic failures stay terminal. */
 export function isRetryableWorkerFailure(reason: string): boolean {
+  // Retrying cannot repair a tenant credential, exhausted quota, or unavailable
+  // selected model. Preserve the first diagnostic on the task board so the
+  // dashboard can tell the owner what to fix.
+  if (
+    /context_provider_configuration|invalid (?:api )?key|unauthorized|authentication failed|token_expired|invalid_grant|insufficient[_ ]quota|quota exhausted|usage limit|out of credits|unknown model|model .*not found/i.test(
+      reason
+    )
+  ) {
+    return false;
+  }
   const category = workerFailureCategory(reason);
   if (
     category === "api_transport" ||

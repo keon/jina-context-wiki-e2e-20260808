@@ -200,6 +200,133 @@ test("Daytona runner rejects a credential value where a Secret name is required"
   );
 });
 
+test("Daytona runner supports per-build OpenRouter and Codex credentials without persisting them in outputs", async () => {
+  const requests: DaytonaBoardAgentCreateRequest[] = [];
+  const commands: string[] = [];
+  const uploads = new Map<string, Buffer>();
+  const sandbox: DaytonaBoardAgentSandbox = {
+    fs: {
+      async uploadFile(file, path) {
+        uploads.set(path, file);
+      },
+      async downloadFileStream(path) {
+        return (async function* () {
+          yield path.endsWith("/usage.json") ? Buffer.from(JSON.stringify(usage)) : Buffer.from('{"a":true}');
+        })();
+      }
+    },
+    process: {
+      async executeCommand(command) {
+        commands.push(command);
+        return { exitCode: 0, result: "" };
+      }
+    },
+    async delete() {}
+  };
+  const client = {
+    async create(request: DaytonaBoardAgentCreateRequest) {
+      requests.push(request);
+      return sandbox;
+    }
+  };
+
+  await new DaytonaBoardAgentStageRunner({
+    client,
+    snapshot: "board-agent-image-v1",
+    credential: { kind: "api-key", environmentVariable: "OPENROUTER_API_KEY", value: "or-test-key" },
+    model: "openai/gpt-5.6-terra",
+    allowedDomains: ["openrouter.ai"],
+    protectedValues: ["or-test-key"]
+  }).run(fixtureInput());
+  assert.equal(requests[0]?.envVars.OPENROUTER_API_KEY, "or-test-key");
+  assert.deepEqual(requests[0]?.secrets, {});
+  assert.match(commands.find((command) => command.includes("codex")) ?? "", /model_provider=openrouter/);
+  assert.match(commands.find((command) => command.includes("codex")) ?? "", /'-m' 'openai\/gpt-5\.6-terra'/);
+
+  commands.length = 0;
+  const authJson = JSON.stringify({ tokens: { access_token: "codex-test-access" } });
+  await new DaytonaBoardAgentStageRunner({
+    client,
+    snapshot: "board-agent-image-v1",
+    credential: { kind: "codex", authJson },
+    allowedDomains: ["api.openai.com"],
+    protectedValues: [authJson, "codex-test-access"]
+  }).run(fixtureInput());
+  assert.equal(uploads.get("/home/daytona/.codex/auth.json")?.toString(), authJson);
+  assert.doesNotMatch(commands.find((command) => command.includes("codex")) ?? "", /model_provider=/);
+});
+
+test("raw per-build credentials are redacted from creation and Codex failure diagnostics then consumed", async () => {
+  const apiKey = "sk-or-v1-private-api-key";
+  const createFailureRunner = new DaytonaBoardAgentStageRunner({
+    client: {
+      async create() {
+        throw new Error(`sandbox request rejected credential ${apiKey}`);
+      }
+    },
+    snapshot: "board-agent-image-v1",
+    credential: { kind: "api-key", environmentVariable: "OPENROUTER_API_KEY", value: apiKey },
+    model: "openai/gpt-5.6-terra",
+    allowedDomains: ["openrouter.ai"]
+  });
+  await assert.rejects(
+    () => createFailureRunner.run(fixtureInput()),
+    (error) => {
+      assert.match(String(error), /\[REDACTED\]/);
+      assert.doesNotMatch(String(error), new RegExp(apiKey));
+      return true;
+    }
+  );
+  await assert.rejects(() => createFailureRunner.run(fixtureInput()), /credential was already consumed/);
+
+  const accessToken = "codex-private-access-token";
+  const refreshToken = "codex-private-refresh-token";
+  const authJson = JSON.stringify({
+    tokens: { access_token: accessToken, refresh_token: refreshToken },
+    account: { id: "account-private-value" }
+  });
+  const codexFailureRunner = new DaytonaBoardAgentStageRunner({
+    client: {
+      async create() {
+        return {
+          fs: {
+            async uploadFile() {},
+            async downloadFileStream() {
+              throw new Error("must not download failed output");
+            }
+          },
+          process: {
+            async executeCommand(command) {
+              return command.includes("'codex' 'exec'")
+                ? {
+                    exitCode: 9,
+                    result: `provider stderr echoed ${accessToken} ${refreshToken} ${authJson}`
+                  }
+                : { exitCode: 0, result: "" };
+            }
+          },
+          async delete() {}
+        };
+      }
+    },
+    snapshot: "board-agent-image-v1",
+    credential: { kind: "codex", authJson },
+    allowedDomains: ["api.openai.com"]
+  });
+  await assert.rejects(
+    () => codexFailureRunner.run(fixtureInput()),
+    (error) => {
+      const message = String(error);
+      assert.match(message, /\[REDACTED\]/);
+      for (const secret of [accessToken, refreshToken, authJson]) {
+        assert.doesNotMatch(message, new RegExp(secret.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      }
+      return true;
+    }
+  );
+  await assert.rejects(() => codexFailureRunner.run(fixtureInput()), /credential was already consumed/);
+});
+
 test("local Codex JSON events are streamed into exact usage without retaining transcript content", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-codex-usage-fixture-"));
   const binary = join(root, "codex-fixture.cjs");

@@ -49,6 +49,8 @@ const DAYTONA_USAGE = `${DAYTONA_OUTPUT}/usage.json`;
 const DAYTONA_USAGE_PARSER = `${DAYTONA_ROOT}/${LOCAL_USAGE_PARSER}`;
 const DAYTONA_EVENTS = "/tmp/jina-codex-events.jsonl";
 const DAYTONA_DIAGNOSTIC = "/tmp/jina-codex-diagnostic.log";
+const DAYTONA_CODEX_HOME = "/home/daytona/.codex";
+const DAYTONA_CODEX_AUTH = `${DAYTONA_CODEX_HOME}/auth.json`;
 const MAX_USAGE_BYTES = 512;
 const MAX_CODEX_EVENT_TYPE_PREFIX_BYTES = 4 * 1024;
 const MAX_CODEX_USAGE_EVENT_LINE_BYTES = 16 * 1024;
@@ -367,7 +369,7 @@ export class LocalBoardAgentStageRunner implements BoardAgentStageRunner {
         ...(prepared.signal ? { signal: prepared.signal } : {})
       });
       if (run.exitCode !== 0) {
-        throw stageExecutionError(input.id, prepared.limits.timeoutSeconds, run);
+        throw stageExecutionError(input.id, prepared.limits.timeoutSeconds, run, this.#protectedValues);
       }
       const usage = validatedModelUsage(run.usage, "local Codex turn.completed usage");
       const raw = run.output ?? (await boundedLocalFile(resultPath, prepared.maximumOutputBytes));
@@ -390,12 +392,23 @@ export interface DaytonaBoardAgentSecret {
   readonly secretName: string;
 }
 
+export type DaytonaBoardAgentCredential =
+  | { readonly kind: "secret"; readonly secret: DaytonaBoardAgentSecret }
+  | {
+      readonly kind: "api-key";
+      readonly environmentVariable: "OPENAI_API_KEY" | "OPENROUTER_API_KEY";
+      readonly value: string;
+    }
+  | { readonly kind: "codex"; readonly authJson: string };
+
 export interface DaytonaBoardAgentStageRunnerOptions extends AgentModelOptions {
   readonly client?: DaytonaBoardAgentClient;
   readonly daytonaApiKey?: string;
   readonly snapshot?: string;
   readonly image?: string;
-  readonly modelSecret: DaytonaBoardAgentSecret;
+  /** Legacy organization-secret reference. Prefer credential for per-build routing. */
+  readonly modelSecret?: DaytonaBoardAgentSecret;
+  readonly credential?: DaytonaBoardAgentCredential;
   readonly allowedDomains: readonly string[];
   readonly resources?: Resources;
   readonly setupTimeoutSeconds?: number;
@@ -445,11 +458,11 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
   readonly #model: Required<AgentModelOptions>;
   readonly #snapshot?: string;
   readonly #image?: string;
-  readonly #modelSecret: DaytonaBoardAgentSecret;
+  #credential: DaytonaBoardAgentCredential | undefined;
   readonly #allowedDomains: readonly string[];
   readonly #resources?: Resources;
   readonly #setupTimeoutSeconds: number;
-  readonly #protectedValues: readonly string[];
+  #protectedValues: readonly string[];
 
   constructor(options: DaytonaBoardAgentStageRunnerOptions) {
     const snapshot = options.snapshot?.trim();
@@ -457,11 +470,33 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
     if (Boolean(snapshot) === Boolean(image)) {
       throw new Error("Daytona board agent runner requires exactly one explicit snapshot or image");
     }
-    if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(options.modelSecret.environmentVariable)) {
-      throw new Error("Daytona model secret environment variable is invalid");
+    if (options.modelSecret && options.credential) {
+      throw new Error("Daytona board agent runner accepts either modelSecret or credential, not both");
     }
-    if (!safeOpaqueName(options.modelSecret.secretName) || /^sk[-_]/i.test(options.modelSecret.secretName)) {
-      throw new Error("Daytona model Secret name is invalid");
+    const credential =
+      options.credential ??
+      (options.modelSecret ? { kind: "secret" as const, secret: options.modelSecret } : undefined);
+    if (!credential) throw new Error("Daytona board agent credential is required");
+    if (credential.kind === "secret") {
+      if (!/^[A-Z][A-Z0-9_]{0,63}$/.test(credential.secret.environmentVariable)) {
+        throw new Error("Daytona model secret environment variable is invalid");
+      }
+      if (!safeOpaqueName(credential.secret.secretName) || /^sk[-_]/i.test(credential.secret.secretName)) {
+        throw new Error("Daytona model Secret name is invalid");
+      }
+    } else if (credential.kind === "api-key") {
+      const credentialBytes = Buffer.byteLength(credential.value, "utf8");
+      if (!credential.value.trim() || credentialBytes < 8 || credentialBytes > 8_192) {
+        throw new Error("Daytona model API key is outside its bound");
+      }
+    } else if (credential.kind === "codex") {
+      if (Buffer.byteLength(credential.authJson, "utf8") > 32_768) {
+        throw new Error("Daytona Codex auth is outside its bound");
+      }
+      const parsed = JSON.parse(credential.authJson) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Daytona Codex auth must be a JSON object");
+      }
     }
     const allowedDomains = [...new Set(options.allowedDomains.map(normalizedDomain))];
     if (allowedDomains.length === 0 || allowedDomains.length > 8) {
@@ -476,17 +511,42 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
     }
     this.#client =
       options.client ?? new SdkDaytonaBoardAgentClient(new Daytona({ apiKey: options.daytonaApiKey!.trim() }));
-    this.#model = modelOptions(options);
+    const openRouterCredential =
+      (credential.kind === "api-key" && credential.environmentVariable === "OPENROUTER_API_KEY") ||
+      (credential.kind === "secret" && credential.secret.environmentVariable === "OPENROUTER_API_KEY");
+    this.#model = modelOptions(options, openRouterCredential);
     if (snapshot) this.#snapshot = snapshot;
     if (image) this.#image = image;
-    this.#modelSecret = options.modelSecret;
+    this.#credential = credential;
     this.#allowedDomains = allowedDomains;
     if (options.resources) this.#resources = options.resources;
     this.#setupTimeoutSeconds = setupTimeoutSeconds;
-    this.#protectedValues = boundedProtectedValues(options.protectedValues ?? []);
+    this.#protectedValues = boundedProtectedValues([
+      ...(options.protectedValues ?? []),
+      ...credentialProtectedValues(credential)
+    ]);
   }
 
   async run(input: BoardAgentStageInput): Promise<BoardAgentStageResultEnvelope> {
+    const credential = this.#credential;
+    if (!credential) throw new Error("Daytona per-build credential was already consumed");
+    const protectedValues = this.#protectedValues;
+    const rawCredential = credential.kind === "api-key" || credential.kind === "codex";
+    if (rawCredential) this.#credential = undefined;
+    try {
+      return await this.#run(input, credential, protectedValues);
+    } catch (error) {
+      throw redactedError(error, protectedValues);
+    } finally {
+      if (rawCredential) this.#protectedValues = [];
+    }
+  }
+
+  async #run(
+    input: BoardAgentStageInput,
+    credential: DaytonaBoardAgentCredential,
+    protectedValues: readonly string[]
+  ): Promise<BoardAgentStageResultEnvelope> {
     const prepared = prepareStageInput(input);
     throwIfAborted(prepared.signal);
     // Sandbox creation itself is not cancellable in the SDK. Await it so an
@@ -496,8 +556,14 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
         language: "typescript",
         ...(this.#snapshot ? { snapshot: this.#snapshot } : { image: this.#image! }),
         ...(this.#resources ? { resources: this.#resources } : {}),
-        envVars: { NODE_ENV: "production", HOME: "/home/daytona", LANG: "C.UTF-8" },
-        secrets: { [this.#modelSecret.environmentVariable]: this.#modelSecret.secretName },
+        envVars: {
+          NODE_ENV: "production",
+          HOME: "/home/daytona",
+          LANG: "C.UTF-8",
+          ...(credential.kind === "api-key" ? { [credential.environmentVariable]: credential.value } : {})
+        },
+        secrets:
+          credential.kind === "secret" ? { [credential.secret.environmentVariable]: credential.secret.secretName } : {},
         labels: { "jina-stage-id": prepared.id },
         domainAllowList: this.#allowedDomains.join(","),
         public: false,
@@ -518,11 +584,46 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
         prepared.signal
       );
       if (setup.exitCode !== 0) {
-        throw new Error(`Daytona board stage workspace setup failed: ${boundedDiagnostic(setup.result)}`);
+        throw new Error(
+          `Daytona board stage workspace setup failed: ${boundedDiagnostic(setup.result, protectedValues)}`
+        );
       }
       await abortable(uploadDaytonaInputs(sandbox, prepared, this.#setupTimeoutSeconds), prepared.signal);
+      if (credential.kind === "codex") {
+        const authSetup = await abortable(
+          sandbox.process.executeCommand(
+            `mkdir -p ${shellQuote(DAYTONA_CODEX_HOME)} && chmod 700 ${shellQuote(DAYTONA_CODEX_HOME)}`,
+            undefined,
+            undefined,
+            this.#setupTimeoutSeconds
+          ),
+          prepared.signal
+        );
+        if (authSetup.exitCode !== 0) throw new Error("Daytona Codex auth directory setup failed");
+        await abortable(
+          sandbox.fs.uploadFile(Buffer.from(credential.authJson), DAYTONA_CODEX_AUTH, this.#setupTimeoutSeconds),
+          prepared.signal
+        );
+        const authPermissions = await abortable(
+          sandbox.process.executeCommand(
+            `chmod 600 ${shellQuote(DAYTONA_CODEX_AUTH)}`,
+            undefined,
+            undefined,
+            this.#setupTimeoutSeconds
+          ),
+          prepared.signal
+        );
+        if (authPermissions.exitCode !== 0) throw new Error("Daytona Codex auth permission setup failed");
+      }
       const args = codexArguments({
-        provider: "daytona_direct",
+        provider:
+          credential.kind === "codex"
+            ? "session"
+            : credential.kind === "api-key" && credential.environmentVariable === "OPENROUTER_API_KEY"
+              ? "daytona_openrouter"
+              : credential.kind === "secret" && credential.secret.environmentVariable === "OPENROUTER_API_KEY"
+                ? "daytona_openrouter"
+                : "daytona_openai",
         root: DAYTONA_ROOT,
         repository: DAYTONA_REPOSITORY,
         output: DAYTONA_OUTPUT,
@@ -554,11 +655,16 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
         prepared.signal
       );
       if (run.exitCode !== 0) {
-        throw stageExecutionError(input.id, prepared.limits.timeoutSeconds, {
-          exitCode: run.exitCode,
-          timedOut: false,
-          diagnostic: run.result
-        });
+        throw stageExecutionError(
+          input.id,
+          prepared.limits.timeoutSeconds,
+          {
+            exitCode: run.exitCode,
+            timedOut: false,
+            diagnostic: run.result
+          },
+          protectedValues
+        );
       }
       const [output, usageBytes] = await abortable(
         Promise.all([
@@ -577,7 +683,7 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
       return resultEnvelope(
         output,
         prepared.maximumOutputBytes,
-        this.#protectedValues,
+        protectedValues,
         usage,
         await abortable(
           collectRemoteOutputs(sandbox, prepared.outputFiles ?? [], this.#setupTimeoutSeconds),
@@ -796,7 +902,7 @@ async function makeTreeReadOnly(root: string): Promise<void> {
 }
 
 function codexArguments(input: {
-  readonly provider: "session" | "daytona_direct";
+  readonly provider: "session" | "daytona_openai" | "daytona_openrouter";
   readonly root: string;
   readonly repository: string;
   readonly output: string;
@@ -806,7 +912,7 @@ function codexArguments(input: {
   readonly limits: BoardAgentStageLimits;
 }): string[] {
   const directProviderArguments =
-    input.provider === "daytona_direct"
+    input.provider === "daytona_openai"
       ? [
           "-c",
           "model_provider=openai_direct",
@@ -819,7 +925,20 @@ function codexArguments(input: {
           "-c",
           "model_providers.openai_direct.wire_api=responses"
         ]
-      : [];
+      : input.provider === "daytona_openrouter"
+        ? [
+            "-c",
+            "model_provider=openrouter",
+            "-c",
+            "model_providers.openrouter.name=openrouter",
+            "-c",
+            "model_providers.openrouter.base_url=https://openrouter.ai/api/v1",
+            "-c",
+            "model_providers.openrouter.env_key=OPENROUTER_API_KEY",
+            "-c",
+            "model_providers.openrouter.wire_api=chat"
+          ]
+        : [];
   return [
     "exec",
     "--json",
@@ -925,13 +1044,17 @@ function stagePrompt(
   ].join("\n\n");
 }
 
-function modelOptions(options: AgentModelOptions): Required<AgentModelOptions> {
+function modelOptions(options: AgentModelOptions, preserveProviderPrefix = false): Required<AgentModelOptions> {
+  const selectedModel = options.model?.trim() || "gpt-5.6-terra";
   const value = {
     binary: options.binary?.trim() || "codex",
-    model: (options.model?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
+    model: preserveProviderPrefix ? selectedModel : selectedModel.replace(/^openai\//, ""),
     effort: options.effort?.trim() || "low",
     verbosity: options.verbosity?.trim() || "high"
   };
+  if (preserveProviderPrefix && !/^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(value.model)) {
+    throw new Error("board agent OpenRouter model must be a provider/model slug");
+  }
   for (const [name, setting] of Object.entries(value)) {
     if (!setting || Buffer.byteLength(setting, "utf8") > 240 || setting.includes("\0")) {
       throw new Error(`board agent ${name} setting is invalid`);
@@ -1475,24 +1598,67 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function stageExecutionError(
   id: string,
   timeoutSeconds: number,
-  result: Pick<LocalBoardAgentProcessResult, "exitCode" | "timedOut" | "diagnostic">
+  result: Pick<LocalBoardAgentProcessResult, "exitCode" | "timedOut" | "diagnostic">,
+  protectedValues: readonly string[] = []
 ): Error {
   return new Error(
     result.timedOut
       ? `board agent stage ${id} exceeded its ${timeoutSeconds}s budget`
-      : `board agent stage ${id} exited with ${result.exitCode}: ${boundedDiagnostic(result.diagnostic ?? "")}`
+      : `board agent stage ${id} exited with ${result.exitCode}: ${boundedDiagnostic(
+          result.diagnostic ?? "",
+          protectedValues
+        )}`
   );
 }
 
-function boundedDiagnostic(value: string): string {
-  return value.replaceAll(/(?:jina_atk_|gh[opsu]_)[A-Za-z0-9_-]+/g, "[REDACTED]").slice(-2_000);
+function boundedDiagnostic(value: string, protectedValues: readonly string[] = []): string {
+  let redacted = value.replaceAll(/(?:jina_atk_|gh[opsu]_|sk-(?:or-v1-)?)[A-Za-z0-9_-]+/g, "[REDACTED]");
+  for (const protectedValue of [...protectedValues].sort((left, right) => right.length - left.length)) {
+    redacted = redacted.replaceAll(protectedValue, "[REDACTED]");
+  }
+  return redacted.slice(-2_000);
+}
+
+function redactedError(error: unknown, protectedValues: readonly string[]): Error {
+  const message = error instanceof Error ? error.message : String(error);
+  return new Error(boundedDiagnostic(message, protectedValues));
+}
+
+function credentialProtectedValues(credential: DaytonaBoardAgentCredential): readonly string[] {
+  if (credential.kind === "secret") return [];
+  if (credential.kind === "api-key") return [credential.value];
+
+  const parsed = JSON.parse(credential.authJson) as unknown;
+  const values = Buffer.byteLength(credential.authJson, "utf8") <= 8_192 ? [credential.authJson] : [];
+  const visit = (value: unknown, depth: number): void => {
+    if (depth > 16 || values.length > 64) {
+      throw new Error("Daytona Codex auth secret leaves are outside their bound");
+    }
+    if (typeof value === "string") {
+      if (Buffer.byteLength(value, "utf8") > 8_192) {
+        throw new Error("Daytona Codex auth secret leaf is outside its bound");
+      }
+      if (Buffer.byteLength(value, "utf8") >= 8) values.push(value);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, depth + 1);
+      return;
+    }
+    if (isRecord(value)) {
+      for (const child of Object.values(value)) visit(child, depth + 1);
+    }
+  };
+  visit(parsed, 0);
+  return values;
 }
 
 function boundedProtectedValues(values: readonly string[]): readonly string[] {
-  if (values.length > 32 || values.some((value) => value.length > 8_192)) {
+  const unique = [...new Set(values.filter((value) => Buffer.byteLength(value, "utf8") >= 8))];
+  if (unique.length > 64 || unique.some((value) => Buffer.byteLength(value, "utf8") > 8_192)) {
     throw new Error("board agent protected-value set is outside its bound");
   }
-  return values.filter((value) => value.length >= 8);
+  return unique;
 }
 
 function throwIfAborted(signal: AbortSignal | undefined): void {

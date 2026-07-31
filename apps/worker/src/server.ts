@@ -312,6 +312,8 @@ const configuredBoardAgentStageRunner =
           return {
             commitSha: requiredGitSha(activeMetadata?.commitSha, "board agent commitSha"),
             attempt: activeWork?.message.attempt ?? 1,
+            tenantId: requiredString(activeMetadata?.tenantId, "board agent tenantId"),
+            buildId: requiredString(activeMetadata?.contextBuildId, "board agent contextBuildId"),
             ...(activeLease ? { signal: activeLease.controller.signal } : {})
           };
         }

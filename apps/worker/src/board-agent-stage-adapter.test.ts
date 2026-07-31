@@ -18,7 +18,10 @@ import {
 import {
   addBoardAgentModelUsage,
   boardAgentModelUsageForCompletion,
+  configuredPortableContextBoardAgentStageRunner,
   configuredBoardAgentRunner,
+  resolveContextExecutionProfile,
+  type BoardAgentExecutionConfiguration,
   runPortableBoardAgentStage
 } from "./board-agent-stage-adapter.js";
 
@@ -377,6 +380,201 @@ test("Daytona worker configuration requires one immutable selector and a Secret 
   );
 });
 
+test("execution profiles are fetched without retaining decrypted credentials and strictly bounded", async () => {
+  const environment = {
+    JINA_V1_API_URL: "https://api.usejina.test",
+    JINA_V1_INTERNAL_API_TOKEN: "internal-test-token"
+  };
+  const attempt = {
+    commitSha: "a".repeat(40),
+    attempt: 1,
+    tenantId: "tenant-1",
+    buildId: "build-1"
+  };
+  let calls = 0;
+  const profileFetch = async () => {
+    calls += 1;
+    return profileResponse({
+      provider: "byok",
+      model: "openai/gpt-5.6-terra",
+      effort: "medium",
+      fallback_policy: "fail_notify",
+      credential: {
+        kind: "openai",
+        value: `sk-profile-${calls}-credential`,
+        revision: `revision-${calls}`
+      },
+      settings_revision: "settings-1"
+    });
+  };
+
+  const first = await resolveContextExecutionProfile(environment, attempt, profileFetch);
+  const second = await resolveContextExecutionProfile(environment, attempt, profileFetch);
+  assert.equal(calls, 2);
+  assert.equal(first?.credential.kind === "openai" ? first.credential.value : undefined, "sk-profile-1-credential");
+  assert.equal(second?.credential.kind === "openai" ? second.credential.value : undefined, "sk-profile-2-credential");
+
+  await assert.rejects(
+    () =>
+      resolveContextExecutionProfile(environment, attempt, async () =>
+        profileResponse({
+          provider: "byok",
+          model: "openai/gpt-5.6-terra",
+          effort: "extreme",
+          fallback_policy: "fail_notify",
+          credential: { kind: "openai", value: "sk-private-invalid", revision: "revision-1" },
+          settings_revision: "settings-1"
+        })
+      ),
+    /effort is invalid/
+  );
+  await assert.rejects(
+    () =>
+      resolveContextExecutionProfile(environment, attempt, async () =>
+        profileResponse({
+          provider: "managed",
+          model: "openai/gpt-5.6-terra",
+          effort: "medium",
+          fallback_policy: "fail_notify",
+          credential: { kind: "managed" },
+          settings_revision: "settings-1",
+          unexpected: true
+        })
+      ),
+    /unexpected fields/
+  );
+  await assert.rejects(
+    () =>
+      resolveContextExecutionProfile(environment, attempt, async () =>
+        profileResponse({
+          provider: "managed",
+          model: "openai/gpt-5.6-terra",
+          effort: "medium",
+          fallback_policy: "fail_notify",
+          credential: {
+            kind: "openrouter",
+            value: "sk-or-v1-private-invalid",
+            revision: "revision-1"
+          },
+          settings_revision: "settings-1"
+        })
+      ),
+    /provider and credential are inconsistent/
+  );
+  await assert.rejects(
+    () =>
+      resolveContextExecutionProfile(
+        environment,
+        attempt,
+        async () =>
+          new Response("x".repeat(64 * 1024 + 1), {
+            status: 200,
+            headers: { "content-type": "application/json" }
+          })
+      ),
+    /exceeds its byte bound/
+  );
+  await assert.rejects(
+    () => resolveContextExecutionProfile(environment, attempt, async () => new Response("", { status: 503 })),
+    /Context API execution-profile request failed with 503/
+  );
+  await assert.rejects(
+    () => resolveContextExecutionProfile(environment, attempt, async () => new Response("", { status: 401 })),
+    /Context API execution-profile request failed with 401/
+  );
+});
+
+test("managed initial execution and non-OpenAI provider fallback use the configured managed model", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jina-profile-fallback-"));
+  const environment = {
+    CONTEXT_DAYTONA_MODEL_SECRET: "managed-openai-secret",
+    CONTEXT_DAYTONA_MODEL_SECRET_ENV: "OPENAI_API_KEY",
+    CONTEXT_DAYTONA_MODEL_DOMAINS: "api.openai.com",
+    CONTEXT_CODEX_MODEL: "openai/gpt-5.6-terra",
+    JINA_V1_API_URL: "https://api.usejina.test",
+    JINA_V1_INTERNAL_API_TOKEN: "internal-test-token"
+  };
+  const executions: (BoardAgentExecutionConfiguration | undefined)[] = [];
+  const runnerFactory = (
+    _environment: Readonly<Record<string, string | undefined>>,
+    _protectedValues: readonly string[],
+    execution?: BoardAgentExecutionConfiguration
+  ): BoardAgentStageRunner => {
+    executions.push(execution);
+    return {
+      mode: "daytona",
+      async run() {
+        if (execution?.credential.kind === "api-key") {
+          throw new Error("OpenRouter provider service unavailable");
+        }
+        return envelope(Buffer.from('{"text":"completed"}'), []);
+      }
+    };
+  };
+  const attemptContext = () => ({
+    commitSha: "b".repeat(40),
+    attempt: 1,
+    tenantId: "tenant-1",
+    buildId: "build-1"
+  });
+  try {
+    const fallbackRunner = configuredPortableContextBoardAgentStageRunner({
+      environment,
+      attemptContext,
+      runnerFactory,
+      profileFetch: async () =>
+        profileResponse({
+          provider: "byok",
+          model: "anthropic/claude-sonnet-4",
+          effort: "high",
+          fallback_policy: "managed",
+          credential: { kind: "openrouter", value: "sk-or-v1-tenant-key", revision: "key-1" },
+          settings_revision: "settings-1"
+        })
+    });
+    await fallbackRunner.run({
+      id: "fallback-stage",
+      prompt: "Complete the stage.",
+      workingDirectory: root,
+      readOnly: true,
+      budgetSeconds: 30
+    });
+    const selected = executions.find((execution) => execution?.credential.kind === "api-key");
+    const fallback = executions.find((execution) => execution?.credential.kind === "secret");
+    assert.equal(selected?.model, "anthropic/claude-sonnet-4");
+    assert.equal(fallback?.model, "gpt-5.6-terra");
+    assert.equal(fallback?.effort, "high");
+
+    executions.length = 0;
+    const managedRunner = configuredPortableContextBoardAgentStageRunner({
+      environment,
+      attemptContext,
+      runnerFactory,
+      profileFetch: async () =>
+        profileResponse({
+          provider: "managed",
+          model: "anthropic/claude-sonnet-4",
+          effort: "medium",
+          fallback_policy: "fail_notify",
+          credential: { kind: "managed" },
+          settings_revision: "settings-2"
+        })
+    });
+    await managedRunner.run({
+      id: "managed-stage",
+      prompt: "Complete the stage.",
+      workingDirectory: root,
+      readOnly: true,
+      budgetSeconds: 30
+    });
+    const managed = executions.find((execution) => execution?.credential.kind === "secret");
+    assert.equal(managed?.model, "gpt-5.6-terra");
+    assert.equal(managed?.effort, "medium");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("model usage aggregates every portable call and rejects unsafe totals", () => {
   const first = addBoardAgentModelUsage(
     { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 },
@@ -450,6 +648,13 @@ function envelope(bytes: Uint8Array, files: BoardAgentStageResultEnvelope["files
     usage,
     files
   };
+}
+
+function profileResponse(value: unknown): Response {
+  return new Response(JSON.stringify(value), {
+    status: 200,
+    headers: { "content-type": "application/json" }
+  });
 }
 
 async function gunzipArchive(bytes: Uint8Array): Promise<string> {

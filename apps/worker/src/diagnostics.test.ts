@@ -84,3 +84,31 @@ test("only transient provider, sandbox, model, and API transport failures retry"
     false
   );
 });
+
+test("credential, quota, and selected-model failures fail once so owners can act", () => {
+  for (const reason of [
+    "context_provider_configuration: connect an OpenAI key",
+    "Codex failed: usage limit reached",
+    "OpenAI: invalid API key",
+    "provider returned unknown model"
+  ]) {
+    assert.equal(isRetryableWorkerFailure(reason), false, reason);
+  }
+});
+
+test("execution-profile transport statuses retry only when another request can repair them", () => {
+  for (const status of [408, 425, 429, 500, 502, 503, 504]) {
+    assert.equal(
+      isRetryableWorkerFailure(`Context API execution-profile request failed with ${status}`),
+      true,
+      String(status)
+    );
+  }
+  for (const status of [400, 401, 403, 404, 422]) {
+    assert.equal(
+      isRetryableWorkerFailure(`Context API execution-profile request failed with ${status}`),
+      false,
+      String(status)
+    );
+  }
+});

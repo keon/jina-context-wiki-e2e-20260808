@@ -345,11 +345,24 @@ Secret placeholder, and verifies egress substitution and actual model authentica
 rather than only the binary. A missing snapshot, missing/inaccessible Secret,
 incompatible toolchain, or failed model request fails the release closed.
 
-`CONTEXT_DAYTONA_MODEL_SECRET` is a Daytona organization Secret name, never the
-model credential itself. The worker passes only that name to Daytona and does
-not mount the model key into its own Cloud Run process. The sandbox is private,
-ephemeral, receives only the exact repository archive and declared stage
-inputs, and may reach only the configured model-provider domains.
+Production Context workers also require `JINA_V1_API_URL` and
+`JINA_V1_INTERNAL_API_TOKEN` when tenant model routing is enabled. For every build,
+the worker resolves the write-once profile created by V1 and honors its Context model,
+reasoning effort, credential revision, and fallback policy. Credential/configuration,
+quota, and unknown-model failures are terminal and remain visible on the task board;
+only transient provider/sandbox failures consume bounded automatic retries.
+Production stores the latter as `jina-v1-internal-api-token` in the V2 project
+because V1 and V2 intentionally use different service-internal tokens. Rotate this
+mirror whenever V1's `jina-internal-api-token` rotates; only the Context worker
+service account receives accessor permission.
+
+`CONTEXT_DAYTONA_MODEL_SECRET` is the Jina-managed fallback's Daytona organization
+Secret name, never its credential value. Tenant BYOK or Codex credentials arrive
+through the authenticated V1 execution-profile endpoint, are added to redaction, and
+are injected only into the build's private ephemeral sandbox. They are not mounted as
+static Cloud Run configuration or persisted by V2. The sandbox receives only the exact
+repository archive and declared stage inputs and may reach only the selected
+model-provider domain.
 
 The context worker mounts read-only `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, `GITHUB_CLONE_TOKEN`, and `DAYTONA_API_KEY`.

@@ -47,6 +47,14 @@ Daytona image or snapshot and organization model-Secret name are absent. Both ex
 receive the same immutable repository archive, declared dependency artifacts, output
 manifest, task/attempt identity, cancellation signal, and result-envelope schema.
 
+When V1 model routing is configured, each production task resolves a write-once
+tenant/build execution profile from V1. The profile selects the Context model,
+low/medium/high effort, provider credential revision, and explicit `fail_notify` or
+managed fallback policy. A cached profile is stable across the build's checkpoint
+retries. Tenant credentials are redacted, held only in worker memory long enough to
+provision the private ephemeral sandbox, and never enter Board metadata, artifacts,
+prompts, or public Context.
+
 The repository snapshot is read-only. Network access, browser tools, plugins, and
 ambient repository instructions are unavailable to the agent. Each task can write only
 its declared output files. Repository and provider content is untrusted data, never
