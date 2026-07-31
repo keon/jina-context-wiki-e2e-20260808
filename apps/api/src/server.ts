@@ -1778,6 +1778,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (await hasDelivery(result.deliveryId)) {
+      if (result.webhook && isContextTrigger(result.webhook.event)) {
+        await reload();
+        const identity = await resolveWebhookIdentity(result.webhook);
+        const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
+        await reconcileContextQuotas(config.contextQuotaService, intakeState.board, tenantId);
+      }
       json(response, 200, { accepted: true, duplicate: true, deliveryId: result.deliveryId });
       return;
     }
@@ -1813,7 +1819,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             : accepted.outcome === "duplicate" || context.outcome === "duplicate"
               ? ("duplicate" as const)
               : ("ignored" as const),
-        createdTaskIds
+        createdTaskIds,
+        supersededBuildTaskIds: context.supersededBuildTaskIds
       };
     }, deliveryId);
     if (!result && newlyReservedBuildId && config.contextQuotaService) {
@@ -1821,7 +1828,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         .completeBuild({ tenantId, buildId: newlyReservedBuildId })
         .catch(() => undefined);
     }
-    return result ?? { outcome: "duplicate", createdTaskIds: [] };
+    if (result) {
+      await settleSupersededContextBuildQuotas(
+        config.contextQuotaService,
+        intakeState.board,
+        tenantId,
+        result.supersededBuildTaskIds
+      );
+      return { outcome: result.outcome, createdTaskIds: result.createdTaskIds };
+    }
+    return { outcome: "duplicate" as const, createdTaskIds: [] };
   }
 
   async function acceptParsedContextWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
@@ -1831,14 +1847,27 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const result = await mutate(async () => {
       const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity);
       newlyReservedBuildId = context.reservedBuildId;
-      return { outcome: context.outcome, createdTaskIds: context.createdTaskIds };
+      return {
+        outcome: context.outcome,
+        createdTaskIds: context.createdTaskIds,
+        supersededBuildTaskIds: context.supersededBuildTaskIds
+      };
     }, deliveryId);
     if (!result && newlyReservedBuildId && config.contextQuotaService) {
       await config.contextQuotaService
         .completeBuild({ tenantId, buildId: newlyReservedBuildId })
         .catch(() => undefined);
     }
-    return result ?? { outcome: "duplicate" as const, createdTaskIds: [] };
+    if (result) {
+      await settleSupersededContextBuildQuotas(
+        config.contextQuotaService,
+        intakeState.board,
+        tenantId,
+        result.supersededBuildTaskIds
+      );
+      return { outcome: result.outcome, createdTaskIds: result.createdTaskIds };
+    }
+    return { outcome: "duplicate" as const, createdTaskIds: [] };
   }
 
   async function admitContextWebhook(
@@ -1849,10 +1878,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   ): Promise<{
     outcome: "created" | "duplicate" | "ignored";
     createdTaskIds: TaskId[];
+    supersededBuildTaskIds: readonly TaskId[];
     reservedBuildId?: string;
   }> {
-    if (!isContextTrigger(webhook.event)) return { outcome: "ignored", createdTaskIds: [] };
-    await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, tenantId);
+    if (!isContextTrigger(webhook.event)) {
+      return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [] };
+    }
+    await reconcileContextQuotas(config.contextQuotaService, intakeState.board, tenantId);
     const repository = identity?.repository ?? webhook.repository;
     const ref = contextTriggerRef(webhook.event, identity?.defaultBranch ?? webhook.repositoryDefaultBranch);
     const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
@@ -1877,15 +1909,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
     if (admission.outcome !== "created") {
       intakeState = { ...intakeState, board: admission.state };
-      return { outcome: admission.outcome, createdTaskIds: [] };
+      return { outcome: admission.outcome, createdTaskIds: [], supersededBuildTaskIds: [] };
     }
     if (config.contextQuotaService) {
-      await config.contextQuotaService.admitBuild({ tenantId, buildId: admission.build.buildTaskId });
+      await config.contextQuotaService.admitBuild({
+        tenantId,
+        buildId: admission.build.buildTaskId,
+        replacesBuildIds: admission.supersededBuildTaskIds
+      });
     }
     intakeState = { ...intakeState, board: admission.state };
     return {
       outcome: "created",
       createdTaskIds: [admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId],
+      supersededBuildTaskIds: admission.supersededBuildTaskIds,
       ...(config.contextQuotaService ? { reservedBuildId: admission.build.buildTaskId } : {})
     };
   }
@@ -3300,6 +3337,7 @@ const PUBLIC_CONTEXT_FAILURE_REASONS = {
   build_time_budget_exceeded: "This Context build reached its wall-clock limit.",
   build_token_budget_exceeded: "This Context build reached its model-token limit.",
   build_canceled: "This Context build was canceled by an authorized operator.",
+  build_superseded: "A newer pull request commit superseded this Context build.",
   stage_failed: "This stage failed before producing a valid checkpoint.",
   build_failed: "This Context build stopped after a stage failure."
 } as const;
@@ -4630,6 +4668,37 @@ async function reconcileActiveContextBuildQuotas(
       : []
   );
   await quota.reconcileActiveBuilds({ tenantId, activeBuildIds });
+}
+
+async function reconcileContextQuotas(
+  quota: ContextQuotaService | undefined,
+  state: BoardState,
+  tenantId: string
+): Promise<void> {
+  if (!quota) return;
+  await reconcileActiveContextBuildQuotas(quota, state, tenantId);
+  for (const task of state.tasks) {
+    if (
+      task.type === contextBoardTaskTypes.build &&
+      task.metadata.tenantId === tenantId &&
+      isTerminalTaskStatus(task.status)
+    ) {
+      await settleTerminalReconciledModelQuotas(quota, state, tenantId, task.id);
+    }
+  }
+}
+
+async function settleSupersededContextBuildQuotas(
+  quota: ContextQuotaService | undefined,
+  state: BoardState,
+  tenantId: string,
+  buildIds: readonly TaskId[]
+): Promise<void> {
+  if (!quota || buildIds.length === 0) return;
+  await reconcileActiveContextBuildQuotas(quota, state, tenantId);
+  for (const buildId of buildIds) {
+    await settleTerminalReconciledModelQuotas(quota, state, tenantId, buildId);
+  }
 }
 
 async function settleTerminalReconciledModelQuotas(

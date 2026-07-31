@@ -953,6 +953,63 @@ test("the V1 relay admits Context work without creating V2 review work", async (
   );
 });
 
+test("a newer relayed PR commit supersedes stale work and releases its build quota", async () => {
+  const pullRequestNumber = 80;
+  const firstHead = "1".repeat(40);
+  const secondHead = "2".repeat(40);
+  const quotaBefore = await serverConfig.contextQuotaService.snapshot(tenantId);
+  const payload = (action: "opened" | "synchronize", headSha: string) => ({
+    action,
+    repository: { full_name: repository, default_branch: "main" },
+    installation: { id: 140435029 },
+    pull_request: { number: pullRequestNumber, head: { sha: headSha } }
+  });
+
+  const opened = await signedGitHubWebhook(
+    "pull_request",
+    "v1-context-relay-pr-80-open",
+    payload("opened", firstHead),
+    "/context/webhooks/github"
+  );
+  assert.equal(opened.status, 202);
+  const quotaAfterOpen = await serverConfig.contextQuotaService.snapshot(tenantId);
+  assert.equal(quotaAfterOpen.active.builds, quotaBefore.active.builds + 1);
+  const boardAfterOpen = await api("/board", { headers: contextHeaders() });
+  const firstBuild = array(boardAfterOpen.body.tasks)
+    .map(record)
+    .find(
+      (task) =>
+        task.type === "build-context" &&
+        record(task.metadata).ref === `pull/${pullRequestNumber}/head` &&
+        record(task.metadata).commitSha === firstHead
+    );
+  assert.ok(firstBuild);
+
+  const synchronized = await signedGitHubWebhook(
+    "pull_request",
+    "v1-context-relay-pr-80-sync",
+    payload("synchronize", secondHead),
+    "/context/webhooks/github"
+  );
+  assert.equal(synchronized.status, 202);
+  const quotaAfterSync = await serverConfig.contextQuotaService.snapshot(tenantId);
+  assert.equal(quotaAfterSync.active.builds, quotaAfterOpen.active.builds);
+
+  const boardAfterSync = await api("/board", { headers: contextHeaders() });
+  const firstBuildTasks = array(boardAfterSync.body.tasks)
+    .map(record)
+    .filter((task) => task.id === firstBuild.id || record(task.metadata).contextBuildId === firstBuild.id);
+  assert.ok(firstBuildTasks.length >= 3);
+  assert.ok(firstBuildTasks.every((task) => task.status === "canceled"));
+  const progress = await api(`/context/builds/${encodeURIComponent(string(firstBuild.id))}/progress`, {
+    headers: contextHeaders()
+  });
+  assert.equal(progress.response.status, 200);
+  assert.equal(progress.body.status, "failed");
+  assert.equal(progress.body.failureCode, "build_superseded");
+  assert.equal(progress.body.failureReason, "A newer pull request commit superseded this Context build.");
+});
+
 test("generic board work is fenced by attempt, lease id, and token", async () => {
   const delivery = await api("/dev/webhooks/github", {
     method: "POST",

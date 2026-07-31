@@ -250,10 +250,17 @@ export class ContextQuotaService {
   async admitBuild(input: {
     readonly tenantId: string;
     readonly buildId: string;
+    readonly replacesBuildIds?: readonly string[];
     readonly at?: string;
   }): Promise<ContextQuotaAdmission> {
     const tenantId = tenant(input.tenantId);
     const buildId = resourceId(input.buildId, "buildId");
+    const replacesBuildIds = new Set(
+      (input.replacesBuildIds ?? []).map((replacedBuildId) => resourceId(replacedBuildId, "replacesBuildId"))
+    );
+    if (replacesBuildIds.has(buildId)) {
+      throw new ContextQuotaInvariantError("invalid_input", "a Context build cannot replace itself");
+    }
     const now = this.#time(input.at);
     const limits = await this.#limits(tenantId);
     const outcome = await this.#store.transact<QuotaOutcome<ContextQuotaAdmission>>(tenantId, (current) => {
@@ -289,7 +296,10 @@ export class ContextQuotaService {
           rateResetMs(state.buildRate, limits.buildWindowMs, now.ms)
         );
       }
-      if (Object.keys(state.activeBuilds).length >= limits.maxActiveBuilds) {
+      const retainedActiveBuilds = Object.fromEntries(
+        Object.entries(state.activeBuilds).filter(([activeBuildId]) => !replacesBuildIds.has(activeBuildId))
+      );
+      if (Object.keys(retainedActiveBuilds).length >= limits.maxActiveBuilds) {
         state = deniedState(state, "active_builds", now.iso);
         return denied(
           state,
@@ -305,6 +315,9 @@ export class ContextQuotaService {
         ...state,
         buildRate: consumeRate(state.buildRate, buildId),
         activeBuilds: {
+          // Keep replaced reservations until the Board mutation commits. The
+          // caller reconciles them afterward, so a state-store rollback cannot
+          // leave a still-active build permanently uncounted.
           ...state.activeBuilds,
           [buildId]: { createdAt: now.iso, expiresAt }
         },

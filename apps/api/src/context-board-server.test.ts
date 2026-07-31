@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -816,6 +816,104 @@ test("new build admission reconciles terminal and orphaned quota reservations ag
       stateStore.current().intakeState.board.tasks.find((task) => task.id === stale.buildTaskId)?.status,
       "failed"
     );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("duplicate PR delivery retries model-quota settlement after durable supersession", async () => {
+  const tenantId = "tenant-supersession-settlement-retry";
+  const repository = "omxyz/supersession-settlement-retry";
+  const webhookSecret = "supersession-settlement-retry-secret";
+  const firstHead = "1".repeat(40);
+  const secondHead = "2".repeat(40);
+  const old = createContextBoardBuild(createEmptyBoardState(), {
+    tenantId,
+    repository,
+    ref: "pull/88/head",
+    refSequence: 1,
+    requestKey: "github:pull:omxyz/supersession-settlement-retry:88:first",
+    commitSha: firstHead,
+    trigger: "pull_request",
+    now: NOW
+  });
+  const modelTaskId = entityId<"task">("supersession-settlement-model-task");
+  let board = addContextTask(old.state, {
+    id: modelTaskId,
+    type: contextBoardTaskTypes.researchPlan,
+    kind: "dispatchable",
+    title: "Leased model work from the superseded build",
+    assigneeRole: "context-agent",
+    dedupeKey: "supersession-settlement:model-task",
+    dispatchTopic: contextBoardTopics.researchPlan,
+    parentTaskId: old.buildTaskId,
+    metadata: contextMetadata(tenantId, repository, old.buildTaskId)
+  });
+  board = reduceBoard(board, NOW);
+  const leased = leaseNextOutboxMessage(board, {
+    topics: [contextBoardTopics.researchPlan],
+    taskIds: [modelTaskId],
+    leaseId: "supersession-settlement-lease",
+    writeFenceToken: "supersession-settlement-fence",
+    now: NOW,
+    expiresAt: "2026-07-29T22:00:00.000Z"
+  });
+  assert.ok(leased);
+  board = transitionBoardTask(leased.state, modelTaskId, "in_progress", NOW);
+  const quotaTaskId = `${modelTaskId}:attempt:${leased.message.payload.attempt}`;
+  const quotaService = new FailOnceModelSettlementQuotaService(quotaTaskId);
+  await quotaService.admitBuild({ tenantId, buildId: old.buildTaskId });
+  await quotaService.startModelTask({ tenantId, taskId: quotaTaskId });
+  const stateStore = deliveryTrackingStateStore({
+    intakeState: { board, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const server = createApiServer({
+    tenantId,
+    stateStore,
+    githubWebhookSecret: webhookSecret,
+    contextQuotaService: quotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const deliveryId = "supersession-settlement-retry-delivery";
+  const rawBody = JSON.stringify({
+    action: "synchronize",
+    repository: { full_name: repository, default_branch: "main" },
+    pull_request: { number: 88, head: { sha: secondHead } }
+  });
+  const signature = `sha256=${createHmac("sha256", webhookSecret).update(rawBody).digest("hex")}`;
+  const deliver = () =>
+    fetch(`${baseUrl}/context/webhooks/github`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "pull_request",
+        "x-github-delivery": deliveryId,
+        "x-hub-signature-256": signature
+      },
+      body: rawBody
+    });
+
+  try {
+    const first = await deliver();
+    assert.equal(first.status, 500, await first.text());
+    const committed = stateStore.current().intakeState.board;
+    assert.equal(committed.tasks.find((task) => task.id === old.buildTaskId)?.status, "canceled");
+    assert.ok(
+      committed.tasks.some(
+        (task) => task.type === contextBoardTaskTypes.build && task.metadata.commitSha === secondHead
+      )
+    );
+    assert.equal((await quotaService.snapshot(tenantId)).active.modelTasks, 1);
+    assert.equal(quotaService.failedSettlementAttempts, 1);
+
+    const duplicate = await deliver();
+    const duplicateBody = (await duplicate.json()) as { duplicate?: boolean };
+    assert.equal(duplicate.status, 200);
+    assert.equal(duplicateBody.duplicate, true);
+    assert.equal((await quotaService.snapshot(tenantId)).active.modelTasks, 0);
+    assert.equal(quotaService.successfulSettlementAttempts, 1);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
@@ -2553,6 +2651,55 @@ function mutableStateStore(initial: ApiSnapshot): ApiStateStore & { current(): A
     },
     async close() {}
   };
+}
+
+function deliveryTrackingStateStore(initial: ApiSnapshot): ApiStateStore & { current(): ApiSnapshot } {
+  let snapshot = structuredClone(initial);
+  const deliveries = new Set<string>();
+  return {
+    current: () => structuredClone(snapshot),
+    async load() {
+      return structuredClone(snapshot);
+    },
+    async ping() {},
+    async hasDelivery(deliveryId) {
+      return deliveries.has(deliveryId);
+    },
+    async save(next, deliveryId) {
+      snapshot = structuredClone(next);
+      if (deliveryId) deliveries.add(deliveryId);
+      return true;
+    },
+    async update<T>(
+      operation: (current: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
+      deliveryId?: string
+    ) {
+      const updated = await operation(structuredClone(snapshot));
+      snapshot = structuredClone(updated.state);
+      if (deliveryId) deliveries.add(deliveryId);
+      return { committed: true, result: updated.result };
+    },
+    async close() {}
+  };
+}
+
+class FailOnceModelSettlementQuotaService extends ContextQuotaService {
+  failedSettlementAttempts = 0;
+  successfulSettlementAttempts = 0;
+
+  constructor(private readonly targetTaskId: string) {
+    super({ store: new InMemoryContextQuotaStore() });
+  }
+
+  override async cancelModelTask(input: Parameters<ContextQuotaService["cancelModelTask"]>[0]) {
+    if (input.taskId === this.targetTaskId && this.failedSettlementAttempts === 0) {
+      this.failedSettlementAttempts += 1;
+      throw new Error("injected model-quota settlement failure");
+    }
+    const settled = await super.cancelModelTask(input);
+    if (input.taskId === this.targetTaskId) this.successfulSettlementAttempts += 1;
+    return settled;
+  }
 }
 
 function addContextTask(

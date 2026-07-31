@@ -75,6 +75,65 @@ test("board reconciliation atomically releases terminal and orphaned build reser
   assert.equal(replay.active.builds, 2);
 });
 
+test("new pull request build atomically replaces a superseded build at the active limit", async () => {
+  const service = quotaService({ maxActiveBuilds: 1 });
+  await service.admitBuild(buildInput("old-build", start));
+
+  const replacement = await service.admitBuild({
+    ...buildInput("new-build", start + 1),
+    replacesBuildIds: ["old-build", "old-build"]
+  });
+  assert.equal(replacement.outcome, "admitted");
+  // Both reservations remain until durable Board commit; reconciliation is
+  // the second phase that retires the superseded build.
+  assert.equal(replacement.snapshot.active.builds, 2);
+  assert.equal(replacement.snapshot.rates.build.used, 2);
+  assert.equal((await service.admitBuild(buildInput("old-build", start + 2))).outcome, "already_admitted");
+  const reconciled = await service.reconcileActiveBuilds({
+    tenantId: "tenant-a",
+    activeBuildIds: ["new-build"],
+    at: iso(start + 3)
+  });
+  assert.equal(reconciled.active.builds, 1);
+  assert.equal((await service.admitBuild(buildInput("old-build", start + 4))).outcome, "already_completed");
+
+  const replay = await service.admitBuild({
+    ...buildInput("new-build", start + 5),
+    replacesBuildIds: ["old-build"]
+  });
+  assert.equal(replay.outcome, "already_admitted");
+  assert.equal(replay.snapshot.active.builds, 1);
+  assert.equal(replay.snapshot.rates.build.used, 2);
+
+  await assert.rejects(
+    service.admitBuild({
+      ...buildInput("self-replacing-build", start + 6),
+      replacesBuildIds: ["self-replacing-build"]
+    }),
+    (error: unknown) => error instanceof ContextQuotaInvariantError && error.reason === "invalid_input"
+  );
+});
+
+test("rolled-back replacement admission leaves the superseded build counted at the active limit", async () => {
+  const service = quotaService({ maxActiveBuilds: 1 });
+  await service.admitBuild(buildInput("old-build", start));
+
+  const replacement = await service.admitBuild({
+    ...buildInput("replacement-build", start + 1),
+    replacesBuildIds: ["old-build"]
+  });
+  assert.equal(replacement.outcome, "admitted");
+  assert.equal(replacement.snapshot.active.builds, 2);
+
+  // Simulate a Board CAS rollback: only the speculative replacement
+  // reservation is compensated. The authoritative old build must still count.
+  await service.completeBuild(buildInput("replacement-build", start + 2));
+  const afterRollback = await service.snapshot("tenant-a", iso(start + 3));
+  assert.equal(afterRollback.active.builds, 1);
+  assert.equal((await service.admitBuild(buildInput("old-build", start + 4))).outcome, "already_admitted");
+  await assert.rejects(service.admitBuild(buildInput("unrelated-build", start + 5)), quotaError("active_builds"));
+});
+
 test("atomic tenant partitions enforce rate and concurrency limits under parallel admission", async () => {
   const queryService = quotaService({
     queryRequestsPerWindow: 3,

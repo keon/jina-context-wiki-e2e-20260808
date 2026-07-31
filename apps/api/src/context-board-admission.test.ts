@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createEmptyBoardState, findTask } from "@jina/board";
+import { createEmptyBoardState, findTask, leaseNextOutboxMessage, transitionBoardTask } from "@jina/board";
 import { contextBoardTaskTypes } from "@jina/context-engine";
 import { parseGitHubWebhook, type GitHubWebhookEvent } from "@jina/github";
 import { admitContextBoardBuild } from "./context-board-admission.js";
@@ -331,6 +331,125 @@ test("a distinct PR synchronize delivery advances even when the head returns to 
   assert.notEqual(rollback.build.buildTaskId, opened.build.buildTaskId);
 });
 
+test("a newer PR commit cancels older queued work while replay leaves the newest build active", () => {
+  const first = github(
+    createEmptyBoardState(),
+    prEvent("pull_request.opened", 52, "1".repeat(40)),
+    "delivery-pr-52-open"
+  );
+  assert.equal(first.outcome, "created");
+
+  const newer = github(first.state, prEvent("pull_request.synchronize", 52, "2".repeat(40)), "delivery-pr-52-sync");
+  assert.equal(newer.outcome, "created");
+  assert.deepEqual(newer.supersededBuildTaskIds, [first.build.buildTaskId]);
+  assert.equal(findTask(newer.state, first.build.buildTaskId)?.status, "canceled");
+  assert.equal(findTask(newer.state, first.build.graphTaskId)?.status, "canceled");
+  assert.equal(findTask(newer.state, first.build.snapshotTaskId)?.status, "canceled");
+  assert.equal(findTask(newer.state, newer.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(newer.state, newer.build.snapshotTaskId)?.status, "queued");
+
+  const staleMessage = newer.state.outbox.find((message) => message.taskId === first.build.snapshotTaskId);
+  assert.equal(staleMessage?.status, "dispatched");
+  assert.equal(
+    leaseNextOutboxMessage(newer.state, {
+      topics: ["run-context-input-snapshot"],
+      taskIds: [first.build.snapshotTaskId],
+      leaseId: "lease-stale",
+      writeFenceToken: "fence-stale",
+      now: LATER,
+      expiresAt: "2026-07-29T21:02:00.000Z"
+    }),
+    undefined
+  );
+  const supersededEvent = newer.state.events.find(
+    (event) => event.taskId === first.build.buildTaskId && event.type === "context.build_superseded.failed"
+  );
+  assert.deepEqual(supersededEvent?.payload, {
+    actor: "context-build-admission",
+    failureCategory: "build_superseded",
+    reason: "superseded by a newer pull request commit",
+    supersededByBuildTaskId: newer.build.buildTaskId
+  });
+
+  const replay = github(newer.state, prEvent("pull_request.synchronize", 52, "2".repeat(40)), "delivery-pr-52-sync");
+  assert.equal(replay.outcome, "duplicate");
+  assert.strictEqual(replay.state, newer.state);
+  assert.equal(findTask(replay.state, newer.build.buildTaskId)?.status, "triage");
+});
+
+test("a newer PR commit retires an active lease and preserves unrelated or terminal builds", () => {
+  const first = github(
+    createEmptyBoardState(),
+    prEvent("pull_request.opened", 61, "3".repeat(40)),
+    "delivery-pr-61-open"
+  );
+  assert.equal(first.outcome, "created");
+  const unrelated = github(first.state, prEvent("pull_request.opened", 62, "4".repeat(40)), "delivery-pr-62-open");
+  assert.equal(unrelated.outcome, "created");
+  const otherRepository = github(
+    unrelated.state,
+    prEvent("pull_request.opened", 61, "4".repeat(40)),
+    "delivery-pr-61-other-repository",
+    "main",
+    "example/other"
+  );
+  assert.equal(otherRepository.outcome, "created");
+  const otherTenant = github(
+    otherRepository.state,
+    prEvent("pull_request.opened", 61, "4".repeat(40)),
+    "delivery-pr-61-other-tenant",
+    "main",
+    REPOSITORY,
+    "tenant-2"
+  );
+  assert.equal(otherTenant.outcome, "created");
+  const leased = leaseNextOutboxMessage(otherTenant.state, {
+    topics: ["run-context-input-snapshot"],
+    taskIds: [first.build.snapshotTaskId],
+    leaseId: "lease-active",
+    writeFenceToken: "fence-active",
+    now: NOW,
+    expiresAt: "2026-07-29T21:02:00.000Z"
+  });
+  assert.ok(leased);
+  const active = transitionBoardTask(leased.state, first.build.snapshotTaskId, "in_progress", NOW);
+
+  const newer = github(active, prEvent("pull_request.synchronize", 61, "5".repeat(40)), "delivery-pr-61-sync");
+  assert.equal(newer.outcome, "created");
+  assert.equal(findTask(newer.state, first.build.snapshotTaskId)?.status, "canceled");
+  const retired = newer.state.outbox.find((message) => message.taskId === first.build.snapshotTaskId);
+  assert.equal(retired?.status, "dispatched");
+  assert.equal(retired?.dispatchedLeaseId, "lease-active");
+  assert.equal(findTask(newer.state, unrelated.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(newer.state, otherRepository.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(newer.state, otherTenant.build.buildTaskId)?.status, "triage");
+
+  const newest = github(newer.state, prEvent("pull_request.synchronize", 61, "6".repeat(40)), "delivery-pr-61-newest");
+  assert.equal(newest.outcome, "created");
+  assert.deepEqual(newest.supersededBuildTaskIds, [newer.build.buildTaskId]);
+  assert.equal(findTask(newest.state, first.build.buildTaskId)?.status, "canceled");
+  assert.equal(findTask(newest.state, unrelated.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(newest.state, otherRepository.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(newest.state, otherTenant.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(newest.state, newest.build.buildTaskId)?.status, "triage");
+});
+
+test("same-commit PR deliveries and non-PR admissions do not supersede builds", () => {
+  const head = "7".repeat(40);
+  const opened = github(createEmptyBoardState(), prEvent("pull_request.opened", 71, head), "delivery-pr-71-open");
+  assert.equal(opened.outcome, "created");
+  const sameCommit = github(opened.state, prEvent("pull_request.synchronize", 71, head), "delivery-pr-71-same-commit");
+  assert.equal(sameCommit.outcome, "created");
+  assert.deepEqual(sameCommit.supersededBuildTaskIds, []);
+  assert.equal(findTask(sameCommit.state, opened.build.buildTaskId)?.status, "triage");
+
+  const pushed = github(sameCommit.state, pushEvent("8".repeat(40)), "delivery-push-newer");
+  assert.equal(pushed.outcome, "created");
+  assert.deepEqual(pushed.supersededBuildTaskIds, []);
+  assert.equal(findTask(pushed.state, opened.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(pushed.state, sameCommit.build.buildTaskId)?.status, "triage");
+});
+
 test("comments, reviews, labels, edits, closes, deleted pushes, and tag pushes create no Context build", () => {
   const unsupported = [
     ["issue_comment", { action: "created" }],
@@ -431,11 +550,12 @@ function github(
   event: GitHubWebhookEvent | undefined,
   deliveryId: string,
   defaultBranch = "main",
-  repository = REPOSITORY
+  repository = REPOSITORY,
+  tenantId = TENANT
 ) {
   return admitContextBoardBuild(state, {
     source: "github",
-    tenantId: TENANT,
+    tenantId,
     repository,
     githubInstallationId: INSTALLATION,
     deliveryId,

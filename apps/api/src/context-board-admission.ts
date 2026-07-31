@@ -1,4 +1,4 @@
-import { type BoardState, type TaskId } from "@jina/board";
+import { applyCommand, isTerminalTaskStatus, reduceBoard, type BoardState, type TaskId } from "@jina/board";
 import {
   contextBoardTaskTypes,
   createContextBoardBuild,
@@ -55,6 +55,7 @@ interface CreatedContextBoardAdmission {
   readonly outcome: "created";
   readonly build: ContextBoardBuild;
   readonly scope: ContextBuildScope;
+  readonly supersededBuildTaskIds: readonly TaskId[];
 }
 
 interface DuplicateContextBoardAdmission {
@@ -136,7 +137,72 @@ export function admitContextBoardBuild(
     refSequence
   };
   const build = createContextBoardBuild(state, { ...scope, now: input.now });
-  return { state: build.state, outcome: "created", build, scope };
+  const superseded = supersedeOlderPullRequestBuilds(build.state, build.buildTaskId, scope, input);
+  return {
+    state: superseded.state,
+    outcome: "created",
+    build: { ...build, state: superseded.state },
+    scope,
+    supersededBuildTaskIds: superseded.buildTaskIds
+  };
+}
+
+const SUPERSEDED_PULL_REQUEST_REASON = "superseded by a newer pull request commit";
+
+function supersedeOlderPullRequestBuilds(
+  state: BoardState,
+  newBuildTaskId: TaskId,
+  scope: ContextBuildScope,
+  input: ContextBoardAdmissionInput
+): { readonly state: BoardState; readonly buildTaskIds: readonly TaskId[] } {
+  const event = input.source === "github" ? input.event : undefined;
+  if (event?.type !== "pull_request.opened" && event?.type !== "pull_request.synchronize") {
+    return { state, buildTaskIds: [] };
+  }
+
+  const candidates = state.tasks.filter(
+    (task) =>
+      task.type === contextBoardTaskTypes.build &&
+      task.metadata.tenantId === scope.tenantId &&
+      task.metadata.repository === scope.repository &&
+      task.metadata.ref === scope.ref &&
+      task.metadata.trigger === "pull_request" &&
+      task.metadata.commitSha !== scope.commitSha &&
+      typeof task.metadata.refSequence === "number" &&
+      task.metadata.refSequence < scope.refSequence &&
+      !isTerminalTaskStatus(task.status)
+  );
+
+  let next = state;
+  for (const candidate of candidates) {
+    const options = {
+      actor: { type: "system" as const, id: "context-build-admission" },
+      now: input.now
+    };
+    const commented = applyCommand(
+      next,
+      {
+        command: "CommentTask",
+        taskId: candidate.id,
+        eventType: "context.build_superseded.failed",
+        payload: {
+          failureCategory: "build_superseded",
+          reason: SUPERSEDED_PULL_REQUEST_REASON,
+          supersededByBuildTaskId: newBuildTaskId
+        }
+      },
+      options
+    );
+    if (!commented.accepted) throw new Error("failed to record superseded Context build");
+    const transitioned = applyCommand(
+      commented.state,
+      { command: "TransitionTask", taskId: candidate.id, toStatus: "canceled" },
+      options
+    );
+    if (!transitioned.accepted) throw new Error("failed to cancel superseded Context build");
+    next = reduceBoard(transitioned.state, input.now);
+  }
+  return { state: next, buildTaskIds: candidates.map((candidate) => candidate.id) };
 }
 
 function resolveAdmissionScope(input: ContextBoardAdmissionInput): Omit<ContextBuildScope, "refSequence"> | undefined {
