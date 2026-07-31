@@ -115,6 +115,7 @@ steps:
       - JINA_API_MIN_INSTANCES=${_JINA_API_MIN_INSTANCES}
       - JINA_API_MAX_INSTANCES=${_JINA_API_MAX_INSTANCES}
       - JINA_API_CONCURRENCY=${_JINA_API_CONCURRENCY}
+      - JINA_API_DB_POOL_MAX=${_JINA_API_DB_POOL_MAX}
       - JINA_API_CPU=${_JINA_API_CPU}
       - JINA_API_MEMORY=${_JINA_API_MEMORY}
       - JINA_CONTEXT_WORKER_MEMORY=${_JINA_CONTEXT_WORKER_MEMORY}
@@ -153,11 +154,12 @@ substitutions:
   _JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET: jina-trigger-acceptance-github-app-private-key
   _JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID: "150069172"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
-  # start. The API owns three PostgreSQL pools whose configured maxima total 18
-  # connections, so keep one instance until the pools share a bounded budget.
+  # start. Each API instance owns three PostgreSQL pools capped at three
+  # connections, keeping two instances within an aggregate budget of 18.
   _JINA_API_MIN_INSTANCES: "1"
-  _JINA_API_MAX_INSTANCES: "1"
+  _JINA_API_MAX_INSTANCES: "2"
   _JINA_API_CONCURRENCY: "10"
+  _JINA_API_DB_POOL_MAX: "3"
   _JINA_API_CPU: "1"
   _JINA_API_MEMORY: 1Gi
   _JINA_CONTEXT_WORKER_MEMORY: 1Gi

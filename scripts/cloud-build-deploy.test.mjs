@@ -768,6 +768,16 @@ test("production storage, quota database, and PageIndex dependencies are explici
   assert.doesNotMatch(apiDockerfile, /PageIndex|pageindex-worker/);
 });
 
+test("API burst capacity preserves the aggregate PostgreSQL connection budget", () => {
+  assert.match(cloudBuild, /_JINA_API_MAX_INSTANCES: "2"/);
+  assert.match(cloudBuild, /_JINA_API_DB_POOL_MAX: "3"/);
+  assert.match(cloudBuild, /JINA_API_DB_POOL_MAX=\$\{_JINA_API_DB_POOL_MAX\}/);
+  assert.match(
+    deployment.match(/^api_env_vars=.*$/m)?.[0] ?? "",
+    /JINA_DB_POOL_MAX=\$\{api_db_pool_max\}/
+  );
+});
+
 test("production acceptance receives both web surfaces and only its bounded credentials", () => {
   const acceptanceDeployment = deployment.match(
     /gcloud run jobs deploy jina-acceptance[\s\S]+?acceptance_status=0/

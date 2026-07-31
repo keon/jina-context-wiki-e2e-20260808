@@ -163,13 +163,15 @@ function databaseConfig(): PostgresJsonStateStoreConfig | undefined {
   const connectionString = process.env.DATABASE_URL;
   const host = process.env.INSTANCE_UNIX_SOCKET ?? process.env.DB_HOST;
   if (!connectionString && !host) return undefined;
-  if (connectionString) return { connectionString };
+  const max = optionalPositiveIntegerEnv("JINA_DB_POOL_MAX");
+  if (connectionString) return { connectionString, ...(max === undefined ? {} : { max }) };
   const databasePort = process.env.DB_PORT ? Number(process.env.DB_PORT) : undefined;
   return {
     host,
     user: requiredEnv("DB_USER"),
     password: requiredEnv("DB_PASS"),
     database: requiredEnv("DB_NAME"),
+    ...(max === undefined ? {} : { max }),
     ...(databasePort !== undefined ? { port: databasePort } : {})
   };
 }

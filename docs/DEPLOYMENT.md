@@ -261,8 +261,9 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | Cloud Build substitution                                 |                                          Default | Guidance                                                                                                   |
 | -------------------------------------------------------- | -----------------------------------------------: | ---------------------------------------------------------------------------------------------------------- |
 | `_JINA_API_MIN_INSTANCES`                                |                                              `1` | Keeps one API container warm.                                                                              |
-| `_JINA_API_MAX_INSTANCES`                                |                                              `1` | Raise only after enforcing one aggregate budget across all PostgreSQL pools.                               |
+| `_JINA_API_MAX_INSTANCES`                                |                                              `2` | Allows a second API instance during request bursts.                                                        |
 | `_JINA_API_CONCURRENCY`                                  |                                             `10` | Maximum concurrent API requests per instance.                                                              |
+| `_JINA_API_DB_POOL_MAX`                                  |                                              `3` | Maximum connections in each of the API's three PostgreSQL pools.                                          |
 | `_JINA_API_CPU`                                          |                                              `1` | API CPU allocation.                                                                                        |
 | `_JINA_API_MEMORY`                                       |                                            `1Gi` | API memory allocation.                                                                                     |
 | `_JINA_CONTEXT_WORKER_MEMORY`                            |                                            `1Gi` | Memory reserved for repository cloning, evidence parsing, and derivation.                                  |
@@ -285,10 +286,10 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_CONTEXT_RESET_MODE`                               |                                       `disabled` | Set to `legacy-once` only for the audited first v2 transition.                                             |
 | `_JINA_CONFIRM_CONTEXT_RESET`                            |                                            empty | Must equal `delete-rebuildable-context` only with `legacy-once`.                                           |
 
-The API request timeout is 3,600 seconds. Its context, state, and shared-identity
-PostgreSQL pools have configured maxima totaling 18 connections, so increasing API
-instances without first imposing a shared pool budget can exhaust the database even at
-low request concurrency.
+The API request timeout is 3,600 seconds. Each instance's context, state, and
+shared-identity PostgreSQL pools are capped at three connections. With two instances,
+their configured maxima total 18 connections; raise either limit only while preserving
+an explicit aggregate database connection budget.
 
 Dashboard/admin values are server-side Cloud Run environment variables and secrets:
 `JINA_API_URL`, `INTERNAL_API_TOKEN`, `JINA_WEB_AUTH_USERNAME`,

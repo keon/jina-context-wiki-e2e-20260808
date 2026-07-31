@@ -41,6 +41,7 @@ trigger_acceptance_github_installation_id="${JINA_TRIGGER_ACCEPTANCE_GITHUB_INST
 api_min_instances="${JINA_API_MIN_INSTANCES:-1}"
 api_max_instances="${JINA_API_MAX_INSTANCES:-1}"
 api_concurrency="${JINA_API_CONCURRENCY:-10}"
+api_db_pool_max="${JINA_API_DB_POOL_MAX:-3}"
 api_cpu="${JINA_API_CPU:-1}"
 api_memory="${JINA_API_MEMORY:-1Gi}"
 api_request_timeout_seconds="${JINA_API_REQUEST_TIMEOUT_SECONDS:-3600}"
@@ -150,6 +151,7 @@ validate_cloud_sql_instance "CLOUD_SQL_INSTANCE" "${cloud_sql_instance}"
 validate_nonnegative_integer "JINA_API_MIN_INSTANCES" "${api_min_instances}"
 validate_positive_integer "JINA_API_MAX_INSTANCES" "${api_max_instances}"
 validate_positive_integer "JINA_API_CONCURRENCY" "${api_concurrency}"
+validate_positive_integer "JINA_API_DB_POOL_MAX" "${api_db_pool_max}"
 validate_positive_integer "JINA_API_REQUEST_TIMEOUT_SECONDS" "${api_request_timeout_seconds}"
 validate_positive_integer "JINA_CONTEXT_API_TIMEOUT_MS" "${context_api_timeout_ms}"
 validate_positive_integer "JINA_CONTEXT_COMPLETION_TIMEOUT_MS" "${context_completion_timeout_ms}"
@@ -303,7 +305,7 @@ deploy_candidate_args=(
   --revision-suffix="${release_suffix}"
 )
 
-api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
+api_env_vars="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=true~JINA_TENANCY_MODE=${tenancy_mode}~INSTANCE_UNIX_SOCKET=/cloudsql/${cloud_sql_instance}~DB_NAME=${db_name}~DB_USER=${db_user}~JINA_DB_POOL_MAX=${api_db_pool_max}~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=${context_worker_lease_ms}~CONTEXT_GCS_BUCKET=${context_artifact_bucket}"
 api_secrets="DB_PASS=${db_pass_secret},GITHUB_WEBHOOK_SECRET=jina-github-webhook-secret:latest,INTERNAL_API_TOKEN=jina-internal-api-token:latest,CONTEXT_API_TOKEN=jina-context-api-token:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=jina-context-private-checkpoint-key:latest"
 
 case "${tenancy_mode}" in
@@ -1646,6 +1648,7 @@ Cloud SQL: ${cloud_sql_instance}
 Tenancy mode: ${tenancy_mode}
 API instances: ${api_min_instances}-${api_max_instances}
 API concurrency: ${api_concurrency}
+API PostgreSQL pool maximum (per pool): ${api_db_pool_max}
 API size: ${api_cpu} CPU / ${api_memory}
 Context worker memory: ${context_worker_memory}
 Candidate tag: ${release_tag}
