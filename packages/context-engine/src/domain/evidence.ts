@@ -133,6 +133,20 @@ export function validateEvidenceAnchor(anchor: EvidenceAnchor): EvidenceAnchor {
   if (anchor.startLine !== undefined && anchor.endLine !== undefined && anchor.endLine < anchor.startLine) {
     throw new Error("endLine must not precede startLine");
   }
+  if (anchor.jsonPointer !== undefined) {
+    if (
+      typeof anchor.jsonPointer !== "string" ||
+      anchor.jsonPointer.length > 8_192 ||
+      anchor.jsonPointer.includes("\0") ||
+      (anchor.jsonPointer !== "" && !anchor.jsonPointer.startsWith("/")) ||
+      /~(?![01])/u.test(anchor.jsonPointer)
+    ) {
+      throw new Error("jsonPointer must be an RFC 6901 JSON Pointer");
+    }
+    if (anchor.startLine !== undefined || anchor.endLine !== undefined) {
+      throw new Error("jsonPointer and line ranges are mutually exclusive");
+    }
+  }
   if (anchor.observedAt !== undefined) normalizeIsoTime(anchor.observedAt);
   return { ...anchor, repository: normalizeRepository(anchor.repository) };
 }

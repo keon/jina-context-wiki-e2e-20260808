@@ -634,7 +634,7 @@ function parseEvidenceAnchor(value: unknown): EvidenceAnchor {
     ...(input.endLine === undefined ? {} : { endLine: requiredInteger(input.endLine, "citation.anchor.endLine") }),
     ...(input.jsonPointer === undefined
       ? {}
-      : { jsonPointer: requiredString(input.jsonPointer, "citation.anchor.jsonPointer") }),
+      : { jsonPointer: jsonPointerString(input.jsonPointer, "citation.anchor.jsonPointer") }),
     ...(input.observedAt === undefined
       ? {}
       : { observedAt: requiredString(input.observedAt, "citation.anchor.observedAt") })
@@ -646,6 +646,11 @@ function parseEvidenceAnchor(value: unknown): EvidenceAnchor {
       cause: error
     });
   }
+}
+
+function jsonPointerString(value: unknown, label: string): string {
+  if (typeof value !== "string") invalidRelease(`${label} must be a string`);
+  return value;
 }
 
 function hierarchyDocument(release: CertifiedRelease, page: CertifiedReleasePage): PageIndexBuildDocument {

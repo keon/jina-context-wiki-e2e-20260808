@@ -261,6 +261,13 @@ test("evidence anchors enforce digest, commit, path, and range invariants", () =
   const { pathOrUrl: _path, ...withoutPath } = anchor;
   assert.throws(() => validateEvidenceAnchor(withoutPath), /require pathOrUrl/);
   assert.throws(() => validateEvidenceAnchor({ ...anchor, startLine: 4, endLine: 2 }), /must not precede/);
+  const { startLine: _startLine, endLine: _endLine, ...providerAnchor } = anchor;
+  assert.deepEqual(validateEvidenceAnchor({ ...providerAnchor, sourceType: "issue", jsonPointer: "" }).jsonPointer, "");
+  assert.throws(
+    () => validateEvidenceAnchor({ ...providerAnchor, sourceType: "issue", jsonPointer: "body" }),
+    /RFC 6901/
+  );
+  assert.throws(() => validateEvidenceAnchor({ ...anchor, jsonPointer: "" }), /mutually exclusive/);
 });
 
 test("thin ingestion is content-addressed, idempotent, and does not derive structure", async () => {

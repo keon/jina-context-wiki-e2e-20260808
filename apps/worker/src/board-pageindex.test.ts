@@ -62,6 +62,13 @@ test("board PageIndex execution indexes every certified page with pinned source 
   });
 });
 
+test("board PageIndex execution preserves an RFC 6901 root JSON Pointer citation", async () => {
+  await withFakeWorker("success", async (client) => {
+    const result = await buildBoardPageIndex(client, fixtureRelease({ rootJsonPointer: true }));
+    assert.ok(result.artifact.nodes.some((node) => node.anchors.some((anchor) => anchor.jsonPointer === "")));
+  });
+});
+
 test("board PageIndex execution rejects an incomplete certified-document tree", async () => {
   await withFakeWorker("incomplete", async (client) => {
     await assert.rejects(
@@ -190,7 +197,7 @@ function fakeWorkerSource(mode: FakeWorkerMode): string {
   ].join("\n");
 }
 
-function fixtureRelease(): CertifiedContextReleaseArtifactV1 {
+function fixtureRelease(options: { readonly rootJsonPointer?: boolean } = {}): CertifiedContextReleaseArtifactV1 {
   const pageInputs = [
     {
       documentPath: "operations/runtime.md",
@@ -208,6 +215,28 @@ function fixtureRelease(): CertifiedContextReleaseArtifactV1 {
   const pages = pageInputs
     .map((page, pageIndex) => {
       const revisionId = `kr_fixture_${pageIndex}`;
+      const anchor: KnowledgeEvidenceCitation["anchor"] =
+        options.rootJsonPointer && pageIndex === 0
+          ? {
+              tenantId,
+              repository,
+              sourceType: "issue",
+              sourceId: "42",
+              contentDigest: fingerprint("fixture issue 42"),
+              pathOrUrl: "https://github.com/acme/context/issues/42",
+              jsonPointer: ""
+            }
+          : {
+              tenantId,
+              repository,
+              sourceType: "blob",
+              sourceId: `${commitSha}:src/file-${pageIndex}.ts`,
+              contentDigest: fingerprint(`fixture source ${pageIndex}`),
+              commitSha,
+              pathOrUrl: `src/file-${pageIndex}.ts`,
+              startLine: 1,
+              endLine: 1
+            };
       const citation: KnowledgeEvidenceCitation = {
         id: `kc_fixture_${pageIndex}`,
         revisionId,
@@ -215,17 +244,7 @@ function fixtureRelease(): CertifiedContextReleaseArtifactV1 {
         claim: page.bodyMarkdown.split("\n")[2]!,
         citationId: `cite_${String(pageIndex).padStart(20, "0")}`,
         claimSpan: page.bodyMarkdown.split("\n")[2]!,
-        anchor: {
-          tenantId,
-          repository,
-          sourceType: "blob",
-          sourceId: `${commitSha}:src/file-${pageIndex}.ts`,
-          contentDigest: fingerprint(`fixture source ${pageIndex}`),
-          commitSha,
-          pathOrUrl: `src/file-${pageIndex}.ts`,
-          startLine: 1,
-          endLine: 1
-        }
+        anchor
       };
       return {
         ...page,
