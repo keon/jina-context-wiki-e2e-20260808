@@ -1147,7 +1147,7 @@ admin_image="$(resolve_release_image "${admin_image}")"
 
 # Validate the remote sandbox, organization Secret reference, and Codex
 # toolchain before touching Cloud SQL, GCS, or any serving service.
-daytona_preflight_env="^~^CONTEXT_DAYTONA_MODULE_PATH=/app/node_modules/@jina/daytona/dist/index.js~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}"
+daytona_preflight_env="^~^CONTEXT_DAYTONA_MODULE_PATH=/app/node_modules/@jina/daytona/dist/index.js~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}"
 if [[ -n "${context_daytona_snapshot}" ]]; then
   daytona_preflight_env+="~CONTEXT_DAYTONA_SNAPSHOT=${context_daytona_snapshot}"
 else

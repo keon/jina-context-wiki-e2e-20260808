@@ -687,7 +687,7 @@ test("production gate has a measured three-hour acceptance window", () => {
   assert.match(deployment, /--task-timeout="\$\{acceptance_job_timeout_seconds\}s"/);
 });
 
-test("Daytona snapshot, Secret reference, and Codex toolchain are probed before Cloud SQL mutation", () => {
+test("the exact production Daytona BoardAgent contract is probed before Cloud SQL mutation", () => {
   const preflight = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
   const backup = deployment.indexOf("gcloud sql backups create");
   const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
@@ -695,21 +695,23 @@ test("Daytona snapshot, Secret reference, and Codex toolchain are probed before 
   assert.ok(backup > preflight);
   assert.ok(migration > backup);
   assert.match(productionPreflight, /daytona\.snapshot\.get/);
-  assert.match(productionPreflight, /secrets: \{ \[secretEnvironment\]: secretName \}/);
-  assert.match(productionPreflight, /command -v codex >\/dev\/null/);
-  assert.match(productionPreflight, /-m gpt-5\.6-terra/);
-  assert.match(productionPreflight, /model_reasoning_effort=low/);
-  assert.match(productionPreflight, /model_provider="openai_direct"/);
-  assert.match(productionPreflight, /model_providers\.openai_direct\.env_key/);
-  assert.match(productionPreflight, /model_providers\.openai_direct\.wire_api="responses"/);
+  assert.match(productionPreflight, /DaytonaBoardAgentStageRunner/);
+  assert.match(productionPreflight, /modelSecret:\s*\{[\s\S]*environmentVariable: secretEnvironment,[\s\S]*secretName/);
+  assert.match(productionPreflight, /result = await runner\.run/);
+  assert.match(productionPreflight, /CONTEXT_CODEX_MODEL"\) \?\? "gpt-5\.6-terra"/);
+  assert.match(productionPreflight, /CONTEXT_CODEX_EFFORT"\) \?\? "low"/);
+  assert.match(productionPreflight, /CONTEXT_CODEX_VERBOSITY"\) \?\? "high"/);
+  assert.match(productionPreflight, /CONTEXT_CODEX_CONTEXT_TOKENS", 128_000/);
+  assert.match(productionPreflight, /CONTEXT_CODEX_COMPACT_TOKENS", 96_000/);
   assert.match(productionPreflight, /AUTH_OK/);
-  assert.match(productionPreflight, /command -v bwrap/);
-  assert.match(productionPreflight, /sandbox_workspace_write\.writable_roots/);
-  assert.match(productionPreflight, /jina-preflight-output\/tool-ok/);
-  assert.match(productionPreflight, /for attempt in 1 2 3/);
-  assert.match(productionPreflight, /sleep \$\(\(attempt \* 2\)\)/);
-  assert.match(productionPreflight, /test "\$probe_status" -eq 0/);
-  assert.match(productionPreflight, /ephemeral: true/);
+  assert.match(productionPreflight, /outputFiles: \[\{ path: "tool-ok", contentType: "text\/plain", maxBytes: 64 \}\]/);
+  assert.match(productionPreflight, /protectedValues: \[apiKey\]/);
+  assert.match(productionPreflight, /result\.files\.find\(\(file\) => file\.path === "tool-ok"\)/);
+  assert.doesNotMatch(productionPreflight, /codex exec|for attempt in 1 2 3|responses_websockets/);
+  assert.match(
+    deployment,
+    /daytona_preflight_env=.*CONTEXT_CODEX_MODEL=gpt-5\.6-terra.*CONTEXT_CODEX_EFFORT=low.*CONTEXT_CODEX_VERBOSITY=high.*CONTEXT_CODEX_CONTEXT_TOKENS=\$\{context_codex_context_tokens\}.*CONTEXT_CODEX_COMPACT_TOKENS=\$\{context_codex_compact_tokens\}/
+  );
 });
 
 test("production context worker claims exactly the Board topics", () => {

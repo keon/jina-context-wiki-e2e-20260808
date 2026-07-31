@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
+import { gzipSync } from "node:zlib";
 
 const LEGACY_CONTEXT_TABLES = ["derivation_progress", "pipeline_builds", "pipeline_stages"];
 const TABLES_ADDED_AFTER_LEGACY = [
@@ -116,110 +117,102 @@ async function preflightDaytona() {
   }
   const secretName = requiredEnv("CONTEXT_DAYTONA_MODEL_SECRET");
   const secretEnvironment = requiredEnv("CONTEXT_DAYTONA_MODEL_SECRET_ENV");
-  const allowedDomains = requiredEnv("CONTEXT_DAYTONA_MODEL_DOMAINS");
+  const allowedDomains = requiredEnv("CONTEXT_DAYTONA_MODEL_DOMAINS")
+    .split(",")
+    .map((domain) => domain.trim())
+    .filter(Boolean);
   const daytonaModulePath = process.env.CONTEXT_DAYTONA_MODULE_PATH ?? "/app/node_modules/@jina/daytona/dist/index.js";
-  const daytonaRequire = createRequire(realpathSync(daytonaModulePath));
-  const { Daytona } = await import(pathToFileURL(daytonaRequire.resolve("@daytona/sdk")).href);
-  const daytona = new Daytona({ apiKey });
-  let sandbox;
-  try {
-    if (snapshot) {
+  const resolvedDaytonaModulePath = realpathSync(daytonaModulePath);
+  const { DaytonaBoardAgentStageRunner } = await import(pathToFileURL(resolvedDaytonaModulePath).href);
+  if (snapshot) {
+    const daytonaRequire = createRequire(resolvedDaytonaModulePath);
+    const { Daytona } = await import(pathToFileURL(daytonaRequire.resolve("@daytona/sdk")).href);
+    const daytona = new Daytona({ apiKey });
+    try {
       const snapshotRecord = await daytona.snapshot.get(snapshot);
       if (snapshotRecord.name !== snapshot || snapshotRecord.state !== "active") {
         throw new Error(`Daytona snapshot ${snapshot} is not active`);
       }
-    }
-    sandbox = await daytona.create(
-      {
-        ...(snapshot ? { snapshot } : { image }),
-        language: "typescript",
-        envVars: { HOME: "/home/daytona", LANG: "C.UTF-8" },
-        secrets: { [secretEnvironment]: secretName },
-        labels: { "jina-purpose": "production-preflight" },
-        domainAllowList: allowedDomains,
-        public: false,
-        ephemeral: true,
-        ttlMinutes: 5
-      },
-      { timeout: 300 }
-    );
-    const probe = await sandbox.process.executeCommand(
-      [
-        "set -eu",
-        "command -v codex >/dev/null",
-        "command -v bwrap >/dev/null",
-        "codex --version",
-        "bwrap --version",
-        "mkdir -p /tmp/jina-preflight-output",
-        `printf '%s' '${JSON.stringify({
-          type: "object",
-          properties: { status: { type: "string", enum: ["AUTH_OK"] } },
-          required: ["status"],
-          additionalProperties: false
-        })}' > /tmp/jina-preflight-schema.json`,
-        "probe_status=1",
-        "for attempt in 1 2 3; do",
-        "rm -f /tmp/jina-preflight-output/tool-ok /tmp/jina-preflight-result.json /tmp/jina-preflight-events.jsonl",
-        [
-          "if printf '%s\\n' 'Use the shell tool to write exactly TOOL_OK to /tmp/jina-preflight-output/tool-ok, verify the file, then return the JSON status AUTH_OK.' |",
-          "codex exec",
-          "--json",
-          "--ignore-user-config",
-          "--ignore-rules",
-          "--strict-config",
-          "--skip-git-repo-check",
-          "--enable shell_tool",
-          "--disable multi_agent",
-          "--disable shell_snapshot",
-          "--disable unified_exec",
-          "--disable responses_websockets",
-          "--disable responses_websockets_v2",
-          "--disable apps",
-          "--disable browser_use",
-          "--disable computer_use",
-          "--disable image_generation",
-          "--disable plugins",
-          "-c web_search=disabled",
-          "-c approval_policy=never",
-          "-c project_doc_max_bytes=0",
-          '-c model_provider="openai_direct"',
-          '-c model_providers.openai_direct.name="openai-direct"',
-          '-c model_providers.openai_direct.base_url="https://api.openai.com/v1"',
-          `-c model_providers.openai_direct.env_key="${secretEnvironment}"`,
-          '-c model_providers.openai_direct.wire_api="responses"',
-          "--sandbox workspace-write",
-          `-c 'sandbox_workspace_write.writable_roots=["/tmp/jina-preflight-output"]'`,
-          "-c sandbox_workspace_write.network_access=false",
-          "-m gpt-5.6-terra",
-          "-c model_reasoning_effort=low",
-          "-c model_verbosity=low",
-          "--output-schema /tmp/jina-preflight-schema.json",
-          "--output-last-message /tmp/jina-preflight-result.json",
-          "> /tmp/jina-preflight-events.jsonl; then probe_status=0; break; fi"
-        ].join(" "),
-        "sleep $((attempt * 2))",
-        "done",
-        'test "$probe_status" -eq 0',
-        `node -e 'const fs=require("fs");const value=JSON.parse(fs.readFileSync("/tmp/jina-preflight-result.json","utf8"));if(value.status!=="AUTH_OK"||Object.keys(value).length!==1)process.exit(1)'`,
-        `test "$(cat /tmp/jina-preflight-output/tool-ok)" = "TOOL_OK"`,
-        "rm -rf /tmp/jina-preflight-output /tmp/jina-preflight-schema.json /tmp/jina-preflight-result.json /tmp/jina-preflight-events.jsonl"
-      ].join("\n"),
-      undefined,
-      { PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin" },
-      180
-    );
-    if (probe.exitCode !== 0 || !/^codex-cli [0-9]+\.[0-9]+\.[0-9]+/m.test(probe.result)) {
+    } catch (error) {
+      // The SDK cause is untrusted and may include request credentials.
+      // eslint-disable-next-line preserve-caught-error
       throw new Error(
-        `Daytona Codex toolchain or model authentication preflight failed (exit ${probe.exitCode}): ${sanitizedDiagnostic(
-          probe.result
-        )}`
+        `Daytona snapshot verification failed: ${sanitizedDiagnostic(error instanceof Error ? error.message : error, [
+          apiKey
+        ])}`
       );
+    } finally {
+      await daytona[Symbol.asyncDispose]();
     }
-    console.log(`Daytona Codex/model preflight passed for ${snapshot ?? image}`);
-  } finally {
-    await sandbox?.delete(120, true).catch(() => undefined);
-    await daytona[Symbol.asyncDispose]();
   }
+
+  const configuredModel = optionalEnv("CONTEXT_CODEX_MODEL") ?? "gpt-5.6-terra";
+  const archive = archiveWithFile("README.md", "production Daytona preflight\n");
+  let result;
+  try {
+    const runner = new DaytonaBoardAgentStageRunner({
+      daytonaApiKey: apiKey,
+      ...(snapshot ? { snapshot } : { image }),
+      modelSecret: {
+        environmentVariable: secretEnvironment,
+        secretName
+      },
+      allowedDomains,
+      model: configuredModel.replace(/^openai\//, ""),
+      effort: optionalEnv("CONTEXT_CODEX_EFFORT") ?? "low",
+      verbosity: optionalEnv("CONTEXT_CODEX_VERBOSITY") ?? "high",
+      setupTimeoutSeconds: 300,
+      protectedValues: [apiKey]
+    });
+    result = await runner.run({
+      id: "production-preflight",
+      prompt:
+        'Use the shell tool to write exactly TOOL_OK, with no trailing newline, to the only declared output file. Verify the file, then return exactly {"status":"AUTH_OK"}.',
+      schema: {
+        type: "object",
+        properties: { status: { type: "string", enum: ["AUTH_OK"] } },
+        required: ["status"],
+        additionalProperties: false
+      },
+      repository: {
+        commitSha: "0".repeat(40),
+        archive,
+        sha256: createHash("sha256").update(archive).digest("hex")
+      },
+      artifacts: [],
+      limits: {
+        timeoutSeconds: 180,
+        contextTokens: positiveIntegerEnv("CONTEXT_CODEX_CONTEXT_TOKENS", 128_000),
+        compactTokens: positiveIntegerEnv("CONTEXT_CODEX_COMPACT_TOKENS", 96_000),
+        attempt: 1,
+        maxAttempts: 1,
+        maxOutputBytes: 1_024
+      },
+      outputFiles: [{ path: "tool-ok", contentType: "text/plain", maxBytes: 64 }]
+    });
+  } catch (error) {
+    // The original cause can contain provider stderr or credentials. Deliberately
+    // do not attach it to the process-visible error after constructing the safe diagnostic.
+    // eslint-disable-next-line preserve-caught-error
+    throw new Error(
+      `Daytona production BoardAgent preflight failed: ${sanitizedDiagnostic(
+        error instanceof Error ? error.message : error,
+        [apiKey]
+      )}`
+    );
+  }
+  const response = JSON.parse(Buffer.from(result.bytes).toString("utf8"));
+  const toolOutput = result.files.find((file) => file.path === "tool-ok");
+  if (
+    response.status !== "AUTH_OK" ||
+    Object.keys(response).length !== 1 ||
+    result.files.length !== 1 ||
+    !toolOutput ||
+    Buffer.from(toolOutput.bytes).toString("utf8") !== "TOOL_OK"
+  ) {
+    throw new Error("Daytona production BoardAgent preflight returned an invalid bounded result");
+  }
+  console.log(`Daytona production BoardAgent preflight passed for ${snapshot ?? image}`);
 }
 
 async function withDatabase(operation) {
@@ -853,9 +846,42 @@ function optionalEnv(name) {
   return value || undefined;
 }
 
-function sanitizedDiagnostic(value) {
-  return String(value || "(no diagnostic)")
+function positiveIntegerEnv(name, fallback) {
+  const raw = optionalEnv(name);
+  if (!raw) return fallback;
+  if (!/^[1-9][0-9]*$/.test(raw) || !Number.isSafeInteger(Number(raw))) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return Number(raw);
+}
+
+function archiveWithFile(name, body) {
+  const payload = Buffer.from(body, "utf8");
+  const header = Buffer.alloc(512);
+  header.write(name, 0, "utf8");
+  header.write("0000644\0", 100, "ascii");
+  header.write("0000000\0", 108, "ascii");
+  header.write("0000000\0", 116, "ascii");
+  header.write(payload.length.toString(8).padStart(11, "0") + "\0", 124, "ascii");
+  header.write("00000000000\0", 136, "ascii");
+  header.fill(0x20, 148, 156);
+  header[156] = 0x30;
+  header.write("ustar\0", 257, "ascii");
+  header.write("00", 263, "ascii");
+  let checksum = 0;
+  for (const byte of header) checksum += byte;
+  header.write(checksum.toString(8).padStart(6, "0") + "\0 ", 148, "ascii");
+  return gzipSync(
+    Buffer.concat([header, payload, Buffer.alloc((512 - (payload.length % 512)) % 512), Buffer.alloc(1024)])
+  );
+}
+
+function sanitizedDiagnostic(value, protectedValues = []) {
+  let diagnostic = String(value || "(no diagnostic)")
     .replace(/\b(?:sk|dtn_secret)[-_][A-Za-z0-9._-]{8,}\b/gi, "[credential-redacted]")
-    .replace(/\bBearer\s+\S+/gi, "Bearer [credential-redacted]")
-    .slice(-2_000);
+    .replace(/\bBearer\s+\S+/gi, "Bearer [credential-redacted]");
+  for (const protectedValue of [...new Set(protectedValues)].sort((left, right) => right.length - left.length)) {
+    if (protectedValue.length >= 8) diagnostic = diagnostic.replaceAll(protectedValue, "[credential-redacted]");
+  }
+  return diagnostic.slice(-2_000);
 }
