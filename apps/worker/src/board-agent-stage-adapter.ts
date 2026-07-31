@@ -148,7 +148,12 @@ export function configuredPortableContextBoardAgentStageRunner(
         credential,
         model: profile.credential.kind === "openrouter" ? profile.model : profile.model.replace(/^openai\//, ""),
         effort: profile.effort,
-        domains: profile.credential.kind === "openrouter" ? ["openrouter.ai"] : ["api.openai.com"]
+        domains:
+          profile.credential.kind === "openrouter"
+            ? ["openrouter.ai"]
+            : profile.credential.kind === "codex"
+              ? ["chatgpt.com"]
+              : ["api.openai.com"]
       });
       try {
         return await runPortableBoardAgentStage(selectedRunner, input, attempt, environment);

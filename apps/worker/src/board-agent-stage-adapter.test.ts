@@ -570,6 +570,31 @@ test("managed initial execution and non-OpenAI provider fallback use the configu
     const managed = executions.find((execution) => execution?.credential.kind === "secret");
     assert.equal(managed?.model, "gpt-5.6-terra");
     assert.equal(managed?.effort, "medium");
+
+    executions.length = 0;
+    const codexRunner = configuredPortableContextBoardAgentStageRunner({
+      environment,
+      attemptContext,
+      runnerFactory,
+      profileFetch: async () =>
+        profileResponse({
+          provider: "codex",
+          model: "openai/gpt-5.6-terra",
+          effort: "low",
+          fallback_policy: "fail_notify",
+          credential: { kind: "codex", value: '{"tokens":{"access_token":"private"}}', revision: "auth-1" },
+          settings_revision: "settings-3"
+        })
+    });
+    await codexRunner.run({
+      id: "codex-stage",
+      prompt: "Complete the stage.",
+      workingDirectory: root,
+      readOnly: true,
+      budgetSeconds: 30
+    });
+    const codex = executions.find((execution) => execution?.credential.kind === "codex");
+    assert.deepEqual(codex?.domains, ["chatgpt.com"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

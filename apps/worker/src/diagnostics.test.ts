@@ -16,6 +16,10 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("Daytona sandbox creation failed"), "daytona");
   assert.equal(workerFailureCategory("Codex context build failed"), "model");
   assert.equal(
+    workerFailureCategory("stream disconnected before completion: Codex provider websocket failed"),
+    "model"
+  );
+  assert.equal(
     workerFailureCategory(
       "board agent stage repair-context-projection-and-indexing-md-7 exited with 1: Reading prompt from stdin..."
     ),
