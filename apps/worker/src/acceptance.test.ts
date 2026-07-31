@@ -164,7 +164,7 @@ test("blocked task detection is dynamic and scoped to repository and ref", () =>
   );
 });
 
-test("production acceptance resumes one explicitly eligible page or global-gate branch", async () => {
+test("production acceptance resumes one explicitly eligible checkpoint branch", async () => {
   const requests: { readonly path: string; readonly body?: Record<string, unknown> }[] = [];
   const fetchImpl: typeof fetch = async (input, init) => {
     const url = new URL(String(input));
@@ -245,6 +245,38 @@ test("production acceptance resumes one explicitly eligible page or global-gate 
   assert.equal(
     gateRequests[1]?.body?.requestKey,
     "production-acceptance:task_build:gate-remediation:3:task_certification"
+  );
+
+  const checkpointRequests: { readonly path: string; readonly body?: Record<string, unknown> }[] = [];
+  const checkpointFetch: typeof fetch = async (input, init) => {
+    const url = new URL(String(input));
+    checkpointRequests.push({
+      path: url.pathname,
+      ...(init?.body ? { body: JSON.parse(String(init.body)) as Record<string, unknown> } : {})
+    });
+    return url.pathname.endsWith("/progress")
+      ? json({
+          retryEligibility: {
+            eligible: true,
+            recoverableTaskIds: ["task_publication_plan"],
+            blockers: []
+          }
+        })
+      : json({ accepted: true }, 202);
+  };
+  assert.equal(
+    await requestProductionRemediation({
+      fetchImpl: checkpointFetch,
+      apiUrl: "https://api.example.test",
+      internalHeaders: { authorization: "Bearer internal" },
+      buildId: "task_build",
+      attempt: 1
+    }),
+    "checkpoint_retry"
+  );
+  assert.equal(
+    checkpointRequests[1]?.body?.requestKey,
+    "production-acceptance:task_build:checkpoint-retry:1:task_publication_plan"
   );
 });
 

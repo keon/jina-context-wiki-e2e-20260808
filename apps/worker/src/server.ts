@@ -100,7 +100,11 @@ import {
   retainedPageRepairCheckpoint
 } from "./board-page-repair.js";
 import type { PageRepairCheckpointDiagnostics } from "./board-page-repair.js";
-import { parsePublicationPlanWithRepair, retainedPublicationPlanProblems } from "./board-publication-plan.js";
+import {
+  parsePublicationPlanWithRepair,
+  promoteUnsafeRetainedPages,
+  retainedPublicationPlanProblems
+} from "./board-publication-plan.js";
 import { parseResearchPlanWithRepair } from "./board-research-plan.js";
 import { shouldRetryWorkerFailure, workerFailureCategory, type WorkerFailureCategory } from "./diagnostics.js";
 import { assertExpectedRemoteHead } from "./git-ref.js";
@@ -1105,6 +1109,17 @@ async function runContextPublicationPlan(
       },
       ...(priorContext
         ? {
+            normalize: (candidate: unknown) =>
+              promoteUnsafeRetainedPages({
+                candidate,
+                options: {
+                  researchAssignments: planPacket.plan.assignments,
+                  repositoryAreas,
+                  priorPages: priorContext.pages
+                },
+                priorPages: priorContext.certifiedPages,
+                snapshot
+              }),
             validate: (candidate: DocumentationStagePlan) => {
               const problems = retainedPublicationPlanProblems({
                 plan: candidate,

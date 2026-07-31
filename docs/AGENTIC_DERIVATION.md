@@ -274,7 +274,10 @@ branch commit, PR head, or newly opened issue creates a newer Board build for th
 appropriate ref. Prior published context is an input, not mutable state: agents inspect
 changed paths and triggering provider records, retain still-supported subjects, revise
 affected pages, add newly supported pages, and omit retired material from the complete
-successor catalog.
+successor catalog. `retain` is only a byte-identical optimization: if deterministic
+validation finds that any immutable citation binding changed, the host promotes that page
+to `revise` before writing begins. This is constraint enforcement rather than a content
+decision and prevents an unwinnable downstream citation-repair loop.
 
 The trigger itself is provenance, not evidence. A PR or issue is cited only when its
 captured contents support a material current claim. Issue comments, reviews, labels,

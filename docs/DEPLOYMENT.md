@@ -691,9 +691,10 @@ The coordinated `cloudbuild.yaml` invocation above calls
 11. by default, executes the full production acceptance job exclusively against the
     tagged candidate API, workers, dashboard, and admin, requiring health attestations
     and Board completion receipts naming the exact release and worker revision; an
-    explicitly eligible citation-quality page or repository-wide quality gate may resume
-    from its retained checkpoint, with at most four total acceptance recoveries, while
-    every other task or infrastructure failure remains terminal. An operator may
+    explicitly eligible single failed branch may resume from its retained checkpoint,
+    including citation-quality pages, repository-wide quality gates, and earlier planning
+    stages, with at most four total acceptance recoveries. Ineligible, ambiguous,
+    multi-branch, and infrastructure failures remain terminal. An operator may
     explicitly set `_JINA_DEPLOYMENT_ACCEPTANCE_MODE=mechanical` to cut over after all
     five candidates are ready and worker isolation is proven, deferring the expensive
     full Context build to a later final verification release;

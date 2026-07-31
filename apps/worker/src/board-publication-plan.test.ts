@@ -3,7 +3,11 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { boardPageAuditInventory, type ResearchAssignment } from "@jina/daytona";
 import type { CertifiedContextReleasePage, ContextPriorPage, IngestEvidenceInput } from "@jina/context-engine";
-import { parsePublicationPlanWithRepair, retainedPublicationPlanProblems } from "./board-publication-plan.js";
+import {
+  parsePublicationPlanWithRepair,
+  promoteUnsafeRetainedPages,
+  retainedPublicationPlanProblems
+} from "./board-publication-plan.js";
 
 const QUESTION = "How does a maintainer change the request path safely?";
 const ASSIGNMENT: ResearchAssignment = {
@@ -87,7 +91,7 @@ test("publication planning fails closed when the one repair is still invalid", a
   );
 });
 
-test("incremental planning promotes a stale retain to revise in its bounded repair", async () => {
+test("incremental planning deterministically promotes a stale retain to revise", async () => {
   const priorBody = [
     "# Architecture",
     "",
@@ -155,6 +159,13 @@ test("incremental planning promotes a stale retain to revise in its bounded repa
   const plan = await parsePublicationPlanWithRepair({
     candidate: retained,
     options: { ...OPTIONS, priorPages: [priorCatalog] },
+    normalize: (candidate) =>
+      promoteUnsafeRetainedPages({
+        candidate,
+        options: { ...OPTIONS, priorPages: [priorCatalog] },
+        priorPages: [priorPage],
+        snapshot: changedSnapshot
+      }),
     validate: (candidate) => {
       const problems = retainedPublicationPlanProblems({
         plan: candidate,
@@ -169,7 +180,7 @@ test("incremental planning promotes a stale retain to revise in its bounded repa
       return revised;
     }
   });
-  assert.equal(repairCalls, 1);
+  assert.equal(repairCalls, 0);
   assert.equal(plan.pages[0]?.change, "revise");
 
   const unchanged = retainedPublicationPlanProblems({

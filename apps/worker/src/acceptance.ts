@@ -198,10 +198,15 @@ export async function runProductionContextAcceptance(
           : undefined;
       if (remediationMode) {
         remediationAttempts += 1;
+        const checkpoint =
+          remediationMode === "page_remediation"
+            ? "page"
+            : remediationMode === "gate_remediation"
+              ? "global gate"
+              : "recoverable stage";
         log(
           `Production context build ${buildId} resumed from a retained ` +
-            `${remediationMode === "page_remediation" ? "page" : "global gate"} checkpoint ` +
-            `(${remediationAttempts}/${MAX_PRODUCTION_REMEDIATIONS})`
+            `${checkpoint} checkpoint (${remediationAttempts}/${MAX_PRODUCTION_REMEDIATIONS})`
         );
         await delay(pollIntervalMs);
         continue;
@@ -1094,7 +1099,7 @@ async function verifyWorkerHealth(
   throw new Error(`worker health verification failed: ${lastFailure ?? "no response"}`);
 }
 
-export type ProductionRemediationMode = "page_remediation" | "gate_remediation";
+export type ProductionRemediationMode = "page_remediation" | "gate_remediation" | "checkpoint_retry";
 
 export async function requestProductionRemediation(input: {
   readonly fetchImpl: typeof fetch;
@@ -1110,16 +1115,21 @@ export async function requestProductionRemediation(input: {
   );
   const eligibility = recordOrEmpty(progress.retryEligibility);
   const mode = eligibility.mode;
-  if (eligibility.eligible !== true || (mode !== "page_remediation" && mode !== "gate_remediation")) {
-    return undefined;
-  }
+  if (eligibility.eligible !== true) return undefined;
   const taskIds = requiredArray(eligibility.recoverableTaskIds, "retryEligibility.recoverableTaskIds").map((taskId) =>
     requiredString(taskId, "retryEligibility task id")
   );
   if (taskIds.length !== 1) {
     throw new Error("production remediation must identify exactly one recovery target");
   }
-  const requestMode = mode === "page_remediation" ? "page-remediation" : "gate-remediation";
+  const remediationMode: ProductionRemediationMode =
+    mode === "page_remediation" || mode === "gate_remediation" ? mode : "checkpoint_retry";
+  const requestMode =
+    remediationMode === "page_remediation"
+      ? "page-remediation"
+      : remediationMode === "gate_remediation"
+        ? "gate-remediation"
+        : "checkpoint-retry";
   await apiJson(input.fetchImpl, `${input.apiUrl}/context/builds/${encodeURIComponent(input.buildId)}/retry`, {
     method: "POST",
     headers: input.internalHeaders,
@@ -1127,12 +1137,14 @@ export async function requestProductionRemediation(input: {
       taskIds,
       requestKey: `production-acceptance:${input.buildId}:${requestMode}:${input.attempt}:${taskIds[0]}`,
       reason:
-        mode === "page_remediation"
+        remediationMode === "page_remediation"
           ? "Production acceptance resumed one bounded citation-quality page from its retained checkpoint; preserve supported bindings and repair only current findings."
-          : "Production acceptance resumed one bounded global quality-gate pass from its retained draft and gate checkpoints; repair only current findings."
+          : remediationMode === "gate_remediation"
+            ? "Production acceptance resumed one bounded global quality-gate pass from its retained draft and gate checkpoints; repair only current findings."
+            : "Production acceptance resumed one recoverable stage from retained upstream checkpoints; use its Board failure observations and preserve completed work."
     })
   });
-  return mode;
+  return remediationMode;
 }
 
 export async function verifyProductionMcp(input: {
@@ -1522,6 +1534,10 @@ function contextBuildDescendants(
 }
 
 function failureReason(task: Record<string, unknown>): string {
+  if (typeof task.failureReason === "string") {
+    const code = typeof task.failureCode === "string" ? `${task.failureCode}: ` : "";
+    return `${code}${task.failureReason}`.slice(0, 500);
+  }
   const metadata = recordOrEmpty(task.metadata);
   return typeof metadata.error === "string" ? metadata.error.slice(0, 500) : "no public reason";
 }

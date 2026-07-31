@@ -19,17 +19,21 @@ export async function parsePublicationPlanWithRepair(input: {
   readonly candidate: unknown;
   readonly options: Parameters<typeof parseDocumentationStagePlan>[1];
   readonly validate?: (plan: DocumentationStagePlan) => void;
+  readonly normalize?: (candidate: unknown) => unknown;
   readonly repair: (request: PublicationPlanRepairRequest) => Promise<unknown>;
 }): Promise<DocumentationStagePlan> {
+  const prepare = (candidate: unknown): unknown => {
+    const completed = completeMaintenanceQuestionCoverage(candidate, input.options.researchAssignments);
+    return input.normalize?.(completed) ?? completed;
+  };
   return parsePlanWithSingleRepair({
-    candidate: completeMaintenanceQuestionCoverage(input.candidate, input.options.researchAssignments),
+    candidate: prepare(input.candidate),
     parse: (candidate) => {
       const plan = parseDocumentationStagePlan(candidate, input.options);
       input.validate?.(plan);
       return plan;
     },
-    repair: async (request) =>
-      completeMaintenanceQuestionCoverage(await input.repair(request), input.options.researchAssignments)
+    repair: async (request) => prepare(await input.repair(request))
   });
 }
 
@@ -82,10 +86,9 @@ function completeMaintenanceQuestionCoverage(candidate: unknown, assignments: re
  * the same immutable source/provider identities and its existing bytes satisfy
  * the new plan's deterministic navigation contract.
  *
- * A failure is deliberately returned to the publication planner so its one
- * bounded repair can promote the page to `revise`. Letting the page enter the
- * ordinary citation-repair loop would be unwinnable: repairing it changes the
- * bytes that publication correctly requires a retain to preserve.
+ * Letting the page enter the ordinary citation-repair loop would be unwinnable:
+ * repairing it changes the bytes that publication correctly requires a retain
+ * to preserve.
  */
 export function retainedPublicationPlanProblems(input: {
   readonly plan: DocumentationStagePlan;
@@ -135,6 +138,40 @@ export function retainedPublicationPlanProblems(input: {
     }
   }
   return [...new Set(problems)];
+}
+
+export function promoteUnsafeRetainedPages(input: {
+  readonly candidate: unknown;
+  readonly options: Parameters<typeof parseDocumentationStagePlan>[1];
+  readonly priorPages: readonly CertifiedContextReleasePage[];
+  readonly snapshot: IngestEvidenceInput;
+}): unknown {
+  let plan: DocumentationStagePlan;
+  try {
+    plan = parseDocumentationStagePlan(input.candidate, input.options);
+  } catch {
+    return input.candidate;
+  }
+  const problems = retainedPublicationPlanProblems({
+    plan,
+    priorPages: input.priorPages,
+    snapshot: input.snapshot
+  });
+  const unsafePaths = new Set(
+    plan.pages
+      .filter(
+        (page) =>
+          page.change === "retain" &&
+          problems.some((problem) => problem.startsWith(`${page.path}:`) || problem.startsWith(`${page.path} `))
+      )
+      .map((page) => page.path)
+  );
+  return unsafePaths.size === 0
+    ? input.candidate
+    : {
+        ...plan,
+        pages: plan.pages.map((page) => (unsafePaths.has(page.path) ? { ...page, change: "revise" as const } : page))
+      };
 }
 
 function sameRetainedEvidenceBinding(
