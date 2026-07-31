@@ -211,3 +211,49 @@ test("admin rejects checkpoint progress returned for a different tenant scope", 
     /mismatched progress/
   );
 });
+
+test("admin keeps the context page available when one progress read is backpressured", async (context) => {
+  context.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.endsWith("/build-overloaded/progress")) {
+      return new Response("busy", { status: 429 });
+    }
+    return Response.json({
+      buildId: "build-healthy",
+      repository: "acme/repository",
+      ref: "main",
+      status: "active",
+      stages: [],
+      pages: [],
+      updatedAt: "2026-01-02T01:00:00.000Z"
+    });
+  });
+
+  const progress = await listContextBuildProgress([
+    {
+      id: "build-overloaded",
+      repository: "acme/repository",
+      ref: "main",
+      refSequence: 2,
+      status: "active",
+      stages: [],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T01:00:00.000Z"
+    },
+    {
+      id: "build-healthy",
+      repository: "acme/repository",
+      ref: "main",
+      refSequence: 1,
+      status: "active",
+      stages: [],
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T01:00:00.000Z"
+    }
+  ]);
+
+  assert.deepEqual(
+    progress.map((item) => item.buildId),
+    ["build-healthy"]
+  );
+});

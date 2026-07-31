@@ -175,6 +175,9 @@ export default async function ContextAdminPage({
                   const failure = stage.status === "failed" ? contextFailureText(stage) : undefined;
                   return failure ? [{ id: stage.id, title: stage.title, failure }] : [];
                 });
+                const activeStages = stages.filter(
+                  (stage) => stage.status === "in_progress" || stage.status === "queued" || stage.status === "triage"
+                );
                 return (
                   <tr key={build.id}>
                     <td>{build.repository}</td>
@@ -213,6 +216,16 @@ export default async function ContextAdminPage({
                           <br />
                           <span className="muted">{retries} retried</span>
                         </>
+                      ) : null}
+                      {activeStages.length > 0 ? (
+                        <ul className="active-stage-list">
+                          {activeStages.map((stage) => (
+                            <li key={stage.id}>
+                              <strong>{stage.title}</strong>: {stage.status.replaceAll("_", " ")} · attempt{" "}
+                              {stage.attempt} · updated {formatTimestamp(stage.updatedAt)}
+                            </li>
+                          ))}
+                        </ul>
                       ) : null}
                       {failedStages.length > 0 ? (
                         <ul className="failure-stage-list">

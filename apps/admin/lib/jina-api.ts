@@ -150,18 +150,23 @@ async function apiGet(pathname: string): Promise<unknown> {
     tenantId,
     principalId: process.env.JINA_WEB_PRINCIPAL_ID?.trim()
   });
-  let response: Response;
-  try {
-    response = await fetch(`${apiBaseUrl()}${pathname}`, { headers, cache: "no-store" });
-  } catch (error) {
-    throw new JinaApiError(
-      `Jina API unreachable at ${apiBaseUrl()}: ${error instanceof Error ? error.message : String(error)}`
-    );
-  }
-  if (!response.ok) {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetch(`${apiBaseUrl()}${pathname}`, { headers, cache: "no-store" });
+    } catch (error) {
+      throw new JinaApiError(
+        `Jina API unreachable at ${apiBaseUrl()}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+    if (response.ok) return response.json();
+    if ((response.status === 429 || response.status === 503) && attempt < 2) {
+      await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      continue;
+    }
     throw new JinaApiError(`Jina API responded ${response.status} for ${pathname}`, response.status);
   }
-  return response.json();
+  throw new JinaApiError(`Jina API did not complete ${pathname}`);
 }
 
 export function adminApiHeaders(input: {
@@ -200,25 +205,23 @@ export async function listContextDocuments(
     const key = `${release.repository}\0${release.ref}`;
     if (!latestByScope.has(key)) latestByScope.set(key, release);
   }
-  const catalogs = await Promise.all(
-    [...latestByScope.values()].map(async (release) => {
-      const body = (await apiGet(
-        `/context/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`
-      )) as { readonly documents?: unknown };
-      if (!Array.isArray(body.documents)) {
-        throw new JinaApiError(`Jina API response for context release ${release.id} omitted documents`);
-      }
-      return (body.documents as Omit<AdminContextDocument, "repository" | "releaseId" | "ref" | "commitSha">[]).map(
-        (document) => ({
-          ...document,
-          repository: release.repository,
-          releaseId: release.id,
-          ref: release.ref,
-          commitSha: release.commitSha
-        })
-      );
-    })
-  );
+  const catalogs = await mapInBatches([...latestByScope.values()], 3, async (release) => {
+    const body = (await apiGet(
+      `/context/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`
+    )) as { readonly documents?: unknown };
+    if (!Array.isArray(body.documents)) {
+      throw new JinaApiError(`Jina API response for context release ${release.id} omitted documents`);
+    }
+    return (body.documents as Omit<AdminContextDocument, "repository" | "releaseId" | "ref" | "commitSha">[]).map(
+      (document) => ({
+        ...document,
+        repository: release.repository,
+        releaseId: release.id,
+        ref: release.ref,
+        commitSha: release.commitSha
+      })
+    );
+  });
   return catalogs.flat().sort((left, right) => left.logicalId.localeCompare(right.logicalId));
 }
 
@@ -235,17 +238,35 @@ export async function listContextBuildProgress(
   limit = 12
 ): Promise<readonly AdminContextBuildProgress[]> {
   const selected = builds.slice(0, Math.max(0, limit));
-  return Promise.all(
-    selected.map(async (build) => {
-      const progress = (await apiGet(
+  const progress = await mapInBatches(selected, 3, async (build) => {
+    try {
+      const item = (await apiGet(
         `/context/builds/${encodeURIComponent(build.id)}/progress`
       )) as AdminContextBuildProgress;
-      if (progress.buildId !== build.id || progress.repository !== build.repository || progress.ref !== build.ref) {
+      if (item.buildId !== build.id || item.repository !== build.repository || item.ref !== build.ref) {
         throw new JinaApiError(`Jina API returned mismatched progress for context build ${build.id}`);
       }
-      return progress;
-    })
-  );
+      return item;
+    } catch (error) {
+      if (error instanceof JinaApiError && (error.status === 429 || error.status === 503)) {
+        return undefined;
+      }
+      throw error;
+    }
+  });
+  return progress.filter((item): item is AdminContextBuildProgress => item !== undefined);
+}
+
+async function mapInBatches<Input, Output>(
+  values: readonly Input[],
+  concurrency: number,
+  map: (value: Input) => Promise<Output>
+): Promise<Output[]> {
+  const output: Output[] = [];
+  for (let index = 0; index < values.length; index += concurrency) {
+    output.push(...(await Promise.all(values.slice(index, index + concurrency).map(map))));
+  }
+  return output;
 }
 
 export async function getContextMetrics(): Promise<AdminContextMetrics> {

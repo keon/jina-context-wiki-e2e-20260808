@@ -183,6 +183,15 @@ code {
   line-height: 1.4;
 }
 
+.active-stage-list {
+  max-width: 420px;
+  margin: 7px 0 0;
+  padding-left: 16px;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .empty-state,
 .error-state {
   background: var(--panel);
