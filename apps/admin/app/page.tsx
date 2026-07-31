@@ -8,6 +8,7 @@ import {
   listContextBuilds,
   listContextDocuments,
   type AdminContextBuild,
+  type AdminContextMetrics,
   type AdminContextRelease
 } from "../lib/jina-api";
 
@@ -19,33 +20,26 @@ export default async function ContextAdminPage({
   readonly searchParams: Promise<{ readonly repository?: string }>;
 }) {
   const { repository } = await searchParams;
-  let releases: readonly AdminContextRelease[];
-  let builds: readonly AdminContextBuild[];
-  let buildProgress: Awaited<ReturnType<typeof listContextBuildProgress>>;
-  let documents: Awaited<ReturnType<typeof listContextDocuments>>;
-  let metrics: Awaited<ReturnType<typeof getContextMetrics>>;
-  try {
-    [releases, metrics, builds] = await Promise.all([listAllReleases(), getContextMetrics(), listContextBuilds()]);
-    const scopedBuilds = repository ? builds.filter((build) => build.repository === repository) : builds;
-    [documents, buildProgress] = await Promise.all([
-      listContextDocuments(releases, repository),
-      listContextBuildProgress(scopedBuilds)
-    ]);
-  } catch (error) {
-    return (
-      <div className="error-state">
-        <p>Could not load repository context from the Jina API.</p>
-        <p>
-          <code>{error instanceof JinaApiError ? error.message : "unexpected error"}</code>
-        </p>
-        <p className="muted">
-          Check <code>JINA_API_URL</code> and <code>INTERNAL_API_TOKEN</code>, or start the local stack.
-        </p>
-      </div>
-    );
-  }
+  const loadFailures: string[] = [];
+  const [releaseResult, metricsResult, buildsResult] = await Promise.allSettled([
+    listAllReleases(),
+    getContextMetrics(),
+    listContextBuilds()
+  ]);
+  const releases: readonly AdminContextRelease[] = settledOr(releaseResult, [], "releases", loadFailures);
+  const metrics = settledOr(metricsResult, EMPTY_METRICS, "metrics", loadFailures);
+  const builds: readonly AdminContextBuild[] = settledOr(buildsResult, [], "builds", loadFailures);
+  const scopedBuilds = repository ? builds.filter((build) => build.repository === repository) : builds;
+  const [documentsResult, progressResult] = await Promise.allSettled([
+    releases.length > 0 ? listContextDocuments(releases, repository) : Promise.resolve([]),
+    scopedBuilds.length > 0 ? listContextBuildProgress(scopedBuilds) : Promise.resolve([])
+  ]);
+  const documents = settledOr(documentsResult, [], "documents", loadFailures);
+  const buildProgress = settledOr(progressResult, [], "build progress", loadFailures);
 
-  const repositories = [...new Set(releases.map((release) => release.repository))].sort();
+  const repositories = [
+    ...new Set([...releases.map((release) => release.repository), ...builds.map((build) => build.repository)])
+  ].sort();
   const visible = repository ? releases.filter((release) => release.repository === repository) : releases;
   const visibleBuilds = repository ? builds.filter((build) => build.repository === repository) : builds;
   const progressByBuild = new Map(buildProgress.map((progress) => [progress.buildId, progress]));
@@ -67,6 +61,14 @@ export default async function ContextAdminPage({
 
   return (
     <main>
+      {loadFailures.length > 0 ? (
+        <div className="error-state">
+          <p>Some Context data is temporarily unavailable. Available sections remain live.</p>
+          <p>
+            <code>{loadFailures.join(" · ")}</code>
+          </p>
+        </div>
+      ) : null}
       <div className="stat-row">
         <Stat label="Context releases" value={metrics.publishedGenerationCount} />
         <Stat label="Repositories" value={repository ? 1 : repositories.length} />
@@ -336,6 +338,27 @@ export default async function ContextAdminPage({
       </section>
     </main>
   );
+}
+
+const EMPTY_METRICS: AdminContextMetrics = {
+  outboxDepthByConsumer: {},
+  publishedGenerationCount: 0,
+  documentCount: 0,
+  fragmentCount: 0,
+  hierarchyNodeCount: 0,
+  embeddingCount: 0
+};
+
+function settledOr<T>(
+  result: PromiseSettledResult<T>,
+  fallback: T,
+  label: string,
+  failures: string[]
+): T {
+  if (result.status === "fulfilled") return result.value;
+  const message = result.reason instanceof JinaApiError ? result.reason.message : "unexpected error";
+  failures.push(`${label}: ${message}`);
+  return fallback;
 }
 
 function Stat({ label, value }: { readonly label: string; readonly value: number }) {
