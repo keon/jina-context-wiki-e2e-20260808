@@ -674,6 +674,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await acceptSignedWebhook(request, response);
       return;
     }
+    if (request.method === "POST" && url.pathname === "/context/webhooks/github") {
+      await acceptSignedContextWebhook(request, response);
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/dev/webhooks/github" && config.enableDevEndpoints) {
       const webhook = parseDevWebhook(parseJsonObject(await readRawBody(request)));
       devDeliverySequence += 1;
@@ -713,6 +717,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/context/tokens") {
       await mintApiToken(request, response);
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/review-access") {
+      await mintReviewAccess(request, response);
       return;
     }
     if (request.method === "GET" && url.pathname === "/internal/context/tokens") {
@@ -1732,6 +1740,31 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   async function acceptSignedWebhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    await acceptSignedGitHubWebhook(request, response, acceptParsedWebhook);
+  }
+
+  /**
+   * Accept a GitHub delivery relayed by the original Jina API and admit only
+   * Context work. The original raw body and signature are verified again here,
+   * so the relay gains no authority to manufacture provider events. Unlike the
+   * general webhook route this never creates a V2 review task: V1 remains the
+   * sole review orchestrator while V2 owns Context derivation.
+   */
+  async function acceptSignedContextWebhook(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    await acceptSignedGitHubWebhook(request, response, acceptParsedContextWebhook);
+  }
+
+  async function acceptSignedGitHubWebhook(
+    request: IncomingMessage,
+    response: ServerResponse,
+    accept: (
+      webhook: ParsedGitHubWebhook,
+      deliveryId: string
+    ) => Promise<{
+      outcome: "created" | "duplicate" | "ignored";
+      createdTaskIds: readonly string[];
+    }>
+  ): Promise<void> {
     const rawBody = await readRawBody(request);
     const result = handleGitHubWebhook({
       rawBody,
@@ -1753,7 +1786,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, result.statusCode, result);
       return;
     }
-    const accepted = await acceptParsedWebhook(result.webhook, result.deliveryId);
+    const accepted = await accept(result.webhook, result.deliveryId);
     json(response, result.statusCode, { accepted: true, deliveryId: result.deliveryId, ...accepted });
   }
 
@@ -1770,49 +1803,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       intakeState = accepted.state;
       const createdTaskIds = [...accepted.createdTaskIds];
-      let contextOutcome: "created" | "duplicate" | "ignored" = "ignored";
-      if (isContextTrigger(webhook.event)) {
-        await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, tenantId);
-        const contextRepository = identity?.repository ?? webhook.repository;
-        const contextRef = contextTriggerRef(webhook.event, identity?.defaultBranch ?? webhook.repositoryDefaultBranch);
-        const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
-          tenantId,
-          repository: contextRepository,
-          ref: contextRef
-        });
-        const admission = admitContextBoardBuild(intakeState.board, {
-          source: "github",
-          tenantId,
-          repository: contextRepository,
-          ...(priorRelease ? { priorRelease } : {}),
-          ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
-          derivationBudgetSeconds: DEFAULT_DERIVATION_BUDGET_SECONDS,
-          derivationTokenBudget: DEFAULT_DERIVATION_TOKEN_BUDGET,
-          deliveryId,
-          event: webhook.event,
-          ...((identity?.defaultBranch ?? webhook.repositoryDefaultBranch)
-            ? { defaultBranch: identity?.defaultBranch ?? webhook.repositoryDefaultBranch }
-            : {}),
-          now: nowIso()
-        });
-        if (admission.outcome === "created" && config.contextQuotaService) {
-          await config.contextQuotaService.admitBuild({
-            tenantId,
-            buildId: admission.build.buildTaskId
-          });
-          newlyReservedBuildId = admission.build.buildTaskId;
-        }
-        intakeState = { ...intakeState, board: admission.state };
-        contextOutcome = admission.outcome;
-        if (admission.outcome === "created") {
-          createdTaskIds.push(admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId);
-        }
-      }
+      const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity);
+      newlyReservedBuildId = context.reservedBuildId;
+      createdTaskIds.push(...context.createdTaskIds);
       return {
         outcome:
           createdTaskIds.length > 0
             ? ("created" as const)
-            : accepted.outcome === "duplicate" || contextOutcome === "duplicate"
+            : accepted.outcome === "duplicate" || context.outcome === "duplicate"
               ? ("duplicate" as const)
               : ("ignored" as const),
         createdTaskIds
@@ -1824,6 +1822,72 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         .catch(() => undefined);
     }
     return result ?? { outcome: "duplicate", createdTaskIds: [] };
+  }
+
+  async function acceptParsedContextWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
+    const identity = await resolveWebhookIdentity(webhook);
+    const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
+    let newlyReservedBuildId: string | undefined;
+    const result = await mutate(async () => {
+      const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity);
+      newlyReservedBuildId = context.reservedBuildId;
+      return { outcome: context.outcome, createdTaskIds: context.createdTaskIds };
+    }, deliveryId);
+    if (!result && newlyReservedBuildId && config.contextQuotaService) {
+      await config.contextQuotaService
+        .completeBuild({ tenantId, buildId: newlyReservedBuildId })
+        .catch(() => undefined);
+    }
+    return result ?? { outcome: "duplicate" as const, createdTaskIds: [] };
+  }
+
+  async function admitContextWebhook(
+    webhook: ParsedGitHubWebhook,
+    deliveryId: string,
+    tenantId: string,
+    identity: ResolvedRepositoryIdentity | undefined
+  ): Promise<{
+    outcome: "created" | "duplicate" | "ignored";
+    createdTaskIds: TaskId[];
+    reservedBuildId?: string;
+  }> {
+    if (!isContextTrigger(webhook.event)) return { outcome: "ignored", createdTaskIds: [] };
+    await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, tenantId);
+    const repository = identity?.repository ?? webhook.repository;
+    const ref = contextTriggerRef(webhook.event, identity?.defaultBranch ?? webhook.repositoryDefaultBranch);
+    const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
+      tenantId,
+      repository,
+      ref
+    });
+    const admission = admitContextBoardBuild(intakeState.board, {
+      source: "github",
+      tenantId,
+      repository,
+      ...(priorRelease ? { priorRelease } : {}),
+      ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
+      derivationBudgetSeconds: DEFAULT_DERIVATION_BUDGET_SECONDS,
+      derivationTokenBudget: DEFAULT_DERIVATION_TOKEN_BUDGET,
+      deliveryId,
+      event: webhook.event,
+      ...((identity?.defaultBranch ?? webhook.repositoryDefaultBranch)
+        ? { defaultBranch: identity?.defaultBranch ?? webhook.repositoryDefaultBranch }
+        : {}),
+      now: nowIso()
+    });
+    if (admission.outcome !== "created") {
+      intakeState = { ...intakeState, board: admission.state };
+      return { outcome: admission.outcome, createdTaskIds: [] };
+    }
+    if (config.contextQuotaService) {
+      await config.contextQuotaService.admitBuild({ tenantId, buildId: admission.build.buildTaskId });
+    }
+    intakeState = { ...intakeState, board: admission.state };
+    return {
+      outcome: "created",
+      createdTaskIds: [admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId],
+      ...(config.contextQuotaService ? { reservedBuildId: admission.build.buildTaskId } : {})
+    };
   }
 
   async function resolveWebhookIdentity(webhook: ParsedGitHubWebhook): Promise<ResolvedRepositoryIdentity | undefined> {
@@ -1908,7 +1972,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   async function mintApiToken(request: IncomingMessage, response: ServerResponse): Promise<void> {
-    const store = requireApiTokenStore();
     const tenantId = tokenRequestTenantId(request);
     const body = parseJsonObject(await readRawBody(request));
     const principalId = requiredString(body.principalId, "principalId");
@@ -1923,10 +1986,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!Array.isArray(body.scopes) || body.scopes.length === 0) {
       throw invalidRequest("scopes must be a non-empty array");
     }
-    const scopes = [...new Set(body.scopes.map((scope) => requiredString(scope, "scope")))];
-    for (const scope of scopes) {
+    const requestedScopes = [...new Set(body.scopes.map((scope) => requiredString(scope, "scope")))];
+    for (const scope of requestedScopes) {
       if (!isContextScope(scope)) throw invalidRequest(`unsupported scope ${scope}`);
     }
+    const scopes = requestedScopes.filter(isContextScope);
     // A token carrying these on a non-administrator principal is issued dead: it
     // reaches the route and is then refused by requireTenantAdmin. Refusing here
     // makes that a mint-time error rather than a puzzle at first use.
@@ -1946,30 +2010,93 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (expiresInMinutes < MIN_API_TOKEN_MINUTES || expiresInMinutes > MAX_API_TOKEN_MINUTES) {
       throw invalidRequest(`expiresInMinutes must be between ${MIN_API_TOKEN_MINUTES} and ${MAX_API_TOKEN_MINUTES}`);
     }
+    const { secret, token } = await storeIssuedApiToken({
+      tenantId,
+      principalId: principal,
+      name,
+      scopes,
+      expiresInMinutes
+    });
+    // The only time the secret exists outside the caller's hands. `writeHead`
+    // merges headers already set on the response, so this survives `json`.
+    response.setHeader("cache-control", "no-store");
+    json(response, 201, { secret, token: publicApiToken(token) });
+  }
+
+  /**
+   * Gives one V1 review run direct, least-privilege access to one repository's
+   * published Context. The caller is the trusted V1 API, but the credential
+   * handed to its sandbox is a different, short-lived bearer that cannot build,
+   * administer, or read a second repository.
+   */
+  async function mintReviewAccess(request: IncomingMessage, response: ServerResponse): Promise<void> {
+    const tenantId = tokenRequestTenantId(request);
+    const body = parseJsonObject(await readRawBody(request));
+    const reviewRunId = requiredString(body.reviewRunId, "reviewRunId");
+    if (reviewRunId.length > 200) throw invalidRequest("reviewRunId must be at most 200 characters");
+    const requestedRepository = requiredRepositoryName(body.repository, "repository");
+    const identity = config.sharedIdentityResolver
+      ? await config.sharedIdentityResolver.resolveRepository({ tenantId, repository: requestedRepository })
+      : undefined;
+    if (config.sharedIdentityResolver && (!identity || identity.tenantId !== tenantId)) {
+      throw notFound("repository context not found");
+    }
+    const repository = identity?.repository ?? requestedRepository;
+    const expiresInMinutes =
+      body.expiresInMinutes === undefined ? 180 : requiredPositiveInteger(body.expiresInMinutes, "expiresInMinutes");
+    if (expiresInMinutes < MIN_API_TOKEN_MINUTES || expiresInMinutes > 360) {
+      throw invalidRequest(`expiresInMinutes must be between ${MIN_API_TOKEN_MINUTES} and 360`);
+    }
+    const runHash = createHash("sha256")
+      .update(`${tenantId}\u0000${repository}\u0000${reviewRunId}`, "utf8")
+      .digest("hex")
+      .slice(0, 32);
+    const principalId = `user:review-${runHash}@runs.jina`;
+    await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+    const { secret, token } = await storeIssuedApiToken({
+      tenantId,
+      principalId,
+      name: `V1 review ${reviewRunId.slice(0, 80)}`,
+      scopes: CONTEXT_CREDENTIAL_SCOPES,
+      expiresInMinutes
+    });
+    response.setHeader("cache-control", "no-store");
+    json(response, 201, {
+      repository,
+      mcpPath: "/mcp",
+      secret,
+      token: publicApiToken(token)
+    });
+  }
+
+  async function storeIssuedApiToken(input: {
+    readonly tenantId: string;
+    readonly principalId: string;
+    readonly name: string;
+    readonly scopes: readonly ContextScope[];
+    readonly expiresInMinutes: number;
+  }): Promise<{ readonly secret: string; readonly token: ApiTokenRecord }> {
+    const store = requireApiTokenStore();
     const secret = `jina_atk_${randomBytes(32).toString("base64url")}`;
     const createdAt = nowIso();
-    let token: ApiTokenRecord;
     try {
-      token = await store.mintApiToken({
+      const token = await store.mintApiToken({
         id: newId("atk"),
-        tenantId,
-        principalId: principal,
-        name,
+        tenantId: input.tenantId,
+        principalId: input.principalId,
+        name: input.name,
         secretHash: createHash("sha256").update(secret, "utf8").digest("hex"),
-        scopes,
+        scopes: input.scopes,
         createdAt,
         createdBy: tokenRequestActor(),
-        expiresAt: new Date(Date.parse(createdAt) + expiresInMinutes * 60_000).toISOString()
+        expiresAt: new Date(Date.parse(createdAt) + input.expiresInMinutes * 60_000).toISOString()
       });
+      return { secret, token };
     } catch {
       // The store has seen the hash at this point. Replace its exception before
       // the request logger sees it, because adapters may include bind values.
       throw new ApiError(500, "api_token_storage", "api token storage failed");
     }
-    // The only time the secret exists outside the caller's hands. `writeHead`
-    // merges headers already set on the response, so this survives `json`.
-    response.setHeader("cache-control", "no-store");
-    json(response, 201, { secret, token: publicApiToken(token) });
   }
 
   async function listApiTokens(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -4114,6 +4241,7 @@ const METRICS_ROUTES = new Set([
   "/healthz",
   "/task-types",
   "/webhooks/github",
+  "/context/webhooks/github",
   "/dev/webhooks/github",
   "/mcp",
   "/board",
@@ -4127,6 +4255,7 @@ const METRICS_ROUTES = new Set([
   "/context/diff",
   "/context/metrics",
   "/internal/context/access/sync",
+  "/internal/context/review-access",
   "/internal/context/tokens",
   "/internal/context/builds/:id/worker-completions",
   "/internal/context/builds/:id/cancel",

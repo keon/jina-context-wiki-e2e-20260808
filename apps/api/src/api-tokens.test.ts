@@ -200,6 +200,61 @@ test("a minted token authenticates as its own row and every failure looks identi
   });
 });
 
+test("V1 review access is short-lived, repository-scoped, and MCP-capable", async () => {
+  await withServer(async ({ store, request }) => {
+    const response = await request("/internal/context/review-access", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        reviewRunId: "review-run-123",
+        repository,
+        expiresInMinutes: 30
+      })
+    });
+    const rawBody = await response.text();
+    assert.equal(response.status, 201, rawBody);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    const body = JSON.parse(rawBody) as {
+      repository: string;
+      mcpPath: string;
+      secret: string;
+      token: {
+        principalId: string;
+        scopes: string[];
+        createdAt: string;
+        expiresAt: string;
+      };
+    };
+    assert.equal(body.repository, repository);
+    assert.equal(body.mcpPath, "/mcp");
+    assert.match(body.secret, /^jina_atk_[A-Za-z0-9_-]{43}$/);
+    assert.match(body.token.principalId, /^user:review-[0-9a-f]{32}@runs\.jina$/);
+    assert.deepEqual(body.token.scopes, ["context:query", "context:read"]);
+    assert.equal(Date.parse(body.token.expiresAt) - Date.parse(body.token.createdAt), 30 * 60_000);
+    assert.deepEqual(await store.repositoriesForPrincipal(tenantId, body.token.principalId), [repository]);
+
+    const read = await request(`/context/releases?repository=${encodeURIComponent(repository)}`, bearer(body.secret));
+    assert.equal(read.status, 200);
+    const crossRepository = await request(
+      `/context/releases?repository=${encodeURIComponent(forbiddenRepository)}`,
+      bearer(body.secret)
+    );
+    assert.equal(crossRepository.status, 404);
+    const build = await request("/context/build", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${body.secret}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({ repository })
+    });
+    assert.equal(build.status, 403);
+  });
+});
+
 test("headers stay assertions, and the asymmetry between them is deliberate", async () => {
   await withServer(async ({ request, mint }) => {
     const secret = await mintSecret(mint);

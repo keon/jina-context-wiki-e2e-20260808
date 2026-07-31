@@ -20,8 +20,9 @@ The remaining limitations belong to the static path and the unfinished reporting
 
 - neither static credential can safely serve as a personal, multi-tenant credential;
 - calls made with one static credential cannot be attributed to distinct people or tokens;
-- Jina v1 still needs delegated per-tenant tokens before the static context credential can be
-  retired; and
+- Jina v1 dashboard reads use delegated per-tenant tokens, while each review receives a
+  separate short-lived, exact-repository token; the static context credential remains only
+  as a rollout fallback; and
 - there is no `GET /context/usage` or dashboard workflow that exposes per-token consumption.
 
 ## The model
@@ -31,13 +32,13 @@ server-side. Authorization stops depending on who holds a shared secret.
 
 ### Scopes
 
-| Scope           | Routes                                                                                 |
-| --------------- | -------------------------------------------------------------------------------------- |
-| `context:query` | `POST /context/search`, `POST /mcp`                                                    |
-| `context:read`  | `GET /context/releases`, `/context/list`, `/context/read`, `/context/diff`             |
-| `context:build` | `POST /context/build`, `POST /context/rebuild`                                         |
-| `context:admin` | `POST /context/erasure`, `POST /context/knowledge/{id}/review`, `GET /context/metrics` |
-| `context:usage` | Reserved for a future self-service usage route                                         |
+| Scope           | Routes                                                                     |
+| --------------- | -------------------------------------------------------------------------- |
+| `context:query` | `POST /context/search`, `POST /mcp`                                        |
+| `context:read`  | `GET /context/releases`, `/context/list`, `/context/read`, `/context/diff` |
+| `context:build` | `POST /context/build`                                                      |
+| `context:admin` | Context build/task retry routes and `GET /context/metrics`                 |
+| `context:usage` | Reserved for a future self-service usage route                             |
 
 Scope grants route reach, not permission. `requireTenantAdmin` still applies on top, and it
 covers every route under `context:build` and `context:admin` — so a token carrying either on
@@ -68,8 +69,9 @@ ACL allows, and tenant administrators keep the access they have today.
 ### Issuance
 
 A token is minted for a principal by a caller holding the internal credential. This is the
-mechanism the dashboard and Jina v1 can use once their delegated issuance flows are
-implemented. The secret is returned once and stored only as a hash, so a disclosed database
+mechanism the dashboard uses for delegated tenant reads. Reviews use the narrower
+`POST /internal/context/review-access` flow below. The secret is returned once and stored
+only as a hash, so a disclosed database
 yields no working credential. Every token carries a
 recognizable prefix, both so it is greppable in logs and so it can later be registered for
 secret scanning.
@@ -84,6 +86,16 @@ real boundary, because tenant administration is derived from the principal id ra
 from any scope.
 
 Expiry is required and bounded. Revocation takes effect immediately.
+
+### V1 review credentials
+
+`POST /internal/context/review-access` requires the internal credential plus the shared
+tenant UUID, repository, and V1 review-run ID. It re-resolves the repository inside that
+tenant, binds a run-and-repository principal to exactly that repository, and mints
+`context:query` plus `context:read` for 180 minutes by default (5–360 allowed). The response
+is `Cache-Control: no-store` and includes the direct `/mcp` path. Reusing a review-run ID
+for another repository produces a different principal, so an earlier token cannot acquire
+the later repository's ACL.
 
 ## Usage and model accounting
 

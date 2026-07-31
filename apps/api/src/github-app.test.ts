@@ -890,6 +890,69 @@ test("pull-request intake queues review work and a PR-preview context build", as
   );
 });
 
+test("the V1 relay admits Context work without creating V2 review work", async () => {
+  const pullRequestNumber = 79;
+  const headSha = "d".repeat(40);
+  const deliveryId = "v1-context-relay-pr";
+  const payload = {
+    action: "opened",
+    repository: { full_name: repository, default_branch: "main" },
+    installation: { id: 140435029 },
+    pull_request: {
+      number: pullRequestNumber,
+      head: { sha: headSha }
+    }
+  };
+
+  const created = await signedGitHubWebhook("pull_request", deliveryId, payload, "/context/webhooks/github");
+  assert.equal(created.status, 202);
+  const createdBody = record(await created.json());
+  assert.equal(createdBody.outcome, "created");
+
+  const board = await api("/board", { headers: contextHeaders() });
+  const tasks = array(board.body.tasks).map(record);
+  assert.equal(
+    tasks.some(
+      (task) =>
+        (task.type === "pr_review" || task.type === "review_pass") &&
+        record(task.metadata).pullRequestNumber === pullRequestNumber
+    ),
+    false
+  );
+  const contextBuild = tasks.find(
+    (task) =>
+      task.type === "build-context" &&
+      record(task.metadata).ref === `pull/${pullRequestNumber}/head` &&
+      record(task.metadata).commitSha === headSha
+  );
+  assert.ok(contextBuild);
+
+  const replay = await signedGitHubWebhook("pull_request", deliveryId, payload, "/context/webhooks/github");
+  assert.equal(replay.status, 200);
+  assert.equal(record(await replay.json()).duplicate, true);
+
+  const beforeComment = array(board.body.tasks).filter((task) => record(task).type === "build-context").length;
+  const comment = await signedGitHubWebhook(
+    "issue_comment",
+    "v1-context-relay-comment",
+    {
+      action: "created",
+      repository: { full_name: repository },
+      issue: { number: pullRequestNumber },
+      comment: { id: 7901, body: "No Context build should be created." }
+    },
+    "/context/webhooks/github"
+  );
+  assert.equal(comment.status, 202);
+  const afterComment = await api("/board", { headers: contextHeaders() });
+  assert.equal(
+    array(afterComment.body.tasks)
+      .map(record)
+      .filter((task) => task.type === "build-context").length,
+    beforeComment
+  );
+});
+
 test("generic board work is fenced by attempt, lease id, and token", async () => {
   const delivery = await api("/dev/webhooks/github", {
     method: "POST",
@@ -1206,11 +1269,12 @@ function internalHeaders(): Record<string, string> {
 async function signedGitHubWebhook(
   event: string,
   deliveryId: string,
-  payload: Readonly<Record<string, unknown>>
+  payload: Readonly<Record<string, unknown>>,
+  path = "/webhooks/github"
 ): Promise<Response> {
   const rawBody = JSON.stringify(payload);
   const signature = `sha256=${createHmac("sha256", githubWebhookSecret).update(rawBody).digest("hex")}`;
-  return fetch(`${baseUrl}/webhooks/github`, {
+  return fetch(`${baseUrl}${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

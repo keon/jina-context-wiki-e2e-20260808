@@ -1,9 +1,15 @@
 # GitHub App webhook setup
 
-Jina accepts GitHub App webhook deliveries at `POST /webhooks/github`. The endpoint
-verifies the unmodified body with `X-Hub-Signature-256`, requires
-`X-GitHub-Delivery` for durable idempotency, and reads the event from
-`X-GitHub-Event`.
+In integrated production, the GitHub App sends deliveries to the original Jina API at
+`https://api.usejina.com/webhooks/github`. V1 verifies and records the delivery, remains
+the sole review orchestrator, and relays the exact raw body plus the three GitHub headers
+to V2 `POST /context/webhooks/github`. V2 verifies `X-Hub-Signature-256` again, uses
+`X-GitHub-Delivery` for durable idempotency, and admits only Context Board work. The relay
+cannot manufacture provider events or create a second review.
+
+`POST /webhooks/github` remains V2's standalone combined review-and-Context endpoint for
+isolated deployments and tests. Do not configure the production GitHub App to call both
+services.
 
 ## Current behavior
 
@@ -14,6 +20,9 @@ verifies the unmodified body with `X-Hub-Signature-256`, requires
 | Pull request    | `synchronize`           | Supersedes the prior review/head epoch and starts a new preview at the new head                           |
 | Issues          | `opened`                | Creates manual triage and starts a Board Context build on the default branch so the new issue is evidence |
 | Everything else | any                     | Acknowledged and ignored; comments, edits, closes, labels, and reviews do not schedule Context builds     |
+
+The integrated `POST /context/webhooks/github` route produces only the Context result in
+this table. V1 owns all review tasks.
 
 An unchanged latest head deduplicates redelivery. A real ref transition supersedes active
 older context work, including a force-push back to a previously seen SHA. At ingestion,
@@ -47,7 +56,7 @@ for local testing.
 Create a private GitHub App under the account or organization that owns the repositories.
 For normal Context repositories, grant:
 
-- Webhook URL: `https://<api-host>/webhooks/github`
+- Webhook URL in integrated production: `https://api.usejina.com/webhooks/github`
 - Webhook secret: the exact `GITHUB_WEBHOOK_SECRET`
 - Repository permission: **Contents — Read-only**
 - Repository permission: **Pull requests — Read-only**
@@ -162,6 +171,20 @@ agent-derived change summary cited to the checkpoint commit and changed paths wh
 evidence supports one.
 
 GitHub's App settings show delivery response status and support redelivery.
+
+## V1 review access to V2 Context
+
+A V1 review never receives either service credential. After resolving the shared tenant
+UUID and exact repository, V1 calls `POST /internal/context/review-access` with its
+server-only V2 internal credential. V2 resolves the repository through shared identity,
+creates a deterministic run-and-repository principal, replaces that principal's ACL with
+exactly one repository, and returns a 5–360 minute opaque token with only
+`context:query` and `context:read`.
+
+The review sandbox connects directly to V2 `/mcp` with that token and can use only
+`search_context`, `list_context`, `read_context`, and `diff_context`. It cannot build,
+administer, or read another repository. V1 exposes no MCP proxy and stores no Context
+response bodies in review telemetry.
 
 ## Local demo and persistence
 
