@@ -65,19 +65,26 @@ export function isValidBasicAuthorization(
 /**
  * Resolves the principal the server-side proxy may forward to the API.
  *
- * Google Cloud deployments use IAP's verified email header. Vercel deployments
- * use app-level HTTP authentication and an explicit fixed tenant principal.
+ * IAP or HTTP Basic authentication establishes the deployment boundary. When
+ * the deployment configures a fixed principal, both boundaries forward that
+ * same tenant-scoped identity; otherwise IAP falls back to its verified user.
  */
 export function resolveDashboardPrincipal(input: DashboardPrincipalInput): string | undefined {
+  const configuredPrincipal = input.webPrincipal?.trim();
+  const fixedPrincipal =
+    configuredPrincipal &&
+    (/^(?:user|svc):[^\s]+$/.test(configuredPrincipal) ||
+      /^tenant:[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(configuredPrincipal))
+      ? configuredPrincipal.toLowerCase()
+      : undefined;
   const iapEmail = input.iapEmailHeader
     ?.replace(/^accounts\.google\.com:/i, "")
     .trim()
     .toLowerCase();
-  if (iapEmail && /^[^\s@]+@[^\s@]+$/.test(iapEmail)) return `user:${iapEmail}`;
+  if (iapEmail && /^[^\s@]+@[^\s@]+$/.test(iapEmail)) return fixedPrincipal ?? `user:${iapEmail}`;
 
   if (!isValidBasicAuthorization(input.authorizationHeader, input.webAuthUsername, input.webAuthPassword)) {
     return undefined;
   }
-  const principal = input.webPrincipal?.trim();
-  return principal && /^(?:user|svc):[^\s]+$/.test(principal) ? principal : undefined;
+  return fixedPrincipal;
 }

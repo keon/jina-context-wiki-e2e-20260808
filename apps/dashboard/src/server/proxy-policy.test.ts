@@ -50,6 +50,19 @@ test("dashboard principal prefers a validated IAP email", () => {
   );
 });
 
+test("dashboard principal uses the configured tenant identity behind IAP", () => {
+  assert.equal(
+    resolveDashboardPrincipal({
+      iapEmailHeader: "accounts.google.com:jina-acceptance@example.iam.gserviceaccount.com",
+      authorizationHeader: null,
+      webAuthUsername: undefined,
+      webAuthPassword: undefined,
+      webPrincipal: "tenant:eff0efc9-b103-494a-b7a3-1ae7f95c2d26"
+    }),
+    "tenant:eff0efc9-b103-494a-b7a3-1ae7f95c2d26"
+  );
+});
+
 test("dashboard principal accepts the fixed identity only with valid HTTP authentication", () => {
   const input = {
     iapEmailHeader: null,

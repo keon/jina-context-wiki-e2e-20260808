@@ -59,8 +59,8 @@ export interface ProductionWorkerHealthCheck {
 export interface ProductionWebSurfaceChecks {
   readonly dashboardUrl: string;
   readonly adminUrl: string;
-  readonly authorization: string;
-  readonly dashboardInvocationAuthorization: string;
+  readonly dashboardAuthorization: string;
+  readonly adminAuthorization: string;
 }
 
 export interface ProductionContextAcceptanceConfig {
@@ -1286,8 +1286,7 @@ export async function verifyProductionWebSurfaces(
     {
       headers: {
         accept: "application/json",
-        authorization: checks.authorization,
-        "x-serverless-authorization": checks.dashboardInvocationAuthorization
+        authorization: checks.dashboardAuthorization
       },
       signal: AbortSignal.timeout(expected.timeoutMs)
     }
@@ -1297,7 +1296,11 @@ export async function verifyProductionWebSurfaces(
   try {
     dashboardPayload = JSON.parse(dashboardText);
   } catch {
-    throw new Error("production dashboard API proxy returned invalid JSON");
+    throw new Error(
+      `production dashboard API proxy returned ${dashboard.status} ${
+        dashboard.headers.get("content-type") ?? "without content-type"
+      } instead of JSON`
+    );
   }
   if (!dashboard.ok) {
     throw new Error(`production dashboard API proxy failed with ${dashboard.status}`);
@@ -1312,8 +1315,7 @@ export async function verifyProductionWebSurfaces(
     {
       headers: {
         accept: "text/html",
-        authorization: checks.authorization,
-        "x-serverless-authorization": checks.dashboardInvocationAuthorization
+        authorization: checks.dashboardAuthorization
       },
       signal: AbortSignal.timeout(expected.timeoutMs)
     }
@@ -1329,7 +1331,7 @@ export async function verifyProductionWebSurfaces(
   const admin = await fetchImpl(`${adminUrl}/?repository=${encodeURIComponent(expected.repository)}`, {
     headers: {
       accept: "text/html",
-      authorization: checks.authorization
+      authorization: checks.adminAuthorization
     },
     signal: AbortSignal.timeout(expected.timeoutMs)
   });
@@ -1651,8 +1653,8 @@ async function configuredWebSurfaceChecks(): Promise<ProductionWebSurfaceChecks>
   return {
     dashboardUrl: dashboardTarget.url,
     adminUrl,
-    authorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`,
-    dashboardInvocationAuthorization: `Bearer ${await identityTokenForAudience(dashboardTarget.audience)}`
+    dashboardAuthorization: `Bearer ${await iapServiceAccountJwt(`${dashboardTarget.url}/*`)}`,
+    adminAuthorization: `Basic ${Buffer.from(`${username}:${password}`).toString("base64")}`
   };
 }
 
@@ -1690,6 +1692,72 @@ async function identityTokenForAudience(audience: string): Promise<string> {
     throw new Error(`Cloud Run identity token request failed with ${response.status}`);
   }
   return token;
+}
+
+export async function iapServiceAccountJwt(
+  audience: string,
+  fetchImpl: typeof fetch = fetch,
+  nowSeconds = Math.floor(Date.now() / 1_000)
+): Promise<string> {
+  const parsedAudience = new URL(audience);
+  if (
+    parsedAudience.protocol !== "https:" ||
+    parsedAudience.username ||
+    parsedAudience.password ||
+    parsedAudience.search ||
+    parsedAudience.hash ||
+    !parsedAudience.pathname.endsWith("/*")
+  ) {
+    throw new Error("IAP JWT audience must be an HTTPS URL ending in /*");
+  }
+
+  const metadataBase = "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default";
+  const metadataHeaders = { "Metadata-Flavor": "Google" };
+  const [emailResponse, tokenResponse] = await Promise.all([
+    fetchImpl(`${metadataBase}/email`, { headers: metadataHeaders }),
+    fetchImpl(`${metadataBase}/token`, { headers: metadataHeaders })
+  ]);
+  const email = (await emailResponse.text()).trim();
+  const tokenPayload: unknown = await tokenResponse.json();
+  const accessToken =
+    tokenPayload && typeof tokenPayload === "object" && "access_token" in tokenPayload
+      ? String(tokenPayload.access_token)
+      : "";
+  if (!emailResponse.ok || !/^[^\s@]+@[^\s@]+$/.test(email)) {
+    throw new Error(`IAP service-account email request failed with ${emailResponse.status}`);
+  }
+  if (!tokenResponse.ok || !accessToken) {
+    throw new Error(`IAP service-account access token request failed with ${tokenResponse.status}`);
+  }
+
+  const signResponse = await fetchImpl(
+    `https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/${encodeURIComponent(email)}:signJwt`,
+    {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        payload: JSON.stringify({
+          iss: email,
+          sub: email,
+          aud: audience,
+          iat: nowSeconds,
+          exp: nowSeconds + 3_600
+        })
+      })
+    }
+  );
+  const signedPayload: unknown = await signResponse.json();
+  const signedJwt =
+    signedPayload && typeof signedPayload === "object" && "signedJwt" in signedPayload
+      ? String(signedPayload.signedJwt)
+      : "";
+  if (!signResponse.ok || signedJwt.split(".").length !== 3) {
+    throw new Error(`IAP service-account JWT signing failed with ${signResponse.status}`);
+  }
+  return signedJwt;
 }
 
 function requiredEnv(name: string): string {

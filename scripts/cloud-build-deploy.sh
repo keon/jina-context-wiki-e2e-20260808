@@ -1476,6 +1476,19 @@ gcloud run services add-iam-policy-binding jina-dashboard \
   --member="serviceAccount:${acceptance_service_account}" \
   --role="roles/run.invoker" \
   --quiet >/dev/null
+gcloud iam service-accounts add-iam-policy-binding "${acceptance_service_account}" \
+  --project="${GCP_PROJECT_ID}" \
+  --member="serviceAccount:${acceptance_service_account}" \
+  --role="roles/iam.serviceAccountTokenCreator" \
+  --quiet >/dev/null
+gcloud iap web add-iam-policy-binding \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" \
+  --resource-type=cloud-run \
+  --service=jina-dashboard \
+  --member="serviceAccount:${acceptance_service_account}" \
+  --role="roles/iap.httpsResourceAccessor" \
+  --quiet >/dev/null
 
 gcloud run deploy jina-admin \
   --project="${GCP_PROJECT_ID}" \

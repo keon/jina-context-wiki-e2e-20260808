@@ -965,11 +965,20 @@ job: ACCEPTANCE_DERIVATION_TOKEN_BUDGET=12000000
 job: ACCEPTANCE_TIMEOUT_MS=10800000
 ```
 
-Cloud Run identity tokens deliberately use the stable base service URL as their
-audience even though acceptance sends each private request to the release-tagged
-candidate URL. This authenticates the exact no-traffic candidate without changing
-the `aud` value Cloud Run validates. A missing or malformed stable audience fails
-deployment before the acceptance job starts.
+Worker health checks use Cloud Run identity tokens with the stable base service URL
+as their audience even though acceptance sends each request to a release-tagged
+candidate URL. Dashboard traffic is protected by IAP instead. The acceptance service
+account signs a one-hour JWT whose audience is the exact candidate URL plus `/*`, sends
+it in `Authorization`, and relies on IAP to inject the verified caller identity. The
+dashboard then forwards its configured tenant principal to the API; the IAP identity
+proves the caller may cross that deployment boundary. The stable dashboard URL remains
+a required guard value so acceptance rejects an untagged target before minting the JWT.
+
+The deploy identity needs `roles/iap.admin` in `jina-v2` and
+`roles/iam.serviceAccountAdmin` on the acceptance service account. Each deployment
+idempotently grants the acceptance identity `roles/iap.httpsResourceAccessor` on
+`jina-dashboard` and `roles/iam.serviceAccountTokenCreator` on itself. Keep the latter
+binding on that one service account rather than granting token creation project-wide.
 
 `ACCEPTANCE_PRINCIPAL_ID` must not be a tenant administrator. The administrator may use
 the internal credential but must not be substituted for the context-bearer identity; this

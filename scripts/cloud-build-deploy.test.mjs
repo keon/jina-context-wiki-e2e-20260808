@@ -798,6 +798,14 @@ test("production acceptance receives both web surfaces and only its bounded cred
     deployment,
     /gcloud run services add-iam-policy-binding jina-dashboard[\s\S]+?serviceAccount:\$\{acceptance_service_account\}[\s\S]+?roles\/run\.invoker/
   );
+  assert.match(
+    deployment,
+    /gcloud iam service-accounts add-iam-policy-binding "\$\{acceptance_service_account\}"[\s\S]+?roles\/iam\.serviceAccountTokenCreator/
+  );
+  assert.match(
+    deployment,
+    /gcloud iap web add-iam-policy-binding[\s\S]+?--service=jina-dashboard[\s\S]+?serviceAccount:\$\{acceptance_service_account\}[\s\S]+?roles\/iap\.httpsResourceAccessor/
+  );
 });
 
 test("coordinated Cloud Build requires Daytona sandbox and model Secret substitutions", () => {
