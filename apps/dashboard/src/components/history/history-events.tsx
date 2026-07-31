@@ -3,7 +3,7 @@ import type { BoardEvent, BoardTask } from "../../lib/types.ts";
 
 /** Derived context and filtering helpers for the history page. */
 
-export interface HistoryEventContext {
+interface HistoryEventContext {
   readonly task: BoardTask | null;
   readonly actor: string;
   readonly repository: string;
@@ -44,7 +44,7 @@ export function historyEventConfidence(event: BoardEvent): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-export interface HistoryFilters {
+interface HistoryFilters {
   readonly query: string;
   readonly type: string;
   readonly actor: string;

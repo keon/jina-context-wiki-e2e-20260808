@@ -7,7 +7,7 @@ import { findPullRequest, newPullRequest, upsertPullRequest, type WorkflowState 
 
 const GITHUB_ACTOR: CommandActor = { type: "github", id: "github-webhook" };
 
-export interface PullRequestReviewInput {
+interface PullRequestReviewInput {
   readonly tenantId: string;
   readonly workspaceLabel?: string;
   readonly githubAccountId?: string;

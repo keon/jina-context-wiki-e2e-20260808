@@ -5,9 +5,9 @@ import { runPublishTask } from "../tasks/run-publish.js";
 import { runResearchTask } from "../tasks/run-research.js";
 import { runReviewTask } from "../tasks/run-review.js";
 
-export type WorkflowClock = () => IsoTimestamp;
+type WorkflowClock = () => IsoTimestamp;
 
-export interface RelayResult {
+interface RelayResult {
   readonly state: WorkflowState;
   readonly dispatched: readonly BoardOutboxMessage[];
 }

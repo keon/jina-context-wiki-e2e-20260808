@@ -15,7 +15,7 @@ export const defaultBillingPolicy: BillingPolicy = {
   overageSubsidyRate: 0
 };
 
-export const CREDITS_PER_USD = 100;
+const CREDITS_PER_USD = 100;
 
 function customerShare(policy: BillingPolicy, rateMode: RateMode): number {
   return rateMode === "included" ? 1 - policy.subsidyRate : 1 - policy.overageSubsidyRate;

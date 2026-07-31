@@ -1,14 +1,14 @@
 import { applyCommand, type BoardState, type CommandActor } from "@jina/board";
 import { entityId, type EntityId, type IsoTimestamp } from "@jina/shared-kernel";
 
-export interface PipelineRef {
+interface PipelineRef {
   readonly slug: "pr_review";
   readonly version: string;
 }
 
 export type PlannedTaskId = EntityId<"task">;
 
-export interface PlannedTask {
+interface PlannedTask {
   readonly id: PlannedTaskId;
   readonly type: "pr_review" | "review_pass" | "publish";
   readonly title: string;
@@ -20,7 +20,7 @@ export interface PlannedTask {
   readonly metadata: Record<string, unknown>;
 }
 
-export interface PlannedTaskDependency {
+interface PlannedTaskDependency {
   readonly taskId: PlannedTaskId;
   readonly dependsOnTaskId: PlannedTaskId;
   readonly relationship: "publishes" | "blocks";
@@ -58,7 +58,7 @@ export const prReviewTaskTypeTriggers = [
   }
 ] as const;
 
-export interface PrReviewInput {
+interface PrReviewInput {
   readonly tenantId: string;
   /** Human-readable organization or personal workspace label. */
   readonly workspaceLabel?: string;

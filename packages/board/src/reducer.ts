@@ -6,7 +6,7 @@ import type { CommandActor } from "./commands.js";
 
 export type BoardOutboxMessageId = EntityId<"board_outbox_message">;
 
-export type BoardOutboxStatus = "pending" | "leased" | "dispatched";
+type BoardOutboxStatus = "pending" | "leased" | "dispatched";
 
 export const BOARD_TASK_HARD_MAX_ATTEMPTS = 4;
 export const BOARD_OPERATOR_RETRY_HARD_MAX_ATTEMPTS = 32;

@@ -31,7 +31,7 @@ export interface GitHubIntakeState {
   readonly pullRequests: readonly TrackedPullRequest[];
 }
 
-export interface GitHubIntakeOptions {
+interface GitHubIntakeOptions {
   readonly deliveryId: string;
   readonly now: IsoTimestamp;
   readonly tenantId?: string;

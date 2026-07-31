@@ -3,7 +3,7 @@
 import type { BoardFilters } from "../../lib/board.ts";
 import { humanize } from "../../lib/format.ts";
 
-export interface BoardFilterOptions {
+interface BoardFilterOptions {
   readonly repository: readonly string[];
   readonly owner: readonly string[];
   readonly type: readonly string[];

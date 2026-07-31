@@ -1,4 +1,4 @@
-export interface FindingFingerprintInput {
+interface FindingFingerprintInput {
   readonly repoId: string;
   readonly path: string;
   readonly rule: string;

@@ -3,7 +3,7 @@ import { OpenRouterReviewHarness } from "./openrouter-harness.js";
 
 export type HarnessType = "openrouter-chat" | "codex-cli";
 
-export type ReviewSeverity = "low" | "medium" | "high" | "critical";
+type ReviewSeverity = "low" | "medium" | "high" | "critical";
 
 export interface ReviewFinding {
   readonly title: string;

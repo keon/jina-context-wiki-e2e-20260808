@@ -5,7 +5,7 @@ import {
   type ParsedGitHubWebhook
 } from "@jina/github";
 
-export interface GitHubWebhookRequest {
+interface GitHubWebhookRequest {
   readonly eventName: string | undefined;
   readonly deliveryId: string | undefined;
   readonly signature: string | undefined;
@@ -13,7 +13,7 @@ export interface GitHubWebhookRequest {
   readonly secret: string | undefined;
 }
 
-export interface WebhookRouteResult {
+interface WebhookRouteResult {
   readonly accepted: boolean;
   readonly statusCode: number;
   readonly reason: string;

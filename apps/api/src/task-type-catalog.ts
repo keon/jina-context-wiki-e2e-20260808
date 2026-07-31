@@ -1,6 +1,6 @@
 import type { TaskTypeDefinition } from "@jina/board";
 
-export interface TaskTypeDependencyRule {
+interface TaskTypeDependencyRule {
   readonly workflow: string;
   readonly taskType: string;
   readonly dependsOnTaskType: string;
@@ -9,7 +9,7 @@ export interface TaskTypeDependencyRule {
   readonly condition?: string;
 }
 
-export interface TaskTypeTriggerRule {
+interface TaskTypeTriggerRule {
   readonly workflow: string;
   readonly taskType: string;
   readonly source: string;
@@ -31,7 +31,7 @@ interface TaskTypeTriggerSummary {
   readonly conditions: readonly string[];
 }
 
-export interface TaskTypeCatalogEntry extends TaskTypeDefinition {
+interface TaskTypeCatalogEntry extends TaskTypeDefinition {
   readonly triggeredBy: readonly TaskTypeTriggerSummary[];
   readonly dependsOn: readonly TaskTypeDependencySummary[];
   readonly requiredBy: readonly TaskTypeDependencySummary[];

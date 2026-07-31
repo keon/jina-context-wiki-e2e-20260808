@@ -1,4 +1,4 @@
-export type PublicationStatus = "published" | "updated" | "failed" | "superseded";
+type PublicationStatus = "published" | "updated" | "failed" | "superseded";
 
 export interface PublicationRecord {
   readonly key: string;
@@ -7,7 +7,7 @@ export interface PublicationRecord {
   readonly status: PublicationStatus;
 }
 
-export interface UpsertPublicationResult {
+interface UpsertPublicationResult {
   readonly records: readonly PublicationRecord[];
   readonly action: "created" | "updated";
 }

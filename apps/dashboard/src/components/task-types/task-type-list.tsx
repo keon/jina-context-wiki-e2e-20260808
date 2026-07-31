@@ -6,7 +6,7 @@ import type { BoardTask, TaskTypeDefinition } from "../../lib/types.ts";
 
 /** Task type table rows plus the per-type run metrics derived from board tasks. */
 
-export interface TaskTypeMetrics {
+interface TaskTypeMetrics {
   readonly lastRun: string;
   readonly successRate: string;
   readonly steps: number;
