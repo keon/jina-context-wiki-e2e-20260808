@@ -53,23 +53,23 @@ test("query and build admission are idempotent, rate limited, concurrent, and re
   await service.completeBuild(buildInput("build-1", start + 2_009));
 });
 
-test("terminal board reconciliation atomically releases stale build reservations", async () => {
+test("board reconciliation atomically releases terminal and orphaned build reservations", async () => {
   const service = quotaService({ maxActiveBuilds: 2 });
   await service.admitBuild(buildInput("stale-1", start));
   await service.admitBuild(buildInput("stale-2", start + 1));
 
-  const repaired = await service.reconcileTerminalBuilds({
+  const repaired = await service.reconcileActiveBuilds({
     tenantId: "tenant-a",
-    buildIds: ["stale-1", "missing", "stale-1"],
+    activeBuildIds: ["stale-2", "stale-2"],
     at: iso(start + 2)
   });
   assert.equal(repaired.active.builds, 1);
   assert.equal((await service.admitBuild(buildInput("stale-1", start + 3))).outcome, "already_completed");
   assert.equal((await service.admitBuild(buildInput("new-build", start + 4))).outcome, "admitted");
 
-  const replay = await service.reconcileTerminalBuilds({
+  const replay = await service.reconcileActiveBuilds({
     tenantId: "tenant-a",
-    buildIds: ["stale-1", "missing"],
+    activeBuildIds: ["stale-2", "new-build"],
     at: iso(start + 5)
   });
   assert.equal(replay.active.builds, 2);

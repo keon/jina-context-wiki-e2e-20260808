@@ -754,7 +754,7 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
   }
 });
 
-test("new build admission reconciles stale quota reservations for terminal board builds", async () => {
+test("new build admission reconciles terminal and orphaned quota reservations against the Board", async () => {
   const tenantId = "tenant-terminal-quota-repair";
   const repository = "omxyz/quota-repair";
   const principalId = "user:quota-repair@example.com";
@@ -781,6 +781,8 @@ test("new build admission reconciles stale quota reservations for terminal board
     defaults: { maxActiveBuilds: 1, buildRequestsPerWindow: 10 }
   });
   await quotaService.admitBuild({ tenantId, buildId: stale.buildTaskId });
+  await quotaService.completeBuild({ tenantId, buildId: stale.buildTaskId });
+  await quotaService.admitBuild({ tenantId, buildId: "orphaned-build-reservation" });
   const server = createApiServer({
     tenantId,
     enableDevEndpoints: true,
