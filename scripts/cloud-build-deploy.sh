@@ -1147,31 +1147,38 @@ worker_image="$(resolve_release_image "${worker_image}")"
 dashboard_image="$(resolve_release_image "${dashboard_image}")"
 admin_image="$(resolve_release_image "${admin_image}")"
 
-# Validate the remote sandbox, organization Secret reference, and Codex
-# toolchain before touching Cloud SQL, GCS, or any serving service.
-daytona_preflight_env="^~^CONTEXT_DAYTONA_MODULE_PATH=/app/node_modules/@jina/daytona/dist/index.js~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}"
-if [[ -n "${context_daytona_snapshot}" ]]; then
-  daytona_preflight_env+="~CONTEXT_DAYTONA_SNAPSHOT=${context_daytona_snapshot}"
+# Full releases validate the remote sandbox, organization Secret reference,
+# model access, and Codex toolchain before touching production. An explicitly
+# mechanical release validates infrastructure only: provider credit or model
+# availability must not block an API/runtime repair that does not claim
+# end-to-end Context quality.
+if [[ "${deployment_acceptance_mode}" == "full" ]]; then
+  daytona_preflight_env="^~^CONTEXT_DAYTONA_MODULE_PATH=/app/node_modules/@jina/daytona/dist/index.js~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}"
+  if [[ -n "${context_daytona_snapshot}" ]]; then
+    daytona_preflight_env+="~CONTEXT_DAYTONA_SNAPSHOT=${context_daytona_snapshot}"
+  else
+    daytona_preflight_env+="~CONTEXT_DAYTONA_IMAGE=${context_daytona_image}"
+  fi
+  gcloud run jobs deploy jina-context-daytona-preflight \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --image="${worker_image}" \
+    --service-account="${context_worker_service_account}" \
+    --set-env-vars="${daytona_preflight_env}" \
+    --set-secrets="DAYTONA_API_KEY=jina-daytona-api-key:latest" \
+    --command=node \
+    --args="${production_preflight_path},daytona" \
+    --tasks=1 \
+    --max-retries=0 \
+    --task-timeout=10m \
+    --quiet
+  gcloud run jobs execute jina-context-daytona-preflight \
+    --project="${GCP_PROJECT_ID}" \
+    --region="${GCP_REGION}" \
+    --wait
 else
-  daytona_preflight_env+="~CONTEXT_DAYTONA_IMAGE=${context_daytona_image}"
+  echo "Mechanical deployment: skipping model-executing Daytona preflight"
 fi
-gcloud run jobs deploy jina-context-daytona-preflight \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --image="${worker_image}" \
-  --service-account="${context_worker_service_account}" \
-  --set-env-vars="${daytona_preflight_env}" \
-  --set-secrets="DAYTONA_API_KEY=jina-daytona-api-key:latest" \
-  --command=node \
-  --args="${production_preflight_path},daytona" \
-  --tasks=1 \
-  --max-retries=0 \
-  --task-timeout=10m \
-  --quiet
-gcloud run jobs execute jina-context-daytona-preflight \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --wait
 
 # A traffic tag becomes the left-most DNS label prefix. Validate it against the
 # live Cloud Run service identifiers before creating any candidate revision.

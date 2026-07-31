@@ -121,6 +121,10 @@ test("mechanical deployment is an explicit opt-in and full acceptance remains th
     deployment,
     /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-acceptance[\s\S]+?else[\s\S]+?Mechanical deployment mode/
   );
+  assert.match(
+    deployment,
+    /if \[\[ "\$\{deployment_acceptance_mode\}" == "full" \]\]; then[\s\S]+?gcloud run jobs execute jina-context-daytona-preflight[\s\S]+?else[\s\S]+?skipping model-executing Daytona preflight/
+  );
 });
 
 test("background workers are quiesced and Board leases are proven empty before schema mutation", () => {
@@ -698,7 +702,7 @@ test("production gate has a measured three-hour acceptance window", () => {
   assert.match(deployment, /--task-timeout="\$\{acceptance_job_timeout_seconds\}s"/);
 });
 
-test("the exact production Daytona BoardAgent contract is probed before Cloud SQL mutation", () => {
+test("full releases probe the exact Daytona BoardAgent contract before Cloud SQL mutation", () => {
   const preflight = deployment.indexOf("gcloud run jobs execute jina-context-daytona-preflight");
   const backup = deployment.indexOf("gcloud sql backups create");
   const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate");
