@@ -140,7 +140,7 @@ production-trigger evidence is required:
 ```bash
 gcloud run jobs execute jina-context-production-trigger-acceptance \
   --project=jina-v2 \
-  --region=us-central1 \
+  --region=us-east1 \
   --wait
 ```
 

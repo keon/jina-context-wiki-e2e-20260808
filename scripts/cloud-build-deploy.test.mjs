@@ -49,7 +49,7 @@ async function withFakeGcloud(source, callback) {
       ...process.env,
       PATH: `${directory}:${process.env.PATH}`,
       GCP_PROJECT_ID: "quality-project",
-      GCP_REGION: "us-central1",
+      GCP_REGION: "us-east1",
       CLOUD_BUILD_ID: "quality-build",
       JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
       JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
@@ -64,6 +64,17 @@ test("production deployment shell is syntactically valid", async () => {
   await execFileAsync("bash", ["-n", "scripts/cloud-release-cleanup-lib.sh"]);
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-preflight.mjs"]);
   await execFileAsync(process.execPath, ["--check", "scripts/context-production-trigger-e2e.mjs"]);
+});
+
+test("production compute, images, artifacts, and shared database are co-located in us-east1", () => {
+  assert.match(cloudBuild, /GCP_REGION=us-east1/);
+  assert.match(cloudBuild, /us-east1-docker\.pkg\.dev\/\$PROJECT_ID\/jina\/api:\$BUILD_ID/);
+  assert.match(cloudBuild, /_CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db/);
+  assert.match(
+    cloudBuild,
+    /JINA_CONTEXT_GCS_BUCKET=\$\{_JINA_CONTEXT_GCS_BUCKET\}[\s\S]+?_JINA_CONTEXT_GCS_BUCKET: jina-v2-jina-context-artifacts-us-east1/
+  );
+  assert.doesNotMatch(cloudBuild, /us-central1|US-CENTRAL1/);
 });
 
 test("production jobs execute the image-baked preflight without an oversized environment variable", () => {
@@ -341,7 +352,7 @@ exit 97
           PATH: `${directory}:${process.env.PATH}`,
           FAKE_STATE: stateDirectory,
           GCP_PROJECT_ID: "quality-project",
-          GCP_REGION: "us-central1",
+          GCP_REGION: "us-east1",
           release_control_job: "jina-context-release-test",
           worker_release_secret: "jina-worker-release-credential",
           JINA_RELEASE_CLEANUP_RETRY_SECONDS: "0"
@@ -380,7 +391,7 @@ exit 1
             ...process.env,
             PATH: `${directory}:${process.env.PATH}`,
             GCP_PROJECT_ID: "quality-project",
-            GCP_REGION: "us-central1",
+            GCP_REGION: "us-east1",
             worker_release_secret: "jina-worker-release-credential",
             JINA_RELEASE_CLEANUP_ATTEMPTS: "2",
             JINA_RELEASE_CLEANUP_RETRY_SECONDS: "0"
@@ -495,7 +506,7 @@ test("deployment fails clearly and before mutation when the artifact bucket is a
 test("deployment fails clearly without bucket-scoped build storage administration", async () => {
   const fakeGcloud = `#!/usr/bin/env bash
 if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
-  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-CENTRAL1","location_type":"region","uniform_bucket_level_access":true}'
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-EAST1","location_type":"region","uniform_bucket_level_access":true}'
   exit 0
 fi
 if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
@@ -517,7 +528,7 @@ exit 97
 test("deployment rejects blanket lifecycle rules on retained Context artifacts", async () => {
   const fakeGcloud = `#!/usr/bin/env bash
 if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
-  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-CENTRAL1","location_type":"region","uniform_bucket_level_access":true,"lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":30}}]}}'
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-EAST1","location_type":"region","uniform_bucket_level_access":true,"lifecycle":{"rule":[{"action":{"type":"Delete"},"condition":{"age":30}}]}}'
   exit 0
 fi
 exit 97
@@ -535,7 +546,7 @@ exit 97
 test("deployment rejects public artifact-bucket principals", async () => {
   const fakeGcloud = `#!/usr/bin/env bash
 if [[ "$1 $2 $3" == "storage buckets describe" ]]; then
-  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-CENTRAL1","location_type":"region","uniform_bucket_level_access":true}'
+  printf '%s\\n' '{"name":"quality-project-jina-context-artifacts","location":"US-EAST1","location_type":"region","uniform_bucket_level_access":true}'
   exit 0
 fi
 if [[ "$1 $2 $3" == "storage buckets get-iam-policy" ]]; then
@@ -835,7 +846,7 @@ test("deployment fails before cloud mutation without an explicit Daytona sandbox
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
       }
@@ -855,7 +866,7 @@ test("deployment fails before cloud mutation when both Daytona sandbox selectors
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
         JINA_CONTEXT_DAYTONA_IMAGE: "registry.example/agent@sha256:abc",
@@ -876,7 +887,7 @@ test("deployment fails before cloud mutation without a Daytona model Secret name
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: ""
@@ -897,7 +908,7 @@ test("deployment rejects a mutable Daytona image before cloud mutation", async (
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_IMAGE: "registry.example/agent:latest",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret"
@@ -919,7 +930,7 @@ test("deployment rejects a model credential in place of a Daytona Secret name", 
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: credentialValue
@@ -950,7 +961,7 @@ test("deployment validates and preflights the V1 internal token Secret", async (
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret",
@@ -972,7 +983,7 @@ test("deployment rejects an invalid Daytona network allowlist before cloud mutat
       env: {
         ...process.env,
         GCP_PROJECT_ID: "quality-project",
-        GCP_REGION: "us-central1",
+        GCP_REGION: "us-east1",
         CLOUD_BUILD_ID: "quality-build",
         JINA_CONTEXT_DAYTONA_SNAPSHOT: "snapshot-v1",
         JINA_CONTEXT_DAYTONA_MODEL_SECRET: "openai-model-secret",

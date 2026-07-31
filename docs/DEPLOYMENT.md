@@ -1,13 +1,13 @@
 # Deployment
 
 Cloud Build validates, builds, and deploys one coordinated release to
-`jina-v2/us-central1`. API, worker, dashboard, and admin images are built from the same
+`jina-v2/us-east1`. API, worker, dashboard, and admin images are built from the same
 exact source revision, receive the same unique Cloud Build release identity, and are
 deployed to Cloud Run before production acceptance runs.
 
 ## Resources
 
-- Artifact Registry: `us-central1-docker.pkg.dev/jina-v2/jina`
+- Artifact Registry: `us-east1-docker.pkg.dev/jina-v2/jina`
 - Cloud Run services: `jina-api`, `jina-context-worker`, `jina-task-worker`,
   `jina-dashboard`, `jina-admin`
 - Cloud Run jobs: `jina-context-daytona-preflight`, one short-lived
@@ -15,7 +15,7 @@ deployed to Cloud Run before production acceptance runs.
   `jina-context-migrate`, optional `jina-context-legacy-reset`, `jina-acceptance`,
   and operator-run `jina-context-production-trigger-acceptance`
 - Primary Cloud SQL: `jina-463721:us-east1:jina-db`, database `jina`
-- Context artifact bucket: `gs://jina-v2-jina-context-artifacts`
+- Context artifact bucket: `gs://jina-v2-jina-context-artifacts-us-east1`
 - API service account: `jina-api-runtime@jina-v2.iam.gserviceaccount.com`
 - Context-worker service account: `jina-context-worker@jina-v2.iam.gserviceaccount.com`
 - Task-worker service account: `jina-task-worker@jina-v2.iam.gserviceaccount.com`
@@ -72,13 +72,13 @@ Create the artifact bucket with uniform bucket-level access and public access pr
 then grant storage administration to the build identity on this bucket only:
 
 ```sh
-gcloud storage buckets create gs://jina-v2-jina-context-artifacts \
+gcloud storage buckets create gs://jina-v2-jina-context-artifacts-us-east1 \
   --project=jina-v2 \
-  --location=us-central1 \
+  --location=us-east1 \
   --uniform-bucket-level-access \
   --public-access-prevention
 
-gcloud storage buckets add-iam-policy-binding gs://jina-v2-jina-context-artifacts \
+gcloud storage buckets add-iam-policy-binding gs://jina-v2-jina-context-artifacts-us-east1 \
   --member=serviceAccount:jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com \
   --role=roles/storage.admin
 ```
@@ -91,7 +91,7 @@ incremental builds and PageIndex trees remain referenced by release history.
 
 As verified on 2026-07-30, the custom role is GA with exactly the four permissions above
 and is bound unconditionally in `jina-463721`. The production bucket exists as a regional
-`US-CENTRAL1` STANDARD bucket with uniform bucket-level access, no lifecycle rule, no
+`US-EAST1` STANDARD bucket with uniform bucket-level access, no lifecycle rule, no
 public IAM principal, and an unconditional bucket-scoped `roles/storage.admin` binding
 for the build identity. That identity has no project-wide storage-administrator binding.
 Public access prevention is explicitly enforced, and anonymous access returns HTTP 403.
@@ -609,7 +609,7 @@ release_sha="$(git rev-parse HEAD)"
 test -z "$(git status --porcelain)"
 gcloud builds triggers run jina-main-deploy \
   --project=jina-v2 \
-  --region=us-central1 \
+  --region=us-east1 \
   --sha="${release_sha}" \
   --substitutions=_JINA_CONTEXT_RESET_MODE=legacy-once,_JINA_CONFIRM_CONTEXT_RESET=delete-rebuildable-context
 ```
@@ -621,11 +621,11 @@ timeout, both reset substitutions, and `PENDING` approval state:
 ```sh
 gcloud builds describe "<build-id>" \
   --project=jina-v2 \
-  --region=us-central1 \
+  --region=us-east1 \
   --format='yaml(id,status,source,serviceAccount,timeout,substitutions,approval)'
 gcloud beta builds approve "<build-id>" \
   --project=jina-v2 \
-  --region=us-central1
+  --region=us-east1
 ```
 
 If the main-branch event also created a reset-disabled pending build for the same SHA,
@@ -754,7 +754,7 @@ retrieval/surface checks:
 
 ```bash
 gcloud run services update-traffic jina-api \
-  --project=jina-v2 --region=us-central1 \
+  --project=jina-v2 --region=us-east1 \
   --to-revisions=jina-api-<cloud-build-id>=100
 ```
 
@@ -916,10 +916,10 @@ Before approving a release, inspect IAM and the deployed identities:
 ```sh
 gcloud secrets get-iam-policy jina-primary-owner-db-password --project=jina-v2
 gcloud run jobs describe jina-context-migrate \
-  --project=jina-v2 --region=us-central1 \
+  --project=jina-v2 --region=us-east1 \
   --format='value(spec.template.spec.template.spec.serviceAccountName)'
 gcloud run services list \
-  --project=jina-v2 --region=us-central1 \
+  --project=jina-v2 --region=us-east1 \
   --format='table(metadata.name,spec.template.spec.serviceAccountName)'
 ```
 
@@ -1163,9 +1163,9 @@ the recovery window.
 ## Useful checks
 
 ```sh
-gcloud run services list --project=jina-v2 --region=us-central1
-gcloud run jobs executions list --project=jina-v2 --region=us-central1 --job=jina-acceptance
-gcloud builds list --project=jina-v2 --region=us-central1
+gcloud run services list --project=jina-v2 --region=us-east1
+gcloud run jobs executions list --project=jina-v2 --region=us-east1 --job=jina-acceptance
+gcloud builds list --project=jina-v2 --region=us-east1
 gcloud sql backups list --project=jina-463721 --instance=jina-db
 ```
 

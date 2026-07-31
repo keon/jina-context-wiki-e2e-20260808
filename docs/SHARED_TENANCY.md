@@ -1,6 +1,6 @@
 # Shared database tenancy
 
-Jina runs in `jina-v2/us-central1` and connects to the original PostgreSQL database at
+Jina runs in `jina-v2/us-east1` and connects to the original PostgreSQL database at
 `jina-463721:us-east1:jina-db`.
 
 - Original identity and GitHub App data remain owned by the original service in `public`.
@@ -10,8 +10,9 @@ Jina runs in `jina-v2/us-central1` and connects to the original PostgreSQL datab
 - Workers receive the resolved tenant with each task and never receive a database
   credential.
 
-Cross-region access adds latency, egress, and a dependency on both regions. Monitor it;
-do not introduce another identity cache or database replica without measured need.
+V1, V2, and the shared database are co-located in `us-east1`. Keep the serving services
+and database in the same region; do not introduce another identity cache or database
+replica without measured need.
 
 ## Runtime configuration
 

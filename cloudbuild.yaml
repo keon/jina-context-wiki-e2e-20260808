@@ -28,8 +28,8 @@ steps:
     args:
       - build
       - --file=apps/api/Dockerfile
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:latest
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:latest
       - .
 
   - id: build-worker
@@ -38,8 +38,8 @@ steps:
     args:
       - build
       - --file=apps/worker/Dockerfile
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
       - .
 
   - id: build-dashboard
@@ -48,7 +48,7 @@ steps:
     args:
       - build
       - --file=apps/dashboard/Dockerfile
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID
       - .
 
   - id: build-admin
@@ -57,7 +57,7 @@ steps:
     args:
       - build
       - --file=apps/admin/Dockerfile
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID
       - .
 
   - id: push-api
@@ -67,8 +67,8 @@ steps:
     args:
       - -ceu
       - |
-        docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
-        docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:latest
+        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:$BUILD_ID
+        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:latest
 
   - id: push-worker
     name: gcr.io/cloud-builders/docker
@@ -77,18 +77,18 @@ steps:
     args:
       - -ceu
       - |
-        docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
-        docker push us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
+        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:$BUILD_ID
+        docker push us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:latest
 
   - id: push-dashboard
     name: gcr.io/cloud-builders/docker
     waitFor: [build-dashboard]
-    args: [push, us-central1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID]
+    args: [push, us-east1-docker.pkg.dev/$PROJECT_ID/jina/dashboard:$BUILD_ID]
 
   - id: push-admin
     name: gcr.io/cloud-builders/docker
     waitFor: [build-admin]
-    args: [push, us-central1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID]
+    args: [push, us-east1-docker.pkg.dev/$PROJECT_ID/jina/admin:$BUILD_ID]
 
   - id: deploy-backend
     name: gcr.io/google.com/cloudsdktool/cloud-sdk:563.0.0
@@ -97,9 +97,10 @@ steps:
     args: [scripts/cloud-build-deploy.sh]
     env:
       - GCP_PROJECT_ID=$PROJECT_ID
-      - GCP_REGION=us-central1
+      - GCP_REGION=us-east1
       - CLOUD_BUILD_ID=$BUILD_ID
       - CLOUD_SQL_INSTANCE=${_CLOUD_SQL_INSTANCE}
+      - JINA_CONTEXT_GCS_BUCKET=${_JINA_CONTEXT_GCS_BUCKET}
       - JINA_TENANCY_MODE=${_JINA_TENANCY_MODE}
       - JINA_DB_NAME=${_JINA_DB_NAME}
       - JINA_DB_USER=${_JINA_DB_USER}
@@ -141,6 +142,7 @@ substitutions:
   # tenant isolation is enforced by bound principals, tenant-scoped SQL, and
   # NOINHERIT capability roles. RLS additionally fences consumer-owned queues.
   _CLOUD_SQL_INSTANCE: jina-463721:us-east1:jina-db
+  _JINA_CONTEXT_GCS_BUCKET: jina-v2-jina-context-artifacts-us-east1
   _JINA_TENANCY_MODE: shared-db
   _JINA_DB_NAME: jina
   _JINA_DB_USER: jina_v2_app

@@ -28,7 +28,7 @@ steps:
     args:
       - build
       - --file=apps/api/Dockerfile
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:${_IMAGE_TAG}
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:${_IMAGE_TAG}
       - .
 
   - id: build-worker
@@ -37,7 +37,7 @@ steps:
     args:
       - build
       - --file=apps/worker/Dockerfile
-      - --tag=us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:${_IMAGE_TAG}
+      - --tag=us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:${_IMAGE_TAG}
       - .
 
   - id: push-api
@@ -45,18 +45,18 @@ steps:
     waitFor: [build-api]
     args:
       - push
-      - us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:${_IMAGE_TAG}
+      - us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:${_IMAGE_TAG}
 
   - id: push-worker
     name: gcr.io/cloud-builders/docker
     waitFor: [build-worker]
     args:
       - push
-      - us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:${_IMAGE_TAG}
+      - us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:${_IMAGE_TAG}
 
 images:
-  - us-central1-docker.pkg.dev/$PROJECT_ID/jina/api:${_IMAGE_TAG}
-  - us-central1-docker.pkg.dev/$PROJECT_ID/jina/worker:${_IMAGE_TAG}
+  - us-east1-docker.pkg.dev/$PROJECT_ID/jina/api:${_IMAGE_TAG}
+  - us-east1-docker.pkg.dev/$PROJECT_ID/jina/worker:${_IMAGE_TAG}
 
 substitutions:
   _IMAGE_TAG: manual
