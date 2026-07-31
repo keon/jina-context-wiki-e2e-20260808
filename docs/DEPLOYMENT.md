@@ -714,15 +714,17 @@ the paused drains and prior worker revisions are deleted. An unaccepted failure 
 closes the database claim gate, removes enabled candidates, returns both services to the
 paused drains, fences residual leases, independently verifies zero, destroys the
 unaccepted worker-generation credential and verifies its Secret Manager state is
-`DESTROYED`, and only then releases the deployment lease. Lease renewal stays active
-through that destruction and the zero-lease proof. Secret destruction and control-job
-deletion use bounded retries and explicit state/absence verification. If any fail-closed
-proof before lease release fails, the release extends its lease for twelve hours and
-leaves the drains paused for operator repair. Cleanup failure after an accepted cutover
-fails the build and reports only the control artifacts whose absence was not verified,
-but never invokes candidate cleanup or attempts a mixed-version rollback. A failure
-after both cleanup proofs instead reports the exact later phase and explicitly states
-that no release-control repair is needed.
+`DESTROYED`, restores the serving API's Board DML grant without enabling worker claims,
+and only then releases the deployment lease. This keeps intake, cancellation, and
+webhooks operational while rejected workers remain fenced. Lease renewal stays active
+through that destruction, grant restoration, and zero-lease proof. Secret destruction
+and control-job deletion use bounded retries and explicit state/absence verification. If
+any fail-closed proof before lease release fails, the release extends its lease for
+twelve hours and leaves the drains paused for operator repair. Cleanup failure after an
+accepted cutover fails the build and reports only the control artifacts whose absence
+was not verified, but never invokes candidate cleanup or attempts a mixed-version
+rollback. A failure after both cleanup proofs instead reports the exact later phase and
+explicitly states that no release-control repair is needed.
 
 `mechanical` is an operator override, not the default release policy. It still runs
 validation, Daytona preflight, backup, worker drain, lease fencing, migration, candidate
@@ -798,6 +800,11 @@ Lease renewal intentionally does not take the Board advisory lock: migration and
 hold that lock across their full critical sections, while renewal continues to serialize
 on the release-control row and release-control advisory lock. All gate-changing actions
 still take the Board lock before the release-control lock.
+
+An accepted candidate restores runtime writes as part of `worker-enable`. A rejected
+candidate restores only the runtime table grant after its generation credential is
+destroyed and zero leases are verified; the release-control row continues to disable
+worker claims.
 
 During acceptance, each worker service may contain exactly two revisions: the paused
 drain and `jina-*-worker-<Cloud Build ID>`. The deployment checks the full revision

@@ -252,7 +252,11 @@ type WorkResult =
       readonly reason: string;
       readonly failureCategory: WorkerFailureCategory;
     }
-  | { readonly outcome: "failed"; readonly reason: string };
+  | {
+      readonly outcome: "failed";
+      readonly reason: string;
+      readonly failureCategory: WorkerFailureCategory;
+    };
 
 interface LeaseExecutionState {
   readonly controller: AbortController;
@@ -488,7 +492,7 @@ async function execute(work: ClaimedWork): Promise<void> {
           maxAttempts: contextBoardMaxAttempts
         })
           ? { outcome: "retry", reason, failureCategory }
-          : { outcome: "failed", reason };
+          : { outcome: "failed", reason, failureCategory };
     }
   } finally {
     clearInterval(heartbeat);
@@ -534,11 +538,7 @@ async function execute(work: ClaimedWork): Promise<void> {
       topic: work.message.topic,
       outcome: result.outcome,
       finishedAt: new Date().toISOString(),
-      ...(result.outcome === "failed" || result.outcome === "retry"
-        ? {
-            failureCategory: result.outcome === "retry" ? result.failureCategory : workerFailureCategory(result.reason)
-          }
-        : {})
+      ...(result.outcome === "failed" || result.outcome === "retry" ? { failureCategory: result.failureCategory } : {})
     };
     logStageOutcome(work, startedAt, result);
   } finally {
@@ -576,7 +576,10 @@ function logStageOutcome(
         ? "unknown"
         : undefined);
   if (reason !== undefined) {
-    const failureCategory = result?.outcome === "retry" ? result.failureCategory : workerFailureCategory(reason);
+    const failureCategory =
+      result?.outcome === "retry" || result?.outcome === "failed"
+        ? result.failureCategory
+        : workerFailureCategory(reason);
     const outcome = result?.outcome === "retry" ? "retry" : "failed";
     metrics.count("worker.tasks", {
       topic: work.message.topic,

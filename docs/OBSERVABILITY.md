@@ -92,6 +92,11 @@ capabilities, duration, citation failures, and conflict count. Search telemetry 
 selection, not a model-written answer; bounded operational records follow retention
 policy.
 
+Every failed or retried worker stage appends its bounded diagnostic and stable failure
+category to the task's Board event stream. Tenant-facing build summaries expose the
+category's safe fixed description; operators inspect the authorized Board events for the
+specific reason without relying on ephemeral worker logs.
+
 ## Required dashboards
 
 A production context dashboard should show:

@@ -871,6 +871,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const buildRef = optionalString(body.ref) ?? identity?.defaultBranch ?? "main";
       let newlyReservedBuildId: string | undefined;
       const admitted = await mutate(async () => {
+        await reconcileTerminalContextBuildQuotas(config.contextQuotaService, intakeState.board, principal.tenantId);
         const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
           tenantId: principal.tenantId,
           repository: buildRepository,
@@ -1771,6 +1772,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const createdTaskIds = [...accepted.createdTaskIds];
       let contextOutcome: "created" | "duplicate" | "ignored" = "ignored";
       if (isContextTrigger(webhook.event)) {
+        await reconcileTerminalContextBuildQuotas(config.contextQuotaService, intakeState.board, tenantId);
         const contextRepository = identity?.repository ?? webhook.repository;
         const contextRef = contextTriggerRef(webhook.event, identity?.defaultBranch ?? webhook.repositoryDefaultBranch);
         const priorRelease = await config.contextBoardReleaseSeedStore?.findCurrentReleaseSeed({
@@ -2471,7 +2473,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ? undefined
         : (optionalString(body.reason)?.slice(0, 2_000) ??
           (outcome === "retry" ? "worker requested retry" : "worker failed"));
-    const failureCategory = outcome === "retry" ? workerFailureCategory(body.failureCategory) : undefined;
+    const failureCategory = outcome === "done" ? undefined : workerFailureCategory(body.failureCategory);
     const retryable =
       outcome === "retry" && failureCategory !== undefined && RETRYABLE_WORKER_FAILURE_CATEGORIES.has(failureCategory);
     const terminalOutcome: "done" | "failed" = outcome === "done" ? "done" : "failed";
@@ -4432,6 +4434,24 @@ async function settleContextModelQuota(
     // no active reservation and is already settled.
     if (error instanceof ContextQuotaInvariantError && error.reason === "reservation_not_found") return;
     throw error;
+  }
+}
+
+async function reconcileTerminalContextBuildQuotas(
+  quota: ContextQuotaService | undefined,
+  state: BoardState,
+  tenantId: string
+): Promise<void> {
+  if (!quota) return;
+  const buildIds = state.tasks.flatMap((task) =>
+    task.type === contextBoardTaskTypes.build &&
+    task.metadata.tenantId === tenantId &&
+    isTerminalTaskStatus(task.status)
+      ? [task.id]
+      : []
+  );
+  if (buildIds.length > 0) {
+    await quota.reconcileTerminalBuilds({ tenantId, buildIds });
   }
 }
 

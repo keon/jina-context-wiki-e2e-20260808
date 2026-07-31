@@ -428,6 +428,43 @@ export class ContextQuotaService {
     });
   }
 
+  /**
+   * Repairs reservations left behind when the board reached a terminal state
+   * but the process died before quota settlement committed. The board is the
+   * authoritative lifecycle record, so callers pass only terminal build ids.
+   */
+  async reconcileTerminalBuilds(input: {
+    readonly tenantId: string;
+    readonly buildIds: readonly string[];
+    readonly at?: string;
+  }): Promise<ContextQuotaSnapshot> {
+    const tenantId = tenant(input.tenantId);
+    const buildIds = [...new Set(input.buildIds.map((buildId) => resourceId(buildId, "buildId")))];
+    const now = this.#time(input.at);
+    const limits = await this.#limits(tenantId);
+    return this.#store.transact(tenantId, (current) => {
+      const state = currentState(current, tenantId, now, limits);
+      const activeBuilds = { ...state.activeBuilds };
+      const completedBuilds = { ...state.completedBuilds };
+      let changed = false;
+      for (const buildId of buildIds) {
+        if (!activeBuilds[buildId]) continue;
+        delete activeBuilds[buildId];
+        completedBuilds[buildId] = { completedAt: now.iso };
+        changed = true;
+      }
+      const next = changed
+        ? {
+            ...state,
+            activeBuilds,
+            completedBuilds,
+            updatedAt: now.iso
+          }
+        : state;
+      return { state: next, result: quotaSnapshot(next, limits, now) };
+    });
+  }
+
   async startModelTask(input: {
     readonly tenantId: string;
     readonly taskId: string;

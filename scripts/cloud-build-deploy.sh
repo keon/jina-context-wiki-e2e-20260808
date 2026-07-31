@@ -1027,6 +1027,12 @@ ROLLFORWARD
       destroy_worker_release_credential_verified || cleanup_ok="false"
     fi
     if [[ "${cleanup_ok}" == "true" ]]; then
+      # Worker claims remain disabled after a rejected candidate, but the
+      # serving API must still accept/cancel work and webhooks. Restore only
+      # its Board DML grant; do not reactivate an unaccepted worker generation.
+      run_release_control "runtime-write-enable" >/dev/null 2>&1 || cleanup_ok="false"
+    fi
+    if [[ "${cleanup_ok}" == "true" ]]; then
       # Keep renewing throughout all fail-closed work. Stop only after the
       # generation is destroyed and zero leases have been independently
       # verified, so release-release cannot race a background renewal.

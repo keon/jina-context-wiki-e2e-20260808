@@ -221,7 +221,8 @@ test("failed unaccepted candidates are paused, fenced, and independently verifie
   const drain = deployment.indexOf('run_release_control "board-drain"', taskDrain);
   const verify = deployment.indexOf('run_release_control "board-verify"', drain);
   const destroyGeneration = deployment.indexOf("destroy_worker_release_credential_verified", verify);
-  const stopRenewal = deployment.indexOf("stop_release_renewal", destroyGeneration);
+  const restoreApiWrites = deployment.indexOf('run_release_control "runtime-write-enable"', destroyGeneration);
+  const stopRenewal = deployment.indexOf("stop_release_renewal", restoreApiWrites);
   const release = deployment.indexOf('run_release_control "release-release"', stopRenewal);
   assert.ok(pause > trap);
   assert.ok(contextDrain > pause);
@@ -229,8 +230,10 @@ test("failed unaccepted candidates are paused, fenced, and independently verifie
   assert.ok(drain > taskDrain);
   assert.ok(verify > drain);
   assert.ok(destroyGeneration > verify);
-  assert.ok(stopRenewal > destroyGeneration);
+  assert.ok(restoreApiWrites > destroyGeneration);
+  assert.ok(stopRenewal > restoreApiWrites);
   assert.ok(release > stopRenewal);
+  assert.match(productionPreflight, /action === "runtime-write-enable"/);
   assert.match(
     deployment,
     /destroy_worker_release_credential_verified \|\| cleanup_ok="false"[\s\S]+?extend_release_lease_for_repair \|\| true[\s\S]+?stop_release_renewal/

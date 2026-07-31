@@ -754,6 +754,71 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
   }
 });
 
+test("new build admission reconciles stale quota reservations for terminal board builds", async () => {
+  const tenantId = "tenant-terminal-quota-repair";
+  const repository = "omxyz/quota-repair";
+  const principalId = "user:quota-repair@example.com";
+  const internalApiToken = "terminal-quota-repair-token";
+  const stale = createContextBoardBuild(createEmptyBoardState(), {
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "stale-terminal-build",
+    now: NOW
+  });
+  const stateStore = mutableStateStore({
+    intakeState: {
+      board: setTaskStatus(stale.state, stale.buildTaskId, "failed"),
+      pullRequests: []
+    },
+    devDeliverySequence: 0
+  });
+  const contextStore = new MemoryContextEngineStore();
+  await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+  const quotaService = new ContextQuotaService({
+    store: new InMemoryContextQuotaStore(),
+    defaults: { maxActiveBuilds: 1, buildRequestsPerWindow: 10 }
+  });
+  await quotaService.admitBuild({ tenantId, buildId: stale.buildTaskId });
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextStore,
+    contextQuotaService: quotaService,
+    internalApiToken,
+    tenantAdminPrincipalIds: [principalId]
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/context/build`, {
+      method: "POST",
+      headers: {
+        ...devHeaders(tenantId, principalId),
+        authorization: `Bearer ${internalApiToken}`
+      },
+      body: JSON.stringify({
+        repository,
+        ref: "main",
+        commitSha: "d".repeat(40),
+        requestKey: "replacement-build"
+      })
+    });
+    const body = await response.text();
+    assert.equal(response.status, 202, body);
+    assert.equal((await quotaService.snapshot(tenantId)).active.builds, 1);
+    assert.equal(
+      stateStore.current().intakeState.board.tasks.find((task) => task.id === stale.buildTaskId)?.status,
+      "failed"
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("a quota-denied model task does not block later same-tenant non-model work", async () => {
   const tenantId = "tenant-claim-bypass";
   const modelTaskId = entityId<"task">("claim-bypass-model");

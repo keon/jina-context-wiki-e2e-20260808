@@ -89,11 +89,20 @@ if (command === "daytona") {
   await withDatabase((pool) => drainBoardLeases(pool));
 } else if (command === "board-verify") {
   await withDatabase((pool) => verifyBoardLeases(pool));
-} else if (["release-acquire", "release-renew", "worker-pause", "worker-enable", "release-release"].includes(command)) {
+} else if (
+  [
+    "release-acquire",
+    "release-renew",
+    "worker-pause",
+    "worker-enable",
+    "runtime-write-enable",
+    "release-release"
+  ].includes(command)
+) {
   await withDatabase((pool) => updateReleaseControl(pool, command));
 } else {
   throw new Error(
-    "Expected daytona, release-acquire, release-renew, worker-pause, worker-enable, release-release, " +
+    "Expected daytona, release-acquire, release-renew, worker-pause, worker-enable, runtime-write-enable, release-release, " +
       "board-drain, board-verify, schema-inspect, or schema-reset"
   );
 }
@@ -367,6 +376,10 @@ async function updateReleaseControl(pool, action) {
            where id=1`,
           [release.releaseId, workerCredentialSha256, contextRevision, taskRevision]
         );
+        await client.query(
+          `grant select,insert,update on jina_runtime.api_state to "${requiredRuntimeUser().replaceAll('"', '""')}"`
+        );
+      } else if (action === "runtime-write-enable") {
         await client.query(
           `grant select,insert,update on jina_runtime.api_state to "${requiredRuntimeUser().replaceAll('"', '""')}"`
         );
