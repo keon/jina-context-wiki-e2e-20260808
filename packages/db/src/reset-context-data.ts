@@ -1,3 +1,4 @@
+import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Pool, type PoolClient, type PoolConfig, type QueryResult } from "pg";
@@ -303,7 +304,7 @@ function printPreserved(): void {
   );
 }
 
-const entrypoint = process.argv[1] ? resolve(process.argv[1]) : undefined;
+const entrypoint = process.argv[1] ? await realpath(resolve(process.argv[1])) : undefined;
 if (entrypoint && fileURLToPath(import.meta.url) === entrypoint) {
   await main();
 }

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, symlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { Pool } from "pg";
@@ -14,6 +17,19 @@ import {
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const resetCli = fileURLToPath(new URL("./reset-context-data.js", import.meta.url));
 const EXPECTED_REBUILDABLE_ROWS = REBUILDABLE_CONTEXT_TABLES.length + 1;
+
+test("packaged Context reset CLI executes through a symlink", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "jina-context-reset-"));
+  const linkedCli = join(directory, "reset-context-data.js");
+  try {
+    await symlink(resetCli, linkedCli);
+    const result = await runResetCli([], "", undefined, linkedCli);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stdout, /Dry run\. Rebuildable Context data that would be deleted:/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test(
   "explicit Context reset reports exact rows, fails closed, and preserves identity and control data",
@@ -253,7 +269,8 @@ async function tableCount(pool: Pool, table: string): Promise<string> {
 async function runResetCli(
   args: readonly string[],
   targetDatabaseUrl: string,
-  confirmation?: string
+  confirmation?: string,
+  cli = resetCli
 ): Promise<{ readonly code: number | null; readonly stdout: string; readonly stderr: string }> {
   const environment = {
     ...process.env,
@@ -262,7 +279,7 @@ async function runResetCli(
     JINA_CONFIRM_CONTEXT_RESET: confirmation ?? ""
   };
   return new Promise((resolveResult, reject) => {
-    const child = spawn(process.execPath, [resetCli, "--json", ...args], {
+    const child = spawn(process.execPath, [cli, "--json", ...args], {
       env: environment,
       stdio: ["ignore", "pipe", "pipe"]
     });
