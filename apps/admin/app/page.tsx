@@ -21,21 +21,24 @@ export default async function ContextAdminPage({
 }) {
   const { repository } = await searchParams;
   const loadFailures: string[] = [];
-  const [releaseResult, metricsResult, buildsResult] = await Promise.allSettled([
-    listAllReleases(),
-    getContextMetrics(),
-    listContextBuilds()
-  ]);
-  const releases: readonly AdminContextRelease[] = settledOr(releaseResult, [], "releases", loadFailures);
-  const metrics = settledOr(metricsResult, EMPTY_METRICS, "metrics", loadFailures);
-  const builds: readonly AdminContextBuild[] = settledOr(buildsResult, [], "builds", loadFailures);
+  // The production API intentionally runs as one replica. Keep this operator
+  // page from turning one navigation into a burst of expensive Board and
+  // catalog reads that competes with workers, MCP, and webhook admission.
+  const releases: readonly AdminContextRelease[] = await loadSection(
+    listAllReleases,
+    [],
+    "releases",
+    loadFailures
+  );
+  const metrics = await loadSection(getContextMetrics, EMPTY_METRICS, "metrics", loadFailures);
+  const builds: readonly AdminContextBuild[] = await loadSection(listContextBuilds, [], "builds", loadFailures);
   const scopedBuilds = repository ? builds.filter((build) => build.repository === repository) : builds;
-  const [documentsResult, progressResult] = await Promise.allSettled([
-    releases.length > 0 ? listContextDocuments(releases, repository) : Promise.resolve([]),
-    scopedBuilds.length > 0 ? listContextBuildProgress(scopedBuilds) : Promise.resolve([])
-  ]);
-  const documents = settledOr(documentsResult, [], "documents", loadFailures);
-  const buildProgress = settledOr(progressResult, [], "build progress", loadFailures);
+  const documents = releases.length > 0
+    ? await loadSection(() => listContextDocuments(releases, repository), [], "documents", loadFailures)
+    : [];
+  const buildProgress = scopedBuilds.length > 0
+    ? await loadSection(() => listContextBuildProgress(scopedBuilds), [], "build progress", loadFailures)
+    : [];
 
   const repositories = [
     ...new Set([...releases.map((release) => release.repository), ...builds.map((build) => build.repository)])
@@ -349,16 +352,19 @@ const EMPTY_METRICS: AdminContextMetrics = {
   embeddingCount: 0
 };
 
-function settledOr<T>(
-  result: PromiseSettledResult<T>,
+async function loadSection<T>(
+  load: () => Promise<T>,
   fallback: T,
   label: string,
   failures: string[]
-): T {
-  if (result.status === "fulfilled") return result.value;
-  const message = result.reason instanceof JinaApiError ? result.reason.message : "unexpected error";
-  failures.push(`${label}: ${message}`);
-  return fallback;
+): Promise<T> {
+  try {
+    return await load();
+  } catch (error) {
+    const message = error instanceof JinaApiError ? error.message : "unexpected error";
+    failures.push(`${label}: ${message}`);
+    return fallback;
+  }
 }
 
 function Stat({ label, value }: { readonly label: string; readonly value: number }) {

@@ -237,7 +237,9 @@ export async function listContextBuildProgress(
   builds: readonly AdminContextBuild[],
   limit = 12
 ): Promise<readonly AdminContextBuildProgress[]> {
-  const selected = builds.slice(0, Math.max(0, limit));
+  // Terminal rows already include their stages and bounded failure reason.
+  // Checkpoint progress matters only while a build is changing.
+  const selected = builds.filter((build) => build.status === "active").slice(0, Math.max(0, limit));
   const progress = await mapInBatches(selected, 3, async (build) => {
     try {
       const item = (await apiGet(
