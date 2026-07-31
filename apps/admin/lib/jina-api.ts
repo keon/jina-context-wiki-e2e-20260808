@@ -248,7 +248,9 @@ export async function listContextBuildProgress(
       }
       return item;
     } catch (error) {
-      if (error instanceof JinaApiError && (error.status === 429 || error.status === 503)) {
+      // Progress is supplementary to the build row. A malformed or temporarily
+      // unavailable build must not take down the tenant-wide admin page.
+      if (error instanceof JinaApiError && error.status !== undefined) {
         return undefined;
       }
       throw error;

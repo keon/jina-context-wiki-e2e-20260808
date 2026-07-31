@@ -212,11 +212,14 @@ test("admin rejects checkpoint progress returned for a different tenant scope", 
   );
 });
 
-test("admin keeps the context page available when one progress read is backpressured", async (context) => {
+test("admin keeps the context page available when individual progress reads fail", async (context) => {
   context.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
     const url = String(input);
     if (url.endsWith("/build-overloaded/progress")) {
       return new Response("busy", { status: 429 });
+    }
+    if (url.endsWith("/build-invalid/progress")) {
+      return new Response("invalid legacy build", { status: 500 });
     }
     return Response.json({
       buildId: "build-healthy",
@@ -236,6 +239,16 @@ test("admin keeps the context page available when one progress read is backpress
       ref: "main",
       refSequence: 2,
       status: "active",
+      stages: [],
+      createdAt: "2026-01-02T00:00:00.000Z",
+      updatedAt: "2026-01-02T01:00:00.000Z"
+    },
+    {
+      id: "build-invalid",
+      repository: "acme/repository",
+      ref: "main",
+      refSequence: 2,
+      status: "failed",
       stages: [],
       createdAt: "2026-01-02T00:00:00.000Z",
       updatedAt: "2026-01-02T01:00:00.000Z"
