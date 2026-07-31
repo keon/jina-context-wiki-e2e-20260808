@@ -1722,6 +1722,109 @@ test("transient Board failures retry with fresh fences, preserved siblings, and 
   }
 });
 
+test("public Context model failures expose only fixed safe provider reasons", async () => {
+  const tenantId = "tenant-model-failure-reasons";
+  const repository = "omxyz/jina";
+  const cases = [
+    {
+      suffix: "codex-quota",
+      diagnostic: "Codex failed: 0 weighted tokens left; usage limit resets later\nBearer sk-codex-private",
+      failureCode: "codex_quota_exhausted",
+      failureReason: "Codex has no remaining credits or usage allowance."
+    },
+    {
+      suffix: "provider-quota",
+      diagnostic: "OpenAI request failed: insufficient_quota\naccount acct-private",
+      failureCode: "model_quota_exhausted",
+      failureReason: "The model provider has no remaining quota or usage allowance."
+    },
+    {
+      suffix: "codex-named-stage-provider-quota",
+      diagnostic: "board agent stage codex-integration exited with 1: OpenAI insufficient_quota",
+      failureCode: "model_quota_exhausted",
+      failureReason: "The model provider has no remaining quota or usage allowance."
+    },
+    {
+      suffix: "rate-limit",
+      diagnostic: "model provider returned HTTP status 429: too many requests\nrequest req-private",
+      failureCode: "model_rate_limit",
+      failureReason: "The model provider rate limit prevented this stage from completing."
+    },
+    {
+      suffix: "authentication",
+      diagnostic: "OpenAI: invalid API key sk-auth-private",
+      failureCode: "model_authentication",
+      failureReason: "Model provider authentication failed for this stage."
+    },
+    {
+      suffix: "model-unavailable",
+      diagnostic: "provider returned unknown model gpt-private",
+      failureCode: "model_unavailable",
+      failureReason: "The requested model is unsupported or unavailable from the provider."
+    },
+    {
+      suffix: "generic",
+      diagnostic:
+        "provider returned catastrophic private upstream response\nBearer sk-raw-private\n    at /Users/private/model.ts:42:1",
+      failureCode: "model",
+      failureReason: "The model provider did not complete this stage."
+    }
+  ] as const;
+  let board = createEmptyBoardState();
+  const fixtures = cases.map((failureCase) => {
+    const fixture = failedModelBuildFixture(board, tenantId, repository, failureCase.suffix, failureCase.diagnostic);
+    board = fixture.state;
+    return { ...failureCase, ...fixture };
+  });
+  const store = mutableStateStore({
+    intakeState: { board, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const principalId = "user:model-failure-admin@example.com";
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore: store,
+    tenantAdminPrincipalIds: [principalId]
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/context/builds`, {
+      headers: devHeaders(tenantId, principalId)
+    });
+    const responseText = await response.text();
+    assert.equal(response.status, 200, responseText);
+    const result = JSON.parse(responseText) as {
+      readonly builds: readonly {
+        readonly id: string;
+        readonly failureCode?: string;
+        readonly failureReason?: string;
+        readonly stages: readonly {
+          readonly id: string;
+          readonly failureCode?: string;
+          readonly failureReason?: string;
+        }[];
+      }[];
+    };
+    for (const fixture of fixtures) {
+      const build = result.builds.find((candidate) => candidate.id === fixture.buildId);
+      assert.equal(build?.failureCode, fixture.failureCode);
+      assert.equal(build?.failureReason, fixture.failureReason);
+      const stage = build?.stages.find((candidate) => candidate.id === fixture.taskId);
+      assert.equal(stage?.failureCode, fixture.failureCode);
+      assert.equal(stage?.failureReason, fixture.failureReason);
+    }
+    assert.doesNotMatch(
+      responseText,
+      /sk-codex-private|acct-private|req-private|sk-auth-private|gpt-private|catastrophic|Bearer|sk-raw-private|\/Users\/private|model\.ts/i
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("tenant-admin operator retry resumes a failed publication planner from retained checkpoints", async () => {
   const tenantId = "tenant-operator";
   const repository = "omxyz/jina";
@@ -2510,6 +2613,45 @@ function contextMetadata(tenantId: string, repository: string, contextBuildId: s
     commitSha: "a".repeat(40),
     contextBuildId
   };
+}
+
+function failedModelBuildFixture(
+  initial: BoardState,
+  tenantId: string,
+  repository: string,
+  suffix: string,
+  diagnostic: string
+): { readonly state: BoardState; readonly buildId: TaskId; readonly taskId: TaskId } {
+  const buildId = entityId<"task">(`model-failure-${suffix}-build`);
+  const taskId = entityId<"task">(`model-failure-${suffix}-task`);
+  let state = addContextTask(initial, {
+    id: buildId,
+    type: contextBoardTaskTypes.build,
+    kind: "aggregate",
+    title: `Model failure ${suffix}`,
+    assigneeRole: "system",
+    dedupeKey: `model-failure:${suffix}:build`,
+    metadata: contextMetadata(tenantId, repository, buildId)
+  });
+  state = addContextTask(state, {
+    id: taskId,
+    type: contextBoardTaskTypes.research,
+    kind: "dispatchable",
+    title: `Model failure stage ${suffix}`,
+    assigneeRole: "context-researcher",
+    dedupeKey: `model-failure:${suffix}:stage`,
+    dispatchTopic: contextBoardTopics.research,
+    parentTaskId: buildId,
+    metadata: contextMetadata(tenantId, repository, buildId)
+  });
+  state = reduceBoard(state, NOW);
+  state = transitionBoardTask(state, taskId, "failed", NOW);
+  state = reduceBoard(state, NOW);
+  state = appendEvent(state, `${contextBoardTopics.research}.failed`, NOW, taskId, {
+    failureCategory: "model",
+    reason: diagnostic
+  });
+  return { state, buildId, taskId };
 }
 
 function failedParallelPagesFixture(

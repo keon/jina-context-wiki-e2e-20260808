@@ -3286,6 +3286,11 @@ const PUBLIC_CONTEXT_FAILURE_REASONS = {
   git_checkout: "The requested repository revision could not be prepared.",
   daytona: "The isolated execution sandbox did not complete this stage.",
   model: "The model provider did not complete this stage.",
+  codex_quota_exhausted: "Codex has no remaining credits or usage allowance.",
+  model_quota_exhausted: "The model provider has no remaining quota or usage allowance.",
+  model_rate_limit: "The model provider rate limit prevented this stage from completing.",
+  model_authentication: "Model provider authentication failed for this stage.",
+  model_unavailable: "The requested model is unsupported or unavailable from the provider.",
   context_validation: "Generated Context did not pass deterministic validation.",
   api_transport: "The worker could not reach the Context API.",
   lease: "The worker lost its fenced lease before completion.",
@@ -3345,12 +3350,57 @@ function publicContextFailureFromEvent(
     return publicContextFailure("bounded_gate_repair_exhausted");
   }
   if (event.type === "task.retry_exhausted") {
-    return publicContextFailure(publicContextFailureCode(event.payload?.category));
+    return publicContextFailureFromCategory(event.payload?.category, event.payload?.reason);
   }
   if (event.type.endsWith(".failed")) {
-    return publicContextFailure(publicContextFailureCode(event.payload?.failureCategory));
+    return publicContextFailureFromCategory(event.payload?.failureCategory, event.payload?.reason);
   }
   return undefined;
+}
+
+function publicContextFailureFromCategory(
+  category: unknown,
+  reason: unknown
+): { readonly failureCode: PublicContextFailureCode; readonly failureReason: string } {
+  const code = publicContextFailureCode(category);
+  return publicContextFailure(code === "model" ? publicContextModelFailureCode(reason) : code);
+}
+
+function publicContextModelFailureCode(reason: unknown): PublicContextFailureCode {
+  if (typeof reason !== "string") return "model";
+
+  // Worker diagnostics are already bounded when recorded. Bound again at this
+  // public projection boundary so imported or legacy Board events cannot make
+  // classification cost depend on an untrusted payload size.
+  const diagnostic = reason.slice(0, 2_000).toLowerCase();
+  if (/\b0 weighted tokens left\b/.test(diagnostic)) return "codex_quota_exhausted";
+  const quotaExhausted =
+    /\binsufficient[ _-]+quota\b|\bquota (?:is |has been )?(?:exhausted|reached|exceeded)\b|\busage (?:limit|allowance)(?: (?:is |has been )?(?:exhausted|reached|exceeded))?\b|\bout of credits\b|\bcredits? (?:are |have been )?(?:exhausted|depleted)\b/.test(
+      diagnostic
+    );
+  if (quotaExhausted) return "model_quota_exhausted";
+  if (
+    /\brate[ _-]?limit(?:ed|ing)?\b|\btoo many requests\b|\b(?:http(?: status)?|status(?: code)?) 429\b/.test(
+      diagnostic
+    )
+  ) {
+    return "model_rate_limit";
+  }
+  if (
+    /\binvalid (?:api )?key\b|\bmissing (?:api )?key\b|\bunauthorized\b|\bauthentication failed\b|\btoken_expired\b|\binvalid_grant\b|\bcredentials? (?:were )?rejected\b/.test(
+      diagnostic
+    )
+  ) {
+    return "model_authentication";
+  }
+  if (
+    /\bunknown model\b|\bunsupported model\b|\bmodel\b.{0,80}\b(?:not found|unsupported|unavailable|not available)\b|\b(?:unsupported|unavailable) model\b/.test(
+      diagnostic
+    )
+  ) {
+    return "model_unavailable";
+  }
+  return "model";
 }
 
 function publicContextFailureCode(value: unknown): PublicContextFailureCode {
