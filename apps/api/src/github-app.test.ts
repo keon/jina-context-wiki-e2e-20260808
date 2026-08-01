@@ -992,6 +992,65 @@ test("the V1 relay admits Context work without creating V2 review work", async (
   );
 });
 
+test("an ignored relay delivery cannot roll back work committed by another API instance", async () => {
+  const sharedState = deliveryTrackingStateStore({
+    intakeState: {
+      board: { tasks: [], dependencies: [], outbox: [], events: [] },
+      pullRequests: []
+    },
+    devDeliverySequence: 0
+  });
+  const staleServer = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    githubWebhookSecret,
+    stateStore: sharedState
+  });
+  const writerServer = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    githubWebhookSecret,
+    stateStore: sharedState
+  });
+  await Promise.all([
+    new Promise<void>((resolve) => staleServer.listen(0, "127.0.0.1", resolve)),
+    new Promise<void>((resolve) => writerServer.listen(0, "127.0.0.1", resolve))
+  ]);
+  const staleUrl = `http://127.0.0.1:${(staleServer.address() as AddressInfo).port}`;
+  const writerUrl = `http://127.0.0.1:${(writerServer.address() as AddressInfo).port}`;
+  try {
+    assert.equal((await fetch(`${staleUrl}/board`)).status, 200);
+    const push = await signedGitHubWebhookAt(writerUrl, "push", "concurrent-push", {
+      ref: "refs/heads/main",
+      before: "0".repeat(40),
+      after: "1".repeat(40),
+      deleted: false,
+      repository: { full_name: repository, default_branch: "main" },
+      installation: { id: 140435029 }
+    });
+    assert.equal(push.status, 202);
+    const committedTaskIds = sharedState.current().intakeState.board.tasks.map((task) => task.id);
+    assert.ok(committedTaskIds.length > 0);
+
+    const ignored = await signedGitHubWebhookAt(staleUrl, "pull_request_review", "ignored-review", {
+      action: "submitted",
+      repository: { full_name: repository }
+    });
+    assert.equal(ignored.status, 202);
+    assert.deepEqual(
+      sharedState.current().intakeState.board.tasks.map((task) => task.id),
+      committedTaskIds
+    );
+  } finally {
+    await Promise.all(
+      [staleServer, writerServer].map(
+        (candidate) =>
+          new Promise<void>((resolve, reject) => candidate.close((error) => (error ? reject(error) : resolve())))
+      )
+    );
+  }
+});
+
 test("a newer relayed PR commit supersedes stale work and releases its build quota", async () => {
   const pullRequestNumber = 80;
   const firstHead = "1".repeat(40);
@@ -1347,6 +1406,39 @@ function readOnlyStateStore(snapshot: ApiSnapshot): ApiStateStore {
   };
 }
 
+function deliveryTrackingStateStore(initial: ApiSnapshot): ApiStateStore & { current(): ApiSnapshot } {
+  let snapshot = structuredClone(initial);
+  const deliveries = new Set<string>();
+  return {
+    current() {
+      return structuredClone(snapshot);
+    },
+    async load() {
+      return structuredClone(snapshot);
+    },
+    async ping() {},
+    async hasDelivery(deliveryId) {
+      return deliveries.has(deliveryId);
+    },
+    async save(next, deliveryId) {
+      snapshot = structuredClone(next);
+      if (deliveryId) deliveries.add(deliveryId);
+      return true;
+    },
+    async update<T>(
+      operation: (current: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
+      deliveryId?: string
+    ) {
+      if (deliveryId && deliveries.has(deliveryId)) return { committed: false };
+      const updated = await operation(structuredClone(snapshot));
+      snapshot = structuredClone(updated.state);
+      if (deliveryId) deliveries.add(deliveryId);
+      return { committed: true, result: updated.result };
+    },
+    async close() {}
+  };
+}
+
 function contextHeaders(): Record<string, string> {
   return {
     authorization: `Bearer ${contextToken}`,
@@ -1368,9 +1460,19 @@ async function signedGitHubWebhook(
   payload: Readonly<Record<string, unknown>>,
   path = "/webhooks/github"
 ): Promise<Response> {
+  return signedGitHubWebhookAt(baseUrl, event, deliveryId, payload, path);
+}
+
+async function signedGitHubWebhookAt(
+  targetBaseUrl: string,
+  event: string,
+  deliveryId: string,
+  payload: Readonly<Record<string, unknown>>,
+  path = "/webhooks/github"
+): Promise<Response> {
   const rawBody = JSON.stringify(payload);
   const signature = `sha256=${createHmac("sha256", githubWebhookSecret).update(rawBody).digest("hex")}`;
-  return fetch(`${baseUrl}${path}`, {
+  return fetch(`${targetBaseUrl}${path}`, {
     method: "POST",
     headers: {
       "content-type": "application/json",

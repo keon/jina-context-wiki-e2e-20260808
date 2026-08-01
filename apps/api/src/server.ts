@@ -1843,7 +1843,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       return;
     }
     if (!result.webhook) {
-      await persist(result.deliveryId);
+      await mutate(async () => true, result.deliveryId);
       json(response, result.statusCode, result);
       return;
     }
@@ -3111,7 +3111,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       { actor: RUN_ACTOR, now: nowIso() }
     ).state;
     intakeState = { ...intakeState, board: reduceBoard(board, nowIso()) };
-    await persist();
   }
 
   if (config.simulateRuns) {
