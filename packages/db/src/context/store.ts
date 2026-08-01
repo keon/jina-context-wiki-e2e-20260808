@@ -731,6 +731,66 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     return this.query.metrics(tenantId);
   }
 
+  async contextCatalogMetrics(tenantId: string): Promise<{
+    readonly publishedGenerationCount: number;
+    readonly documentCount: number;
+    readonly fragmentCount: number;
+    readonly hierarchyNodeCount: number;
+  }> {
+    await this.database.initialize();
+    const result = await this.database.queryAs<{
+      published_generation_count: string;
+      document_count: string;
+      fragment_count: string;
+      hierarchy_node_count: string;
+    }>(
+      "jina_context_admin",
+      { tenantIds: [tenantId] },
+      `select
+         (select count(*)::text
+            from jina_context.index_generations generation
+           where generation.tenant_id=$1 and generation.status='published') as published_generation_count,
+         (select count(*)::text
+            from jina_context.knowledge_document_revisions revision
+           where revision.tenant_id=$1
+             and not exists (
+               select 1
+               from jina_context.knowledge_revision_evidence citation
+               join jina_context.erasure_filters erasure
+                 on erasure.tenant_id=citation.tenant_id
+                and erasure.repository=citation.repository
+                and erasure.source_type=citation.source_type
+                and (erasure.source_id is null or erasure.source_id=citation.source_id)
+                and (erasure.content_digest is null or erasure.content_digest=citation.content_digest)
+                and (
+                  erasure.path_pattern is null
+                  or citation.path_or_url like erasure.path_pattern escape '\\'
+                )
+               where citation.tenant_id=revision.tenant_id
+                 and citation.repository=revision.repository
+                 and citation.revision_id=revision.id
+             )) as document_count,
+         (select count(*)::text
+            from jina_context.context_fragments fragment
+            join jina_context.index_generations generation
+              on generation.id=fragment.generation_id and generation.status='published'
+           where fragment.tenant_id=$1) as fragment_count,
+         (select count(*)::text
+            from jina_context.hierarchy_nodes hierarchy
+            join jina_context.index_generations generation
+              on generation.id=hierarchy.generation_id and generation.status='published'
+           where hierarchy.tenant_id=$1) as hierarchy_node_count`,
+      [tenantId]
+    );
+    const row = result.rows[0]!;
+    return {
+      publishedGenerationCount: Number(row.published_generation_count),
+      documentCount: Number(row.document_count),
+      fragmentCount: Number(row.fragment_count),
+      hierarchyNodeCount: Number(row.hierarchy_node_count)
+    };
+  }
+
   async eraseEvidence(input: EraseEvidenceInput): Promise<{ erasedGenerationCount: number }> {
     if (!input.sourceId.trim() || !input.actorId.trim() || !input.reason.trim()) {
       throw new Error("Evidence erasure requires sourceId, actorId, and reason");

@@ -145,6 +145,13 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
   }): Promise<RetrievalCandidate[]>;
   recordQueryRun(run: QueryRunTelemetry): Promise<void>;
   queryMetrics(tenantId: string): Promise<QueryMetrics>;
+  /** Aggregate catalog counts without hydrating every immutable release. */
+  contextCatalogMetrics?(tenantId: string): Promise<{
+    readonly publishedGenerationCount: number;
+    readonly documentCount: number;
+    readonly fragmentCount: number;
+    readonly hierarchyNodeCount: number;
+  }>;
   /**
    * Per-principal API tokens. Optional so that a store predating them keeps
    * satisfying this interface, and so that the absence of an implementation

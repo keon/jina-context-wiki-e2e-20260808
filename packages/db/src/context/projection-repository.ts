@@ -45,6 +45,10 @@ interface GenerationRow {
   published_at: Date | null;
 }
 
+interface GenerationListingRow extends GenerationRow {
+  projector_statuses: Partial<Record<ContextProjectionConsumer, ProjectorStatus>>;
+}
+
 export class PostgresProjectionRepository implements ProjectionStore {
   constructor(private readonly database: ContextDatabase) {}
 
@@ -187,24 +191,27 @@ export class PostgresProjectionRepository implements ProjectionStore {
 
   async listGenerations(tenantId: string, repository: string): Promise<IndexGeneration[]> {
     await this.database.initialize();
-    const result = await this.database.queryAs<GenerationRow>(
+    const result = await this.database.queryAs<GenerationListingRow>(
       "jina_context_admin",
       { tenantIds: [tenantId] },
-      `select generation.*
+      `select generation.*,coalesce(projector.statuses,'{}'::jsonb) as projector_statuses
        from jina_context.index_generations generation
        left join jina_context.current_context_board_releases current_release
          on current_release.release_id=generation.id
+       left join lateral (
+         select jsonb_object_agg(status.consumer,status.status) as statuses
+         from jina_context.generation_projectors status
+         where status.generation_id=generation.id
+       ) projector on true
        where generation.tenant_id=$1 and generation.repository=$2
          and generation.status <> 'invalidated'
        order by (current_release.release_id is not null) desc,
                 generation.created_at desc,generation.id desc`,
       [tenantId, repository]
     );
-    const generations: IndexGeneration[] = [];
-    for (const row of result.rows) {
-      generations.push(generationFromRow(row, await this.projectorStatuses(row.id)));
-    }
-    return generations;
+    return result.rows.map((row) =>
+      generationFromRow(row, row.projector_statuses as IndexGeneration["projectorStatuses"])
+    );
   }
 
   private async hydrate(row: GenerationRow, allowedAclFingerprints?: readonly string[]): Promise<GenerationProjection> {
@@ -259,7 +266,9 @@ export class PostgresProjectionRepository implements ProjectionStore {
                 fragment.source_text,fragment.contextual_text,fragment.source_anchors,
                 fragment.source_start,fragment.source_end,fragment.content_fingerprint
            from jina_context.context_fragments fragment
-           join jina_context.context_documents document on document.id=fragment.document_id
+           join jina_context.context_documents document
+             on document.generation_id=fragment.generation_id
+            and document.id=fragment.document_id
            where fragment.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by fragment.document_id,fragment.ordinal`,
@@ -273,7 +282,9 @@ export class PostgresProjectionRepository implements ProjectionStore {
                 hierarchy.preorder_end,hierarchy.source_anchors,hierarchy.adapter_name,
                 hierarchy.adapter_version
            from jina_context.hierarchy_nodes hierarchy
-           join jina_context.context_documents document on document.id=hierarchy.document_id
+           join jina_context.context_documents document
+             on document.generation_id=hierarchy.generation_id
+            and document.id=hierarchy.document_id
            where hierarchy.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by hierarchy.document_id,hierarchy.preorder_start`,

@@ -167,6 +167,8 @@ function storeFor(projections: GenerationProjection[]): ContextEngineStore {
     getAuthorizedGeneration: async (id: string, principalId: string) =>
       principalId === "reader" ? byId.get(id) : undefined,
     getGeneration: async (id: string) => byId.get(id),
+    aclFingerprintsForPrincipal: async (_tenantId: string, principalId: string) =>
+      principalId === "reader" ? ["a".repeat(64)] : [],
     listCitations: async (revisionId: string) => citations.get(revisionId) ?? []
   } as unknown as ContextEngineStore;
 }
@@ -262,6 +264,28 @@ test("release listing preserves the store's authoritative current-before-history
     releases.map((release) => release.id),
     [current.id, historical.id]
   );
+});
+
+test("release listing authorizes metadata without hydrating release contents", async () => {
+  const release = generation("release-current", "2222222222222222222222222222222222222222", "2026-07-29T00:00:00.000Z");
+  const store = storeFor([projection(release, [])]);
+  let hydrationCalls = 0;
+  store.getAuthorizedGeneration = async () => {
+    hydrationCalls += 1;
+    return undefined;
+  };
+
+  const releases = await new ContextCatalogService(store).listReleases({
+    tenantId: "tenant-1",
+    principalId: "reader",
+    repository: "acme/widget"
+  });
+
+  assert.deepEqual(
+    releases.map((candidate) => candidate.id),
+    [release.id]
+  );
+  assert.equal(hydrationCalls, 0);
 });
 
 test("public context search uses deterministic PageIndex-tree retrieval", async () => {

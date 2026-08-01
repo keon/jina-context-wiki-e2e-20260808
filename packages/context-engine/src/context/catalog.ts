@@ -237,16 +237,19 @@ export class ContextCatalogService {
 
   async listReleases(input: Omit<AccessInput, "ref" | "releaseId">): Promise<ContextReleaseRef[]> {
     const generations = await this.store.listGenerations(input.tenantId, input.repository);
-    const releases: ContextReleaseRef[] = [];
-    for (const generation of generations.filter((candidate) => candidate.status === "published")) {
-      const projection = await this.authorizedProjection(input, generation.id);
-      if (projection) releases.push(publicRelease(generation));
-    }
+    const published = generations.filter((candidate) => candidate.status === "published");
+    // Release cards contain generation metadata only. Hydrating every document,
+    // fragment, hierarchy node, and citation merely to authorize that metadata
+    // made the dashboard cost grow with the entire release history.
+    const authorized =
+      input.tenantAdmin ||
+      (await this.store.aclFingerprintsForPrincipal(input.tenantId, input.principalId, input.repository)).length > 0;
+    if (!authorized) return [];
     // Preserve store order. PostgreSQL places each ref's authoritative current
     // pointer before historical releases; re-sorting by a preparation
     // timestamp could otherwise make a rolled-back historical release look
     // current to API clients that select the first release for a ref.
-    return releases;
+    return published.map(publicRelease);
   }
 
   async listContext(input: AccessInput): Promise<{

@@ -547,6 +547,8 @@ create index if not exists context_knowledge_revisions_logical_created
 create index if not exists context_knowledge_revisions_commit_kind
   on jina_context.knowledge_document_revisions
   (tenant_id,repository,commit_sha,logical_id);
+create index if not exists context_knowledge_revisions_id
+  on jina_context.knowledge_document_revisions (id);
 
 -- Existing deployments already protect canonical rows with this trigger. Remove
 -- it inside the schema transaction for the one-time association backfill; the
@@ -613,6 +615,8 @@ alter table jina_context.knowledge_revision_evidence
 create index if not exists context_knowledge_evidence_source
   on jina_context.knowledge_revision_evidence
   (tenant_id,repository,source_type,source_id);
+create index if not exists context_knowledge_evidence_revision
+  on jina_context.knowledge_revision_evidence (revision_id,ordinal);
 
 create table if not exists jina_context.knowledge_revision_events (
   id text not null,
@@ -635,6 +639,8 @@ create table if not exists jina_context.knowledge_revision_events (
 create index if not exists context_knowledge_events_revision
   on jina_context.knowledge_revision_events
   (tenant_id,repository,revision_id,sequence desc);
+create index if not exists context_knowledge_events_revision_lookup
+  on jina_context.knowledge_revision_events (revision_id,sequence);
 
 create table if not exists jina_context.repository_acl_observations (
   id text not null,
@@ -760,6 +766,10 @@ create index if not exists context_generations_published
   on jina_context.index_generations
   (tenant_id,repository,ref_name,published_at desc,id desc)
   where status='published';
+create index if not exists context_generations_dashboard
+  on jina_context.index_generations
+  (tenant_id,repository,created_at desc,id desc)
+  where status <> 'invalidated';
 
 -- Board-native certification publication. The immutable row first binds a
 -- complete prepared projection to its GCS bundle and idempotency input.
@@ -1001,6 +1011,12 @@ create table if not exists jina_context.context_documents (
 create index if not exists context_documents_scope
   on jina_context.context_documents
   (tenant_id,repository,ref_name,generation_id,source_kind,source_id);
+create index if not exists context_documents_manifest_path
+  on jina_context.context_documents (generation_id,(metadata->>'path'))
+  where metadata ? 'path';
+create index if not exists context_documents_revision
+  on jina_context.context_documents (generation_id,source_revision_id)
+  where source_revision_id is not null;
 create index if not exists context_documents_exact
   on jina_context.context_documents using gin (exact_vector);
 create index if not exists context_documents_prose
@@ -1033,6 +1049,9 @@ create table if not exists jina_context.context_fragments (
 );
 create index if not exists context_fragments_scope
   on jina_context.context_fragments (tenant_id,repository,generation_id,document_id,ordinal);
+create index if not exists context_fragments_generation_acl
+  on jina_context.context_fragments
+  (generation_id,effective_acl_fingerprint,document_id,ordinal);
 create index if not exists context_fragments_exact
   on jina_context.context_fragments using gin (exact_vector);
 create index if not exists context_fragments_prose
@@ -1187,6 +1206,10 @@ create table if not exists jina_context.query_runs (
 );
 create index if not exists context_query_runs_scope
   on jina_context.query_runs (tenant_id,repository,started_at desc);
+create index if not exists context_query_runs_completed_metrics
+  on jina_context.query_runs (tenant_id,duration_ms)
+  include (citation_failure_count,conflict_count)
+  where completed_at is not null;
 
 create table if not exists jina_context.retrieval_candidates (
   query_run_id text not null references jina_context.query_runs(id) on delete cascade,

@@ -391,7 +391,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const logger = config.logger ?? createLogger({ service: process.env.K_SERVICE ?? "jina-api" });
   const metrics = new MetricsRegistry();
   const startedAt = nowIso();
-  const contextStore = config.contextStore ?? new MemoryContextEngineStore();
+  const contextStore: ContextEngineStore = config.contextStore ?? new MemoryContextEngineStore();
   const contextCatalog = new ContextCatalogService(contextStore);
   const contextBoardPublisher =
     config.contextArtifactStore && config.contextBoardPublicationTransaction
@@ -2166,16 +2166,26 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const generations = (
       await Promise.all(repositories.map((repository) => contextStore.listGenerations(tenantId, repository)))
     ).flat();
-    const revisions = (
-      await Promise.all(repositories.map((repository) => contextStore.listRevisions(tenantId, repository)))
-    ).flat();
-    let fragmentCount = 0;
-    let hierarchyNodeCount = 0;
-    for (const generation of generations) {
-      const projection = await contextStore.getGeneration(generation.id);
-      fragmentCount += projection?.fragments.length ?? 0;
-      hierarchyNodeCount += projection?.hierarchyNodes.length ?? 0;
-    }
+    const catalogMetrics = contextStore.contextCatalogMetrics
+      ? await contextStore.contextCatalogMetrics(tenantId)
+      : await (async () => {
+          const revisions = (
+            await Promise.all(repositories.map((repository) => contextStore.listRevisions(tenantId, repository)))
+          ).flat();
+          let fragmentCount = 0;
+          let hierarchyNodeCount = 0;
+          for (const generation of generations) {
+            const projection = await contextStore.getGeneration(generation.id);
+            fragmentCount += projection?.fragments.length ?? 0;
+            hierarchyNodeCount += projection?.hierarchyNodes.length ?? 0;
+          }
+          return {
+            publishedGenerationCount: generations.filter((generation) => generation.status === "published").length,
+            documentCount: revisions.length,
+            fragmentCount,
+            hierarchyNodeCount
+          };
+        })();
     const backlog = await contextStore.projectionBacklog(tenantId);
     const oldestPendingAt = Object.values(backlog)
       .map((value) => value.oldestAvailableAt)
@@ -2187,10 +2197,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         Object.entries(backlog).map(([consumer, value]) => [consumer, value.count])
       ),
       ...(oldestPendingAt ? { oldestPendingAt } : {}),
-      publishedGenerationCount: generations.filter((generation) => generation.status === "published").length,
-      documentCount: revisions.length,
-      fragmentCount,
-      hierarchyNodeCount,
+      publishedGenerationCount: catalogMetrics.publishedGenerationCount,
+      documentCount: catalogMetrics.documentCount,
+      fragmentCount: catalogMetrics.fragmentCount,
+      hierarchyNodeCount: catalogMetrics.hierarchyNodeCount,
       embeddingCount: 0,
       query: await contextStore.queryMetrics(tenantId),
       ...(config.contextQuotaService ? { quotas: await config.contextQuotaService.snapshot(tenantId) } : {}),

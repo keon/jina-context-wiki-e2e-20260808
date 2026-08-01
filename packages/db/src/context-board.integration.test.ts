@@ -47,6 +47,16 @@ const PAGEINDEX_TASK_ID = "task_context_pageindex";
 const PAGEINDEX_MESSAGE_ID = "outbox_context_pageindex";
 const RUNTIME_LOGIN = "jina_context_runtime_integration";
 const RUNTIME_PASSWORD = "runtime-integration-password";
+const CONTEXT_READ_PATH_INDEXES = [
+  "context_documents_manifest_path",
+  "context_documents_revision",
+  "context_fragments_generation_acl",
+  "context_generations_dashboard",
+  "context_knowledge_events_revision_lookup",
+  "context_knowledge_evidence_revision",
+  "context_knowledge_revisions_id",
+  "context_query_runs_completed_metrics"
+] as const;
 
 test(
   "Board publication, PageIndex attachment, citations, and tenant quotas survive a fresh Postgres round trip",
@@ -62,6 +72,17 @@ test(
       await database.pool.query("drop schema if exists jina_runtime cascade");
       await database.pool.query("drop schema if exists jina_context cascade");
       await database.initialize();
+      const readPathIndexes = await database.pool.query<{ indexname: string }>(
+        `select indexname
+         from pg_indexes
+         where schemaname='jina_context' and indexname=any($1::text[])
+         order by indexname`,
+        [[...CONTEXT_READ_PATH_INDEXES]]
+      );
+      assert.deepEqual(
+        readPathIndexes.rows.map((row) => row.indexname),
+        [...CONTEXT_READ_PATH_INDEXES].sort()
+      );
       await database.pool.query(`
         create schema jina_runtime;
         create table jina_runtime.api_state (
@@ -265,6 +286,12 @@ test(
         ).map((release) => release.id),
         [publication.commit.releaseId]
       );
+      assert.deepEqual(await preparedStore.contextCatalogMetrics(TENANT), {
+        publishedGenerationCount: 1,
+        documentCount: 1,
+        fragmentCount: 1,
+        hierarchyNodeCount: 1
+      });
 
       const restartedAfterAttach = new ContextDatabase({
         connectionString: databaseUrl,
