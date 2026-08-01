@@ -35,6 +35,7 @@ export function workerFailureCategory(reason: string): WorkerFailureCategory {
   // stage IDs such as "citation" or "context-..." as validation failures.
   if (/board agent stage .* (?:exited with [1-9][0-9]*|exceeded its \d+s budget)/.test(value)) return "model";
   if (
+    value.includes("source_challenge_contract") ||
     /evidence|citation|knowledge output|context result|schema|document|publication plan|research plan|maintenance question|research assignment|repository area|shallow|not valid json|invalid json|outside the repository|does not match/.test(
       value
     )
@@ -63,6 +64,11 @@ export function isRetryableWorkerFailure(reason: string): boolean {
   ) {
     return false;
   }
+  // The challenger already receives one in-stage correction. If that complete
+  // correction still violates the deterministic contract, retry the read-only
+  // task with a fresh agent while retaining every verified page checkpoint.
+  // The board's hard attempt bound prevents an unproductive repair loop.
+  if (/source_challenge_contract/i.test(reason)) return true;
   const category = workerFailureCategory(reason);
   if (
     category === "api_transport" ||

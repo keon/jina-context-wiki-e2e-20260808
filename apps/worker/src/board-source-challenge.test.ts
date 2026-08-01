@@ -129,7 +129,7 @@ test("Board source-challenge validation never retries a rejected correction", as
         return { ...challenge, worker: { ...challenge.worker, id: "still-wrong" } };
       }
     ),
-    /worker id/
+    /source_challenge_contract: source challenge worker id/
   );
   assert.equal(attempts, 1);
 });

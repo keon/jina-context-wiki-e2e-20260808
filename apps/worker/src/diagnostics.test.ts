@@ -30,6 +30,10 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("board agent stage audit-citation-contract exceeded its 600s budget"), "model");
   assert.equal(workerFailureCategory("citation path is outside the checkout"), "context_validation");
   assert.equal(
+    workerFailureCategory("source_challenge_contract: source challenge worker id must be source-challenge-0"),
+    "context_validation"
+  );
+  assert.equal(
     workerFailureCategory("research maintenance question is absent from the page plan"),
     "context_validation"
   );
@@ -41,7 +45,7 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("unexpected failure with private details"), "worker_execution");
 });
 
-test("only transient provider, sandbox, model, and API transport failures retry", () => {
+test("only transient failures and bounded source-challenge corrections retry", () => {
   for (const reason of [
     "Daytona sandbox creation failed",
     "command execution timeout",
@@ -54,7 +58,8 @@ test("only transient provider, sandbox, model, and API transport failures retry"
     "GitHub request failed with 503: service unavailable",
     "Context API /internal/context/board/artifacts failed with 502: bad gateway",
     "This operation was aborted",
-    "fetch failed: ECONNRESET"
+    "fetch failed: ECONNRESET",
+    "source_challenge_contract: source challenge worker id must be source-challenge-0"
   ]) {
     assert.equal(isRetryableWorkerFailure(reason), true, reason);
   }
@@ -87,6 +92,13 @@ test("only transient provider, sandbox, model, and API transport failures retry"
   assert.equal(
     shouldRetryWorkerFailure("citation schema is invalid", {
       attempt: 1,
+      maxAttempts: 4
+    }),
+    false
+  );
+  assert.equal(
+    shouldRetryWorkerFailure("source_challenge_contract: source challenge worker id must be source-challenge-0", {
+      attempt: 4,
       maxAttempts: 4
     }),
     false

@@ -28,6 +28,12 @@ export async function parseBoardSourceChallengeStageResultWithRepair(
     return parseBoardSourceChallengeStageResult(value, expected);
   } catch (error) {
     const diagnostic = error instanceof Error ? error.message : String(error);
-    return parseBoardSourceChallengeStageResult(await repair(diagnostic, value), expected);
+    const corrected = await repair(diagnostic, value);
+    try {
+      return parseBoardSourceChallengeStageResult(corrected, expected);
+    } catch (correctionError) {
+      const correctionDiagnostic = correctionError instanceof Error ? correctionError.message : String(correctionError);
+      throw new Error(`source_challenge_contract: ${correctionDiagnostic}`, { cause: correctionError });
+    }
   }
 }
