@@ -151,7 +151,7 @@ export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, Proje
   repositoryAccessFingerprint(tenantId: string, repository: string): Promise<string>;
   projectionInputFingerprint(tenantId: string, repository: string): Promise<string>;
   listRepositories(tenantId: string): Promise<string[]>;
-  projectionBacklog(tenantId: string): Promise<ProjectionBacklog>;
+  projectionBacklog(tenantId: string, repository?: string): Promise<ProjectionBacklog>;
   pendingProjectionCheckpoints(tenantId: string, limit: number): Promise<string[]>;
   latestAuthorizedGeneration?(
     tenantId: string,

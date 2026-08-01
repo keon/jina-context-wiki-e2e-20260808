@@ -567,7 +567,7 @@ export class MemoryContextEngineStore implements ContextEngineStore {
     return [...repositories].sort();
   }
 
-  async projectionBacklog(_tenantId: string): Promise<ProjectionBacklog> {
+  async projectionBacklog(_tenantId: string, _repository?: string): Promise<ProjectionBacklog> {
     return Object.fromEntries(
       contextProjectionConsumers.map((consumer) => [consumer, { count: 0 }])
     ) as ProjectionBacklog;

@@ -469,6 +469,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
         ]
       );
       const aclId = contextStableId("acl", { observationId, principalId, sequence });
+      const eventId = contextStableId("event", { aclId });
       await client.query(
         `insert into jina_context.repository_acl_observations
           (id,tenant_id,repository,principal_id,permission,acl_fingerprint,
@@ -478,7 +479,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
         [aclId, tenantId, row.repository, principalId, permission, aclFingerprint, observationId, observedAt]
       );
       await enqueueContextEvent(client, {
-        id: contextStableId("event", { aclId }),
+        id: eventId,
         sequence: 1,
         tenantId,
         repository: row.repository,
@@ -489,6 +490,24 @@ export class PostgresContextEngineStore implements ContextEngineStore {
         consumers: ["acl", "retention"],
         occurredAt: observedAt
       });
+      await client.query(
+        `insert into jina_context.repository_acl_projection
+          (generation_id,tenant_id,repository,principal_id,permission,acl_fingerprint,source_observation_id)
+         select generation.id,$1,$2,$3,$4,$5,$6
+         from jina_context.index_generations generation
+         where generation.tenant_id=$1 and generation.repository=$2 and generation.status='published'
+         on conflict (generation_id,principal_id) do update
+           set permission=excluded.permission,
+               acl_fingerprint=excluded.acl_fingerprint,
+               source_observation_id=excluded.source_observation_id`,
+        [tenantId, row.repository, principalId, permission, aclFingerprint, observationId]
+      );
+      await client.query(
+        `update jina_context.outbox
+         set processed_at=$2,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
+         where event_id=$1 and consumer in ('acl','retention') and processed_at is null`,
+        [eventId, observedAt]
+      );
     }
   }
 
@@ -547,7 +566,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     return result.rows.map((row) => row.repository);
   }
 
-  async projectionBacklog(tenantId: string): Promise<ProjectionBacklog> {
+  async projectionBacklog(tenantId: string, repository?: string): Promise<ProjectionBacklog> {
     await this.database.initialize();
     const result = await this.database.queryAs<{
       consumer: keyof ProjectionBacklog;
@@ -559,8 +578,9 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       `select consumer,count(*)::text as count,min(available_at) as oldest
        from jina_context.outbox
        where tenant_id=$1 and processed_at is null
+         and ($2::text is null or repository=$2)
        group by consumer`,
-      [tenantId],
+      [tenantId, repository ?? null],
       "context.metrics.projection-backlog"
     );
     const byConsumer = new Map(result.rows.map((row) => [row.consumer, row]));

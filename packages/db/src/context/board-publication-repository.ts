@@ -917,6 +917,7 @@ async function persistProjection(
       ]
     );
   }
+  await refreshRepositoryAclProjection(client, generation.id, generation.tenantId, generation.repository);
   const manifestRows = input.snapshot.manifest.map((entry) => ({
     generation_id: generation.id,
     tenant_id: entry.tenantId,
@@ -1059,6 +1060,29 @@ async function persistProjection(
        generation_id text,term text,document_id text,field text
      )`,
     [JSON.stringify(exact)]
+  );
+}
+
+export async function refreshRepositoryAclProjection(
+  client: PoolClient,
+  generationId: string,
+  tenantId: string,
+  repository: string
+): Promise<void> {
+  await client.query(
+    `insert into jina_context.repository_acl_projection
+      (generation_id,tenant_id,repository,principal_id,permission,acl_fingerprint,source_observation_id)
+     select distinct on (acl.principal_id)
+       $1,acl.tenant_id,acl.repository,acl.principal_id,acl.permission,
+       acl.acl_fingerprint,acl.source_observation_id
+     from jina_context.repository_acl_observations acl
+     where acl.tenant_id=$2 and acl.repository=$3
+     order by acl.principal_id,acl.observed_at desc,acl.id desc
+     on conflict (generation_id,principal_id) do update
+       set permission=excluded.permission,
+           acl_fingerprint=excluded.acl_fingerprint,
+           source_observation_id=excluded.source_observation_id`,
+    [generationId, tenantId, repository]
   );
 }
 

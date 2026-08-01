@@ -421,7 +421,9 @@ export async function runProductionContextAcceptance(
   // fails if it stays.
   const backlogDeadline = Date.now() + (optionalPositiveInteger(process.env.ACCEPTANCE_BACKLOG_TIMEOUT_MS) ?? 120_000);
   for (;;) {
-    const metrics = await apiJson(fetchImpl, `${apiUrl}/context/metrics`, { headers: internalHeaders });
+    const metrics = await apiJson(fetchImpl, `${apiUrl}/context/metrics?repository=${encodeURIComponent(repository)}`, {
+      headers: internalHeaders
+    });
     const pending = Object.entries(record(metrics.outboxDepthByConsumer)).filter(([, value]) => Number(value) > 0);
     if (pending.length === 0) break;
     if (Date.now() >= backlogDeadline) {

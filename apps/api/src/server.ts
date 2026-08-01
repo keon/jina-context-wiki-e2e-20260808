@@ -1478,7 +1478,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "GET" && url.pathname === "/context/metrics") {
       requireTenantAdmin(principal);
-      json(response, 200, await contextMetrics(principal.tenantId));
+      json(response, 200, await contextMetrics(principal.tenantId, url.searchParams.get("repository") ?? undefined));
       return;
     }
     if (request.method === "GET" && url.pathname === "/board") {
@@ -2216,7 +2216,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     json(response, 200, { token: publicApiToken(revoked) });
   }
 
-  async function contextMetrics(tenantId: string) {
+  async function contextMetrics(tenantId: string, repository?: string) {
     const repositories = await contextStore.listRepositories(tenantId);
     const generations = (
       await Promise.all(repositories.map((repository) => contextStore.listGenerations(tenantId, repository)))
@@ -2241,7 +2241,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             hierarchyNodeCount
           };
         })();
-    const backlog = await contextStore.projectionBacklog(tenantId);
+    const backlog = await contextStore.projectionBacklog(tenantId, repository);
     const oldestPendingAt = Object.values(backlog)
       .map((value) => value.oldestAvailableAt)
       .filter((value): value is string => Boolean(value))

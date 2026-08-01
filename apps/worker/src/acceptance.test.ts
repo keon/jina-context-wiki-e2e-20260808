@@ -286,6 +286,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
   let staleTokenRevoked = false;
   const requested: string[] = [];
   const requestedAuthorization: string[] = [];
+  const metricsRepositories: (string | null)[] = [];
   let buildRequest: Record<string, unknown> | undefined;
   let accessSyncRequest: Record<string, unknown> | undefined;
   let tokenMintRequest: Record<string, unknown> | undefined;
@@ -618,6 +619,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
       });
     }
     if (url.pathname === "/context/metrics") {
+      metricsRepositories.push(url.searchParams.get("repository"));
       return authorization === `Bearer ${issuedSecret}`
         ? json({ error: "token scope does not permit this route", code: "insufficient_scope" }, 403)
         : json({ outboxDepthByConsumer: { lexical: 0 } });
@@ -700,6 +702,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
   assert.equal(tokenRevoked, true);
   assert.equal(staleTokenRevoked, true);
   assert.equal(principalSpoofRejected, true);
+  assert.deepEqual(metricsRepositories, [null, "omlabs/repo"]);
   assert.deepEqual(requested, [
     "GET /health",
     "GET /health",

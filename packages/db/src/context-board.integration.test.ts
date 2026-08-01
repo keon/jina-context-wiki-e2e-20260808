@@ -95,6 +95,8 @@ test(
       `);
 
       const publication = await publicationFixture();
+      const accessStore = new PostgresContextEngineStore(database);
+      await accessStore.replaceRepositoryAccess(TENANT, "user:context-reader", [REPOSITORY]);
       await saveBoardState(database, publicationBoardState(publication.commit));
       const publisher = new PostgresBoardContextPublicationRepository(database);
 
@@ -103,6 +105,16 @@ test(
         publisher.publishAtomically(publication.commit)
       ]);
       assert.deepEqual(replay, first);
+      assert.equal(
+        (
+          await database.pool.query(
+            `select 1 from jina_context.repository_acl_projection
+             where generation_id=$1 and principal_id='user:context-reader' and permission='read'`,
+            [publication.commit.releaseId]
+          )
+        ).rowCount,
+        1
+      );
       const publicationCount = await database.pool.query<{ count: string }>(
         "select count(*)::text count from jina_context.context_board_publications where release_id=$1",
         [publication.commit.releaseId]
@@ -277,6 +289,26 @@ test(
         publication.commit.releaseId
       );
       await preparedStore.replaceRepositoryAccess(TENANT, "tenant-admin", [REPOSITORY]);
+      assert.equal(
+        (
+          await database.pool.query(
+            `select 1 from jina_context.repository_acl_projection
+             where generation_id=$1 and principal_id='tenant-admin' and permission='read'`,
+            [publication.commit.releaseId]
+          )
+        ).rowCount,
+        1
+      );
+      assert.equal(
+        (
+          await database.pool.query(
+            `select 1 from jina_context.outbox
+             where tenant_id=$1 and repository=$2 and aggregate_type='access' and processed_at is null`,
+            [TENANT, REPOSITORY]
+          )
+        ).rowCount,
+        0
+      );
       const authorizedGeneration = await preparedStore.latestAuthorizedGeneration(
         TENANT,
         REPOSITORY,

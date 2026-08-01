@@ -14,6 +14,7 @@ import {
 } from "@jina/context-engine";
 import type { PoolClient } from "pg";
 import { ContextDatabase, dateString } from "./database.js";
+import { refreshRepositoryAclProjection } from "./board-publication-repository.js";
 
 // Publication and attachment serialize on the same ref frontier. Publication
 // prepares immutable rows; attachment is the only operation that may advance
@@ -210,6 +211,7 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
           "hierarchy projector was not in an attachable state"
         );
       }
+      await refreshRepositoryAclProjection(client, input.releaseId, input.scope.tenantId, input.scope.repository);
       const generation = await client.query(
         `update jina_context.index_generations
          set projector_versions=jsonb_set(projector_versions,'{hierarchy}',$2::jsonb,true),
@@ -305,6 +307,12 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
           "the public current release pointer changed before PageIndex attachment commit"
         );
       }
+      await acknowledgePublishedAccessDeliveries(
+        client,
+        input.scope.tenantId,
+        input.scope.repository,
+        input.attachedAt
+      );
       const commitLease = assertLivePageIndexLease(boardSnapshot, input, await databaseClockMillis(client));
       assertAttachmentFrontier(commitLease.latestAdmittedSequence, input.scope.refSequence, currentSequence);
       await client.query("commit");
@@ -320,6 +328,39 @@ export class PostgresBoardPageIndexAttachmentRepository implements BoardPageInde
       client.release();
     }
   }
+}
+
+async function acknowledgePublishedAccessDeliveries(
+  client: PoolClient,
+  tenantId: string,
+  repository: string,
+  processedAt: string
+): Promise<void> {
+  await client.query(
+    `update jina_context.outbox delivery
+     set processed_at=$3,lease_id=null,lease_owner=null,lease_expires_at=null,last_error=null
+     where delivery.tenant_id=$1 and delivery.repository=$2
+       and delivery.aggregate_type='access' and delivery.processed_at is null
+       and delivery.consumer in ('acl','retention')
+       and not exists (
+         select 1
+         from jina_context.current_context_board_releases current_release
+         cross join jina_context.current_repository_acl current_acl
+         where current_release.tenant_id=delivery.tenant_id
+           and current_release.repository=delivery.repository
+           and current_acl.tenant_id=current_release.tenant_id
+           and current_acl.repository=current_release.repository
+           and not exists (
+             select 1
+             from jina_context.repository_acl_projection projected_acl
+             where projected_acl.generation_id=current_release.release_id
+               and projected_acl.principal_id=current_acl.principal_id
+               and projected_acl.permission=current_acl.permission
+               and projected_acl.acl_fingerprint=current_acl.acl_fingerprint
+           )
+       )`,
+    [tenantId, repository, processedAt]
+  );
 }
 
 function assertLivePageIndexLease(
