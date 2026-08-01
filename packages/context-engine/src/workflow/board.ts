@@ -276,6 +276,7 @@ export type ContextBoardTaskResult =
       readonly verdict: "supported" | "unsupported";
       readonly publicSnapshotDigest: string;
       readonly unsupportedCitationCount: number;
+      readonly diagnostics: readonly string[];
     }
   | {
       readonly version: 1;
@@ -396,7 +397,9 @@ export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, v
         taskType: task.type,
         verdict,
         publicSnapshotDigest: requiredDigest(result.publicSnapshotDigest, "publicSnapshotDigest"),
-        unsupportedCitationCount
+        unsupportedCitationCount,
+        diagnostics:
+          result.diagnostics === undefined ? [] : requiredBoundedStrings(result.diagnostics, "diagnostics", 32, 500)
       };
     }
     case contextBoardTaskTypes.sourceChallenge:
@@ -1745,6 +1748,18 @@ function requiredBoundedString(value: unknown, name: string, maximumLength: numb
     throw new Error(`${name} must be a non-empty string of at most ${maximumLength} characters`);
   }
   return value.trim();
+}
+
+function requiredBoundedStrings(
+  value: unknown,
+  name: string,
+  maximumItems: number,
+  maximumLength: number
+): readonly string[] {
+  if (!Array.isArray(value) || value.length > maximumItems) {
+    throw new Error(`${name} must contain at most ${maximumItems} items`);
+  }
+  return value.map((item, index) => requiredBoundedString(item, `${name}[${index}]`, maximumLength));
 }
 
 function requiredKey(value: unknown, name: string): string {

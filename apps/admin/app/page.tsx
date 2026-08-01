@@ -200,6 +200,17 @@ export default async function ContextAdminPage({
                         <>
                           {compactNumber(progress?.consumedModelTokens ?? build.consumedModelTokens ?? 0)} /{" "}
                           {compactNumber(build.derivationTokenBudget)} tokens
+                          {(progress?.activeModelReservedTokens ?? build.activeModelReservedTokens ?? 0) > 0 ? (
+                            <>
+                              <br />
+                              <span className="muted">
+                                {compactNumber(
+                                  progress?.activeModelReservedTokens ?? build.activeModelReservedTokens ?? 0
+                                )}{" "}
+                                actively reserved
+                              </span>
+                            </>
+                          ) : null}
                         </>
                       ) : (
                         "not recorded"
@@ -224,7 +235,12 @@ export default async function ContextAdminPage({
                           {activeStages.map((stage) => (
                             <li key={stage.id}>
                               <strong>{stage.title}</strong>: {stage.status.replaceAll("_", " ")} · attempt{" "}
-                              {stage.attempt} · updated {formatTimestamp(stage.updatedAt)}
+                              {stage.attempt}
+                              {stage.modelTotalTokens !== undefined
+                                ? ` · ${compactNumber(stage.modelTotalTokens)} tokens`
+                                : ""}
+                              {stage.lastRetryFailureReason ? ` · previous: ${stage.lastRetryFailureReason}` : ""} ·
+                              updated {formatTimestamp(stage.updatedAt)}
                             </li>
                           ))}
                         </ul>

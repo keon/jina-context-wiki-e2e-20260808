@@ -27,7 +27,7 @@ export function workerFailureCategory(reason: string): WorkerFailureCategory {
   if (/github.*(?:timed out|timeout)|(?:timed out|timeout).*github/.test(value)) return "github_timeout";
   if (/github request|github response|github installation token/.test(value)) return "github_response";
   if (/clone|repository ref|prepared commit|git fetch|git checkout/.test(value)) return "git_checkout";
-  if (/daytona|sandbox/.test(value)) return "daytona";
+  if (/daytona|sandbox|command execution timeout|operation timed out/.test(value)) return "daytona";
   // The isolated board-agent process is the model transport boundary. A
   // non-zero Codex exit or hard model wall-clock can be caused by transient
   // provider capacity before the agent emits a result (and before there is

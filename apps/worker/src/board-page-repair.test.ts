@@ -91,7 +91,7 @@ test("page repair resolves dependency IDs to public paths", () => {
   assert.match(prompt, /reread every exact structural problem/);
 });
 
-test("page repair protects proven citation IDs and escalates after a retained no-progress checkpoint", () => {
+test("page repair preserves relevant proven facts and escalates after a retained no-progress checkpoint", () => {
   const prompt = pageRepairCoveragePrompt(api, [architecture, api], {
     supportedCitationIds: ["cite_supported"],
     priorCheckpoint: {
@@ -104,7 +104,8 @@ test("page repair protects proven citation IDs and escalates after a retained no
   assert.match(prompt, /CONVERGENCE ESCALATION/);
   assert.match(prompt, /Rewrite the complete page/);
   assert.match(prompt, /bounded host limit/);
-  assert.match(prompt, /Preserve the Markdown evidence link.*verbatim/);
+  assert.match(prompt, /Preserve their supported facts when they remain relevant/);
+  assert.match(prompt, /independently audited again/);
   assert.match(prompt, /cite_supported/);
 });
 
@@ -115,7 +116,7 @@ test("operator remediation prompt targets the remaining findings after the ordin
   });
   assert.match(prompt, /OPERATOR REMEDIATION PASS 9/);
   assert.match(prompt, /Resolve only the exact remaining host findings/);
-  assert.match(prompt, /Preserve every unrelated supported binding verbatim/);
+  assert.match(prompt, /Prefer leaving unrelated proven links unchanged/);
   assert.match(prompt, /Do not repeat a prior edit/);
 });
 
@@ -205,7 +206,7 @@ test("page repair monotonicity rejects structural regressions and invented sourc
   assert.match(problems.join("\n"), /invalid or unavailable source binding.*identity collision/);
 });
 
-test("page repair monotonicity protects supported references but permits removal of unsupported ones", () => {
+test("page repair monotonicity permits citation replacement before independent re-audit", () => {
   const supported = citationReference("cite_supported", "src/server.ts#L10-L18");
   const unsupported = citationReference("cite_unsupported", "src/legacy.ts#L1-L8");
   const candidate = [{ ...unsupported, citationId: "cite_replacement" }];
@@ -218,7 +219,7 @@ test("page repair monotonicity protects supported references but permits removal
     candidateStructuralProblems: [],
     candidatePlanStructuralProblems: []
   });
-  assert.deepEqual(lost, ["repair lost 1 previously valid source-bound citation reference(s)"]);
+  assert.deepEqual(lost, []);
 
   const unsupportedRemoved = pageRepairRegressionProblems({
     priorReferences: [supported, unsupported],

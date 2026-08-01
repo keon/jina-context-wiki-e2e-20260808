@@ -78,8 +78,8 @@ export function pageRepairCoveragePrompt(
       ? "This checkpoint has structural findings only; no semantic citation audit exists. Do not assume that every unaudited prior binding is proven-supported. You may replace or remove an unaudited binding when doing so reduces the exact structural findings without introducing a new invalid binding."
       : supportedCitationIds.length > 0
         ? [
-            "The independent semantic auditor already proved the following citation IDs. Preserve the Markdown evidence link behind every listed ID verbatim—including its visible linked words, target, and occurrence—unless the host finding explicitly rejects that same binding.",
-            "Do not recreate or reword a proven link: citation IDs are host-derived, so copying the complete existing Markdown link verbatim is the reliable way to preserve the proven-supported ID.",
+            "The independent semantic auditor already proved the following citation IDs. Preserve their supported facts when they remain relevant, but you may rewrite or remove a link when resolving a compound claim or reorganizing the page; the candidate will be independently audited again.",
+            "Prefer leaving unrelated proven links unchanged. Do not preserve a link at the cost of keeping an unsupported compound assertion.",
             `Proven-supported citation IDs:\n${JSON.stringify(supportedCitationIds, null, 2)}`
           ].join("\n\n")
         : "A semantic audit ran, but it did not prove any current citation binding. Do not describe an unaudited or unsupported binding as proven.",
@@ -112,10 +112,10 @@ export function pageRepairCoveragePrompt(
  *
  * Structural diagnostics and plan coverage are compared independently so a
  * repair cannot trade a missing diagram or valid source binding for a lower
- * count elsewhere. References already accepted by the independent auditor are
- * protected by their immutable source binding, not by claim text or citation
- * identity, which allows a supported assertion to be reworded without allowing
- * its evidence to disappear.
+ * count elsewhere. The candidate receives a fresh independent citation audit,
+ * so this structural guard preserves subject and plan coverage without freezing
+ * every prior citation. A correct repair may remove a compound claim, replace
+ * its source, or reorganize a section before that audit runs.
  */
 export function pageRepairRegressionProblems(input: {
   readonly priorReferences: readonly CitationAuditReference[];
@@ -147,23 +147,6 @@ export function pageRepairRegressionProblems(input: {
     }
   }
 
-  const protectedIds =
-    input.priorSupportedCitationIds === undefined ? new Set<string>() : new Set(input.priorSupportedCitationIds);
-  const protectedReferences = input.priorReferences.filter((reference) => protectedIds.has(reference.citationId));
-  const remainingCandidateBindings = referenceBindingCounts(input.candidateReferences);
-  let lostReferences = 0;
-  for (const reference of protectedReferences) {
-    const binding = referenceBinding(reference);
-    const remaining = remainingCandidateBindings.get(binding) ?? 0;
-    if (remaining === 0) {
-      lostReferences += 1;
-      continue;
-    }
-    remainingCandidateBindings.set(binding, remaining - 1);
-  }
-  if (lostReferences > 0) {
-    problems.push(`repair lost ${lostReferences} previously valid source-bound citation reference(s)`);
-  }
   return problems;
 }
 
@@ -357,28 +340,6 @@ function isSourceBindingProblem(problem: string): boolean {
   return /^(?:repository citation (?:has no complete path and range|path is unavailable|range is invalid|range exceeds)|provider citation does not bind|citation identity collision)/.test(
     problem
   );
-}
-
-function referenceBindingCounts(references: readonly CitationAuditReference[]): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const reference of references) {
-    const binding = referenceBinding(reference);
-    counts.set(binding, (counts.get(binding) ?? 0) + 1);
-  }
-  return counts;
-}
-
-function referenceBinding(reference: CitationAuditReference): string {
-  return JSON.stringify([
-    reference.sourceType,
-    reference.sourceId,
-    reference.contentDigest,
-    reference.target,
-    reference.pathOrUrl ?? null,
-    reference.startLine ?? null,
-    reference.endLine ?? null,
-    reference.jsonPointer ?? null
-  ]);
 }
 
 function sameStringMultiset(left: readonly string[], right: readonly string[]): boolean {

@@ -14,6 +14,8 @@ test("worker diagnostics expose only stable failure categories", () => {
   assert.equal(workerFailureCategory("GitHub response is not an object array"), "github_response");
   assert.equal(workerFailureCategory("Unable to fetch prepared commit"), "git_checkout");
   assert.equal(workerFailureCategory("Daytona sandbox creation failed"), "daytona");
+  assert.equal(workerFailureCategory("command execution timeout"), "daytona");
+  assert.equal(workerFailureCategory("Operation timed out"), "daytona");
   assert.equal(workerFailureCategory("Codex context build failed"), "model");
   assert.equal(
     workerFailureCategory("stream disconnected before completion: Codex provider websocket failed"),
@@ -42,6 +44,8 @@ test("worker diagnostics expose only stable failure categories", () => {
 test("only transient provider, sandbox, model, and API transport failures retry", () => {
   for (const reason of [
     "Daytona sandbox creation failed",
+    "command execution timeout",
+    "Operation timed out",
     "OpenAI model_provider temporarily unavailable",
     "board agent stage repair-context-projection-and-indexing-md-7 exited with 1: Reading prompt from stdin...",
     "board agent stage audit-citation-contract exceeded its 600s budget",

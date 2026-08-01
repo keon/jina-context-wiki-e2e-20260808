@@ -10,17 +10,20 @@ Source text and credentials must never be metric labels or routine logs.
 `@jina/observability` emits one JSON document per event with `severity`, `time`, a
 human-readable `message`, and a stable `event` field.
 
-| Event                                              | Service        | Meaning                                                                    |
-| -------------------------------------------------- | -------------- | -------------------------------------------------------------------------- |
-| `http.request`                                     | API            | Completed request with low-cardinality route, method, status, and duration |
-| `http.request.error`                               | API            | Handler error, mapped status, and diagnostic fields                        |
-| `github.webhook`                                   | API            | Delivery outcome, repository, and task count                               |
-| `stage.completed` / `stage.failed`                 | workers        | Board topic, task, repository, duration, and redacted failure category     |
-| `worker.started`                                   | workers        | Worker identity and configured topics                                      |
-| `worker.poll_failed`                               | workers        | API polling/control-plane failure                                          |
-| `worker.lease_lost` / `worker.lease_renewal_retry` | workers        | Lease fencing or renewal health                                            |
-| `worker.lease_release_failed`                      | workers        | Failed release after an incomplete execution                               |
-| `ingest.github_source_unavailable`                 | context worker | Optional provider endpoint unavailable during bounded intake               |
+| Event                                                | Service        | Meaning                                                                                       |
+| ---------------------------------------------------- | -------------- | --------------------------------------------------------------------------------------------- |
+| `http.request`                                       | API            | Completed request with low-cardinality route, method, status, and duration                    |
+| `http.request.error`                                 | API            | Handler error, mapped status, and diagnostic fields                                           |
+| `github.webhook`                                     | API            | Delivery outcome, repository, and task count                                                  |
+| `stage.started` / `stage.completed` / `stage.failed` | workers        | Build, topic, task, attempt, duration, exact model-token usage, and redacted failure category |
+| `context.page_draft_created`                         | context worker | Draft bytes, citation count, and deterministic structural findings                            |
+| `context.page_audit_evaluated`                       | context worker | Audit pass, structural and unsupported-citation counts, and bounded diagnostics               |
+| `context.page_repair_evaluated`                      | context worker | Repair pass, candidate findings, and regression-retention decision                            |
+| `worker.started`                                     | workers        | Worker identity and configured topics                                                         |
+| `worker.poll_failed`                                 | workers        | API polling/control-plane failure                                                             |
+| `worker.lease_lost` / `worker.lease_renewal_retry`   | workers        | Lease fencing or renewal health                                                               |
+| `worker.lease_release_failed`                        | workers        | Failed release after an incomplete execution                                                  |
+| `ingest.github_source_unavailable`                   | context worker | Optional provider endpoint unavailable during bounded intake                                  |
 
 Unknown raw paths are logged as `(unknown)`, preventing attacker-controlled
 high-cardinality route labels. Healthy probes are counted without routine info logs.
@@ -47,6 +50,11 @@ GitHub delivery
 
 The API response exposes only the query `traceId`; authenticated task and release
 views provide the remaining operational identities.
+
+Authenticated build progress exposes per-stage input, cached-input, output, and total
+model tokens, current build reservations and remaining budget, the latest retry reason,
+and bounded page diagnostics. This state is durable on the Board and survives worker or
+dashboard restarts; Cloud Logging supplies the higher-cardinality execution timeline.
 
 ## Live metrics
 
@@ -155,6 +163,8 @@ Notification channels are configured in Cloud Monitoring, not in application sou
 ```text
 jsonPayload.event="stage.failed"
 jsonPayload.event="stage.completed" AND jsonPayload.topic="run-context-pageindex"
+jsonPayload.event="context.page_audit_evaluated" AND jsonPayload.unsupportedCitationCount>0
+jsonPayload.event="context.page_repair_evaluated" AND jsonPayload.regressionProblemCount>0
 jsonPayload.event="http.request" AND severity>=ERROR
 jsonPayload.event="github.webhook"
 jsonPayload.taskId="<task id>"

@@ -279,7 +279,7 @@ the same limits through `search_context`; `list_context`, `read_context`, and
 | `_JINA_TRIGGER_ACCEPTANCE_GITHUB_APP_PRIVATE_KEY_SECRET` | `jina-trigger-acceptance-github-app-private-key` | Secret containing the fixture-mutation App PEM key.                                                        |
 | `_JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID`        |                                      `150069172` | Fixture-only mutation App installation; must differ from the operational installation.                     |
 | `_JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS`             |                                          `10800` | Three-hour agent-stage budget for the measured 2.5-hour full build.                                        |
-| `_JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET`               |                                       `12000000` | Hard input-plus-output model-token ceiling for the acceptance build.                                       |
+| `_JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET`               |                                       `24000000` | Hard input-plus-output model-token ceiling for the acceptance build.                                       |
 | `_JINA_ACCEPTANCE_TIMEOUT_MS`                            |                                       `10800000` | Three-hour acceptance polling window.                                                                      |
 | `_JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS`                   |                                          `11700` | Three hours fifteen minutes, leaving cleanup/logging time.                                                 |
 | `_JINA_DEPLOYMENT_ACCEPTANCE_MODE`                       |                                           `full` | `full` runs the release Context build; explicit `mechanical` gates only on candidate readiness.            |
@@ -976,7 +976,7 @@ job: ACCEPTANCE_WEB_AUTH_PASSWORD=<Secret Manager: app-level password>
 job: ACCEPTANCE_GITHUB_INSTALLATION_ID=<fixture installation>
 job: ACCEPTANCE_REQUEST_KEY=deploy-<Cloud Build ID>
 job: ACCEPTANCE_DERIVATION_BUDGET_SECONDS=10800
-job: ACCEPTANCE_DERIVATION_TOKEN_BUDGET=12000000
+job: ACCEPTANCE_DERIVATION_TOKEN_BUDGET=24000000
 job: ACCEPTANCE_TIMEOUT_MS=10800000
 ```
 

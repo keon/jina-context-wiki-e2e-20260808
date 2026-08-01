@@ -457,6 +457,17 @@ async function execute(work: ClaimedWork): Promise<void> {
     : undefined;
   activeModelUsageObserved = false;
   const startedAt = Date.now();
+  const startedMetadata = work.task.metadata as Record<string, unknown>;
+  logger.info(`${work.message.topic} started for task ${work.task.id}`, {
+    event: "stage.started",
+    workerId,
+    topic: work.message.topic,
+    taskId: work.task.id,
+    attempt: work.message.attempt ?? 1,
+    ...(typeof startedMetadata.contextBuildId === "string" ? { contextBuildId: startedMetadata.contextBuildId } : {}),
+    ...(typeof startedMetadata.repository === "string" ? { repository: startedMetadata.repository } : {}),
+    ...(typeof startedMetadata.ref === "string" ? { ref: startedMetadata.ref } : {})
+  });
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
   const buildDeadlineTimer = scheduleBuildDeadline(work, lease.controller);
@@ -568,9 +579,20 @@ function logStageOutcome(
     workerId,
     topic: work.message.topic,
     taskId: work.task.id,
+    attempt: work.message.attempt ?? 1,
+    ...(typeof metadata.contextBuildId === "string" ? { contextBuildId: metadata.contextBuildId } : {}),
     ...(typeof metadata.repository === "string" ? { repository: metadata.repository } : {}),
     ...(typeof metadata.ref === "string" ? { ref: metadata.ref } : {}),
-    durationMs
+    durationMs,
+    ...(activeModelUsage
+      ? {
+          modelInputTokens: activeModelUsage.inputTokens,
+          modelCachedInputTokens: activeModelUsage.cachedInputTokens,
+          modelOutputTokens: activeModelUsage.outputTokens,
+          modelTotalTokens: activeModelUsage.inputTokens + activeModelUsage.outputTokens,
+          modelUsageObserved: activeModelUsageObserved
+        }
+      : {})
   };
   const stageLogger = logger.withTrace(generateTraceContext());
   metrics.observe("worker.stage.duration_ms", durationMs, { topic: work.message.topic });
@@ -1322,6 +1344,28 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
     await assertOnlyContextPage(outputDirectory, page.path);
     const bodyMarkdown = canonicalPublicPageMarkdown(await readFile(join(outputDirectory, page.path), "utf8"));
     if (bodyMarkdown.trim().length < 400) throw new Error(`page writer returned a shallow page for ${page.path}`);
+    const draftInventory = boardPageAuditInventory({
+      documentPath: page.path,
+      bodyMarkdown,
+      snapshot
+    });
+    const draftStructuralProblems = [
+      ...draftInventory.structuralProblems,
+      ...pagePlanStructuralProblems(page, publication.plan.pages, bodyMarkdown)
+    ];
+    logger.info(`page writer produced ${page.path}`, {
+      event: "context.page_draft_created",
+      workerId,
+      taskId: work.task.id,
+      contextBuildId: work.task.metadata.contextBuildId,
+      repository: snapshot.repository,
+      ref: snapshot.ref,
+      documentPath: page.path,
+      bytes: Buffer.byteLength(bodyMarkdown, "utf8"),
+      referenceCount: draftInventory.references.length,
+      structuralProblemCount: draftStructuralProblems.length,
+      structuralProblems: draftStructuralProblems.slice(0, 32).map((problem) => problem.slice(0, 500))
+    });
     const publicSnapshotDigest = boardPublicPageDigest(page.path, bodyMarkdown);
     const outputArtifact = await uploadContextBoardArtifact(work, {
       kind: "context-page",
@@ -1522,6 +1566,28 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
   }
   const unsupportedCitationCount =
     structuralProblems.length + (audit?.results.filter((candidate) => candidate.verdict === "unsupported").length ?? 0);
+  const diagnostics = [
+    ...structuralProblems,
+    ...(audit?.results
+      .filter((candidate) => candidate.verdict === "unsupported")
+      .map((candidate) => `Unsupported ${candidate.citationId}: ${candidate.rationale}`) ?? [])
+  ]
+    .slice(0, 32)
+    .map((diagnostic) => diagnostic.slice(0, 500));
+  logger.info(`citation audit evaluated ${page.documentPath}`, {
+    event: "context.page_audit_evaluated",
+    workerId,
+    taskId: work.task.id,
+    contextBuildId: work.task.metadata.contextBuildId,
+    repository: snapshot.repository,
+    ref: snapshot.ref,
+    documentPath: page.documentPath,
+    pass: work.task.metadata.pass,
+    referenceCount: inventory.references.length,
+    structuralProblemCount: structuralProblems.length,
+    unsupportedCitationCount,
+    diagnostics
+  });
   const outputArtifact = await uploadContextBoardArtifact(work, {
     kind: "citation-audit",
     name: `${pageArtifactName(page.documentPath)}.json`,
@@ -1545,7 +1611,8 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
     outputArtifact,
     verdict: unsupportedCitationCount === 0 ? "supported" : "unsupported",
     publicSnapshotDigest,
-    unsupportedCitationCount
+    unsupportedCitationCount,
+    diagnostics
   };
 }
 
@@ -1673,6 +1740,20 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
         candidateBodyMarkdown: bodyMarkdown
       })
     ];
+    logger.info(`citation repair evaluated ${page.documentPath}`, {
+      event: "context.page_repair_evaluated",
+      workerId,
+      taskId: work.task.id,
+      contextBuildId: work.task.metadata.contextBuildId,
+      repository: snapshot.repository,
+      ref: snapshot.ref,
+      documentPath: page.documentPath,
+      pass: work.task.metadata.pass,
+      priorStructuralProblemCount: findings.structuralProblems.length,
+      candidateStructuralProblemCount: candidateStructuralProblems.length,
+      regressionProblemCount: regressionProblems.length,
+      regressionProblems: regressionProblems.slice(0, 16).map((problem) => problem.slice(0, 500))
+    });
     const checkpointDiagnostics =
       regressionProblems.length === 0
         ? undefined

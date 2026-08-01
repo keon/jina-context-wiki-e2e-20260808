@@ -536,7 +536,7 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
     try {
       return await this.#run(input, credential, protectedValues);
     } catch (error) {
-      throw redactedError(error, protectedValues);
+      throw normalizedDaytonaStageError(error, input.id, input.limits.timeoutSeconds, protectedValues);
     } finally {
       if (rawCredential) this.#protectedValues = [];
     }
@@ -694,6 +694,19 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
       await sandbox.delete(this.#setupTimeoutSeconds, true).catch(() => undefined);
     }
   }
+}
+
+function normalizedDaytonaStageError(
+  error: unknown,
+  stageId: string,
+  timeoutSeconds: number,
+  protectedValues: readonly string[]
+): Error {
+  const redacted = redactedError(error, protectedValues);
+  if (/command execution timeout|operation timed out|timed out|timeout(?:error)?/i.test(redacted.message)) {
+    return new Error(`Daytona board agent stage ${stageId} timed out within its ${timeoutSeconds}s budget`);
+  }
+  return redacted;
 }
 
 export type BoardAgentStageRunnerConfiguration =

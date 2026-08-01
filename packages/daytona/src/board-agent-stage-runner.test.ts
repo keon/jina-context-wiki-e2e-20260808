@@ -356,6 +356,41 @@ process.stdout.write('{"type":"turn.completed","usage":{"input_tokens":91,"cache
   }
 });
 
+test("Daytona SDK command timeouts are normalized into a stable retryable stage error", async () => {
+  for (const reason of ["command execution timeout", "Operation timed out"]) {
+    const runner = new DaytonaBoardAgentStageRunner({
+      client: {
+        async create() {
+          let commands = 0;
+          return {
+            fs: {
+              async uploadFile() {},
+              async downloadFileStream() {
+                throw new Error("must not download timed-out output");
+              }
+            },
+            process: {
+              async executeCommand() {
+                commands += 1;
+                if (commands === 1) return { exitCode: 0, result: "" };
+                throw new Error(reason);
+              }
+            },
+            async delete() {}
+          };
+        }
+      },
+      snapshot: "board-agent-image-v1",
+      modelSecret: { environmentVariable: "OPENAI_API_KEY", secretName: "board-openai-key" },
+      allowedDomains: ["api.openai.com"]
+    });
+    await assert.rejects(
+      () => runner.run(fixtureInput()),
+      /Daytona board agent stage bounded-fixture timed out within its 30s budget/
+    );
+  }
+});
+
 test("local Codex usage collection stream-discards oversized non-usage events", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-codex-large-event-fixture-"));
   const binary = join(root, "codex-fixture.cjs");

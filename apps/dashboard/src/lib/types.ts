@@ -174,6 +174,14 @@ interface ContextBuildStage {
   readonly attempt: number;
   readonly failureCode?: string;
   readonly failureReason?: string;
+  readonly startedAt?: string;
+  readonly modelInputTokens?: number;
+  readonly modelCachedInputTokens?: number;
+  readonly modelOutputTokens?: number;
+  readonly modelTotalTokens?: number;
+  readonly lastRetryAt?: string;
+  readonly lastRetryFailureCode?: string;
+  readonly lastRetryFailureReason?: string;
   readonly updatedAt: string;
 }
 
@@ -188,6 +196,8 @@ export interface ContextBuildSummary {
   readonly derivationDeadlineAt?: string;
   readonly derivationTokenBudget?: number;
   readonly consumedModelTokens?: number;
+  readonly activeModelReservedTokens?: number;
+  readonly remainingModelTokens?: number;
   readonly status: "active" | "completed" | "failed";
   readonly failureCode?: string;
   readonly failureReason?: string;
@@ -209,6 +219,8 @@ export interface ContextBuildProgressResponse {
   readonly derivationDeadlineAt?: string;
   readonly derivationTokenBudget?: number;
   readonly consumedModelTokens?: number;
+  readonly activeModelReservedTokens?: number;
+  readonly remainingModelTokens?: number;
   readonly failureCode?: string;
   readonly failureReason?: string;
   readonly stages: readonly ContextBuildStage[];

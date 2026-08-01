@@ -1241,7 +1241,8 @@ test("terminal context exhaustion commits worker receipts before failing the bui
     stateStore: store,
     internalApiToken,
     contextArtifactStore: new FileContextArtifactStore(artifactRoot),
-    contextQuotaService: quotaService
+    contextQuotaService: quotaService,
+    tenantAdminPrincipalIds: ["user:context-admin@example.com"]
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -1270,11 +1271,24 @@ test("terminal context exhaustion commits worker receipts before failing the bui
         outputArtifact: pageArtifact,
         verdict: "unsupported",
         publicSnapshotDigest: "d".repeat(64),
-        unsupportedCitationCount: 1
+        unsupportedCitationCount: 1,
+        diagnostics: ["repository citation range exceeds 120 lines: src/server.ts"]
       }
     };
     const pageResponse = await workerComplete(baseUrl, internalApiToken, pageCompletion);
     assert.equal(pageResponse.status, 200, await pageResponse.text());
+
+    const pageProgressResponse = await fetch(`${baseUrl}/context/builds/${page.buildId}/progress`, {
+      headers: devHeaders(tenantId, "user:context-admin@example.com")
+    });
+    const pageProgressText = await pageProgressResponse.text();
+    assert.equal(pageProgressResponse.status, 200, pageProgressText);
+    const pageProgress = JSON.parse(pageProgressText) as {
+      readonly pages: readonly { readonly diagnostics: readonly string[] }[];
+    };
+    assert.deepEqual(pageProgress.pages[0]?.diagnostics, [
+      "repository citation range exceeds 120 lines: src/server.ts"
+    ]);
 
     let persisted = store.current().intakeState.board;
     assert.equal(persisted.tasks.find((task) => task.id === page.auditTaskId)?.status, "done");
@@ -1780,6 +1794,14 @@ test("transient Board failures retry with fresh fences, preserved siblings, and 
           readonly id: string;
           readonly failureCode?: string;
           readonly failureReason?: string;
+          readonly startedAt?: string;
+          readonly modelInputTokens?: number;
+          readonly modelCachedInputTokens?: number;
+          readonly modelOutputTokens?: number;
+          readonly modelTotalTokens?: number;
+          readonly lastRetryAt?: string;
+          readonly lastRetryFailureCode?: string;
+          readonly lastRetryFailureReason?: string;
         }[];
       }[];
     };
@@ -1789,6 +1811,14 @@ test("transient Board failures retry with fresh fences, preserved siblings, and 
     const transientPublicStage = transientPublicBuild?.stages.find((stage) => stage.id === transientTaskId);
     assert.equal(transientPublicStage?.failureCode, "daytona");
     assert.ok((transientPublicStage?.failureReason?.length ?? 0) <= 240);
+    assert.equal(transientPublicStage?.modelInputTokens, transientUsage.inputTokens);
+    assert.equal(transientPublicStage?.modelCachedInputTokens, transientUsage.cachedInputTokens);
+    assert.equal(transientPublicStage?.modelOutputTokens, transientUsage.outputTokens);
+    assert.equal(transientPublicStage?.modelTotalTokens, transientUsage.inputTokens + transientUsage.outputTokens);
+    assert.equal(transientPublicStage?.lastRetryFailureCode, "model");
+    assert.equal(transientPublicStage?.lastRetryFailureReason, "The model provider did not complete this stage.");
+    assert.equal(typeof transientPublicStage?.startedAt, "string");
+    assert.equal(typeof transientPublicStage?.lastRetryAt, "string");
     assert.doesNotMatch(
       JSON.stringify(transientPublicBuild),
       /private prompt|sk-secret|Bearer|\/Users\/private|worker\.ts/i

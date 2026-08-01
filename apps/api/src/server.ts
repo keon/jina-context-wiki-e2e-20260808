@@ -261,7 +261,16 @@ const MAX_DERIVATION_BUDGET_SECONDS = 3 * 60 * 60;
 const DEFAULT_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
 const MIN_DERIVATION_TOKEN_BUDGET = DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
 const MAX_DERIVATION_TOKEN_BUDGET = 50_000_000;
-const DEFAULT_DERIVATION_TOKEN_BUDGET = 12_000_000;
+// Cold repository initialization includes research, document generation, and
+// independent citation repair. Retain enough headroom for certification and
+// atomic publication after the model-heavy page stages finish. Incremental
+// builds reuse the published catalog and normally consume substantially less.
+const DEFAULT_DERIVATION_TOKEN_BUDGET = 24_000_000;
+// Repository research stages regularly use 0.5M-1M tokens. The quota service
+// keeps its smaller global reservation for concurrency accounting, while the
+// per-build guard uses this observed upper estimate so parallel claims cannot
+// silently consume the publication tail.
+const DEFAULT_CONTEXT_BUILD_TASK_RESERVATION_TOKENS = 1_000_000;
 const MIN_API_TOKEN_MINUTES = 5;
 const MAX_API_TOKEN_MINUTES = 525_600;
 
@@ -1410,7 +1419,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(typeof build.metadata.derivationTokenBudget === "number"
           ? {
               derivationTokenBudget: build.metadata.derivationTokenBudget,
-              consumedModelTokens: contextBuildConsumedModelTokens(intakeState.board, build.id)
+              consumedModelTokens: contextBuildConsumedModelTokens(intakeState.board, build.id),
+              activeModelReservedTokens: contextBuildActiveModelReservations(intakeState.board, build.id),
+              remainingModelTokens: Math.max(
+                0,
+                build.metadata.derivationTokenBudget - contextBuildConsumedModelTokens(intakeState.board, build.id)
+              )
             }
           : {}),
         ...publicContextBuildFailure(intakeState.board, build),
@@ -2352,7 +2366,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 intakeState.board,
                 candidateBuild,
                 now,
-                candidateUsesModel ? DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens : 0
+                candidateUsesModel ? contextBuildModelTaskReservation(candidateBuild) : 0
               );
               if (limitFailure) {
                 intakeState = {
@@ -3284,7 +3298,12 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
     ...(typeof task.metadata.derivationTokenBudget === "number"
       ? {
           derivationTokenBudget: task.metadata.derivationTokenBudget,
-          consumedModelTokens: contextBuildConsumedModelTokens(state, task.id)
+          consumedModelTokens: contextBuildConsumedModelTokens(state, task.id),
+          activeModelReservedTokens: contextBuildActiveModelReservations(state, task.id),
+          remainingModelTokens: Math.max(
+            0,
+            task.metadata.derivationTokenBudget - contextBuildConsumedModelTokens(state, task.id)
+          )
         }
       : {}),
     ...publicContextBuildFailure(state, task),
@@ -3318,9 +3337,61 @@ function publicContextBoardStages(state: BoardState, buildTaskId: TaskId) {
       title: task.title,
       status: task.status,
       attempt: task.attempt,
+      ...publicContextTaskRuntime(state, task),
       ...publicContextTaskFailure(state, task),
       updatedAt: task.updatedAt
     }));
+}
+
+function publicContextTaskRuntime(state: BoardState, task: BoardTask) {
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+  let outputTokens = 0;
+  for (const event of state.events) {
+    if (
+      event.taskId !== task.id ||
+      (event.type !== "task.worker_completion_recorded" && event.type !== "task.model_usage_recorded") ||
+      event.payload?.modelUsageObserved !== true
+    ) {
+      continue;
+    }
+    inputTokens += requiredPositiveIntegerOrZero(event.payload.modelInputTokens, "stage modelInputTokens");
+    cachedInputTokens += requiredPositiveIntegerOrZero(
+      event.payload.modelCachedInputTokens,
+      "stage modelCachedInputTokens"
+    );
+    outputTokens += requiredPositiveIntegerOrZero(event.payload.modelOutputTokens, "stage modelOutputTokens");
+  }
+  const startedAt = [...state.events]
+    .reverse()
+    .find(
+      (event) =>
+        event.taskId === task.id && event.type === "task.transitioned" && event.payload?.toStatus === "in_progress"
+    )?.at;
+  const retryEvent = [...state.events]
+    .reverse()
+    .find((event) => event.taskId === task.id && event.type === "task.retry_scheduled");
+  const retryFailure = retryEvent
+    ? publicContextFailureFromCategory(retryEvent.payload?.category, retryEvent.payload?.reason)
+    : undefined;
+  return {
+    ...(startedAt ? { startedAt } : {}),
+    ...(inputTokens || outputTokens
+      ? {
+          modelInputTokens: inputTokens,
+          modelCachedInputTokens: cachedInputTokens,
+          modelOutputTokens: outputTokens,
+          modelTotalTokens: inputTokens + outputTokens
+        }
+      : {}),
+    ...(retryFailure
+      ? {
+          lastRetryAt: retryEvent!.at,
+          lastRetryFailureCode: retryFailure.failureCode,
+          lastRetryFailureReason: retryFailure.failureReason
+        }
+      : {})
+  };
 }
 
 const PUBLIC_CONTEXT_FAILURE_REASONS = {
@@ -3517,7 +3588,15 @@ function contextBuildActiveModelReservations(state: BoardState, buildId: string)
     const task = findTask(state, message.taskId);
     return task?.metadata.contextBuildId === buildId;
   }).length;
-  return active * DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
+  const build = findTask(state, entityId<"task">(buildId));
+  return active * contextBuildModelTaskReservation(build);
+}
+
+function contextBuildModelTaskReservation(build: BoardTask | undefined): number {
+  const budget = build?.metadata.derivationTokenBudget;
+  return typeof budget === "number"
+    ? Math.min(DEFAULT_CONTEXT_BUILD_TASK_RESERVATION_TOKENS, budget)
+    : DEFAULT_CONTEXT_BUILD_TASK_RESERVATION_TOKENS;
 }
 
 function contextBuildLimitFailure(
@@ -3752,6 +3831,7 @@ function publicContextBoardCheckpointPages(state: BoardState, buildTaskId: TaskI
         )
       );
       const documentPath = String(task.metadata.documentPath);
+      const diagnostics = contextPageDiagnostics(state, task.id);
       return {
         documentPath: documentPath.endsWith(".md") ? documentPath.slice(0, -3) : documentPath,
         title: task.title.replace(/^Write /, ""),
@@ -3762,11 +3842,26 @@ function publicContextBoardCheckpointPages(state: BoardState, buildTaskId: TaskI
             : task.status === "failed"
               ? ("invalid" as const)
               : ("pending" as const),
-        diagnostics: [] as string[],
+        diagnostics,
         checkpointSequence: output?.pass ?? 0,
         updatedAt: task.updatedAt
       };
     });
+}
+
+function contextPageDiagnostics(state: BoardState, pageTaskId: TaskId): readonly string[] {
+  const auditTaskIds = new Set(
+    state.tasks
+      .filter((task) => task.type === contextBoardTaskTypes.pageAudit && task.metadata.pageTaskId === pageTaskId)
+      .map((task) => task.id)
+  );
+  for (const event of [...state.events].reverse()) {
+    if (!event.taskId || !auditTaskIds.has(event.taskId) || !Array.isArray(event.payload?.diagnostics)) continue;
+    return event.payload.diagnostics
+      .filter((diagnostic): diagnostic is string => typeof diagnostic === "string")
+      .slice(0, 32);
+  }
+  return [];
 }
 
 async function readContextBoardCheckpointPage(
@@ -3822,7 +3917,7 @@ async function readContextBoardCheckpointPage(
       bodyMarkdown: found.bodyMarkdown,
       bytes: Buffer.byteLength(found.bodyMarkdown, "utf8"),
       validationStatus: page?.status === "failed" ? ("invalid" as const) : ("valid" as const),
-      diagnostics: [] as string[],
+      diagnostics: page ? contextPageDiagnostics(state, page.id) : [],
       checkpointSequence: candidate.pass,
       updatedAt: candidate.task.updatedAt,
       unpublished: true

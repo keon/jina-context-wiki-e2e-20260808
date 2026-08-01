@@ -181,7 +181,7 @@ substitutions:
   # A measured full Board run takes about 2.5 hours. The acceptance poll gets
   # three hours, with a further fifteen-minute Cloud Run job envelope.
   _JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS: "10800"
-  _JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET: "12000000"
+  _JINA_ACCEPTANCE_DERIVATION_TOKEN_BUDGET: "24000000"
   _JINA_ACCEPTANCE_TIMEOUT_MS: "10800000"
   _JINA_ACCEPTANCE_JOB_TIMEOUT_SECONDS: "11700"
   # Full acceptance is the release default. An operator may explicitly select

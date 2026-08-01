@@ -26,6 +26,8 @@ export function BuildCheckpoints({
   const buildFailure = contextFailureText(currentProgress ?? build);
   const tokenBudget = currentProgress?.derivationTokenBudget ?? build.derivationTokenBudget;
   const consumedTokens = currentProgress?.consumedModelTokens ?? build.consumedModelTokens;
+  const activeReservedTokens = currentProgress?.activeModelReservedTokens ?? build.activeModelReservedTokens;
+  const remainingTokens = currentProgress?.remainingModelTokens ?? build.remainingModelTokens;
   const deadline = currentProgress?.derivationDeadlineAt ?? build.derivationDeadlineAt;
   return (
     <section className="context-operations-panel" aria-label="Context build checkpoints">
@@ -49,6 +51,8 @@ export function BuildCheckpoints({
         {tokenBudget !== undefined && consumedTokens !== undefined
           ? ` · ${compactNumber(consumedTokens)} / ${compactNumber(tokenBudget)} model tokens`
           : ""}
+        {activeReservedTokens ? ` · ${compactNumber(activeReservedTokens)} actively reserved` : ""}
+        {remainingTokens !== undefined ? ` · ${compactNumber(remainingTokens)} remaining` : ""}
         {deadline ? ` · deadline ${formatTime(deadline)}` : ""}
       </p>
       <p className={`context-alert ${status === "failed" || invalidPages > 0 ? "danger" : ""}`}>
@@ -68,6 +72,18 @@ export function BuildCheckpoints({
             <div className="context-projector-row" key={stage.id}>
               <div className="context-stage-details">
                 <strong title={stage.type}>{stage.title}</strong>
+                {stage.modelTotalTokens !== undefined ? (
+                  <span className="muted">
+                    {compactNumber(stage.modelTotalTokens)} tokens ({compactNumber(stage.modelInputTokens ?? 0)} in /{" "}
+                    {compactNumber(stage.modelOutputTokens ?? 0)} out)
+                  </span>
+                ) : null}
+                {stage.lastRetryFailureReason ? (
+                  <span className="context-failure-reason">
+                    Previous attempt: {stage.lastRetryFailureReason}
+                    {stage.lastRetryAt ? ` · ${formatTime(stage.lastRetryAt)}` : ""}
+                  </span>
+                ) : null}
                 {stageFailure ? <span className="context-failure-reason">{stageFailure}</span> : null}
               </div>
               <span className={`context-status ${stage.status}`}>
