@@ -1104,6 +1104,21 @@ test("critic reconciliation repairs redundant bookkeeping without upgrading verd
         verification: ["Run tests."],
         failureTriage: [],
         blockingUnknowns: ["Control flow is missing."]
+      },
+      {
+        questionId: "task-unattached",
+        pageIds: [],
+        headings: [],
+        entrypoints: [],
+        importantSymbols: [],
+        changePlan: [],
+        controlFlow: [],
+        state: [],
+        invariants: [],
+        configuration: [],
+        verification: [],
+        failureTriage: [],
+        blockingUnknowns: []
       }
     ]
   };
@@ -1114,6 +1129,7 @@ test("critic reconciliation repairs redundant bookkeeping without upgrading verd
   assert.equal(parsed.review.results[0]?.verdict, "partial");
   assert.deepEqual(parsed.review.results[0]?.pageIds, ["architecture", "operations"]);
   assert.deepEqual(parsed.attempts[0]?.pageIds, ["architecture", "operations"]);
+  assert.equal(parsed.attempts.length, 1);
   assert.equal(parsed.gaps.length, 1);
   assert.equal(parsed.gaps[0]?.severity, "blocking");
   assert.ok(reconciled.corrections.length >= 5);

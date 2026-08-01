@@ -31,6 +31,7 @@ import {
   applyCommand,
   appendEvent,
   createEmptyBoardState,
+  findTask,
   leaseNextOutboxMessage,
   markOutboxDispatched,
   reduceBoard,
@@ -749,6 +750,90 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
     );
     assert.equal(canceledProgress.status, 200);
     assert.equal((await canceledProgress.json()).failureCode, "build_canceled");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
+test("tenant administrators can extend and resume only the task canceled by a build deadline", async () => {
+  const tenantId = "tenant-deadline-recovery";
+  const repository = "omxyz/deadline-recovery";
+  const principalId = "user:deadline-admin@example.com";
+  const internalApiToken = "context-deadline-recovery-token";
+  const created = createContextBoardBuild(createEmptyBoardState(), {
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "deadline:expired",
+    derivationBudgetSeconds: 300,
+    derivationTokenBudget: 12_000_000,
+    now: new Date(Date.now() - 301_000).toISOString()
+  });
+  const stateStore = mutableStateStore({
+    intakeState: { board: created.state, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const contextStore = new MemoryContextEngineStore();
+  await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+  const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  await quotaService.admitBuild({ tenantId, buildId: created.buildTaskId });
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextStore,
+    internalApiToken,
+    contextQuotaService: quotaService,
+    tenantAdminPrincipalIds: [principalId]
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const expiredClaim = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ workerId: "deadline-recovery-test", topics: [contextBoardTopics.snapshot] })
+    });
+    assert.equal(expiredClaim.status, 204);
+    const expired = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/progress`, {
+      headers: devHeaders(tenantId, principalId)
+    });
+    assert.equal(expired.status, 200);
+    assert.equal((await expired.json()).failureCode, "build_time_budget_exceeded");
+
+    const retryUrl = `${baseUrl}/context/builds/${created.buildTaskId}/tasks/${created.snapshotTaskId}/retry`;
+    const retryBody = {
+      requestKey: "operator:deadline-recovery",
+      reason: "the provider outage consumed the original build envelope",
+      extendDeadlineBySeconds: 3_600
+    };
+    for (const [expectedStatus, duplicate] of [
+      [202, false],
+      [200, true]
+    ] as const) {
+      const retried = await fetch(retryUrl, {
+        method: "POST",
+        headers: devHeaders(tenantId, principalId),
+        body: JSON.stringify(retryBody)
+      });
+      const body = (await retried.json()) as Record<string, unknown>;
+      assert.equal(retried.status, expectedStatus, JSON.stringify(body));
+      assert.equal(body.duplicate, duplicate);
+      assert.equal(body.taskId, created.snapshotTaskId);
+      assert.equal(typeof body.extendedDeadlineAt, "string");
+    }
+
+    const recovered = stateStore.current().intakeState.board;
+    const recoveredBuild = findTask(recovered, created.buildTaskId);
+    assert.equal(recoveredBuild?.metadata.derivationBudgetSeconds, 3_900);
+    assert.equal(findTask(recovered, created.snapshotTaskId)?.status, "queued");
+    assert.equal(recovered.events.filter((event) => event.type === "context.build_time_budget_extended").length, 1);
+    assert.equal(
+      recovered.events.filter((event) => event.type === "context.deadline_interrupted_task_reclassified").length,
+      1
+    );
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }

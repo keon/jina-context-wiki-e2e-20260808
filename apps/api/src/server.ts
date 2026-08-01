@@ -259,6 +259,8 @@ const MIN_DERIVATION_BUDGET_SECONDS = 300;
 // coordinated deployment gate before any work was admitted.
 const MAX_DERIVATION_BUDGET_SECONDS = 3 * 60 * 60;
 const DEFAULT_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
+const MAX_CONTEXT_OPERATOR_DEADLINE_EXTENSION_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
+const MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS = 4 * MAX_DERIVATION_BUDGET_SECONDS;
 const MIN_DERIVATION_TOKEN_BUDGET = DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
 const MAX_DERIVATION_TOKEN_BUDGET = 50_000_000;
 // Cold repository initialization includes research, document generation, and
@@ -1135,6 +1137,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       }
       const reason = requiredString(body.reason, "reason");
       if (reason.length > 2_000) throw invalidRequest("reason must be at most 2000 characters");
+      const extendDeadlineBySeconds =
+        body.extendDeadlineBySeconds === undefined
+          ? undefined
+          : requiredPositiveInteger(body.extendDeadlineBySeconds, "extendDeadlineBySeconds");
+      if (
+        extendDeadlineBySeconds !== undefined &&
+        (extendDeadlineBySeconds < MIN_DERIVATION_BUDGET_SECONDS ||
+          extendDeadlineBySeconds > MAX_CONTEXT_OPERATOR_DEADLINE_EXTENSION_SECONDS)
+      ) {
+        throw invalidRequest(
+          `extendDeadlineBySeconds must be between ${MIN_DERIVATION_BUDGET_SECONDS} and ${MAX_CONTEXT_OPERATOR_DEADLINE_EXTENSION_SECONDS}`
+        );
+      }
 
       const buildTaskId = entityId<"task">(operatorRetryRoute.buildId) as TaskId;
       const boardTaskId = entityId<"task">(operatorRetryRoute.taskId) as TaskId;
@@ -1160,12 +1175,32 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       let retried;
       try {
         retried = await mutate(async () => {
-          const build = contextBoardBuildForPrincipal(
+          const currentBuild = contextBoardBuildForPrincipal(
             intakeState.board,
             principal.tenantId,
             operatorRetryRoute.buildId
           );
-          const target = findTask(intakeState.board, boardTaskId);
+          if (!currentBuild) throw notFound("build not found");
+          const priorRetry = intakeState.board.events.some(
+            (event) => event.type === "task.operator_retry_scheduled" && event.payload?.requestKey === requestKey
+          );
+          const prepared =
+            extendDeadlineBySeconds === undefined || priorRetry
+              ? {
+                  state: intakeState.board,
+                  extendedDeadlineAt:
+                    extendDeadlineBySeconds !== undefined ? contextBuildDeadlineAt(currentBuild) : undefined
+                }
+              : prepareContextDeadlineRetry(intakeState.board, {
+                  buildTaskId,
+                  taskId: boardTaskId,
+                  extensionSeconds: extendDeadlineBySeconds,
+                  actorId: principal.principalId,
+                  reason,
+                  now: nowIso()
+                });
+          const build = contextBoardBuildForPrincipal(prepared.state, principal.tenantId, operatorRetryRoute.buildId);
+          const target = findTask(prepared.state, boardTaskId);
           if (
             !build ||
             !target ||
@@ -1174,8 +1209,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           ) {
             throw notFound("build task not found");
           }
-          assertContextOperatorRetrySafety(intakeState.board, build, target);
-          const result = retryFailedBoardTask(intakeState.board, {
+          assertContextOperatorRetrySafety(prepared.state, build, target);
+          const result = retryFailedBoardTask(prepared.state, {
             buildTaskId,
             taskId: boardTaskId,
             requestKey,
@@ -1191,7 +1226,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             quotaResumed = quota.outcome === "admitted";
           }
           intakeState = { ...intakeState, board: result.state };
-          return result;
+          return { ...result, extendedDeadlineAt: prepared.extendedDeadlineAt };
         });
       } catch (error) {
         if (quotaResumed && config.contextQuotaService) {
@@ -1227,7 +1262,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         taskId: visibleTarget.id,
         attempt: retried.nextMessage.payload.attempt,
         outboxMessageId: retried.nextMessage.id,
-        reopenedTaskIds: retried.reopenedTaskIds
+        reopenedTaskIds: retried.reopenedTaskIds,
+        ...(retried.extendedDeadlineAt ? { extendedDeadlineAt: retried.extendedDeadlineAt } : {})
       });
       return;
     }
@@ -3632,6 +3668,100 @@ function contextBuildModelReservationBlocked(state: BoardState, build: BoardTask
   // against its observed completion receipt.
   if (activeReserved === 0) return false;
   return consumed + activeReserved + contextBuildModelTaskReservation(build) > tokenBudget;
+}
+
+function prepareContextDeadlineRetry(
+  state: BoardState,
+  input: {
+    readonly buildTaskId: TaskId;
+    readonly taskId: TaskId;
+    readonly extensionSeconds: number;
+    readonly actorId: string;
+    readonly reason: string;
+    readonly now: IsoTimestamp;
+  }
+): { readonly state: BoardState; readonly extendedDeadlineAt: string } {
+  const build = findTask(state, input.buildTaskId);
+  const target = findTask(state, input.taskId);
+  const terminalReconciliation = [...state.events]
+    .reverse()
+    .find(
+      (event) =>
+        event.taskId === build?.id &&
+        event.type === "aggregate.terminal_reconciled" &&
+        Array.isArray(event.payload?.canceledTaskIds)
+    );
+  const deadlineFailure = [...state.events]
+    .reverse()
+    .find((event) => event.taskId === build?.id && event.type === "context.build_time_budget_exceeded.failed");
+  if (
+    !build ||
+    build.type !== contextBoardTaskTypes.build ||
+    build.status !== "failed" ||
+    !target ||
+    target.kind !== "dispatchable" ||
+    target.status !== "canceled" ||
+    target.metadata.contextBuildId !== build.id ||
+    !deadlineFailure ||
+    !(terminalReconciliation?.payload?.canceledTaskIds as unknown[]).includes(target.id)
+  ) {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      "deadline extension requires the exact dispatchable task canceled by a time-limited failed build"
+    );
+  }
+  const previousBudgetSeconds = requiredPositiveInteger(
+    build.metadata.derivationBudgetSeconds,
+    "derivationBudgetSeconds"
+  );
+  const nextBudgetSeconds = previousBudgetSeconds + input.extensionSeconds;
+  if (!Number.isSafeInteger(nextBudgetSeconds) || nextBudgetSeconds > MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS) {
+    throw new OperatorRetryRejectedError(
+      "unsafe_graph_state",
+      `recovered derivation budget cannot exceed ${MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS} seconds`
+    );
+  }
+  let next = applyCommand(
+    state,
+    {
+      command: "CommentTask",
+      taskId: build.id,
+      eventType: "context.build_time_budget_extended",
+      payload: {
+        previousDerivationBudgetSeconds: previousBudgetSeconds,
+        nextDerivationBudgetSeconds: nextBudgetSeconds,
+        reason: input.reason
+      }
+    },
+    { actor: { type: "user", id: input.actorId }, now: input.now }
+  ).state;
+  next = applyCommand(
+    next,
+    {
+      command: "CommentTask",
+      taskId: target.id,
+      eventType: "context.deadline_interrupted_task_reclassified",
+      payload: { fromStatus: "canceled", toStatus: "failed", reason: input.reason }
+    },
+    { actor: { type: "user", id: input.actorId }, now: input.now }
+  ).state;
+  next = {
+    ...next,
+    tasks: next.tasks.map((task) => {
+      if (task.id === build.id) {
+        return {
+          ...task,
+          metadata: { ...task.metadata, derivationBudgetSeconds: nextBudgetSeconds },
+          updatedAt: input.now
+        };
+      }
+      return task.id === target.id ? { ...task, status: "failed" as const, updatedAt: input.now } : task;
+    })
+  };
+  return {
+    state: next,
+    extendedDeadlineAt: new Date(Date.parse(build.createdAt) + nextBudgetSeconds * 1_000).toISOString()
+  };
 }
 
 function terminateContextBuild(

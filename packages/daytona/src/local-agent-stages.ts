@@ -1912,6 +1912,13 @@ export function reconcileCriticStageResult(
     attempts.set(normalizedQuestionId, { ...previous, ...normalized });
   }
 
+  for (const attemptQuestionId of attempts.keys()) {
+    if (!results.has(attemptQuestionId)) {
+      attempts.delete(attemptQuestionId);
+      recordCorrection(`discarded unattached task attempt ${attemptQuestionId}`);
+    }
+  }
+
   for (const [normalizedQuestionId, reviewResult] of results) {
     let attempt = attempts.get(normalizedQuestionId);
     if (!attempt) {
