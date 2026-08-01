@@ -2386,6 +2386,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 // of failing the build on a conservative estimate.
                 continue;
               }
+              if (candidateUsesModel && config.contextQuotaService) {
+                await renewOrResumeContextBuildQuota(config.contextQuotaService, candidateTenantId, candidateBuild.id);
+              }
             }
             const leaseId = randomUUID();
             const writeFenceToken = randomUUID();
@@ -2582,7 +2585,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         const task = findTask(intakeState.board, message.taskId);
         const buildId = task?.metadata.contextBuildId;
         if (typeof buildId === "string") {
-          await config.contextQuotaService.renewBuild({ tenantId, buildId });
+          await renewOrResumeContextBuildQuota(config.contextQuotaService, tenantId, buildId);
         }
       }
     }
@@ -4765,6 +4768,23 @@ async function settleContextModelQuota(
     // no active reservation and is already settled.
     if (error instanceof ContextQuotaInvariantError && error.reason === "reservation_not_found") return;
     throw error;
+  }
+}
+
+async function renewOrResumeContextBuildQuota(
+  quota: ContextQuotaService,
+  tenantId: string,
+  buildId: string
+): Promise<void> {
+  try {
+    await quota.renewBuild({ tenantId, buildId });
+  } catch (error) {
+    if (!(error instanceof ContextQuotaInvariantError) || error.reason !== "reservation_not_found") throw error;
+    // The Board is authoritative. A prior process may have settled quota after
+    // a stale terminal observation, or the quota TTL may have elapsed while a
+    // long model stage was running. Restore accounting idempotently before
+    // leasing more work instead of forcing every worker into a release loop.
+    await quota.restoreActiveBuild({ tenantId, buildId });
   }
 }
 

@@ -1983,32 +1983,59 @@ async function runContextTaskEvaluation(
   const taskCatalog = JSON.stringify(questions, null, 2);
   const taskCatalogDigest = createHash("sha256").update(taskCatalog).digest("hex");
   const workerId = `critic-context-${work.task.metadata.pass}`;
+  const prompt = criticStagePrompt({
+    workerId,
+    publicContext,
+    questions: taskCatalog,
+    snapshotDigest: publicSnapshotDigest,
+    taskCatalogDigest
+  });
+  const expected = {
+    snapshotDigest: publicSnapshotDigest,
+    taskCatalogDigest,
+    questionIds: questions.map((question) => question.id),
+    requiredAnswerPartsByQuestionId: Object.fromEntries(
+      questions
+        .filter((question) => (question.requiredAnswerParts?.length ?? 0) > 0)
+        .map((question) => [question.id, question.requiredAnswerParts!])
+    )
+  };
   const stageRoot = await mkdtemp(join(tmpdir(), "jina-context-task-evaluation-"));
   try {
-    const output = await requireBoardAgentStageRunner().run({
+    let output = await requireBoardAgentStageRunner().run({
       id: workerId,
-      prompt: criticStagePrompt({
-        workerId,
-        publicContext,
-        questions: taskCatalog,
-        snapshotDigest: publicSnapshotDigest,
-        taskCatalogDigest
-      }),
+      prompt,
       schema: CRITIC_STAGE_SCHEMA,
       workingDirectory: stageRoot,
       readOnly: true,
       budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
     });
-    const result = parseCriticStageResult(output.parsed, workerId, {
-      snapshotDigest: publicSnapshotDigest,
-      taskCatalogDigest,
-      questionIds: questions.map((question) => question.id),
-      requiredAnswerPartsByQuestionId: Object.fromEntries(
-        questions
-          .filter((question) => (question.requiredAnswerParts?.length ?? 0) > 0)
-          .map((question) => [question.id, question.requiredAnswerParts!])
-      )
-    });
+    let result: ReturnType<typeof parseCriticStageResult>;
+    try {
+      result = parseCriticStageResult(output.parsed, workerId, expected);
+    } catch (error) {
+      const rejection = error instanceof Error ? error.message : String(error);
+      logger.warn("task evaluator contract rejected model output; retrying once", {
+        event: "context.contract_retry",
+        buildId: work.task.metadata.contextBuildId,
+        taskId: work.task.id,
+        stage: "task-evaluation",
+        reason: rejection.slice(0, 1_000)
+      });
+      output = await requireBoardAgentStageRunner().run({
+        id: `${workerId}-contract-repair`,
+        prompt: [
+          prompt,
+          `Your previous result violated the host contract: ${rejection.slice(0, 1_000)}.`,
+          "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass."
+        ].join("\n\n"),
+        schema: CRITIC_STAGE_SCHEMA,
+        workingDirectory: stageRoot,
+        readOnly: true,
+        budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
+      });
+      result = parseCriticStageResult(output.parsed, workerId, expected);
+    }
     const hostPlanStructuralProblems = pages.flatMap(({ page }) => {
       const plannedPage = publication.plan.pages.find((candidate) => candidate.path === page.documentPath);
       if (!plannedPage) return [`${page.documentPath} is absent from the binding publication plan`];

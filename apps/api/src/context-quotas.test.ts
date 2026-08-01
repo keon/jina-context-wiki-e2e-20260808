@@ -75,6 +75,17 @@ test("board reconciliation atomically releases terminal and orphaned build reser
   assert.equal(replay.active.builds, 2);
 });
 
+test("durable Board recovery restores an expired active-build reservation without a new rate token", async () => {
+  const service = quotaService({ buildReservationTtlMs: 1_000 });
+  await service.admitBuild(buildInput("long-build", start));
+
+  const restored = await service.restoreActiveBuild(buildInput("long-build", start + 1_001));
+  assert.equal(restored.outcome, "admitted");
+  assert.equal(restored.snapshot.active.builds, 1);
+  assert.equal(restored.snapshot.rates.build.used, 1);
+  assert.equal((await service.restoreActiveBuild(buildInput("long-build", start + 1_002))).outcome, "already_admitted");
+});
+
 test("new pull request build atomically replaces a superseded build at the active limit", async () => {
   const service = quotaService({ maxActiveBuilds: 1 });
   await service.admitBuild(buildInput("old-build", start));

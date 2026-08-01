@@ -409,6 +409,66 @@ export class ContextQuotaService {
     return unwrap(outcome);
   }
 
+  /**
+   * Restores quota accounting for a build that the durable Board still marks
+   * active. Unlike operator resume, this also covers an expired reservation;
+   * callers must establish active Board state before using it. The original
+   * build-rate admission remains unchanged.
+   */
+  async restoreActiveBuild(input: {
+    readonly tenantId: string;
+    readonly buildId: string;
+    readonly at?: string;
+  }): Promise<ContextQuotaAdmission> {
+    const tenantId = tenant(input.tenantId);
+    const buildId = resourceId(input.buildId, "buildId");
+    const now = this.#time(input.at);
+    const limits = await this.#limits(tenantId);
+    const outcome = await this.#store.transact<QuotaOutcome<ContextQuotaAdmission>>(tenantId, (current) => {
+      let state = currentState(current, tenantId, now, limits);
+      const active = state.activeBuilds[buildId];
+      if (active) {
+        return accepted(
+          {
+            outcome: "already_admitted",
+            expiresAt: active.expiresAt,
+            snapshot: quotaSnapshot(state, limits, now)
+          } satisfies ContextQuotaAdmission,
+          state
+        );
+      }
+      if (Object.keys(state.activeBuilds).length >= limits.maxActiveBuilds) {
+        state = deniedState(state, "active_builds", now.iso);
+        return denied(
+          state,
+          limits,
+          now,
+          "active_builds",
+          "tenant active Context build limit exceeded",
+          earliestExpiryMs(state.activeBuilds, now.ms)
+        );
+      }
+      const completedBuilds = { ...state.completedBuilds };
+      delete completedBuilds[buildId];
+      const expiresAt = new Date(now.ms + limits.buildReservationTtlMs).toISOString();
+      state = {
+        ...state,
+        activeBuilds: { ...state.activeBuilds, [buildId]: { createdAt: now.iso, expiresAt } },
+        completedBuilds,
+        updatedAt: now.iso
+      };
+      return accepted(
+        {
+          outcome: "admitted",
+          expiresAt,
+          snapshot: quotaSnapshot(state, limits, now)
+        } satisfies ContextQuotaAdmission,
+        state
+      );
+    });
+    return unwrap(outcome);
+  }
+
   async completeBuild(input: {
     readonly tenantId: string;
     readonly buildId: string;

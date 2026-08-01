@@ -754,7 +754,7 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
   }
 });
 
-test("Context model reservations defer excess parallel claims without failing the build", async () => {
+test("Context claims recover a settled build quota and defer excess parallel reservations", async () => {
   const tenantId = "tenant-reservation-headroom";
   const repository = "omxyz/reservation-fixture";
   const principalId = "user:reservation@example.com";
@@ -839,6 +839,9 @@ test("Context model reservations defer excess parallel claims without failing th
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
   try {
+    // Simulate a stale terminal observation settling quota while the durable
+    // Board still has active work. The next claim must reactivate it.
+    await quotaService.completeBuild({ tenantId, buildId: created.buildTaskId });
     const first = await claimContextTask(baseUrl, internalApiToken, contextBoardTopics.research);
     await claimContextTask(baseUrl, internalApiToken, contextBoardTopics.research);
     const deferred = await fetch(`${baseUrl}/internal/worker/claim`, {
