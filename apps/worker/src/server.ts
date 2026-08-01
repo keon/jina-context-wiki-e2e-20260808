@@ -301,7 +301,7 @@ const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 *
 const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TIMEOUT_MS, 10 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
-const MAX_CRITIC_CONTRACT_ATTEMPTS = 3;
+const MAX_CRITIC_CONTRACT_ATTEMPTS = 4;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const configuredBoardAgentStageRunner =
@@ -2014,7 +2014,8 @@ async function runContextTaskEvaluation(
             : [
                 prompt,
                 `Previous results violated the host contract:\n${contractRejections.map((reason, index) => `${index + 1}. ${reason}`).join("\n")}`,
-                "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass. Every question, attempt, and gap ID must be unique, and every referenced gap ID must be defined exactly once."
+                "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass. Every question, attempt, and gap ID must be unique, and every referenced gap ID must be defined exactly once.",
+                "Before returning, check every host invariant: copy the supplied snapshot digest, task-catalog digest, and worker IDs exactly; emit exactly one review result and one attempt for every supplied question and no others; keep each attempt's pageIds identical to its review result; give every non-passing result at least one defined blocking gap; and give every passing attempt no blocking unknowns plus every required answer part."
               ].join("\n\n"),
         schema: CRITIC_STAGE_SCHEMA,
         workingDirectory: stageRoot,
