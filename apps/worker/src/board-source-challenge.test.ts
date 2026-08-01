@@ -109,13 +109,28 @@ test("Board source-challenge parsing gives one bounded repair attempt determinis
     { ...expected, researchPlan },
     async (diagnostic, previousResult) => {
       diagnostics.push(diagnostic);
-      assert.equal(previousResult, invalid);
+      assert.deepEqual(previousResult, invalid);
       return challenge;
     }
   );
 
   assert.equal(result.addedTasks[0]?.evidence[0]?.reference, "id.go");
   assert.match(diagnostics[0] ?? "", /access-service\.md/);
+});
+
+test("Board source-challenge repair canonicalizes the host-owned accepted task catalog", async () => {
+  let repairCalls = 0;
+  const result = await parseBoardSourceChallengeStageResultWithRepair(
+    { ...challenge, acceptedTaskIds: ["task-invented-by-the-model"] },
+    { ...expected, researchPlan },
+    async () => {
+      repairCalls += 1;
+      return challenge;
+    }
+  );
+
+  assert.deepEqual(result.acceptedTaskIds, ["understand-id-format"]);
+  assert.equal(repairCalls, 0);
 });
 
 test("Board source-challenge validation never retries a rejected correction", async () => {

@@ -54,7 +54,7 @@ export function pageRepairCoveragePrompt(
   const dependencyPaths = page.dependencies.map((dependencyId) => {
     const dependency = allPages.find((candidate) => candidate.id === dependencyId);
     if (!dependency) throw new Error(`page repair cannot resolve planned dependency ${dependencyId}`);
-    return dependency.path;
+    return posix.relative(posix.dirname(page.path), dependency.path);
   });
   const supportedCitationIds = state.supportedCitationIds ?? [];
   const fullPageRewrite = (state.priorCheckpoint?.consecutiveNoProgressPasses ?? 0) > 0;

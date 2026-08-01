@@ -267,7 +267,7 @@ const MAX_DERIVATION_TOKEN_BUDGET = 50_000_000;
 // independent citation repair. Retain enough headroom for certification and
 // atomic publication after the model-heavy page stages finish. Incremental
 // builds reuse the published catalog and normally consume substantially less.
-const DEFAULT_DERIVATION_TOKEN_BUDGET = 24_000_000;
+const DEFAULT_DERIVATION_TOKEN_BUDGET = 36_000_000;
 // Repository research stages regularly use 0.5M-1M tokens. The quota service
 // keeps its smaller global reservation for concurrency accounting, while the
 // per-build guard uses this observed upper estimate so parallel claims cannot

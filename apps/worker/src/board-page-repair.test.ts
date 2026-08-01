@@ -69,7 +69,7 @@ test("architecture repair preserves plan coverage and the complete public naviga
 
 test("page repair resolves dependency IDs to public paths", () => {
   const prompt = pageRepairCoveragePrompt(api, [architecture, api]);
-  assert.match(prompt, /Preserve ordinary Markdown navigation.*architecture\.md/);
+  assert.match(prompt, /Preserve ordinary Markdown navigation.*\.\.\/architecture\.md/);
   assert.match(prompt, /How is the API extended/);
   assert.match(prompt, /No diagram is required/);
   assert.match(prompt, /inflection-normalized plan vocabulary/);
