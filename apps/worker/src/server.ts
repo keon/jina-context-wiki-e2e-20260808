@@ -78,7 +78,11 @@ import {
   type PortableContextBoardAgentStageRunner
 } from "./board-agent-stage-adapter.js";
 import { parseBoardSourceChallengeStageResultWithRepair } from "./board-source-challenge.js";
-import { citationAuditDelta, retryCitationAuditValidation } from "./citation-audit-validation.js";
+import {
+  citationAuditDelta,
+  retainAssignedCitationAuditResults,
+  retryCitationAuditValidation
+} from "./citation-audit-validation.js";
 import {
   assertNoGitHubOperationalCredentials,
   sanitizeGitHubCommitCommentPayload,
@@ -1510,13 +1514,15 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
                 });
                 return output.parsed;
               },
-              parse: (value) =>
-                parseCitationAuditStageResult(value, {
+              parse: (value) => {
+                const citationIds = references.map((reference) => reference.citationId);
+                return parseCitationAuditStageResult(retainAssignedCitationAuditResults(value, citationIds), {
                   workerId,
                   inputDigest,
                   publicSnapshotDigest,
-                  citationIds: references.map((reference) => reference.citationId)
-                })
+                  citationIds
+                });
+              }
             })
           );
         }
@@ -2384,12 +2390,18 @@ async function auditContextDraftCitations(input: {
       budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
     });
     batchAudits.push(
-      parseCitationAuditStageResult(output.parsed, {
-        workerId,
-        inputDigest,
-        publicSnapshotDigest,
-        citationIds: batch.map((reference) => reference.citationId)
-      })
+      parseCitationAuditStageResult(
+        retainAssignedCitationAuditResults(
+          output.parsed,
+          batch.map((reference) => reference.citationId)
+        ),
+        {
+          workerId,
+          inputDigest,
+          publicSnapshotDigest,
+          citationIds: batch.map((reference) => reference.citationId)
+        }
+      )
     );
   }
   const result = parseCitationAuditStageResult(

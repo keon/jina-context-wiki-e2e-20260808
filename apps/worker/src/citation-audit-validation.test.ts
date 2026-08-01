@@ -1,7 +1,35 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { CitationAuditReference, CitationAuditStageResult } from "@jina/daytona";
-import { citationAuditDelta, retryCitationAuditValidation } from "./citation-audit-validation.js";
+import {
+  citationAuditDelta,
+  retainAssignedCitationAuditResults,
+  retryCitationAuditValidation
+} from "./citation-audit-validation.js";
+
+test("citation audit drops unassigned critic findings but preserves strict assigned results", () => {
+  assert.deepEqual(
+    retainAssignedCitationAuditResults(
+      {
+        version: 1,
+        results: [
+          { citationId: "expected", verdict: "supported" },
+          { citationId: "invented", verdict: "unsupported" }
+        ]
+      },
+      ["expected"]
+    ),
+    {
+      version: 1,
+      results: [{ citationId: "expected", verdict: "supported" }]
+    }
+  );
+});
+
+test("citation audit filtering leaves malformed envelopes for the strict parser", () => {
+  const malformed = { version: 1, results: "invalid" };
+  assert.equal(retainAssignedCitationAuditResults(malformed, ["expected"]), malformed);
+});
 
 test("citation audit semantic validation retries with the exact host diagnostic", async () => {
   const calls: { attempt: number; diagnostic?: string }[] = [];

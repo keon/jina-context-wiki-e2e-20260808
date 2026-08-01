@@ -27,6 +27,30 @@ export async function retryCitationAuditValidation<T>(input: {
   throw new Error("citation audit validation exhausted without a result");
 }
 
+/**
+ * Model critics may append a finding for a citation that was not in their
+ * assigned batch. Such a finding has no host-bound evidence and must not fail
+ * an otherwise complete audit. Keep only assigned IDs; the strict parser still
+ * rejects omissions, duplicates, and malformed results for those IDs.
+ */
+export function retainAssignedCitationAuditResults(value: unknown, citationIds: readonly string[]): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const record = value as Record<string, unknown>;
+  if (!Array.isArray(record.results)) return value;
+  const assigned = new Set(citationIds);
+  return {
+    ...record,
+    results: record.results.filter(
+      (result) =>
+        result !== null &&
+        typeof result === "object" &&
+        !Array.isArray(result) &&
+        typeof (result as Record<string, unknown>).citationId === "string" &&
+        assigned.has((result as Record<string, unknown>).citationId as string)
+    )
+  };
+}
+
 export function citationAuditDelta(input: {
   readonly references: readonly CitationAuditReference[];
   readonly priorReferences?: readonly CitationAuditReference[];
