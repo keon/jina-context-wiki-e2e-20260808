@@ -301,6 +301,7 @@ const contextApiTimeoutMs = positiveInt(process.env.CONTEXT_API_TIMEOUT_MS, 62 *
 const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TIMEOUT_MS, 10 * 60_000);
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
+const MAX_CRITIC_CONTRACT_ATTEMPTS = 3;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const configuredBoardAgentStageRunner =
@@ -2002,40 +2003,44 @@ async function runContextTaskEvaluation(
   };
   const stageRoot = await mkdtemp(join(tmpdir(), "jina-context-task-evaluation-"));
   try {
-    let output = await requireBoardAgentStageRunner().run({
-      id: workerId,
-      prompt,
-      schema: CRITIC_STAGE_SCHEMA,
-      workingDirectory: stageRoot,
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
-    });
-    let result: ReturnType<typeof parseCriticStageResult>;
-    try {
-      result = parseCriticStageResult(output.parsed, workerId, expected);
-    } catch (error) {
-      const rejection = error instanceof Error ? error.message : String(error);
-      logger.warn("task evaluator contract rejected model output; retrying once", {
-        event: "context.contract_retry",
-        buildId: work.task.metadata.contextBuildId,
-        taskId: work.task.id,
-        stage: "task-evaluation",
-        reason: rejection.slice(0, 1_000)
-      });
-      output = await requireBoardAgentStageRunner().run({
-        id: `${workerId}-contract-repair`,
-        prompt: [
-          prompt,
-          `Your previous result violated the host contract: ${rejection.slice(0, 1_000)}.`,
-          "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass."
-        ].join("\n\n"),
+    let result: ReturnType<typeof parseCriticStageResult> | undefined;
+    const contractRejections: string[] = [];
+    for (let contractAttempt = 1; contractAttempt <= MAX_CRITIC_CONTRACT_ATTEMPTS; contractAttempt += 1) {
+      const output = await requireBoardAgentStageRunner().run({
+        id: contractAttempt === 1 ? workerId : `${workerId}-contract-repair-${contractAttempt - 1}`,
+        prompt:
+          contractAttempt === 1
+            ? prompt
+            : [
+                prompt,
+                `Previous results violated the host contract:\n${contractRejections.map((reason, index) => `${index + 1}. ${reason}`).join("\n")}`,
+                "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass. Every question, attempt, and gap ID must be unique, and every referenced gap ID must be defined exactly once."
+              ].join("\n\n"),
         schema: CRITIC_STAGE_SCHEMA,
         workingDirectory: stageRoot,
         readOnly: true,
         budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
       });
-      result = parseCriticStageResult(output.parsed, workerId, expected);
+      try {
+        result = parseCriticStageResult(output.parsed, workerId, expected);
+        break;
+      } catch (error) {
+        const rejection = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
+        if (contractAttempt === MAX_CRITIC_CONTRACT_ATTEMPTS) throw error;
+        contractRejections.push(rejection);
+        logger.warn("task evaluator contract rejected model output; scheduling bounded correction", {
+          event: "context.contract_retry",
+          buildId: work.task.metadata.contextBuildId,
+          taskId: work.task.id,
+          stage: "task-evaluation",
+          contractAttempt,
+          nextContractAttempt: contractAttempt + 1,
+          maxContractAttempts: MAX_CRITIC_CONTRACT_ATTEMPTS,
+          reason: rejection
+        });
+      }
     }
+    if (!result) throw new Error("task evaluator exhausted its semantic contract attempts");
     const hostPlanStructuralProblems = pages.flatMap(({ page }) => {
       const plannedPage = publication.plan.pages.find((candidate) => candidate.path === page.documentPath);
       if (!plannedPage) return [`${page.documentPath} is absent from the binding publication plan`];
