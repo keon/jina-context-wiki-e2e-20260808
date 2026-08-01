@@ -32,6 +32,7 @@ import {
   parseCitationAuditStageResult,
   parseCriticStageResult,
   parseResearchStagePlan,
+  reconcileCriticStageResult,
   researchPlannerRepairPrompt,
   researchPlannerPrompt,
   researchWorkerPrompt,
@@ -2023,11 +2024,35 @@ async function runContextTaskEvaluation(
         budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
       });
       try {
-        result = parseCriticStageResult(output.parsed, workerId, expected);
+        const reconciled = reconcileCriticStageResult(output.parsed, workerId, expected);
+        if (reconciled.corrections.length > 0) {
+          logger.info("task evaluator reconciled copy-sensitive model output", {
+            event: "context.contract_reconciled",
+            buildId: work.task.metadata.contextBuildId,
+            taskId: work.task.id,
+            stage: "task-evaluation",
+            contractAttempt,
+            correctionCount: reconciled.corrections.length,
+            corrections: reconciled.corrections
+          });
+        }
+        result = parseCriticStageResult(reconciled.value, workerId, expected);
         break;
       } catch (error) {
         const rejection = (error instanceof Error ? error.message : String(error)).slice(0, 1_000);
-        if (contractAttempt === MAX_CRITIC_CONTRACT_ATTEMPTS) throw error;
+        if (contractAttempt === MAX_CRITIC_CONTRACT_ATTEMPTS) {
+          logger.error("task evaluator exhausted semantic contract attempts", {
+            event: "context.contract_failed",
+            buildId: work.task.metadata.contextBuildId,
+            taskId: work.task.id,
+            stage: "task-evaluation",
+            contractAttempt,
+            maxContractAttempts: MAX_CRITIC_CONTRACT_ATTEMPTS,
+            rejectionCount: contractRejections.length + 1,
+            reasons: [...contractRejections, rejection]
+          });
+          throw error;
+        }
         contractRejections.push(rejection);
         logger.warn("task evaluator contract rejected model output; scheduling bounded correction", {
           event: "context.contract_retry",

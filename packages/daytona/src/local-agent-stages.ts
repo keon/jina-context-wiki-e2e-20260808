@@ -364,6 +364,18 @@ export interface CriticStageResult {
   }[];
 }
 
+export interface CriticStageExpected {
+  readonly snapshotDigest: string;
+  readonly taskCatalogDigest: string;
+  readonly questionIds: readonly string[];
+  readonly requiredAnswerPartsByQuestionId?: Readonly<Record<string, readonly ChallengeAnswerPart[]>>;
+}
+
+export interface ReconciledCriticStageResult {
+  readonly value: unknown;
+  readonly corrections: readonly string[];
+}
+
 export const RESEARCH_STAGE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1749,15 +1761,236 @@ export function sourceChallengePromotionDiagnostics(
   return diagnostics;
 }
 
+const CRITIC_ATTEMPT_ARRAY_FIELDS = [
+  "pageIds",
+  "headings",
+  "entrypoints",
+  "importantSymbols",
+  "changePlan",
+  "controlFlow",
+  "state",
+  "invariants",
+  "configuration",
+  "verification",
+  "failureTriage",
+  "blockingUnknowns"
+] as const;
+
+const ANSWER_FIELD_BY_PART: Record<ChallengeAnswerPart, (typeof CRITIC_ATTEMPT_ARRAY_FIELDS)[number]> = {
+  entrypoints: "entrypoints",
+  important_symbols: "importantSymbols",
+  control_flow: "controlFlow",
+  state: "state",
+  invariants: "invariants",
+  failure_triage: "failureTriage",
+  configuration: "configuration",
+  verification: "verification"
+};
+
+/**
+ * Repairs copy-sensitive redundancy in otherwise schema-valid critic output.
+ * The host owns digests and worker IDs, while duplicate records and mismatched
+ * page lists are merged conservatively. This never upgrades a verdict or
+ * invents an omitted task evaluation.
+ */
+export function reconcileCriticStageResult(
+  value: unknown,
+  expectedWorkerId: string,
+  expected: CriticStageExpected
+): ReconciledCriticStageResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { value, corrections: [] };
+  const result = structuredClone(value) as Record<string, unknown>;
+  const corrections: string[] = [];
+  const recordCorrection = (message: string): void => {
+    if (!corrections.includes(message)) corrections.push(message);
+  };
+  const expectedQuestionIdByCompactId = new Map(
+    expected.questionIds.map((questionId) => [questionId.replace(/\s+/g, ""), questionId])
+  );
+  const questionId = (candidate: unknown): unknown => {
+    if (typeof candidate !== "string") return candidate;
+    const trimmed = candidate.trim();
+    return expectedQuestionIdByCompactId.get(trimmed.replace(/\s+/g, "")) ?? trimmed;
+  };
+  const id = (candidate: unknown): unknown =>
+    typeof candidate === "string" ? candidate.trim().replace(/\s+/g, "") : candidate;
+  const stringArray = (candidate: unknown): unknown[] =>
+    Array.isArray(candidate)
+      ? [...new Set((candidate as unknown[]).map((entry) => (typeof entry === "string" ? entry.trim() : entry)))]
+      : [];
+  const union = (...values: unknown[]): unknown[] => [...new Set(values.flatMap(stringArray))];
+  const textUnion = (...values: unknown[]): string[] =>
+    [
+      ...new Set(values.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()))
+    ].filter(Boolean);
+
+  if (result.snapshotDigest !== expected.snapshotDigest) recordCorrection("bound snapshot digest to host input");
+  if (result.taskCatalogDigest !== expected.taskCatalogDigest)
+    recordCorrection("bound task catalog digest to host input");
+  result.snapshotDigest = expected.snapshotDigest;
+  result.taskCatalogDigest = expected.taskCatalogDigest;
+  for (const key of ["worker", "review"] as const) {
+    const entry = result[key];
+    if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      const record = entry as Record<string, unknown>;
+      const idKey = key === "worker" ? "id" : "workerId";
+      if (record[idKey] !== expectedWorkerId) recordCorrection(`bound ${key} ${idKey} to host input`);
+      record[idKey] = expectedWorkerId;
+    }
+  }
+
+  const rawGaps = Array.isArray(result.gaps) ? result.gaps : [];
+  const gaps = new Map<string, Record<string, unknown>>();
+  for (const candidate of rawGaps) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const gap = candidate as Record<string, unknown>;
+    const gapId = id(gap.id);
+    if (typeof gapId !== "string" || !gapId) continue;
+    const previous = gaps.get(gapId);
+    if (!previous) {
+      gaps.set(gapId, { ...gap, id: gapId });
+      continue;
+    }
+    recordCorrection(`merged duplicate gap ${gapId}`);
+    const descriptions = textUnion(previous.description, gap.description);
+    gaps.set(gapId, {
+      ...previous,
+      severity: previous.severity === "blocking" || gap.severity === "blocking" ? "blocking" : "advisory",
+      description: descriptions.join(" "),
+      status: "open",
+      ...(previous.pageId === gap.pageId && previous.pageId !== undefined ? { pageId: previous.pageId } : {})
+    });
+  }
+
+  const review = result.review as Record<string, unknown> | undefined;
+  const rawResults = review && Array.isArray(review.results) ? review.results : [];
+  const results = new Map<string, Record<string, unknown>>();
+  const verdictRank = { pass: 0, partial: 1, fail: 2 } as const;
+  for (const candidate of rawResults) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const reviewResult = candidate as Record<string, unknown>;
+    const normalizedQuestionId = questionId(reviewResult.questionId);
+    if (typeof normalizedQuestionId !== "string" || !normalizedQuestionId) continue;
+    const normalized: Record<string, unknown> = {
+      ...reviewResult,
+      questionId: normalizedQuestionId,
+      pageIds: stringArray(reviewResult.pageIds),
+      gapIds: stringArray(reviewResult.gapIds).map(id)
+    };
+    const previous = results.get(normalizedQuestionId);
+    if (!previous) {
+      results.set(normalizedQuestionId, normalized);
+      continue;
+    }
+    recordCorrection(`merged duplicate review result ${normalizedQuestionId}`);
+    const previousVerdict = String(previous.verdict) as keyof typeof verdictRank;
+    const nextVerdict = String(normalized.verdict) as keyof typeof verdictRank;
+    const verdict =
+      (verdictRank[nextVerdict] ?? 2) > (verdictRank[previousVerdict] ?? 2) ? nextVerdict : previousVerdict;
+    results.set(normalizedQuestionId, {
+      ...previous,
+      verdict,
+      pageIds: union(previous.pageIds, normalized.pageIds),
+      gapIds: union(previous.gapIds, normalized.gapIds).map(id),
+      summary: textUnion(previous.summary, normalized.summary).join(" ")
+    });
+  }
+
+  const rawAttempts = Array.isArray(result.attempts) ? result.attempts : [];
+  const attempts = new Map<string, Record<string, unknown>>();
+  for (const candidate of rawAttempts) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const attempt = candidate as Record<string, unknown>;
+    const normalizedQuestionId = questionId(attempt.questionId);
+    if (typeof normalizedQuestionId !== "string" || !normalizedQuestionId) continue;
+    const previous = attempts.get(normalizedQuestionId);
+    const normalized: Record<string, unknown> = { ...attempt, questionId: normalizedQuestionId };
+    for (const field of CRITIC_ATTEMPT_ARRAY_FIELDS) {
+      normalized[field] = previous ? union(previous[field], attempt[field]) : stringArray(attempt[field]);
+    }
+    if (previous) recordCorrection(`merged duplicate task attempt ${normalizedQuestionId}`);
+    attempts.set(normalizedQuestionId, { ...previous, ...normalized });
+  }
+
+  for (const [normalizedQuestionId, reviewResult] of results) {
+    let attempt = attempts.get(normalizedQuestionId);
+    if (!attempt) {
+      recordCorrection(`created conservative attempt shell for ${normalizedQuestionId}`);
+      attempt = { questionId: normalizedQuestionId };
+      for (const field of CRITIC_ATTEMPT_ARRAY_FIELDS) attempt[field] = [];
+      attempts.set(normalizedQuestionId, attempt);
+    }
+    const pages = union(reviewResult.pageIds, attempt.pageIds);
+    if (
+      JSON.stringify(reviewResult.pageIds) !== JSON.stringify(pages) ||
+      JSON.stringify(attempt.pageIds) !== JSON.stringify(pages)
+    ) {
+      recordCorrection(`reconciled reviewed pages for ${normalizedQuestionId}`);
+    }
+    reviewResult.pageIds = pages;
+    attempt.pageIds = pages;
+
+    const missingPassParts =
+      reviewResult.verdict === "pass"
+        ? [
+            "headings",
+            "entrypoints",
+            "changePlan",
+            "verification",
+            ...(expected.requiredAnswerPartsByQuestionId?.[normalizedQuestionId] ?? []).map(
+              (part) => ANSWER_FIELD_BY_PART[part]
+            )
+          ].filter(
+            (field, index, fields) => fields.indexOf(field) === index && stringArray(attempt?.[field]).length === 0
+          )
+        : [];
+    const missingSymbolOrInvariant =
+      reviewResult.verdict === "pass" &&
+      stringArray(attempt.importantSymbols).length === 0 &&
+      stringArray(attempt.invariants).length === 0;
+    const blockingUnknowns = stringArray(attempt.blockingUnknowns);
+    if (
+      reviewResult.verdict === "pass" &&
+      (blockingUnknowns.length > 0 || missingPassParts.length > 0 || missingSymbolOrInvariant)
+    ) {
+      reviewResult.verdict = "partial";
+      recordCorrection(`downgraded unsupported pass for ${normalizedQuestionId}`);
+    }
+    let resultGapIds = stringArray(reviewResult.gapIds)
+      .map(id)
+      .filter((gapId): gapId is string => typeof gapId === "string");
+    if (reviewResult.verdict !== "pass" && resultGapIds.length === 0) {
+      const gapId = `host-gap-${normalizedQuestionId}`.slice(0, 200);
+      resultGapIds = [gapId];
+      recordCorrection(`materialized missing blocking gap for ${normalizedQuestionId}`);
+    }
+    for (const gapId of resultGapIds) {
+      if (!gaps.has(gapId)) {
+        gaps.set(gapId, {
+          id: gapId,
+          severity: "blocking",
+          description:
+            typeof reviewResult.summary === "string" && reviewResult.summary.trim()
+              ? reviewResult.summary.trim()
+              : `Public context does not completely answer ${normalizedQuestionId}.`,
+          status: "open"
+        });
+        recordCorrection(`materialized referenced blocking gap ${gapId}`);
+      }
+    }
+    reviewResult.gapIds = resultGapIds;
+  }
+
+  if (review) review.results = [...results.values()];
+  result.gaps = [...gaps.values()];
+  result.attempts = [...attempts.values()];
+  return { value: result, corrections };
+}
+
 export function parseCriticStageResult(
   value: unknown,
   expectedWorkerId: string,
-  expected?: {
-    readonly snapshotDigest: string;
-    readonly taskCatalogDigest: string;
-    readonly questionIds: readonly string[];
-    readonly requiredAnswerPartsByQuestionId?: Readonly<Record<string, readonly ChallengeAnswerPart[]>>;
-  }
+  expected?: CriticStageExpected
 ): CriticStageResult {
   const input = object(value, "critic result");
   const snapshotDigest = text(input.snapshotDigest, "critic result snapshotDigest");

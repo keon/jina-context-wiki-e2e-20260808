@@ -14,6 +14,7 @@ import {
   parseDocumentationStagePlan,
   parseResearchStagePlan,
   parseSourceChallengeStageResult,
+  reconcileCriticStageResult,
   RESEARCH_STAGE_SCHEMA,
   researchPlannerPrompt,
   researchWorkerPrompt,
@@ -1047,6 +1048,75 @@ test("critic results bind their worker and require gaps for non-passing tasks", 
       ),
     /has no required control_flow/
   );
+});
+
+test("critic reconciliation repairs redundant bookkeeping without upgrading verdicts", () => {
+  const expected = {
+    snapshotDigest: "a".repeat(64),
+    taskCatalogDigest: "b".repeat(64),
+    questionIds: ["task-123"],
+    requiredAnswerPartsByQuestionId: { "task-123": ["control_flow" as const] }
+  };
+  const raw = {
+    snapshotDigest: "wrong",
+    taskCatalogDigest: "wrong",
+    worker: { id: "wrong", summary: "Checked the task." },
+    review: {
+      id: "review-1",
+      kind: "context_only",
+      status: "complete",
+      reviewer: "subagent",
+      workerId: "wrong",
+      results: [
+        {
+          questionId: "task- 123",
+          verdict: "pass",
+          pageIds: ["architecture"],
+          gapIds: [],
+          summary: "The answer is incomplete."
+        },
+        {
+          questionId: "task-123",
+          verdict: "partial",
+          pageIds: ["operations"],
+          gapIds: ["gap- 1"],
+          summary: "Control flow is missing."
+        }
+      ],
+      summary: "One gap remains."
+    },
+    gaps: [
+      { id: "gap-1", severity: "advisory", description: "Missing detail.", status: "open" },
+      { id: "gap- 1", severity: "blocking", description: "Missing control flow.", status: "open" }
+    ],
+    attempts: [
+      {
+        questionId: "task-123",
+        pageIds: ["operations"],
+        headings: ["Operations"],
+        entrypoints: ["start"],
+        importantSymbols: ["Service"],
+        changePlan: ["Update the service."],
+        controlFlow: [],
+        state: [],
+        invariants: [],
+        configuration: [],
+        verification: ["Run tests."],
+        failureTriage: [],
+        blockingUnknowns: ["Control flow is missing."]
+      }
+    ]
+  };
+
+  const reconciled = reconcileCriticStageResult(raw, "critic-pass-1", expected);
+  const parsed = parseCriticStageResult(reconciled.value, "critic-pass-1", expected);
+  assert.equal(parsed.review.results.length, 1);
+  assert.equal(parsed.review.results[0]?.verdict, "partial");
+  assert.deepEqual(parsed.review.results[0]?.pageIds, ["architecture", "operations"]);
+  assert.deepEqual(parsed.attempts[0]?.pageIds, ["architecture", "operations"]);
+  assert.equal(parsed.gaps.length, 1);
+  assert.equal(parsed.gaps[0]?.severity, "blocking");
+  assert.ok(reconciled.corrections.length >= 5);
 });
 
 test("source challenges preserve existing ids and add distinct evidence-backed maintenance tasks", () => {
