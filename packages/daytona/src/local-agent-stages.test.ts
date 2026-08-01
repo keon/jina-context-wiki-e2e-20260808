@@ -34,6 +34,8 @@ test("citation repairs stay page-scoped and request minimal edits", () => {
 
   assert.match(prompt, /bounded source-aware citation repair stage/);
   assert.match(prompt, /smallest edit that fully grounds each exact claimSpan/);
+  assert.match(prompt, /declaration but not its use/);
+  assert.match(prompt, /Do not leave a rejected target and claim span effectively unchanged/);
   assert.match(prompt, /do not change any other citation/i);
   assert.match(prompt, /VALID:.*Webhook payloads are verified before parsing/);
   assert.match(prompt, /INVALID:.*webhook handler/);

@@ -754,6 +754,121 @@ test("Context builds enforce wall-clock and token ceilings and support idempoten
   }
 });
 
+test("Context model reservations defer excess parallel claims without failing the build", async () => {
+  const tenantId = "tenant-reservation-headroom";
+  const repository = "omxyz/reservation-fixture";
+  const principalId = "user:reservation@example.com";
+  const internalApiToken = "context-reservation-test-token";
+  const now = new Date().toISOString();
+  const created = createContextBoardBuild(createEmptyBoardState(), {
+    tenantId,
+    repository,
+    ref: "main",
+    refSequence: 1,
+    requestKey: "reservation:parallel",
+    derivationBudgetSeconds: 10_800,
+    derivationTokenBudget: 2_500_000,
+    now
+  });
+  const artifact = (name: string): ContextArtifactRef => {
+    const content = Buffer.from(name, "utf8");
+    const kind = name === "snapshot" ? "evidence-snapshot" : name === "plan" ? "research-plan" : "research-report";
+    return {
+      uri: `memory://${name}`,
+      key: contextArtifactKey({
+        tenantId,
+        repository,
+        buildId: created.buildTaskId,
+        kind,
+        name: `${name}.json`,
+        contentType: "application/json",
+        content
+      }),
+      contentType: "application/json",
+      bytes: content.byteLength,
+      sha256: createHash("sha256").update(content).digest("hex")
+    };
+  };
+  let board = transitionBoardTask(created.state, created.snapshotTaskId, "in_progress", now);
+  const snapshotMessage = board.outbox.find((message) => message.taskId === created.snapshotTaskId);
+  assert.ok(snapshotMessage);
+  board = markOutboxDispatched(board, snapshotMessage.id, now);
+  board = transitionBoardTask(board, created.snapshotTaskId, "done", now);
+  const plan = addContextResearchPlan(board, {
+    buildTaskId: created.buildTaskId,
+    snapshotTaskId: created.snapshotTaskId,
+    snapshot: artifact("snapshot"),
+    now
+  });
+  board = transitionBoardTask(plan.state, plan.taskId, "in_progress", now);
+  const planMessage = board.outbox.find((message) => message.taskId === plan.taskId);
+  assert.ok(planMessage);
+  board = markOutboxDispatched(board, planMessage.id, now);
+  board = transitionBoardTask(board, plan.taskId, "done", now);
+  const research = addContextResearchWork(board, {
+    buildTaskId: created.buildTaskId,
+    researchPlanTaskId: plan.taskId,
+    plan: artifact("plan"),
+    work: ["one", "two", "three"].map((key) => ({
+      key,
+      title: `Research ${key}`,
+      input: artifact(`input-${key}`)
+    })),
+    now
+  });
+  const stateStore = mutableStateStore({
+    intakeState: { board: research.state, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const contextStore = new MemoryContextEngineStore();
+  await contextStore.replaceRepositoryAccess(tenantId, principalId, [repository]);
+  const quotaService = new ContextQuotaService({
+    store: new InMemoryContextQuotaStore(),
+    defaults: { maxActiveBuilds: 10, maxActiveModelTasks: 10 }
+  });
+  await quotaService.admitBuild({ tenantId, buildId: created.buildTaskId });
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextStore,
+    internalApiToken,
+    contextQuotaService: quotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const first = await claimContextTask(baseUrl, internalApiToken, contextBoardTopics.research);
+    await claimContextTask(baseUrl, internalApiToken, contextBoardTopics.research);
+    const deferred = await fetch(`${baseUrl}/internal/worker/claim`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ workerId: "reservation-third", topics: [contextBoardTopics.research] })
+    });
+    assert.equal(deferred.status, 204);
+
+    const progress = await fetch(`${baseUrl}/context/builds/${encodeURIComponent(created.buildTaskId)}/progress`, {
+      headers: devHeaders(tenantId, principalId)
+    });
+    assert.equal(progress.status, 200);
+    const progressBody = (await progress.json()) as Record<string, unknown>;
+    assert.equal(progressBody.status, "active");
+    assert.equal(progressBody.activeModelReservedTokens, 2_000_000);
+
+    const released = await fetch(`${baseUrl}/internal/worker/release`, {
+      method: "POST",
+      headers: internalHeaders(internalApiToken),
+      body: JSON.stringify({ ...leaseFromClaim(first), reason: "test reservation release" })
+    });
+    assert.equal(released.status, 200, await released.text());
+    const resumed = await claimContextTask(baseUrl, internalApiToken, contextBoardTopics.research);
+    assert.equal(research.researchTaskIds.includes(entityId<"task">(resumed.task.id)), true);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("new build admission reconciles terminal and orphaned quota reservations against the Board", async () => {
   const tenantId = "tenant-terminal-quota-repair";
   const repository = "omxyz/quota-repair";

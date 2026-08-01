@@ -168,10 +168,11 @@ const SYSTEM_ACTOR = { type: "system", id: "context-board" } as const;
 const MAX_CONTEXT_METADATA_BYTES = 32 * 1024;
 const MAX_RESEARCH_TASKS = 24;
 const MAX_PAGE_TASKS = 96;
-// Two automatic page repairs are enough to correct a bad core binding without
-// turning stylistic citation churn into an unbounded build. Further recovery
-// is an explicit operator-remediation decision over retained checkpoints.
-export const MAX_CONTEXT_REPAIR_PASS = 2;
+// Three automatic page repairs cover the observed progression from structural
+// cleanup, through compound-claim correction, to one final focused evidence
+// adjustment without turning citation churn into an unbounded build. Further
+// recovery is an explicit operator-remediation decision over checkpoints.
+export const MAX_CONTEXT_REPAIR_PASS = 3;
 export const MAX_CONTEXT_GATE_REPAIR_PASS = 3;
 export const MAX_CONTEXT_OPERATOR_REMEDIATION_PASS = 12;
 

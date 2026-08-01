@@ -2362,12 +2362,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               ? findTask(intakeState.board, entityId<"task">(candidateBuildId))
               : undefined;
             if (candidateBuild?.type === contextBoardTaskTypes.build && !isTerminalTaskStatus(candidateBuild.status)) {
-              const limitFailure = contextBuildLimitFailure(
-                intakeState.board,
-                candidateBuild,
-                now,
-                candidateUsesModel ? contextBuildModelTaskReservation(candidateBuild) : 0
-              );
+              const limitFailure = contextBuildLimitFailure(intakeState.board, candidateBuild, now);
               if (limitFailure) {
                 intakeState = {
                   ...intakeState,
@@ -2383,6 +2378,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                   )
                 };
                 terminatedBuilds.set(candidateBuild.id, candidateTenantId);
+                continue;
+              }
+              if (candidateUsesModel && contextBuildModelReservationBlocked(intakeState.board, candidateBuild)) {
+                // Reservations are a concurrency guard, not usage. Defer this
+                // claim until an active stage reports its actual tokens instead
+                // of failing the build on a conservative estimate.
                 continue;
               }
             }
@@ -3602,19 +3603,27 @@ function contextBuildModelTaskReservation(build: BoardTask | undefined): number 
 function contextBuildLimitFailure(
   state: BoardState,
   build: BoardTask,
-  at: IsoTimestamp,
-  additionalReservedTokens = 0
+  at: IsoTimestamp
 ): ContextBuildLimitFailure | undefined {
   if (typeof build.metadata.derivationBudgetSeconds === "number" && at >= contextBuildDeadlineAt(build)) {
     return "build_time_budget_exceeded";
   }
   if (typeof build.metadata.derivationTokenBudget !== "number") return undefined;
   const tokenBudget = requiredPositiveInteger(build.metadata.derivationTokenBudget, "derivationTokenBudget");
-  const projected =
-    contextBuildConsumedModelTokens(state, build.id) +
-    contextBuildActiveModelReservations(state, build.id) +
-    additionalReservedTokens;
-  return projected > tokenBudget ? "build_token_budget_exceeded" : undefined;
+  return contextBuildConsumedModelTokens(state, build.id) >= tokenBudget ? "build_token_budget_exceeded" : undefined;
+}
+
+function contextBuildModelReservationBlocked(state: BoardState, build: BoardTask): boolean {
+  if (typeof build.metadata.derivationTokenBudget !== "number") return false;
+  const tokenBudget = requiredPositiveInteger(build.metadata.derivationTokenBudget, "derivationTokenBudget");
+  const consumed = contextBuildConsumedModelTokens(state, build.id);
+  const activeReserved = contextBuildActiveModelReservations(state, build.id);
+  if (consumed >= tokenBudget) return true;
+  // A final stage may use less than the conservative reservation. Let one run
+  // when the build has no other model work in flight, then enforce the budget
+  // against its observed completion receipt.
+  if (activeReserved === 0) return false;
+  return consumed + activeReserved + contextBuildModelTaskReservation(build) > tokenBudget;
 }
 
 function terminateContextBuild(
