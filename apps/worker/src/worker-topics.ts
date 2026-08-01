@@ -48,3 +48,11 @@ export function configuredWorkerTopics(value: string | undefined): WorkerTopic[]
 export function requiresContextBoardExecutor(topics: readonly WorkerTopic[]): boolean {
   return topics.some((topic) => CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic));
 }
+
+export function workerClaimTimeoutMs(
+  topics: readonly WorkerTopic[],
+  workerApiTimeoutMs: number,
+  contextApiTimeoutMs: number
+): number {
+  return requiresContextBoardExecutor(topics) ? contextApiTimeoutMs : workerApiTimeoutMs;
+}

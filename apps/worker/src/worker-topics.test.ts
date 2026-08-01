@@ -4,7 +4,8 @@ import {
   CONTEXT_BOARD_TOPICS,
   configuredWorkerClaimMode,
   configuredWorkerTopics,
-  requiresContextBoardExecutor
+  requiresContextBoardExecutor,
+  workerClaimTimeoutMs
 } from "./worker-topics.js";
 
 test("worker claim mode defaults enabled and accepts only the explicit paused drain mode", () => {
@@ -28,4 +29,12 @@ test("every Context topic requires the production Board executor preflight", () 
   for (const topic of CONTEXT_BOARD_TOPICS) {
     assert.equal(requiresContextBoardExecutor(configuredWorkerTopics(topic)), true, topic);
   }
+});
+
+test("Context claims use the long API timeout so committed claims are not orphaned", () => {
+  assert.equal(workerClaimTimeoutMs(configuredWorkerTopics("run-review"), 30_000, 7_800_000), 30_000);
+  assert.equal(
+    workerClaimTimeoutMs(configuredWorkerTopics(CONTEXT_BOARD_TOPICS.join("|")), 30_000, 7_800_000),
+    7_800_000
+  );
 });

@@ -120,6 +120,7 @@ import {
   configuredWorkerClaimMode,
   configuredWorkerTopics,
   requiresContextBoardExecutor,
+  workerClaimTimeoutMs,
   type ContextWorkerTopic,
   type WorkerTopic
 } from "./worker-topics.js";
@@ -438,7 +439,11 @@ async function poll(): Promise<void> {
 }
 
 async function claim(): Promise<ClaimedWork | undefined> {
-  const response = await apiRequest("/internal/worker/claim", { workerId, topics });
+  const response = await apiRequest(
+    "/internal/worker/claim",
+    { workerId, topics },
+    workerClaimTimeoutMs(topics, workerApiTimeoutMs, contextApiTimeoutMs)
+  );
   if (response.status === 204) {
     recordApiSuccess();
     return undefined;
