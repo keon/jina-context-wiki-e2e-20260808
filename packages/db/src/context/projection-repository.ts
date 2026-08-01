@@ -14,7 +14,7 @@ import type {
   StructuralRelation
 } from "@jina/context-engine";
 import { contextProjectionConsumers, EXACT_TERM_MAX_CHARACTERS } from "@jina/context-engine";
-import type { PoolClient } from "pg";
+import type { PoolClient, QueryResultRow } from "pg";
 import { assertRepositoryAccessFingerprint, lockRepositoryAccess } from "./access.js";
 import { ContextDatabase, contextDigest, dateString } from "./database.js";
 import type { ContextDatabaseRole } from "./roles.js";
@@ -124,7 +124,8 @@ export class PostgresProjectionRepository implements ProjectionStore {
         "jina_context_admin",
         { system: true },
         "select * from jina_context.index_generations where id=$1",
-        [generationId]
+        [generationId],
+        "projection.get-generation"
       )
     ).rows[0];
     if (!generation || generation.status !== "published") return undefined;
@@ -142,7 +143,8 @@ export class PostgresProjectionRepository implements ProjectionStore {
         "jina_context_admin",
         { tenantIds: [tenantId] },
         "select * from jina_context.index_generations where id=$1 and tenant_id=$2 and repository=any($3::text[])",
-        [generationId, tenantId, [...repositories]]
+        [generationId, tenantId, [...repositories]],
+        "projection.get-scoped-generation"
       )
     ).rows[0];
     if (!generation || generation.status !== "published") return undefined;
@@ -156,7 +158,8 @@ export class PostgresProjectionRepository implements ProjectionStore {
         "jina_context_admin",
         { system: true },
         "select * from jina_context.index_generations where id=$1",
-        [generationId]
+        [generationId],
+        "projection.get-authorized-generation"
       )
     ).rows[0];
     if (!generation || generation.status !== "published") return undefined;
@@ -183,8 +186,9 @@ export class PostgresProjectionRepository implements ProjectionStore {
         and generation.ref_name=current_release.ref_name
        where current_release.tenant_id=$1 and current_release.repository=$2
          and current_release.ref_name=$3 and generation.status='published'
-       limit 1`,
-      [tenantId, repository, ref]
+      limit 1`,
+      [tenantId, repository, ref],
+      "projection.latest-published"
     );
     return result.rows[0] ? this.hydrate(result.rows[0]) : undefined;
   }
@@ -207,7 +211,8 @@ export class PostgresProjectionRepository implements ProjectionStore {
          and generation.status <> 'invalidated'
        order by (current_release.release_id is not null) desc,
                 generation.created_at desc,generation.id desc`,
-      [tenantId, repository]
+      [tenantId, repository],
+      "projection.list-generations"
     );
     return result.rows.map((row) =>
       generationFromRow(row, row.projector_statuses as IndexGeneration["projectorStatuses"])
@@ -216,12 +221,22 @@ export class PostgresProjectionRepository implements ProjectionStore {
 
   private async hydrate(row: GenerationRow, allowedAclFingerprints?: readonly string[]): Promise<GenerationProjection> {
     const acl = allowedAclFingerprints === undefined ? null : [...allowedAclFingerprints];
-    const [statuses, manifest, currentKnowledge, documents, fragments, hierarchyNodes, relations] = await Promise.all([
-      this.projectorStatuses(row.id),
-      this.database.queryAs<ManifestDbRow>(
-        "jina_context_admin",
-        { tenantIds: [row.tenant_id] },
-        `select distinct manifest.*
+    return this.database.transactionAs(
+      "jina_context_admin",
+      { tenantIds: [row.tenant_id] },
+      async (client) => {
+        const query = <T extends QueryResultRow>(databaseOperation: string, text: string, values: readonly unknown[]) =>
+          this.database.observeOperation("jina_context_tenant_admin", databaseOperation, () =>
+            client.query<T>(text, [...values])
+          );
+        const statusesResult = await query<{ consumer: ContextProjectionConsumer; status: ProjectorStatus }>(
+          "projection.hydrate.statuses",
+          "select consumer,status from jina_context.generation_projectors where generation_id=$1",
+          [row.id]
+        );
+        const manifest = await query<ManifestDbRow>(
+          "projection.hydrate.manifest",
+          `select distinct manifest.*
            from jina_context.ref_manifest manifest
            join jina_context.context_documents document
              on document.generation_id=manifest.generation_id
@@ -229,12 +244,11 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where manifest.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by manifest.path`,
-        [row.id, acl]
-      ),
-      this.database.queryAs<CurrentKnowledgeDbRow>(
-        "jina_context_admin",
-        { tenantIds: [row.tenant_id] },
-        `select distinct current.*
+          [row.id, acl]
+        );
+        const currentKnowledge = await query<CurrentKnowledgeDbRow>(
+          "projection.hydrate.current-knowledge",
+          `select distinct current.*
            from jina_context.current_knowledge_revisions current
            join jina_context.context_documents document
              on document.generation_id=current.generation_id
@@ -242,12 +256,11 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where current.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by current.logical_id`,
-        [row.id, acl]
-      ),
-      this.database.queryAs<DocumentDbRow>(
-        "jina_context_admin",
-        { tenantIds: [row.tenant_id] },
-        `select document.id,document.generation_id,document.tenant_id,document.repository,
+          [row.id, acl]
+        );
+        const documents = await query<DocumentDbRow>(
+          "projection.hydrate.documents",
+          `select document.id,document.generation_id,document.tenant_id,document.repository,
                 document.ref_name,document.commit_sha,document.source_kind,document.source_id,
                 document.source_revision_id,document.title,document.body,document.contextual_text,
                 document.metadata,document.authority_class,document.effective_acl_fingerprint,
@@ -257,12 +270,11 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where document.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by document.id`,
-        [row.id, acl]
-      ),
-      this.database.queryAs<FragmentDbRow>(
-        "jina_context_admin",
-        { tenantIds: [row.tenant_id] },
-        `select fragment.id,fragment.generation_id,fragment.document_id,fragment.ordinal,
+          [row.id, acl]
+        );
+        const fragments = await query<FragmentDbRow>(
+          "projection.hydrate.fragments",
+          `select fragment.id,fragment.generation_id,fragment.document_id,fragment.ordinal,
                 fragment.source_text,fragment.contextual_text,fragment.source_anchors,
                 fragment.source_start,fragment.source_end,fragment.content_fingerprint
            from jina_context.context_fragments fragment
@@ -272,12 +284,11 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where fragment.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by fragment.document_id,fragment.ordinal`,
-        [row.id, acl]
-      ),
-      this.database.queryAs<HierarchyDbRow>(
-        "jina_context_admin",
-        { tenantIds: [row.tenant_id] },
-        `select hierarchy.id,hierarchy.generation_id,hierarchy.document_id,hierarchy.parent_id,
+          [row.id, acl]
+        );
+        const hierarchyNodes = await query<HierarchyDbRow>(
+          "projection.hydrate.hierarchy",
+          `select hierarchy.id,hierarchy.generation_id,hierarchy.document_id,hierarchy.parent_id,
                 hierarchy.title,hierarchy.summary,hierarchy.depth,hierarchy.preorder_start,
                 hierarchy.preorder_end,hierarchy.source_anchors,hierarchy.adapter_name,
                 hierarchy.adapter_version
@@ -288,40 +299,46 @@ export class PostgresProjectionRepository implements ProjectionStore {
            where hierarchy.generation_id=$1
              and ($2::text[] is null or (${authorizedDocumentSql("document")}))
            order by hierarchy.document_id,hierarchy.preorder_start`,
-        [row.id, acl]
-      ),
-      this.database.queryAs<RelationDbRow>(
-        "jina_context_admin",
-        { tenantIds: [row.tenant_id] },
-        "select * from jina_context.structural_relations where generation_id=$1 order by id",
-        [row.id]
-      )
-    ]);
-    const hydratedDocuments = documents.rows.map(documentFromRow);
-    const allowedAnchors = new Set(
-      hydratedDocuments.flatMap((document) =>
-        document.anchors.map((anchor) => `${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
-      )
-    );
-    const hydratedRelations = relations.rows
-      .map(relationFromRow)
-      .filter(
-        (relation) =>
-          allowedAclFingerprints === undefined ||
-          relation.anchors.every((anchor) =>
-            allowedAnchors.has(`${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
+          [row.id, acl]
+        );
+        const relations = await query<RelationDbRow>(
+          "projection.hydrate.relations",
+          "select * from jina_context.structural_relations where generation_id=$1 order by id",
+          [row.id]
+        );
+        const hydratedDocuments = documents.rows.map(documentFromRow);
+        const allowedAnchors = new Set(
+          hydratedDocuments.flatMap((document) =>
+            document.anchors.map(
+              (anchor) => `${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`
+            )
           )
-      );
-    return {
-      generation: generationFromRow(row, statuses),
-      manifest: manifest.rows.map(manifestFromRow),
-      currentKnowledge: currentKnowledge.rows.map(currentKnowledgeFromRow),
-      documents: hydratedDocuments,
-      fragments: fragments.rows.map(fragmentFromRow),
-      exactIndex: [],
-      hierarchyNodes: hierarchyNodes.rows.map(hierarchyFromRow),
-      structuralRelations: hydratedRelations
-    };
+        );
+        const hydratedRelations = relations.rows
+          .map(relationFromRow)
+          .filter(
+            (relation) =>
+              allowedAclFingerprints === undefined ||
+              relation.anchors.every((anchor) =>
+                allowedAnchors.has(`${anchor.sourceType}\u0000${anchor.sourceId}\u0000${anchor.contentDigest}`)
+              )
+          );
+        const statuses = Object.fromEntries(
+          statusesResult.rows.map((status) => [status.consumer, status.status])
+        ) as IndexGeneration["projectorStatuses"];
+        return {
+          generation: generationFromRow(row, statuses),
+          manifest: manifest.rows.map(manifestFromRow),
+          currentKnowledge: currentKnowledge.rows.map(currentKnowledgeFromRow),
+          documents: hydratedDocuments,
+          fragments: fragments.rows.map(fragmentFromRow),
+          exactIndex: [],
+          hierarchyNodes: hierarchyNodes.rows.map(hierarchyFromRow),
+          structuralRelations: hydratedRelations
+        };
+      },
+      "projection.hydrate"
+    );
   }
 
   private async projectorStatuses(generationId: string): Promise<IndexGeneration["projectorStatuses"]> {
@@ -329,7 +346,8 @@ export class PostgresProjectionRepository implements ProjectionStore {
       "jina_context_admin",
       { system: true },
       "select consumer,status from jina_context.generation_projectors where generation_id=$1",
-      [generationId]
+      [generationId],
+      "projection.hydrate.statuses"
     );
     return Object.fromEntries(
       result.rows.map((row) => [row.consumer, row.status])
@@ -347,8 +365,9 @@ export class PostgresProjectionRepository implements ProjectionStore {
        from jina_context.current_repository_acl
        where tenant_id=$1 and repository=$2 and principal_id=$3
          and permission in ('read','write','admin')
-       order by acl_fingerprint`,
-      [generation.tenant_id, generation.repository, principalId]
+      order by acl_fingerprint`,
+      [generation.tenant_id, generation.repository, principalId],
+      "projection.authorize"
     );
     return result.rows.map((row) => row.acl_fingerprint);
   }

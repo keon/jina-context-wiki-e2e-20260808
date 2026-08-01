@@ -1,4 +1,5 @@
 import type { EvidenceAnchor } from "../domain/evidence.js";
+import type { KnowledgeEvidenceCitation } from "../domain/knowledge.js";
 import type {
   ContextDocument,
   ContextFragment,
@@ -261,7 +262,7 @@ export class ContextCatalogService {
     const documents = derivedDocuments(projection);
     return {
       release: publicRelease(projection.generation),
-      documents: await Promise.all(documents.map((document) => this.summary(document))),
+      documents: await this.summaries(documents),
       tree: treeNodes(projection, documents)
     };
   }
@@ -310,23 +311,24 @@ export class ContextCatalogService {
       const documentId = validNodes.get(nodeId)!.documentId;
       selectedByDocument.set(documentId, [...(selectedByDocument.get(documentId) ?? []), nodeId]);
     }
-    const results = await Promise.all(
-      [...selectedByDocument.entries()].map(async ([documentId, nodeIds]) => {
-        const document = documents.find((candidate) => candidate.id === documentId)!;
-        const excerpt = bestExcerpts(input.query, document, projection.fragments);
-        const summary = await this.summary(document);
-        return {
-          documentId,
-          logicalId: document.sourceId,
-          revisionId: document.sourceRevisionId!,
-          title: document.title,
-          score: excerpt.score,
-          selectedNodeIds: nodeIds,
-          excerpts: excerpt.excerpts,
-          citations: summary.citations
-        };
-      })
-    );
+    const selected = [...selectedByDocument.entries()].map(([documentId, nodeIds]) => ({
+      document: documents.find((candidate) => candidate.id === documentId)!,
+      nodeIds
+    }));
+    const summaries = await this.summaries(selected.map(({ document }) => document));
+    const results = selected.map(({ document, nodeIds }, index) => {
+      const excerpt = bestExcerpts(input.query, document, projection.fragments);
+      return {
+        documentId: document.id,
+        logicalId: document.sourceId,
+        revisionId: document.sourceRevisionId!,
+        title: document.title,
+        score: excerpt.score,
+        selectedNodeIds: nodeIds,
+        excerpts: excerpt.excerpts,
+        citations: summaries[index]!.citations
+      };
+    });
     results.sort((left, right) => right.score - left.score || left.documentId.localeCompare(right.documentId));
     return {
       context: {
@@ -358,23 +360,27 @@ export class ContextCatalogService {
     ]);
     const before = new Map(derivedDocuments(from).map((document) => [document.sourceId, document]));
     const after = new Map(derivedDocuments(to).map((document) => [document.sourceId, document]));
-    const added = await Promise.all(
-      [...after.entries()].filter(([id]) => !before.has(id)).map(([, document]) => this.summary(document))
-    );
-    const removed = await Promise.all(
-      [...before.entries()].filter(([id]) => !after.has(id)).map(([, document]) => this.summary(document))
-    );
-    const changed = await Promise.all(
-      [...after.entries()]
-        .filter(([id, document]) => {
-          const prior = before.get(id);
-          return prior !== undefined && prior.sourceFingerprint !== document.sourceFingerprint;
-        })
-        .map(async ([id, document]) => ({
-          before: await this.summary(before.get(id)!),
-          after: await this.summary(document)
-        }))
-    );
+    const addedDocuments = [...after.entries()].filter(([id]) => !before.has(id)).map(([, document]) => document);
+    const removedDocuments = [...before.entries()].filter(([id]) => !after.has(id)).map(([, document]) => document);
+    const changedDocuments = [...after.entries()]
+      .filter(([id, document]) => {
+        const prior = before.get(id);
+        return prior !== undefined && prior.sourceFingerprint !== document.sourceFingerprint;
+      })
+      .map(([id, document]) => ({ before: before.get(id)!, after: document }));
+    const allSummaries = await this.summaries([
+      ...addedDocuments,
+      ...removedDocuments,
+      ...changedDocuments.flatMap((documents) => [documents.before, documents.after])
+    ]);
+    const added = allSummaries.slice(0, addedDocuments.length);
+    const removedOffset = addedDocuments.length;
+    const removed = allSummaries.slice(removedOffset, removedOffset + removedDocuments.length);
+    const changedOffset = removedOffset + removedDocuments.length;
+    const changed = changedDocuments.map((_, index) => ({
+      before: allSummaries[changedOffset + index * 2]!,
+      after: allSummaries[changedOffset + index * 2 + 1]!
+    }));
     const unchanged = [...after.entries()]
       .filter(([id, document]) => before.get(id)?.sourceFingerprint === document.sourceFingerprint)
       .map(([id]) => id)
@@ -390,22 +396,26 @@ export class ContextCatalogService {
   }
 
   private async summary(document: ContextDocument & { sourceRevisionId?: string }): Promise<ContextDocumentSummary> {
-    if (!document.sourceRevisionId) throw new Error("derived context document is missing its revision");
-    const citations = await this.store.listCitations(document.sourceRevisionId);
-    return {
-      id: document.id,
-      logicalId: document.sourceId,
-      revisionId: document.sourceRevisionId,
-      ...(document.knowledgeKind === undefined ? {} : { kind: document.knowledgeKind }),
-      title: document.title,
-      summary: documentSummary(document),
-      citations: citations.map((citation) => ({
-        claim: citation.claim,
-        ...(citation.citationId === undefined ? {} : { citationId: citation.citationId }),
-        ...(citation.claimSpan === undefined ? {} : { claimSpan: citation.claimSpan }),
-        anchor: citation.anchor
-      }))
-    };
+    return (await this.summaries([document]))[0]!;
+  }
+
+  private async summaries(
+    documents: readonly (ContextDocument & { sourceRevisionId?: string })[]
+  ): Promise<ContextDocumentSummary[]> {
+    const revisionIds = documents.map((document) => {
+      if (!document.sourceRevisionId) throw new Error("derived context document is missing its revision");
+      return document.sourceRevisionId;
+    });
+    const citationsByRevision = this.store.listCitationsForRevisions
+      ? await this.store.listCitationsForRevisions(revisionIds)
+      : new Map(
+          await Promise.all(
+            revisionIds.map(async (revisionId) => [revisionId, await this.store.listCitations(revisionId)] as const)
+          )
+        );
+    return documents.map((document, index) =>
+      contextDocumentSummary(document, citationsByRevision.get(revisionIds[index]!) ?? [])
+    );
   }
 
   private async resolveProjection(input: AccessInput): Promise<GenerationProjection> {
@@ -436,4 +446,25 @@ export class ContextCatalogService {
       ? this.store.getGeneration(generationId)
       : this.store.getAuthorizedGeneration(generationId, input.principalId);
   }
+}
+
+function contextDocumentSummary(
+  document: ContextDocument & { sourceRevisionId?: string },
+  citations: readonly KnowledgeEvidenceCitation[]
+): ContextDocumentSummary {
+  if (!document.sourceRevisionId) throw new Error("derived context document is missing its revision");
+  return {
+    id: document.id,
+    logicalId: document.sourceId,
+    revisionId: document.sourceRevisionId,
+    ...(document.knowledgeKind === undefined ? {} : { kind: document.knowledgeKind }),
+    title: document.title,
+    summary: documentSummary(document),
+    citations: citations.map((citation) => ({
+      claim: citation.claim,
+      ...(citation.citationId === undefined ? {} : { citationId: citation.citationId }),
+      ...(citation.claimSpan === undefined ? {} : { claimSpan: citation.claimSpan }),
+      anchor: citation.anchor
+    }))
+  };
 }

@@ -23,6 +23,7 @@ export interface KnowledgeStore {
   ): Promise<KnowledgeDocumentRevision | undefined>;
   listRevisions(tenantId: string, repository: string): Promise<KnowledgeDocumentRevision[]>;
   listCitations(revisionId: string): Promise<KnowledgeEvidenceCitation[]>;
+  listCitationsForRevisions?(revisionIds: readonly string[]): Promise<ReadonlyMap<string, KnowledgeEvidenceCitation[]>>;
   appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent>;
   listRevisionEvents(revisionId: string): Promise<KnowledgeRevisionEvent[]>;
   listCheckpointRevisions(

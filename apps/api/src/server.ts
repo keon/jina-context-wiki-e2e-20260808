@@ -1730,7 +1730,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
 
     if (request.method === "GET" && url.pathname === "/internal/observability") {
-      json(response, 200, { service: process.env.K_SERVICE ?? "jina-api", startedAt, metrics: metrics.snapshot() });
+      json(response, 200, {
+        service: process.env.K_SERVICE ?? "jina-api",
+        startedAt,
+        metrics: metrics.snapshot(),
+        ...(contextStore.contextDatabaseTelemetry ? { database: contextStore.contextDatabaseTelemetry() } : {})
+      });
       return;
     }
     if (request.method === "POST" && url.pathname === "/internal/worker/claim") {

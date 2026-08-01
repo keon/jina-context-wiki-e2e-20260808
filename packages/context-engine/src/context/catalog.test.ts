@@ -169,7 +169,9 @@ function storeFor(projections: GenerationProjection[]): ContextEngineStore {
     getGeneration: async (id: string) => byId.get(id),
     aclFingerprintsForPrincipal: async (_tenantId: string, principalId: string) =>
       principalId === "reader" ? ["a".repeat(64)] : [],
-    listCitations: async (revisionId: string) => citations.get(revisionId) ?? []
+    listCitations: async (revisionId: string) => citations.get(revisionId) ?? [],
+    listCitationsForRevisions: async (revisionIds: readonly string[]) =>
+      new Map(revisionIds.map((revisionId) => [revisionId, citations.get(revisionId) ?? []]))
   } as unknown as ContextEngineStore;
 }
 
@@ -212,6 +214,46 @@ test("context catalog lists and reads derived knowledge only", async () => {
   assert.equal(read.document.citations[0]?.anchor.pathOrUrl, "src/widget.ts");
   assert.equal(read.document.citations[0]?.citationId, "cite_22222222222222222222");
   assert.equal(read.document.citations[0]?.claimSpan, "The cache keeps widget state.");
+});
+
+test("context catalog batches citations for every document in a response", async () => {
+  const release = generation("release-batch", "1".repeat(40), "2026-07-29T00:00:00.000Z");
+  const documents = [
+    document({
+      id: "derived-a",
+      generationId: release.id,
+      logicalId: "component:a",
+      revisionId: "revision-a",
+      title: "Component A",
+      body: "# Component A"
+    }),
+    document({
+      id: "derived-b",
+      generationId: release.id,
+      logicalId: "component:b",
+      revisionId: "revision-b",
+      title: "Component B",
+      body: "# Component B"
+    })
+  ];
+  const store = storeFor([projection(release, documents)]);
+  const batches: string[][] = [];
+  store.listCitations = async () => {
+    throw new Error("per-revision citation query must not run");
+  };
+  store.listCitationsForRevisions = async (revisionIds) => {
+    batches.push([...revisionIds]);
+    return new Map(revisionIds.map((revisionId) => [revisionId, []]));
+  };
+
+  const listed = await new ContextCatalogService(store).listContext({
+    tenantId: "tenant-1",
+    principalId: "reader",
+    repository: "acme/widget"
+  });
+
+  assert.equal(listed.documents.length, 2);
+  assert.deepEqual(batches, [["revision-a", "revision-b"]]);
 });
 
 test("prepared releases are hidden from current and explicit release access", async () => {

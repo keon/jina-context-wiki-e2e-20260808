@@ -259,6 +259,9 @@ importers:
       '@jina/context-engine':
         specifier: workspace:*
         version: link:../context-engine
+      '@jina/observability':
+        specifier: workspace:*
+        version: link:../observability
       pg:
         specifier: ^8.22.0
         version: 8.22.0

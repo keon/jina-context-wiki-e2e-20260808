@@ -363,9 +363,42 @@ export class PostgresKnowledgeRepository implements KnowledgeStore {
              )
          )
        order by ordinal`,
-      [revisionId]
+      [revisionId],
+      "knowledge.list-citations"
     );
     return result.rows.map(citationFromRow);
+  }
+
+  async listCitationsForRevisions(
+    revisionIds: readonly string[]
+  ): Promise<ReadonlyMap<string, KnowledgeEvidenceCitation[]>> {
+    const uniqueRevisionIds = [...new Set(revisionIds)];
+    const citations = new Map(uniqueRevisionIds.map((revisionId) => [revisionId, [] as KnowledgeEvidenceCitation[]]));
+    if (uniqueRevisionIds.length === 0) return citations;
+    await this.database.initialize();
+    const result = await this.database.queryAs<CitationRow>(
+      "jina_context_admin",
+      { system: true },
+      `select * from jina_context.knowledge_revision_evidence
+       where revision_id=any($1::text[])
+         and not exists (
+           select 1 from jina_context.erasure_filters erasure
+           where erasure.tenant_id=knowledge_revision_evidence.tenant_id
+             and erasure.repository=knowledge_revision_evidence.repository
+             and erasure.source_type=knowledge_revision_evidence.source_type
+             and (erasure.source_id is null or erasure.source_id=knowledge_revision_evidence.source_id)
+             and (erasure.content_digest is null or erasure.content_digest=knowledge_revision_evidence.content_digest)
+             and (
+               erasure.path_pattern is null
+               or knowledge_revision_evidence.path_or_url like erasure.path_pattern escape '\\'
+             )
+         )
+       order by revision_id,ordinal`,
+      [uniqueRevisionIds],
+      "knowledge.list-citations-batch"
+    );
+    for (const row of result.rows) citations.get(row.revision_id)?.push(citationFromRow(row));
+    return citations;
   }
 
   async appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent> {

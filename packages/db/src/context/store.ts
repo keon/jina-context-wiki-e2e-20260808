@@ -92,6 +92,10 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     return this.database.runInTenantScope(tenantId, operation);
   }
 
+  contextDatabaseTelemetry() {
+    return this.database.telemetry();
+  }
+
   commitSnapshot(snapshot: EvidenceSnapshot): Promise<EvidenceCheckpoint> {
     return this.evidence.commitSnapshot(snapshot);
   }
@@ -144,6 +148,9 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   }
   listCitations(revisionId: string): Promise<KnowledgeEvidenceCitation[]> {
     return this.knowledge.listCitations(revisionId);
+  }
+  listCitationsForRevisions(revisionIds: readonly string[]): Promise<ReadonlyMap<string, KnowledgeEvidenceCitation[]>> {
+    return this.knowledge.listCitationsForRevisions(revisionIds);
   }
   appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent> {
     return this.knowledge.appendRevisionEvent(event);
@@ -255,20 +262,17 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     let rows: readonly StoredRetrievalCandidate[];
     if (input.route === "exact") {
       const terms = exactTerms(input.plan);
-      rows = (
-        await Promise.all(
-          terms.slice(0, 50).map((term) =>
-            this.query.exactLookup({
+      rows =
+        terms.length === 0
+          ? []
+          : await this.query.exactLookup({
               tenantId: input.tenantId,
               repository: input.repository,
               principalId: input.principalId,
               generationId: input.generation.id,
-              term,
+              terms,
               limit: input.limit
-            })
-          )
-        )
-      ).flat();
+            });
     } else if (input.route === "hierarchy") {
       rows = await this.query.hierarchySearch({
         tenantId: input.tenantId,
@@ -537,7 +541,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
       "jina_context_admin",
       { tenantIds: [tenantId] },
       "select repository from jina_context.repositories where tenant_id=$1 order by repository",
-      [tenantId]
+      [tenantId],
+      "context.metrics.list-repositories"
     );
     return result.rows.map((row) => row.repository);
   }
@@ -555,7 +560,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
        from jina_context.outbox
        where tenant_id=$1 and processed_at is null
        group by consumer`,
-      [tenantId]
+      [tenantId],
+      "context.metrics.projection-backlog"
     );
     const byConsumer = new Map(result.rows.map((row) => [row.consumer, row]));
     const consumers = [
@@ -780,7 +786,8 @@ export class PostgresContextEngineStore implements ContextEngineStore {
             join jina_context.index_generations generation
               on generation.id=hierarchy.generation_id and generation.status='published'
            where hierarchy.tenant_id=$1) as hierarchy_node_count`,
-      [tenantId]
+      [tenantId],
+      "context.metrics.catalog-counts"
     );
     const row = result.rows[0]!;
     return {

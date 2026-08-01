@@ -263,6 +263,16 @@ export class MemoryContextEngineStore implements ContextEngineStore {
     return copy((this.#citations.get(revisionId) ?? []).filter((citation) => !this.#isErased(citation.anchor)));
   }
 
+  async listCitationsForRevisions(
+    revisionIds: readonly string[]
+  ): Promise<ReadonlyMap<string, KnowledgeEvidenceCitation[]>> {
+    return new Map(
+      await Promise.all(
+        revisionIds.map(async (revisionId) => [revisionId, await this.listCitations(revisionId)] as const)
+      )
+    );
+  }
+
   async appendRevisionEvent(event: KnowledgeRevisionEvent): Promise<KnowledgeRevisionEvent> {
     if (!this.#revisions.has(event.revisionId)) throw new Error("Unknown knowledge revision");
     const values = this.#events.get(event.revisionId) ?? [];

@@ -40,3 +40,14 @@ test("quota ledgers have a tenant-scoped least-privilege runtime role", () => {
   assert.match(CONTEXT_ROLES_SQL, /alter table jina_context\.context_quota_ledgers enable row level security;/);
   assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on jina_context\.context_quota_ledgers\s+using/);
 });
+
+test("query role can hydrate projector status only inside its tenant scope", () => {
+  const policy =
+    /create policy context_generation_projectors_query on jina_context\.generation_projectors[\s\S]*?\n {2}\);/.exec(
+      CONTEXT_ROLES_SQL
+    )?.[0];
+  assert.ok(policy);
+  assert.match(policy, /for select to jina_context_query/);
+  assert.match(policy, /generation\.tenant_id=any\(string_to_array/);
+  assert.doesNotMatch(policy, /current_user='jina_context_admin'/);
+});

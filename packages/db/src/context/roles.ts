@@ -358,6 +358,16 @@ create policy context_generation_projectors_coordinator on jina_context.generati
         and ${tenantScopeSql("generation.tenant_id", false)}
     )
   );
+drop policy if exists context_generation_projectors_query on jina_context.generation_projectors;
+create policy context_generation_projectors_query on jina_context.generation_projectors
+  for select to jina_context_query
+  using (
+    exists (
+      select 1 from jina_context.index_generations generation
+      where generation.id=generation_id
+        and ${tenantScopeSql("generation.tenant_id", false)}
+    )
+  );
 drop policy if exists context_projection_checkpoints_admin on jina_context.projection_checkpoints;
 create policy context_projection_checkpoints_admin on jina_context.projection_checkpoints
   to jina_context_tenant_admin,jina_context_admin

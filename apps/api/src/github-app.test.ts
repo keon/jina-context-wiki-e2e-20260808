@@ -457,6 +457,45 @@ test("all public context routes require a bound principal in production", async 
   }
 });
 
+test("operator observability exposes database latency and pool telemetry", async () => {
+  const observableStore = Object.assign(new MemoryContextEngineStore(), {
+    contextDatabaseTelemetry: () => ({
+      pool: { total: 3, idle: 1, waiting: 2, max: 10 },
+      metrics: {
+        counters: [
+          {
+            name: "context.db.pool.queued_checkouts",
+            labels: { operation: "projection.hydrate", role: "jina_context_tenant_admin" },
+            value: 2
+          }
+        ],
+        durations: [],
+        droppedSeries: 0
+      }
+    })
+  });
+  const observableServer = createApiServer({
+    tenantId,
+    enableDevEndpoints: false,
+    internalApiToken: internalToken,
+    contextStore: observableStore
+  });
+  await new Promise<void>((resolve) => observableServer.listen(0, "127.0.0.1", resolve));
+  const observableUrl = `http://127.0.0.1:${(observableServer.address() as AddressInfo).port}`;
+  try {
+    const response = await fetch(`${observableUrl}/internal/observability`, { headers: internalHeaders() });
+    assert.equal(response.status, 200);
+    const body = record(await response.json());
+    const database = record(body.database);
+    assert.deepEqual(database.pool, { total: 3, idle: 1, waiting: 2, max: 10 });
+    assert.equal(array(record(database.metrics).counters).length, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      observableServer.close((error) => (error ? reject(error) : resolve()))
+    );
+  }
+});
+
 test("unsigned dev webhooks coexist with strict token-bound API identity", async () => {
   const strictDevStore = new MemoryContextEngineStore();
   await strictDevStore.replaceRepositoryAccess(tenantId, principalId, [repository]);

@@ -7,5 +7,5 @@
     "outDir": "dist"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../context-engine" }]
+  "references": [{ "path": "../context-engine" }, { "path": "../observability" }]
 }

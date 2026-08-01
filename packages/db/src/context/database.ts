@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { ContextDatabaseTelemetry } from "@jina/context-engine";
+import { MetricsRegistry } from "@jina/observability";
 import { Pool, type PoolClient, type PoolConfig, type QueryResultRow } from "pg";
 import { applySchema } from "../apply-schema.js";
 import { CONTEXT_ROLES_SQL } from "./roles.js";
@@ -25,6 +27,7 @@ export class ContextDatabase {
   private readonly manageSchema: boolean;
   private readonly manageRoles: boolean;
   private readonly ambientTenantScope = new AsyncLocalStorage<ContextDatabaseScope>();
+  private readonly metrics = new MetricsRegistry();
   private initialized?: Promise<void>;
 
   constructor(config: PostgresContextDatabaseConfig) {
@@ -46,31 +49,97 @@ export class ContextDatabase {
     return this.ambientTenantScope.run(contextTenantScope(tenantId), operation);
   }
 
+  telemetry(): ContextDatabaseTelemetry {
+    return {
+      pool: {
+        total: this.pool.totalCount,
+        idle: this.pool.idleCount,
+        waiting: this.pool.waitingCount,
+        max: this.pool.options.max ?? 10
+      },
+      metrics: this.metrics.snapshot()
+    };
+  }
+
+  async observeOperation<T>(
+    role: ContextDatabaseRole,
+    databaseOperation: string,
+    operation: () => Promise<T>
+  ): Promise<T> {
+    const labels = { operation: normalizeDatabaseOperation(databaseOperation), role };
+    const startedAt = performance.now();
+    let outcome: "ok" | "error" = "error";
+    try {
+      const result = await operation();
+      outcome = "ok";
+      return result;
+    } finally {
+      this.metrics.count("context.db.operations", { ...labels, outcome });
+      this.metrics.observe("context.db.operation.duration_ms", performance.now() - startedAt, labels);
+    }
+  }
+
   async transactionAs<T>(
     role: ContextDatabaseRole,
     scope: ContextDatabaseScope,
-    operation: (client: PoolClient) => Promise<T>
+    operation: (client: PoolClient) => Promise<T>,
+    databaseOperation = "unspecified"
   ): Promise<T> {
     await this.initialize();
     const ambientScope = this.ambientTenantScope.getStore();
     const effectiveScope = "system" in scope && ambientScope ? ambientScope : scope;
     const effectiveRole =
       role === "jina_context_admin" && "tenantIds" in effectiveScope ? "jina_context_tenant_admin" : role;
-    const client = await this.pool.connect();
+    const labels = { operation: normalizeDatabaseOperation(databaseOperation), role: effectiveRole };
+    const totalStartedAt = performance.now();
+    const checkoutStartedAt = totalStartedAt;
+    const queued = this.pool.idleCount === 0 && this.pool.totalCount >= (this.pool.options.max ?? 10);
+    if (queued) this.metrics.count("context.db.pool.queued_checkouts", labels);
+    let client: PoolClient | undefined;
+    let phase: "checkout" | "setup" | "operation" | "commit" = "checkout";
+    let outcome: "ok" | "error" = "error";
     try {
-      await client.query("begin");
-      await client.query(`set local role ${effectiveRole}`);
-      await client.query("select set_config('jina.tenant_id',$1,true)", [
-        "tenantIds" in effectiveScope ? effectiveScope.tenantIds.join("\u001f") : "*"
-      ]);
-      const result = await operation(client);
-      await client.query("commit");
+      try {
+        client = await this.pool.connect();
+      } finally {
+        this.metrics.observe("context.db.pool.checkout_wait_ms", performance.now() - checkoutStartedAt, labels);
+      }
+      phase = "setup";
+      const setupStartedAt = performance.now();
+      try {
+        await client.query("begin");
+        await client.query(`set local role ${effectiveRole}`);
+        await client.query("select set_config('jina.tenant_id',$1,true)", [
+          "tenantIds" in effectiveScope ? effectiveScope.tenantIds.join("\u001f") : "*"
+        ]);
+      } finally {
+        this.metrics.observe("context.db.transaction.setup_ms", performance.now() - setupStartedAt, labels);
+      }
+      phase = "operation";
+      const operationStartedAt = performance.now();
+      let result: T;
+      try {
+        result = await operation(client);
+      } finally {
+        this.metrics.observe("context.db.transaction.operation_ms", performance.now() - operationStartedAt, labels);
+      }
+      phase = "commit";
+      const commitStartedAt = performance.now();
+      try {
+        await client.query("commit");
+      } finally {
+        this.metrics.observe("context.db.transaction.commit_ms", performance.now() - commitStartedAt, labels);
+      }
+      outcome = "ok";
       return result;
     } catch (error) {
-      await client.query("rollback").catch(() => undefined);
+      this.metrics.count("context.db.transaction.errors", { ...labels, phase });
+      await client?.query("rollback").catch(() => undefined);
       throw error;
     } finally {
-      client.release();
+      client?.release();
+      this.metrics.count("context.db.transactions", { ...labels, outcome });
+      this.metrics.observe("context.db.transaction.total_ms", performance.now() - totalStartedAt, labels);
     }
   }
 
@@ -78,9 +147,15 @@ export class ContextDatabase {
     role: ContextDatabaseRole,
     scope: ContextDatabaseScope,
     text: string,
-    values?: readonly unknown[]
+    values?: readonly unknown[],
+    databaseOperation = "unspecified"
   ) {
-    return this.transactionAs(role, scope, (client) => client.query<T>(text, values ? [...values] : undefined));
+    return this.transactionAs(
+      role,
+      scope,
+      (client) => client.query<T>(text, values ? [...values] : undefined),
+      databaseOperation
+    );
   }
 
   async close(): Promise<void> {
@@ -95,6 +170,11 @@ export class ContextDatabase {
       await applySchema(this.pool, "jina_context.roles", CONTEXT_ROLES_SQL);
     }
   }
+}
+
+function normalizeDatabaseOperation(operation: string): string {
+  const normalized = operation.trim().toLowerCase();
+  return /^[a-z0-9][a-z0-9_.-]{0,63}$/.test(normalized) ? normalized : "other";
 }
 
 export function contextDigest(value: unknown): string {

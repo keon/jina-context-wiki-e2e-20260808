@@ -19,6 +19,7 @@
   "dependencies": {
     "@google-cloud/storage": "^7.21.0",
     "@jina/context-engine": "workspace:*",
+    "@jina/observability": "workspace:*",
     "pg": "^8.22.0"
   },
   "devDependencies": {

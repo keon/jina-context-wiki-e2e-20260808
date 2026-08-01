@@ -20,6 +20,7 @@ import {
   type BoardContextPublicationCommit,
   type BoardPageIndexTreeArtifactV1,
   type ContextArtifactRef,
+  type QueryPlan,
   type ContextTenantQuotaLedger
 } from "@jina/context-engine";
 import { ContextDatabase } from "./context/database.js";
@@ -275,6 +276,39 @@ test(
         (await preparedStore.latestPublished(TENANT, REPOSITORY, REF))?.generation.id,
         publication.commit.releaseId
       );
+      await preparedStore.replaceRepositoryAccess(TENANT, "tenant-admin", [REPOSITORY]);
+      const authorizedGeneration = await preparedStore.latestAuthorizedGeneration(
+        TENANT,
+        REPOSITORY,
+        REF,
+        "tenant-admin"
+      );
+      assert.ok(authorizedGeneration);
+      assert.equal(authorizedGeneration.id, publication.commit.releaseId);
+      assert.equal(authorizedGeneration.projectorStatuses.hierarchy, "ready");
+      const exact = await preparedStore.retrieveIndexed({
+        tenantId: TENANT,
+        repository: REPOSITORY,
+        principalId: "tenant-admin",
+        generation: authorizedGeneration,
+        plan: {
+          normalizedQuestion: "Find the architecture context",
+          taskKind: "lookup",
+          routes: [],
+          targets: {
+            paths: [],
+            symbols: ["component:acme/context:architecture"],
+            pullRequests: [],
+            issues: []
+          },
+          plannerVersion: "integration"
+        } satisfies QueryPlan,
+        route: "exact",
+        limit: 12,
+        allowedAclFingerprints: new Set([repositoryAclFingerprint(TENANT, REPOSITORY)])
+      });
+      assert.equal(exact.length, 1);
+      assert.equal(exact[0]?.sourceRevisionId, publication.revisionId);
       assert.deepEqual(
         (
           await new ContextCatalogService(preparedStore).listReleases({
@@ -292,6 +326,30 @@ test(
         fragmentCount: 1,
         hierarchyNodeCount: 1
       });
+      await seedExactSelectionFixtures(database, publication.commit.releaseId);
+      const coveredTargets = await preparedStore.retrieveIndexed({
+        tenantId: TENANT,
+        repository: REPOSITORY,
+        principalId: "tenant-admin",
+        generation: authorizedGeneration,
+        plan: exactPlan("`first-target` and `later-target`"),
+        route: "exact",
+        limit: 2,
+        allowedAclFingerprints: new Set([repositoryAclFingerprint(TENANT, REPOSITORY)])
+      });
+      assert.deepEqual(coveredTargets.map((candidate) => candidate.sourceId).sort(), ["exact-first-a", "exact-later"]);
+      const multiTarget = await preparedStore.retrieveIndexed({
+        tenantId: TENANT,
+        repository: REPOSITORY,
+        principalId: "tenant-admin",
+        generation: authorizedGeneration,
+        plan: exactPlan("`multi-a` and `multi-b`"),
+        route: "exact",
+        limit: 1,
+        allowedAclFingerprints: new Set([repositoryAclFingerprint(TENANT, REPOSITORY)])
+      });
+      assert.equal(multiTarget[0]?.sourceId, "exact-multi");
+      assert.equal(multiTarget[0]?.rawScore, 2);
 
       const restartedAfterAttach = new ContextDatabase({
         connectionString: databaseUrl,
@@ -911,6 +969,70 @@ async function removeRuntimeLogin(database: ContextDatabase): Promise<void> {
   await database.pool.query(`revoke ${CONTEXT_RUNTIME_ROLES.join(",")} from "${RUNTIME_LOGIN}"`);
   await database.pool.query(`drop owned by "${RUNTIME_LOGIN}"`);
   await database.pool.query(`drop role "${RUNTIME_LOGIN}"`);
+}
+
+async function seedExactSelectionFixtures(database: ContextDatabase, generationId: string): Promise<void> {
+  const fixtures = ["exact-first-a", "exact-first-b", "exact-first-c", "exact-later", "exact-multi"];
+  await database.pool.query(
+    `with source as (
+       select * from jina_context.context_documents where generation_id=$1 order by id limit 1
+     ), fixture(document_id) as (
+       select unnest($2::text[])
+     )
+     insert into jina_context.context_documents
+       (id,generation_id,tenant_id,repository,ref_name,commit_sha,source_kind,source_id,
+        source_revision_id,title,body,contextual_text,metadata,authority_class,
+        effective_acl_fingerprint,source_fingerprint,source_anchors,projector_name,
+        projector_version,projected_at)
+     select fixture.document_id,source.generation_id,source.tenant_id,source.repository,
+            source.ref_name,source.commit_sha,'code',fixture.document_id,null,
+            fixture.document_id,source.body,source.contextual_text,
+            jsonb_build_object('fixture',fixture.document_id),source.authority_class,
+            source.effective_acl_fingerprint,source.source_fingerprint,source.source_anchors,
+            source.projector_name,source.projector_version,source.projected_at
+     from source cross join fixture`,
+    [generationId, fixtures]
+  );
+  await database.pool.query(
+    `with source as (
+       select * from jina_context.context_fragments where generation_id=$1 order by id limit 1
+     ), fixture(document_id) as (
+       select unnest($2::text[])
+     )
+     insert into jina_context.context_fragments
+       (id,generation_id,document_id,tenant_id,repository,ordinal,source_text,
+        contextual_text,source_anchors,source_start,source_end,content_fingerprint,
+        effective_acl_fingerprint)
+     select 'fragment-' || fixture.document_id,source.generation_id,fixture.document_id,
+            source.tenant_id,source.repository,0,source.source_text,source.contextual_text,
+            source.source_anchors,source.source_start,source.source_end,source.content_fingerprint,
+            source.effective_acl_fingerprint
+     from source cross join fixture`,
+    [generationId, fixtures]
+  );
+  await database.pool.query(
+    `insert into jina_context.exact_index (generation_id,term,document_id,field)
+     select $1,fixture.term,fixture.document_id,'metadata'
+     from (values
+       ('first-target','exact-first-a'),
+       ('first-target','exact-first-b'),
+       ('first-target','exact-first-c'),
+       ('later-target','exact-later'),
+       ('multi-a','exact-multi'),
+       ('multi-b','exact-multi')
+     ) as fixture(term,document_id)`,
+    [generationId]
+  );
+}
+
+function exactPlan(normalizedQuestion: string): QueryPlan {
+  return {
+    normalizedQuestion,
+    taskKind: "lookup",
+    routes: [],
+    targets: { paths: [], symbols: [], pullRequests: [], issues: [] },
+    plannerVersion: "integration"
+  };
 }
 
 function publicationBoardState(commit: BoardContextPublicationCommit): unknown {

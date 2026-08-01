@@ -80,6 +80,30 @@ export interface QueryMetrics {
   conflictCount: number;
 }
 
+export interface ContextDatabaseTelemetry {
+  readonly pool: {
+    readonly total: number;
+    readonly idle: number;
+    readonly waiting: number;
+    readonly max: number;
+  };
+  readonly metrics: {
+    readonly counters: readonly {
+      readonly name: string;
+      readonly labels: Readonly<Record<string, string>>;
+      readonly value: number;
+    }[];
+    readonly durations: readonly {
+      readonly name: string;
+      readonly labels: Readonly<Record<string, string>>;
+      readonly count: number;
+      readonly totalMs: number;
+      readonly maxMs: number;
+    }[];
+    readonly droppedSeries: number;
+  };
+}
+
 /** A token as anyone but its holder sees it: never the secret, never its hash. */
 export interface ApiTokenRecord {
   readonly id: string;
@@ -118,6 +142,8 @@ export interface VerifiedApiToken {
 
 export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, ProjectionStore {
   runInTenantScope?<T>(tenantId: string, operation: () => Promise<T>): Promise<T>;
+  /** Process-local database latency and pool-pressure telemetry for operator diagnostics. */
+  contextDatabaseTelemetry?(): ContextDatabaseTelemetry;
   replaceRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
   mergeRepositoryAccess(tenantId: string, principalId: string, repositories: string[]): Promise<void>;
   repositoriesForPrincipal(tenantId: string, principalId: string): Promise<string[]>;

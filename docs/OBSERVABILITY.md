@@ -105,6 +105,18 @@ category to the task's Board event stream. Tenant-facing build summaries expose 
 category's safe fixed description; operators inspect the authorized Board events for the
 specific reason without relying on ephemeral worker logs.
 
+The operator-only `GET /internal/observability` response also includes process-local
+database pool state plus cumulative checkout-wait, transaction setup, SQL/body, commit,
+and total latency summaries grouped by stable operation and role. Database metric labels
+never contain tenant IDs, SQL text, bind values, or exception messages. A rising
+`context.db.pool.checkout_wait_ms` or `context.db.pool.queued_checkouts` identifies pool
+pressure; `context.db.transaction.setup_ms` isolates transaction/RLS setup;
+`context.db.transaction.operation_ms` isolates the repository query or transaction body;
+`context.db.operation.duration_ms` breaks multi-statement transaction bodies into named
+repository phases; and `context.db.transaction.commit_ms` isolates commit latency. The
+`pool` object reports current `total`, `idle`, `waiting`, and configured `max` connections.
+Like other in-process metrics, these diagnostics reset when the instance restarts.
+
 ## Required dashboards
 
 A production context dashboard should show:
