@@ -145,6 +145,56 @@ test("canonicalizes case-only differences in model-authored issue references", (
   assert.notEqual(edge.subjectIssueId, edge.object.id);
 });
 
+test("normalizes unambiguous abbreviated evidence and causality commit SHAs", () => {
+  const value = candidate();
+  value.issues[0]!.evidence[0]!.commitSha = introduced.slice(0, 7);
+  value.issues[0]!.evidence[1]!.commitSha = resolved.slice(0, 12);
+  value.causalities[0]!.objectRef = introduced.slice(0, 8);
+  value.causalities[0]!.evidence[0]!.commitSha = introduced.slice(0, 9);
+  const graph = materialize(value);
+  const issue = graph.issues.find((item) => item.title.includes("fan-out"));
+  assert.deepEqual(
+    issue?.evidence.map((item) => item.commitSha),
+    [introduced, resolved]
+  );
+  assert.ok(
+    graph.causalities.some(
+      (edge) => edge.predicate === "CAUSED_BY" && edge.object.kind === "commit" && edge.object.id === introduced
+    )
+  );
+});
+
+test("rejects unknown and ambiguous abbreviated commit SHAs", () => {
+  const unknown = candidate();
+  unknown.issues[0]!.evidence[0]!.commitSha = "1234567";
+  assert.throws(() => materialize(unknown), /does not identify a commit/);
+
+  const ambiguousPrefix = "abcdef0";
+  const left = `${ambiguousPrefix}${"1".repeat(33)}`;
+  const right = `${ambiguousPrefix}${"2".repeat(33)}`;
+  const ambiguous = candidate();
+  ambiguous.issues[0]!.evidence[0]!.commitSha = ambiguousPrefix;
+  assert.throws(
+    () =>
+      materializeIssueGraph({
+        tenantId: "tenant-a",
+        repository: "Acme/Widgets",
+        ref: "main",
+        refSequence: 2,
+        commitSha: left,
+        generatedAt: "2026-08-01T15:00:00.000Z",
+        historyComplete: true,
+        history: [
+          { sha: left, parentShas: [right], message: "fix: first ambiguous commit" },
+          { sha: right, parentShas: [], message: "fix: second ambiguous commit" }
+        ],
+        candidate: ambiguous,
+        generator: { name: "codex", version: "1", model: "test", promptVersion: "issue-causality-v4" }
+      }),
+    /ambiguous in the observed history/
+  );
+});
+
 test("rejects predicate endpoint mismatches and causal cycles", () => {
   const wrongKind = candidate();
   wrongKind.causalities[1]!.objectKind = "issue";
@@ -222,7 +272,7 @@ test("enforces exhaustive candidate disposition and synthesizes lifecycle edges"
     ],
     causalities: [],
     candidateDispositions: ledger.candidates.map((item) => ({
-      commitSha: item.commitSha,
+      commitSha: item.commitSha.slice(0, 7),
       disposition: item.commitSha === followup ? "duplicate" : "issue",
       issueKeys: ["claim-timeout"],
       reason: "The commit describes the same blocked claim timeout failure."

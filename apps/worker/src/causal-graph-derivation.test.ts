@@ -19,6 +19,8 @@ test("causal graph prompt enforces recall, lifecycle evidence, and one agentic r
   assert.match(prompt, /two explicit passes/);
   assert.match(prompt, /result is rejected unless at least 3 distinct issues/);
   assert.match(prompt, /one agentic derivation run/);
+  assert.match(prompt, /full 40-character lowercase SHA/);
+  assert.match(prompt, /never abbreviate it/);
   assert.match(prompt, /deterministically creates commit CAUSED_BY edges/);
   assert.doesNotMatch(prompt, /Prefer fewer/);
 });

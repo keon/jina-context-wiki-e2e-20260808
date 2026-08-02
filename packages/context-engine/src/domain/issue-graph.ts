@@ -193,7 +193,7 @@ export function materializeIssueGraph(input: MaterializeIssueGraphInput): IssueG
   }
   const history = validatedHistory(input.history);
   if (!history.has(commitSha)) throw new Error("issue graph history does not contain its target commit");
-  const candidate = parseIssueGraphCandidate(input.candidate);
+  const candidate = parseIssueGraphCandidate(input.candidate, history);
   if (input.candidateLedger) {
     const expectedLedger = deriveIssueCandidateLedger(input.history);
     if (fingerprint(input.candidateLedger) !== fingerprint(expectedLedger)) {
@@ -393,7 +393,10 @@ export function issueGraphTrace(
   return { issues: [...selected.values()], causalities: [...selectedEdges.values()] };
 }
 
-function parseIssueGraphCandidate(value: unknown): IssueGraphCandidate {
+function parseIssueGraphCandidate(
+  value: unknown,
+  history: ReadonlyMap<string, IssueHistoryCommit>
+): IssueGraphCandidate {
   const root = record(value, "issue graph candidate");
   assertOptionalKeys(
     root,
@@ -430,7 +433,7 @@ function parseIssueGraphCandidate(value: unknown): IssueGraphCandidate {
       ...(existingIssueId ? { existingIssueId } : {}),
       title: boundedString(issue.title, `issue ${index} title`, 200, 4),
       summary: boundedString(issue.summary, `issue ${index} summary`, 4_000, 12),
-      evidence: parseEvidenceArray(issue.evidence, `issue ${index}`)
+      evidence: parseEvidenceArray(issue.evidence, `issue ${index}`, history)
     };
   });
   const causalities = root.causalities.map((value, index) => {
@@ -452,20 +455,26 @@ function parseIssueGraphCandidate(value: unknown): IssueGraphCandidate {
       ),
       predicate,
       objectKind,
-      objectRef: objectKind === "issue" ? canonicalIssueKeyReference(keys, objectRef) : objectRef,
+      objectRef:
+        objectKind === "issue"
+          ? canonicalIssueKeyReference(keys, objectRef)
+          : resolveHistoryCommitSha(objectRef, `causality ${index} objectRef`, history),
       why: boundedString(edge.why, `causality ${index} why`, 2_000, 12),
       confidence: enumValue(edge.confidence, ["explicit", "inferred"] as const, `causality ${index} confidence`),
-      evidence: parseEvidenceArray(edge.evidence, `causality ${index}`)
+      evidence: parseEvidenceArray(edge.evidence, `causality ${index}`, history)
     };
   });
   const candidateDispositions =
-    root.candidateDispositions === undefined ? undefined : parseCandidateDispositions(root.candidateDispositions, keys);
+    root.candidateDispositions === undefined
+      ? undefined
+      : parseCandidateDispositions(root.candidateDispositions, keys, history);
   return { version: 1, summary, issues, causalities, ...(candidateDispositions ? { candidateDispositions } : {}) };
 }
 
 function parseCandidateDispositions(
   value: unknown,
-  issueKeys: ReadonlySet<string>
+  issueKeys: ReadonlySet<string>,
+  history: ReadonlyMap<string, IssueHistoryCommit>
 ): NonNullable<IssueGraphCandidate["candidateDispositions"]> {
   if (!Array.isArray(value) || value.length > 50_000) {
     throw new Error("candidate dispositions must be an array with at most 50000 entries");
@@ -487,7 +496,7 @@ function parseCandidateDispositions(
     );
     if (new Set(keys).size !== keys.length) throw new Error(`candidate disposition ${index} repeats an issue key`);
     return {
-      commitSha: fullCommitSha(disposition.commitSha, `candidate disposition ${index} commitSha`),
+      commitSha: resolveHistoryCommitSha(disposition.commitSha, `candidate disposition ${index} commitSha`, history),
       disposition: enumValue(
         disposition.disposition,
         issueCandidateDispositions,
@@ -565,7 +574,11 @@ function canonicalIssueKeyReference(keys: ReadonlySet<string>, reference: string
   return keys.has(lowercase) ? lowercase : reference;
 }
 
-function parseEvidenceArray(value: unknown, name: string): Omit<IssueCommitEvidence, "excerpt">[] {
+function parseEvidenceArray(
+  value: unknown,
+  name: string,
+  history: ReadonlyMap<string, IssueHistoryCommit>
+): Omit<IssueCommitEvidence, "excerpt">[] {
   if (!Array.isArray(value) || value.length === 0 || value.length > 100) {
     throw new Error(`${name} must contain between 1 and 100 evidence anchors`);
   }
@@ -576,12 +589,27 @@ function parseEvidenceArray(value: unknown, name: string): Omit<IssueCommitEvide
       `${name} evidence ${index}`
     );
     return {
-      commitSha: fullCommitSha(evidence.commitSha, `${name} evidence commitSha`),
+      commitSha: resolveHistoryCommitSha(evidence.commitSha, `${name} evidence commitSha`, history),
       role: enumValue(evidence.role, issueEvidenceRoles, `${name} evidence role`),
       messageStartLine: positiveInteger(evidence.messageStartLine, `${name} evidence messageStartLine`),
       messageEndLine: positiveInteger(evidence.messageEndLine, `${name} evidence messageEndLine`)
     };
   });
+}
+
+function resolveHistoryCommitSha(
+  value: unknown,
+  name: string,
+  history: ReadonlyMap<string, IssueHistoryCommit>
+): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{7,40}$/.test(value)) {
+    throw new Error(`${name} must be a full Git SHA or an unambiguous 7-39 character prefix`);
+  }
+  if (value.length === 40) return value;
+  const matches = [...history.keys()].filter((sha) => sha.startsWith(value));
+  if (matches.length === 0) throw new Error(`${name} does not identify a commit in the observed history: ${value}`);
+  if (matches.length > 1) throw new Error(`${name} is ambiguous in the observed history: ${value}`);
+  return matches[0]!;
 }
 
 function validatedHistory(history: readonly IssueHistoryCommit[]): Map<string, IssueHistoryCommit> {
