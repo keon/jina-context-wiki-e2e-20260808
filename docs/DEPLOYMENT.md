@@ -874,7 +874,9 @@ leases, migrate, or cut over while it is live. The release then deploys
 calls `/internal/worker/claim` and does not initialize a model-backed executor. The
 deployment routes each worker service 100% to that exact drain, clears all revision
 tags, synchronously deletes every other revision, and checks the resulting revision
-inventory. Deletion is deliberate: routing an old polling revision to zero percent does
+inventory. Every drain and candidate explicitly restores automatic scaling, preventing
+a stale manual instance count from multiplying Board pollers across later releases.
+Deletion is deliberate: routing an old polling revision to zero percent does
 not by itself prove its minimum instances have terminated.
 
 Before deleting any revision, the control job sets

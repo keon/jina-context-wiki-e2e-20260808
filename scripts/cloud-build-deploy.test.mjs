@@ -150,6 +150,7 @@ test("background workers are quiesced and Board leases are proven empty before s
   assert.ok(boardVerify > boardDrain);
   assert.ok(migration > boardVerify);
   assert.match(deployment, /JINA_WORKER_CLAIM_MODE=\$\{claim_mode\}/);
+  assert.equal(deployment.match(/--scaling=auto/g)?.length, 4);
   assert.match(deployment, /--clear-tags[\s\S]+?--to-revisions="\$\{drain_revision\}=100"/);
   assert.match(deployment, /gcloud run revisions delete "\$\{revision\}"[\s\S]+?--no-async/);
   assert.match(deployment, /wait_for_exact_worker_revisions "\$\{service\}" "\$\{drain_revision\}"/);
