@@ -13,7 +13,7 @@
 #
 # Options:
 #   --ref <name>               Git ref. Default: main unless repository identity supplies one.
-#   --budget <seconds>         Build budget, 300..10800. Default: 5400.
+#   --budget <seconds>         Build budget, 300..21600. Default: 5400.
 #   --detail <level>           concise | standard | thorough. Default: server policy.
 #   --watch <build-id>         Follow an existing build without starting another.
 #   --retry-failed <build-id>  Atomically retry every recoverable failed leaf, then follow the build.
@@ -77,8 +77,8 @@ if [[ -n "$repository" && ! "$repository" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]];
   echo "repository must be owner/name" >&2
   exit 2
 fi
-if [[ ! "$budget" =~ ^[0-9]+$ ]] || ((budget < 300 || budget > 10800)); then
-  echo "--budget must be an integer from 300 through 10800" >&2
+if [[ ! "$budget" =~ ^[0-9]+$ ]] || ((budget < 300 || budget > 21600)); then
+  echo "--budget must be an integer from 300 through 21600" >&2
   exit 2
 fi
 if [[ -n "$detail" && "$detail" != "concise" && "$detail" != "standard" && "$detail" != "thorough" ]]; then

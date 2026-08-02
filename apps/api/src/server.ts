@@ -286,17 +286,16 @@ const API_TOKEN_USE_STAMP_MS = 60_000;
  * tenant and a one-day floor would mean a fleet of day-long bearer tokens held in
  * a web tier's memory. Day-shaped lifetimes are a presentation choice.
  */
-// Floor: below this no run reaches a first document. Ceiling: the sandbox
-// enforces the same two hours, and the worker lease must outlast it.
+// Floor: below this no run reaches a first document. Individual sandbox calls
+// remain separately bounded inside the larger resumable build envelope.
 const MIN_DERIVATION_BUDGET_SECONDS = 300;
-// The retained Jina cold run demonstrated that a repository-sized Board build
-// needs a three-hour operational envelope. Production acceptance uses the same
-// ceiling; keeping the API at the old two-hour limit would reject the
-// coordinated deployment gate before any work was admitted.
-const MAX_DERIVATION_BUDGET_SECONDS = 3 * 60 * 60;
+// Six hours is failure containment for a resumable cold build, not its target
+// latency. Individual model phases remain independently bounded, and retries
+// consume durable phase checkpoints inside this one build envelope.
+const MAX_DERIVATION_BUDGET_SECONDS = 6 * 60 * 60;
 const DEFAULT_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
 const MAX_CONTEXT_OPERATOR_DEADLINE_EXTENSION_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
-const MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS = 4 * MAX_DERIVATION_BUDGET_SECONDS;
+const MAX_CONTEXT_RECOVERED_DERIVATION_BUDGET_SECONDS = MAX_DERIVATION_BUDGET_SECONDS;
 const MIN_DERIVATION_TOKEN_BUDGET = DEFAULT_CONTEXT_QUOTA_LIMITS.defaultModelTaskReservationTokens;
 const MAX_DERIVATION_TOKEN_BUDGET = 50_000_000;
 // Cold repository initialization includes research, document generation, and
@@ -2079,6 +2078,52 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/context/board/phase-checkpoints/read") {
+      const body = parseJsonObject(await readRawBody(request));
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
+      const phase = requiredContextPhaseCheckpointLabel(body.phase, "phase");
+      const checkpointKey = requiredContextPhaseCheckpointKey(body.checkpointKey, "checkpointKey");
+      const checkpoint = findContextPhaseCheckpoint(intakeState.board, lease.task.id, phase, checkpointKey);
+      json(response, 200, { checkpoint: checkpoint ?? null });
+      return;
+    }
+    if (request.method === "POST" && url.pathname === "/internal/context/board/phase-checkpoints") {
+      const body = parseJsonObject(await readRawBody(request));
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
+      const phase = requiredContextPhaseCheckpointLabel(body.phase, "phase");
+      const checkpointKey = requiredContextPhaseCheckpointKey(body.checkpointKey, "checkpointKey");
+      const artifact = parseContextArtifactRef(body.artifact);
+      assertCurrentTaskOutputArtifact(lease.task, lease.buildTaskId, lease.message.payload.attempt, artifact);
+      const recorded = await mutate(async () => {
+        const current = leasedBoardTask(intakeState.board, principal.tenantId, body, nowIso());
+        const existing = findContextPhaseCheckpoint(intakeState.board, current.task.id, phase, checkpointKey);
+        if (existing) return { checkpoint: existing, created: false };
+        assertCurrentTaskOutputArtifact(current.task, current.buildTaskId, current.message.payload.attempt, artifact);
+        const board = applyCommand(
+          intakeState.board,
+          {
+            command: "CommentTask",
+            taskId: current.task.id,
+            eventType: "task.phase_checkpoint_recorded",
+            payload: {
+              phase,
+              checkpointKey,
+              attempt: current.message.payload.attempt,
+              artifact
+            }
+          },
+          { actor: RUN_ACTOR, now: nowIso() }
+        ).state;
+        intakeState = { ...intakeState, board };
+        return {
+          checkpoint: findContextPhaseCheckpoint(board, current.task.id, phase, checkpointKey)!,
+          created: true
+        };
+      });
+      if (!recorded) throw new ApiError(409, "conflict", "phase checkpoint recording raced another update");
+      json(response, recorded.created ? 201 : 200, recorded);
+      return;
+    }
 
     if (request.method === "GET" && url.pathname === "/internal/observability") {
       json(response, 200, {
@@ -3440,12 +3485,25 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     buildTaskId: string;
   }> {
     await reload();
+    return leasedBoardTask(intakeState.board, tenantId, body, nowIso());
+  }
+
+  function leasedBoardTask(
+    board: BoardState,
+    tenantId: string,
+    body: Record<string, unknown>,
+    at: string
+  ): {
+    task: BoardTask;
+    message: BoardState["outbox"][number];
+    buildTaskId: string;
+  } {
     const taskId = entityId<"task">(requiredString(body.taskId, "taskId")) as TaskId;
     const messageId = entityId<"board_outbox_message">(
       requiredString(body.messageId, "messageId")
     ) as BoardOutboxMessageId;
-    const task = findTask(intakeState.board, taskId);
-    const message = findOutboxMessage(intakeState.board, messageId);
+    const task = findTask(board, taskId);
+    const message = findOutboxMessage(board, messageId);
     const attempt = requiredPositiveInteger(body.attempt, "attempt");
     const leaseId = requiredString(body.leaseId, "leaseId");
     const writeFenceToken = requiredString(body.writeFenceToken, "writeFenceToken");
@@ -3461,19 +3519,19 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       message.leaseId !== leaseId ||
       message.writeFenceToken !== writeFenceToken ||
       !message.leaseExpiresAt ||
-      message.leaseExpiresAt <= nowIso()
+      message.leaseExpiresAt <= at
     ) {
       throw staleLease();
     }
     const buildTaskId = requiredString(task.metadata.contextBuildId, "contextBuildId");
-    const build = findTask(intakeState.board, entityId<"task">(buildTaskId));
+    const build = findTask(board, entityId<"task">(buildTaskId));
     if (
       !build ||
       !isContextBuildTaskType(build.type) ||
       isTerminalTaskStatus(build.status) ||
       build.metadata.tenantId !== tenantId ||
       build.metadata.repository !== task.metadata.repository ||
-      (typeof build.metadata.derivationBudgetSeconds === "number" && nowIso() >= contextBuildDeadlineAt(build))
+      (typeof build.metadata.derivationBudgetSeconds === "number" && at >= contextBuildDeadlineAt(build))
     ) {
       throw staleLease();
     }
@@ -3849,6 +3907,25 @@ function publicContextTaskRuntime(state: BoardState, task: BoardTask) {
   const retryFailure = retryEvent
     ? publicContextFailureFromCategory(retryEvent.payload?.category, retryEvent.payload?.reason)
     : undefined;
+  const phaseCheckpoints = state.events.flatMap((event) => {
+    if (
+      event.taskId !== task.id ||
+      event.type !== "task.phase_checkpoint_recorded" ||
+      typeof event.payload?.phase !== "string" ||
+      typeof event.payload.attempt !== "number" ||
+      !Number.isSafeInteger(event.payload.attempt) ||
+      event.payload.attempt < 1
+    ) {
+      return [];
+    }
+    return [
+      {
+        phase: event.payload.phase,
+        attempt: event.payload.attempt,
+        recordedAt: event.at
+      }
+    ];
+  });
   return {
     ...(startedAt ? { startedAt } : {}),
     ...(inputTokens || outputTokens
@@ -3865,7 +3942,8 @@ function publicContextTaskRuntime(state: BoardState, task: BoardTask) {
           lastRetryFailureCode: retryFailure.failureCode,
           lastRetryFailureReason: retryFailure.failureReason
         }
-      : {})
+      : {}),
+    ...(phaseCheckpoints.length > 0 ? { phaseCheckpoints } : {})
   };
 }
 
@@ -4721,6 +4799,56 @@ function sameArtifactIdentity(left: ContextArtifactRef, right: ContextArtifactRe
   );
 }
 
+interface ContextPhaseCheckpoint {
+  readonly phase: string;
+  readonly checkpointKey: string;
+  readonly attempt: number;
+  readonly artifact: ContextArtifactRef;
+  readonly recordedAt: string;
+}
+
+function findContextPhaseCheckpoint(
+  state: BoardState,
+  taskId: TaskId,
+  phase: string,
+  checkpointKey: string
+): ContextPhaseCheckpoint | undefined {
+  for (const event of [...state.events].reverse()) {
+    if (
+      event.taskId !== taskId ||
+      event.type !== "task.phase_checkpoint_recorded" ||
+      event.payload?.phase !== phase ||
+      event.payload.checkpointKey !== checkpointKey
+    ) {
+      continue;
+    }
+    return {
+      phase,
+      checkpointKey,
+      attempt: requiredPositiveInteger(event.payload.attempt, "phase checkpoint attempt"),
+      artifact: parseContextArtifactRef(event.payload.artifact),
+      recordedAt: event.at
+    };
+  }
+  return undefined;
+}
+
+function requiredContextPhaseCheckpointLabel(value: unknown, label: string): string {
+  const phase = requiredString(value, label);
+  if (!/^[a-z][a-z0-9.-]{0,79}$/.test(phase)) {
+    throw invalidRequest(`${label} is invalid`);
+  }
+  return phase;
+}
+
+function requiredContextPhaseCheckpointKey(value: unknown, label: string): string {
+  const checkpointKey = requiredString(value, label);
+  if (!/^[0-9a-f]{64}$/.test(checkpointKey)) {
+    throw invalidRequest(`${label} must be a SHA-256 digest`);
+  }
+  return checkpointKey;
+}
+
 function assertCurrentTaskOutputArtifact(
   task: BoardTask,
   buildTaskId: string,
@@ -5064,6 +5192,8 @@ const METRICS_ROUTES = new Set([
   "/internal/causal-graph/board/publish",
   "/internal/context/board/pageindex/attach",
   "/internal/context/board/artifacts/read",
+  "/internal/context/board/phase-checkpoints",
+  "/internal/context/board/phase-checkpoints/read",
   "/internal/worker/claim",
   "/internal/worker/renew",
   "/internal/worker/release",

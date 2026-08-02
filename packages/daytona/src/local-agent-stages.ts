@@ -2143,6 +2143,7 @@ export function researchPlannerPrompt(input: {
   readonly repositoryDirectory: string;
   readonly manifestPath: string;
   readonly evidencePath: string;
+  readonly repositoryAreas: readonly string[];
   readonly priorContextPath?: string;
 }): string {
   return [
@@ -2152,7 +2153,8 @@ export function researchPlannerPrompt(input: {
     input.priorContextPath
       ? `This is an incremental build. Read the complete prior published Context catalog and documents at ${input.priorContextPath}. Use them to target changed source/provider frontiers and to identify pages that may be retained, revised, extended, or retired; do not assume absence means retirement.`
       : "",
-    "First map every source-bearing top-level area, important entrypoint, major state or interface boundary, test concentration, operational surface, configuration boundary, recent change hotspot, and relevant issue/PR/commit signal. Then choose as many bounded, non-overlapping assignments as this repository actually needs—not a fixed documentation template. Use one for a genuinely simple repository and no more than twelve; the host schedules at most three concurrently.",
+    `The host requires coverage of these deterministic repository areas: ${JSON.stringify(input.repositoryAreas)}. Every listed area with readable evidence must intersect at least one assignment focus path.`,
+    "First map those required areas plus every important entrypoint, major state or interface boundary, test concentration, operational surface, configuration boundary, recent change hotspot, and relevant issue/PR/commit signal. Then choose as many bounded, non-overlapping assignments as this repository actually needs—not a fixed documentation template. Use one for a genuinely simple repository and no more than twelve; the host schedules at most three concurrently.",
     "Assignments should collectively cover architecture and the major behaviors a maintainer would need to change, debug, extend, or operate. Every focusPaths value must be an exact repository-relative file/directory prefix present in the supplied manifest; `.` is allowed only when every readable file is at the repository root. Never include the checkout directory, a `repository/work` prefix, absolute paths, glob syntax, or conceptual labels; represent a cross-cutting scope by listing its concrete repository paths. Questions must be distinct, concrete maintenance tasks, not broad requests to describe a subsystem.",
     "For each assignment, return retainedHistorySignals as a typed relevance-scored inventory. Include only a captured commit, pull request, issue, or naturally addressable provider observation whose provider fact materially helps explain current design, a migration, regression, compatibility behavior, or an operational decision. Copy the exact captured natural providerUrl; never construct a URL from a number, SHA, title, branch, or nearby commit. Give the signal a stable repository-local ID, source, one factualPremise stated no more strongly than the captured record, an integer relevanceScore from 1 through 100, and an evidence-based relevanceReason. Use an empty array when no captured provider history is materially relevant.",
     "Use captured issue evidence when it is materially relevant, including issue records that explain a constraint or unresolved behavior. An issue statement proves that the issue said or requested something; it does not by itself prove the current implementation, causation, resolution, or that a later commit fixed it. Keep source-backed inferences explicitly separate from captured provider facts, and never invent an issue link.",
@@ -2166,6 +2168,7 @@ export function researchPlannerRepairPrompt(input: {
   readonly repositoryDirectory: string;
   readonly manifestPath: string;
   readonly evidencePath: string;
+  readonly repositoryAreas: readonly string[];
   readonly priorContextPath?: string;
   readonly invalidPlan: string;
   readonly diagnostic: string;
@@ -2180,6 +2183,7 @@ export function researchPlannerRepairPrompt(input: {
       repositoryDirectory: input.repositoryDirectory,
       manifestPath: input.manifestPath,
       evidencePath: input.evidencePath,
+      repositoryAreas: input.repositoryAreas,
       ...(input.priorContextPath ? { priorContextPath: input.priorContextPath } : {})
     }),
     "Every focus path must resolve to readable checkpoint evidence and the assignments must collectively account for every readable deterministic repository area. Keep assignment IDs unique, keep questions distinct, and satisfy the supplied output schema.",

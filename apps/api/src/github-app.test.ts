@@ -86,12 +86,12 @@ test("manual Context admission creates a resumable board build and exposes only 
       ref: "main",
       commitSha,
       githubInstallationId: 140435029,
-      derivationBudgetSeconds: 10_801,
+      derivationBudgetSeconds: 21_601,
       requestKey: "over-budget-build"
     })
   });
   assert.equal(overBudget.response.status, 400);
-  assert.match(JSON.stringify(overBudget.body), /between 300 and 10800/);
+  assert.match(JSON.stringify(overBudget.body), /between 300 and 21600/);
 
   const overTokenBudget = await api("/context/build", {
     method: "POST",
@@ -113,7 +113,7 @@ test("manual Context admission creates a resumable board build and exposes only 
       ref: "main",
       commitSha,
       githubInstallationId: 140435029,
-      derivationBudgetSeconds: 10_800,
+      derivationBudgetSeconds: 21_600,
       requestKey: "acceptance-build"
     })
   });
@@ -125,7 +125,7 @@ test("manual Context admission creates a resumable board build and exposes only 
   assert.equal(build.commitSha, commitSha);
   assert.equal(build.refSequence, 1);
   assert.equal(build.status, "triage");
-  assert.equal(build.derivationBudgetSeconds, 10_800);
+  assert.equal(build.derivationBudgetSeconds, 21_600);
   assert.equal(build.derivationTokenBudget, 36_000_000);
   assert.equal(build.consumedModelTokens, 0);
   assert.equal(typeof build.derivationDeadlineAt, "string");
@@ -139,7 +139,7 @@ test("manual Context admission creates a resumable board build and exposes only 
       ref: "main",
       commitSha,
       githubInstallationId: 140435029,
-      derivationBudgetSeconds: 10_800,
+      derivationBudgetSeconds: 21_600,
       requestKey: "acceptance-build"
     })
   });

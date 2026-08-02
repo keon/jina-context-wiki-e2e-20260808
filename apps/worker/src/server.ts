@@ -1078,6 +1078,55 @@ async function readContextBoardArtifact(work: ClaimedWork, artifact: ContextArti
   return content;
 }
 
+interface WorkerPhaseCheckpoint {
+  readonly phase: string;
+  readonly checkpointKey: string;
+  readonly attempt: number;
+  readonly artifact: ContextArtifactRef;
+  readonly recordedAt: string;
+}
+
+async function loadContextBoardPhaseCheckpoint(
+  work: ClaimedWork,
+  phase: string,
+  checkpointKey: string
+): Promise<{ readonly checkpoint: WorkerPhaseCheckpoint; readonly value: unknown } | undefined> {
+  const result = await internalApiJson<{ readonly checkpoint: WorkerPhaseCheckpoint | null }>(
+    "/internal/context/board/phase-checkpoints/read",
+    leaseBody(work, { phase, checkpointKey })
+  );
+  if (!result.checkpoint) return undefined;
+  if (result.checkpoint.phase !== phase || result.checkpoint.checkpointKey !== checkpointKey) {
+    throw new Error("Context phase checkpoint response does not match its request");
+  }
+  const content = await readContextBoardArtifact(work, result.checkpoint.artifact);
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(content).toString("utf8")) as unknown;
+  } catch {
+    throw new Error(`Context phase checkpoint ${phase} is not valid JSON`);
+  }
+  return { checkpoint: result.checkpoint, value };
+}
+
+async function recordContextBoardPhaseCheckpoint(
+  work: ClaimedWork,
+  input: {
+    readonly phase: string;
+    readonly checkpointKey: string;
+    readonly artifact: ContextArtifactRef;
+  }
+): Promise<WorkerPhaseCheckpoint> {
+  const result = await internalApiJson<{ readonly checkpoint: WorkerPhaseCheckpoint }>(
+    "/internal/context/board/phase-checkpoints",
+    leaseBody(work, input)
+  );
+  if (result.checkpoint.phase !== input.phase || result.checkpoint.checkpointKey !== input.checkpointKey) {
+    throw new Error("recorded Context phase checkpoint does not match its request");
+  }
+  return result.checkpoint;
+}
+
 async function loadPriorContext(work: ClaimedWork<ContextWorkerTopic>): Promise<PriorContextPacket | undefined> {
   const seed = work.task.metadata.priorRelease;
   if (!seed) return undefined;
@@ -1147,50 +1196,122 @@ async function runContextResearchPlan(
       )
     ]);
     const runner = requireBoardAgentStageRunner();
-    const output = await runner.run({
-      id: "research-planner",
-      prompt: researchPlannerPrompt({
-        repository: snapshot.repository,
-        repositoryDirectory: checkout.directory,
-        manifestPath,
-        evidencePath,
-        ...(priorContextPath ? { priorContextPath } : {})
-      }),
-      schema: RESEARCH_STAGE_SCHEMA,
-      workingDirectory: checkout.directory,
-      additionalDirectories: [inputDirectory],
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_SECONDS", 240)
+    const repositoryAreas = repositoryContextAreas(snapshot.files);
+    const checkpointKey = (phase: string) =>
+      createHash("sha256")
+        .update(
+          JSON.stringify({
+            version: 1,
+            contract: "research-plan-phase-checkpoints-v1",
+            phase,
+            taskId: work.task.id,
+            snapshotSha256: snapshotArtifact.sha256,
+            priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
+          })
+        )
+        .digest("hex");
+    const checkpointedCandidate = async (
+      phase: "research-plan.candidate" | "research-plan.repair",
+      generate: () => Promise<unknown>
+    ): Promise<unknown> => {
+      const key = checkpointKey(phase);
+      const existing = await loadContextBoardPhaseCheckpoint(work, phase, key);
+      if (existing) {
+        logger.info(`resumed ${phase} from a durable checkpoint`, {
+          event: "context.phase_checkpoint.reused",
+          taskId: work.task.id,
+          contextBuildId: work.task.metadata.contextBuildId,
+          phase,
+          checkpointKey: key,
+          checkpointAttempt: existing.checkpoint.attempt,
+          artifactSha256: existing.checkpoint.artifact.sha256
+        });
+        return existing.value;
+      }
+      const candidate = await generate();
+      const artifact = await uploadContextBoardArtifact(work, {
+        kind: "research-plan",
+        name: `${phase}.json`,
+        contentType: "application/json",
+        content: Buffer.from(JSON.stringify(candidate), "utf8")
+      });
+      const recorded = await recordContextBoardPhaseCheckpoint(work, {
+        phase,
+        checkpointKey: key,
+        artifact
+      });
+      const selected = await loadContextBoardPhaseCheckpoint(work, phase, key);
+      if (!selected) throw new Error(`recorded Context phase checkpoint ${phase} is unavailable`);
+      logger.info(`recorded durable ${phase} checkpoint`, {
+        event: "context.phase_checkpoint.recorded",
+        taskId: work.task.id,
+        contextBuildId: work.task.metadata.contextBuildId,
+        phase,
+        checkpointKey: key,
+        checkpointAttempt: recorded.attempt,
+        artifactSha256: recorded.artifact.sha256
+      });
+      return selected.value;
+    };
+    const candidate = await checkpointedCandidate("research-plan.candidate", async () => {
+      const output = await runner.run({
+        id: "research-planner",
+        prompt: researchPlannerPrompt({
+          repository: snapshot.repository,
+          repositoryDirectory: checkout.directory,
+          manifestPath,
+          evidencePath,
+          repositoryAreas,
+          ...(priorContextPath ? { priorContextPath } : {})
+        }),
+        schema: RESEARCH_STAGE_SCHEMA,
+        workingDirectory: checkout.directory,
+        additionalDirectories: [inputDirectory],
+        readOnly: true,
+        budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_SECONDS", 240)
+      });
+      return output.parsed;
     });
     const validationOptions = {
       repositoryFiles: snapshot.files.map((file) => ({
         path: file.path,
         contentAvailable: !file.contentOmitted
       })),
-      repositoryAreas: repositoryContextAreas(snapshot.files)
+      repositoryAreas
     };
     const plan = await parseResearchPlanWithRepair({
-      candidate: output.parsed,
+      candidate,
       options: validationOptions,
       repair: async ({ invalidPlan, diagnostic }) => {
-        const repaired = await runner.run({
-          id: "research-planner-repair",
-          prompt: researchPlannerRepairPrompt({
-            repository: snapshot.repository,
-            repositoryDirectory: checkout.directory,
-            manifestPath,
-            evidencePath,
-            ...(priorContextPath ? { priorContextPath } : {}),
-            invalidPlan,
-            diagnostic
-          }),
-          schema: RESEARCH_STAGE_SCHEMA,
-          workingDirectory: checkout.directory,
-          additionalDirectories: [inputDirectory],
-          readOnly: true,
-          budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_REPAIR_SECONDS", 180)
+        logger.warn("research planner contract rejected model output; scheduling bounded correction", {
+          event: "context.research_plan.repair_scheduled",
+          taskId: work.task.id,
+          contextBuildId: work.task.metadata.contextBuildId,
+          repository: snapshot.repository,
+          ref: snapshot.ref,
+          diagnostic: diagnostic.slice(0, 500)
         });
-        return repaired.parsed;
+        return checkpointedCandidate("research-plan.repair", async () => {
+          const repaired = await runner.run({
+            id: "research-planner-repair",
+            prompt: researchPlannerRepairPrompt({
+              repository: snapshot.repository,
+              repositoryDirectory: checkout.directory,
+              manifestPath,
+              evidencePath,
+              repositoryAreas,
+              ...(priorContextPath ? { priorContextPath } : {}),
+              invalidPlan,
+              diagnostic
+            }),
+            schema: RESEARCH_STAGE_SCHEMA,
+            workingDirectory: checkout.directory,
+            additionalDirectories: [inputDirectory],
+            readOnly: true,
+            budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_REPAIR_SECONDS", 300)
+          });
+          return repaired.parsed;
+        });
       }
     });
     const outputArtifact = await uploadContextBoardArtifact(work, {

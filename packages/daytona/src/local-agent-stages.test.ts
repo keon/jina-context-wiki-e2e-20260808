@@ -243,8 +243,10 @@ test("research plans retain typed relevance-scored provider history without reco
     repository: "example/service",
     repositoryDirectory: "/checkpoint/repository",
     manifestPath: "/inputs/manifest.json",
-    evidencePath: "/inputs/evidence.json"
+    evidencePath: "/inputs/evidence.json",
+    repositoryAreas: ["apps", "packages", "root"]
   });
+  assert.match(plannerPrompt, /\["apps","packages","root"\]/);
   assert.match(plannerPrompt, /typed relevance-scored inventory/);
   assert.match(plannerPrompt, /never construct a URL/);
   assert.match(plannerPrompt, /Use captured issue evidence/);
@@ -416,6 +418,7 @@ test("research plan repair receives the rejected candidate, exact diagnostic, an
     repositoryDirectory: "/checkpoint/repository",
     manifestPath: "/work/repository-manifest.json",
     evidencePath: "/work/evidence.json",
+    repositoryAreas: ["apps", "root"],
     invalidPlan: '{"version":1,"assignments":[]}',
     diagnostic: "research plan does not cover repository areas: apps/api"
   });
@@ -423,6 +426,7 @@ test("research plan repair receives the rejected candidate, exact diagnostic, an
   assert.match(prompt, /\/checkpoint\/repository/);
   assert.match(prompt, /\/work\/repository-manifest\.json/);
   assert.match(prompt, /\/work\/evidence\.json/);
+  assert.match(prompt, /\["apps","root"\]/);
   assert.match(prompt, /\{"version":1,"assignments":\[\]\}/);
   assert.match(prompt, /repository-relative file\/directory prefix/);
 });

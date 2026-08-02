@@ -108,9 +108,9 @@ the tenant quota ledger idempotently per attempt and cancels reservations for fa
 before a completed model turn.
 
 The same immutable receipts enforce an independent per-build ceiling. New builds
-default to 8,000,000 input-plus-output tokens and a three-hour wall-clock budget;
+default to 36,000,000 input-plus-output tokens and a six-hour wall-clock budget;
 administrators may request lower values within the API bounds. Claim admission
-accounts for active 250,000-token task reservations so parallel workers cannot
+accounts for active 1,000,000-token task reservations so parallel workers cannot
 collectively over-admit the build. Exact usage replaces reservations on completion,
 and an overrun atomically fails the build before any further work can be claimed.
 Cached-input tokens remain a reported subset of input tokens and are not counted

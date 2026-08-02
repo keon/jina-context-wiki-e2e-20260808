@@ -338,6 +338,51 @@ test("generic worker completion atomically expands a context board graph and ret
       attempt: plannerClaim.message.attempt,
       writeFenceToken: plannerClaim.message.writeFenceToken
     };
+    const plannerCandidateResponse = await fetch(`${baseUrl}/internal/context/board/artifacts`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalApiToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        ...plannerLease,
+        kind: "research-plan",
+        name: "research-plan.candidate.json",
+        contentType: "application/json",
+        contentBase64: Buffer.from('{"candidate":true}').toString("base64")
+      })
+    });
+    const plannerCandidateText = await plannerCandidateResponse.text();
+    assert.equal(plannerCandidateResponse.status, 201, plannerCandidateText);
+    const plannerCandidate = (JSON.parse(plannerCandidateText) as { artifact: ContextArtifactRef }).artifact;
+    const phaseCheckpointBody = {
+      ...plannerLease,
+      phase: "research-plan.candidate",
+      checkpointKey: "c".repeat(64),
+      artifact: plannerCandidate
+    };
+    for (const [expectedStatus, created] of [
+      [201, true],
+      [200, false]
+    ] as const) {
+      const checkpointResponse = await fetch(`${baseUrl}/internal/context/board/phase-checkpoints`, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${internalApiToken}`,
+          "content-type": "application/json"
+        },
+        body: JSON.stringify(phaseCheckpointBody)
+      });
+      const checkpointText = await checkpointResponse.text();
+      assert.equal(checkpointResponse.status, expectedStatus, checkpointText);
+      const checkpoint = JSON.parse(checkpointText) as {
+        created: boolean;
+        checkpoint: { attempt: number; artifact: ContextArtifactRef };
+      };
+      assert.equal(checkpoint.created, created);
+      assert.equal(checkpoint.checkpoint.attempt, plannerLease.attempt);
+      assert.deepEqual(checkpoint.checkpoint.artifact, plannerCandidate);
+    }
     const releaseResponse = await fetch(`${baseUrl}/internal/worker/release`, {
       method: "POST",
       headers: {
@@ -387,6 +432,38 @@ test("generic worker completion atomically expands a context board graph and ret
       attempt: reclaimed.message.attempt,
       writeFenceToken: reclaimed.message.writeFenceToken
     };
+    const resumedCheckpointResponse = await fetch(`${baseUrl}/internal/context/board/phase-checkpoints/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalApiToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        ...reclaimedLease,
+        phase: "research-plan.candidate",
+        checkpointKey: "c".repeat(64)
+      })
+    });
+    const resumedCheckpointText = await resumedCheckpointResponse.text();
+    assert.equal(resumedCheckpointResponse.status, 200, resumedCheckpointText);
+    const resumedCheckpoint = JSON.parse(resumedCheckpointText) as {
+      checkpoint: { attempt: number; artifact: ContextArtifactRef };
+    };
+    assert.equal(resumedCheckpoint.checkpoint.attempt, plannerLease.attempt);
+    assert.deepEqual(resumedCheckpoint.checkpoint.artifact, plannerCandidate);
+    const staleCheckpointRead = await fetch(`${baseUrl}/internal/context/board/phase-checkpoints/read`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${internalApiToken}`,
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        ...plannerLease,
+        phase: "research-plan.candidate",
+        checkpointKey: "c".repeat(64)
+      })
+    });
+    assert.equal(staleCheckpointRead.status, 409);
     const plannerArtifactResponse = await fetch(`${baseUrl}/internal/context/board/artifacts`, {
       method: "POST",
       headers: {
