@@ -190,18 +190,22 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.match(productionPreflight, /grant select,insert,update on jina_runtime\.api_state/);
 });
 
-test("schema and backup checks happen before quiescence and schema is rechecked under the release lease", () => {
+test("schema preflight and exact post-migration checks run under the release lease", () => {
   const acquire = deployment.indexOf('run_release_control "release-acquire"');
-  const firstSchema = deployment.indexOf('run_release_control "schema-inspect"', acquire);
+  const firstSchema = deployment.indexOf('run_release_control "schema-preflight"', acquire);
   const backup = deployment.indexOf("gcloud sql backups create", firstSchema);
   const quiescence = deployment.indexOf('worker_quiescence_started="true"', backup);
-  const secondSchema = deployment.indexOf('run_release_control "schema-inspect"', quiescence);
+  const secondSchema = deployment.indexOf('run_release_control "schema-preflight"', quiescence);
   const migration = deployment.indexOf("gcloud run jobs deploy jina-context-migrate", secondSchema);
+  const exactSchema = deployment.indexOf('run_release_control "schema-inspect"', migration);
+  const api = deployment.indexOf("gcloud run deploy jina-api", exactSchema);
   assert.ok(firstSchema > acquire);
   assert.ok(backup > firstSchema);
   assert.ok(quiescence > backup);
   assert.ok(secondSchema > quiescence);
   assert.ok(migration > secondSchema);
+  assert.ok(exactSchema > migration);
+  assert.ok(api > exactSchema);
   assert.match(productionPreflight, /await assertDeploymentLease\(client\);[\s\S]+?await inspectSchemaDatabase/);
 });
 

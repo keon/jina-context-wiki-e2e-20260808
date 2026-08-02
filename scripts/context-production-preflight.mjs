@@ -84,8 +84,10 @@ const PRESERVED_COLUMNS = {
 const command = process.argv.at(-1);
 if (command === "daytona") {
   await preflightDaytona();
+} else if (command === "schema-preflight") {
+  await withDatabase((pool, reset) => inspectSchema(pool, reset, true));
 } else if (command === "schema-inspect") {
-  await withDatabase((pool, reset) => inspectSchema(pool, reset));
+  await withDatabase((pool, reset) => inspectSchema(pool, reset, false));
 } else if (command === "schema-reset") {
   await withDatabase((pool, reset) => resetLegacySchema(pool, reset));
 } else if (command === "board-drain") {
@@ -106,7 +108,7 @@ if (command === "daytona") {
 } else {
   throw new Error(
     "Expected daytona, release-acquire, release-renew, worker-pause, worker-enable, runtime-write-enable, release-release, " +
-      "board-drain, board-verify, schema-inspect, or schema-reset"
+      "board-drain, board-verify, schema-preflight, schema-inspect, or schema-reset"
   );
 }
 
@@ -245,7 +247,7 @@ async function withDatabase(operation) {
   }
 }
 
-async function inspectSchema(pool, reset) {
+async function inspectSchema(pool, reset, beforeMigration) {
   if (optionalReleaseInput()) {
     const client = await pool.connect();
     try {
@@ -253,7 +255,7 @@ async function inspectSchema(pool, reset) {
       await client.query("set local lock_timeout='60s'");
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
       await assertDeploymentLease(client);
-      await inspectSchemaDatabase(client, reset);
+      await inspectSchemaDatabase(client, reset, beforeMigration);
       await client.query("commit");
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
@@ -263,17 +265,23 @@ async function inspectSchema(pool, reset) {
     }
     return;
   }
-  await inspectSchemaDatabase(pool, reset);
+  await inspectSchemaDatabase(pool, reset, beforeMigration);
 }
 
-async function inspectSchemaDatabase(database, reset) {
+async function inspectSchemaDatabase(database, reset, beforeMigration) {
   const mode = resetMode();
   const tables = await contextTables(database);
   const current = currentTables(reset);
   const legacy = legacyLayout(current);
   if (mode === "disabled") {
-    assertExactSet(tables, current, "current Context v2 schema");
-    assertExactSet(await contextViews(database), CURRENT_CONTEXT_VIEWS, "current Context v2 views");
+    const views = await contextViews(database);
+    if (beforeMigration) {
+      assertNoUnexpected(tables, current, "current Context v2 schema");
+      assertNoUnexpected(views, CURRENT_CONTEXT_VIEWS, "current Context v2 views");
+    } else {
+      assertExactSet(tables, current, "current Context v2 schema");
+      assertExactSet(views, CURRENT_CONTEXT_VIEWS, "current Context v2 views");
+    }
   } else {
     assertExactSet(tables, legacy, "one-time legacy Context schema");
     assertExactSet(await contextViews(database), CURRENT_CONTEXT_VIEWS, "one-time legacy Context views");
@@ -282,7 +290,7 @@ async function inspectSchemaDatabase(database, reset) {
   console.log(
     JSON.stringify({
       mode,
-      layout: mode === "disabled" ? "current" : "legacy-transition",
+      layout: mode === "disabled" ? (beforeMigration ? "current-pre-migration" : "current") : "legacy-transition",
       tableCount: tables.length
     })
   );
@@ -823,6 +831,14 @@ function assertExactSet(actual, expected, label) {
   const extra = actualSorted.filter((table) => !expectedSorted.includes(table));
   if (missing.length > 0 || extra.length > 0) {
     throw new Error(`${label} mismatch; missing=[${missing.join(",")}], unexpected=[${extra.join(",")}]`);
+  }
+}
+
+function assertNoUnexpected(actual, expected, label) {
+  const allowed = new Set(expected);
+  const extra = actual.filter((value) => !allowed.has(value));
+  if (extra.length > 0) {
+    throw new Error(`${label} mismatch; unexpected=[${extra.join(",")}]`);
   }
 }
 

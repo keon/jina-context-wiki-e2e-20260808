@@ -1240,7 +1240,7 @@ start_release_renewal
 
 # Fail every predictable schema/privilege problem and verify a restorable
 # backup while the serving worker generation is still untouched.
-run_release_control "schema-inspect"
+run_release_control "schema-preflight"
 cloud_sql_project="${cloud_sql_instance%%:*}"
 cloud_sql_instance_id="${cloud_sql_instance##*:}"
 backup_description="pre-context-${CLOUD_BUILD_ID}"
@@ -1330,9 +1330,9 @@ run_release_control "board-drain"
 run_release_control "board-verify"
 board_leases_verified="true"
 
-# Recheck the exact schema under the still-live deployment lease after worker
-# quiescence and immediately before owner DDL.
-run_release_control "schema-inspect"
+# Recheck for unexpected schema drift under the still-live deployment lease
+# after worker quiescence and immediately before owner DDL.
+run_release_control "schema-preflight"
 
 # Context artifacts are immutable and tenant scoped. The platform prerequisite
 # check already proved that the precreated bucket has no blanket lifecycle
@@ -1384,6 +1384,12 @@ if [[ "${context_reset_mode}" == "legacy-once" ]]; then
     --region="${GCP_REGION}" \
     --wait
 fi
+
+# The pre-migration checks allow candidate-declared additions to be absent but
+# reject unexpected drift. Before any candidate runtime starts, require owner
+# DDL (and the one-time reset, when selected) to have produced the exact
+# candidate schema under the same lease.
+run_release_control "schema-inspect"
 
 gcloud run deploy jina-api \
   --project="${GCP_PROJECT_ID}" \
