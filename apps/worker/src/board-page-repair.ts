@@ -28,7 +28,10 @@ export interface PageRepairPromptState {
  * audited, retained, compared, or rendered into a release snapshot.
  */
 export function canonicalPublicPageMarkdown(bodyMarkdown: string): string {
-  return normalizeMarkdownEvidenceTargets(bodyMarkdown);
+  const normalizedLines = bodyMarkdown.replace(/^\uFEFF/u, "").replace(/\r\n?/g, "\n");
+  const heading = /^#\s+\S.*$/m.exec(normalizedLines);
+  const publicMarkdown = heading && heading.index > 0 ? normalizedLines.slice(heading.index) : normalizedLines;
+  return normalizeMarkdownEvidenceTargets(publicMarkdown);
 }
 
 export function contextBoardPublicSnapshot(pages: readonly ContextPublicPage[]): string {

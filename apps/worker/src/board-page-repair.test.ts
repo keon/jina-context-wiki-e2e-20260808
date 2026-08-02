@@ -471,6 +471,22 @@ test("public Context detects raw portable checkout aliases but not repository-re
   assert.deepEqual(publicPageCheckoutAliasProblems("[claim](src/server.ts#L1-L2)"), []);
 });
 
+test("public Context removes agent tool envelopes before the required H1", () => {
+  const markdown = [
+    "Exit code: 0",
+    "Wall time: 2.5 seconds",
+    "Output:",
+    "# Board state",
+    "",
+    "[The Board stores tasks](packages/board/src/reducer.ts#L34-L57).",
+    ""
+  ].join("\r\n");
+  assert.equal(
+    canonicalPublicPageMarkdown(markdown),
+    "# Board state\n\n[The Board stores tasks](packages/board/src/reducer.ts#L34-L57).\n"
+  );
+});
+
 function citationReference(citationId: string, target: string): CitationAuditReference {
   const [pathOrUrl = "", range = ""] = target.split("#");
   const lines = /^L(\d+)-L(\d+)$/.exec(range);
