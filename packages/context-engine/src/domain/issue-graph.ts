@@ -3,7 +3,7 @@ import { fingerprint, isFullCommitSha, normalizeIsoTime, normalizeRepository, st
 export const issueEvidenceRoles = ["introduced", "observed", "resolved"] as const;
 export type IssueEvidenceRole = (typeof issueEvidenceRoles)[number];
 
-export const issueCausalityPredicates = ["INTRODUCED_BY", "RESOLVED_BY", "CAUSED_BY", "CONTRIBUTES_TO"] as const;
+export const issueCausalityPredicates = ["CAUSED_BY", "RESOLVED_BY", "CONTRIBUTES_TO"] as const;
 export type IssueCausalityPredicate = (typeof issueCausalityPredicates)[number];
 
 export interface IssueHistoryCommit {
@@ -62,7 +62,7 @@ export interface IssueGraphArtifactV1 {
     readonly version: string;
     readonly model: string;
     readonly promptVersion: string;
-    readonly schemaVersion: "issue-causality-v1";
+    readonly schemaVersion: "issue-causality-v1" | "issue-causality-v2";
   };
   readonly issues: readonly DerivedIssue[];
   readonly causalities: readonly IssueCausality[];
@@ -162,10 +162,7 @@ export function materializeIssueGraph(input: MaterializeIssueGraphInput): IssueG
   const causalities = candidate.causalities.map((causality) => {
     const subject = issuesByKey.get(causality.subjectKey);
     if (!subject) throw new Error(`causality references unknown subject issue key ${causality.subjectKey}`);
-    const expectedKind = causalityObjectKind(causality.predicate);
-    if (causality.objectKind !== expectedKind) {
-      throw new Error(`${causality.predicate} requires a ${expectedKind} object`);
-    }
+    assertCausalityObjectKind(causality.predicate, causality.objectKind);
     const objectId =
       causality.objectKind === "commit"
         ? fullCommitSha(causality.objectRef, "causality commit")
@@ -212,7 +209,7 @@ export function materializeIssueGraph(input: MaterializeIssueGraphInput): IssueG
       complete: input.historyComplete,
       oldestObservedCommit: [...history.keys()].at(-1)!
     },
-    generator: { ...input.generator, schemaVersion: "issue-causality-v1" as const },
+    generator: { ...input.generator, schemaVersion: "issue-causality-v2" as const },
     issues,
     causalities: orderedCausalities
   };
@@ -461,8 +458,13 @@ function assertAcyclicIssueCausality(issues: readonly DerivedIssue[], causalitie
   for (const issue of issues) visit(issue.id);
 }
 
-function causalityObjectKind(predicate: IssueCausalityPredicate): "issue" | "commit" {
-  return predicate === "INTRODUCED_BY" || predicate === "RESOLVED_BY" ? "commit" : "issue";
+function assertCausalityObjectKind(predicate: IssueCausalityPredicate, objectKind: "issue" | "commit"): void {
+  if (predicate === "RESOLVED_BY" && objectKind !== "commit") {
+    throw new Error("RESOLVED_BY requires a commit object");
+  }
+  if (predicate === "CONTRIBUTES_TO" && objectKind !== "issue") {
+    throw new Error("CONTRIBUTES_TO requires an issue object");
+  }
 }
 
 function requiredIssueKey(issues: ReadonlyMap<string, DerivedIssue>, key: string): DerivedIssue {

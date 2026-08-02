@@ -242,7 +242,7 @@ export interface ContextIssue {
 interface IssueCausality {
   readonly id: string;
   readonly subjectIssueId: string;
-  readonly predicate: "INTRODUCED_BY" | "RESOLVED_BY" | "CAUSED_BY" | "CONTRIBUTES_TO";
+  readonly predicate: "CAUSED_BY" | "RESOLVED_BY" | "CONTRIBUTES_TO";
   readonly object: { readonly kind: "issue" | "commit"; readonly id: string };
   readonly why: string;
   readonly confidence: "explicit" | "inferred";

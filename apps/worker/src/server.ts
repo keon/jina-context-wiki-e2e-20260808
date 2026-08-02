@@ -350,7 +350,7 @@ const ISSUE_GRAPH_STAGE_SCHEMA = {
           subjectKey: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
           predicate: {
             type: "string",
-            enum: ["INTRODUCED_BY", "RESOLVED_BY", "CAUSED_BY", "CONTRIBUTES_TO"]
+            enum: ["CAUSED_BY", "RESOLVED_BY", "CONTRIBUTES_TO"]
           },
           objectKind: { type: "string", enum: ["issue", "commit"] },
           objectRef: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
@@ -852,7 +852,7 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
         name: "codex-agentic-issue-deriver",
         version: "1",
         model: (process.env.CAUSAL_GRAPH_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
-        promptVersion: "issue-causality-v1"
+        promptVersion: "issue-causality-v2"
       }
     });
     const outputArtifact = await uploadContextBoardArtifact(work, {
@@ -4960,7 +4960,7 @@ function issueGraphPrompt(repository: string, ref: string, historyPath: string):
     "Read it directly. This is one agentic derivation run; do not create a plan, delegate, or invoke a critic.",
     "An issue is a concrete defect, failure mode, operational constraint, or harmful design tradeoff visible in commit messages. Do not turn ordinary features, refactors, or chores into issues.",
     "Every issue needs exact 1-based commit-message line ranges. Use introduced, observed, and resolved roles only when the cited text supports that role.",
-    "Use INTRODUCED_BY and RESOLVED_BY only with commit SHA objects. Use CAUSED_BY and CONTRIBUTES_TO only between issue keys.",
+    "Use CAUSED_BY for an issue's cause: its object may be either the commit SHA that introduced the issue or another issue key. Use RESOLVED_BY only with commit SHA objects and CONTRIBUTES_TO only between issue keys.",
     "Every subjectKey and issue objectRef must exactly copy one lowercase key from the issues array. Never invent or recase an issue reference.",
     "Emit a causality only when the commit history states the relationship explicitly enough to defend. confidence must be explicit. Omit guesses and ambiguous relationships.",
     "Keep distinct symptoms separate only when the history supports separate identities. Prefer fewer well-evidenced issues over speculative coverage.",

@@ -30,7 +30,7 @@ function candidate() {
     causalities: [
       {
         subjectKey: "pool-contention",
-        predicate: "INTRODUCED_BY",
+        predicate: "CAUSED_BY",
         objectKind: "commit",
         objectRef: introduced,
         why: "The cited commit message explicitly says the fan-out was introduced here.",
@@ -93,16 +93,25 @@ function materialize(value: unknown = candidate()) {
       name: "codex",
       version: "1",
       model: "gpt-5.6-terra",
-      promptVersion: "issue-causality-v1"
+      promptVersion: "issue-causality-v2"
     }
   });
 }
 
-test("materializes stable issue identities, evidence excerpts, and causal traces", () => {
+test("materializes generalized commit and issue causes, stable identities, evidence excerpts, and causal traces", () => {
   const graph = materialize();
   assert.equal(graph.repository, "acme/widgets");
   assert.equal(graph.issues.length, 2);
   assert.equal(graph.causalities.length, 3);
+  assert.equal(graph.generator.schemaVersion, "issue-causality-v2");
+  assert.equal(
+    graph.causalities.filter((edge) => edge.predicate === "CAUSED_BY" && edge.object.kind === "commit").length,
+    1
+  );
+  assert.equal(
+    graph.causalities.filter((edge) => edge.predicate === "CAUSED_BY" && edge.object.kind === "issue").length,
+    1
+  );
   assert.equal(graph.issues.find((issue) => issue.title.includes("fan-out"))?.state, "resolved");
   assert.match(graph.issues[0]!.id, /^issue_[0-9a-f]{32}$/);
   assert.equal(parseIssueGraphArtifact(graph).id, graph.id);
@@ -131,8 +140,8 @@ test("canonicalizes case-only differences in model-authored issue references", (
 
 test("rejects predicate endpoint mismatches and causal cycles", () => {
   const wrongKind = candidate();
-  wrongKind.causalities[0]!.objectKind = "issue";
-  wrongKind.causalities[0]!.objectRef = "claim-timeout";
+  wrongKind.causalities[1]!.objectKind = "issue";
+  wrongKind.causalities[1]!.objectRef = "claim-timeout";
   assert.throws(() => materialize(wrongKind), /requires a commit object/);
 
   const cyclic = candidate();
