@@ -459,19 +459,27 @@ jobs:
                 end
             ' <<<"$previous_service")"
             if [ -z "$previous_revision" ]; then
-              echo "Expected exactly one existing Cloud Run revision at 100% traffic; refusing an ambiguous rollout" >&2
-              exit 1
+              latest_ready_revision="$(jq -r '.status.latestReadyRevisionName // empty' <<<"$previous_service")"
+              if [ "$DEPLOY_ENVIRONMENT" = "Staging" ] && [ -z "$latest_ready_revision" ]; then
+                service_exists=false
+                echo "Retrying incomplete staging bootstrap for ${SERVICE_NAME}"
+              else
+                echo "Expected exactly one existing Cloud Run revision at 100% traffic; refusing an ambiguous rollout" >&2
+                exit 1
+              fi
             fi
-            previous_revision_json="$(gcloud run revisions describe "$previous_revision" \
-              --region "$REGION" \
-              --project "$PROJECT_ID" \
-              --platform managed \
-              --format=json)"
-            previous_ready="$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' \
-              <<<"$previous_revision_json")"
-            if [ "$previous_ready" != "True" ]; then
-              echo "Previous Cloud Run revision ${previous_revision} is not ready; refusing rollout" >&2
-              exit 1
+            if [ "$service_exists" = true ]; then
+              previous_revision_json="$(gcloud run revisions describe "$previous_revision" \
+                --region "$REGION" \
+                --project "$PROJECT_ID" \
+                --platform managed \
+                --format=json)"
+              previous_ready="$(jq -r '.status.conditions[]? | select(.type == "Ready") | .status' \
+                <<<"$previous_revision_json")"
+              if [ "$previous_ready" != "True" ]; then
+                echo "Previous Cloud Run revision ${previous_revision} is not ready; refusing rollout" >&2
+                exit 1
+              fi
             fi
           else
             if [ "$DEPLOY_ENVIRONMENT" != "Staging" ]; then
