@@ -65,13 +65,13 @@ export function ContextPage() {
   const build = preferredBuild(
     builds.filter(
       (candidate) =>
-        candidate.repository === repository && candidate.ref === ref && candidate.buildKind !== "issue_graph"
+        candidate.repository === repository && candidate.ref === ref && candidate.buildKind !== "causal_graph"
     )
   );
-  const issueBuild = preferredBuild(
+  const causalGraphBuild = preferredBuild(
     builds.filter(
       (candidate) =>
-        candidate.repository === repository && candidate.ref === ref && candidate.buildKind === "issue_graph"
+        candidate.repository === repository && candidate.ref === ref && candidate.buildKind === "causal_graph"
     )
   );
 
@@ -117,7 +117,7 @@ export function ContextPage() {
           </section>
         </>
       )}
-      {repository && ref ? <IssueGraphBrowser repository={repository} ref={ref} build={issueBuild} /> : null}
+      {repository && ref ? <IssueGraphBrowser repository={repository} ref={ref} build={causalGraphBuild} /> : null}
     </section>
   );
 }

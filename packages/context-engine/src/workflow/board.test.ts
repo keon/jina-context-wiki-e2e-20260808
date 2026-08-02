@@ -17,18 +17,19 @@ import {
   addContextResearchPlan,
   addContextResearchWork,
   assertContextBoardMetadata,
+  causalGraphBoardTaskTypes,
   contextBoardTaskTypes,
   contextBoardTopics,
   contextGateRepairMustChangeSnapshot,
   createContextBoardBuild,
-  createIssueGraphBoardBuild,
+  createCausalGraphBoardBuild,
   failContextGateRepairExhausted,
   failContextPageRepairExhausted,
   MAX_CONTEXT_GATE_REPAIR_PASS,
   MAX_CONTEXT_OPERATOR_REMEDIATION_PASS,
   MAX_CONTEXT_REPAIR_PASS,
   nextContextBoardRefSequence,
-  nextIssueGraphBoardRefSequence,
+  nextCausalGraphBoardRefSequence,
   parseContextBoardTaskResult,
   resumeContextGateExhaustion,
   resumeContextPageExhaustion
@@ -37,8 +38,8 @@ import type { ContextArtifactRef } from "../ports/artifact-store.js";
 
 const NOW = "2026-07-29T18:00:00.000Z";
 
-test("issue graph sidecar is a fixed snapshot, one-run derivation, publication chain", () => {
-  const created = createIssueGraphBoardBuild(createEmptyBoardState(), {
+test("causal graph is a fixed snapshot, one-run derivation, publication chain", () => {
+  const created = createCausalGraphBoardBuild(createEmptyBoardState(), {
     tenantId: "tenant-1",
     repository: "omxyz/jina",
     ref: "main",
@@ -52,7 +53,7 @@ test("issue graph sidecar is a fixed snapshot, one-run derivation, publication c
   assert.equal(created.state.tasks.length, 4);
   assert.deepEqual(
     children.map((task) => task.type),
-    [contextBoardTaskTypes.issueSnapshot, contextBoardTaskTypes.issueDerive, contextBoardTaskTypes.issuePublication]
+    [causalGraphBoardTaskTypes.snapshot, causalGraphBoardTaskTypes.derive, causalGraphBoardTaskTypes.publication]
   );
   assert.equal(findTask(created.state, created.snapshotTaskId)?.status, "queued");
   assert.equal(findTask(created.state, created.deriveTaskId)?.status, "triage");
@@ -60,7 +61,7 @@ test("issue graph sidecar is a fixed snapshot, one-run derivation, publication c
   assert.deepEqual(requiredDependencies(created.state, created.deriveTaskId), [created.snapshotTaskId]);
   assert.deepEqual(requiredDependencies(created.state, created.publicationTaskId), [created.deriveTaskId]);
   assert.equal(
-    nextIssueGraphBoardRefSequence(created.state, {
+    nextCausalGraphBoardRefSequence(created.state, {
       tenantId: "tenant-1",
       repository: "omxyz/jina",
       ref: "main"

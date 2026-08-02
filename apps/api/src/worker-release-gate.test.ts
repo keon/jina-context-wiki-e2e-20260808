@@ -88,6 +88,42 @@ test("exact active release reaches the Board transaction and topic/service ident
   }
 });
 
+test("causal graph claims require the causal worker identity and reject Context topics", async () => {
+  const activeCausalRelease = {
+    releaseId: "causal-release-current",
+    credentialSha256: sha256("causal-credential-causal-credential"),
+    service: "jina-causal-graph-worker",
+    revision: "jina-causal-graph-worker-release-current"
+  } as const;
+  const store = guardedStateStore(activeCausalRelease);
+  const { baseUrl, close } = await runningApi(store, true);
+  const identity = {
+    workerReleaseId: activeCausalRelease.releaseId,
+    workerReleaseCredential: "causal-credential-causal-credential",
+    workerService: activeCausalRelease.service,
+    workerRevision: activeCausalRelease.revision
+  };
+  try {
+    const accepted = await workerPost(baseUrl, "/internal/worker/claim", {
+      workerId: "causal-candidate",
+      topics: ["run-causal-graph-history", "run-causal-graph-derive", "run-causal-graph-publication"],
+      ...identity
+    });
+    assert.equal(accepted.status, 204);
+    assert.equal(store.verificationCount(), 1);
+
+    const contextTopic = await workerPost(baseUrl, "/internal/worker/claim", {
+      workerId: "causal-candidate",
+      topics: ["run-context-input-snapshot"],
+      ...identity
+    });
+    assert.equal(contextTopic.status, 409);
+    assert.equal((await contextTopic.json()).code, "worker_release_rejected");
+  } finally {
+    await close();
+  }
+});
+
 test("local development remains explicitly ungated when the release gate is disabled", async () => {
   const store = guardedStateStore(undefined);
   const { baseUrl, close } = await runningApi(store, false);

@@ -52,7 +52,7 @@ test("partitionBoardTasks keeps only the latest context build request per scope"
   );
 });
 
-test("documentation and issue sidecars keep independent current requests", () => {
+test("Context and causal graph builds keep independent current requests", () => {
   const scope = { tenantId: "t", repository: "o/r", ref: "main" };
   const tasks = [
     task({
@@ -63,13 +63,13 @@ test("documentation and issue sidecars keep independent current requests", () =>
     }),
     task({
       id: "issues",
-      type: "build-context-issues",
+      type: "build-causal-graph",
       createdAt: "2026-01-02T00:00:00Z",
       metadata: { ...scope, requestKey: "issue-request" }
     }),
     task({
       id: "issue-stage",
-      type: "derive-context-issues",
+      type: "derive-causal-graph",
       metadata: { ...scope, requestKey: "issue-request" }
     })
   ];

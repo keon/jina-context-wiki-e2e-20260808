@@ -22,7 +22,7 @@ export function IssueGraphBrowser({
     const controller = new AbortController();
     setStatus("loading");
     setGraph(undefined);
-    void fetch(`/api/context/issue-graph?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`, {
+    void fetch(`/api/causal-graph?repository=${encodeURIComponent(repository)}&ref=${encodeURIComponent(ref)}`, {
       headers: { accept: "application/json" },
       signal: controller.signal
     })
@@ -34,7 +34,7 @@ export function IssueGraphBrowser({
         if (!response.ok) throw new Error(`request failed with ${response.status}`);
         const value = (await response.json()) as IssueGraphResponse;
         if (value.release.repository !== repository || value.release.ref !== ref) {
-          throw new Error("issue graph response escaped the selected scope");
+          throw new Error("causal graph response escaped the selected scope");
         }
         setGraph(value);
         setStatus("ready");
@@ -77,12 +77,12 @@ export function IssueGraphBrowser({
       </header>
 
       {status === "loading" ? <p className="context-panel-empty">Loading the current issue release…</p> : null}
-      {status === "error" ? <p className="context-alert danger">The issue graph could not be loaded.</p> : null}
+      {status === "error" ? <p className="context-alert danger">The causal graph could not be loaded.</p> : null}
       {status === "missing" ? (
         <p className="context-panel-empty">
           {build?.status === "active"
             ? "Commit history is being analyzed. The prior release remains live until publication succeeds."
-            : "No issue graph has been published for this repository ref yet."}
+            : "No causal graph has been published for this repository ref yet."}
         </p>
       ) : null}
       {graph ? (

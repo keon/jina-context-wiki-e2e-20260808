@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  CAUSAL_GRAPH_TOPICS,
   CONTEXT_BOARD_TOPICS,
   configuredWorkerClaimMode,
   configuredWorkerTopics,
-  requiresContextBoardExecutor,
+  requiresBoardAgentExecutor,
   workerClaimTimeoutMs
 } from "./worker-topics.js";
 
@@ -25,9 +26,20 @@ test("worker topics reject every legacy Context executor route", () => {
 });
 
 test("every Context topic requires the production Board executor preflight", () => {
-  assert.equal(requiresContextBoardExecutor(configuredWorkerTopics("run-review")), false);
+  assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics("run-review")), false);
   for (const topic of CONTEXT_BOARD_TOPICS) {
-    assert.equal(requiresContextBoardExecutor(configuredWorkerTopics(topic)), true, topic);
+    assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics(topic)), true, topic);
+  }
+});
+
+test("causal graph topics are an explicit worker-only allowlist disjoint from Context", () => {
+  assert.equal(
+    CAUSAL_GRAPH_TOPICS.some((topic) => CONTEXT_BOARD_TOPICS.includes(topic as never)),
+    false
+  );
+  assert.deepEqual(configuredWorkerTopics(CAUSAL_GRAPH_TOPICS.join("|")), CAUSAL_GRAPH_TOPICS);
+  for (const topic of CAUSAL_GRAPH_TOPICS) {
+    assert.equal(requiresBoardAgentExecutor(configuredWorkerTopics(topic)), true, topic);
   }
 });
 

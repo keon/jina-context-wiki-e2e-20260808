@@ -15,6 +15,12 @@ const ACTIVE_RELEASE: WorkerReleaseGuard = {
   service: "jina-context-worker",
   revision: "jina-context-worker-active"
 };
+const ACTIVE_CAUSAL_RELEASE: WorkerReleaseGuard = {
+  releaseId: "causal-release-active",
+  credentialSha256: "c".repeat(64),
+  service: "jina-causal-graph-worker",
+  revision: "jina-causal-graph-worker-active"
+};
 
 test(
   "worker mutations are serialized with release changes and reject stale identities",
@@ -35,6 +41,14 @@ test(
       await controlPool.query("drop schema if exists jina_runtime cascade");
       await store.load();
       await enableRelease(controlPool, ACTIVE_RELEASE);
+      await enableCausalRelease(controlPool, ACTIVE_CAUSAL_RELEASE);
+
+      const causalExact = await store.update(
+        async () => ({ state: { value: 0 }, result: "causal-accepted" }),
+        undefined,
+        ACTIVE_CAUSAL_RELEASE
+      );
+      assert.deepEqual(causalExact, { committed: true, result: "causal-accepted" });
 
       const exact = await store.update(
         async () => ({ state: { value: 1 }, result: "accepted" }),
@@ -136,5 +150,14 @@ async function enableRelease(pool: Pool, release: WorkerReleaseGuard): Promise<v
        context_worker_revision,task_worker_revision
      ) values (1,true,$1,$2,$3,$4)`,
     [release.releaseId, release.credentialSha256, release.revision, "jina-task-worker-active"]
+  );
+}
+
+async function enableCausalRelease(pool: Pool, release: WorkerReleaseGuard): Promise<void> {
+  await pool.query(
+    `insert into jina_runtime.causal_graph_release_control (
+       id,worker_claims_enabled,worker_release_id,worker_credential_sha256,worker_revision
+     ) values (1,true,$1,$2,$3)`,
+    [release.releaseId, release.credentialSha256, release.revision]
   );
 }

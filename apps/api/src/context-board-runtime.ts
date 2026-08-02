@@ -6,6 +6,7 @@ import {
   addContextResearchPlan,
   addContextResearchWork,
   bindContextBoardBuildCommit,
+  causalGraphBoardTaskTypes,
   contextBoardTaskTypes,
   failContextGateRepairExhausted,
   failContextPageRepairExhausted,
@@ -69,7 +70,7 @@ export function applyContextBoardTaskResult(
       });
       return { state: expanded.state, result };
     }
-    case contextBoardTaskTypes.issueSnapshot:
+    case causalGraphBoardTaskTypes.snapshot:
       return {
         state: bindContextBoardBuildCommit(state, {
           buildTaskId,

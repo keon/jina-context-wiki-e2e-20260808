@@ -118,17 +118,19 @@ import { assertExpectedRemoteHead } from "./git-ref.js";
 import { parseGitTreeEntries } from "./git-tree.js";
 import {
   CONTEXT_BOARD_TOPICS,
+  CAUSAL_GRAPH_TOPICS,
   SUPPORTED_WORKER_TOPICS,
   configuredWorkerClaimMode,
   configuredWorkerTopics,
-  requiresContextBoardExecutor,
+  requiresBoardAgentExecutor,
   workerClaimTimeoutMs,
   type ContextWorkerTopic,
+  type CausalGraphWorkerTopic,
   type WorkerTopic
 } from "./worker-topics.js";
 
 const execFileAsync = promisify(execFile);
-const CONTEXT_MODEL_TOPICS = new Set<WorkerTopic>([
+const BOARD_MODEL_TOPICS = new Set<WorkerTopic>([
   "run-context-research-plan",
   "run-context-research",
   "run-context-publication-plan",
@@ -138,7 +140,7 @@ const CONTEXT_MODEL_TOPICS = new Set<WorkerTopic>([
   "run-context-source-challenge",
   "run-context-task-evaluation",
   "run-context-gap-repair",
-  "run-context-issue-derive"
+  "run-causal-graph-derive"
 ]);
 
 interface RepositoryContextMetadata {
@@ -238,9 +240,9 @@ interface WorkMetadataByTopic {
   readonly "run-context-pageindex": ContextBoardWorkerMetadata & {
     readonly planArtifact: ContextArtifactRef;
   };
-  readonly "run-context-issue-history": ContextBoardWorkerMetadata;
-  readonly "run-context-issue-derive": ContextBoardWorkerMetadata;
-  readonly "run-context-issue-publication": ContextBoardWorkerMetadata;
+  readonly "run-causal-graph-history": ContextBoardWorkerMetadata;
+  readonly "run-causal-graph-derive": ContextBoardWorkerMetadata;
+  readonly "run-causal-graph-publication": ContextBoardWorkerMetadata;
 }
 
 type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic
@@ -285,7 +287,7 @@ interface LeaseExecutionState {
 interface WorkerReleaseIdentity {
   readonly releaseId: string;
   readonly credential: string;
-  readonly service: "jina-context-worker" | "jina-task-worker";
+  readonly service: "jina-context-worker" | "jina-causal-graph-worker" | "jina-task-worker";
   readonly revision: string;
 }
 
@@ -362,7 +364,7 @@ const ISSUE_GRAPH_STAGE_SCHEMA = {
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const configuredBoardAgentStageRunner =
-  claimMode === "enabled" && requiresContextBoardExecutor(topics)
+  claimMode === "enabled" && requiresBoardAgentExecutor(topics)
     ? configuredPortableContextBoardAgentStageRunner({
         protectedValues: [token],
         attemptContext: () => {
@@ -381,7 +383,7 @@ const boardAgentStageRunner: PortableContextBoardAgentStageRunner | undefined = 
   ? {
       async run(input) {
         const output = await configuredBoardAgentStageRunner.run(input);
-        if (!activeWork || !CONTEXT_MODEL_TOPICS.has(activeWork.topic) || !activeModelUsage) {
+        if (!activeWork || !BOARD_MODEL_TOPICS.has(activeWork.topic) || !activeModelUsage) {
           throw new Error("board agent usage was produced outside an active model-backed lease");
         }
         activeModelUsage = addBoardAgentModelUsage(activeModelUsage, output.usage);
@@ -467,7 +469,7 @@ async function poll(): Promise<void> {
       if (work) {
         if (stopping) {
           const lease: LeaseExecutionState = { controller: new AbortController() };
-          await releaseContextLeaseOnce(work, lease, "worker shutdown").catch((error) => {
+          await releaseBoardLeaseOnce(work, lease, "worker shutdown").catch((error) => {
             logger.error("worker lease release failed for a claim received during shutdown", {
               event: "worker.lease_release_failed",
               workerId,
@@ -514,7 +516,7 @@ async function claim(): Promise<ClaimedWork | undefined> {
 async function execute(work: ClaimedWork): Promise<void> {
   active = true;
   activeWork = work;
-  activeModelUsage = CONTEXT_MODEL_TOPICS.has(work.topic)
+  activeModelUsage = BOARD_MODEL_TOPICS.has(work.topic)
     ? { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 }
     : undefined;
   activeModelUsageObserved = false;
@@ -532,7 +534,7 @@ async function execute(work: ClaimedWork): Promise<void> {
   });
   const lease: LeaseExecutionState = { controller: new AbortController() };
   activeLease = lease;
-  const buildDeadlineTimer = scheduleBuildDeadline(work, lease.controller);
+  const buildDeadlineTimer = scheduleBoardBuildDeadline(work, lease.controller);
   const heartbeat = setInterval(() => {
     if (lease.renewalInFlight) return;
     lease.renewalInFlight = true;
@@ -565,7 +567,7 @@ async function execute(work: ClaimedWork): Promise<void> {
       const reason = errorMessage(error).slice(0, 2_000);
       const failureCategory = workerFailureCategory(reason);
       result =
-        isContextTopic(work.topic) &&
+        isBoardTopic(work.topic) &&
         shouldRetryWorkerFailure(reason, {
           attempt: work.message.attempt ?? 1,
           maxAttempts: contextBoardMaxAttempts
@@ -581,7 +583,7 @@ async function execute(work: ClaimedWork): Promise<void> {
   try {
     if (lease.lostReason || !result) {
       logStageOutcome(work, startedAt, undefined, lease.lostReason ?? "lease lost");
-      await releaseContextLeaseOnce(work, lease, lease.lostReason ?? "worker lost its lease").catch((error) => {
+      await releaseBoardLeaseOnce(work, lease, lease.lostReason ?? "worker lost its lease").catch((error) => {
         logger.error("worker lease release failed", {
           event: "worker.lease_release_failed",
           workerId,
@@ -599,17 +601,15 @@ async function execute(work: ClaimedWork): Promise<void> {
     try {
       await complete(work, result);
     } catch (error) {
-      if (!(error instanceof LeaseLostError) && isContextTopic(work.topic)) {
-        await releaseContextLeaseOnce(work, lease, `completion failed: ${errorMessage(error)}`).catch(
-          (releaseError) => {
-            logger.error("worker lease release failed after completion failure", {
-              event: "worker.completion_failure_release_failed",
-              workerId,
-              taskId: work.task.id,
-              ...errorLogFields(releaseError)
-            });
-          }
-        );
+      if (!(error instanceof LeaseLostError) && isBoardTopic(work.topic)) {
+        await releaseBoardLeaseOnce(work, lease, `completion failed: ${errorMessage(error)}`).catch((releaseError) => {
+          logger.error("worker lease release failed after completion failure", {
+            event: "worker.completion_failure_release_failed",
+            workerId,
+            taskId: work.task.id,
+            ...errorLogFields(releaseError)
+          });
+        });
       }
       throw error;
     }
@@ -725,12 +725,12 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
       return { outcome: "done", result: await runContextPublication(work) };
     case "run-context-pageindex":
       return { outcome: "done", result: await runContextPageIndex(work) };
-    case "run-context-issue-history":
-      return { outcome: "done", result: await runContextIssueHistory(work) };
-    case "run-context-issue-derive":
-      return { outcome: "done", result: await runContextIssueDerive(work) };
-    case "run-context-issue-publication":
-      return { outcome: "done", result: await runContextIssuePublication(work) };
+    case "run-causal-graph-history":
+      return { outcome: "done", result: await runCausalGraphHistory(work) };
+    case "run-causal-graph-derive":
+      return { outcome: "done", result: await runCausalGraphDerive(work) };
+    case "run-causal-graph-publication":
+      return { outcome: "done", result: await runCausalGraphPublication(work) };
     case "run-review":
       return { outcome: "done", result: await runReview(work) };
   }
@@ -749,9 +749,7 @@ async function runContextInputSnapshot(
   return { version: 1, outputArtifact, commitSha: input.commitSha };
 }
 
-async function runContextIssueHistory(
-  work: ClaimedWork<"run-context-issue-history">
-): Promise<Record<string, unknown>> {
+async function runCausalGraphHistory(work: ClaimedWork<"run-causal-graph-history">): Promise<Record<string, unknown>> {
   const { tenantId, repository, ref, commitSha: expectedCommitSha, githubInstallationId } = work.task.metadata;
   if (requireGithubInstallation && !githubInstallationId) {
     throw new Error("provisioned GitHub installation is required for the issue history snapshot");
@@ -798,14 +796,14 @@ async function runContextIssueHistory(
   }
 }
 
-async function runContextIssueDerive(work: ClaimedWork<"run-context-issue-derive">): Promise<Record<string, unknown>> {
+async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">): Promise<Record<string, unknown>> {
   const historyArtifact = latestDependencyArtifact(
     work.task.metadata.dependencyResults,
-    ["snapshot-context-issue-history"],
-    "issue graph derivation"
+    ["snapshot-causal-graph-history"],
+    "causal graph derivation"
   );
   const history = parseIssueHistoryPacket(await readContextBoardArtifact(work, historyArtifact), work.task.metadata);
-  const inputDirectory = await mkdtemp(join(tmpdir(), "jina-context-issues-"));
+  const inputDirectory = await mkdtemp(join(tmpdir(), "jina-causal-graph-"));
   try {
     const historyPath = join(inputDirectory, "commit-history.json");
     await writeFile(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
@@ -816,7 +814,7 @@ async function runContextIssueDerive(work: ClaimedWork<"run-context-issue-derive
       workingDirectory: inputDirectory,
       additionalDirectories: [inputDirectory],
       readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_ISSUE_DERIVE_SECONDS", 300)
+      budgetSeconds: stageBudgetSeconds("CAUSAL_GRAPH_DERIVE_SECONDS", 300)
     });
     const graph = materializeIssueGraph({
       tenantId: history.tenantId,
@@ -831,7 +829,7 @@ async function runContextIssueDerive(work: ClaimedWork<"run-context-issue-derive
       generator: {
         name: "codex-agentic-issue-deriver",
         version: "1",
-        model: (process.env.CONTEXT_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
+        model: (process.env.CAUSAL_GRAPH_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
         promptVersion: "issue-causality-v1"
       }
     });
@@ -855,20 +853,20 @@ async function runContextIssueDerive(work: ClaimedWork<"run-context-issue-derive
   }
 }
 
-async function runContextIssuePublication(
-  work: ClaimedWork<"run-context-issue-publication">
+async function runCausalGraphPublication(
+  work: ClaimedWork<"run-causal-graph-publication">
 ): Promise<Record<string, unknown>> {
   const graphArtifact = latestDependencyArtifact(
     work.task.metadata.dependencyResults,
-    ["derive-context-issues"],
-    "issue graph publication"
+    ["derive-causal-graph"],
+    "causal graph publication"
   );
   const result = await internalApiJson<Record<string, unknown>>(
-    "/internal/context/board/issues/publish",
+    "/internal/causal-graph/board/publish",
     leaseBody(work, { graphArtifact })
   );
-  if (result.version !== 1) throw new Error("issue graph publication result version must be 1");
-  const releaseId = requiredString(result.releaseId, "issue graph publication releaseId");
+  if (result.version !== 1) throw new Error("causal graph publication result version must be 1");
+  const releaseId = requiredString(result.releaseId, "causal graph publication releaseId");
   const receiptArtifact = await uploadContextBoardArtifact(work, {
     kind: "issue-graph",
     name: `${releaseId}-publication.json`,
@@ -1011,7 +1009,7 @@ async function captureContextInput(work: ClaimedWork<"run-context-input-snapshot
 }
 
 async function uploadContextBoardArtifact(
-  work: ClaimedWork<ContextWorkerTopic>,
+  work: ClaimedWork<ContextWorkerTopic | CausalGraphWorkerTopic>,
   input: {
     readonly kind: ContextArtifactKind;
     readonly name: string;
@@ -3369,7 +3367,7 @@ function requireBoardAgentStageRunner(): PortableContextBoardAgentStageRunner {
 function stageBudgetSeconds(environmentName: string, fallback: number): number {
   const configured = positiveInt(process.env[environmentName], fallback);
   const deadline =
-    activeWork && isContextTopic(activeWork.topic)
+    activeWork && isBoardTopic(activeWork.topic)
       ? (activeWork.task.metadata as ContextBoardWorkerMetadata).derivationDeadlineAt
       : undefined;
   if (!deadline) return configured;
@@ -3911,7 +3909,7 @@ async function renew(work: ClaimedWork): Promise<void> {
       ...(work.message.attempt === undefined ? {} : { attempt: work.message.attempt }),
       ...(work.message.writeFenceToken === undefined ? {} : { writeFenceToken: work.message.writeFenceToken })
     },
-    isContextTopic(work.topic) ? contextApiTimeoutMs : workerApiTimeoutMs
+    isBoardTopic(work.topic) ? contextApiTimeoutMs : workerApiTimeoutMs
   );
   if (!response.ok) {
     const message = `renewal failed with ${response.status}: ${await boundedFailureDetail(response)}`;
@@ -3923,14 +3921,14 @@ async function renew(work: ClaimedWork): Promise<void> {
 
 async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
   const modelUsage =
-    CONTEXT_MODEL_TOPICS.has(work.topic) && activeModelUsage
+    BOARD_MODEL_TOPICS.has(work.topic) && activeModelUsage
       ? boardAgentModelUsageForCompletion({
           outcome: result.outcome,
           observed: activeModelUsageObserved,
           usage: activeModelUsage
         })
       : undefined;
-  if (result.outcome === "done" && CONTEXT_MODEL_TOPICS.has(work.topic) && !modelUsage) {
+  if (result.outcome === "done" && BOARD_MODEL_TOPICS.has(work.topic) && !modelUsage) {
     throw new Error("model-backed task completed without an exact usage accumulator");
   }
   const response = await apiRequest(
@@ -3944,7 +3942,7 @@ async function complete(work: ClaimedWork, result: WorkResult): Promise<void> {
       ...(modelUsage ? { modelUsage } : {}),
       ...result
     },
-    isContextTopic(work.topic) ? contextCompletionTimeoutMs : workerApiTimeoutMs
+    isBoardTopic(work.topic) ? contextCompletionTimeoutMs : workerApiTimeoutMs
   );
   if (response.status === 409) {
     throw new LeaseLostError(`completion rejected after lease loss: ${await boundedFailureDetail(response)}`);
@@ -4136,12 +4134,12 @@ function parseClaimedWork(value: unknown): ClaimedWork {
       }
     };
   }
-  if (isContextTopic(topic)) {
+  if (isBoardTopic(topic)) {
     const common = repositoryMetadata(metadata);
     const contextMetadata = {
       ...common,
       ...(metadata.commitSha === undefined ? {} : { commitSha: requiredGitSha(metadata.commitSha, "task commitSha") }),
-      ...contextBoardMetadata(metadata, topic)
+      ...boardWorkMetadata(metadata, topic)
     };
     return {
       topic,
@@ -4166,13 +4164,16 @@ function repositoryMetadata(metadata: Record<string, unknown>): RepositoryContex
   };
 }
 
-function isContextTopic(topic: string): topic is ContextWorkerTopic {
-  return CONTEXT_BOARD_TOPICS.includes(topic as (typeof CONTEXT_BOARD_TOPICS)[number]);
+function isBoardTopic(topic: string): topic is ContextWorkerTopic | CausalGraphWorkerTopic {
+  return (
+    CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic) ||
+    CAUSAL_GRAPH_TOPICS.includes(topic as CausalGraphWorkerTopic)
+  );
 }
 
-function contextBoardMetadata(
+function boardWorkMetadata(
   metadata: Record<string, unknown>,
-  topic: (typeof CONTEXT_BOARD_TOPICS)[number]
+  topic: ContextWorkerTopic | CausalGraphWorkerTopic
 ): Omit<ContextBoardWorkerMetadata, keyof RepositoryContextMetadata> {
   const dependencyResults = parseContextBoardDependencyResults(metadata.dependencyResults);
   const base = {
@@ -4187,9 +4188,9 @@ function contextBoardMetadata(
   };
   switch (topic) {
     case "run-context-input-snapshot":
-    case "run-context-issue-history":
-    case "run-context-issue-derive":
-    case "run-context-issue-publication":
+    case "run-causal-graph-history":
+    case "run-causal-graph-derive":
+    case "run-causal-graph-publication":
       return base;
     case "run-context-research-plan":
       return {
@@ -4253,12 +4254,12 @@ function contextBoardMetadata(
   }
 }
 
-function scheduleBuildDeadline(work: ClaimedWork, controller: AbortController): NodeJS.Timeout | undefined {
-  if (!isContextTopic(work.topic)) return undefined;
+function scheduleBoardBuildDeadline(work: ClaimedWork, controller: AbortController): NodeJS.Timeout | undefined {
+  if (!isBoardTopic(work.topic)) return undefined;
   const deadline = (work.task.metadata as ContextBoardWorkerMetadata).derivationDeadlineAt;
   if (!deadline) return undefined;
   const remainingMs = Date.parse(deadline) - Date.now();
-  const abort = () => controller.abort(new Error("Context build derivation deadline exceeded"));
+  const abort = () => controller.abort(new Error("Board build derivation deadline exceeded"));
   if (remainingMs <= 0) {
     queueMicrotask(abort);
     return undefined;
@@ -4397,7 +4398,7 @@ function configuredWorkerReleaseIdentity(): WorkerReleaseIdentity | undefined {
   if (credential.length < 32 || credential.length > 512) {
     throw new Error("JINA_WORKER_RELEASE_CREDENTIAL must contain 32..512 characters");
   }
-  if (service !== "jina-context-worker" && service !== "jina-task-worker") {
+  if (service !== "jina-context-worker" && service !== "jina-causal-graph-worker" && service !== "jina-task-worker") {
     throw new Error("K_SERVICE is not a production worker service");
   }
   if (!revision.startsWith(`${service}-`)) {
@@ -4614,8 +4615,8 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-async function releaseContextLease(work: ClaimedWork, reason: string): Promise<void> {
-  if (!isContextTopic(work.topic)) return;
+async function releaseBoardLease(work: ClaimedWork, reason: string): Promise<void> {
+  if (!isBoardTopic(work.topic)) return;
   const response = await fetch(`${apiUrl}/internal/worker/release`, {
     method: "POST",
     headers: {
@@ -4639,8 +4640,8 @@ async function releaseContextLease(work: ClaimedWork, reason: string): Promise<v
   }
 }
 
-function releaseContextLeaseOnce(work: ClaimedWork, lease: LeaseExecutionState, reason: string): Promise<void> {
-  lease.releasePromise ??= releaseContextLease(work, reason);
+function releaseBoardLeaseOnce(work: ClaimedWork, lease: LeaseExecutionState, reason: string): Promise<void> {
+  lease.releasePromise ??= releaseBoardLease(work, reason);
   return lease.releasePromise;
 }
 
@@ -4652,7 +4653,7 @@ async function shutdown(signal: "SIGINT" | "SIGTERM"): Promise<void> {
     const lease = activeLease;
     if (lease) loseLease(lease, new LeaseLostError(`worker received ${signal}`));
     if (work && lease) {
-      await releaseContextLeaseOnce(work, lease, "worker shutdown").catch((error) => {
+      await releaseBoardLeaseOnce(work, lease, "worker shutdown").catch((error) => {
         logger.error("worker lease release failed", {
           event: "worker.lease_release_failed",
           workerId,

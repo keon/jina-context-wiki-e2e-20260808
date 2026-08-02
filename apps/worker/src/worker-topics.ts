@@ -11,16 +11,20 @@ export const CONTEXT_BOARD_TOPICS = [
   "run-context-gap-repair",
   "run-context-certification",
   "run-context-publication",
-  "run-context-pageindex",
-  "run-context-issue-history",
-  "run-context-issue-derive",
-  "run-context-issue-publication"
+  "run-context-pageindex"
 ] as const;
 
-export const SUPPORTED_WORKER_TOPICS = ["run-review", ...CONTEXT_BOARD_TOPICS] as const;
+export const CAUSAL_GRAPH_TOPICS = [
+  "run-causal-graph-history",
+  "run-causal-graph-derive",
+  "run-causal-graph-publication"
+] as const;
+
+export const SUPPORTED_WORKER_TOPICS = ["run-review", ...CONTEXT_BOARD_TOPICS, ...CAUSAL_GRAPH_TOPICS] as const;
 
 export type WorkerTopic = (typeof SUPPORTED_WORKER_TOPICS)[number];
 export type ContextWorkerTopic = (typeof CONTEXT_BOARD_TOPICS)[number];
+export type CausalGraphWorkerTopic = (typeof CAUSAL_GRAPH_TOPICS)[number];
 export type WorkerClaimMode = "enabled" | "paused";
 
 export function configuredWorkerClaimMode(value: string | undefined): WorkerClaimMode {
@@ -48,8 +52,12 @@ export function configuredWorkerTopics(value: string | undefined): WorkerTopic[]
  * Every Context worker must pass the Daytona production preflight, including a
  * worker that happens to claim only snapshot, publication, or PageIndex work.
  */
-export function requiresContextBoardExecutor(topics: readonly WorkerTopic[]): boolean {
-  return topics.some((topic) => CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic));
+export function requiresBoardAgentExecutor(topics: readonly WorkerTopic[]): boolean {
+  return topics.some(
+    (topic) =>
+      CONTEXT_BOARD_TOPICS.includes(topic as ContextWorkerTopic) ||
+      CAUSAL_GRAPH_TOPICS.includes(topic as CausalGraphWorkerTopic)
+  );
 }
 
 export function workerClaimTimeoutMs(
@@ -57,5 +65,5 @@ export function workerClaimTimeoutMs(
   workerApiTimeoutMs: number,
   contextApiTimeoutMs: number
 ): number {
-  return requiresContextBoardExecutor(topics) ? contextApiTimeoutMs : workerApiTimeoutMs;
+  return requiresBoardAgentExecutor(topics) ? contextApiTimeoutMs : workerApiTimeoutMs;
 }

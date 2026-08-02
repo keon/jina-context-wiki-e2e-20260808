@@ -34,6 +34,9 @@ import {
   contextBoardTaskTypeDefinitions,
   contextBoardTaskTypes,
   contextBoardTopics,
+  causalGraphBoardTaskTypes,
+  causalGraphBoardTaskTypeDefinitions,
+  causalGraphBoardTopics,
   contextArtifactKinds,
   contextArtifactKey,
   contextArtifactScopePrefix,
@@ -48,12 +51,13 @@ import {
   parseContextBoardTaskResult,
   parseBoardPageIndexTreeArtifact,
   isContextBoardTaskType,
+  isBoardWorkTaskType,
   MAX_CONTEXT_OPERATOR_REMEDIATION_PASS,
   resumeContextGateExhaustion,
   resumeContextPageExhaustion,
   newId,
-  createIssueGraphBoardBuild,
-  nextIssueGraphBoardRefSequence,
+  createCausalGraphBoardBuild,
+  nextCausalGraphBoardRefSequence,
   type ApiTokenRecord,
   type ContextArtifactStore,
   type ContextArtifactRef,
@@ -106,9 +110,14 @@ const WORKER_LEASE_MS = 30 * 60 * 1000;
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 75 * 60 * 1000;
 const DEFAULT_CONTEXT_BOARD_MAX_ATTEMPTS = BOARD_TASK_HARD_MAX_ATTEMPTS;
 const RUN_ACTOR: CommandActor = { type: "run", id: "worker" };
-const WORKER_TOPICS = ["run-review", ...Object.values(contextBoardTopics)] as const;
+const WORKER_TOPICS = [
+  "run-review",
+  ...Object.values(contextBoardTopics),
+  ...Object.values(causalGraphBoardTopics)
+] as const;
 const CONTEXT_BOARD_TOPICS = new Set<string>(Object.values(contextBoardTopics));
-const CONTEXT_MODEL_TOPICS = new Set<string>([
+const CAUSAL_GRAPH_TOPICS = new Set<string>(Object.values(causalGraphBoardTopics));
+const MODEL_BOARD_TOPICS = new Set<string>([
   contextBoardTopics.researchPlan,
   contextBoardTopics.research,
   contextBoardTopics.publicationPlan,
@@ -118,8 +127,20 @@ const CONTEXT_MODEL_TOPICS = new Set<string>([
   contextBoardTopics.sourceChallenge,
   contextBoardTopics.taskEvaluation,
   contextBoardTopics.gapRepair,
-  contextBoardTopics.issueDerive
+  causalGraphBoardTopics.derive
 ]);
+const CONTEXT_QUOTA_MODEL_TOPICS = new Set<string>([
+  contextBoardTopics.researchPlan,
+  contextBoardTopics.research,
+  contextBoardTopics.publicationPlan,
+  contextBoardTopics.pageWrite,
+  contextBoardTopics.pageAudit,
+  contextBoardTopics.pageRepair,
+  contextBoardTopics.sourceChallenge,
+  contextBoardTopics.taskEvaluation,
+  contextBoardTopics.gapRepair
+]);
+const LONG_LEASE_BOARD_TOPICS = new Set<string>([...CONTEXT_BOARD_TOPICS, ...CAUSAL_GRAPH_TOPICS]);
 const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
   "api_transport",
   "daytona",
@@ -128,7 +149,10 @@ const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
   "github_timeout",
   "model"
 ]);
-const RUNTIME_CONTEXT_TASK_TYPE_DEFINITIONS = contextBoardTaskTypeDefinitions;
+const RUNTIME_BOARD_TASK_TYPE_DEFINITIONS = [
+  ...contextBoardTaskTypeDefinitions,
+  ...causalGraphBoardTaskTypeDefinitions
+];
 
 export interface ApiServerConfig {
   readonly githubWebhookSecret?: string;
@@ -219,7 +243,7 @@ export interface ApiStateStore {
 export interface WorkerReleaseGuard {
   readonly releaseId: string;
   readonly credentialSha256: string;
-  readonly service: "jina-context-worker" | "jina-task-worker";
+  readonly service: "jina-context-worker" | "jina-causal-graph-worker" | "jina-task-worker";
   readonly revision: string;
 }
 
@@ -689,7 +713,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         request,
         response,
         buildTaskTypeCatalog(
-          [...taskTypeDefinitions, ...RUNTIME_CONTEXT_TASK_TYPE_DEFINITIONS],
+          [...taskTypeDefinitions, ...RUNTIME_BOARD_TASK_TYPE_DEFINITIONS],
           prReviewTaskTypeDependencies,
           prReviewTaskTypeTriggers
         )
@@ -844,10 +868,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       );
       return;
     }
-    if (url.pathname.startsWith("/context/")) {
+    if (url.pathname.startsWith("/context/") || url.pathname.startsWith("/causal-graph")) {
       requireBoundPrincipal(principal, config);
     }
-    if (request.method === "POST" && url.pathname === "/context/issues/build") {
+    if (request.method === "POST" && url.pathname === "/causal-graph/build") {
       requireTenantAdmin(principal);
       const body = parseJsonObject(await readRawBody(request));
       const repository = requiredRepositoryName(body.repository, "repository");
@@ -896,19 +920,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           `derivationTokenBudget must be between ${MIN_DERIVATION_TOKEN_BUDGET} and ${MAX_DERIVATION_TOKEN_BUDGET}`
         );
       }
-      let newlyReservedBuildId: string | undefined;
       const admitted = await mutate(async () => {
-        await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, principal.tenantId);
         const existing = intakeState.board.tasks.filter(
           (task) =>
-            task.type === contextBoardTaskTypes.issueBuild &&
+            task.type === causalGraphBoardTaskTypes.build &&
             task.metadata.tenantId === principal.tenantId &&
             task.metadata.requestKey === requestKey
         );
-        if (existing.length > 1) throw new Error("issue graph request key resolves to multiple builds");
+        if (existing.length > 1) throw new Error("causal graph request key resolves to multiple builds");
         if (existing[0]) {
           const refSequence = requiredPositiveInteger(existing[0].metadata.refSequence, "existing refSequence");
-          const replay = createIssueGraphBoardBuild(intakeState.board, {
+          const replay = createCausalGraphBoardBuild(intakeState.board, {
             tenantId: principal.tenantId,
             repository: buildRepository,
             ref,
@@ -923,12 +945,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           });
           return { outcome: "duplicate" as const, buildTaskId: replay.buildTaskId };
         }
-        const refSequence = nextIssueGraphBoardRefSequence(intakeState.board, {
+        const refSequence = nextCausalGraphBoardRefSequence(intakeState.board, {
           tenantId: principal.tenantId,
           repository: buildRepository,
           ref
         });
-        const build = createIssueGraphBoardBuild(intakeState.board, {
+        const build = createCausalGraphBoardBuild(intakeState.board, {
           tenantId: principal.tenantId,
           repository: buildRepository,
           ref,
@@ -941,20 +963,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           trigger: "manual",
           now: nowIso()
         });
-        if (config.contextQuotaService) {
-          await config.contextQuotaService.admitBuild({ tenantId: principal.tenantId, buildId: build.buildTaskId });
-          newlyReservedBuildId = build.buildTaskId;
-        }
         intakeState = { ...intakeState, board: build.state };
         return { outcome: "created" as const, buildTaskId: build.buildTaskId };
       });
       if (!admitted) {
-        if (newlyReservedBuildId && config.contextQuotaService) {
-          await config.contextQuotaService
-            .completeBuild({ tenantId: principal.tenantId, buildId: newlyReservedBuildId })
-            .catch(() => undefined);
-        }
-        throw new ApiError(409, "conflict", "issue graph build admission raced another update");
+        throw new ApiError(409, "conflict", "causal graph build admission raced another update");
       }
       json(response, admitted.outcome === "created" ? 202 : 200, {
         build: publicContextBoardBuild(intakeState.board, admitted.buildTaskId),
@@ -1423,11 +1436,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/issues") {
-      await config.contextQuotaService?.admitQuery({
-        tenantId: principal.tenantId,
-        requestId: quotaRequestId(request)
-      });
+    if (request.method === "GET" && url.pathname === "/causal-graph/issues") {
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
       const query = optionalQuery(url, "q") ?? "";
@@ -1447,12 +1456,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    const issueTraceId = contextIssueTraceRoute(url.pathname);
+    const issueTraceId = causalGraphIssueTraceRoute(url.pathname);
     if (request.method === "GET" && issueTraceId) {
-      await config.contextQuotaService?.admitQuery({
-        tenantId: principal.tenantId,
-        requestId: quotaRequestId(request)
-      });
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
       const depth = optionalBoundedQueryInteger(url, "depth", 2, 4, 0);
@@ -1472,12 +1477,8 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    const issueId = routeId(url.pathname, "/context/issues/");
+    const issueId = routeId(url.pathname, "/causal-graph/issues/");
     if (request.method === "GET" && issueId) {
-      await config.contextQuotaService?.admitQuery({
-        tenantId: principal.tenantId,
-        requestId: quotaRequestId(request)
-      });
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
       const result = await resultAfterCredentialRevalidation(request, principal, async () => {
@@ -1494,11 +1495,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
-    if (request.method === "GET" && url.pathname === "/context/issue-graph") {
-      await config.contextQuotaService?.admitQuery({
-        tenantId: principal.tenantId,
-        requestId: quotaRequestId(request)
-      });
+    if (request.method === "GET" && url.pathname === "/causal-graph") {
       const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
       const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
       const result = await resultAfterCredentialRevalidation(request, principal, async () => {
@@ -1789,7 +1786,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 
     if (request.method === "POST" && url.pathname === "/internal/context/board/artifacts") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
       if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
       if (!config.contextQuotaService) throw new Error("context artifact quota storage is not configured");
       if (lease.task.type === contextBoardTaskTypes.publication) {
@@ -1855,7 +1852,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/context/board/publish") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
       if (lease.task.type !== contextBoardTaskTypes.publication) {
         throw invalidRequest("leased task is not a Context publication");
       }
@@ -1899,42 +1896,42 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
-    if (request.method === "POST" && url.pathname === "/internal/context/board/issues/publish") {
+    if (request.method === "POST" && url.pathname === "/internal/causal-graph/board/publish") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
-      if (lease.task.type !== contextBoardTaskTypes.issuePublication) {
-        throw invalidRequest("leased task is not an issue graph publication");
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
+      if (lease.task.type !== causalGraphBoardTaskTypes.publication) {
+        throw invalidRequest("leased task is not a causal graph publication");
       }
       if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
       const graphArtifact = parseContextArtifactRef(body.graphArtifact);
       assertBoardArtifactScope(lease.task, lease.buildTaskId, graphArtifact);
       if (graphArtifact.contentType !== "application/json" || graphArtifact.bytes > 8 * 1024 * 1024) {
-        throw invalidRequest("issue graph artifact must be bounded JSON");
+        throw invalidRequest("causal graph artifact must be bounded JSON");
       }
       const dependency = contextBoardDependencyResults(intakeState.board, lease.task.id).find(
-        (candidate) => candidate.taskType === contextBoardTaskTypes.issueDerive
+        (candidate) => candidate.taskType === causalGraphBoardTaskTypes.derive
       );
       const dependencyArtifact = dependency ? parseContextArtifactRef(dependency.result?.outputArtifact) : undefined;
       if (!dependencyArtifact || !sameArtifactIdentity(dependencyArtifact, graphArtifact)) {
-        throw invalidRequest("issue graph publication artifact is not the completed derivation dependency");
+        throw invalidRequest("causal graph publication artifact is not the completed derivation dependency");
       }
       const bytes = await config.contextArtifactStore.get(graphArtifact);
       let value: unknown;
       try {
         value = JSON.parse(Buffer.from(bytes).toString("utf8"));
       } catch {
-        throw invalidRequest("issue graph artifact is not valid JSON");
+        throw invalidRequest("causal graph artifact is not valid JSON");
       }
       let graph: ReturnType<typeof parseIssueGraphArtifact>;
       try {
         graph = parseIssueGraphArtifact(value);
       } catch (error) {
-        throw invalidRequest(error instanceof Error ? error.message : "issue graph artifact is invalid");
+        throw invalidRequest(error instanceof Error ? error.message : "causal graph artifact is invalid");
       }
       const repository = requiredRepositoryName(lease.task.metadata.repository, "repository");
-      const ref = requiredString(lease.task.metadata.ref, "issue graph ref");
-      const refSequence = requiredPositiveInteger(lease.task.metadata.refSequence, "issue graph refSequence");
-      const commitSha = requiredGitSha(lease.task.metadata.commitSha, "issue graph commitSha");
+      const ref = requiredString(lease.task.metadata.ref, "causal graph ref");
+      const refSequence = requiredPositiveInteger(lease.task.metadata.refSequence, "causal graph refSequence");
+      const commitSha = requiredGitSha(lease.task.metadata.commitSha, "causal graph commitSha");
       if (
         graph.tenantId !== principal.tenantId ||
         graph.repository !== repository ||
@@ -1942,7 +1939,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         graph.refSequence !== refSequence ||
         graph.commitSha !== commitSha
       ) {
-        throw invalidRequest("issue graph artifact does not match the leased build scope");
+        throw invalidRequest("causal graph artifact does not match the leased build scope");
       }
       let release: IssueGraphRelease;
       try {
@@ -1976,11 +1973,11 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           : await contextStore.publishIssueGraphRelease(candidate);
       } catch (error) {
         const message = error instanceof Error ? error.message.toLowerCase() : "";
-        if (message.includes("issue graph") && (message.includes("stale") || message.includes("no longer"))) {
+        if (message.includes("causal graph") && (message.includes("stale") || message.includes("no longer"))) {
           throw new ApiError(
             409,
-            "stale_issue_graph_release",
-            "the issue graph publication lease is no longer current"
+            "stale_causal_graph_release",
+            "the causal graph publication lease is no longer current"
           );
         }
         throw error;
@@ -1998,7 +1995,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/context/board/pageindex/attach") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
-      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
       if (lease.task.type !== contextBoardTaskTypes.pageIndex) {
         throw invalidRequest("leased task is not a Context PageIndex attachment");
       }
@@ -2059,7 +2056,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (request.method === "POST" && url.pathname === "/internal/context/board/artifacts/read") {
       const body = parseJsonObject(await readRawBody(request));
-      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      const lease = await requireLeasedBoardTask(principal.tenantId, body);
       if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
       const artifact = parseContextArtifactRef(body.artifact);
       const priorRelease = assertBoardArtifactReadable(lease.task, lease.buildTaskId, artifact);
@@ -2288,25 +2285,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       intakeState = { ...intakeState, board: admission.state };
       return { outcome: admission.outcome, createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
     }
-    let nextBoard = admission.state;
-    const defaultBranch = identity?.defaultBranch ?? webhook.repositoryDefaultBranch;
-    const issueBuild =
-      webhook.event.type === "push" && defaultBranch && ref === defaultBranch
-        ? createIssueGraphBoardBuild(nextBoard, {
-            tenantId,
-            repository,
-            ref,
-            refSequence: nextIssueGraphBoardRefSequence(nextBoard, { tenantId, repository, ref }),
-            requestKey: `github:issue-graph:${repository}:${ref}:${webhook.event.headSha}:${deliveryId}`,
-            commitSha: webhook.event.headSha,
-            ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
-            derivationBudgetSeconds: DEFAULT_DERIVATION_BUDGET_SECONDS,
-            derivationTokenBudget: DEFAULT_DERIVATION_TOKEN_BUDGET,
-            trigger: "push",
-            now: nowIso()
-          })
-        : undefined;
-    if (issueBuild) nextBoard = issueBuild.state;
     const reservedBuildIds: string[] = [];
     if (config.contextQuotaService) {
       try {
@@ -2316,10 +2294,6 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           replacesBuildIds: admission.supersededBuildTaskIds
         });
         reservedBuildIds.push(admission.build.buildTaskId);
-        if (issueBuild) {
-          await config.contextQuotaService.admitBuild({ tenantId, buildId: issueBuild.buildTaskId });
-          reservedBuildIds.push(issueBuild.buildTaskId);
-        }
       } catch (error) {
         await Promise.all(
           reservedBuildIds.map((buildId) =>
@@ -2329,17 +2303,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         throw error;
       }
     }
-    intakeState = { ...intakeState, board: nextBoard };
+    intakeState = { ...intakeState, board: admission.state };
     return {
       outcome: "created",
-      createdTaskIds: [
-        admission.build.buildTaskId,
-        admission.build.graphTaskId,
-        admission.build.snapshotTaskId,
-        ...(issueBuild
-          ? [issueBuild.buildTaskId, issueBuild.snapshotTaskId, issueBuild.deriveTaskId, issueBuild.publicationTaskId]
-          : [])
-      ],
+      createdTaskIds: [admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId],
       supersededBuildTaskIds: admission.supersededBuildTaskIds,
       reservedBuildIds
     };
@@ -2680,7 +2647,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   }
 
   async function currentIssueGraph(principal: Principal, repository: string, ref: string) {
-    if (!issueGraphCatalog) throw new ApiError(503, "issue_graph_unavailable", "issue graph storage is not configured");
+    if (!issueGraphCatalog) {
+      throw new ApiError(503, "causal_graph_unavailable", "causal graph storage is not configured");
+    }
     const current = await issueGraphCatalog.current({
       tenantId: principal.tenantId,
       repository,
@@ -2689,7 +2658,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       tenantAdmin: isTenantAdmin(principal)
     });
     // Authorization and existence intentionally collapse to the same response.
-    if (!current) throw notFound("issue graph not found");
+    if (!current) throw notFound("causal graph not found");
     return current;
   }
 
@@ -2711,7 +2680,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const credential = requiredString(body.workerReleaseCredential, "workerReleaseCredential");
     const service = requiredString(body.workerService, "workerService");
     const revision = requiredString(body.workerRevision, "workerRevision");
-    if (service !== "jina-context-worker" && service !== "jina-task-worker") {
+    if (service !== "jina-context-worker" && service !== "jina-causal-graph-worker" && service !== "jina-task-worker") {
       throw invalidRequest("workerService is not a production worker service");
     }
     if (!revision.startsWith(`${service}-`)) {
@@ -2734,7 +2703,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       ? "jina-task-worker"
       : topics.every((topic) => CONTEXT_BOARD_TOPICS.has(topic))
         ? "jina-context-worker"
-        : undefined;
+        : topics.every((topic) => CAUSAL_GRAPH_TOPICS.has(topic))
+          ? "jina-causal-graph-worker"
+          : undefined;
     if (!expectedService || workerRelease.service !== expectedService) {
       throw new ApiError(409, "worker_release_rejected", "worker service is not allowed to process these topics");
     }
@@ -2797,12 +2768,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const candidate = findOutboxMessage(intakeState.board, messageId);
             const candidateTask = candidate ? findTask(intakeState.board, candidate.taskId) : undefined;
             if (!candidate || !candidateTask || !topics.includes(candidate.topic)) continue;
-            const candidateUsesModel = CONTEXT_MODEL_TOPICS.has(candidate.topic);
+            const candidateUsesContextQuota = CONTEXT_QUOTA_MODEL_TOPICS.has(candidate.topic);
             const candidateTenantId = requiredString(candidateTask.metadata.tenantId, "task tenantId");
 
             const now = nowIso();
             const candidateBuildId =
-              isContextBoardTaskType(candidateTask.type) && typeof candidateTask.metadata.contextBuildId === "string"
+              isBoardWorkTaskType(candidateTask.type) && typeof candidateTask.metadata.contextBuildId === "string"
                 ? candidateTask.metadata.contextBuildId
                 : undefined;
             const candidateBuild = candidateBuildId
@@ -2827,13 +2798,13 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 terminatedBuilds.set(candidateBuild.id, candidateTenantId);
                 continue;
               }
-              if (candidateUsesModel && contextBuildModelReservationBlocked(intakeState.board, candidateBuild)) {
+              if (candidateUsesContextQuota && contextBuildModelReservationBlocked(intakeState.board, candidateBuild)) {
                 // Reservations are a concurrency guard, not usage. Defer this
                 // claim until an active stage reports its actual tokens instead
                 // of failing the build on a conservative estimate.
                 continue;
               }
-              if (candidateUsesModel && config.contextQuotaService) {
+              if (candidateUsesContextQuota && config.contextQuotaService) {
                 await renewOrResumeContextBuildQuota(config.contextQuotaService, candidateTenantId, candidateBuild.id);
               }
             }
@@ -2848,7 +2819,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               expiresAt: new Date(Date.parse(now) + WORKER_LEASE_MS).toISOString()
             });
             if (!initiallyLeased) continue;
-            const leaseDurationMs = CONTEXT_BOARD_TOPICS.has(initiallyLeased.message.topic)
+            const leaseDurationMs = LONG_LEASE_BOARD_TOPICS.has(initiallyLeased.message.topic)
               ? contextWorkerLeaseMs
               : WORKER_LEASE_MS;
             const leasedState = renewOutboxLease(
@@ -2863,7 +2834,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             if (!leasedState || !leasedMessage) throw new Error("newly claimed worker lease could not be configured");
             const task = findTask(leasedState, leasedMessage.taskId);
             if (!task) throw new Error("newly claimed worker task disappeared");
-            if (candidateUsesModel && config.contextQuotaService) {
+            if (candidateUsesContextQuota && config.contextQuotaService) {
               const candidateQuotaModelTask = {
                 tenantId: candidateTenantId,
                 taskId: contextModelQuotaTaskId(task.id, leasedMessage.payload.attempt)
@@ -2895,14 +2866,14 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             const claimedTask = findTask(board, task.id);
             if (!claimedTask) throw new Error("newly claimed worker task disappeared");
             const claimedBuildId =
-              isContextBoardTaskType(claimedTask.type) && typeof claimedTask.metadata.contextBuildId === "string"
+              isBoardWorkTaskType(claimedTask.type) && typeof claimedTask.metadata.contextBuildId === "string"
                 ? claimedTask.metadata.contextBuildId
                 : undefined;
             const claimedBuild = claimedBuildId ? findTask(board, entityId<"task">(claimedBuildId)) : undefined;
             intakeState = { ...intakeState, board };
             return {
               message: { ...leasedMessage, attempt: leasedMessage.payload.attempt },
-              task: isContextBoardTaskType(claimedTask.type)
+              task: isBoardWorkTaskType(claimedTask.type)
                 ? {
                     ...claimedTask,
                     metadata: {
@@ -2966,7 +2937,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         }
         const now = nowIso();
         const buildId =
-          isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+          isBoardWorkTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
             ? task.metadata.contextBuildId
             : undefined;
         const build = buildId ? findTask(intakeState.board, entityId<"task">(buildId)) : undefined;
@@ -2997,7 +2968,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
           now,
           new Date(
             Date.parse(now) +
-              (message && CONTEXT_BOARD_TOPICS.has(message.topic) ? contextWorkerLeaseMs : WORKER_LEASE_MS)
+              (message && LONG_LEASE_BOARD_TOPICS.has(message.topic) ? contextWorkerLeaseMs : WORKER_LEASE_MS)
           ).toISOString()
         );
         if (!board) return { accepted: false };
@@ -3019,7 +2990,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!renewed?.accepted) throw staleLease();
     if (config.contextQuotaService) {
       const message = findOutboxMessage(intakeState.board, id);
-      if (message && CONTEXT_MODEL_TOPICS.has(message.topic)) {
+      if (message && CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)) {
         const task = findTask(intakeState.board, message.taskId);
         if (task) {
           await config.contextQuotaService.renewModelTask({
@@ -3031,8 +3002,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (message) {
         const task = findTask(intakeState.board, message.taskId);
         const buildId = task?.metadata.contextBuildId;
-        if (typeof buildId === "string") {
-          await renewOrResumeContextBuildQuota(config.contextQuotaService, tenantId, buildId);
+        const build = typeof buildId === "string" ? findTask(intakeState.board, entityId<"task">(buildId)) : undefined;
+        if (build?.type === contextBoardTaskTypes.build) {
+          await renewOrResumeContextBuildQuota(config.contextQuotaService, tenantId, build.id);
         }
       }
     }
@@ -3085,7 +3057,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (!released) throw staleLease();
     if (config.contextQuotaService) {
       const message = findOutboxMessage(intakeState.board, messageId);
-      if (message && CONTEXT_MODEL_TOPICS.has(message.topic)) {
+      if (message && CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)) {
         await config.contextQuotaService.cancelModelTask({
           tenantId,
           taskId: contextModelQuotaTaskId(taskId, message.payload.attempt)
@@ -3129,7 +3101,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       currentMessage.payload.attempt === attempt &&
       currentMessage.writeFenceToken === writeFenceToken &&
       currentTask.metadata.tenantId === tenantId;
-    const isModelCompletion = ownsCurrentLease && CONTEXT_MODEL_TOPICS.has(currentMessage.topic);
+    const isModelCompletion = ownsCurrentLease && MODEL_BOARD_TOPICS.has(currentMessage.topic);
     const modelUsage = body.modelUsage === undefined ? undefined : requiredModelUsage(body.modelUsage);
     if (ownsCurrentLease && isModelCompletion && outcome === "done" && !modelUsage) {
       throw invalidRequest("modelUsage is required for successful model-backed topics");
@@ -3154,7 +3126,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (
       terminalOutcome === "done" &&
       currentTask &&
-      isContextBoardTaskType(currentTask.type) &&
+      isBoardWorkTaskType(currentTask.type) &&
       (ownsCurrentLease || isCompletionReplay)
     ) {
       const parsed = parseContextBoardTaskResult(intakeState.board, currentTask.id, body.result);
@@ -3203,7 +3175,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               modelUsage
             );
           }
-          const modelTaskId = CONTEXT_MODEL_TOPICS.has(message.topic)
+          const modelTaskId = CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)
             ? contextModelQuotaTaskId(task.id, message.payload.attempt)
             : undefined;
           let retryState = retried.replay
@@ -3224,7 +3196,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
                 { actor: RUN_ACTOR, now }
               ).state;
           const buildId =
-            isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+            isBoardWorkTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
               ? task.metadata.contextBuildId
               : undefined;
           let build = buildId ? findTask(retryState, entityId<"task">(buildId)) : undefined;
@@ -3276,7 +3248,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
               "replayed worker completion changed its release identity"
             );
           }
-          const messageIsModel = CONTEXT_MODEL_TOPICS.has(message.topic);
+          const messageIsModel = MODEL_BOARD_TOPICS.has(message.topic);
           if (messageIsModel && terminalOutcome === "done" && !modelUsage) {
             throw invalidRequest("modelUsage is required for successful model-backed topics");
           }
@@ -3284,15 +3256,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             throw invalidRequest("modelUsage is accepted only for model-backed topics");
           }
           assertModelUsageReplay(completionReceipt.payload, modelUsage);
-          const modelTaskId = messageIsModel ? contextModelQuotaTaskId(task.id, message.payload.attempt) : undefined;
+          const modelTaskId = CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)
+            ? contextModelQuotaTaskId(task.id, message.payload.attempt)
+            : undefined;
           if (
-            isContextBoardTaskType(task.type) &&
+            isBoardWorkTaskType(task.type) &&
             completionReceipt.payload?.resultDigest !== verifiedContextResult?.resultDigest
           ) {
             throw new ApiError(409, "completion_replay_conflict", "replayed worker completion changed its result");
           }
           const buildId =
-            isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+            isBoardWorkTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
               ? task.metadata.contextBuildId
               : undefined;
           const build = buildId ? findTask(intakeState.board, entityId<"task">(buildId)) : undefined;
@@ -3316,7 +3290,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ) {
           return undefined;
         }
-        const messageIsModel = CONTEXT_MODEL_TOPICS.has(message.topic);
+        const messageIsModel = MODEL_BOARD_TOPICS.has(message.topic);
         if (messageIsModel && terminalOutcome === "done" && !modelUsage) {
           throw invalidRequest("modelUsage is required for successful model-backed topics");
         }
@@ -3326,7 +3300,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         let board = intakeState.board;
         let completionPayload: Record<string, unknown>;
         let postCompletion: ContextBoardPostCompletion | undefined;
-        if (terminalOutcome === "done" && isContextBoardTaskType(task.type)) {
+        if (terminalOutcome === "done" && isBoardWorkTaskType(task.type)) {
           const applied = applyContextBoardTaskResult(board, boardTaskId, body.result, now);
           board = applied.state;
           completionPayload = applied.result;
@@ -3394,7 +3368,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         }
         let reduced = reduceBoard(board, now);
         const buildId =
-          isContextBoardTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
+          isBoardWorkTaskType(task.type) && typeof task.metadata.contextBuildId === "string"
             ? task.metadata.contextBuildId
             : undefined;
         let build = buildId ? findTask(reduced, entityId<"task">(buildId)) : undefined;
@@ -3414,7 +3388,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             build = findTask(reduced, build.id);
           }
         }
-        const modelTaskId = messageIsModel ? contextModelQuotaTaskId(task.id, message.payload.attempt) : undefined;
+        const modelTaskId = CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)
+          ? contextModelQuotaTaskId(task.id, message.payload.attempt)
+          : undefined;
         intakeState = { ...intakeState, board: reduced };
         return {
           accepted: true,
@@ -3434,24 +3410,28 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         ...(modelUsage ? { modelUsage } : {})
       });
     }
-    if ("buildId" in completed && completed.buildId && config.contextQuotaService) {
+    const completedBuild =
+      "buildId" in completed && completed.buildId
+        ? findTask(intakeState.board, entityId<"task">(completed.buildId))
+        : undefined;
+    if (completedBuild?.type === contextBoardTaskTypes.build && config.contextQuotaService) {
       await settleTerminalReconciledModelQuotas(
         config.contextQuotaService,
         intakeState.board,
         tenantId,
-        completed.buildId
+        completedBuild.id
       );
     }
-    if (completed.buildTerminal && "buildId" in completed && completed.buildId) {
+    if (completed.buildTerminal && completedBuild?.type === contextBoardTaskTypes.build) {
       await config.contextQuotaService?.completeBuild({
         tenantId,
-        buildId: completed.buildId
+        buildId: completedBuild.id
       });
     }
     json(response, 200, { accepted: true });
   }
 
-  async function requireLeasedContextBoardTask(
+  async function requireLeasedBoardTask(
     tenantId: string,
     body: Record<string, unknown>
   ): Promise<{
@@ -3472,7 +3452,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     if (
       !task ||
       !message ||
-      !isContextBoardTaskType(task.type) ||
+      !isBoardWorkTaskType(task.type) ||
       task.kind !== "dispatchable" ||
       task.metadata.tenantId !== tenantId ||
       message.taskId !== task.id ||
@@ -3550,8 +3530,8 @@ function optionalBoundedQueryInteger(url: URL, name: string, fallback: number, m
   return parsed;
 }
 
-function contextIssueTraceRoute(pathname: string): string | undefined {
-  const match = /^\/context\/issues\/([^/]+)\/trace$/.exec(pathname);
+function causalGraphIssueTraceRoute(pathname: string): string | undefined {
+  const match = /^\/causal-graph\/issues\/([^/]+)\/trace$/.exec(pathname);
   if (!match?.[1]) return undefined;
   try {
     return decodeURIComponent(match[1]);
@@ -3561,7 +3541,7 @@ function contextIssueTraceRoute(pathname: string): string | undefined {
 }
 
 function isContextBuildTaskType(type: string): boolean {
-  return type === contextBoardTaskTypes.build || type === contextBoardTaskTypes.issueBuild;
+  return type === contextBoardTaskTypes.build || type === causalGraphBoardTaskTypes.build;
 }
 
 function publicIssueGraphRelease(release: IssueGraphRelease) {
@@ -3723,7 +3703,7 @@ function requireIssuedTokenScope(principal: Principal, required: ContextScope): 
 function requiredScope(pathname: string, method: string): ContextScope | "internal-only" {
   if (method === "POST") {
     if (pathname === "/mcp" || pathname === "/context/search") return "context:query";
-    if (pathname === "/context/build" || pathname === "/context/issues/build") return "context:build";
+    if (pathname === "/context/build" || pathname === "/causal-graph/build") return "context:build";
     if (contextBuildRetryRoute(pathname) || contextTaskRetryRoute(pathname)) return "context:admin";
     return "internal-only";
   }
@@ -3739,9 +3719,9 @@ function requiredScope(pathname: string, method: string): ContextScope | "intern
     pathname === "/context/list" ||
     pathname === "/context/read" ||
     pathname === "/context/diff" ||
-    pathname === "/context/issues" ||
-    pathname === "/context/issue-graph" ||
-    pathname.startsWith("/context/issues/")
+    pathname === "/causal-graph/issues" ||
+    pathname === "/causal-graph" ||
+    pathname.startsWith("/causal-graph/issues/")
     ? "context:read"
     : "internal-only";
 }
@@ -3776,7 +3756,7 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
   }
   return {
     id: task.id,
-    buildKind: task.type === contextBoardTaskTypes.issueBuild ? "issue_graph" : "documentation",
+    buildKind: task.type === causalGraphBoardTaskTypes.build ? "causal_graph" : "documentation",
     status: task.status,
     tenantId: requiredString(task.metadata.tenantId, "context build tenantId"),
     repository: requiredRepositoryName(task.metadata.repository, "context build repository"),
@@ -4079,7 +4059,7 @@ function contextBuildConsumedModelTokens(state: BoardState, buildId: string): nu
 
 function contextBuildActiveModelReservations(state: BoardState, buildId: string): number {
   const active = state.outbox.filter((message) => {
-    if (message.status !== "leased" || !CONTEXT_MODEL_TOPICS.has(message.topic)) return false;
+    if (message.status !== "leased" || !CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)) return false;
     const task = findTask(state, message.taskId);
     return task?.metadata.contextBuildId === buildId;
   }).length;
@@ -4587,7 +4567,7 @@ function contextBoardDependencyResults(state: BoardState, taskId: TaskId) {
   }
   return [...discovered].sort().flatMap((dependencyId) => {
     const task = findTask(state, dependencyId);
-    if (!task || !isContextBoardTaskType(task.type)) return [];
+    if (!task || !isBoardWorkTaskType(task.type)) return [];
     const event = [...state.events]
       .reverse()
       .find(
@@ -4638,10 +4618,10 @@ function contextBoardArtifactKind(taskType: string): ContextArtifactKind {
       return "context-release";
     case contextBoardTaskTypes.pageIndex:
       return "pageindex-tree";
-    case contextBoardTaskTypes.issueSnapshot:
+    case causalGraphBoardTaskTypes.snapshot:
       return "issue-history";
-    case contextBoardTaskTypes.issueDerive:
-    case contextBoardTaskTypes.issuePublication:
+    case causalGraphBoardTaskTypes.derive:
+    case causalGraphBoardTaskTypes.publication:
       return "issue-graph";
     default:
       throw new Error(`context board task ${taskType} does not produce an artifact`);
@@ -4768,7 +4748,7 @@ function tenantBoardView(state: GitHubIntakeState, tenantId: string, allowedRepo
 }
 
 function publicBoardTask(task: BoardTask): BoardTask {
-  if (!isContextBoardTaskType(task.type)) return task;
+  if (!isBoardWorkTaskType(task.type)) return task;
   const metadata = Object.fromEntries(
     [
       "tenantId",
@@ -4788,7 +4768,7 @@ function publicBoardTask(task: BoardTask): BoardTask {
 
 function publicBoardEvent(state: BoardState, event: BoardState["events"][number]) {
   const task = event.taskId ? findTask(state, event.taskId) : undefined;
-  if (!task || !isContextBoardTaskType(task.type) || !event.payload) return event;
+  if (!task || !isBoardWorkTaskType(task.type) || !event.payload) return event;
   const payload = Object.fromEntries(
     ["verdict", "unsupportedCitationCount", "blockingGapCount", "releaseId", "reason"].flatMap((key) => {
       const value = event.payload?.[key];
@@ -4976,7 +4956,7 @@ function migrateSnapshotTenantAliases(
 
 function sanitizeSnapshotForCurrentRuntime(snapshot: ApiSnapshot): ApiSnapshot {
   const supportedTypes = new Set(
-    [...taskTypeDefinitions, ...RUNTIME_CONTEXT_TASK_TYPE_DEFINITIONS].map((definition) => definition.type)
+    [...taskTypeDefinitions, ...RUNTIME_BOARD_TASK_TYPE_DEFINITIONS].map((definition) => definition.type)
   );
   const tasks = snapshot.intakeState.board.tasks.filter((task) => supportedTypes.has(task.type));
   const taskIds = new Set(tasks.map((task) => task.id));
@@ -5043,12 +5023,12 @@ const METRICS_ROUTES = new Set([
   "/overview",
   "/events",
   "/context/build",
-  "/context/issues/build",
+  "/causal-graph/build",
   "/context/search",
-  "/context/issues",
-  "/context/issues/:id",
-  "/context/issues/:id/trace",
-  "/context/issue-graph",
+  "/causal-graph/issues",
+  "/causal-graph/issues/:id",
+  "/causal-graph/issues/:id/trace",
+  "/causal-graph",
   "/context/releases",
   "/context/list",
   "/context/read",
@@ -5061,7 +5041,7 @@ const METRICS_ROUTES = new Set([
   "/internal/context/builds/:id/cancel",
   "/internal/context/board/artifacts",
   "/internal/context/board/publish",
-  "/internal/context/board/issues/publish",
+  "/internal/causal-graph/board/publish",
   "/internal/context/board/pageindex/attach",
   "/internal/context/board/artifacts/read",
   "/internal/worker/claim",
@@ -5073,9 +5053,9 @@ const METRICS_ROUTES = new Set([
 
 function metricsRoute(pathname: string): string {
   if (pathname === "/context/builds") return "/context/builds";
-  if (pathname === "/context/issues/build") return "/context/issues/build";
-  if (contextIssueTraceRoute(pathname)) return "/context/issues/:id/trace";
-  if (routeId(pathname, "/context/issues/")) return "/context/issues/:id";
+  if (pathname === "/causal-graph/build") return "/causal-graph/build";
+  if (causalGraphIssueTraceRoute(pathname)) return "/causal-graph/issues/:id/trace";
+  if (routeId(pathname, "/causal-graph/issues/")) return "/causal-graph/issues/:id";
   if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
   if (contextBuildRetryRoute(pathname)) return "/context/builds/:id/retry";
   if (contextTaskRetryRoute(pathname)) return "/context/builds/:id/tasks/:taskId/retry";
@@ -5451,7 +5431,7 @@ async function settleTerminalReconciledModelQuotas(
 
   for (const messageId of messageIds) {
     const message = findOutboxMessage(state, messageId);
-    if (!message || !CONTEXT_MODEL_TOPICS.has(message.topic)) continue;
+    if (!message || !CONTEXT_QUOTA_MODEL_TOPICS.has(message.topic)) continue;
     await settleContextModelQuota(quota, {
       tenantId,
       taskId: contextModelQuotaTaskId(message.taskId, message.payload.attempt)

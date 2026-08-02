@@ -49,7 +49,7 @@ export class PostgresIssueGraphRepository implements IssueGraphStore, BoardIssue
         "select snapshot from jina_runtime.api_state where id=1 for update"
       );
       const snapshot = runtime.rows[0]?.snapshot;
-      if (!snapshot) throw new Error("durable Board state is unavailable for issue graph publication");
+      if (!snapshot) throw new Error("durable Board state is unavailable for causal graph publication");
       const nowMillis = await databaseClockMillis(client);
       assertLiveIssueGraphLease(snapshot, { ...input, release }, nowMillis);
       await client.query("set local role jina_context_issue_publish");
@@ -140,7 +140,7 @@ async function persistIssueGraphRelease(client: PoolClient, release: IssueGraphR
   if (existing.rows[0]) {
     const stored = fromRow(existing.rows[0]);
     if (stored.contentDigest !== release.contentDigest || stored.artifact.sha256 !== release.artifact.sha256) {
-      throw new Error("Issue graph release identity collision");
+      throw new Error("Causal graph release identity collision");
     }
     return stored;
   }
@@ -152,7 +152,7 @@ async function persistIssueGraphRelease(client: PoolClient, release: IssueGraphR
     [release.tenantId, release.repository, release.ref]
   );
   const currentSequence = Number(current.rows[0]?.ref_sequence ?? 0);
-  if (currentSequence >= release.refSequence) throw new Error("Issue graph release ref sequence is stale");
+  if (currentSequence >= release.refSequence) throw new Error("Causal graph release ref sequence is stale");
   await client.query(
     `insert into jina_context.issue_graph_releases
       (release_id,tenant_id,repository,ref_name,ref_sequence,commit_sha,build_id,
@@ -213,7 +213,7 @@ function assertLiveIssueGraphLease(
   if (
     !task ||
     !message ||
-    task.type !== "publish-context-issues" ||
+    task.type !== "publish-causal-graph" ||
     task.kind !== "dispatchable" ||
     task.status !== "in_progress" ||
     task.attempt !== input.lease.attempt ||
@@ -224,7 +224,7 @@ function assertLiveIssueGraphLease(
     metadata.commitSha !== release.commitSha ||
     metadata.contextBuildId !== release.buildId ||
     message.taskId !== input.lease.taskId ||
-    message.topic !== "run-context-issue-publication" ||
+    message.topic !== "run-causal-graph-publication" ||
     message.status !== "leased" ||
     payload?.attempt !== input.lease.attempt ||
     message.leaseId !== input.lease.leaseId ||
@@ -232,20 +232,20 @@ function assertLiveIssueGraphLease(
     typeof message.leaseExpiresAt !== "string" ||
     new Date(message.leaseExpiresAt).valueOf() <= databaseNowMillis
   ) {
-    throw new Error("issue graph publication task no longer owns its durable Board lease");
+    throw new Error("causal graph publication task no longer owns its durable Board lease");
   }
   const build = tasks.find((candidate) => candidate.id === release.buildId);
   const buildMetadata = objectValue(build?.metadata);
   if (
     !build ||
-    build.type !== "build-context-issues" ||
+    build.type !== "build-causal-graph" ||
     buildMetadata?.tenantId !== release.tenantId ||
     buildMetadata.repository !== release.repository ||
     buildMetadata.ref !== release.ref ||
     buildMetadata.refSequence !== release.refSequence ||
     buildMetadata.commitSha !== release.commitSha
   ) {
-    throw new Error("issue graph publication build no longer matches its durable Board scope");
+    throw new Error("causal graph publication build no longer matches its durable Board scope");
   }
   const latestAdmitted = Math.max(
     0,
@@ -253,7 +253,7 @@ function assertLiveIssueGraphLease(
       .filter((candidate) => {
         const candidateMetadata = objectValue(candidate.metadata);
         return (
-          candidate.type === "build-context-issues" &&
+          candidate.type === "build-causal-graph" &&
           candidateMetadata?.tenantId === release.tenantId &&
           candidateMetadata.repository === release.repository &&
           candidateMetadata.ref === release.ref &&
@@ -262,7 +262,7 @@ function assertLiveIssueGraphLease(
       })
       .map((candidate) => Number(objectValue(candidate.metadata)!.refSequence))
   );
-  if (latestAdmitted > release.refSequence) throw new Error("Issue graph release ref sequence is stale");
+  if (latestAdmitted > release.refSequence) throw new Error("Causal graph release ref sequence is stale");
 }
 
 async function databaseClockMillis(client: PoolClient): Promise<number> {
@@ -270,7 +270,7 @@ async function databaseClockMillis(client: PoolClient): Promise<number> {
     "select (extract(epoch from clock_timestamp()) * 1000)::text as now_ms"
   );
   const value = Number(result.rows[0]?.now_ms);
-  if (!Number.isFinite(value)) throw new Error("database clock is unavailable for issue graph publication");
+  if (!Number.isFinite(value)) throw new Error("database clock is unavailable for causal graph publication");
   return value;
 }
 

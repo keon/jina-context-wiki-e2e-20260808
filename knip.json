@@ -16,7 +16,13 @@
       "entry": ["src/cli/review-pr.ts", "src/simulations/pr-review-trace.ts"]
     },
     "packages/db": {
-      "entry": ["src/migrate.ts", "src/reset-context-data.ts", "src/**/*.test.ts"]
+      "entry": [
+        "src/migrate.ts",
+        "src/migrate-causal-graph.ts",
+        "src/activate-causal-graph-release.ts",
+        "src/reset-context-data.ts",
+        "src/**/*.test.ts"
+      ]
     }
   }
 }

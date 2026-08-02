@@ -13,6 +13,7 @@ import {
   type ContextArtifactWrite
 } from "@jina/context-engine";
 import { createApiServer } from "./server.js";
+import type { ContextQuotaService } from "./context-quotas.js";
 
 const TENANT = "tenant-issue-graph";
 const PRINCIPAL = "user:reader@example.com";
@@ -36,7 +37,7 @@ class CountingArtifactStore implements ContextArtifactStore {
   }
 }
 
-test("issue graph API authorizes through the current pointer and serves cached artifact reads", async () => {
+test("causal graph API authorizes through the current pointer and serves cached artifact reads", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-issue-graph-api-"));
   const artifacts = new CountingArtifactStore(new FileContextArtifactStore(root));
   const store = new MemoryContextEngineStore();
@@ -132,31 +133,33 @@ test("issue graph API authorizes through the current pointer and serves cached a
   const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
   const headers = { "x-jina-tenant-id": TENANT, "x-jina-principal-id": PRINCIPAL };
   try {
-    const searched = await fetch(`${baseUrl}/context/issues?repository=${REPOSITORY}&q=fan-out&limit=10`, { headers });
+    const searched = await fetch(`${baseUrl}/causal-graph/issues?repository=${REPOSITORY}&q=fan-out&limit=10`, {
+      headers
+    });
     assert.equal(searched.status, 200, await searched.clone().text());
     const searchBody = record(await searched.json());
     assert.equal(array(searchBody.issues).length, 1);
     const rootIssueId = String(record(array(searchBody.issues)[0]).id);
 
     const detail = await fetch(
-      `${baseUrl}/context/issues/${encodeURIComponent(rootIssueId)}?repository=${REPOSITORY}`,
+      `${baseUrl}/causal-graph/issues/${encodeURIComponent(rootIssueId)}?repository=${REPOSITORY}`,
       { headers }
     );
     assert.equal(detail.status, 200, await detail.clone().text());
 
     const trace = await fetch(
-      `${baseUrl}/context/issues/${encodeURIComponent(rootIssueId)}/trace?repository=${REPOSITORY}&depth=2`,
+      `${baseUrl}/causal-graph/issues/${encodeURIComponent(rootIssueId)}/trace?repository=${REPOSITORY}&depth=2`,
       { headers }
     );
     assert.equal(trace.status, 200, await trace.clone().text());
     assert.equal(array(record(await trace.json()).causalities).length, 1);
 
-    const full = await fetch(`${baseUrl}/context/issue-graph?repository=${REPOSITORY}`, { headers });
+    const full = await fetch(`${baseUrl}/causal-graph?repository=${REPOSITORY}`, { headers });
     assert.equal(full.status, 200, await full.clone().text());
     assert.equal(array(record(await full.json()).issues).length, 2);
     assert.equal(artifacts.reads, 1, "immutable graph bytes should be loaded once per API process");
 
-    const forbidden = await fetch(`${baseUrl}/context/issues?repository=${REPOSITORY}`, {
+    const forbidden = await fetch(`${baseUrl}/causal-graph/issues?repository=${REPOSITORY}`, {
       headers: { ...headers, "x-jina-principal-id": "user:stranger@example.com" }
     });
     assert.equal(forbidden.status, 404);
@@ -172,13 +175,13 @@ test("issue graph API authorizes through the current pointer and serves cached a
       commitSha: RESOLVED_SHA,
       requestKey: "manual-issue-graph-test"
     });
-    const admitted = await fetch(`${baseUrl}/context/issues/build`, {
+    const admitted = await fetch(`${baseUrl}/causal-graph/build`, {
       method: "POST",
       headers: adminHeaders,
       body: buildBody
     });
     assert.equal(admitted.status, 202, await admitted.clone().text());
-    const replay = await fetch(`${baseUrl}/context/issues/build`, {
+    const replay = await fetch(`${baseUrl}/causal-graph/build`, {
       method: "POST",
       headers: adminHeaders,
       body: buildBody
@@ -188,10 +191,10 @@ test("issue graph API authorizes through the current pointer and serves cached a
     const board = await fetch(`${baseUrl}/board`, { headers: adminHeaders });
     const tasks = array(record(await board.json()).tasks).map((task) => String(record(task).type));
     const issueTaskTypes = new Set([
-      "build-context-issues",
-      "snapshot-context-issue-history",
-      "derive-context-issues",
-      "publish-context-issues"
+      "build-causal-graph",
+      "snapshot-causal-graph-history",
+      "derive-causal-graph",
+      "publish-causal-graph"
     ]);
     assert.deepEqual(
       tasks.filter((type) => issueTaskTypes.has(type)),
@@ -200,6 +203,48 @@ test("issue graph API authorizes through the current pointer and serves cached a
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("causal graph admission does not reserve Context build or model quota", async () => {
+  const store = new MemoryContextEngineStore();
+  await store.replaceRepositoryAccess(TENANT, "svc:dev", [REPOSITORY]);
+  const contextQuotaService = new Proxy(
+    {},
+    {
+      get(_target, property) {
+        return async () => {
+          throw new Error(`causal graph touched Context quota method ${String(property)}`);
+        };
+      }
+    }
+  ) as ContextQuotaService;
+  const server = createApiServer({
+    tenantId: TENANT,
+    enableDevEndpoints: true,
+    contextStore: store,
+    contextQuotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const response = await fetch(`${baseUrl}/causal-graph/build`, {
+      method: "POST",
+      headers: {
+        "x-jina-tenant-id": TENANT,
+        "x-jina-principal-id": "svc:dev",
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        repository: REPOSITORY,
+        ref: "main",
+        commitSha: RESOLVED_SHA,
+        requestKey: "causal-quota-isolation"
+      })
+    });
+    assert.equal(response.status, 202, await response.clone().text());
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 });
 

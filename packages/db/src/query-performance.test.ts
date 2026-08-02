@@ -159,7 +159,7 @@ test("atomic issue publication rejects a stale Board write fence before relation
         tasks: [
           {
             id: release.buildId,
-            type: "build-context-issues",
+            type: "build-causal-graph",
             kind: "aggregate",
             metadata: {
               tenantId: release.tenantId,
@@ -171,7 +171,7 @@ test("atomic issue publication rejects a stale Board write fence before relation
           },
           {
             id: "task_issue_publish",
-            type: "publish-context-issues",
+            type: "publish-causal-graph",
             kind: "dispatchable",
             status: "in_progress",
             attempt: 1,
@@ -189,7 +189,7 @@ test("atomic issue publication rejects a stale Board write fence before relation
           {
             id: "message_issue_publish",
             taskId: "task_issue_publish",
-            topic: "run-context-issue-publication",
+            topic: "run-causal-graph-publication",
             status: "leased",
             payload: { attempt: 1 },
             leaseId: "lease-live",

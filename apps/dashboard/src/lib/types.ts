@@ -187,7 +187,7 @@ interface ContextBuildStage {
 
 export interface ContextBuildSummary {
   readonly id: string;
-  readonly buildKind?: "documentation" | "issue_graph";
+  readonly buildKind?: "documentation" | "causal_graph";
   readonly repository: string;
   readonly ref: string;
   readonly refSequence: number;

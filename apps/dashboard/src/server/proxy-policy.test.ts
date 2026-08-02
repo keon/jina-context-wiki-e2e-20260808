@@ -13,10 +13,10 @@ test("allows dashboard reads, blocks internal and unknown routes", () => {
     "/api/context/list",
     "/api/context/read",
     "/api/context/diff",
-    "/api/context/issue-graph",
-    "/api/context/issues",
-    "/api/context/issues/issue-1",
-    "/api/context/issues/issue-1/trace",
+    "/api/causal-graph",
+    "/api/causal-graph/issues",
+    "/api/causal-graph/issues/issue-1",
+    "/api/causal-graph/issues/issue-1/trace",
     "/api/context/builds",
     "/api/context/builds/build-1/progress"
   ]) {

@@ -20,7 +20,9 @@ flowchart LR
     API --> GCS["GCS context artifacts"]
     API --> BOARD["Durable board and outbox"]
     BOARD --> WORKER["Context worker"]
+    BOARD --> CAUSAL["Causal graph worker"]
     WORKER --> CODEX["Codex derivation"]
+    CAUSAL --> CODEX
     WORKER --> PI["Pinned local PageIndex runtime"]
     WORKER --> API
     API --> SEARCH["Deterministic PageIndex tree search"]
@@ -52,6 +54,31 @@ execution failures consume retry attempts.
 A monotonically allocated ref sequence is bound to the build root and publication fence
 for each tenant/repository/ref. Admission order, rather than completion time, determines
 which release may become current. A delayed old build cannot publish over a newer event.
+
+## Causal graph
+
+The causal graph uses the same generic Board commands, durable outbox, leases, retries,
+and aggregate reconciliation, but it is a separate workflow rather than a Context build
+stage. Its topology is deliberately fixed at four tasks:
+
+1. `build-causal-graph` — aggregate root;
+2. `snapshot-causal-graph-history` — deterministic bounded commit-history capture;
+3. `derive-causal-graph` — one read-only Codex run that derives issues and explicit
+   issue/commit causalities; and
+4. `publish-causal-graph` — immutable artifact publication behind a ref-sequence fence.
+
+The three dispatch topics are accepted only from `jina-causal-graph-worker`. Context
+topics are accepted only from `jina-context-worker`; a mixed or cross-service claim is
+rejected before the Board transaction. The causal worker owns separate Cloud Run
+capacity, Google identity, generation credential, release-control row, and deployment
+lane. Deploying or scaling it cannot pause, invalidate, or consume instances from a
+Context worker generation.
+
+Commit messages and parent SHAs are the derivation boundary; repository file bodies are
+not inputs. Every issue and causality must bind to an exact observed commit-message
+excerpt. The graph is one bounded immutable artifact. PostgreSQL stores only constant
+release metadata plus one mutable current pointer, so graph cardinality does not create
+high-volume relational writes or degrade query indexes during publication.
 
 ## Trigger and ref policy
 

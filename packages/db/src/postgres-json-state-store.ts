@@ -14,7 +14,7 @@ export interface StateUpdate<T, R> {
 export interface WorkerReleaseGuard {
   readonly releaseId: string;
   readonly credentialSha256: string;
-  readonly service: "jina-context-worker" | "jina-task-worker";
+  readonly service: "jina-context-worker" | "jina-causal-graph-worker" | "jina-task-worker";
   readonly revision: string;
 }
 
@@ -93,18 +93,28 @@ export class PostgresJsonStateStore<T> {
 
   async verifyWorkerRelease(workerRelease: WorkerReleaseGuard): Promise<void> {
     await this.initialize();
-    const expectedRevisionColumn =
-      workerRelease.service === "jina-context-worker" ? "context_worker_revision" : "task_worker_revision";
-    const accepted = await this.pool.query(
-      `select 1
-       from jina_runtime.release_control
-       where id=1
-         and worker_claims_enabled
-         and worker_release_id=$1
-         and worker_credential_sha256=$2
-         and ${expectedRevisionColumn}=$3`,
-      [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
-    );
+    const accepted =
+      workerRelease.service === "jina-causal-graph-worker"
+        ? await this.pool.query(
+            `select 1
+             from jina_runtime.causal_graph_release_control
+             where id=1
+               and worker_claims_enabled
+               and worker_release_id=$1
+               and worker_credential_sha256=$2
+               and worker_revision=$3`,
+            [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+          )
+        : await this.pool.query(
+            `select 1
+             from jina_runtime.release_control
+             where id=1
+               and worker_claims_enabled
+               and worker_release_id=$1
+               and worker_credential_sha256=$2
+               and ${workerRevisionColumn(workerRelease.service)}=$3`,
+            [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+          );
     if (accepted.rowCount !== 1) throw new WorkerReleaseRejectedError();
   }
 
@@ -125,18 +135,28 @@ export class PostgresJsonStateStore<T> {
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
 
       if (workerRelease) {
-        const expectedRevisionColumn =
-          workerRelease.service === "jina-context-worker" ? "context_worker_revision" : "task_worker_revision";
-        const accepted = await client.query(
-          `select 1
-           from jina_runtime.release_control
-           where id=1
-             and worker_claims_enabled
-             and worker_release_id=$1
-             and worker_credential_sha256=$2
-             and ${expectedRevisionColumn}=$3`,
-          [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
-        );
+        const accepted =
+          workerRelease.service === "jina-causal-graph-worker"
+            ? await client.query(
+                `select 1
+                 from jina_runtime.causal_graph_release_control
+                 where id=1
+                   and worker_claims_enabled
+                   and worker_release_id=$1
+                   and worker_credential_sha256=$2
+                   and worker_revision=$3`,
+                [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+              )
+            : await client.query(
+                `select 1
+                 from jina_runtime.release_control
+                 where id=1
+                   and worker_claims_enabled
+                   and worker_release_id=$1
+                   and worker_credential_sha256=$2
+                   and ${workerRevisionColumn(workerRelease.service)}=$3`,
+                [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+              );
         if (accepted.rowCount !== 1) {
           throw new WorkerReleaseRejectedError();
         }
@@ -270,7 +290,31 @@ export class PostgresJsonStateStore<T> {
              and context_worker_revision is not null and task_worker_revision is not null)
         )
       );
+      create table if not exists jina_runtime.causal_graph_release_control (
+        id smallint primary key check (id=1),
+        worker_claims_enabled boolean not null default false,
+        worker_release_id text,
+        worker_credential_sha256 text,
+        worker_revision text,
+        updated_at timestamptz not null default now(),
+        check (
+          (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+             and worker_revision is null)
+          or
+          (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+             and worker_revision is not null)
+        )
+      );
     `);
+  }
+}
+
+function workerRevisionColumn(service: Exclude<WorkerReleaseGuard["service"], "jina-causal-graph-worker">): string {
+  switch (service) {
+    case "jina-context-worker":
+      return "context_worker_revision";
+    case "jina-task-worker":
+      return "task_worker_revision";
   }
 }
 

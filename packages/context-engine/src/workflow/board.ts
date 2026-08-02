@@ -34,11 +34,7 @@ export const contextBoardTaskTypes = {
   gapRepair: "repair-context-gaps",
   certification: "certify-context-release",
   publication: "publish-context-release",
-  pageIndex: "index-context-release",
-  issueBuild: "build-context-issues",
-  issueSnapshot: "snapshot-context-issue-history",
-  issueDerive: "derive-context-issues",
-  issuePublication: "publish-context-issues"
+  pageIndex: "index-context-release"
 } as const;
 
 export type ContextBoardTaskType = (typeof contextBoardTaskTypes)[keyof typeof contextBoardTaskTypes];
@@ -56,13 +52,29 @@ export const contextBoardTopics = {
   gapRepair: "run-context-gap-repair",
   certification: "run-context-certification",
   publication: "run-context-publication",
-  pageIndex: "run-context-pageindex",
-  issueSnapshot: "run-context-issue-history",
-  issueDerive: "run-context-issue-derive",
-  issuePublication: "run-context-issue-publication"
+  pageIndex: "run-context-pageindex"
 } as const;
 
 export type ContextBoardTopic = (typeof contextBoardTopics)[keyof typeof contextBoardTopics];
+
+export const causalGraphBoardTaskTypes = {
+  build: "build-causal-graph",
+  snapshot: "snapshot-causal-graph-history",
+  derive: "derive-causal-graph",
+  publication: "publish-causal-graph"
+} as const;
+
+export type CausalGraphBoardTaskType = (typeof causalGraphBoardTaskTypes)[keyof typeof causalGraphBoardTaskTypes];
+
+export type BoardWorkTaskType = ContextBoardTaskType | CausalGraphBoardTaskType;
+
+export const causalGraphBoardTopics = {
+  snapshot: "run-causal-graph-history",
+  derive: "run-causal-graph-derive",
+  publication: "run-causal-graph-publication"
+} as const;
+
+export type CausalGraphBoardTopic = (typeof causalGraphBoardTopics)[keyof typeof causalGraphBoardTopics];
 
 export const contextBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
   definition(
@@ -168,33 +180,31 @@ export const contextBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
     "context_worker",
     "Builds the self-hosted PageIndex tree for one published release.",
     contextBoardTopics.pageIndex
-  ),
+  )
+];
+
+export const causalGraphBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
+  definition(causalGraphBoardTaskTypes.build, "aggregate", "system", "Coordinates one immutable causal graph release."),
   definition(
-    contextBoardTaskTypes.issueBuild,
-    "aggregate",
-    "system",
-    "Coordinates one immutable issue and causality graph release."
-  ),
-  definition(
-    contextBoardTaskTypes.issueSnapshot,
+    causalGraphBoardTaskTypes.snapshot,
     "dispatchable",
-    "context_worker",
+    "causal_graph_worker",
     "Captures bounded commit history without repository file contents.",
-    contextBoardTopics.issueSnapshot
+    causalGraphBoardTopics.snapshot
   ),
   definition(
-    contextBoardTaskTypes.issueDerive,
+    causalGraphBoardTaskTypes.derive,
     "dispatchable",
-    "context_agent",
+    "causal_graph_agent",
     "Derives issues and explicit causalities in one read-only agent run.",
-    contextBoardTopics.issueDerive
+    causalGraphBoardTopics.derive
   ),
   definition(
-    contextBoardTaskTypes.issuePublication,
+    causalGraphBoardTaskTypes.publication,
     "dispatchable",
-    "context_worker",
-    "Publishes an immutable issue graph behind a ref-sequence fence.",
-    contextBoardTopics.issuePublication
+    "causal_graph_worker",
+    "Publishes an immutable causal graph behind a ref-sequence fence.",
+    causalGraphBoardTopics.publication
   )
 ];
 
@@ -344,7 +354,7 @@ export type ContextBoardTaskResult =
     }
   | {
       readonly version: 1;
-      readonly taskType: typeof contextBoardTaskTypes.issueSnapshot;
+      readonly taskType: typeof causalGraphBoardTaskTypes.snapshot;
       readonly outputArtifact: ContextArtifactRef;
       readonly commitSha: string;
       readonly observedCommitCount: number;
@@ -352,7 +362,7 @@ export type ContextBoardTaskResult =
     }
   | {
       readonly version: 1;
-      readonly taskType: typeof contextBoardTaskTypes.issueDerive;
+      readonly taskType: typeof causalGraphBoardTaskTypes.derive;
       readonly outputArtifact: ContextArtifactRef;
       readonly releaseId: string;
       readonly contentDigest: string;
@@ -362,7 +372,7 @@ export type ContextBoardTaskResult =
     }
   | {
       readonly version: 1;
-      readonly taskType: typeof contextBoardTaskTypes.issuePublication;
+      readonly taskType: typeof causalGraphBoardTaskTypes.publication;
       readonly outputArtifact: ContextArtifactRef;
       readonly releaseId: string;
     };
@@ -373,8 +383,8 @@ export type ContextBoardTaskResult =
  */
 export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, value: unknown): ContextBoardTaskResult {
   const task = findTask(state, taskId);
-  if (!task || !isContextBoardTaskType(task.type) || task.kind !== "dispatchable") {
-    throw new Error("dispatchable context board task not found");
+  if (!task || !isBoardWorkTaskType(task.type) || task.kind !== "dispatchable") {
+    throw new Error("dispatchable Board task not found");
   }
   const result = requiredRecord(value, "context task result");
   assertJsonValue(result, "$");
@@ -400,7 +410,7 @@ export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, v
       if (!isFullCommitSha(commitSha)) throw new Error("snapshot commitSha must be a full Git commit SHA");
       return { ...base, taskType: task.type, commitSha };
     }
-    case contextBoardTaskTypes.issueSnapshot: {
+    case causalGraphBoardTaskTypes.snapshot: {
       const commitSha = requiredBoundedString(result.commitSha, "commitSha", 40).toLowerCase();
       if (!isFullCommitSha(commitSha)) throw new Error("issue history commitSha must be a full Git commit SHA");
       return {
@@ -504,13 +514,13 @@ export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, v
       };
     case contextBoardTaskTypes.publication:
     case contextBoardTaskTypes.pageIndex:
-    case contextBoardTaskTypes.issuePublication:
+    case causalGraphBoardTaskTypes.publication:
       return {
         ...base,
         taskType: task.type,
         releaseId: requiredBoundedString(result.releaseId, "releaseId", 240)
       };
-    case contextBoardTaskTypes.issueDerive:
+    case causalGraphBoardTaskTypes.derive:
       return {
         ...base,
         taskType: task.type,
@@ -527,6 +537,14 @@ export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, v
 
 export function isContextBoardTaskType(value: string): value is ContextBoardTaskType {
   return Object.values(contextBoardTaskTypes).some((type) => type === value);
+}
+
+export function isCausalGraphBoardTaskType(value: string): value is CausalGraphBoardTaskType {
+  return Object.values(causalGraphBoardTaskTypes).some((type) => type === value);
+}
+
+export function isBoardWorkTaskType(value: string): value is BoardWorkTaskType {
+  return isContextBoardTaskType(value) || isCausalGraphBoardTaskType(value);
 }
 
 /**
@@ -635,28 +653,28 @@ export function createContextBoardBuild(
 }
 
 /**
- * Creates the deliberately narrow issue sidecar. Its topology is fixed: one
+ * Creates the deliberately narrow causal graph. Its topology is fixed: one
  * deterministic history capture, one agentic derivation, and one publication.
  * No planner, critic, per-issue tasks, or graph-shaped Board fan-out is created.
  */
-export function createIssueGraphBoardBuild(
+export function createCausalGraphBoardBuild(
   state: BoardState,
   input: ContextBuildScope & { readonly now: string }
 ): IssueGraphBoardBuild {
   const scope = normalizeScope(input);
   const now = normalizeIsoTime(input.now);
-  const buildTaskId = taskId("context-issue-build", {
+  const buildTaskId = taskId("causal-graph-build", {
     tenantId: scope.tenantId,
     requestKey: scope.requestKey
   });
-  const snapshotTaskId = taskId("context-issue-history", { buildTaskId });
-  const deriveTaskId = taskId("context-issue-derive", { buildTaskId });
-  const publicationTaskId = taskId("context-issue-publication", { buildTaskId });
+  const snapshotTaskId = taskId("causal-graph-history", { buildTaskId });
+  const deriveTaskId = taskId("causal-graph-derive", { buildTaskId });
+  const publicationTaskId = taskId("causal-graph-publication", { buildTaskId });
   const scoped = scopeMetadata(scope, buildTaskId);
   const existing = findTask(state, buildTaskId);
   if (existing) {
     if (
-      existing.type !== contextBoardTaskTypes.issueBuild ||
+      existing.type !== causalGraphBoardTaskTypes.build ||
       existing.metadata.tenantId !== scope.tenantId ||
       existing.metadata.repository !== scope.repository ||
       existing.metadata.ref !== scope.ref ||
@@ -665,16 +683,16 @@ export function createIssueGraphBoardBuild(
       existing.metadata.commitSha !== scope.commitSha ||
       existing.metadata.githubInstallationId !== scope.githubInstallationId
     ) {
-      throw new Error("issue graph build request key is already bound to a different scope");
+      throw new Error("causal graph build request key is already bound to a different scope");
     }
   }
 
   let next = createTask(state, {
     id: buildTaskId,
-    type: contextBoardTaskTypes.issueBuild,
-    title: `Build issue graph for ${scope.repository}@${scope.ref}`,
+    type: causalGraphBoardTaskTypes.build,
+    title: `Build causal graph for ${scope.repository}@${scope.ref}`,
     role: "system",
-    dedupeKey: `context-issues:${scope.tenantId}:${scope.requestKey}`,
+    dedupeKey: `causal-graph:${scope.tenantId}:${scope.requestKey}`,
     kind: "aggregate",
     now,
     metadata: scoped,
@@ -682,24 +700,24 @@ export function createIssueGraphBoardBuild(
   });
   next = createTask(next, {
     id: snapshotTaskId,
-    type: contextBoardTaskTypes.issueSnapshot,
+    type: causalGraphBoardTaskTypes.snapshot,
     title: `Snapshot commit history for ${scope.repository}@${scope.ref}`,
-    role: "context_worker",
-    dedupeKey: `context-issues:${buildTaskId}:history`,
+    role: "causal_graph_worker",
+    dedupeKey: `causal-graph:${buildTaskId}:history`,
     kind: "dispatchable",
-    topic: contextBoardTopics.issueSnapshot,
+    topic: causalGraphBoardTopics.snapshot,
     parentTaskId: buildTaskId,
     now,
     metadata: scoped
   });
   next = createTask(next, {
     id: deriveTaskId,
-    type: contextBoardTaskTypes.issueDerive,
+    type: causalGraphBoardTaskTypes.derive,
     title: `Derive issues and causalities for ${scope.repository}@${scope.ref}`,
-    role: "context_agent",
-    dedupeKey: `context-issues:${buildTaskId}:derive`,
+    role: "causal_graph_agent",
+    dedupeKey: `causal-graph:${buildTaskId}:derive`,
     kind: "dispatchable",
-    topic: contextBoardTopics.issueDerive,
+    topic: causalGraphBoardTopics.derive,
     parentTaskId: buildTaskId,
     dependencies: [blocks(deriveTaskId, snapshotTaskId)],
     now,
@@ -707,12 +725,12 @@ export function createIssueGraphBoardBuild(
   });
   next = createTask(next, {
     id: publicationTaskId,
-    type: contextBoardTaskTypes.issuePublication,
-    title: `Publish issue graph for ${scope.repository}@${scope.ref}`,
-    role: "context_worker",
-    dedupeKey: `context-issues:${buildTaskId}:publish`,
+    type: causalGraphBoardTaskTypes.publication,
+    title: `Publish causal graph for ${scope.repository}@${scope.ref}`,
+    role: "causal_graph_worker",
+    dedupeKey: `causal-graph:${buildTaskId}:publish`,
     kind: "dispatchable",
-    topic: contextBoardTopics.issuePublication,
+    topic: causalGraphBoardTopics.publication,
     parentTaskId: buildTaskId,
     dependencies: [blocks(publicationTaskId, deriveTaskId)],
     now,
@@ -741,7 +759,7 @@ export function nextContextBoardRefSequence(
   return next;
 }
 
-export function nextIssueGraphBoardRefSequence(
+export function nextCausalGraphBoardRefSequence(
   state: BoardState,
   input: { readonly tenantId: string; readonly repository: string; readonly ref: string }
 ): number {
@@ -749,7 +767,7 @@ export function nextIssueGraphBoardRefSequence(
   const sequences = state.tasks
     .filter(
       (task) =>
-        task.type === contextBoardTaskTypes.issueBuild &&
+        task.type === causalGraphBoardTaskTypes.build &&
         task.metadata.tenantId === input.tenantId &&
         task.metadata.repository === repository &&
         task.metadata.ref === input.ref
@@ -757,7 +775,7 @@ export function nextIssueGraphBoardRefSequence(
     .map((task) => task.metadata.refSequence)
     .filter((value): value is number => Number.isSafeInteger(value) && Number(value) > 0);
   const next = Math.max(0, ...sequences) + 1;
-  if (!Number.isSafeInteger(next)) throw new Error("issue graph ref sequence exceeds the supported range");
+  if (!Number.isSafeInteger(next)) throw new Error("causal graph ref sequence exceeds the supported range");
   return next;
 }
 
@@ -1611,11 +1629,11 @@ export function assertContextBoardMetadata(metadata: Record<string, unknown>): v
 }
 
 function definition(
-  type: ContextBoardTaskType,
+  type: BoardWorkTaskType,
   kind: TaskTypeDefinition["kind"],
   defaultAssigneeRole: string,
   description: string,
-  dispatchTopic?: ContextBoardTopic
+  dispatchTopic?: ContextBoardTopic | CausalGraphBoardTopic
 ): TaskTypeDefinition {
   return { type, kind, defaultAssigneeRole, description, ...(dispatchTopic ? { dispatchTopic } : {}) };
 }
@@ -1654,12 +1672,12 @@ function createTask(
   state: BoardState,
   input: {
     readonly id: TaskId;
-    readonly type: ContextBoardTaskType;
+    readonly type: BoardWorkTaskType;
     readonly title: string;
     readonly role: string;
     readonly dedupeKey: string;
     readonly kind: "aggregate" | "dispatchable" | "manual";
-    readonly topic?: ContextBoardTopic;
+    readonly topic?: ContextBoardTopic | CausalGraphBoardTopic;
     readonly parentTaskId?: TaskId;
     readonly dependencies?: readonly TaskDependencyDraft[];
     readonly now: IsoTimestamp;
@@ -1719,7 +1737,7 @@ function requireContextBuild(state: BoardState, id: TaskId) {
   const task = findTask(state, id);
   if (
     !task ||
-    (task.type !== contextBoardTaskTypes.build && task.type !== contextBoardTaskTypes.issueBuild) ||
+    (task.type !== contextBoardTaskTypes.build && task.type !== causalGraphBoardTaskTypes.build) ||
     task.kind !== "aggregate"
   ) {
     throw new Error("context build task not found");

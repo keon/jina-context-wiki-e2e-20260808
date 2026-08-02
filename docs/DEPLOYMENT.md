@@ -8,8 +8,8 @@ deployed to Cloud Run before production acceptance runs.
 ## Resources
 
 - Artifact Registry: `us-east1-docker.pkg.dev/jina-v2/jina`
-- Cloud Run services: `jina-api`, `jina-context-worker`, `jina-task-worker`,
-  `jina-dashboard`, `jina-admin`
+- Cloud Run services: `jina-api`, `jina-context-worker`, `jina-causal-graph-worker`,
+  `jina-task-worker`, `jina-dashboard`, `jina-admin`
 - Cloud Run jobs: `jina-context-daytona-preflight`, one short-lived
   `jina-context-release-<short-build-id>` control job per coordinated release,
   `jina-context-migrate`, optional `jina-context-legacy-reset`, `jina-acceptance`,
@@ -18,6 +18,8 @@ deployed to Cloud Run before production acceptance runs.
 - Context artifact bucket: `gs://jina-v2-jina-context-artifacts-us-east1`
 - API service account: `jina-api-runtime@jina-v2.iam.gserviceaccount.com`
 - Context-worker service account: `jina-context-worker@jina-v2.iam.gserviceaccount.com`
+- Causal-graph-worker service account:
+  `jina-causal-graph-worker@jina-v2.iam.gserviceaccount.com`
 - Task-worker service account: `jina-task-worker@jina-v2.iam.gserviceaccount.com`
 - Dashboard service account: `jina-dashboard@jina-v2.iam.gserviceaccount.com`
 - Admin service account: `jina-admin@jina-v2.iam.gserviceaccount.com`
@@ -30,6 +32,12 @@ deployed to Cloud Run before production acceptance runs.
 - Pull-request validator: `jina-cloud-build-ci@jina-v2.iam.gserviceaccount.com`
 
 No Google service-account key is stored in GitHub or the web applications.
+
+The causal graph uses the generic Board storage and command framework, but it is not a
+Context build stage. Its four task types and three topics are disjoint, only
+`jina-causal-graph-worker` may claim them, and its worker generation is selected in
+`jina_runtime.causal_graph_release_control`. Context workers continue to use
+`jina_runtime.release_control`; neither release row can authorize the other service.
 
 ## Platform bootstrap prerequisites
 
@@ -127,6 +135,44 @@ candidate worker revisions, retains that version after acceptance so future scal
 can start, and always destroys the independent control version after releasing its
 lease. It destroys an unaccepted worker version only after claims are paused, candidate
 revisions are removed, and Board leases are independently proven empty.
+
+Create the causal graph worker identity and release secret once. Its secret is separate
+because a causal worker rollout must not rotate a credential used by either Context or
+review work:
+
+```sh
+gcloud iam service-accounts create jina-causal-graph-worker \
+  --project=jina-v2 \
+  --display-name="Jina causal graph worker"
+
+gcloud secrets create jina-causal-graph-worker-release-credential \
+  --project=jina-v2 \
+  --replication-policy=automatic
+
+gcloud secrets add-iam-policy-binding jina-causal-graph-worker-release-credential \
+  --project=jina-v2 \
+  --member=serviceAccount:jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com \
+  --role=roles/secretmanager.secretVersionManager
+
+for secret in \
+  jina-causal-graph-worker-release-credential \
+  jina-internal-api-token \
+  jina-daytona-api-key \
+  jina-github-app-id \
+  jina-github-app-private-key \
+  jina-github-clone-token; do
+  gcloud secrets add-iam-policy-binding "${secret}" \
+    --project=jina-v2 \
+    --member=serviceAccount:jina-causal-graph-worker@jina-v2.iam.gserviceaccount.com \
+    --role=roles/secretmanager.secretAccessor
+done
+
+gcloud iam service-accounts add-iam-policy-binding \
+  jina-causal-graph-worker@jina-v2.iam.gserviceaccount.com \
+  --project=jina-v2 \
+  --member=serviceAccount:jina-cloud-build-deployer@jina-v2.iam.gserviceaccount.com \
+  --role=roles/iam.serviceAccountUser
+```
 
 Create the production-trigger acceptance identity and its fixture-App secrets once.
 The fixture App must be installed only on `omxyz/jina-context-graph-e2e`; its current
@@ -638,6 +684,41 @@ to the exact artifact produced from that audited source. `latest` is also pushed
 and worker convenience, but the deploy script does not select it. API/worker-only split
 build files are unsupported; deployments use the current
 full-build `$BUILD_ID`.
+
+### Independent causal graph release
+
+The causal graph is the one supported split lane. Run `cloudbuild.causal-graph.yaml`
+instead of `cloudbuild.yaml`; it does not deploy, pause, drain, or delete either Context
+worker or the review worker, and it never acquires the Context deployment lease. The
+lane refuses to start while a live Context deployment lease exists and performs three
+bounded changes:
+
+1. install the additive causal release tables and causal-only release-control table;
+2. roll forward the shared API with backward-compatible causal Board definitions and
+   `/causal-graph` routes, without changing the active Context worker identity; and
+3. activate and route an exact `jina-causal-graph-worker` revision whose allowlist is
+   exactly `run-causal-graph-history|run-causal-graph-derive|run-causal-graph-publication`.
+
+Submit the audited SHA directly:
+
+```sh
+release_sha="$(git rev-parse HEAD)"
+test -z "$(git status --porcelain)"
+gcloud builds submit \
+  --project=jina-v2 \
+  --region=us-east1 \
+  --config=cloudbuild.causal-graph.yaml \
+  --substitutions=_JINA_CAUSAL_GRAPH_DAYTONA_SNAPSHOT='<immutable-snapshot>',_JINA_CAUSAL_GRAPH_DAYTONA_MODEL_SECRET='<organization-secret-name>' \
+  "https://github.com/omxyz/jina.git#${release_sha}"
+```
+
+An immutable Daytona image digest may be supplied with
+`_JINA_CAUSAL_GRAPH_DAYTONA_IMAGE` instead of a snapshot. Never set both. The causal
+worker has one reserved instance, concurrency one, and its own maximum-instance limit,
+so causal writes and agent runs cannot consume Context worker capacity. The API/Board
+database transaction remains the shared consistency boundary; graph publication writes
+one immutable artifact metadata row and one current-pointer row regardless of graph
+cardinality.
 
 The production transition program is copied into both immutable backend images at
 `/opt/jina/context-production-preflight.mjs` and executed from that path by the Daytona,
