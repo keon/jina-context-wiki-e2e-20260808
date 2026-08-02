@@ -755,6 +755,68 @@ export class GraphApiClient {
     });
   }
 
+  /** The operational dashboard's reusable workflow catalog. */
+  async listTaskTypes(context: RequestContext): Promise<unknown> {
+    return this.request("/task-types", context);
+  }
+
+  /** Raw Context release data used by the merged operational dashboard. */
+  async listContextReleases(
+    context: RequestContext,
+    repository?: string,
+  ): Promise<unknown> {
+    const path = repository
+      ? `/context/releases?repository=${encodeURIComponent(repository)}`
+      : "/context/releases";
+    return this.request(path, context);
+  }
+
+  /** Raw Context catalog data used by the merged operational dashboard. */
+  async listContextCatalog(
+    context: RequestContext,
+    input: { repository: string; releaseId: string },
+  ): Promise<unknown> {
+    return this.request(
+      `/context/list?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}`,
+      context,
+    );
+  }
+
+  /** Read one raw Context document from an authorized release. */
+  async readContextCatalogDocument(
+    context: RequestContext,
+    input: { repository: string; releaseId: string; documentId: string },
+  ): Promise<unknown> {
+    return this.request(
+      `/context/read?repository=${encodeURIComponent(input.repository)}&releaseId=${encodeURIComponent(input.releaseId)}&document=${encodeURIComponent(input.documentId)}`,
+      context,
+    );
+  }
+
+  /** Compare two authorized Context releases. */
+  async diffContextReleases(
+    context: RequestContext,
+    input: { repository: string; fromReleaseId: string; toReleaseId: string },
+  ): Promise<unknown> {
+    const query = new URLSearchParams({
+      repository: input.repository,
+      fromReleaseId: input.fromReleaseId,
+      toReleaseId: input.toReleaseId,
+    });
+    return this.request(`/context/diff?${query.toString()}`, context);
+  }
+
+  /** Run the Context engine's grounded document search for the merged dashboard. */
+  async searchContextCatalog(
+    context: RequestContext,
+    input: { repository: string; releaseId: string; query: string },
+  ): Promise<unknown> {
+    return this.request("/context/search", context, {
+      method: "POST",
+      body: input,
+    });
+  }
+
   /**
    * Return whether the graph service has published any graph head for this
    * repository. This deliberately uses the scoped list endpoint without

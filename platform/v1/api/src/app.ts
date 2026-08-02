@@ -777,6 +777,98 @@ export function createApp(config: AppConfig): Hono {
     return c.json(await graphs.getWorkOverview(await tenantGraphContext(tenantId)));
   });
 
+  app.get("/v1/dashboard/tenants/:tenantId/operations/task-types", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    return c.json(await graphs.listTaskTypes(await tenantGraphContext(tenantId)));
+  });
+
+  app.get("/v1/dashboard/tenants/:tenantId/operations/context/releases", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    const repository = c.req.query("repository")?.trim();
+    return c.json(
+      await graphs.listContextReleases(
+        await tenantGraphContext(tenantId, repository || undefined),
+        repository || undefined,
+      ),
+    );
+  });
+
+  app.get("/v1/dashboard/tenants/:tenantId/operations/context/list", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    const repository = requiredDashboardQuery(c, "repository");
+    const releaseId = requiredDashboardQuery(c, "releaseId");
+    return c.json(
+      await graphs.listContextCatalog(await tenantGraphContext(tenantId, repository), {
+        repository,
+        releaseId,
+      }),
+    );
+  });
+
+  app.get("/v1/dashboard/tenants/:tenantId/operations/context/read", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    const repository = requiredDashboardQuery(c, "repository");
+    const releaseId = requiredDashboardQuery(c, "releaseId");
+    const documentId = requiredDashboardQuery(c, "document");
+    return c.json(
+      await graphs.readContextCatalogDocument(await tenantGraphContext(tenantId, repository), {
+        repository,
+        releaseId,
+        documentId,
+      }),
+    );
+  });
+
+  app.get("/v1/dashboard/tenants/:tenantId/operations/context/diff", async (c) => {
+    const session = await requireDashboardSession(c, config);
+    const tenantId = tenantIdParam(c);
+    await requireTenantMembership(session, tenantId, { requireAdmin: false });
+    const repository = requiredDashboardQuery(c, "repository");
+    const fromReleaseId = requiredDashboardQuery(c, "fromReleaseId");
+    const toReleaseId = requiredDashboardQuery(c, "toReleaseId");
+    return c.json(
+      await graphs.diffContextReleases(await tenantGraphContext(tenantId, repository), {
+        repository,
+        fromReleaseId,
+        toReleaseId,
+      }),
+    );
+  });
+
+  app.post(
+    "/v1/dashboard/tenants/:tenantId/operations/context/search",
+    requireDashboardOrigin,
+    requireJsonContentType,
+    async (c) => {
+      const session = await requireDashboardSession(c, config);
+      const tenantId = tenantIdParam(c);
+      await requireTenantMembership(session, tenantId, { requireAdmin: false });
+      const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>;
+      const repository = typeof body.repository === "string" ? body.repository.trim() : "";
+      const releaseId = typeof body.releaseId === "string" ? body.releaseId.trim() : "";
+      const query = typeof body.query === "string" ? body.query.trim() : "";
+      if (!repository || !releaseId || !query) {
+        throw new ApiError(400, "repository, releaseId, and query are required");
+      }
+      if (query.length > 4_000) throw new ApiError(400, "query must not exceed 4000 characters");
+      return c.json(
+        await graphs.searchContextCatalog(await tenantGraphContext(tenantId, repository), {
+          repository,
+          releaseId,
+          query,
+        }),
+      );
+    },
+  );
+
   app.get("/v1/dashboard/tenants/:tenantId/graphs/:graphId", async (c) => {
     const session = await requireDashboardSession(c, config);
     const tenantId = tenantIdParam(c);
@@ -1506,6 +1598,12 @@ function tenantIdParam(c: Context): string {
     throw new ApiError(400, "missing tenant id");
   }
   return tenantId;
+}
+
+function requiredDashboardQuery(c: Context, name: string): string {
+  const value = c.req.query(name)?.trim();
+  if (!value) throw new ApiError(400, `${name} is required`);
+  return value;
 }
 
 /**

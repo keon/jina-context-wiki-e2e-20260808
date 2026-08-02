@@ -2,15 +2,20 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { formatTime, humanize, shortId } from "../../lib/format.ts";
+import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import { usePoll } from "../../lib/poll.ts";
 import type { ContextBuildListResponse, ContextBuildSummary, ContextRelease } from "../../lib/types.ts";
+import { useTenant } from "../../v1/providers.tsx";
 import { BuildCheckpoints } from "./build-checkpoints.tsx";
 import { ContextBrowser } from "./context-browser.tsx";
 import { IssueGraphBrowser } from "./issue-graph-browser.tsx";
 
 export function ContextPage() {
-  const releasesResource = usePoll<{ readonly releases: readonly ContextRelease[] }>("/api/context/releases", 10_000);
-  const buildsResource = usePoll<ContextBuildListResponse>("/api/context/builds", 5_000);
+  const { selected } = useTenant();
+  const releasesPath = selected ? operationsApiUrl(selected.tenantId, "context/releases") : "";
+  const buildsPath = selected ? tenantDashboardApiUrl(selected.tenantId, "context/builds") : "";
+  const releasesResource = usePoll<{ readonly releases: readonly ContextRelease[] }>(releasesPath, 10_000);
+  const buildsResource = usePoll<ContextBuildListResponse>(buildsPath, 5_000);
   // Preserve API order: the authoritative current pointer leads historical
   // releases even when an operator intentionally rolls back to an older one.
   const releases = useMemo(() => releasesResource.data?.releases ?? [], [releasesResource.data]);
@@ -103,7 +108,11 @@ export function ContextPage() {
         <>
           <ReleaseStrip release={release} />
           {build ? <BuildCheckpoints build={build} release={release} /> : null}
-          <ContextBrowser release={release} releases={scopeReleases} />
+          <ContextBrowser
+            release={release}
+            releases={scopeReleases}
+            apiBasePath={operationsApiUrl(selected!.tenantId, "context")}
+          />
         </>
       ) : (
         <>

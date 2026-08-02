@@ -18,13 +18,15 @@ import { ContextMarkdown } from "./context-markdown.tsx";
 
 export function ContextBrowser({
   release,
-  releases
+  releases,
+  apiBasePath,
 }: {
   readonly release: ContextRelease;
   readonly releases: readonly ContextRelease[];
+  readonly apiBasePath: string;
 }) {
   const catalog = usePoll<ContextListResponse>(
-    `/api/context/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`,
+    `${apiBasePath}/list?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}`,
     10_000
   );
   const [selectedId, setSelectedId] = useState("");
@@ -59,8 +61,8 @@ export function ContextBrowser({
     setDocument(null);
     setError("");
     void fetch(
-      `/api/context/read?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}&document=${encodeURIComponent(selectedId)}`,
-      { headers: { accept: "application/json" }, signal: controller.signal }
+      `${apiBasePath}/read?repository=${encodeURIComponent(release.repository)}&releaseId=${encodeURIComponent(release.id)}&document=${encodeURIComponent(selectedId)}`,
+      { credentials: "include", headers: { accept: "application/json" }, signal: controller.signal }
     )
       .then(async (response) => {
         if (!response.ok) throw new Error(`Document read failed with ${response.status}`);
@@ -76,7 +78,7 @@ export function ContextBrowser({
         if (!(cause instanceof DOMException && cause.name === "AbortError")) setError(String(cause));
       });
     return () => controller.abort();
-  }, [release.id, release.repository, selectedId]);
+  }, [apiBasePath, release.id, release.repository, selectedId]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -84,8 +86,9 @@ export function ContextBrowser({
     setLoading(true);
     setError("");
     try {
-      const response = await fetch("/api/context/search", {
+      const response = await fetch(`${apiBasePath}/search`, {
         method: "POST",
+        credentials: "include",
         headers: { "content-type": "application/json", accept: "application/json" },
         body: JSON.stringify({
           repository: release.repository,
@@ -151,7 +154,7 @@ export function ContextBrowser({
         {error ? <p className="context-alert danger">{error}</p> : null}
       </section>
 
-      <ContextDiff release={release} releases={releases} onOpen={setSelectedId} />
+      <ContextDiff release={release} releases={releases} apiBasePath={apiBasePath} onOpen={setSelectedId} />
 
       <section className="context-browser-grid">
         <nav className="context-operations-panel context-document-list" aria-label="Context tree">
@@ -207,10 +210,12 @@ export function ContextBrowser({
 function ContextDiff({
   release,
   releases,
+  apiBasePath,
   onOpen
 }: {
   readonly release: ContextRelease;
   readonly releases: readonly ContextRelease[];
+  readonly apiBasePath: string;
   readonly onOpen: (id: string) => void;
 }) {
   const candidates = useMemo(
@@ -248,7 +253,8 @@ function ContextDiff({
         fromReleaseId,
         toReleaseId: release.id
       });
-      const response = await fetch(`/api/context/diff?${parameters.toString()}`, {
+      const response = await fetch(`${apiBasePath}/diff?${parameters.toString()}`, {
+        credentials: "include",
         headers: { accept: "application/json" }
       });
       if (!response.ok) throw new Error(`Context diff failed with ${response.status}`);

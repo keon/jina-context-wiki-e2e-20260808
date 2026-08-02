@@ -20,14 +20,12 @@ export function proxy(request: NextRequest): NextResponse {
 
   return new NextResponse("Authentication required", {
     status: 401,
-    headers: { "www-authenticate": 'Basic realm="Jina Dashboard", charset="UTF-8"' }
   });
 }
 
 export const config = {
-  // Product routes authenticate with the v1 API's GitHub OAuth session and
-  // must remain reachable before that session exists. The operational views
-  // and their privileged same-origin API proxy retain the existing deployment
-  // boundary until v2 has a customer-session token exchange of its own.
-  matcher: ["/board/:path*", "/history/:path*", "/tasks/:path*", "/operations/:path*", "/api/:path*"]
+  // Every page is now gated by the v1 API's GitHub OAuth session. Retain the
+  // legacy same-origin API boundary for old clients, but do not emit a browser
+  // Basic-Auth challenge: the merged UI no longer uses this proxy.
+  matcher: ["/api/:path*"]
 };

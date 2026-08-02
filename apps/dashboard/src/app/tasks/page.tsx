@@ -5,11 +5,16 @@ import { TaskTypeInspector } from "../../components/task-types/task-type-inspect
 import { TaskTypeList } from "../../components/task-types/task-type-list.tsx";
 import { WorkflowTreesPanel } from "../../components/task-types/workflow-trees.tsx";
 import { usePoll } from "../../lib/poll.ts";
+import { operationsApiUrl, tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { OverviewResponse, TaskTypeDefinition } from "../../lib/types.ts";
+import { useTenant } from "../../v1/providers.tsx";
 
 export default function TaskTypesPage() {
-  const { data: overview } = usePoll<OverviewResponse>("/api/overview");
-  const { data: taskTypesData } = usePoll<readonly TaskTypeDefinition[]>("/api/task-types");
+  const { selected } = useTenant();
+  const overviewPath = selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "";
+  const taskTypesPath = selected ? operationsApiUrl(selected.tenantId, "task-types") : "";
+  const { data: overview } = usePoll<OverviewResponse>(overviewPath);
+  const { data: taskTypesData } = usePoll<readonly TaskTypeDefinition[]>(taskTypesPath);
   const [query, setQuery] = useState("");
   const [selectedType, setSelectedType] = useState<string | null>(null);
 

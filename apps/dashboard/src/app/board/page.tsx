@@ -7,7 +7,9 @@ import { BoardToolbar } from "../../components/board/toolbar.tsx";
 import type { BoardFilters } from "../../lib/board.ts";
 import { EMPTY_BOARD_FILTERS, filterBoardTasks, partitionBoardTasks, uniqueValues } from "../../lib/board.ts";
 import { usePoll } from "../../lib/poll.ts";
+import { tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { BoardState, OverviewResponse } from "../../lib/types.ts";
+import { useTenant } from "../../v1/providers.tsx";
 
 const EMPTY_BOARD: BoardState = { tasks: [], dependencies: [] };
 
@@ -24,7 +26,10 @@ function taskIdFromHash(): string | null {
 }
 
 export default function BoardPage() {
-  const { data } = usePoll<OverviewResponse>("/api/overview");
+  const { selected } = useTenant();
+  const { data } = usePoll<OverviewResponse>(
+    selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "",
+  );
   const board = data?.board ?? EMPTY_BOARD;
   const events = data?.events ?? [];
 

@@ -7,7 +7,9 @@ import { filteredHistoryEvents, historyEventContext } from "../../components/his
 import { uniqueValues } from "../../lib/board.ts";
 import { humanize } from "../../lib/format.ts";
 import { usePoll } from "../../lib/poll.ts";
+import { tenantDashboardApiUrl } from "../../lib/operations-api.ts";
 import type { OverviewResponse } from "../../lib/types.ts";
+import { useTenant } from "../../v1/providers.tsx";
 
 function FilterSelect({
   id,
@@ -42,7 +44,10 @@ function FilterSelect({
 }
 
 export default function HistoryPage() {
-  const { data } = usePoll<OverviewResponse>("/api/overview");
+  const { selected } = useTenant();
+  const { data } = usePoll<OverviewResponse>(
+    selected ? tenantDashboardApiUrl(selected.tenantId, "work-overview") : "",
+  );
   const [query, setQuery] = useState("");
   const [type, setType] = useState("");
   const [actor, setActor] = useState("");
