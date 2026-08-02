@@ -149,6 +149,18 @@ else
   worker_environment+="~CONTEXT_DAYTONA_IMAGE=${daytona_image}"
 fi
 
+# Cloud Run does not accept --no-traffic while creating a service. A first
+# causal worker revision may receive traffic, but it still cannot claim work:
+# its release id and credential are not activated until the job below commits
+# them to the causal-only release-control table. Existing services keep the
+# normal zero-traffic candidate path.
+worker_traffic_args=(--tag="${candidate_tag}")
+if gcloud run services describe "${worker_service}" \
+  --project="${GCP_PROJECT_ID}" \
+  --region="${GCP_REGION}" >/dev/null 2>&1; then
+  worker_traffic_args=(--no-traffic --tag="${candidate_tag}")
+fi
+
 gcloud run deploy "${worker_service}" \
   --project="${GCP_PROJECT_ID}" \
   --region="${GCP_REGION}" \
@@ -163,8 +175,7 @@ gcloud run deploy "${worker_service}" \
   --no-cpu-throttling \
   --set-env-vars="${worker_environment}" \
   --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
-  --no-traffic \
-  --tag="${candidate_tag}" \
+  "${worker_traffic_args[@]}" \
   --revision-suffix="${release_suffix}" \
   --quiet
 

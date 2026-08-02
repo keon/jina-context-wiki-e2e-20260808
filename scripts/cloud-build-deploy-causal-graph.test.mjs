@@ -33,3 +33,12 @@ test("causal graph deployment uses isolated capacity and an exact topic check", 
   assert.match(deployment, /--concurrency=1/);
   assert.match(deployment, /if \[\[ "\$\{observed_topics\}" != "\$\{causal_topics\}" \]\]/);
 });
+
+test("first worker creation is release-gated without relying on zero traffic", () => {
+  assert.match(deployment, /worker_traffic_args=\(--tag="\$\{candidate_tag\}"\)/);
+  assert.match(
+    deployment,
+    /gcloud run services describe "\$\{worker_service\}"[\s\S]+?worker_traffic_args=\(--no-traffic/
+  );
+  assert.match(deployment, /gcloud run deploy "\$\{worker_service\}"[\s\S]+?activate-causal-graph-release\.js/);
+});
