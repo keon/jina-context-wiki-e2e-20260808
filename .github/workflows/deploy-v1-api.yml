@@ -1,5 +1,7 @@
 name: Deploy V1 Review API
 
+# Staging deployments are intentionally dispatched only from the staging ref.
+
 on:
   push:
     branches:
