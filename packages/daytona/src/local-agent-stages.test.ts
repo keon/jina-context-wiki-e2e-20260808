@@ -140,6 +140,7 @@ test("source challenge validation repair is bounded to the rejected structured r
     repositoryDirectory: "/checkpoint/repository",
     evidencePath: "/checkpoint/evidence.json",
     repositoryPaths: ["src/server.ts"],
+    existingSubjectIds: ["runtime-request-lifecycle"],
     diagnostic: "evidence reference is not a checkpoint repository path: access-service.md",
     previousResult: { worker: { id: "source-challenge-3" } }
   });
@@ -147,6 +148,8 @@ test("source challenge validation repair is bounded to the rejected structured r
   assert.match(prompt, /Preserve every valid field and change only what deterministic validation rejected/);
   assert.match(prompt, /Generated Context page paths are not repository evidence/);
   assert.match(prompt, /src\/server\.ts/);
+  assert.match(prompt, /runtime-request-lifecycle/);
+  assert.match(prompt, /document path, page title, or newly paraphrased slug is not an existing subject ID/i);
   assert.match(prompt, /access-service\.md/);
   assert.match(prompt, /source-challenge-3/);
 });
@@ -410,6 +413,8 @@ test("research and criticism distinguish deployed paths from code that merely ex
   assert.match(critic, /Judge Context sufficiency/);
   assert.match(critic, /Do not mark it partial merely because/);
   assert.match(critic, /exact same deduplicated pageIds array/);
+  assert.match(critic, /not a generated copy of the repository or an exhaustive API\/configuration reference/);
+  assert.match(critic, /Missing convenience enumeration/);
 });
 
 test("research plan repair receives the rejected candidate, exact diagnostic, and original inputs", () => {

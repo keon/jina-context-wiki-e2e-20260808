@@ -2376,11 +2376,22 @@ async function runContextSourceChallenge(
       readOnly: true,
       budgetSeconds: stageBudgetSeconds("CONTEXT_SOURCE_CHALLENGE_SECONDS", 900)
     } as const;
-    const phaseCheckpointKey = (phase: string) =>
-      contextPhaseCheckpointKey(work, "source-challenge-phase-checkpoints-v1", phase, { inputDigest });
+    const existingSubjectIds = researchPlan.assignments.map((assignment) => assignment.id);
+    const candidateCheckpointKey = contextPhaseCheckpointKey(
+      work,
+      "source-challenge-phase-checkpoints-v1",
+      "source-challenge.candidate",
+      { inputDigest }
+    );
+    const repairCheckpointKey = contextPhaseCheckpointKey(
+      work,
+      "source-challenge-phase-checkpoints-v2",
+      "source-challenge.repair",
+      { inputDigest, existingSubjectIds }
+    );
     const candidate = await checkpointedContextCandidate(work, {
       phase: "source-challenge.candidate",
-      checkpointKey: phaseCheckpointKey("source-challenge.candidate"),
+      checkpointKey: candidateCheckpointKey,
       kind: "gate-evaluation",
       generate: async () => (await runner.run(stageInput)).parsed
     });
@@ -2397,7 +2408,7 @@ async function runContextSourceChallenge(
       async (diagnostic, previousResult) => {
         return checkpointedContextCandidate(work, {
           phase: "source-challenge.repair",
-          checkpointKey: phaseCheckpointKey("source-challenge.repair"),
+          checkpointKey: repairCheckpointKey,
           kind: "gate-evaluation",
           generate: async () => {
             const repaired = await runner.run({
@@ -2408,6 +2419,7 @@ async function runContextSourceChallenge(
                 repositoryDirectory: checkout.directory,
                 evidencePath,
                 repositoryPaths: repositoryInventory.paths,
+                existingSubjectIds,
                 diagnostic,
                 previousResult
               })
@@ -3096,12 +3108,10 @@ async function contextCitationEvidenceCertified(
   const auditDependencies = work.task.metadata.dependencyResults
     .filter((dependency) => dependency.taskType === "audit-context-page")
     .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1));
-  const loadedAudits = await Promise.all(
-    auditDependencies.map(async (dependency) => ({
-      dependency,
-      audit: parseContextPageAuditArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
-    }))
-  );
+  const loadedAudits = await mapWithConcurrency(auditDependencies, 4, async (dependency) => ({
+    dependency,
+    audit: parseContextPageAuditArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
+  }));
   for (const { artifact: pageArtifact, page } of pages) {
     const matching = loadedAudits.find((candidate) => candidate.audit.pageArtifact.key === pageArtifact.key);
     if (!matching?.audit.audit || matching.audit.structuralProblems.length > 0) {
@@ -3195,15 +3205,21 @@ function maintenanceTaskCatalog(
     }
   >();
   for (const page of plan.pages) {
+    let selectedForPage = 0;
     for (const question of page.maintenanceQuestions) {
       const normalized = question.trim().replace(/\s+/g, " ").toLowerCase();
-      if (!byQuestion.has(normalized)) {
-        byQuestion.set(normalized, {
-          id: `task-${createHash("sha256").update(normalized).digest("hex").slice(0, 20)}`,
-          question,
-          priority: "required"
-        });
-      }
+      if (byQuestion.has(normalized)) continue;
+      byQuestion.set(normalized, {
+        id: `task-${createHash("sha256").update(normalized).digest("hex").slice(0, 20)}`,
+        question,
+        priority: "required"
+      });
+      selectedForPage += 1;
+      // Certification needs a representative maintenance probe for every
+      // public subject, not an exhaustive restatement of every question the
+      // page was planned to answer. Material challenger tasks are added below
+      // without this sampling bound.
+      if (selectedForPage === 2) break;
     }
   }
   for (const task of challengedTasks) {
@@ -3282,13 +3298,14 @@ async function contextPagesFromDependencies(
   const candidates = work.task.metadata.dependencyResults.filter((dependency) =>
     ["write-context-page", "repair-context-page"].includes(dependency.taskType)
   );
-  const loaded = await Promise.all(
-    candidates.map(async (dependency) => ({
-      dependency,
-      artifact: dependency.result.outputArtifact,
-      page: parseContextPageArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
-    }))
-  );
+  // A mature build can retain several write/repair artifacts per public page.
+  // Bound the internal API fan-out so retries and multiple worker instances do
+  // not exhaust Cloud Run concurrency with one synchronized read burst.
+  const loaded = await mapWithConcurrency(candidates, 4, async (dependency) => ({
+    dependency,
+    artifact: dependency.result.outputArtifact,
+    page: parseContextPageArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
+  }));
   const selected = new Map<string, (typeof loaded)[number]>();
   for (const candidate of loaded) {
     const current = selected.get(candidate.page.documentPath);
@@ -3392,12 +3409,10 @@ async function contextPageCitationAuditCheckpoint(
   const auditDependencies = work.task.metadata.dependencyResults
     .filter((dependency) => dependency.taskType === "audit-context-page")
     .sort((left, right) => (right.pass ?? -1) - (left.pass ?? -1));
-  const loaded = await Promise.all(
-    auditDependencies.map(async (dependency) => ({
-      dependency,
-      audit: parseContextPageAuditArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
-    }))
-  );
+  const loaded = await mapWithConcurrency(auditDependencies, 4, async (dependency) => ({
+    dependency,
+    audit: parseContextPageAuditArtifact(await readContextBoardArtifact(work, dependency.result.outputArtifact))
+  }));
   const selected = new Map<
     string,
     {

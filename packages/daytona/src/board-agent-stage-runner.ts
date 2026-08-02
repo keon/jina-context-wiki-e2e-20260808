@@ -36,6 +36,7 @@ const LOCAL_REPOSITORY = "repository";
 const LOCAL_OUTPUT = "output";
 const LOCAL_RESULT = "output/result.json";
 const LOCAL_USAGE_PARSER = "inputs/usage-parser.cjs";
+const LOCAL_ERROR_PARSER = "inputs/error-parser.cjs";
 
 const DAYTONA_ROOT = "/workspace";
 const DAYTONA_REPOSITORY_ARCHIVE = `${DAYTONA_ROOT}/${LOCAL_REPOSITORY_ARCHIVE}`;
@@ -47,6 +48,7 @@ const DAYTONA_OUTPUT = `${DAYTONA_ROOT}/${LOCAL_OUTPUT}`;
 const DAYTONA_RESULT = `${DAYTONA_ROOT}/${LOCAL_RESULT}`;
 const DAYTONA_USAGE = `${DAYTONA_OUTPUT}/usage.json`;
 const DAYTONA_USAGE_PARSER = `${DAYTONA_ROOT}/${LOCAL_USAGE_PARSER}`;
+const DAYTONA_ERROR_PARSER = `${DAYTONA_ROOT}/${LOCAL_ERROR_PARSER}`;
 const DAYTONA_EVENTS = "/tmp/jina-codex-events.jsonl";
 const DAYTONA_DIAGNOSTIC = "/tmp/jina-codex-diagnostic.log";
 const DAYTONA_CODEX_HOME = "/home/daytona/.codex";
@@ -203,6 +205,30 @@ main().catch((error) => {
   process.stderr.write("Codex usage extraction failed: " + String(error && error.message || error) + "\n");
   process.exitCode = 1;
 });
+`.trimStart();
+
+const DAYTONA_ERROR_PARSER_SOURCE = String.raw`
+"use strict";
+const fs = require("node:fs");
+
+const input = process.argv[2];
+if (!input) throw new Error("error parser input is required");
+const diagnostics = [];
+for (const line of fs.readFileSync(input, "utf8").split("\n")) {
+  if (!line.trim() || Buffer.byteLength(line, "utf8") > 64 * 1024) continue;
+  let event;
+  try {
+    event = JSON.parse(line);
+  } catch {
+    continue;
+  }
+  if (!event || typeof event !== "object" || Array.isArray(event)) continue;
+  if (event.type !== "error" && event.type !== "turn.failed") continue;
+  const nested = event.error && typeof event.error === "object" && !Array.isArray(event.error) ? event.error : {};
+  const message = typeof event.message === "string" ? event.message : typeof nested.message === "string" ? nested.message : "";
+  diagnostics.push({ type: event.type, message: message.slice(0, 2_000) });
+}
+process.stdout.write(JSON.stringify(diagnostics.slice(-4)) + "\n");
 `.trimStart();
 
 export interface BoardAgentStageLimits {
@@ -645,7 +671,7 @@ export class DaytonaBoardAgentStageRunner implements BoardAgentStageRunner {
         `${codex} < ${shellQuote(DAYTONA_PROMPT)} > ${shellQuote(DAYTONA_EVENTS)} 2> ${shellQuote(DAYTONA_DIAGNOSTIC)}`,
         "rc=$?",
         "set -e",
-        `if [ "$rc" -ne 0 ]; then tail -c 4096 ${shellQuote(DAYTONA_DIAGNOSTIC)} 2>/dev/null || true; exit "$rc"; fi`,
+        `if [ "$rc" -ne 0 ]; then tail -c 4096 ${shellQuote(DAYTONA_DIAGNOSTIC)} 2>/dev/null || true; node ${shellQuote(DAYTONA_ERROR_PARSER)} ${shellQuote(DAYTONA_EVENTS)} 2>/dev/null || true; exit "$rc"; fi`,
         `node ${shellQuote(DAYTONA_USAGE_PARSER)} ${shellQuote(DAYTONA_EVENTS)} ${shellQuote(DAYTONA_USAGE)}`,
         "cleanup",
         "trap - EXIT"
@@ -874,6 +900,7 @@ async function uploadDaytonaInputs(
     ),
     sandbox.fs.uploadFile(Buffer.from(input.schemaBytes), DAYTONA_SCHEMA, timeoutSeconds),
     sandbox.fs.uploadFile(Buffer.from(DAYTONA_USAGE_PARSER_SOURCE), DAYTONA_USAGE_PARSER, timeoutSeconds),
+    sandbox.fs.uploadFile(Buffer.from(DAYTONA_ERROR_PARSER_SOURCE), DAYTONA_ERROR_PARSER, timeoutSeconds),
     ...input.artifacts.map((artifact) =>
       sandbox.fs.uploadFile(Buffer.from(artifact.bytes), `${DAYTONA_ARTIFACTS}/${artifact.name}`, timeoutSeconds)
     ),
