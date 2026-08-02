@@ -32,6 +32,66 @@ export interface VersionedState<T> {
   readonly version: number;
 }
 
+export const JINA_RUNTIME_SCHEMA_SQL = `
+  create schema if not exists jina_runtime;
+
+  create table if not exists jina_runtime.api_state (
+    id smallint primary key check (id = 1),
+    snapshot jsonb not null,
+    version bigint not null default 1,
+    updated_at timestamptz not null default now()
+  );
+
+  create table if not exists jina_runtime.github_deliveries (
+    delivery_id text primary key,
+    received_at timestamptz not null default now()
+  );
+
+  create table if not exists jina_runtime.release_control (
+    id smallint primary key check (id = 1),
+    lease_release_id text,
+    lease_credential_sha256 text,
+    lease_expires_at timestamptz,
+    worker_claims_enabled boolean not null default false,
+    worker_accepts_claims boolean not null default true,
+    worker_release_id text,
+    worker_credential_sha256 text,
+    context_worker_revision text,
+    task_worker_revision text,
+    updated_at timestamptz not null default now(),
+    check (
+      (lease_release_id is null and lease_credential_sha256 is null and lease_expires_at is null)
+      or
+      (lease_release_id is not null and lease_credential_sha256 is not null and lease_expires_at is not null)
+    ),
+    check (
+      (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+         and context_worker_revision is null and task_worker_revision is null)
+      or
+      (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+         and context_worker_revision is not null and task_worker_revision is not null)
+    )
+  );
+
+  alter table jina_runtime.release_control
+    add column if not exists worker_accepts_claims boolean not null default true;
+  create table if not exists jina_runtime.causal_graph_release_control (
+    id smallint primary key check (id=1),
+    worker_claims_enabled boolean not null default false,
+    worker_release_id text,
+    worker_credential_sha256 text,
+    worker_revision text,
+    updated_at timestamptz not null default now(),
+    check (
+      (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
+         and worker_revision is null)
+      or
+      (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
+         and worker_revision is not null)
+    )
+  );
+`;
+
 /**
  * Durable MVP state store. The board snapshot and delivery ledger are written
  * in one Postgres transaction so an acknowledged webhook survives restarts.
@@ -310,65 +370,7 @@ export class PostgresJsonStateStore<T> {
   }
 
   private async createSchema(): Promise<void> {
-    await this.pool.query(`
-      create schema if not exists jina_runtime;
-
-      create table if not exists jina_runtime.api_state (
-        id smallint primary key check (id = 1),
-        snapshot jsonb not null,
-        version bigint not null default 1,
-        updated_at timestamptz not null default now()
-      );
-
-      create table if not exists jina_runtime.github_deliveries (
-        delivery_id text primary key,
-        received_at timestamptz not null default now()
-      );
-
-      create table if not exists jina_runtime.release_control (
-        id smallint primary key check (id = 1),
-        lease_release_id text,
-        lease_credential_sha256 text,
-        lease_expires_at timestamptz,
-        worker_claims_enabled boolean not null default false,
-        worker_accepts_claims boolean not null default true,
-        worker_release_id text,
-        worker_credential_sha256 text,
-        context_worker_revision text,
-        task_worker_revision text,
-        updated_at timestamptz not null default now(),
-        check (
-          (lease_release_id is null and lease_credential_sha256 is null and lease_expires_at is null)
-          or
-          (lease_release_id is not null and lease_credential_sha256 is not null and lease_expires_at is not null)
-        ),
-        check (
-          (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
-             and context_worker_revision is null and task_worker_revision is null)
-          or
-          (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
-             and context_worker_revision is not null and task_worker_revision is not null)
-        )
-      );
-
-      alter table jina_runtime.release_control
-        add column if not exists worker_accepts_claims boolean not null default true;
-      create table if not exists jina_runtime.causal_graph_release_control (
-        id smallint primary key check (id=1),
-        worker_claims_enabled boolean not null default false,
-        worker_release_id text,
-        worker_credential_sha256 text,
-        worker_revision text,
-        updated_at timestamptz not null default now(),
-        check (
-          (not worker_claims_enabled and worker_release_id is null and worker_credential_sha256 is null
-             and worker_revision is null)
-          or
-          (worker_claims_enabled and worker_release_id is not null and worker_credential_sha256 is not null
-             and worker_revision is not null)
-        )
-      );
-    `);
+    await this.pool.query(JINA_RUNTIME_SCHEMA_SQL);
   }
 }
 

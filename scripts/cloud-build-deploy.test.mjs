@@ -278,6 +278,7 @@ test("owner migration and destructive reset are bound to the live coordinated de
       /JINA_WORKER_RELEASE_CREDENTIAL=\$\{worker_release_secret\}:\$\{deployment_release_secret_version\}/
     );
   }
+  assert.match(databaseMigration, /applySchema\(pool, "jina_runtime\.schema", JINA_RUNTIME_SCHEMA_SQL\)/);
   assert.match(databaseMigration, /pg_advisory_lock\(hashtext\('jina_runtime\.api_state'\)\)/);
   assert.match(databaseMigration, /lease_credential_sha256=\$2/);
   assert.match(databaseMigration, /lease_expires_at > clock_timestamp\(\)/);
