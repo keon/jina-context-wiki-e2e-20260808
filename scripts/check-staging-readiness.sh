@@ -55,7 +55,11 @@ else
   fi
 fi
 
-variables_json="$(gh api "repos/${repository}/environments/${github_environment}/variables?per_page=100" 2>/dev/null || true)"
+variables_json="$(
+  gh api --paginate --slurp \
+    "repos/${repository}/environments/${github_environment}/variables?per_page=30" 2>/dev/null |
+    jq '{variables: [.[].variables[]]}' || true
+)"
 secrets_json="$(gh api "repos/${repository}/environments/${github_environment}/secrets?per_page=100" 2>/dev/null || true)"
 
 required_variables=(
