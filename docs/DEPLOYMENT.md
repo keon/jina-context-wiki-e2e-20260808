@@ -700,13 +700,14 @@ full-build `$BUILD_ID`.
 
 The causal graph is the one supported split lane. Run `cloudbuild.causal-graph.yaml`
 instead of `cloudbuild.yaml`; it does not deploy, pause, drain, or delete either Context
-worker or the review worker, and it never acquires the Context deployment lease. The
-lane refuses to start while a live Context deployment lease exists and performs three
-bounded changes:
+worker or the review worker, it never acquires the Context deployment lease, and it
+cannot deploy or route the shared `jina-api` service. The coordinated main release is
+the only release train that owns shared API traffic. When a causal change adds or
+changes an API/Board contract, deploy that backward-compatible contract with
+`cloudbuild.yaml` first. The causal lane then performs three bounded changes:
 
 1. install the additive causal release tables and causal-only release-control table;
-2. roll forward the shared API with backward-compatible causal Board definitions and
-   `/causal-graph` routes, without changing the active Context worker identity; and
+2. verify and consume the stable shared API identity without mutating it; and
 3. activate and route an exact `jina-causal-graph-worker` revision whose allowlist is
    exactly `run-causal-graph-history|run-causal-graph-derive|run-causal-graph-publication`.
 
@@ -729,7 +730,8 @@ worker has one reserved instance, concurrency one, and its own maximum-instance 
 so causal writes and agent runs cannot consume Context worker capacity. The API/Board
 database transaction remains the shared consistency boundary; graph publication writes
 one immutable artifact metadata row and one current-pointer row regardless of graph
-cardinality.
+cardinality. The API image built by this lane is used only by its migration and
+activation jobs; it is never deployed as the shared API service.
 
 Context derivation runs with three warm workers and may scale to eight workers by
 default so independent research, page-writing, and audit stages can execute in

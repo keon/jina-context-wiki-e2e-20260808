@@ -480,6 +480,22 @@ test("an invested default-ref build retains only the newest follow-up until it b
   assert.equal(latestContextBoardFollowup(promoted.state, first.build.buildTaskId), undefined);
 });
 
+test("a stale deferred follow-up cannot supersede a newer ref sequence", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-stale-first");
+  assert.equal(first.outcome, "created");
+  const active = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
+  const deferred = github(active, pushEvent("8".repeat(40)), "delivery-stale-followup");
+  assert.equal(deferred.outcome, "deferred");
+
+  const completed = transitionBoardTask(deferred.state, first.build.buildTaskId, "done", LATER);
+  const newer = github(completed, pushEvent("9".repeat(40)), "delivery-newer-build");
+  assert.equal(newer.outcome, "created");
+  assert.equal(newer.scope.refSequence, 2);
+
+  assert.equal(latestContextBoardFollowup(newer.state, first.build.buildTaskId), undefined);
+  assert.equal(findTask(newer.state, newer.build.buildTaskId)?.status, "triage");
+});
+
 test("comments, reviews, labels, edits, closes, deleted pushes, and tag pushes create no Context build", () => {
   const unsupported = [
     ["issue_comment", { action: "created" }],

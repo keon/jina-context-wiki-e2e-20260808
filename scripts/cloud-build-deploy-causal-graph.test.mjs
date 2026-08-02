@@ -22,9 +22,16 @@ test("causal graph release activation is independent of Context release control"
   assert.match(deployment, /migrate-causal-graph\.js/);
   assert.match(deployment, /activate-causal-graph-release\.js/);
   assert.doesNotMatch(deployment, /worker-pause|board-drain|release-acquire/);
-  assert.match(deployment, /--to-revisions="\$\{api_service\}-\$\{release_suffix\}=100"[\s\S]+?--remove-tags/);
   assert.match(stateStore, /from jina_runtime\.causal_graph_release_control/);
   assert.match(stateStore, /from jina_runtime\.release_control/);
+});
+
+test("causal graph releases cannot deploy or route the shared API", () => {
+  assert.match(deployment, /api_service="jina-api"/);
+  assert.match(deployment, /api_url="\$\(gcloud run services describe "\$\{api_service\}"[\s\S]+?value\(status\.url\)/);
+  assert.doesNotMatch(deployment, /gcloud run deploy "\$\{api_service\}"/);
+  assert.doesNotMatch(deployment, /gcloud run services update-traffic "\$\{api_service\}"/);
+  assert.doesNotMatch(deployment, /api_candidate_url|tagged_service_url/);
 });
 
 test("causal graph deployment uses isolated capacity and an exact topic check", () => {

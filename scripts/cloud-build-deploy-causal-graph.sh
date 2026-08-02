@@ -71,63 +71,16 @@ gcloud run jobs execute jina-causal-graph-migrate \
   --region="${GCP_REGION}" \
   --wait
 
-# The API is the shared Board control plane. This additive revision preserves
-# the active Context release identity and never changes either Context worker.
-gcloud run deploy "${api_service}" \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --image="${api_image}" \
-  --no-traffic \
-  --tag="${candidate_tag}" \
-  --revision-suffix="${release_suffix}" \
-  --quiet
-
-tagged_service_url() {
-  local service="$1"
-  local tag="$2"
-  gcloud run services describe "${service}" \
-    --project="${GCP_PROJECT_ID}" \
-    --region="${GCP_REGION}" \
-    --format=json | TAG="${tag}" python3 -c '
-import json, os, sys
-traffic=json.load(sys.stdin).get("status",{}).get("traffic",[])
-for target in traffic:
-    if target.get("tag")==os.environ["TAG"] and target.get("url"):
-        print(target["url"])
-        break
-else:
-    raise SystemExit("candidate tag URL is unavailable")
-'
-}
-
-retry_health() {
-  local url="$1"
-  for _attempt in $(seq 1 60); do
-    if curl --fail --silent --show-error "${url}/health" >/dev/null; then
-      return 0
-    fi
-    sleep 2
-  done
-  echo "Health check failed for ${url}" >&2
-  return 1
-}
-
-api_candidate_url="$(tagged_service_url "${api_service}" "${candidate_tag}")"
-retry_health "${api_candidate_url}"
-# Re-run the idempotent causal migration immediately before shared API traffic
-# moves. Its first query fails if a Context deployment acquired its lease while
-# this build was producing or checking the candidate revision.
-gcloud run jobs execute jina-causal-graph-migrate \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --wait
-gcloud run services update-traffic "${api_service}" \
-  --project="${GCP_PROJECT_ID}" \
-  --region="${GCP_REGION}" \
-  --to-revisions="${api_service}-${release_suffix}=100" \
-  --remove-tags="${candidate_tag}" \
-  --quiet
+# The API is a shared control plane owned exclusively by the coordinated main
+# release. Causal releases consume its stable identity but cannot deploy a
+# revision, create a tag, or change traffic. Any new causal API contract must
+# therefore reach production through cloudbuild.yaml before this lane runs.
 api_url="$(gcloud run services describe "${api_service}" --project="${GCP_PROJECT_ID}" --region="${GCP_REGION}" --format='value(status.url)')"
+if [[ -z "${api_url}" ]]; then
+  echo "Stable shared API URL is unavailable; deploy the coordinated main release first" >&2
+  exit 2
+fi
+curl --fail --silent --show-error "${api_url}/health" >/dev/null
 
 release_secret_version_name="$(
   printf '%s' "${release_credential}" |
@@ -222,4 +175,4 @@ if [[ "${observed_topics}" != "${causal_topics}" ]]; then
   exit 2
 fi
 
-echo "Causal graph release ${CLOUD_BUILD_ID} deployed without changing Context worker services or release control"
+echo "Causal graph release ${CLOUD_BUILD_ID} deployed without changing the shared API, Context workers, or Context release control"

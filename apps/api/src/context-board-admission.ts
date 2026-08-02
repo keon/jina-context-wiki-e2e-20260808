@@ -230,6 +230,17 @@ export function latestContextBoardFollowup(state: BoardState, buildTaskId: TaskI
   const newest = events[0];
   if (!newest) return undefined;
   const followup = parseFollowup(newest.payload?.followup);
+  const predecessorSequence = requiredRefSequence(build.metadata.refSequence);
+  const newerRefBuildExists = state.tasks.some(
+    (task) =>
+      task.type === contextBoardTaskTypes.build &&
+      task.metadata.tenantId === followup.tenantId &&
+      task.metadata.repository === followup.repository &&
+      task.metadata.ref === followup.ref &&
+      typeof task.metadata.refSequence === "number" &&
+      task.metadata.refSequence > predecessorSequence
+  );
+  if (newerRefBuildExists) return undefined;
   return existingRequestBuilds(state, followup.tenantId, followup.requestKey).length ? undefined : followup;
 }
 
