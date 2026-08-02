@@ -44,6 +44,7 @@ import {
 import { PostgresProjectionRepository } from "./projection-repository.js";
 import { PostgresContextQueryRepository, type StoredRetrievalCandidate } from "./query-repository.js";
 import { PostgresApiTokenRepository } from "./api-token-repository.js";
+import { PostgresIssueGraphRepository } from "./issue-graph-repository.js";
 
 /**
  * Cohesive store façade for domain services. SQL remains split across the
@@ -57,6 +58,7 @@ export class PostgresContextEngineStore implements ContextEngineStore {
   readonly projection: PostgresProjectionRepository;
   readonly query: PostgresContextQueryRepository;
   readonly apiTokens: PostgresApiTokenRepository;
+  readonly issueGraphs: PostgresIssueGraphRepository;
 
   constructor(config: PostgresContextDatabaseConfig | ContextDatabase) {
     this.database = config instanceof ContextDatabase ? config : new ContextDatabase(config);
@@ -65,6 +67,20 @@ export class PostgresContextEngineStore implements ContextEngineStore {
     this.projection = new PostgresProjectionRepository(this.database);
     this.query = new PostgresContextQueryRepository(this.database);
     this.apiTokens = new PostgresApiTokenRepository(this.database);
+    this.issueGraphs = new PostgresIssueGraphRepository(this.database);
+  }
+
+  publishIssueGraphRelease(release: import("@jina/context-engine").IssueGraphRelease) {
+    return this.issueGraphs.publishIssueGraphRelease(release);
+  }
+  currentIssueGraphRelease(tenantId: string, repository: string, ref: string) {
+    return this.issueGraphs.currentIssueGraphRelease(tenantId, repository, ref);
+  }
+  currentAuthorizedIssueGraphRelease(tenantId: string, repository: string, ref: string, principalId: string) {
+    return this.issueGraphs.currentAuthorizedIssueGraphRelease(tenantId, repository, ref, principalId);
+  }
+  listIssueGraphReleases(tenantId: string, repository: string, ref: string) {
+    return this.issueGraphs.listIssueGraphReleases(tenantId, repository, ref);
   }
 
   verifyApiToken(secretHash: string, expectedTenantId?: string): Promise<VerifiedApiToken | undefined> {

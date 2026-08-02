@@ -12,6 +12,7 @@ import type { ContextProjectionConsumer } from "../domain/projection.js";
 import type { EvidenceSourceType } from "../domain/evidence.js";
 import type { IndexGeneration } from "../domain/projection.js";
 import type { QueryPlan, QueryRoute, RetrievalCandidate } from "../domain/query.js";
+import type { IssueGraphStore } from "./issue-graph-store.js";
 
 export type ProjectionBacklog = Record<ContextProjectionConsumer, { count: number; oldestAvailableAt?: string }>;
 
@@ -140,7 +141,7 @@ export interface VerifiedApiToken {
   readonly lastUsedAt?: string;
 }
 
-export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, ProjectionStore {
+export interface ContextEngineStore extends EvidenceStore, KnowledgeStore, ProjectionStore, IssueGraphStore {
   runInTenantScope?<T>(tenantId: string, operation: () => Promise<T>): Promise<T>;
   /** Process-local database latency and pool-pressure telemetry for operator diagnostics. */
   contextDatabaseTelemetry?(): ContextDatabaseTelemetry;

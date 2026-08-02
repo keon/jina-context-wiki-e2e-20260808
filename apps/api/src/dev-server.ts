@@ -6,6 +6,7 @@ import {
   PostgresContextQuotaStore,
   PostgresContextEngineStore,
   PostgresJsonStateStore,
+  PostgresIssueGraphRepository,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
@@ -64,6 +65,9 @@ const contextBoardPublicationTransaction = contextDatabase
 const contextBoardPageIndexAttachmentTransaction = contextDatabase
   ? new PostgresBoardPageIndexAttachmentRepository(contextDatabase)
   : undefined;
+const issueGraphPublicationTransaction = contextDatabase
+  ? new PostgresIssueGraphRepository(contextDatabase)
+  : undefined;
 const contextQuotaService = new ContextQuotaService({
   store: contextDatabase ? new PostgresContextQuotaStore(contextDatabase) : new InMemoryContextQuotaStore(),
   ...(devContextMaxActiveBuilds === undefined
@@ -98,6 +102,7 @@ const server = createApiServer({
   ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),
   ...(contextBoardPageIndexAttachmentTransaction ? { contextBoardPageIndexAttachmentTransaction } : {}),
+  ...(issueGraphPublicationTransaction ? { issueGraphPublicationTransaction } : {}),
   contextQuotaService,
   ...(sharedIdentityResolver ? { sharedIdentityResolver } : {}),
   ...(process.env.INTERNAL_API_TOKEN ? { internalApiToken: process.env.INTERNAL_API_TOKEN } : {}),

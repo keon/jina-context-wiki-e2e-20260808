@@ -14,6 +14,7 @@ const CONTEXT_ROLES = [
   "jina_context_query",
   "jina_context_quota",
   "jina_context_tokens",
+  "jina_context_issue_publish",
   "jina_context_tenant_admin",
   "jina_context_admin"
 ] as const;
@@ -74,6 +75,8 @@ const tenantScopedTables = [
   "index_generations",
   "context_board_publications",
   "current_context_board_releases",
+  "issue_graph_releases",
+  "current_issue_graph_releases",
   "ref_manifest",
   "current_knowledge_revisions",
   "context_documents",
@@ -263,7 +266,8 @@ grant select on
   jina_context.published_context_fragments,
   jina_context.published_structural_relations,jina_context.published_hierarchy_nodes,
   jina_context.context_embeddings,jina_context.exact_index,jina_context.knowledge_documents,
-  jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence
+  jina_context.knowledge_document_revisions,jina_context.knowledge_revision_evidence,
+  jina_context.issue_graph_releases,jina_context.current_issue_graph_releases
 to jina_context_query;
 grant select,insert,update on jina_context.query_runs to jina_context_query;
 grant select,insert on
@@ -277,6 +281,13 @@ grant select,insert,update on jina_context.context_quota_ledgers
 grant select,insert on jina_context.api_tokens to jina_context_tokens;
 grant update (last_used_at,revoked_at,revoked_by) on jina_context.api_tokens
   to jina_context_tokens;
+
+grant select on jina_context.repositories,jina_context.current_repository_acl,
+                jina_context.issue_graph_releases,jina_context.current_issue_graph_releases
+  to jina_context_issue_publish;
+grant insert on jina_context.repositories to jina_context_issue_publish;
+grant insert on jina_context.issue_graph_releases to jina_context_issue_publish;
+grant insert,update on jina_context.current_issue_graph_releases to jina_context_issue_publish;
 
 grant all privileges on all tables in schema jina_context to
   jina_context_tenant_admin,jina_context_admin;

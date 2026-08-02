@@ -8,7 +8,9 @@ const LEGACY_CONTEXT_TABLES = ["derivation_progress", "pipeline_builds", "pipeli
 const TABLES_ADDED_AFTER_LEGACY = [
   "context_board_publications",
   "context_quota_ledgers",
-  "current_context_board_releases"
+  "current_context_board_releases",
+  "current_issue_graph_releases",
+  "issue_graph_releases"
 ];
 const CURRENT_CONTEXT_VIEWS = [
   "current_repository_acl",

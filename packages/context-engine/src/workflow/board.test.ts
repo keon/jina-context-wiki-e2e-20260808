@@ -21,12 +21,14 @@ import {
   contextBoardTopics,
   contextGateRepairMustChangeSnapshot,
   createContextBoardBuild,
+  createIssueGraphBoardBuild,
   failContextGateRepairExhausted,
   failContextPageRepairExhausted,
   MAX_CONTEXT_GATE_REPAIR_PASS,
   MAX_CONTEXT_OPERATOR_REMEDIATION_PASS,
   MAX_CONTEXT_REPAIR_PASS,
   nextContextBoardRefSequence,
+  nextIssueGraphBoardRefSequence,
   parseContextBoardTaskResult,
   resumeContextGateExhaustion,
   resumeContextPageExhaustion
@@ -34,6 +36,43 @@ import {
 import type { ContextArtifactRef } from "../ports/artifact-store.js";
 
 const NOW = "2026-07-29T18:00:00.000Z";
+
+test("issue graph sidecar is a fixed snapshot, one-run derivation, publication chain", () => {
+  const created = createIssueGraphBoardBuild(createEmptyBoardState(), {
+    tenantId: "tenant-1",
+    repository: "omxyz/jina",
+    ref: "main",
+    refSequence: 1,
+    requestKey: "push:issue-sidecar",
+    commitSha: "8".repeat(40),
+    trigger: "push",
+    now: NOW
+  });
+  const children = created.state.tasks.filter((task) => task.parentTaskId === created.buildTaskId);
+  assert.equal(created.state.tasks.length, 4);
+  assert.deepEqual(
+    children.map((task) => task.type),
+    [contextBoardTaskTypes.issueSnapshot, contextBoardTaskTypes.issueDerive, contextBoardTaskTypes.issuePublication]
+  );
+  assert.equal(findTask(created.state, created.snapshotTaskId)?.status, "queued");
+  assert.equal(findTask(created.state, created.deriveTaskId)?.status, "triage");
+  assert.equal(findTask(created.state, created.publicationTaskId)?.status, "triage");
+  assert.deepEqual(requiredDependencies(created.state, created.deriveTaskId), [created.snapshotTaskId]);
+  assert.deepEqual(requiredDependencies(created.state, created.publicationTaskId), [created.deriveTaskId]);
+  assert.equal(
+    nextIssueGraphBoardRefSequence(created.state, {
+      tenantId: "tenant-1",
+      repository: "omxyz/jina",
+      ref: "main"
+    }),
+    2
+  );
+  assert.equal(
+    nextContextBoardRefSequence(created.state, { tenantId: "tenant-1", repository: "omxyz/jina", ref: "main" }),
+    1,
+    "documentation and issue releases own independent ref sequences"
+  );
+});
 
 test("dynamic context work is scheduled entirely through root-blocking board tasks", () => {
   const created = createContextBoardBuild(createEmptyBoardState(), {

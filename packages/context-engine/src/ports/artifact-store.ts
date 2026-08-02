@@ -17,6 +17,8 @@ export const contextArtifactKinds = [
   "derivation-checkpoint",
   "derivation-private-checkpoint",
   "context-release",
+  "issue-history",
+  "issue-graph",
   "pageindex-tree"
 ] as const;
 

@@ -40,6 +40,8 @@ export const REBUILDABLE_CONTEXT_TABLES = [
   "index_generations",
   "context_board_publications",
   "current_context_board_releases",
+  "issue_graph_releases",
+  "current_issue_graph_releases",
   "generation_projectors",
   "projection_checkpoints",
   "ref_manifest",

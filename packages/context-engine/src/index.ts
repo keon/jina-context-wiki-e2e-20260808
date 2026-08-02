@@ -1,6 +1,7 @@
 export * from "./domain/evidence.js";
 export * from "./domain/fingerprint.js";
 export * from "./domain/knowledge.js";
+export * from "./domain/issue-graph.js";
 export * from "./domain/projection.js";
 export * from "./domain/query.js";
 export * from "./context/catalog.js";
@@ -10,6 +11,7 @@ export * from "./ports/context-quota-store.js";
 export * from "./ports/artifact-store.js";
 export * from "./ports/evidence-store.js";
 export * from "./ports/knowledge-store.js";
+export * from "./ports/issue-graph-store.js";
 export * from "./ports/projection-store.js";
 export * from "./ports/hierarchy.js";
 export * from "./ports/embeddings.js";

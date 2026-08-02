@@ -41,6 +41,9 @@ import {
   assertContextPriorReleaseMatches,
   isContextArtifactKeyInScope,
   parseCertifiedContextReleaseArtifact,
+  parseIssueGraphArtifact,
+  issueGraphTrace,
+  searchIssueGraph,
   parseContextPriorReleaseSeed,
   parseContextBoardTaskResult,
   parseBoardPageIndexTreeArtifact,
@@ -49,11 +52,15 @@ import {
   resumeContextGateExhaustion,
   resumeContextPageExhaustion,
   newId,
+  createIssueGraphBoardBuild,
+  nextIssueGraphBoardRefSequence,
   type ApiTokenRecord,
   type ContextArtifactStore,
   type ContextArtifactRef,
   type ContextArtifactKind,
   type ContextEngineStore,
+  type IssueGraphRelease,
+  type BoardIssueGraphPublicationTransactionPort,
   type BoardContextPublicationTransactionPort,
   type BoardContextReleaseSeedPort,
   type BoardPageIndexAttachmentTransactionPort,
@@ -79,6 +86,7 @@ import {
   type ContextBoardPostCompletion
 } from "./context-board-runtime.js";
 import { ContextBoardPublicationService } from "./context-board-publication.js";
+import { IssueGraphCatalogService } from "./issue-graph-catalog.js";
 import {
   ContextQuotaExceededError,
   ContextQuotaInvariantError,
@@ -92,6 +100,7 @@ import { buildTaskTypeCatalog } from "./task-type-catalog.js";
 const MAX_REQUEST_BYTES = 30 * 1024 * 1024;
 const MAX_CONTEXT_BOARD_ARTIFACT_BYTES = 20 * 1024 * 1024;
 const MAX_CONTEXT_QUERY_REQUEST_BYTES = 128 * 1024;
+const DEFAULT_ISSUE_GRAPH_REF = "main";
 const MAX_CONTEXT_OPERATOR_RETRY_TASKS = 25;
 const WORKER_LEASE_MS = 30 * 60 * 1000;
 const DEFAULT_CONTEXT_WORKER_LEASE_MS = 75 * 60 * 1000;
@@ -108,7 +117,8 @@ const CONTEXT_MODEL_TOPICS = new Set<string>([
   contextBoardTopics.pageRepair,
   contextBoardTopics.sourceChallenge,
   contextBoardTopics.taskEvaluation,
-  contextBoardTopics.gapRepair
+  contextBoardTopics.gapRepair,
+  contextBoardTopics.issueDerive
 ]);
 const RETRYABLE_WORKER_FAILURE_CATEGORIES = new Set([
   "api_transport",
@@ -155,6 +165,7 @@ export interface ApiServerConfig {
   readonly contextBoardPublicationTransaction?: BoardContextPublicationTransactionPort;
   readonly contextBoardReleaseSeedStore?: BoardContextReleaseSeedPort;
   readonly contextBoardPageIndexAttachmentTransaction?: BoardPageIndexAttachmentTransactionPort;
+  readonly issueGraphPublicationTransaction?: BoardIssueGraphPublicationTransactionPort;
   readonly contextQuotaService?: ContextQuotaService;
   /** Test/embedding override. Production uses the structured service logger. */
   readonly logger?: Logger;
@@ -405,6 +416,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const startedAt = nowIso();
   const contextStore: ContextEngineStore = config.contextStore ?? new MemoryContextEngineStore();
   const contextCatalog = new ContextCatalogService(contextStore);
+  const issueGraphCatalog = config.contextArtifactStore
+    ? new IssueGraphCatalogService(contextStore, config.contextArtifactStore)
+    : undefined;
   const contextBoardPublisher =
     config.contextArtifactStore && config.contextBoardPublicationTransaction
       ? new ContextBoardPublicationService(
@@ -832,6 +846,121 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     }
     if (url.pathname.startsWith("/context/")) {
       requireBoundPrincipal(principal, config);
+    }
+    if (request.method === "POST" && url.pathname === "/context/issues/build") {
+      requireTenantAdmin(principal);
+      const body = parseJsonObject(await readRawBody(request));
+      const repository = requiredRepositoryName(body.repository, "repository");
+      await requireRepositoryAccess(principal, repository);
+      const requestedGithubInstallationId =
+        body.githubInstallationId === undefined
+          ? undefined
+          : requiredPositiveInteger(body.githubInstallationId, "githubInstallationId");
+      const identity = config.sharedIdentityResolver
+        ? await config.sharedIdentityResolver.resolveRepository({
+            tenantId: principal.tenantId,
+            repository,
+            ...(requestedGithubInstallationId ? { githubInstallationId: requestedGithubInstallationId } : {})
+          })
+        : undefined;
+      if (config.sharedIdentityResolver && (!identity || identity.tenantId !== principal.tenantId)) {
+        throw notFound("repository context not found");
+      }
+      const githubInstallationId = identity?.githubInstallationId
+        ? requiredPositiveInteger(Number(identity.githubInstallationId), "resolved githubInstallationId")
+        : requestedGithubInstallationId;
+      if (config.sharedIdentityResolver && !githubInstallationId) throw notFound("repository context not found");
+      const buildRepository = identity?.repository ?? repository;
+      const ref = optionalString(body.ref) ?? identity?.defaultBranch ?? DEFAULT_ISSUE_GRAPH_REF;
+      const commitSha = optionalString(body.commitSha);
+      const requestKey = optionalString(body.requestKey) ?? randomUUID();
+      if (requestKey.length > 240) throw invalidRequest("requestKey must be at most 240 characters");
+      const derivationBudgetSeconds =
+        body.derivationBudgetSeconds === undefined
+          ? DEFAULT_DERIVATION_BUDGET_SECONDS
+          : requiredPositiveInteger(body.derivationBudgetSeconds, "derivationBudgetSeconds");
+      if (
+        derivationBudgetSeconds < MIN_DERIVATION_BUDGET_SECONDS ||
+        derivationBudgetSeconds > MAX_DERIVATION_BUDGET_SECONDS
+      ) {
+        throw invalidRequest(
+          `derivationBudgetSeconds must be between ${MIN_DERIVATION_BUDGET_SECONDS} and ${MAX_DERIVATION_BUDGET_SECONDS}`
+        );
+      }
+      const derivationTokenBudget =
+        body.derivationTokenBudget === undefined
+          ? DEFAULT_DERIVATION_TOKEN_BUDGET
+          : requiredPositiveInteger(body.derivationTokenBudget, "derivationTokenBudget");
+      if (derivationTokenBudget < MIN_DERIVATION_TOKEN_BUDGET || derivationTokenBudget > MAX_DERIVATION_TOKEN_BUDGET) {
+        throw invalidRequest(
+          `derivationTokenBudget must be between ${MIN_DERIVATION_TOKEN_BUDGET} and ${MAX_DERIVATION_TOKEN_BUDGET}`
+        );
+      }
+      let newlyReservedBuildId: string | undefined;
+      const admitted = await mutate(async () => {
+        await reconcileActiveContextBuildQuotas(config.contextQuotaService, intakeState.board, principal.tenantId);
+        const existing = intakeState.board.tasks.filter(
+          (task) =>
+            task.type === contextBoardTaskTypes.issueBuild &&
+            task.metadata.tenantId === principal.tenantId &&
+            task.metadata.requestKey === requestKey
+        );
+        if (existing.length > 1) throw new Error("issue graph request key resolves to multiple builds");
+        if (existing[0]) {
+          const refSequence = requiredPositiveInteger(existing[0].metadata.refSequence, "existing refSequence");
+          const replay = createIssueGraphBoardBuild(intakeState.board, {
+            tenantId: principal.tenantId,
+            repository: buildRepository,
+            ref,
+            refSequence,
+            requestKey,
+            ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
+            ...(githubInstallationId ? { githubInstallationId } : {}),
+            derivationBudgetSeconds,
+            derivationTokenBudget,
+            trigger: "manual",
+            now: nowIso()
+          });
+          return { outcome: "duplicate" as const, buildTaskId: replay.buildTaskId };
+        }
+        const refSequence = nextIssueGraphBoardRefSequence(intakeState.board, {
+          tenantId: principal.tenantId,
+          repository: buildRepository,
+          ref
+        });
+        const build = createIssueGraphBoardBuild(intakeState.board, {
+          tenantId: principal.tenantId,
+          repository: buildRepository,
+          ref,
+          refSequence,
+          requestKey,
+          ...(commitSha ? { commitSha: requiredGitSha(commitSha, "commitSha") } : {}),
+          ...(githubInstallationId ? { githubInstallationId } : {}),
+          derivationBudgetSeconds,
+          derivationTokenBudget,
+          trigger: "manual",
+          now: nowIso()
+        });
+        if (config.contextQuotaService) {
+          await config.contextQuotaService.admitBuild({ tenantId: principal.tenantId, buildId: build.buildTaskId });
+          newlyReservedBuildId = build.buildTaskId;
+        }
+        intakeState = { ...intakeState, board: build.state };
+        return { outcome: "created" as const, buildTaskId: build.buildTaskId };
+      });
+      if (!admitted) {
+        if (newlyReservedBuildId && config.contextQuotaService) {
+          await config.contextQuotaService
+            .completeBuild({ tenantId: principal.tenantId, buildId: newlyReservedBuildId })
+            .catch(() => undefined);
+        }
+        throw new ApiError(409, "conflict", "issue graph build admission raced another update");
+      }
+      json(response, admitted.outcome === "created" ? 202 : 200, {
+        build: publicContextBoardBuild(intakeState.board, admitted.buildTaskId),
+        duplicate: admitted.outcome === "duplicate"
+      });
+      return;
     }
     if (request.method === "POST" && url.pathname === "/context/build") {
       requireTenantAdmin(principal);
@@ -1294,6 +1423,97 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       json(response, 200, result);
       return;
     }
+    if (request.method === "GET" && url.pathname === "/context/issues") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
+      const query = optionalQuery(url, "q") ?? "";
+      if (query.length > 4_000) throw invalidRequest("q must be at most 4000 characters");
+      const limit = optionalBoundedQueryInteger(url, "limit", 25, 100);
+      const state = optionalQuery(url, "state");
+      if (state && state !== "active" && state !== "resolved") {
+        throw invalidRequest("state must be active or resolved");
+      }
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const current = await currentIssueGraph(principal, repository, ref);
+        const issues = searchIssueGraph(current.graph, query, 100)
+          .filter((issue) => !state || issue.state === state)
+          .slice(0, limit);
+        return { release: publicIssueGraphRelease(current.release), issues };
+      });
+      json(response, 200, result);
+      return;
+    }
+    const issueTraceId = contextIssueTraceRoute(url.pathname);
+    if (request.method === "GET" && issueTraceId) {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
+      const depth = optionalBoundedQueryInteger(url, "depth", 2, 4, 0);
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const current = await currentIssueGraph(principal, repository, ref);
+        let trace: ReturnType<typeof issueGraphTrace>;
+        try {
+          trace = issueGraphTrace(current.graph, issueTraceId, { depth });
+        } catch (error) {
+          if (error instanceof Error && error.message === "issue graph root issue was not found") {
+            throw notFound("issue not found");
+          }
+          throw error;
+        }
+        return { release: publicIssueGraphRelease(current.release), rootIssueId: issueTraceId, ...trace };
+      });
+      json(response, 200, result);
+      return;
+    }
+    const issueId = routeId(url.pathname, "/context/issues/");
+    if (request.method === "GET" && issueId) {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const current = await currentIssueGraph(principal, repository, ref);
+        const issue = current.graph.issues.find((candidate) => candidate.id === issueId);
+        if (!issue) throw notFound("issue not found");
+        const causalities = current.graph.causalities.filter(
+          (causality) =>
+            causality.subjectIssueId === issue.id ||
+            (causality.object.kind === "issue" && causality.object.id === issue.id)
+        );
+        return { release: publicIssueGraphRelease(current.release), issue, causalities };
+      });
+      json(response, 200, result);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/context/issue-graph") {
+      await config.contextQuotaService?.admitQuery({
+        tenantId: principal.tenantId,
+        requestId: quotaRequestId(request)
+      });
+      const repository = requiredRepositoryName(url.searchParams.get("repository"), "repository");
+      const ref = optionalQuery(url, "ref") ?? DEFAULT_ISSUE_GRAPH_REF;
+      const result = await resultAfterCredentialRevalidation(request, principal, async () => {
+        const current = await currentIssueGraph(principal, repository, ref);
+        return {
+          release: publicIssueGraphRelease(current.release),
+          summary: current.graph.summary,
+          coverage: current.graph.coverage,
+          issues: current.graph.issues,
+          causalities: current.graph.causalities
+        };
+      });
+      json(response, 200, result);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/context/releases") {
       await config.contextQuotaService?.admitQuery({
         tenantId: principal.tenantId,
@@ -1389,7 +1609,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const builds = intakeState.board.tasks
         .filter(
           (task) =>
-            task.type === contextBoardTaskTypes.build &&
+            isContextBuildTaskType(task.type) &&
             task.metadata.tenantId === principal.tenantId &&
             typeof task.metadata.repository === "string" &&
             (!allowed || allowed.has(task.metadata.repository))
@@ -1679,6 +1899,103 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       });
       return;
     }
+    if (request.method === "POST" && url.pathname === "/internal/context/board/issues/publish") {
+      const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
+      const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
+      if (lease.task.type !== contextBoardTaskTypes.issuePublication) {
+        throw invalidRequest("leased task is not an issue graph publication");
+      }
+      if (!config.contextArtifactStore) throw new Error("context artifact storage is not configured");
+      const graphArtifact = parseContextArtifactRef(body.graphArtifact);
+      assertBoardArtifactScope(lease.task, lease.buildTaskId, graphArtifact);
+      if (graphArtifact.contentType !== "application/json" || graphArtifact.bytes > 8 * 1024 * 1024) {
+        throw invalidRequest("issue graph artifact must be bounded JSON");
+      }
+      const dependency = contextBoardDependencyResults(intakeState.board, lease.task.id).find(
+        (candidate) => candidate.taskType === contextBoardTaskTypes.issueDerive
+      );
+      const dependencyArtifact = dependency ? parseContextArtifactRef(dependency.result?.outputArtifact) : undefined;
+      if (!dependencyArtifact || !sameArtifactIdentity(dependencyArtifact, graphArtifact)) {
+        throw invalidRequest("issue graph publication artifact is not the completed derivation dependency");
+      }
+      const bytes = await config.contextArtifactStore.get(graphArtifact);
+      let value: unknown;
+      try {
+        value = JSON.parse(Buffer.from(bytes).toString("utf8"));
+      } catch {
+        throw invalidRequest("issue graph artifact is not valid JSON");
+      }
+      let graph: ReturnType<typeof parseIssueGraphArtifact>;
+      try {
+        graph = parseIssueGraphArtifact(value);
+      } catch (error) {
+        throw invalidRequest(error instanceof Error ? error.message : "issue graph artifact is invalid");
+      }
+      const repository = requiredRepositoryName(lease.task.metadata.repository, "repository");
+      const ref = requiredString(lease.task.metadata.ref, "issue graph ref");
+      const refSequence = requiredPositiveInteger(lease.task.metadata.refSequence, "issue graph refSequence");
+      const commitSha = requiredGitSha(lease.task.metadata.commitSha, "issue graph commitSha");
+      if (
+        graph.tenantId !== principal.tenantId ||
+        graph.repository !== repository ||
+        graph.ref !== ref ||
+        graph.refSequence !== refSequence ||
+        graph.commitSha !== commitSha
+      ) {
+        throw invalidRequest("issue graph artifact does not match the leased build scope");
+      }
+      let release: IssueGraphRelease;
+      try {
+        const candidate = {
+          id: graph.id,
+          tenantId: principal.tenantId,
+          repository,
+          ref,
+          refSequence,
+          commitSha,
+          buildId: lease.buildTaskId,
+          contentDigest: graph.contentDigest,
+          artifact: graphArtifact,
+          issueCount: graph.issues.length,
+          causalityCount: graph.causalities.length,
+          historyComplete: graph.coverage.complete,
+          publishedAt: graph.generatedAt
+        } satisfies IssueGraphRelease;
+        release = config.issueGraphPublicationTransaction
+          ? await config.issueGraphPublicationTransaction.publishIssueGraphAtomically({
+              release: candidate,
+              lease: {
+                taskId: lease.task.id,
+                messageId: requiredString(body.messageId, "messageId"),
+                attempt: lease.message.payload.attempt,
+                leaseId: requiredString(body.leaseId, "leaseId"),
+                writeFenceToken: requiredString(body.writeFenceToken, "writeFenceToken"),
+                leaseExpiresAt: requiredString(lease.message.leaseExpiresAt, "leaseExpiresAt")
+              }
+            })
+          : await contextStore.publishIssueGraphRelease(candidate);
+      } catch (error) {
+        const message = error instanceof Error ? error.message.toLowerCase() : "";
+        if (message.includes("issue graph") && (message.includes("stale") || message.includes("no longer"))) {
+          throw new ApiError(
+            409,
+            "stale_issue_graph_release",
+            "the issue graph publication lease is no longer current"
+          );
+        }
+        throw error;
+      }
+      json(response, 200, {
+        version: 1,
+        outputArtifact: graphArtifact,
+        releaseId: release.id,
+        contentDigest: release.contentDigest,
+        refSequence: release.refSequence,
+        commitSha: release.commitSha,
+        publishedAt: release.publishedAt
+      });
+      return;
+    }
     if (request.method === "POST" && url.pathname === "/internal/context/board/pageindex/attach") {
       const body = parseJsonObject(await readRawBody(request, MAX_REQUEST_BYTES));
       const lease = await requireLeasedContextBoardTask(principal.tenantId, body);
@@ -1855,7 +2172,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function acceptParsedWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
     const identity = await resolveWebhookIdentity(webhook);
     const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
-    let newlyReservedBuildId: string | undefined;
+    let newlyReservedBuildIds: readonly string[] = [];
     const result = await mutate(async () => {
       const accepted = ingestGitHubWebhook(intakeState, webhook, {
         deliveryId,
@@ -1866,7 +2183,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       intakeState = accepted.state;
       const createdTaskIds = [...accepted.createdTaskIds];
       const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity);
-      newlyReservedBuildId = context.reservedBuildId;
+      newlyReservedBuildIds = context.reservedBuildIds;
       createdTaskIds.push(...context.createdTaskIds);
       return {
         outcome:
@@ -1879,10 +2196,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         supersededBuildTaskIds: context.supersededBuildTaskIds
       };
     }, deliveryId);
-    if (!result && newlyReservedBuildId && config.contextQuotaService) {
-      await config.contextQuotaService
-        .completeBuild({ tenantId, buildId: newlyReservedBuildId })
-        .catch(() => undefined);
+    if (!result && config.contextQuotaService) {
+      await Promise.all(
+        newlyReservedBuildIds.map((buildId) =>
+          config.contextQuotaService!.completeBuild({ tenantId, buildId }).catch(() => undefined)
+        )
+      );
     }
     if (result) {
       await settleSupersededContextBuildQuotas(
@@ -1899,20 +2218,22 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function acceptParsedContextWebhook(webhook: ParsedGitHubWebhook, deliveryId: string) {
     const identity = await resolveWebhookIdentity(webhook);
     const tenantId = identity?.tenantId ?? config.tenantId ?? "default";
-    let newlyReservedBuildId: string | undefined;
+    let newlyReservedBuildIds: readonly string[] = [];
     const result = await mutate(async () => {
       const context = await admitContextWebhook(webhook, deliveryId, tenantId, identity);
-      newlyReservedBuildId = context.reservedBuildId;
+      newlyReservedBuildIds = context.reservedBuildIds;
       return {
         outcome: context.outcome,
         createdTaskIds: context.createdTaskIds,
         supersededBuildTaskIds: context.supersededBuildTaskIds
       };
     }, deliveryId);
-    if (!result && newlyReservedBuildId && config.contextQuotaService) {
-      await config.contextQuotaService
-        .completeBuild({ tenantId, buildId: newlyReservedBuildId })
-        .catch(() => undefined);
+    if (!result && config.contextQuotaService) {
+      await Promise.all(
+        newlyReservedBuildIds.map((buildId) =>
+          config.contextQuotaService!.completeBuild({ tenantId, buildId }).catch(() => undefined)
+        )
+      );
     }
     if (result) {
       await settleSupersededContextBuildQuotas(
@@ -1935,10 +2256,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     outcome: "created" | "duplicate" | "ignored";
     createdTaskIds: TaskId[];
     supersededBuildTaskIds: readonly TaskId[];
-    reservedBuildId?: string;
+    reservedBuildIds: readonly string[];
   }> {
     if (!isContextTrigger(webhook.event)) {
-      return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [] };
+      return { outcome: "ignored", createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
     }
     await reconcileContextQuotas(config.contextQuotaService, intakeState.board, tenantId);
     const repository = identity?.repository ?? webhook.repository;
@@ -1965,21 +2286,62 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     });
     if (admission.outcome !== "created") {
       intakeState = { ...intakeState, board: admission.state };
-      return { outcome: admission.outcome, createdTaskIds: [], supersededBuildTaskIds: [] };
+      return { outcome: admission.outcome, createdTaskIds: [], supersededBuildTaskIds: [], reservedBuildIds: [] };
     }
+    let nextBoard = admission.state;
+    const defaultBranch = identity?.defaultBranch ?? webhook.repositoryDefaultBranch;
+    const issueBuild =
+      webhook.event.type === "push" && defaultBranch && ref === defaultBranch
+        ? createIssueGraphBoardBuild(nextBoard, {
+            tenantId,
+            repository,
+            ref,
+            refSequence: nextIssueGraphBoardRefSequence(nextBoard, { tenantId, repository, ref }),
+            requestKey: `github:issue-graph:${repository}:${ref}:${webhook.event.headSha}:${deliveryId}`,
+            commitSha: webhook.event.headSha,
+            ...(webhook.installationId ? { githubInstallationId: webhook.installationId } : {}),
+            derivationBudgetSeconds: DEFAULT_DERIVATION_BUDGET_SECONDS,
+            derivationTokenBudget: DEFAULT_DERIVATION_TOKEN_BUDGET,
+            trigger: "push",
+            now: nowIso()
+          })
+        : undefined;
+    if (issueBuild) nextBoard = issueBuild.state;
+    const reservedBuildIds: string[] = [];
     if (config.contextQuotaService) {
-      await config.contextQuotaService.admitBuild({
-        tenantId,
-        buildId: admission.build.buildTaskId,
-        replacesBuildIds: admission.supersededBuildTaskIds
-      });
+      try {
+        await config.contextQuotaService.admitBuild({
+          tenantId,
+          buildId: admission.build.buildTaskId,
+          replacesBuildIds: admission.supersededBuildTaskIds
+        });
+        reservedBuildIds.push(admission.build.buildTaskId);
+        if (issueBuild) {
+          await config.contextQuotaService.admitBuild({ tenantId, buildId: issueBuild.buildTaskId });
+          reservedBuildIds.push(issueBuild.buildTaskId);
+        }
+      } catch (error) {
+        await Promise.all(
+          reservedBuildIds.map((buildId) =>
+            config.contextQuotaService!.completeBuild({ tenantId, buildId }).catch(() => undefined)
+          )
+        );
+        throw error;
+      }
     }
-    intakeState = { ...intakeState, board: admission.state };
+    intakeState = { ...intakeState, board: nextBoard };
     return {
       outcome: "created",
-      createdTaskIds: [admission.build.buildTaskId, admission.build.graphTaskId, admission.build.snapshotTaskId],
+      createdTaskIds: [
+        admission.build.buildTaskId,
+        admission.build.graphTaskId,
+        admission.build.snapshotTaskId,
+        ...(issueBuild
+          ? [issueBuild.buildTaskId, issueBuild.snapshotTaskId, issueBuild.deriveTaskId, issueBuild.publicationTaskId]
+          : [])
+      ],
       supersededBuildTaskIds: admission.supersededBuildTaskIds,
-      ...(config.contextQuotaService ? { reservedBuildId: admission.build.buildTaskId } : {})
+      reservedBuildIds
     };
   }
 
@@ -2315,6 +2677,20 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   async function requireRepositoryAccess(principal: Principal, repository: string): Promise<void> {
     if (isTenantAdmin(principal)) return;
     if (!(await permittedRepositories(principal)).includes(repository)) throw notFound("repository context not found");
+  }
+
+  async function currentIssueGraph(principal: Principal, repository: string, ref: string) {
+    if (!issueGraphCatalog) throw new ApiError(503, "issue_graph_unavailable", "issue graph storage is not configured");
+    const current = await issueGraphCatalog.current({
+      tenantId: principal.tenantId,
+      repository,
+      ref,
+      principalId: principal.principalId,
+      tenantAdmin: isTenantAdmin(principal)
+    });
+    // Authorization and existence intentionally collapse to the same response.
+    if (!current) throw notFound("issue graph not found");
+    return current;
   }
 
   function isTenantAdmin(principal: Principal): boolean {
@@ -3113,7 +3489,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const build = findTask(intakeState.board, entityId<"task">(buildTaskId));
     if (
       !build ||
-      build.type !== contextBoardTaskTypes.build ||
+      !isContextBuildTaskType(build.type) ||
       isTerminalTaskStatus(build.status) ||
       build.metadata.tenantId !== tenantId ||
       build.metadata.repository !== task.metadata.repository ||
@@ -3161,6 +3537,47 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
 function optionalQuery(url: URL, name: string): string | undefined {
   const value = url.searchParams.get(name)?.trim();
   return value ? value : undefined;
+}
+
+function optionalBoundedQueryInteger(url: URL, name: string, fallback: number, maximum: number, minimum = 1): number {
+  const value = optionalQuery(url, name);
+  if (!value) return fallback;
+  if (!/^\d+$/.test(value)) throw invalidRequest(`${name} must be an integer`);
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw invalidRequest(`${name} must be between ${minimum} and ${maximum}`);
+  }
+  return parsed;
+}
+
+function contextIssueTraceRoute(pathname: string): string | undefined {
+  const match = /^\/context\/issues\/([^/]+)\/trace$/.exec(pathname);
+  if (!match?.[1]) return undefined;
+  try {
+    return decodeURIComponent(match[1]);
+  } catch {
+    return undefined;
+  }
+}
+
+function isContextBuildTaskType(type: string): boolean {
+  return type === contextBoardTaskTypes.build || type === contextBoardTaskTypes.issueBuild;
+}
+
+function publicIssueGraphRelease(release: IssueGraphRelease) {
+  return {
+    id: release.id,
+    repository: release.repository,
+    ref: release.ref,
+    refSequence: release.refSequence,
+    commitSha: release.commitSha,
+    buildId: release.buildId,
+    contentDigest: release.contentDigest,
+    issueCount: release.issueCount,
+    causalityCount: release.causalityCount,
+    historyComplete: release.historyComplete,
+    publishedAt: release.publishedAt
+  };
 }
 
 async function authenticatedPrincipal(
@@ -3306,7 +3723,7 @@ function requireIssuedTokenScope(principal: Principal, required: ContextScope): 
 function requiredScope(pathname: string, method: string): ContextScope | "internal-only" {
   if (method === "POST") {
     if (pathname === "/mcp" || pathname === "/context/search") return "context:query";
-    if (pathname === "/context/build") return "context:build";
+    if (pathname === "/context/build" || pathname === "/context/issues/build") return "context:build";
     if (contextBuildRetryRoute(pathname) || contextTaskRetryRoute(pathname)) return "context:admin";
     return "internal-only";
   }
@@ -3321,7 +3738,10 @@ function requiredScope(pathname: string, method: string): ContextScope | "intern
   return pathname === "/context/releases" ||
     pathname === "/context/list" ||
     pathname === "/context/read" ||
-    pathname === "/context/diff"
+    pathname === "/context/diff" ||
+    pathname === "/context/issues" ||
+    pathname === "/context/issue-graph" ||
+    pathname.startsWith("/context/issues/")
     ? "context:read"
     : "internal-only";
 }
@@ -3351,11 +3771,12 @@ function contextCredentialTenantId(value: string | undefined, config: ApiServerC
 
 function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
   const task = findTask(state, buildTaskId);
-  if (!task || task.type !== contextBoardTaskTypes.build) {
+  if (!task || !isContextBuildTaskType(task.type)) {
     throw new Error("admitted context board build disappeared");
   }
   return {
     id: task.id,
+    buildKind: task.type === contextBoardTaskTypes.issueBuild ? "issue_graph" : "documentation",
     status: task.status,
     tenantId: requiredString(task.metadata.tenantId, "context build tenantId"),
     repository: requiredRepositoryName(task.metadata.repository, "context build repository"),
@@ -3826,7 +4247,7 @@ function terminateContextBuild(
 
 function contextBoardBuildForPrincipal(state: BoardState, tenantId: string, buildId: string): BoardTask | undefined {
   const task = state.tasks.find((candidate) => candidate.id === buildId);
-  return task?.type === contextBoardTaskTypes.build && task.metadata.tenantId === tenantId ? task : undefined;
+  return task && isContextBuildTaskType(task.type) && task.metadata.tenantId === tenantId ? task : undefined;
 }
 
 function contextWorkerCompletionAttestation(state: BoardState, build: BoardTask) {
@@ -3940,7 +4361,7 @@ function assertContextOperatorRetrySafety(state: BoardState, build: BoardTask, t
   const pageIndex = buildTasks.find((task) => task.type === contextBoardTaskTypes.pageIndex);
   const hasNewerRefSequence = state.tasks.some(
     (task) =>
-      task.type === contextBoardTaskTypes.build &&
+      task.type === build.type &&
       task.id !== build.id &&
       task.metadata.tenantId === build.metadata.tenantId &&
       task.metadata.repository === build.metadata.repository &&
@@ -4217,6 +4638,11 @@ function contextBoardArtifactKind(taskType: string): ContextArtifactKind {
       return "context-release";
     case contextBoardTaskTypes.pageIndex:
       return "pageindex-tree";
+    case contextBoardTaskTypes.issueSnapshot:
+      return "issue-history";
+    case contextBoardTaskTypes.issueDerive:
+    case contextBoardTaskTypes.issuePublication:
+      return "issue-graph";
     default:
       throw new Error(`context board task ${taskType} does not produce an artifact`);
   }
@@ -4617,7 +5043,12 @@ const METRICS_ROUTES = new Set([
   "/overview",
   "/events",
   "/context/build",
+  "/context/issues/build",
   "/context/search",
+  "/context/issues",
+  "/context/issues/:id",
+  "/context/issues/:id/trace",
+  "/context/issue-graph",
   "/context/releases",
   "/context/list",
   "/context/read",
@@ -4630,6 +5061,7 @@ const METRICS_ROUTES = new Set([
   "/internal/context/builds/:id/cancel",
   "/internal/context/board/artifacts",
   "/internal/context/board/publish",
+  "/internal/context/board/issues/publish",
   "/internal/context/board/pageindex/attach",
   "/internal/context/board/artifacts/read",
   "/internal/worker/claim",
@@ -4641,6 +5073,9 @@ const METRICS_ROUTES = new Set([
 
 function metricsRoute(pathname: string): string {
   if (pathname === "/context/builds") return "/context/builds";
+  if (pathname === "/context/issues/build") return "/context/issues/build";
+  if (contextIssueTraceRoute(pathname)) return "/context/issues/:id/trace";
+  if (routeId(pathname, "/context/issues/")) return "/context/issues/:id";
   if (pathname.startsWith("/context/builds/") && pathname.endsWith("/progress")) return "/context/builds/:id/progress";
   if (contextBuildRetryRoute(pathname)) return "/context/builds/:id/retry";
   if (contextTaskRetryRoute(pathname)) return "/context/builds/:id/tasks/:taskId/retry";
@@ -4959,9 +5394,7 @@ async function reconcileActiveContextBuildQuotas(
 ): Promise<void> {
   if (!quota) return;
   const activeBuildIds = state.tasks.flatMap((task) =>
-    task.type === contextBoardTaskTypes.build &&
-    task.metadata.tenantId === tenantId &&
-    !isTerminalTaskStatus(task.status)
+    isContextBuildTaskType(task.type) && task.metadata.tenantId === tenantId && !isTerminalTaskStatus(task.status)
       ? [task.id]
       : []
   );
@@ -4976,11 +5409,7 @@ async function reconcileContextQuotas(
   if (!quota) return;
   await reconcileActiveContextBuildQuotas(quota, state, tenantId);
   for (const task of state.tasks) {
-    if (
-      task.type === contextBoardTaskTypes.build &&
-      task.metadata.tenantId === tenantId &&
-      isTerminalTaskStatus(task.status)
-    ) {
+    if (isContextBuildTaskType(task.type) && task.metadata.tenantId === tenantId && isTerminalTaskStatus(task.status)) {
       await settleTerminalReconciledModelQuotas(quota, state, tenantId, task.id);
     }
   }

@@ -34,7 +34,11 @@ export const contextBoardTaskTypes = {
   gapRepair: "repair-context-gaps",
   certification: "certify-context-release",
   publication: "publish-context-release",
-  pageIndex: "index-context-release"
+  pageIndex: "index-context-release",
+  issueBuild: "build-context-issues",
+  issueSnapshot: "snapshot-context-issue-history",
+  issueDerive: "derive-context-issues",
+  issuePublication: "publish-context-issues"
 } as const;
 
 export type ContextBoardTaskType = (typeof contextBoardTaskTypes)[keyof typeof contextBoardTaskTypes];
@@ -52,7 +56,10 @@ export const contextBoardTopics = {
   gapRepair: "run-context-gap-repair",
   certification: "run-context-certification",
   publication: "run-context-publication",
-  pageIndex: "run-context-pageindex"
+  pageIndex: "run-context-pageindex",
+  issueSnapshot: "run-context-issue-history",
+  issueDerive: "run-context-issue-derive",
+  issuePublication: "run-context-issue-publication"
 } as const;
 
 export type ContextBoardTopic = (typeof contextBoardTopics)[keyof typeof contextBoardTopics];
@@ -161,6 +168,33 @@ export const contextBoardTaskTypeDefinitions: readonly TaskTypeDefinition[] = [
     "context_worker",
     "Builds the self-hosted PageIndex tree for one published release.",
     contextBoardTopics.pageIndex
+  ),
+  definition(
+    contextBoardTaskTypes.issueBuild,
+    "aggregate",
+    "system",
+    "Coordinates one immutable issue and causality graph release."
+  ),
+  definition(
+    contextBoardTaskTypes.issueSnapshot,
+    "dispatchable",
+    "context_worker",
+    "Captures bounded commit history without repository file contents.",
+    contextBoardTopics.issueSnapshot
+  ),
+  definition(
+    contextBoardTaskTypes.issueDerive,
+    "dispatchable",
+    "context_agent",
+    "Derives issues and explicit causalities in one read-only agent run.",
+    contextBoardTopics.issueDerive
+  ),
+  definition(
+    contextBoardTaskTypes.issuePublication,
+    "dispatchable",
+    "context_worker",
+    "Publishes an immutable issue graph behind a ref-sequence fence.",
+    contextBoardTopics.issuePublication
   )
 ];
 
@@ -204,6 +238,14 @@ export interface ContextBoardBuild {
   readonly buildTaskId: TaskId;
   readonly graphTaskId: TaskId;
   readonly snapshotTaskId: TaskId;
+}
+
+export interface IssueGraphBoardBuild {
+  readonly state: BoardState;
+  readonly buildTaskId: TaskId;
+  readonly snapshotTaskId: TaskId;
+  readonly deriveTaskId: TaskId;
+  readonly publicationTaskId: TaskId;
 }
 
 export interface ContextResearchWork {
@@ -299,6 +341,30 @@ export type ContextBoardTaskResult =
       readonly taskType: typeof contextBoardTaskTypes.publication | typeof contextBoardTaskTypes.pageIndex;
       readonly outputArtifact: ContextArtifactRef;
       readonly releaseId: string;
+    }
+  | {
+      readonly version: 1;
+      readonly taskType: typeof contextBoardTaskTypes.issueSnapshot;
+      readonly outputArtifact: ContextArtifactRef;
+      readonly commitSha: string;
+      readonly observedCommitCount: number;
+      readonly historyComplete: boolean;
+    }
+  | {
+      readonly version: 1;
+      readonly taskType: typeof contextBoardTaskTypes.issueDerive;
+      readonly outputArtifact: ContextArtifactRef;
+      readonly releaseId: string;
+      readonly contentDigest: string;
+      readonly issueCount: number;
+      readonly causalityCount: number;
+      readonly historyComplete: boolean;
+    }
+  | {
+      readonly version: 1;
+      readonly taskType: typeof contextBoardTaskTypes.issuePublication;
+      readonly outputArtifact: ContextArtifactRef;
+      readonly releaseId: string;
     };
 
 /**
@@ -333,6 +399,17 @@ export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, v
       const commitSha = requiredBoundedString(result.commitSha, "commitSha", 40).toLowerCase();
       if (!isFullCommitSha(commitSha)) throw new Error("snapshot commitSha must be a full Git commit SHA");
       return { ...base, taskType: task.type, commitSha };
+    }
+    case contextBoardTaskTypes.issueSnapshot: {
+      const commitSha = requiredBoundedString(result.commitSha, "commitSha", 40).toLowerCase();
+      if (!isFullCommitSha(commitSha)) throw new Error("issue history commitSha must be a full Git commit SHA");
+      return {
+        ...base,
+        taskType: task.type,
+        commitSha,
+        observedCommitCount: requiredCount(result.observedCommitCount, "observedCommitCount"),
+        historyComplete: requiredBoolean(result.historyComplete, "historyComplete")
+      };
     }
     case contextBoardTaskTypes.pageWrite:
     case contextBoardTaskTypes.pageRepair:
@@ -427,10 +504,21 @@ export function parseContextBoardTaskResult(state: BoardState, taskId: TaskId, v
       };
     case contextBoardTaskTypes.publication:
     case contextBoardTaskTypes.pageIndex:
+    case contextBoardTaskTypes.issuePublication:
       return {
         ...base,
         taskType: task.type,
         releaseId: requiredBoundedString(result.releaseId, "releaseId", 240)
+      };
+    case contextBoardTaskTypes.issueDerive:
+      return {
+        ...base,
+        taskType: task.type,
+        releaseId: requiredBoundedString(result.releaseId, "releaseId", 240),
+        contentDigest: requiredDigest(result.contentDigest, "contentDigest"),
+        issueCount: requiredCount(result.issueCount, "issueCount"),
+        causalityCount: requiredCount(result.causalityCount, "causalityCount"),
+        historyComplete: requiredBoolean(result.historyComplete, "historyComplete")
       };
     default:
       throw new Error(`context task type ${task.type} does not produce a worker result`);
@@ -546,6 +634,93 @@ export function createContextBoardBuild(
   return { state: reduceBoard(next, now), buildTaskId, graphTaskId, snapshotTaskId };
 }
 
+/**
+ * Creates the deliberately narrow issue sidecar. Its topology is fixed: one
+ * deterministic history capture, one agentic derivation, and one publication.
+ * No planner, critic, per-issue tasks, or graph-shaped Board fan-out is created.
+ */
+export function createIssueGraphBoardBuild(
+  state: BoardState,
+  input: ContextBuildScope & { readonly now: string }
+): IssueGraphBoardBuild {
+  const scope = normalizeScope(input);
+  const now = normalizeIsoTime(input.now);
+  const buildTaskId = taskId("context-issue-build", {
+    tenantId: scope.tenantId,
+    requestKey: scope.requestKey
+  });
+  const snapshotTaskId = taskId("context-issue-history", { buildTaskId });
+  const deriveTaskId = taskId("context-issue-derive", { buildTaskId });
+  const publicationTaskId = taskId("context-issue-publication", { buildTaskId });
+  const scoped = scopeMetadata(scope, buildTaskId);
+  const existing = findTask(state, buildTaskId);
+  if (existing) {
+    if (
+      existing.type !== contextBoardTaskTypes.issueBuild ||
+      existing.metadata.tenantId !== scope.tenantId ||
+      existing.metadata.repository !== scope.repository ||
+      existing.metadata.ref !== scope.ref ||
+      existing.metadata.refSequence !== scope.refSequence ||
+      existing.metadata.requestKey !== scope.requestKey ||
+      existing.metadata.commitSha !== scope.commitSha ||
+      existing.metadata.githubInstallationId !== scope.githubInstallationId
+    ) {
+      throw new Error("issue graph build request key is already bound to a different scope");
+    }
+  }
+
+  let next = createTask(state, {
+    id: buildTaskId,
+    type: contextBoardTaskTypes.issueBuild,
+    title: `Build issue graph for ${scope.repository}@${scope.ref}`,
+    role: "system",
+    dedupeKey: `context-issues:${scope.tenantId}:${scope.requestKey}`,
+    kind: "aggregate",
+    now,
+    metadata: scoped,
+    blocksParentCompletion: false
+  });
+  next = createTask(next, {
+    id: snapshotTaskId,
+    type: contextBoardTaskTypes.issueSnapshot,
+    title: `Snapshot commit history for ${scope.repository}@${scope.ref}`,
+    role: "context_worker",
+    dedupeKey: `context-issues:${buildTaskId}:history`,
+    kind: "dispatchable",
+    topic: contextBoardTopics.issueSnapshot,
+    parentTaskId: buildTaskId,
+    now,
+    metadata: scoped
+  });
+  next = createTask(next, {
+    id: deriveTaskId,
+    type: contextBoardTaskTypes.issueDerive,
+    title: `Derive issues and causalities for ${scope.repository}@${scope.ref}`,
+    role: "context_agent",
+    dedupeKey: `context-issues:${buildTaskId}:derive`,
+    kind: "dispatchable",
+    topic: contextBoardTopics.issueDerive,
+    parentTaskId: buildTaskId,
+    dependencies: [blocks(deriveTaskId, snapshotTaskId)],
+    now,
+    metadata: scoped
+  });
+  next = createTask(next, {
+    id: publicationTaskId,
+    type: contextBoardTaskTypes.issuePublication,
+    title: `Publish issue graph for ${scope.repository}@${scope.ref}`,
+    role: "context_worker",
+    dedupeKey: `context-issues:${buildTaskId}:publish`,
+    kind: "dispatchable",
+    topic: contextBoardTopics.issuePublication,
+    parentTaskId: buildTaskId,
+    dependencies: [blocks(publicationTaskId, deriveTaskId)],
+    now,
+    metadata: scoped
+  });
+  return { state: reduceBoard(next, now), buildTaskId, snapshotTaskId, deriveTaskId, publicationTaskId };
+}
+
 export function nextContextBoardRefSequence(
   state: BoardState,
   input: { readonly tenantId: string; readonly repository: string; readonly ref: string }
@@ -563,6 +738,26 @@ export function nextContextBoardRefSequence(
     .filter((value): value is number => Number.isSafeInteger(value) && Number(value) > 0);
   const next = Math.max(0, ...sequences) + 1;
   if (!Number.isSafeInteger(next)) throw new Error("context board ref sequence exceeds the supported range");
+  return next;
+}
+
+export function nextIssueGraphBoardRefSequence(
+  state: BoardState,
+  input: { readonly tenantId: string; readonly repository: string; readonly ref: string }
+): number {
+  const repository = normalizeRepository(input.repository);
+  const sequences = state.tasks
+    .filter(
+      (task) =>
+        task.type === contextBoardTaskTypes.issueBuild &&
+        task.metadata.tenantId === input.tenantId &&
+        task.metadata.repository === repository &&
+        task.metadata.ref === input.ref
+    )
+    .map((task) => task.metadata.refSequence)
+    .filter((value): value is number => Number.isSafeInteger(value) && Number(value) > 0);
+  const next = Math.max(0, ...sequences) + 1;
+  if (!Number.isSafeInteger(next)) throw new Error("issue graph ref sequence exceeds the supported range");
   return next;
 }
 
@@ -1522,7 +1717,11 @@ function linkRequiredTask(state: BoardState, taskId: TaskId, dependsOnTaskId: Ta
 
 function requireContextBuild(state: BoardState, id: TaskId) {
   const task = findTask(state, id);
-  if (!task || task.type !== contextBoardTaskTypes.build || task.kind !== "aggregate") {
+  if (
+    !task ||
+    (task.type !== contextBoardTaskTypes.build && task.type !== contextBoardTaskTypes.issueBuild) ||
+    task.kind !== "aggregate"
+  ) {
     throw new Error("context build task not found");
   }
   return task;
@@ -1779,6 +1978,11 @@ function requiredDigest(value: unknown, name: string): string {
 function requiredCount(value: unknown, name: string): number {
   if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${name} must be a non-negative integer`);
   return Number(value);
+}
+
+function requiredBoolean(value: unknown, name: string): boolean {
+  if (typeof value !== "boolean") throw new Error(`${name} must be a boolean`);
+  return value;
 }
 
 function requiredEnum<const T extends string>(value: unknown, name: string, allowed: readonly T[]): T {

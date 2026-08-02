@@ -5,6 +5,7 @@ import { ContextDatabase } from "./context/database.js";
 import { PostgresKnowledgeRepository } from "./context/knowledge-repository.js";
 import { PostgresProjectionRepository } from "./context/projection-repository.js";
 import { PostgresContextQueryRepository } from "./context/query-repository.js";
+import { PostgresIssueGraphRepository } from "./context/issue-graph-repository.js";
 import { PostgresContextEngineStore } from "./context/store.js";
 
 test("latest published generation and projector statuses use one database round trip", async () => {
@@ -42,6 +43,198 @@ test("latest published generation and projector statuses use one database round 
   assert.equal(calls.length, 1);
   assert.match(calls[0]!.sql, /jsonb_object_agg/);
   assert.deepEqual(generation?.projectorStatuses, { lexical: "ready", hierarchy: "ready" });
+});
+
+test("authorized current issue graph lookup is one ACL-aware metadata query", async () => {
+  const calls: { readonly sql: string; readonly values: readonly unknown[]; readonly operation: string }[] = [];
+  const database = {
+    async queryAs(_role: string, _scope: unknown, sql: string, values: readonly unknown[], operation: string) {
+      calls.push({ sql, values, operation });
+      return { rows: [] };
+    }
+  } as unknown as ContextDatabase;
+
+  const release = await new PostgresIssueGraphRepository(database).currentAuthorizedIssueGraphRelease(
+    "tenant-1",
+    "ACME/WIDGETS",
+    "main",
+    "user:reader@example.com"
+  );
+
+  assert.equal(release, undefined);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.operation, "issue-graph.current-authorized");
+  assert.match(calls[0]!.sql, /current_issue_graph_releases/);
+  assert.match(calls[0]!.sql, /exists \(\s*select 1 from jina_context\.current_repository_acl/);
+  assert.doesNotMatch(calls[0]!.sql, /issues|causalities|projector|outbox/);
+  assert.deepEqual(calls[0]!.values, ["tenant-1", "acme/widgets", "main", "user:reader@example.com"]);
+});
+
+test("issue graph publication has constant SQL work regardless of graph cardinality", async () => {
+  const statements: string[] = [];
+  const client = {
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes("where release_id=$1")) return { rows: [] };
+      if (sql.includes("current_issue_graph_releases") && sql.includes("for update")) return { rows: [] };
+      return { rows: [] };
+    }
+  };
+  const database = {
+    async transactionAs(
+      role: string,
+      scope: unknown,
+      operation: (value: typeof client) => Promise<unknown>,
+      databaseOperation: string
+    ) {
+      assert.equal(role, "jina_context_issue_publish");
+      assert.deepEqual(scope, { tenantIds: ["tenant-1"] });
+      assert.equal(databaseOperation, "issue-graph.publish");
+      return operation(client);
+    }
+  } as unknown as ContextDatabase;
+  const artifact = {
+    uri: "gs://context/context-v2/tenants/tenant-1/repositories/acme/widgets/builds/build-1/issue-graph/release.json",
+    key: "context-v2/tenants/tenant-1/repositories/acme/widgets/builds/build-1/issue-graph/release.json",
+    contentType: "application/json",
+    bytes: 8_000_000,
+    sha256: "b".repeat(64)
+  };
+
+  await new PostgresIssueGraphRepository(database).publishIssueGraphRelease({
+    id: `cir_${"a".repeat(32)}`,
+    tenantId: "tenant-1",
+    repository: "acme/widgets",
+    ref: "main",
+    refSequence: 1,
+    commitSha: "c".repeat(40),
+    buildId: "build-1",
+    contentDigest: "d".repeat(64),
+    artifact,
+    issueCount: 2_000,
+    causalityCount: 5_000,
+    historyComplete: true,
+    publishedAt: "2026-08-01T00:00:00.000Z"
+  });
+
+  assert.equal(statements.length, 6);
+  assert.equal(statements.filter((sql) => sql.includes("insert into jina_context.repositories")).length, 1);
+  assert.equal(statements.filter((sql) => sql.includes("insert into jina_context.issue_graph_releases")).length, 1);
+  assert.equal(
+    statements.filter((sql) => sql.includes("insert into jina_context.current_issue_graph_releases")).length,
+    1
+  );
+  assert.equal(
+    statements.some((sql) => /issue_rows|causality_rows|projector|outbox/.test(sql)),
+    false
+  );
+});
+
+test("atomic issue publication rejects a stale Board write fence before relational writes", async () => {
+  const statements: string[] = [];
+  const release = {
+    id: `cir_${"a".repeat(32)}`,
+    tenantId: "tenant-1",
+    repository: "acme/widgets",
+    ref: "main",
+    refSequence: 1,
+    commitSha: "c".repeat(40),
+    buildId: "task_issue_build",
+    contentDigest: "d".repeat(64),
+    artifact: {
+      uri: "gs://context/context-v2/tenants/tenant-1/repositories/acme/widgets/builds/task_issue_build/issue-graph/release.json",
+      key: "context-v2/tenants/tenant-1/repositories/acme/widgets/builds/task_issue_build/issue-graph/release.json",
+      contentType: "application/json",
+      bytes: 1024,
+      sha256: "b".repeat(64)
+    },
+    issueCount: 20,
+    causalityCount: 30,
+    historyComplete: true,
+    publishedAt: "2026-08-01T00:00:00.000Z"
+  };
+  const snapshot = {
+    intakeState: {
+      board: {
+        tasks: [
+          {
+            id: release.buildId,
+            type: "build-context-issues",
+            kind: "aggregate",
+            metadata: {
+              tenantId: release.tenantId,
+              repository: release.repository,
+              ref: release.ref,
+              refSequence: release.refSequence,
+              commitSha: release.commitSha
+            }
+          },
+          {
+            id: "task_issue_publish",
+            type: "publish-context-issues",
+            kind: "dispatchable",
+            status: "in_progress",
+            attempt: 1,
+            metadata: {
+              tenantId: release.tenantId,
+              repository: release.repository,
+              ref: release.ref,
+              refSequence: release.refSequence,
+              commitSha: release.commitSha,
+              contextBuildId: release.buildId
+            }
+          }
+        ],
+        outbox: [
+          {
+            id: "message_issue_publish",
+            taskId: "task_issue_publish",
+            topic: "run-context-issue-publication",
+            status: "leased",
+            payload: { attempt: 1 },
+            leaseId: "lease-live",
+            writeFenceToken: "fence-live",
+            leaseExpiresAt: "2099-01-01T00:00:00.000Z"
+          }
+        ]
+      }
+    }
+  };
+  const client = {
+    async query(sql: string) {
+      statements.push(sql);
+      if (sql.includes("from jina_runtime.api_state")) return { rows: [{ snapshot }] };
+      if (sql.includes("clock_timestamp"))
+        return { rows: [{ now_ms: String(Date.parse("2026-08-01T00:00:00.000Z")) }] };
+      return { rows: [] };
+    },
+    release() {}
+  };
+  const database = {
+    initialize: async () => undefined,
+    pool: { connect: async () => client }
+  } as unknown as ContextDatabase;
+
+  await assert.rejects(
+    () =>
+      new PostgresIssueGraphRepository(database).publishIssueGraphAtomically({
+        release,
+        lease: {
+          taskId: "task_issue_publish",
+          messageId: "message_issue_publish",
+          attempt: 1,
+          leaseId: "lease-live",
+          writeFenceToken: "fence-stale",
+          leaseExpiresAt: "2099-01-01T00:00:00.000Z"
+        }
+      }),
+    /no longer owns its durable Board lease/
+  );
+  assert.equal(
+    statements.some((sql) => /insert into jina_context\.(?:repositories|issue_graph)/.test(sql)),
+    false
+  );
+  assert.equal(statements.at(-1), "rollback");
 });
 
 test("exact retrieval batches all requested terms into one indexed query", async () => {

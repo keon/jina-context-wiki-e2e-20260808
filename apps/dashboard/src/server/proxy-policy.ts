@@ -14,6 +14,9 @@ export function isAllowedDashboardApiRequest(
       pathname === "/api/context/list" ||
       pathname === "/api/context/read" ||
       pathname === "/api/context/diff" ||
+      pathname === "/api/context/issue-graph" ||
+      pathname === "/api/context/issues" ||
+      /^\/api\/context\/issues\/[^/]+(?:\/trace)?$/.test(pathname) ||
       pathname === "/api/context/builds" ||
       /^\/api\/context\/builds\/[^/]+\/progress$/.test(pathname));
   const allowedLocalDemo = !hasInternalApiToken && method === "POST" && pathname === "/api/dev/webhooks/github";

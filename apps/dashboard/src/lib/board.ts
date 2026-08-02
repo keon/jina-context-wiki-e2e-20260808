@@ -40,9 +40,16 @@ function metadataText(value: unknown): string {
   return typeof value === "string" ? value : JSON.stringify(value);
 }
 
-function contextBuildScope(metadata: Readonly<Record<string, unknown>>): string {
-  return `${metadataText(metadata.tenantId)}:${metadataText(metadata.repository)}:${metadataText(metadata.ref)}`;
+function contextBuildScope(metadata: Readonly<Record<string, unknown>>, workflow: "documentation" | "issues"): string {
+  return `${workflow}:${metadataText(metadata.tenantId)}:${metadataText(metadata.repository)}:${metadataText(metadata.ref)}`;
 }
+
+const issueTaskTypes = new Set([
+  "build-context-issues",
+  "snapshot-context-issue-history",
+  "derive-context-issues",
+  "publish-context-issues"
+]);
 
 const contextTaskTypes = new Set([
   "build-context",
@@ -60,7 +67,8 @@ const contextTaskTypes = new Set([
   "repair-context-gaps",
   "certify-context-release",
   "publish-context-release",
-  "index-context-release"
+  "index-context-release",
+  ...issueTaskTypes
 ]);
 
 /**
@@ -74,10 +82,10 @@ export function partitionBoardTasks(tasks: readonly BoardTask[]): {
 } {
   const latestRequestByScope = new Map<string, { requestKey: unknown; createdAt: string; id: string }>();
   for (const task of tasks) {
-    if (task.type !== "build-context") continue;
+    if (task.type !== "build-context" && task.type !== "build-context-issues") continue;
     const metadata = task.metadata ?? {};
     if (!metadata.repository || !metadata.ref || !metadata.requestKey) continue;
-    const scope = contextBuildScope(metadata);
+    const scope = contextBuildScope(metadata, issueTaskTypes.has(task.type) ? "issues" : "documentation");
     const existing = latestRequestByScope.get(scope);
     const createdAt = String(task.createdAt);
     if (!existing || createdAt > existing.createdAt || (createdAt === existing.createdAt && task.id > existing.id)) {
@@ -90,7 +98,7 @@ export function partitionBoardTasks(tasks: readonly BoardTask[]): {
     const metadata = task.metadata ?? {};
     const contextTask = contextTaskTypes.has(task.type) && metadata.repository && metadata.ref && metadata.requestKey;
     if (contextTask) {
-      const scope = contextBuildScope(metadata);
+      const scope = contextBuildScope(metadata, issueTaskTypes.has(task.type) ? "issues" : "documentation");
       const latest = latestRequestByScope.get(scope);
       (latest && latest.requestKey === metadata.requestKey ? current : history).push(task);
     } else {

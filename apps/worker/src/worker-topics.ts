@@ -11,7 +11,10 @@ export const CONTEXT_BOARD_TOPICS = [
   "run-context-gap-repair",
   "run-context-certification",
   "run-context-publication",
-  "run-context-pageindex"
+  "run-context-pageindex",
+  "run-context-issue-history",
+  "run-context-issue-derive",
+  "run-context-issue-publication"
 ] as const;
 
 export const SUPPORTED_WORKER_TOPICS = ["run-review", ...CONTEXT_BOARD_TOPICS] as const;

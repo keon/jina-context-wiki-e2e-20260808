@@ -187,6 +187,7 @@ interface ContextBuildStage {
 
 export interface ContextBuildSummary {
   readonly id: string;
+  readonly buildKind?: "documentation" | "issue_graph";
   readonly repository: string;
   readonly ref: string;
   readonly refSequence: number;
@@ -208,6 +209,56 @@ export interface ContextBuildSummary {
 
 export interface ContextBuildListResponse {
   readonly builds: readonly ContextBuildSummary[];
+}
+
+interface IssueGraphReleaseSummary {
+  readonly id: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly refSequence: number;
+  readonly commitSha: string;
+  readonly issueCount: number;
+  readonly causalityCount: number;
+  readonly historyComplete: boolean;
+  readonly publishedAt: string;
+}
+
+interface IssueGraphEvidence {
+  readonly commitSha: string;
+  readonly role: "introduced" | "observed" | "resolved";
+  readonly messageStartLine: number;
+  readonly messageEndLine: number;
+  readonly excerpt: string;
+}
+
+export interface ContextIssue {
+  readonly id: string;
+  readonly title: string;
+  readonly summary: string;
+  readonly state: "active" | "resolved";
+  readonly evidence: readonly IssueGraphEvidence[];
+}
+
+interface IssueCausality {
+  readonly id: string;
+  readonly subjectIssueId: string;
+  readonly predicate: "INTRODUCED_BY" | "RESOLVED_BY" | "CAUSED_BY" | "CONTRIBUTES_TO";
+  readonly object: { readonly kind: "issue" | "commit"; readonly id: string };
+  readonly why: string;
+  readonly confidence: "explicit" | "inferred";
+  readonly evidence: readonly IssueGraphEvidence[];
+}
+
+export interface IssueGraphResponse {
+  readonly release: IssueGraphReleaseSummary;
+  readonly summary: string;
+  readonly coverage: {
+    readonly observedCommitCount: number;
+    readonly complete: boolean;
+    readonly oldestObservedCommit: string;
+  };
+  readonly issues: readonly ContextIssue[];
+  readonly causalities: readonly IssueCausality[];
 }
 
 export interface ContextBuildProgressResponse {

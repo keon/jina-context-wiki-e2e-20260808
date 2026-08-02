@@ -52,6 +52,33 @@ test("partitionBoardTasks keeps only the latest context build request per scope"
   );
 });
 
+test("documentation and issue sidecars keep independent current requests", () => {
+  const scope = { tenantId: "t", repository: "o/r", ref: "main" };
+  const tasks = [
+    task({
+      id: "docs",
+      type: "build-context",
+      createdAt: "2026-01-01T00:00:00Z",
+      metadata: { ...scope, requestKey: "docs-request" }
+    }),
+    task({
+      id: "issues",
+      type: "build-context-issues",
+      createdAt: "2026-01-02T00:00:00Z",
+      metadata: { ...scope, requestKey: "issue-request" }
+    }),
+    task({
+      id: "issue-stage",
+      type: "derive-context-issues",
+      metadata: { ...scope, requestKey: "issue-request" }
+    })
+  ];
+  assert.deepEqual(
+    partitionBoardTasks(tasks).current.map((item) => item.id),
+    ["docs", "issues", "issue-stage"]
+  );
+});
+
 test("filterBoardTasks combines query and facet filters", () => {
   const tasks = [
     task({ id: "a", title: "Review PR", type: "review", assigneeRole: "agent", metadata: { repository: "o/r" } }),

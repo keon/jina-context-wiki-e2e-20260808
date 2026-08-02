@@ -36,6 +36,7 @@ import type {
   VerifiedApiToken
 } from "../ports/context-engine-store.js";
 import type { KnowledgeCommit } from "../ports/knowledge-store.js";
+import type { IssueGraphRelease } from "../ports/issue-graph-store.js";
 
 function scopeKey(tenantId: string, repository: string, ref: string): string {
   return `${tenantId}\u0000${repository}\u0000${ref}`;
@@ -68,6 +69,8 @@ export class MemoryContextEngineStore implements ContextEngineStore {
   readonly #erasures = new Set<string>();
   readonly #queryRuns: QueryRunTelemetry[] = [];
   readonly #apiTokens = new Map<string, ApiTokenRecord & { readonly secretHash: string }>();
+  readonly #issueGraphReleases = new Map<string, IssueGraphRelease>();
+  readonly #currentIssueGraphReleases = new Map<string, string>();
   #closed = false;
 
   constructor(private readonly now: () => string = () => new Date().toISOString()) {}
@@ -157,6 +160,56 @@ export class MemoryContextEngineStore implements ContextEngineStore {
         fact.anchors.every((anchor) => !this.#isErased(anchor))
       )
     );
+  }
+
+  async publishIssueGraphRelease(release: IssueGraphRelease): Promise<IssueGraphRelease> {
+    this.#assertOpen();
+    const existing = this.#issueGraphReleases.get(release.id);
+    if (existing) {
+      if (fingerprint(existing) !== fingerprint(release)) throw new Error("Issue graph release identity collision");
+      return copy(existing);
+    }
+    const key = scopeKey(release.tenantId, normalizeRepository(release.repository), release.ref);
+    const currentId = this.#currentIssueGraphReleases.get(key);
+    const current = currentId ? this.#issueGraphReleases.get(currentId) : undefined;
+    if (current && current.refSequence >= release.refSequence) {
+      throw new Error("Issue graph release ref sequence is stale");
+    }
+    const stored = { ...copy(release), repository: normalizeRepository(release.repository) };
+    this.#issueGraphReleases.set(stored.id, stored);
+    this.#currentIssueGraphReleases.set(key, stored.id);
+    return copy(stored);
+  }
+
+  async currentIssueGraphRelease(
+    tenantId: string,
+    repository: string,
+    ref: string
+  ): Promise<IssueGraphRelease | undefined> {
+    const id = this.#currentIssueGraphReleases.get(scopeKey(tenantId, normalizeRepository(repository), ref));
+    const release = id ? this.#issueGraphReleases.get(id) : undefined;
+    return release ? copy(release) : undefined;
+  }
+
+  async currentAuthorizedIssueGraphRelease(
+    tenantId: string,
+    repository: string,
+    ref: string,
+    principalId: string
+  ): Promise<IssueGraphRelease | undefined> {
+    const allowed = this.#repositoryAccess.get(`${tenantId}\u0000${principalId}`);
+    if (!allowed?.has(normalizeRepository(repository))) return undefined;
+    return this.currentIssueGraphRelease(tenantId, repository, ref);
+  }
+
+  async listIssueGraphReleases(tenantId: string, repository: string, ref: string): Promise<IssueGraphRelease[]> {
+    return [...this.#issueGraphReleases.values()]
+      .filter(
+        (release) =>
+          release.tenantId === tenantId && release.repository === normalizeRepository(repository) && release.ref === ref
+      )
+      .sort((left, right) => right.refSequence - left.refSequence || right.id.localeCompare(left.id))
+      .map(copy);
   }
 
   async findSuccessfulRun(cacheKey: string): Promise<DerivationRun | undefined> {

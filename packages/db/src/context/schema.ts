@@ -851,6 +851,45 @@ create table if not exists jina_context.current_context_board_releases (
     references jina_context.repositories(tenant_id,repository)
 );
 
+-- Issue causality is published as one immutable, digest-addressed artifact.
+-- PostgreSQL retains only release metadata and one mutable current pointer, so
+-- publication cost is constant rather than proportional to issue/edge count.
+create table if not exists jina_context.issue_graph_releases (
+  release_id text primary key check (release_id ~ '^cir_[0-9a-f]{32}$'),
+  tenant_id text not null,
+  repository text not null,
+  ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
+  commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40}$'),
+  build_id text not null,
+  content_digest text not null check (content_digest ~ '^[0-9a-f]{64}$'),
+  artifact jsonb not null,
+  issue_count integer not null check (issue_count >= 0 and issue_count <= 2000),
+  causality_count integer not null check (causality_count >= 0 and causality_count <= 5000),
+  history_complete boolean not null,
+  published_at timestamptz not null,
+  foreign key (tenant_id,repository)
+    references jina_context.repositories(tenant_id,repository),
+  unique (tenant_id,repository,ref_name,ref_sequence),
+  unique (tenant_id,repository,content_digest)
+);
+create index if not exists context_issue_graph_releases_scope
+  on jina_context.issue_graph_releases
+  (tenant_id,repository,ref_name,ref_sequence desc,release_id);
+
+create table if not exists jina_context.current_issue_graph_releases (
+  tenant_id text not null,
+  repository text not null,
+  ref_name text not null,
+  ref_sequence bigint not null check (ref_sequence > 0),
+  release_id text not null references jina_context.issue_graph_releases(release_id),
+  commit_sha text not null check (commit_sha ~ '^[0-9a-f]{40}$'),
+  advanced_at timestamptz not null,
+  primary key (tenant_id,repository,ref_name),
+  foreign key (tenant_id,repository)
+    references jina_context.repositories(tenant_id,repository)
+);
+
 -- Upgrade fence for databases written by the earlier two-step flow, which
 -- advanced current and marked the generation published before PageIndex.
 -- Unattached Board releases become prepared and disappear from public lookup.
@@ -1371,7 +1410,7 @@ begin
     'entities','identities','derivation_runs','knowledge_documents',
     'knowledge_document_revisions','knowledge_revision_evidence',
     'knowledge_revision_events','repository_acl_observations','erasure_filters','audit_events',
-    'projection_input_events'
+    'projection_input_events','issue_graph_releases'
   ] loop
     execute format('drop trigger if exists reject_immutable_change on jina_context.%I',table_name);
     execute format(

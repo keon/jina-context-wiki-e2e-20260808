@@ -6,6 +6,7 @@ import { usePoll } from "../../lib/poll.ts";
 import type { ContextBuildListResponse, ContextBuildSummary, ContextRelease } from "../../lib/types.ts";
 import { BuildCheckpoints } from "./build-checkpoints.tsx";
 import { ContextBrowser } from "./context-browser.tsx";
+import { IssueGraphBrowser } from "./issue-graph-browser.tsx";
 
 export function ContextPage() {
   const releasesResource = usePoll<{ readonly releases: readonly ContextRelease[] }>("/api/context/releases", 10_000);
@@ -62,7 +63,16 @@ export function ContextPage() {
   const release = releases.find((candidate) => candidate.repository === repository && candidate.ref === ref);
   const scopeReleases = releases.filter((candidate) => candidate.repository === repository && candidate.ref === ref);
   const build = preferredBuild(
-    builds.filter((candidate) => candidate.repository === repository && candidate.ref === ref)
+    builds.filter(
+      (candidate) =>
+        candidate.repository === repository && candidate.ref === ref && candidate.buildKind !== "issue_graph"
+    )
+  );
+  const issueBuild = preferredBuild(
+    builds.filter(
+      (candidate) =>
+        candidate.repository === repository && candidate.ref === ref && candidate.buildKind === "issue_graph"
+    )
   );
 
   return (
@@ -107,6 +117,7 @@ export function ContextPage() {
           </section>
         </>
       )}
+      {repository && ref ? <IssueGraphBrowser repository={repository} ref={ref} build={issueBuild} /> : null}
     </section>
   );
 }

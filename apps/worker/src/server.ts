@@ -53,7 +53,8 @@ import type {
   GitChange,
   GitSnapshotMetadata,
   IngestEvidenceInput,
-  ProviderObservationInput
+  ProviderObservationInput,
+  IssueHistoryCommit
 } from "@jina/context-engine";
 import {
   LocalPageIndexClient,
@@ -66,6 +67,7 @@ import {
   parseContextPriorReleaseSeed,
   repositoryAclFingerprint,
   repositoryContextAreas,
+  materializeIssueGraph,
   type CertifiedContextReleaseArtifactV1,
   type ContextPageChange,
   type ContextPriorPage,
@@ -135,7 +137,8 @@ const CONTEXT_MODEL_TOPICS = new Set<WorkerTopic>([
   "run-context-page-repair",
   "run-context-source-challenge",
   "run-context-task-evaluation",
-  "run-context-gap-repair"
+  "run-context-gap-repair",
+  "run-context-issue-derive"
 ]);
 
 interface RepositoryContextMetadata {
@@ -235,6 +238,9 @@ interface WorkMetadataByTopic {
   readonly "run-context-pageindex": ContextBoardWorkerMetadata & {
     readonly planArtifact: ContextArtifactRef;
   };
+  readonly "run-context-issue-history": ContextBoardWorkerMetadata;
+  readonly "run-context-issue-derive": ContextBoardWorkerMetadata;
+  readonly "run-context-issue-publication": ContextBoardWorkerMetadata;
 }
 
 type ClaimedWork<T extends WorkerTopic = WorkerTopic> = T extends WorkerTopic
@@ -308,6 +314,51 @@ const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TI
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
 const MAX_CRITIC_CONTRACT_ATTEMPTS = 4;
+const ISSUE_GRAPH_STAGE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["version", "summary", "issues", "causalities"],
+  properties: {
+    version: { type: "integer", const: 1 },
+    summary: { type: "string", minLength: 1, maxLength: 4_000 },
+    issues: {
+      type: "array",
+      maxItems: 2_000,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["key", "title", "summary", "evidence"],
+        properties: {
+          key: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
+          title: { type: "string", minLength: 4, maxLength: 200 },
+          summary: { type: "string", minLength: 12, maxLength: 4_000 },
+          evidence: { type: "array", minItems: 1, maxItems: 100, items: issueEvidenceSchema() }
+        }
+      }
+    },
+    causalities: {
+      type: "array",
+      maxItems: 5_000,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["subjectKey", "predicate", "objectKind", "objectRef", "why", "confidence", "evidence"],
+        properties: {
+          subjectKey: { type: "string", minLength: 1, maxLength: 120 },
+          predicate: {
+            type: "string",
+            enum: ["INTRODUCED_BY", "RESOLVED_BY", "CAUSED_BY", "CONTRIBUTES_TO"]
+          },
+          objectKind: { type: "string", enum: ["issue", "commit"] },
+          objectRef: { type: "string", minLength: 1, maxLength: 120 },
+          why: { type: "string", minLength: 12, maxLength: 2_000 },
+          confidence: { type: "string", const: "explicit" },
+          evidence: { type: "array", minItems: 1, maxItems: 100, items: issueEvidenceSchema() }
+        }
+      }
+    }
+  }
+} as const;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const configuredBoardAgentStageRunner =
@@ -674,6 +725,12 @@ async function executeTopic(work: ClaimedWork): Promise<WorkResult> {
       return { outcome: "done", result: await runContextPublication(work) };
     case "run-context-pageindex":
       return { outcome: "done", result: await runContextPageIndex(work) };
+    case "run-context-issue-history":
+      return { outcome: "done", result: await runContextIssueHistory(work) };
+    case "run-context-issue-derive":
+      return { outcome: "done", result: await runContextIssueDerive(work) };
+    case "run-context-issue-publication":
+      return { outcome: "done", result: await runContextIssuePublication(work) };
     case "run-review":
       return { outcome: "done", result: await runReview(work) };
   }
@@ -690,6 +747,135 @@ async function runContextInputSnapshot(
     content: Buffer.from(JSON.stringify(input), "utf8")
   });
   return { version: 1, outputArtifact, commitSha: input.commitSha };
+}
+
+async function runContextIssueHistory(
+  work: ClaimedWork<"run-context-issue-history">
+): Promise<Record<string, unknown>> {
+  const { tenantId, repository, ref, commitSha: expectedCommitSha, githubInstallationId } = work.task.metadata;
+  if (requireGithubInstallation && !githubInstallationId) {
+    throw new Error("provisioned GitHub installation is required for the issue history snapshot");
+  }
+  if (githubInstallationId) {
+    const access = await createGitHubInstallationAccessToken(githubInstallationId, { repository });
+    assertLeaseOwned();
+    if (!activeLease) throw new Error("GitHub installation token was minted outside an active worker lease");
+    activeLease.githubToken = access.token;
+  }
+  const checkout = await checkoutRepository(repository, ref, expectedCommitSha);
+  try {
+    const history = await readGitHistoryMetadata(checkout.directory, checkout.commitSha);
+    const packet = {
+      version: 1 as const,
+      tenantId,
+      repository,
+      ref,
+      refSequence: work.task.metadata.refSequence,
+      commitSha: checkout.commitSha,
+      complete: history.complete,
+      commits: history.commits.map((commit) => ({
+        sha: commit.sha,
+        parentShas: commit.parentShas,
+        message: commit.message,
+        ...(commit.committedAt ? { committedAt: commit.committedAt } : {})
+      }))
+    };
+    const outputArtifact = await uploadContextBoardArtifact(work, {
+      kind: "issue-history",
+      name: "history.json",
+      contentType: "application/json",
+      content: Buffer.from(JSON.stringify(packet), "utf8")
+    });
+    return {
+      version: 1,
+      outputArtifact,
+      commitSha: packet.commitSha,
+      observedCommitCount: packet.commits.length,
+      historyComplete: packet.complete
+    };
+  } finally {
+    await rm(checkout.directory, { recursive: true, force: true });
+  }
+}
+
+async function runContextIssueDerive(work: ClaimedWork<"run-context-issue-derive">): Promise<Record<string, unknown>> {
+  const historyArtifact = latestDependencyArtifact(
+    work.task.metadata.dependencyResults,
+    ["snapshot-context-issue-history"],
+    "issue graph derivation"
+  );
+  const history = parseIssueHistoryPacket(await readContextBoardArtifact(work, historyArtifact), work.task.metadata);
+  const inputDirectory = await mkdtemp(join(tmpdir(), "jina-context-issues-"));
+  try {
+    const historyPath = join(inputDirectory, "commit-history.json");
+    await writeFile(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+    const output = await requireBoardAgentStageRunner().run({
+      id: "issue-causality-derivation",
+      prompt: issueGraphPrompt(history.repository, history.ref, historyPath),
+      schema: ISSUE_GRAPH_STAGE_SCHEMA,
+      workingDirectory: inputDirectory,
+      additionalDirectories: [inputDirectory],
+      readOnly: true,
+      budgetSeconds: stageBudgetSeconds("CONTEXT_ISSUE_DERIVE_SECONDS", 300)
+    });
+    const graph = materializeIssueGraph({
+      tenantId: history.tenantId,
+      repository: history.repository,
+      ref: history.ref,
+      refSequence: history.refSequence,
+      commitSha: history.commitSha,
+      generatedAt: new Date().toISOString(),
+      history: history.commits,
+      historyComplete: history.complete,
+      candidate: output.parsed,
+      generator: {
+        name: "codex-agentic-issue-deriver",
+        version: "1",
+        model: (process.env.CONTEXT_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
+        promptVersion: "issue-causality-v1"
+      }
+    });
+    const outputArtifact = await uploadContextBoardArtifact(work, {
+      kind: "issue-graph",
+      name: `${graph.id}.json`,
+      contentType: "application/json",
+      content: Buffer.from(JSON.stringify(graph), "utf8")
+    });
+    return {
+      version: 1,
+      outputArtifact,
+      releaseId: graph.id,
+      contentDigest: graph.contentDigest,
+      issueCount: graph.issues.length,
+      causalityCount: graph.causalities.length,
+      historyComplete: graph.coverage.complete
+    };
+  } finally {
+    await rm(inputDirectory, { recursive: true, force: true });
+  }
+}
+
+async function runContextIssuePublication(
+  work: ClaimedWork<"run-context-issue-publication">
+): Promise<Record<string, unknown>> {
+  const graphArtifact = latestDependencyArtifact(
+    work.task.metadata.dependencyResults,
+    ["derive-context-issues"],
+    "issue graph publication"
+  );
+  const result = await internalApiJson<Record<string, unknown>>(
+    "/internal/context/board/issues/publish",
+    leaseBody(work, { graphArtifact })
+  );
+  if (result.version !== 1) throw new Error("issue graph publication result version must be 1");
+  const releaseId = requiredString(result.releaseId, "issue graph publication releaseId");
+  const receiptArtifact = await uploadContextBoardArtifact(work, {
+    kind: "issue-graph",
+    name: `${releaseId}-publication.json`,
+    contentType: "application/json",
+    content: Buffer.from(JSON.stringify({ version: 1, releaseId, graphArtifact }), "utf8")
+  });
+  return { version: 1, outputArtifact: receiptArtifact, releaseId };
 }
 
 async function runContextPageIndex(work: ClaimedWork<"run-context-pageindex">): Promise<Record<string, unknown>> {
@@ -4001,6 +4187,9 @@ function contextBoardMetadata(
   };
   switch (topic) {
     case "run-context-input-snapshot":
+    case "run-context-issue-history":
+    case "run-context-issue-derive":
+    case "run-context-issue-publication":
       return base;
     case "run-context-research-plan":
       return {
@@ -4318,6 +4507,90 @@ function failureCode(detail: string): string | undefined {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+interface IssueHistoryPacket {
+  readonly version: 1;
+  readonly tenantId: string;
+  readonly repository: string;
+  readonly ref: string;
+  readonly refSequence: number;
+  readonly commitSha: string;
+  readonly complete: boolean;
+  readonly commits: readonly IssueHistoryCommit[];
+}
+
+function parseIssueHistoryPacket(content: Uint8Array, metadata: RepositoryContextMetadata): IssueHistoryPacket {
+  let value: unknown;
+  try {
+    value = JSON.parse(Buffer.from(content).toString("utf8"));
+  } catch {
+    throw new Error("issue history artifact is not valid JSON");
+  }
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.commits) || value.commits.length === 0) {
+    throw new Error("issue history artifact is incomplete");
+  }
+  const tenantId = requiredString(value.tenantId, "issue history tenantId");
+  const repository = requiredString(value.repository, "issue history repository");
+  const ref = requiredString(value.ref, "issue history ref");
+  const refSequence = requiredPositiveInteger(value.refSequence, "issue history refSequence");
+  const commitSha = requiredGitSha(value.commitSha, "issue history commitSha");
+  if (
+    tenantId !== metadata.tenantId ||
+    repository !== metadata.repository ||
+    ref !== metadata.ref ||
+    refSequence !== metadata.refSequence ||
+    commitSha !== metadata.commitSha
+  ) {
+    throw new Error("issue history artifact does not match the leased board build");
+  }
+  if (typeof value.complete !== "boolean") throw new Error("issue history complete must be a boolean");
+  if (value.commits.length > 50_000) throw new Error("issue history contains too many commits");
+  const commits = value.commits.map((candidate, index): IssueHistoryCommit => {
+    if (!isRecord(candidate) || !Array.isArray(candidate.parentShas)) {
+      throw new Error(`issue history commit ${index} is invalid`);
+    }
+    return {
+      sha: requiredGitSha(candidate.sha, `issue history commit ${index} sha`),
+      parentShas: candidate.parentShas.map((parent, parentIndex) =>
+        requiredGitSha(parent, `issue history commit ${index} parent ${parentIndex}`)
+      ),
+      message: requiredString(candidate.message, `issue history commit ${index} message`),
+      ...(candidate.committedAt === undefined
+        ? {}
+        : { committedAt: requiredIsoTimestamp(candidate.committedAt, `issue history commit ${index} committedAt`) })
+    };
+  });
+  if (commits[0]?.sha !== commitSha) throw new Error("issue history does not begin at the leased commit");
+  return { version: 1, tenantId, repository, ref, refSequence, commitSha, complete: value.complete, commits };
+}
+
+function issueGraphPrompt(repository: string, ref: string, historyPath: string): string {
+  return [
+    `Derive a compact engineering issue and causality graph for ${repository}@${ref}.`,
+    `The sole evidence source is the bounded commit-history file at ${historyPath}.`,
+    "Read it directly. This is one agentic derivation run; do not create a plan, delegate, or invoke a critic.",
+    "An issue is a concrete defect, failure mode, operational constraint, or harmful design tradeoff visible in commit messages. Do not turn ordinary features, refactors, or chores into issues.",
+    "Every issue needs exact 1-based commit-message line ranges. Use introduced, observed, and resolved roles only when the cited text supports that role.",
+    "Use INTRODUCED_BY and RESOLVED_BY only with commit SHA objects. Use CAUSED_BY and CONTRIBUTES_TO only between issue keys.",
+    "Emit a causality only when the commit history states the relationship explicitly enough to defend. confidence must be explicit. Omit guesses and ambiguous relationships.",
+    "Keep distinct symptoms separate only when the history supports separate identities. Prefer fewer well-evidenced issues over speculative coverage.",
+    "Return only the schema-conforming JSON result."
+  ].join("\n\n");
+}
+
+function issueEvidenceSchema() {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["commitSha", "role", "messageStartLine", "messageEndLine"],
+    properties: {
+      commitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+      role: { type: "string", enum: ["introduced", "observed", "resolved"] },
+      messageStartLine: { type: "integer", minimum: 1 },
+      messageEndLine: { type: "integer", minimum: 1 }
+    }
+  } as const;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

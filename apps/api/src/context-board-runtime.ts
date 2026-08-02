@@ -69,6 +69,15 @@ export function applyContextBoardTaskResult(
       });
       return { state: expanded.state, result };
     }
+    case contextBoardTaskTypes.issueSnapshot:
+      return {
+        state: bindContextBoardBuildCommit(state, {
+          buildTaskId,
+          commitSha: result.commitSha,
+          now
+        }),
+        result
+      };
     case contextBoardTaskTypes.researchPlan: {
       const expanded = addContextResearchWork(state, {
         buildTaskId,

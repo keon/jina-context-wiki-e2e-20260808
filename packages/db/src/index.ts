@@ -7,3 +7,4 @@ export { ContextQuotaStoreError, PostgresContextQuotaStore } from "./context/con
 export { GcsContextArtifactStore } from "./context/gcs-artifact-store.js";
 export { PostgresBoardContextPublicationRepository } from "./context/board-publication-repository.js";
 export { PostgresBoardPageIndexAttachmentRepository } from "./context/board-pageindex-attachment-repository.js";
+export { PostgresIssueGraphRepository } from "./context/issue-graph-repository.js";
