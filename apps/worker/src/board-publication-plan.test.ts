@@ -68,6 +68,27 @@ test("publication planning deterministically restores omitted research questions
   assert.deepEqual(plan.pages[0]?.maintenanceQuestions, ["A different question", QUESTION]);
 });
 
+test("publication planning derives repository-area coverage from its selected research assignments", async () => {
+  const packageAssignment: ResearchAssignment = {
+    ...ASSIGNMENT,
+    focusPaths: ["packages/context-engine/src"]
+  };
+  let repairCalls = 0;
+  const plan = await parsePublicationPlanWithRepair({
+    candidate: VALID_PLAN,
+    options: {
+      researchAssignments: [packageAssignment],
+      repositoryAreas: ["root", "packages", "packages/context-engine"]
+    },
+    repair: async () => {
+      repairCalls += 1;
+      throw new Error("repair must not run for deterministic area bookkeeping");
+    }
+  });
+  assert.equal(repairCalls, 0);
+  assert.deepEqual(plan.pages[0]?.coverageAreas, ["root", "packages", "packages/context-engine"]);
+});
+
 test("publication planning does not spend a repair call on a valid candidate", async () => {
   const plan = await parsePublicationPlanWithRepair({
     candidate: VALID_PLAN,

@@ -23,7 +23,8 @@ export async function parsePublicationPlanWithRepair(input: {
   readonly repair: (request: PublicationPlanRepairRequest) => Promise<unknown>;
 }): Promise<DocumentationStagePlan> {
   const prepare = (candidate: unknown): unknown => {
-    const completed = completeMaintenanceQuestionCoverage(candidate, input.options.researchAssignments);
+    const withQuestions = completeMaintenanceQuestionCoverage(candidate, input.options.researchAssignments);
+    const completed = completeRepositoryAreaCoverage(withQuestions, input.options);
     return input.normalize?.(completed) ?? completed;
   };
   return parsePlanWithSingleRepair({
@@ -35,6 +36,68 @@ export async function parsePublicationPlanWithRepair(input: {
     },
     repair: async (request) => prepare(await input.repair(request))
   });
+}
+
+/**
+ * Repository-area ownership is already implied by the planner's selected
+ * research assignments. Materializing that implication host-side prevents a
+ * validation waterfall where a model fixes one hierarchy defect only to expose
+ * a missing bookkeeping label on its sole bounded repair pass.
+ */
+function completeRepositoryAreaCoverage(
+  candidate: unknown,
+  options: Parameters<typeof parseDocumentationStagePlan>[1]
+): unknown {
+  if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) return candidate;
+  const plan = candidate as Record<string, unknown>;
+  if (!Array.isArray(plan.pages)) return candidate;
+
+  const expectedAreas = [...options.repositoryAreas].sort((left, right) => {
+    const depthDifference = left.split("/").length - right.split("/").length;
+    if (depthDifference !== 0) return depthDifference;
+    return left < right ? -1 : left > right ? 1 : 0;
+  });
+  const assignmentById = new Map(options.researchAssignments.map((assignment) => [assignment.id, assignment]));
+  const excludedAreas = new Set(
+    Array.isArray(plan.excludedAreas)
+      ? plan.excludedAreas.flatMap((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return [];
+          const area = (entry as Record<string, unknown>).area;
+          return typeof area === "string" ? [area] : [];
+        })
+      : []
+  );
+  let changed = false;
+  const pages = plan.pages.map((entry): unknown => {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return entry;
+    const page = entry as Record<string, unknown>;
+    if (!Array.isArray(page.sourceAssignmentIds) || !Array.isArray(page.coverageAreas)) return entry;
+    const sourceAssignmentIds = page.sourceAssignmentIds.filter(
+      (assignmentId): assignmentId is string => typeof assignmentId === "string"
+    );
+    const coverageAreas = page.coverageAreas.filter((area): area is string => typeof area === "string");
+    if (
+      sourceAssignmentIds.length !== page.sourceAssignmentIds.length ||
+      coverageAreas.length !== page.coverageAreas.length
+    ) {
+      return entry;
+    }
+    const inferredAreas = sourceAssignmentIds.flatMap((assignmentId) => {
+      const assignment = assignmentById.get(assignmentId);
+      if (!assignment) return [];
+      return assignment.focusPaths.flatMap((focusPath) => {
+        const normalized = focusPath.replace(/\/+$/, "");
+        return expectedAreas.filter(
+          (area) => !excludedAreas.has(area) && (normalized === area || normalized.startsWith(`${area}/`))
+        );
+      });
+    });
+    const additions = [...new Set(inferredAreas)].filter((area) => !coverageAreas.includes(area));
+    if (additions.length === 0) return entry;
+    changed = true;
+    return { ...page, coverageAreas: [...coverageAreas, ...additions] };
+  });
+  return changed ? { ...plan, pages } : candidate;
 }
 
 /**
