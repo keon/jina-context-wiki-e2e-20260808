@@ -83,6 +83,17 @@ export function runCommand(
       }
     });
 
+    // A short-lived command can close its input before Node finishes flushing
+    // the pipe. EPIPE is not the command result: the close event below still
+    // carries the authoritative exit code and captured diagnostics.
+    child.stdin.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "EPIPE" || error.code === "ERR_STREAM_DESTROYED") {
+        return;
+      }
+      clearTimeout(timeout);
+      reject(error);
+    });
+
     child.on("error", (error) => {
       clearTimeout(timeout);
       reject(error);

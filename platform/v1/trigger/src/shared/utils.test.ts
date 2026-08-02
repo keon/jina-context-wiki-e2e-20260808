@@ -3,10 +3,20 @@ import { test } from "node:test";
 
 import {
   reviewCodexModel,
+  runCommand,
   runtimeAgentModel,
   runtimeMentalTraceModel,
   runtimePlannerModel,
 } from "./utils.js";
+
+test("runCommand lets the child exit code decide when a short-lived process closes stdin", async () => {
+  const result = await runCommand(
+    process.execPath,
+    ["-e", "process.stdin.destroy(); process.stdout.write('ok')"],
+    { input: "x".repeat(4 * 1024 * 1024), timeoutMs: 10_000 },
+  );
+  assert.equal(result.stdout, "ok");
+});
 
 test("model defaults are OpenRouter slugs", () => {
   assert.equal(reviewCodexModel({}), "openai/gpt-5.6-luna");
