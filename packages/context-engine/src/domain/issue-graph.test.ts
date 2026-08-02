@@ -234,7 +234,7 @@ test("candidate ledger is deterministic and sets a bounded recall floor", () => 
   assert.equal(minimumDerivedIssueCount(103), 15);
 });
 
-test("enforces exhaustive candidate disposition and synthesizes lifecycle edges", () => {
+test("normalizes uncited issue dispositions, enforces coverage, and synthesizes lifecycle edges", () => {
   const history = [
     {
       sha: followup,
@@ -273,7 +273,7 @@ test("enforces exhaustive candidate disposition and synthesizes lifecycle edges"
     causalities: [],
     candidateDispositions: ledger.candidates.map((item) => ({
       commitSha: item.commitSha.slice(0, 7),
-      disposition: item.commitSha === followup ? "duplicate" : "issue",
+      disposition: "issue",
       issueKeys: ["claim-timeout"],
       reason: "The commit describes the same blocked claim timeout failure."
     }))

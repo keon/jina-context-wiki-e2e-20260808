@@ -806,7 +806,7 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
     await writeFile(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
     await writeFile(candidateLedgerPath, `${JSON.stringify(candidateLedger, null, 2)}\n`, "utf8");
     const phase = "causal-graph-derive.candidate";
-    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v4", phase, {
+    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v5", phase, {
       historyArtifactSha256: historyArtifact.sha256,
       commitSha: history.commitSha
     });
@@ -849,7 +849,7 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
         name: "codex-agentic-issue-deriver",
         version: "1",
         model: (process.env.CAUSAL_GRAPH_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
-        promptVersion: "issue-causality-v4"
+        promptVersion: "issue-causality-v5"
       }
     });
     const outputArtifact = await uploadContextBoardArtifact(work, {

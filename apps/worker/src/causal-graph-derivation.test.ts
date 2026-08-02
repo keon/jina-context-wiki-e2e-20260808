@@ -16,6 +16,8 @@ test("causal graph prompt enforces recall, lifecycle evidence, and one agentic r
   const prompt = issueGraphPrompt("omxyz/jina", "main", "/input/history.json", "/input/ledger.json", 15);
   assert.match(prompt, /at least 15 distinct issues/);
   assert.match(prompt, /every ledger entry/i);
+  assert.match(prompt, /issue only when the referenced issue cites that exact commitSha/i);
+  assert.match(prompt, /duplicate when the commit belongs to an issue already represented/i);
   assert.match(prompt, /two explicit passes/);
   assert.match(prompt, /result is rejected unless at least 3 distinct issues/);
   assert.match(prompt, /one agentic derivation run/);

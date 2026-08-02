@@ -464,10 +464,19 @@ function parseIssueGraphCandidate(
       evidence: parseEvidenceArray(edge.evidence, `causality ${index}`, history)
     };
   });
-  const candidateDispositions =
+  const parsedCandidateDispositions =
     root.candidateDispositions === undefined
       ? undefined
       : parseCandidateDispositions(root.candidateDispositions, keys, history);
+  const evidenceCommitsByIssueKey = new Map(
+    issues.map((issue) => [issue.key, new Set(issue.evidence.map((evidence) => evidence.commitSha))])
+  );
+  const candidateDispositions = parsedCandidateDispositions?.map((disposition) =>
+    disposition.disposition === "issue" &&
+    !disposition.issueKeys.some((key) => evidenceCommitsByIssueKey.get(key)?.has(disposition.commitSha))
+      ? { ...disposition, disposition: "duplicate" as const }
+      : disposition
+  );
   return { version: 1, summary, issues, causalities, ...(candidateDispositions ? { candidateDispositions } : {}) };
 }
 
