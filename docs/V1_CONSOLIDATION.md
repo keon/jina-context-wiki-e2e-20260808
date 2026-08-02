@@ -100,6 +100,9 @@ Provisioned platform resources:
 - Vercel project `omlabs/jina-staging-dashboard`, served at
   `https://jina-staging-dashboard.vercel.app`. All product routes return `200`; the four
   operational routes return `401` without staging Basic Auth and `200` with it.
+- Dedicated operations tenant `ba699695-dc9f-431e-a89c-4dc98220f53e`, shared by the
+  staging dashboard and v2 API configuration. The deployment script rejects labels and
+  malformed identifiers in this database identity boundary.
 
 Repository automation:
 

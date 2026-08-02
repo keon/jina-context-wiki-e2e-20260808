@@ -13,8 +13,9 @@ and production promotion order.
 
 Run `scripts/check-staging-readiness.sh` before a staging release. Build immutable v2
 API/worker images with `cloudbuild.images.yaml` and a tag containing `staging`, then pass
-that tag to `scripts/deploy-staging-v2.sh`. The script is fail-closed on any resource,
-service account, secret, database, bucket, URL, or image tag that is not explicitly
+that tag and the UUID-valued `JINA_CONTEXT_TENANT_ID` to
+`scripts/deploy-staging-v2.sh`. The script is fail-closed on any resource, service
+account, secret, database, tenant, bucket, URL, or image tag that is not explicitly
 staging-scoped. Production continues to use the coordinated `cloudbuild.yaml` path below.
 
 Cloud Build validates, builds, and deploys one coordinated release to

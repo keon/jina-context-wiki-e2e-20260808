@@ -9,6 +9,7 @@ sql_instance="${CLOUD_SQL_INSTANCE:-jina-463721:us-east1:jina-db-staging}"
 database_name="${JINA_DB_NAME:-jina_staging}"
 runtime_user="${JINA_DB_USER:-jina_v2_staging_app}"
 owner_user="${JINA_MIGRATION_DB_USER:-postgres}"
+context_tenant_id="${JINA_CONTEXT_TENANT_ID:?JINA_CONTEXT_TENANT_ID is required}"
 artifact_bucket="${JINA_CONTEXT_GCS_BUCKET:-jina-v2-jina-context-artifacts-staging-us-east1}"
 v1_api_url="${JINA_V1_API_URL:-https://jina-code-review-api-staging-wvupra4l6a-ue.a.run.app}"
 gar="${region}-docker.pkg.dev/${project}/jina"
@@ -75,6 +76,10 @@ if [[ "${IMAGE_TAG}" != *staging* ]]; then
   printf 'IMAGE_TAG must contain staging\n' >&2
   exit 2
 fi
+if [[ ! "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+  printf 'JINA_CONTEXT_TENANT_ID must be an explicit staging tenant UUID\n' >&2
+  exit 2
+fi
 
 for image in "${api_image}" "${worker_image}"; do
   gcloud artifacts docker images describe "${image}" --project="${project}" >/dev/null
@@ -121,7 +126,7 @@ gcloud run jobs execute "${migration_job}" \
   --region="${region}" \
   --wait
 
-api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=staging-bootstrap~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal"
+api_env="^~^GOOGLE_CLOUD_PROJECT=${project}~JINA_ENABLE_DEV_ENDPOINTS=false~JINA_SIMULATE_RUNS=false~JINA_SEED_DEMO=false~JINA_REQUIRE_WORKER_RELEASE_GATE=false~JINA_TENANCY_MODE=shared-db~INSTANCE_UNIX_SOCKET=/cloudsql/${sql_instance}~DB_NAME=${database_name}~DB_USER=${runtime_user}~JINA_DB_POOL_MAX=3~JINA_DB_MANAGE_SCHEMA=false~CONTEXT_WORKER_LEASE_MS=9000000~CONTEXT_GCS_BUCKET=${artifact_bucket}~JINA_CONTEXT_TENANT_ID=${context_tenant_id}~JINA_CONTEXT_PRINCIPAL_ID=user:context-query@staging.internal"
 api_secrets="DB_PASS=${runtime_password_secret}:latest,GITHUB_WEBHOOK_SECRET=${webhook_secret}:latest,INTERNAL_API_TOKEN=${internal_token_secret}:latest,CONTEXT_API_TOKEN=${context_token_secret}:latest,CONTEXT_PRIVATE_CHECKPOINT_KEY=${checkpoint_secret}:latest"
 gcloud run deploy "${api_service}" \
   --project="${project}" \

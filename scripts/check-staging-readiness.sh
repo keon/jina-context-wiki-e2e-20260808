@@ -72,6 +72,7 @@ required_variables=(
   JINA_GITHUB_OAUTH_CLIENT_ID
   JINA_TRIGGER_PROJECT_REF
   JINA_GRAPH_API_URL
+  JINA_CONTEXT_TENANT_ID
   WEBHOOK_SECRET_NAME
   JINA_GITHUB_APP_PRIVATE_KEY_SECRET_NAME
   INTERNAL_API_TOKEN_SECRET_NAME
@@ -101,6 +102,12 @@ for variable_name in "${required_variables[@]}"; do
     pass "GitHub Staging variable ${variable_name} is configured"
   fi
 done
+
+context_tenant_id="$(jq -r '.variables[]? | select(.name == "JINA_CONTEXT_TENANT_ID") | .value' \
+  <<<"${variables_json}")"
+if [[ -n "${context_tenant_id}" && ! "${context_tenant_id}" =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$ ]]; then
+  fail "GitHub Staging variable JINA_CONTEXT_TENANT_ID must be a UUID"
+fi
 
 required_environment_secrets=(
   STAGING_JINA_TRIGGER_ACCESS_TOKEN
