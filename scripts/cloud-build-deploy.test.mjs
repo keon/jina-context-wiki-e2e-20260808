@@ -788,7 +788,7 @@ test("production storage, quota database, and PageIndex dependencies are explici
 });
 
 test("API burst capacity preserves the aggregate PostgreSQL connection budget", () => {
-  assert.match(cloudBuild, /_JINA_API_MAX_INSTANCES: "2"/);
+  assert.match(cloudBuild, /_JINA_API_MAX_INSTANCES: "4"/);
   assert.match(cloudBuild, /_JINA_API_DB_POOL_MAX: "3"/);
   assert.match(cloudBuild, /JINA_API_DB_POOL_MAX=\$\{_JINA_API_DB_POOL_MAX\}/);
   assert.match(deployment.match(/^api_env_vars=.*$/m)?.[0] ?? "", /JINA_DB_POOL_MAX=\$\{api_db_pool_max\}/);

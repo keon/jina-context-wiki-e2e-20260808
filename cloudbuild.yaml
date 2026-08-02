@@ -157,9 +157,9 @@ substitutions:
   _JINA_TRIGGER_ACCEPTANCE_GITHUB_INSTALLATION_ID: "150069172"
   # Keep one API container warm so dashboard reads do not pay a Cloud Run cold
   # start. Each API instance owns three PostgreSQL pools capped at three
-  # connections, keeping two instances within an aggregate budget of 18.
+  # connections, keeping four instances within an aggregate budget of 36.
   _JINA_API_MIN_INSTANCES: "1"
-  _JINA_API_MAX_INSTANCES: "2"
+  _JINA_API_MAX_INSTANCES: "4"
   _JINA_API_CONCURRENCY: "10"
   _JINA_API_DB_POOL_MAX: "3"
   _JINA_API_CPU: "1"

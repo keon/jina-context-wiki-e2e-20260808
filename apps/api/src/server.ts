@@ -4274,23 +4274,30 @@ function contextWorkerCompletionAttestation(state: BoardState, build: BoardTask)
 }
 
 function contextBoardOperatorRetryEligibility(state: BoardState, build: BoardTask, now: ReturnType<typeof nowIso>) {
-  const dispatchable = boardOperatorRetryEligibility(state, {
+  if (build.status !== "failed") {
+    return {
+      eligible: false,
+      recoverableTaskIds: [],
+      blockers: [{ code: "build_not_failed", detail: "operator retry requires a failed build" }]
+    };
+  }
+  const buildState = contextBuildBoardState(state, build.id);
+  const dispatchable = boardOperatorRetryEligibility(buildState, {
     buildTaskId: build.id,
     now
   });
   if (dispatchable.eligible) return dispatchable;
-  if (build.status !== "failed") return dispatchable;
 
-  const recoverablePages = state.tasks
+  const recoverablePages = buildState.tasks
     .filter(
       (task) =>
         task.parentTaskId === build.id &&
         task.type === contextBoardTaskTypes.page &&
         task.status === "failed" &&
-        state.events.some((event) => event.taskId === task.id && event.type === "context.page_repair_exhausted")
+        buildState.events.some((event) => event.taskId === task.id && event.type === "context.page_repair_exhausted")
     )
     .filter((page) => {
-      const latestPass = state.tasks
+      const latestPass = buildState.tasks
         .filter(
           (task) =>
             task.parentTaskId === page.id &&
@@ -4310,12 +4317,12 @@ function contextBoardOperatorRetryEligibility(state: BoardState, build: BoardTas
       mode: "page_remediation" as const
     };
   }
-  const certification = state.tasks.find(
+  const certification = buildState.tasks.find(
     (task) =>
       task.parentTaskId === build.id && task.type === contextBoardTaskTypes.certification && task.status === "canceled"
   );
   const exhaustion = certification
-    ? [...state.events]
+    ? [...buildState.events]
         .reverse()
         .find((event) => event.taskId === certification.id && event.type === "context.gate_repair_exhausted")
     : undefined;
@@ -4333,6 +4340,19 @@ function contextBoardOperatorRetryEligibility(state: BoardState, build: BoardTas
     };
   }
   return dispatchable;
+}
+
+function contextBuildBoardState(state: BoardState, buildId: TaskId): BoardState {
+  const tasks = state.tasks.filter((task) => task.id === buildId || task.metadata.contextBuildId === buildId);
+  const taskIds = new Set(tasks.map((task) => task.id));
+  return {
+    tasks,
+    dependencies: state.dependencies.filter(
+      (dependency) => taskIds.has(dependency.taskId) && taskIds.has(dependency.dependsOnTaskId)
+    ),
+    outbox: state.outbox.filter((message) => taskIds.has(message.taskId)),
+    events: state.events.filter((event) => event.taskId === undefined || taskIds.has(event.taskId))
+  };
 }
 
 function assertContextOperatorRetrySafety(state: BoardState, build: BoardTask, target: BoardTask): void {
