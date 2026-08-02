@@ -174,7 +174,7 @@ gcloud run deploy "${worker_service}" \
   --max-instances=1 \
   --no-cpu-throttling \
   --set-env-vars="${worker_environment}" \
-  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
+  --set-secrets="INTERNAL_API_TOKEN=jina-internal-api-token:latest,JINA_WORKER_RELEASE_CREDENTIAL=${worker_release_secret}:${release_secret_version},DAYTONA_API_KEY=jina-daytona-api-key:latest,CAUSAL_GRAPH_OPENAI_API_KEY=jina-openai-api-key:latest,GITHUB_APP_ID=jina-github-app-id:latest,GITHUB_APP_PRIVATE_KEY=jina-github-app-private-key:latest,GITHUB_CLONE_TOKEN=jina-github-clone-token:latest" \
   "${worker_traffic_args[@]}" \
   --revision-suffix="${release_suffix}" \
   --quiet

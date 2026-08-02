@@ -324,10 +324,31 @@ const claimBackpressureLogIntervalMs = 60_000;
 const MAX_CRITIC_CONTRACT_ATTEMPTS = 4;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
+const causalGraphOpenAiApiKey = process.env.CAUSAL_GRAPH_OPENAI_API_KEY?.trim();
+const causalGraphOnlyWorker =
+  topics.length > 0 &&
+  topics.every((topic) => CAUSAL_GRAPH_TOPICS.includes(topic as (typeof CAUSAL_GRAPH_TOPICS)[number]));
+if (causalGraphOpenAiApiKey && !causalGraphOnlyWorker) {
+  throw new Error("CAUSAL_GRAPH_OPENAI_API_KEY is allowed only on a causal-graph-only worker");
+}
 const configuredBoardAgentStageRunner =
   claimMode === "enabled" && requiresBoardAgentExecutor(topics)
     ? configuredPortableContextBoardAgentStageRunner({
-        protectedValues: [token],
+        protectedValues: [token, ...(causalGraphOpenAiApiKey ? [causalGraphOpenAiApiKey] : [])],
+        ...(causalGraphOpenAiApiKey
+          ? {
+              defaultExecution: {
+                credential: {
+                  kind: "api-key" as const,
+                  environmentVariable: "OPENAI_API_KEY",
+                  value: causalGraphOpenAiApiKey
+                },
+                model: (process.env.CAUSAL_GRAPH_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
+                effort: process.env.CONTEXT_CODEX_EFFORT?.trim() || "medium",
+                domains: ["api.openai.com"]
+              }
+            }
+          : {}),
         attemptContext: () => {
           const activeMetadata = activeWork ? Object.fromEntries(Object.entries(activeWork.task.metadata)) : undefined;
           return {

@@ -34,6 +34,7 @@ test("causal graph deployment uses isolated capacity and an exact topic check", 
   assert.match(deployment, /--format=json \| python3 -c/);
   assert.match(deployment, /item\.get\("name"\) == "WORKER_TOPICS"/);
   assert.match(deployment, /if \[\[ "\$\{observed_topics\}" != "\$\{causal_topics\}" \]\]/);
+  assert.match(deployment, /CAUSAL_GRAPH_OPENAI_API_KEY=jina-openai-api-key:latest/);
 });
 
 test("first worker creation is release-gated without relying on zero traffic", () => {

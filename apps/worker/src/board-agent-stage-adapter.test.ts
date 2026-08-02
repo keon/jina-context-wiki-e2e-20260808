@@ -484,6 +484,52 @@ test("execution profiles are fetched without retaining decrypted credentials and
   );
 });
 
+test("worker-scoped API credentials create a fresh Daytona runner for every stage", async () => {
+  const root = await mkdtemp(join(tmpdir(), "jina-worker-scoped-credential-"));
+  const credentialValue = "sk-worker-scoped-test-credential";
+  const executions: (BoardAgentExecutionConfiguration | undefined)[] = [];
+  const protectedValues: (readonly string[])[] = [];
+  const runner = configuredPortableContextBoardAgentStageRunner({
+    environment: {},
+    protectedValues: [credentialValue],
+    defaultExecution: {
+      credential: { kind: "api-key", environmentVariable: "OPENAI_API_KEY", value: credentialValue },
+      model: "gpt-5.6-terra",
+      effort: "medium",
+      domains: ["api.openai.com"]
+    },
+    attemptContext: () => ({ commitSha: "c".repeat(40), attempt: 1 }),
+    runnerFactory: (_environment, protectedInput, execution) => {
+      executions.push(execution);
+      protectedValues.push(protectedInput);
+      return {
+        mode: "daytona",
+        async run() {
+          return envelope(Buffer.from('{"text":"completed"}'), []);
+        }
+      };
+    }
+  });
+
+  try {
+    const input = {
+      id: "worker-scoped-stage",
+      prompt: "Complete the stage.",
+      workingDirectory: root,
+      readOnly: true,
+      budgetSeconds: 30
+    } as const;
+    await runner.run(input);
+    await runner.run(input);
+
+    assert.equal(executions.length, 2);
+    assert.ok(executions.every((execution) => execution?.credential.kind === "api-key"));
+    assert.ok(protectedValues.every((values) => values.includes(credentialValue)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("managed initial execution and non-OpenAI provider fallback use the configured managed model", async () => {
   const root = await mkdtemp(join(tmpdir(), "jina-profile-fallback-"));
   const environment = {

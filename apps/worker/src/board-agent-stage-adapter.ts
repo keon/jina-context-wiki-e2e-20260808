@@ -100,6 +100,8 @@ export interface BoardAgentAttemptContext {
 export interface PortableBoardAgentConfiguration {
   readonly environment?: WorkerEnvironment;
   readonly protectedValues?: readonly string[];
+  /** A worker-scoped credential used only when no tenant execution profile is configured. */
+  readonly defaultExecution?: BoardAgentExecutionConfiguration;
   readonly attemptContext: () => BoardAgentAttemptContext;
   /** Deterministic seams for contract tests; production uses the global fetch and runner factory. */
   readonly profileFetch?: ContextProfileFetch;
@@ -117,13 +119,19 @@ export function configuredPortableContextBoardAgentStageRunner(
   const environment = configuration.environment ?? process.env;
   const protectedValues = configuration.protectedValues ?? [];
   const runnerFactory = configuration.runnerFactory ?? configuredBoardAgentRunner;
-  const managedRunner = runnerFactory(environment, protectedValues);
+  const managedRunner = configuration.defaultExecution ? undefined : runnerFactory(environment, protectedValues);
   return {
     async run(input) {
       const attempt = configuration.attemptContext();
       const profile = await resolveContextExecutionProfile(environment, attempt, configuration.profileFetch);
       if (!profile) {
-        return runPortableBoardAgentStage(managedRunner, input, attempt, environment);
+        // Raw API-key and Codex credentials are intentionally single-use in the
+        // Daytona runner. Construct a fresh runner for every stage instead of
+        // retaining a consumed credential on the long-lived worker process.
+        const defaultRunner = configuration.defaultExecution
+          ? runnerFactory(environment, protectedValues, configuration.defaultExecution)
+          : managedRunner!;
+        return runPortableBoardAgentStage(defaultRunner, input, attempt, environment);
       }
       const profileManagedRunner = () =>
         configuredManagedProfileRunner(environment, protectedValues, profile.effort, runnerFactory);
