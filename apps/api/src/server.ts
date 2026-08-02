@@ -3975,6 +3975,7 @@ function publicContextBoardBuild(state: BoardState, buildTaskId: TaskId) {
 }
 
 function publicContextBuildQueuedFollowup(state: BoardState, buildTaskId: TaskId) {
+  const build = state.tasks.find((task) => task.id === buildTaskId && task.type === contextBoardTaskTypes.build);
   const event = [...state.events]
     .reverse()
     .find((candidate) => candidate.taskId === buildTaskId && candidate.type === "context.build_followup_requested");
@@ -4004,7 +4005,10 @@ function publicContextBuildQueuedFollowup(state: BoardState, buildTaskId: TaskId
       ...(commitSha ? { commitSha } : {}),
       trigger,
       requestedAt: event.at,
-      reason: "Waiting for the active build to finish so its verified checkpoints become the incremental seed."
+      reason:
+        build?.status === "failed"
+          ? "Waiting for the recoverable failed build to resume from its retained checkpoints and publish."
+          : "Waiting for the active build to finish so its verified checkpoints become the incremental seed."
     }
   };
 }

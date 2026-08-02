@@ -516,11 +516,15 @@ preview immediately, retires its leases, and releases its quota. Unstarted defau
 builds are also cheap to replace. Once a push-, issue-, or manually-triggered build has
 invested work, however, the Board records later admissions as immutable
 `context.build_followup_requested` events instead of canceling it. The history remains
-immutable, but only the newest follow-up is eligible for promotion. When the active build reaches a terminal state, its release (when
-successful) becomes the incremental seed and the API automatically admits that newest
-follow-up at the next ref sequence. Worker claims also reconcile pending follow-ups, so
-process loss between completion and promotion cannot strand them. Request-key redelivery
-reuses either the existing build or the same deferred follow-up.
+immutable, but only the newest follow-up is eligible for promotion. A recoverable failed
+build retains that follow-up while an operator retry resumes its failed stage from the
+same immutable checkpoints; admitting the successor first would strand that invested
+work behind a newer ref sequence. After the predecessor publishes, its release becomes
+the incremental seed and the API automatically admits the newest follow-up at the next
+ref sequence. An unrecoverable terminal predecessor may still yield to the follow-up.
+Worker claims also reconcile pending follow-ups, so process loss between completion and
+promotion cannot strand them. Request-key redelivery reuses either the existing build or
+the same deferred follow-up.
 
 The Board is the only production scheduler. It materializes snapshot, research
 plan, parallel subject research, publication plan, parallel page write/audit,

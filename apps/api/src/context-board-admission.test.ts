@@ -480,6 +480,30 @@ test("an invested default-ref build retains only the newest follow-up until it b
   assert.equal(latestContextBoardFollowup(promoted.state, first.build.buildTaskId), undefined);
 });
 
+test("a recoverable failed build retains its follow-up until checkpoint repair publishes", () => {
+  const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-repair-first");
+  assert.equal(first.outcome, "created");
+  const active = transitionBoardTask(first.state, first.build.buildTaskId, "in_progress", NOW);
+  const deferred = github(active, pushEvent("8".repeat(40)), "delivery-repair-followup");
+  assert.equal(deferred.outcome, "deferred");
+
+  const failedSnapshot = transitionBoardTask(
+    transitionBoardTask(deferred.state, first.build.snapshotTaskId, "in_progress", NOW),
+    first.build.snapshotTaskId,
+    "failed",
+    LATER
+  );
+  const failed = transitionBoardTask(failedSnapshot, first.build.buildTaskId, "failed", LATER);
+
+  assert.equal(findTask(failed, first.build.buildTaskId)?.status, "failed");
+  assert.equal(latestContextBoardFollowup(failed, first.build.buildTaskId), undefined);
+  assert.equal(
+    failed.events.filter((event) => event.type === "context.build_followup_requested").length,
+    1,
+    "the newest follow-up must remain durably attached to the recoverable predecessor"
+  );
+});
+
 test("a stale deferred follow-up cannot supersede a newer ref sequence", () => {
   const first = github(createEmptyBoardState(), pushEvent("7".repeat(40)), "delivery-stale-first");
   assert.equal(first.outcome, "created");
