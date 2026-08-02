@@ -67,7 +67,9 @@ import {
   parseContextPriorReleaseSeed,
   repositoryAclFingerprint,
   repositoryContextAreas,
+  deriveIssueCandidateLedger,
   materializeIssueGraph,
+  minimumDerivedIssueCount,
   type CertifiedContextReleaseArtifactV1,
   type ContextPageChange,
   type ContextPriorPage,
@@ -80,6 +82,7 @@ import {
   type PortableContextBoardAgentStageRunner
 } from "./board-agent-stage-adapter.js";
 import { parseBoardSourceChallengeStageResultWithRepair } from "./board-source-challenge.js";
+import { ISSUE_GRAPH_STAGE_SCHEMA, issueGraphPrompt } from "./causal-graph-derivation.js";
 import { canonicalCausalGraphCommitTimestamp } from "./causal-graph-history.js";
 import {
   citationAuditDelta,
@@ -317,51 +320,6 @@ const contextCompletionTimeoutMs = positiveInt(process.env.CONTEXT_COMPLETION_TI
 const heartbeatIntervalMs = positiveInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS, 60_000);
 const claimBackpressureLogIntervalMs = 60_000;
 const MAX_CRITIC_CONTRACT_ATTEMPTS = 4;
-const ISSUE_GRAPH_STAGE_SCHEMA = {
-  type: "object",
-  additionalProperties: false,
-  required: ["version", "summary", "issues", "causalities"],
-  properties: {
-    version: { type: "integer", const: 1 },
-    summary: { type: "string", minLength: 1, maxLength: 4_000 },
-    issues: {
-      type: "array",
-      maxItems: 2_000,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["key", "title", "summary", "evidence"],
-        properties: {
-          key: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
-          title: { type: "string", minLength: 4, maxLength: 200 },
-          summary: { type: "string", minLength: 12, maxLength: 4_000 },
-          evidence: { type: "array", minItems: 1, maxItems: 100, items: issueEvidenceSchema() }
-        }
-      }
-    },
-    causalities: {
-      type: "array",
-      maxItems: 5_000,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["subjectKey", "predicate", "objectKind", "objectRef", "why", "confidence", "evidence"],
-        properties: {
-          subjectKey: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
-          predicate: {
-            type: "string",
-            enum: ["CAUSED_BY", "RESOLVED_BY", "CONTRIBUTES_TO"]
-          },
-          objectKind: { type: "string", enum: ["issue", "commit"] },
-          objectRef: { type: "string", pattern: "^[a-z0-9][a-z0-9._-]{0,119}$" },
-          why: { type: "string", minLength: 12, maxLength: 2_000 },
-          confidence: { type: "string", const: "explicit" },
-          evidence: { type: "array", minItems: 1, maxItems: 100, items: issueEvidenceSchema() }
-        }
-      }
-    }
-  }
-} as const;
 const contextBoardMaxAttempts = boardMaxAttempts(process.env.CONTEXT_BOARD_MAX_ATTEMPTS);
 const requireGithubInstallation = process.env.JINA_REQUIRE_GITHUB_INSTALLATION === "true";
 const configuredBoardAgentStageRunner =
@@ -814,9 +772,12 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
   const inputDirectory = await mkdtemp(join(tmpdir(), "jina-causal-graph-"));
   try {
     const historyPath = join(inputDirectory, "commit-history.json");
+    const candidateLedger = deriveIssueCandidateLedger(history.commits);
+    const candidateLedgerPath = join(inputDirectory, "candidate-ledger.json");
     await writeFile(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
+    await writeFile(candidateLedgerPath, `${JSON.stringify(candidateLedger, null, 2)}\n`, "utf8");
     const phase = "causal-graph-derive.candidate";
-    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v1", phase, {
+    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v2", phase, {
       historyArtifactSha256: historyArtifact.sha256,
       commitSha: history.commitSha
     });
@@ -827,12 +788,18 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
       generate: async () => {
         const output = await requireBoardAgentStageRunner().run({
           id: "issue-causality-derivation",
-          prompt: issueGraphPrompt(history.repository, history.ref, historyPath),
+          prompt: issueGraphPrompt(
+            history.repository,
+            history.ref,
+            historyPath,
+            candidateLedgerPath,
+            minimumDerivedIssueCount(candidateLedger.candidates.length)
+          ),
           schema: ISSUE_GRAPH_STAGE_SCHEMA,
           workingDirectory: inputDirectory,
           additionalDirectories: [inputDirectory],
           readOnly: true,
-          budgetSeconds: stageBudgetSeconds("CAUSAL_GRAPH_DERIVE_SECONDS", 300)
+          budgetSeconds: stageBudgetSeconds("CAUSAL_GRAPH_DERIVE_SECONDS", 900)
         });
         return { candidate: output.parsed, generatedAt: new Date().toISOString() };
       }
@@ -848,11 +815,12 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
       history: history.commits,
       historyComplete: history.complete,
       candidate: checkpoint.candidate,
+      candidateLedger,
       generator: {
         name: "codex-agentic-issue-deriver",
         version: "1",
         model: (process.env.CAUSAL_GRAPH_CODEX_MODEL?.trim() || "gpt-5.6-terra").replace(/^openai\//, ""),
-        promptVersion: "issue-causality-v2"
+        promptVersion: "issue-causality-v3"
       }
     });
     const outputArtifact = await uploadContextBoardArtifact(work, {
@@ -4966,35 +4934,6 @@ function parseIssueHistoryPacket(content: Uint8Array, metadata: RepositoryContex
   });
   if (commits[0]?.sha !== commitSha) throw new Error("issue history does not begin at the leased commit");
   return { version: 1, tenantId, repository, ref, refSequence, commitSha, complete: value.complete, commits };
-}
-
-function issueGraphPrompt(repository: string, ref: string, historyPath: string): string {
-  return [
-    `Derive a compact engineering issue and causality graph for ${repository}@${ref}.`,
-    `The sole evidence source is the bounded commit-history file at ${historyPath}.`,
-    "Read it directly. This is one agentic derivation run; do not create a plan, delegate, or invoke a critic.",
-    "An issue is a concrete defect, failure mode, operational constraint, or harmful design tradeoff visible in commit messages. Do not turn ordinary features, refactors, or chores into issues.",
-    "Every issue needs exact 1-based commit-message line ranges. Use introduced, observed, and resolved roles only when the cited text supports that role.",
-    "Use CAUSED_BY for an issue's cause: its object may be either the commit SHA that introduced the issue or another issue key. Use RESOLVED_BY only with commit SHA objects and CONTRIBUTES_TO only between issue keys.",
-    "Every subjectKey and issue objectRef must exactly copy one lowercase key from the issues array. Never invent or recase an issue reference.",
-    "Emit a causality only when the commit history states the relationship explicitly enough to defend. confidence must be explicit. Omit guesses and ambiguous relationships.",
-    "Keep distinct symptoms separate only when the history supports separate identities. Prefer fewer well-evidenced issues over speculative coverage.",
-    "Return only the schema-conforming JSON result."
-  ].join("\n\n");
-}
-
-function issueEvidenceSchema() {
-  return {
-    type: "object",
-    additionalProperties: false,
-    required: ["commitSha", "role", "messageStartLine", "messageEndLine"],
-    properties: {
-      commitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-      role: { type: "string", enum: ["introduced", "observed", "resolved"] },
-      messageStartLine: { type: "integer", minimum: 1 },
-      messageEndLine: { type: "integer", minimum: 1 }
-    }
-  } as const;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

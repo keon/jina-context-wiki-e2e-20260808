@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { issueGraphTrace, materializeIssueGraph, parseIssueGraphArtifact, searchIssueGraph } from "./issue-graph.js";
+import {
+  deriveIssueCandidateLedger,
+  issueGraphTrace,
+  materializeIssueGraph,
+  minimumDerivedIssueCount,
+  parseIssueGraphArtifact,
+  searchIssueGraph
+} from "./issue-graph.js";
 
 const introduced = "a".repeat(40);
 const resolved = "b".repeat(40);
@@ -102,7 +109,7 @@ test("materializes generalized commit and issue causes, stable identities, evide
   const graph = materialize();
   assert.equal(graph.repository, "acme/widgets");
   assert.equal(graph.issues.length, 2);
-  assert.equal(graph.causalities.length, 3);
+  assert.equal(graph.causalities.length, 4);
   assert.equal(graph.generator.schemaVersion, "issue-causality-v2");
   assert.equal(
     graph.causalities.filter((edge) => edge.predicate === "CAUSED_BY" && edge.object.kind === "commit").length,
@@ -155,4 +162,104 @@ test("rejects predicate endpoint mismatches and causal cycles", () => {
     evidence: [{ commitSha: resolved, role: "observed", messageStartLine: 1, messageEndLine: 1 }]
   });
   assert.throws(() => materialize(cyclic), /acyclic/);
+});
+
+test("candidate ledger is deterministic and sets a bounded recall floor", () => {
+  const history = [
+    { sha: introduced, parentShas: [], message: "feat: add ordinary behavior" },
+    { sha: resolved, parentShas: [introduced], message: "fix(api): prevent stale state rollback" },
+    { sha: followup, parentShas: [resolved], message: "docs: explain retries after timeout failures" }
+  ];
+  const ledger = deriveIssueCandidateLedger(history);
+  assert.deepEqual(
+    ledger.candidates.map((item) => ({ sha: item.commitSha, signals: item.signals })),
+    [
+      { sha: resolved, signals: ["fix", "prevent", "rollback", "stale"] },
+      { sha: followup, signals: ["failure", "timeout", "retry"] }
+    ]
+  );
+  assert.deepEqual(deriveIssueCandidateLedger(history), ledger);
+  assert.equal(minimumDerivedIssueCount(0), 0);
+  assert.equal(minimumDerivedIssueCount(40), 6);
+  assert.equal(minimumDerivedIssueCount(103), 15);
+});
+
+test("enforces exhaustive candidate disposition and synthesizes lifecycle edges", () => {
+  const history = [
+    {
+      sha: followup,
+      parentShas: [resolved],
+      message: "fix(worker): retry a failed claim",
+      committedAt: "2026-08-01T14:00:00.000Z"
+    },
+    {
+      sha: resolved,
+      parentShas: [introduced],
+      message: "fix(worker): prevent claim timeout",
+      committedAt: "2026-08-01T13:00:00.000Z"
+    },
+    {
+      sha: introduced,
+      parentShas: [],
+      message: "feat(worker): hold claims while blocked",
+      committedAt: "2026-08-01T12:00:00.000Z"
+    }
+  ];
+  const ledger = deriveIssueCandidateLedger(history);
+  const value = {
+    version: 1,
+    summary: "Claim handling could block and time out before the repair.",
+    issues: [
+      {
+        key: "claim-timeout",
+        title: "Blocked claims timed out",
+        summary: "Claim processing remained blocked long enough for workers to time out.",
+        evidence: [
+          { commitSha: introduced, role: "introduced", messageStartLine: 1, messageEndLine: 1 },
+          { commitSha: resolved, role: "resolved", messageStartLine: 1, messageEndLine: 1 }
+        ]
+      }
+    ],
+    causalities: [],
+    candidateDispositions: ledger.candidates.map((item) => ({
+      commitSha: item.commitSha,
+      disposition: item.commitSha === followup ? "duplicate" : "issue",
+      issueKeys: ["claim-timeout"],
+      reason: "The commit describes the same blocked claim timeout failure."
+    }))
+  };
+  const graph = materializeIssueGraph({
+    tenantId: "tenant-a",
+    repository: "Acme/Widgets",
+    ref: "main",
+    refSequence: 2,
+    commitSha: followup,
+    generatedAt: "2026-08-01T15:00:00.000Z",
+    history,
+    historyComplete: true,
+    candidate: value,
+    candidateLedger: ledger,
+    generator: { name: "codex", version: "1", model: "test", promptVersion: "issue-causality-v3" }
+  });
+  assert.equal(graph.causalities.filter((edge) => edge.predicate === "CAUSED_BY").length, 1);
+  assert.equal(graph.causalities.filter((edge) => edge.predicate === "RESOLVED_BY").length, 1);
+
+  value.candidateDispositions.pop();
+  assert.throws(
+    () =>
+      materializeIssueGraph({
+        tenantId: "tenant-a",
+        repository: "Acme/Widgets",
+        ref: "main",
+        refSequence: 2,
+        commitSha: followup,
+        generatedAt: "2026-08-01T15:00:00.000Z",
+        history,
+        historyComplete: true,
+        candidate: value,
+        candidateLedger: ledger,
+        generator: { name: "codex", version: "1", model: "test", promptVersion: "issue-causality-v3" }
+      }),
+    /did not disposition/
+  );
 });

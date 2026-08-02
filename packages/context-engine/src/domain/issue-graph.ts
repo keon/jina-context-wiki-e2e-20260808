@@ -69,6 +69,18 @@ export interface IssueGraphArtifactV1 {
   readonly contentDigest: string;
 }
 
+export const issueCandidateDispositions = ["issue", "duplicate", "non_issue", "insufficient_evidence"] as const;
+export type IssueCandidateDisposition = (typeof issueCandidateDispositions)[number];
+
+export interface IssueCandidateLedger {
+  readonly version: 1;
+  readonly candidates: readonly {
+    readonly commitSha: string;
+    readonly subject: string;
+    readonly signals: readonly string[];
+  }[];
+}
+
 export interface IssueGraphCandidate {
   readonly version: 1;
   readonly summary: string;
@@ -88,6 +100,12 @@ export interface IssueGraphCandidate {
     readonly confidence: "explicit" | "inferred";
     readonly evidence: readonly Omit<IssueCommitEvidence, "excerpt">[];
   }[];
+  readonly candidateDispositions?: readonly {
+    readonly commitSha: string;
+    readonly disposition: IssueCandidateDisposition;
+    readonly issueKeys: readonly string[];
+    readonly reason: string;
+  }[];
 }
 
 export interface MaterializeIssueGraphInput {
@@ -100,6 +118,7 @@ export interface MaterializeIssueGraphInput {
   readonly history: readonly IssueHistoryCommit[];
   readonly historyComplete: boolean;
   readonly candidate: unknown;
+  readonly candidateLedger?: IssueCandidateLedger;
   readonly prior?: IssueGraphArtifactV1;
   readonly generator: Omit<IssueGraphArtifactV1["generator"], "schemaVersion">;
 }
@@ -107,6 +126,53 @@ export interface MaterializeIssueGraphInput {
 const MAX_ISSUES = 2_000;
 const MAX_CAUSALITIES = 5_000;
 const ISSUE_ID_PATTERN = /^issue_[0-9a-f]{32}$/;
+const ISSUE_CANDIDATE_SIGNALS = [
+  ["fix", /^(?:fix|hotfix)(?:\([^)]*\))?[!:]/i],
+  ["repair", /\b(?:repair|repaired|repairs)\b/i],
+  ["prevent", /\b(?:prevent|prevented|prevents|avoid|avoids|avoided)\b/i],
+  ["failure", /\b(?:fail|failed|fails|failure|failures|failing)\b/i],
+  ["timeout", /\b(?:timeout|timeouts|timed[- ]out|deadline[- ]expired)\b/i],
+  ["race", /\b(?:race|races|racy)\b/i],
+  ["deadlock", /\bdeadlocks?\b/i],
+  ["crash", /\b(?:crash|crashed|crashes)\b/i],
+  ["regression", /\bregressions?\b/i],
+  ["rollback", /\b(?:rollback|rolled back)\b/i],
+  ["broken", /\b(?:broken|breakage)\b/i],
+  ["error", /\b(?:error|errors|errored)\b/i],
+  ["invalid", /\binvalid\b/i],
+  ["stale", /\bstale\b/i],
+  ["orphan", /\borphan(?:ed|s)?\b/i],
+  ["contention", /\bcontention\b/i],
+  ["backpressure", /\bbackpressure\b/i],
+  ["retry", /\b(?:retry|retried|retries|retrying)\b/i],
+  ["unavailable", /\bunavailable\b/i],
+  ["leak", /\b(?:leak|leaked|leaks|leaking)\b/i],
+  ["exhaustion", /\b(?:exhaust|exhausted|exhaustion)\b/i],
+  ["discard", /\b(?:discard|discarded|discards)\b/i],
+  ["data-loss", /\b(?:data loss|lost|losing)\b/i],
+  ["blocked", /\b(?:blocked|blocking|unblock)\b/i]
+] as const;
+
+/** Identifies commits that a derivation run must explicitly disposition. */
+export function deriveIssueCandidateLedger(history: readonly IssueHistoryCommit[]): IssueCandidateLedger {
+  const commits = validatedHistory(history);
+  return {
+    version: 1,
+    candidates: [...commits.values()].flatMap((commit) => {
+      const signals = ISSUE_CANDIDATE_SIGNALS.filter(([, pattern]) => pattern.test(commit.message)).map(
+        ([name]) => name
+      );
+      if (signals.length === 0) return [];
+      return [{ commitSha: commit.sha, subject: commit.message.split(/\r?\n/, 1)[0]!.slice(0, 240), signals }];
+    })
+  };
+}
+
+export function minimumDerivedIssueCount(candidateCount: number): number {
+  if (!Number.isSafeInteger(candidateCount) || candidateCount < 0)
+    throw new Error("candidateCount must be non-negative");
+  return candidateCount === 0 ? 0 : Math.min(15, Math.max(1, Math.ceil(candidateCount * 0.15)));
+}
 
 /**
  * Converts one model-authored candidate into a deterministic, immutable graph.
@@ -128,6 +194,13 @@ export function materializeIssueGraph(input: MaterializeIssueGraphInput): IssueG
   const history = validatedHistory(input.history);
   if (!history.has(commitSha)) throw new Error("issue graph history does not contain its target commit");
   const candidate = parseIssueGraphCandidate(input.candidate);
+  if (input.candidateLedger) {
+    const expectedLedger = deriveIssueCandidateLedger(input.history);
+    if (fingerprint(input.candidateLedger) !== fingerprint(expectedLedger)) {
+      throw new Error("issue candidate ledger does not match the observed history");
+    }
+    assertCandidateCoverage(candidate, expectedLedger);
+  }
   const priorIssues = validatedPrior(input.prior, tenantId, repository, ref);
   const issuesByKey = new Map<string, DerivedIssue>();
   const usedIds = new Set<string>();
@@ -159,7 +232,7 @@ export function materializeIssueGraph(input: MaterializeIssueGraphInput): IssueG
     });
   }
 
-  const causalities = candidate.causalities.map((causality) => {
+  const modelCausalities = candidate.causalities.map((causality) => {
     const subject = issuesByKey.get(causality.subjectKey);
     if (!subject) throw new Error(`causality references unknown subject issue key ${causality.subjectKey}`);
     assertCausalityObjectKind(causality.predicate, causality.objectKind);
@@ -189,9 +262,39 @@ export function materializeIssueGraph(input: MaterializeIssueGraphInput): IssueG
       evidence
     } satisfies IssueCausality;
   });
-  const uniqueCausalities = new Map(causalities.map((causality) => [causality.id, causality]));
-  if (uniqueCausalities.size !== causalities.length) throw new Error("issue graph contains duplicate causalities");
-  assertAcyclicIssueCausality([...issuesByKey.values()], causalities);
+  const uniqueModelCausalities = new Map<string, IssueCausality>(
+    modelCausalities.map((causality) => [causality.id, causality])
+  );
+  if (uniqueModelCausalities.size !== modelCausalities.length) {
+    throw new Error("issue graph contains duplicate causalities");
+  }
+  const uniqueCausalities = new Map<string, IssueCausality>(uniqueModelCausalities);
+  for (const issue of issuesByKey.values()) {
+    for (const evidence of issue.evidence) {
+      const predicate =
+        evidence.role === "introduced" ? "CAUSED_BY" : evidence.role === "resolved" ? "RESOLVED_BY" : undefined;
+      if (!predicate) continue;
+      const edge: IssueCausality = {
+        id: stableId("cause", {
+          subjectIssueId: issue.id,
+          predicate,
+          objectKind: "commit",
+          objectId: evidence.commitSha
+        }),
+        subjectIssueId: issue.id,
+        predicate,
+        object: { kind: "commit", id: evidence.commitSha },
+        why:
+          predicate === "CAUSED_BY"
+            ? "The cited history marks this commit as introducing the issue."
+            : "The cited history marks this commit as resolving the issue.",
+        confidence: "explicit",
+        evidence: [evidence]
+      };
+      if (!uniqueCausalities.has(edge.id)) uniqueCausalities.set(edge.id, edge);
+    }
+  }
+  assertAcyclicIssueCausality([...issuesByKey.values()], [...uniqueCausalities.values()]);
 
   const issues = [...issuesByKey.values()].sort((left, right) => left.id.localeCompare(right.id));
   const orderedCausalities = [...uniqueCausalities.values()].sort((left, right) => left.id.localeCompare(right.id));
@@ -291,7 +394,13 @@ export function issueGraphTrace(
 }
 
 function parseIssueGraphCandidate(value: unknown): IssueGraphCandidate {
-  const root = exactRecord(value, ["version", "summary", "issues", "causalities"], "issue graph candidate");
+  const root = record(value, "issue graph candidate");
+  assertOptionalKeys(
+    root,
+    ["version", "summary", "issues", "causalities", "candidateDispositions"],
+    ["version", "summary", "issues", "causalities"],
+    "issue graph candidate"
+  );
   if (root.version !== 1) throw new Error("issue graph candidate version must be 1");
   const summary = boundedString(root.summary, "issue graph summary", 4_000);
   if (!Array.isArray(root.issues) || root.issues.length > MAX_ISSUES) {
@@ -349,7 +458,105 @@ function parseIssueGraphCandidate(value: unknown): IssueGraphCandidate {
       evidence: parseEvidenceArray(edge.evidence, `causality ${index}`)
     };
   });
-  return { version: 1, summary, issues, causalities };
+  const candidateDispositions =
+    root.candidateDispositions === undefined ? undefined : parseCandidateDispositions(root.candidateDispositions, keys);
+  return { version: 1, summary, issues, causalities, ...(candidateDispositions ? { candidateDispositions } : {}) };
+}
+
+function parseCandidateDispositions(
+  value: unknown,
+  issueKeys: ReadonlySet<string>
+): NonNullable<IssueGraphCandidate["candidateDispositions"]> {
+  if (!Array.isArray(value) || value.length > 50_000) {
+    throw new Error("candidate dispositions must be an array with at most 50000 entries");
+  }
+  return value.map((item, index) => {
+    const disposition = exactRecord(
+      item,
+      ["commitSha", "disposition", "issueKeys", "reason"],
+      `candidate disposition ${index}`
+    );
+    if (!Array.isArray(disposition.issueKeys) || disposition.issueKeys.length > 100) {
+      throw new Error(`candidate disposition ${index} issueKeys must be an array with at most 100 entries`);
+    }
+    const keys = disposition.issueKeys.map((key, keyIndex) =>
+      canonicalIssueKeyReference(
+        issueKeys,
+        boundedString(key, `candidate disposition ${index} issue key ${keyIndex}`, 120)
+      )
+    );
+    if (new Set(keys).size !== keys.length) throw new Error(`candidate disposition ${index} repeats an issue key`);
+    return {
+      commitSha: fullCommitSha(disposition.commitSha, `candidate disposition ${index} commitSha`),
+      disposition: enumValue(
+        disposition.disposition,
+        issueCandidateDispositions,
+        `candidate disposition ${index} disposition`
+      ),
+      issueKeys: keys,
+      reason: boundedString(disposition.reason, `candidate disposition ${index} reason`, 1_000, 8)
+    };
+  });
+}
+
+function assertCandidateCoverage(candidate: IssueGraphCandidate, ledger: IssueCandidateLedger): void {
+  const dispositions = candidate.candidateDispositions;
+  if (!dispositions) throw new Error("issue graph candidate must disposition the candidate ledger");
+  const expected = new Set(ledger.candidates.map((item) => item.commitSha));
+  const actual = new Map<string, (typeof dispositions)[number]>();
+  const issueByKey = new Map(candidate.issues.map((issue) => [issue.key, issue]));
+  for (const disposition of dispositions) {
+    if (!expected.has(disposition.commitSha)) {
+      throw new Error(`candidate disposition references commit outside the ledger: ${disposition.commitSha}`);
+    }
+    if (actual.has(disposition.commitSha)) {
+      throw new Error(`candidate ledger commit was dispositioned more than once: ${disposition.commitSha}`);
+    }
+    const needsIssue = disposition.disposition === "issue" || disposition.disposition === "duplicate";
+    if (needsIssue !== disposition.issueKeys.length > 0) {
+      throw new Error(`candidate disposition ${disposition.commitSha} has invalid issue keys`);
+    }
+    for (const key of disposition.issueKeys) {
+      if (!issueByKey.has(key)) throw new Error(`candidate disposition references unknown issue key ${key}`);
+    }
+    if (
+      disposition.disposition === "issue" &&
+      !disposition.issueKeys.some((key) =>
+        issueByKey.get(key)!.evidence.some((item) => item.commitSha === disposition.commitSha)
+      )
+    ) {
+      throw new Error(`issue disposition ${disposition.commitSha} is not cited by its issue`);
+    }
+    actual.set(disposition.commitSha, disposition);
+  }
+  const missing = [...expected].filter((sha) => !actual.has(sha));
+  if (missing.length > 0) throw new Error(`issue graph did not disposition ${missing.length} candidate ledger commits`);
+
+  const minimumIssues = minimumDerivedIssueCount(ledger.candidates.length);
+  if (candidate.issues.length < minimumIssues) {
+    throw new Error(
+      `issue graph derived ${candidate.issues.length} issues; at least ${minimumIssues} are required from ${ledger.candidates.length} candidates`
+    );
+  }
+  const referencedKeys = new Set(dispositions.flatMap((item) => item.issueKeys));
+  const unreferencedIssues = candidate.issues.filter((issue) => !referencedKeys.has(issue.key));
+  if (unreferencedIssues.length > 0) {
+    throw new Error(`issue graph contains ${unreferencedIssues.length} issues not grounded by the candidate ledger`);
+  }
+  const sourceCommits = new Set(candidate.issues.flatMap((issue) => issue.evidence.map((item) => item.commitSha)));
+  const minimumSources = Math.min(10, minimumIssues);
+  if (sourceCommits.size < minimumSources) {
+    throw new Error(`issue graph uses ${sourceCommits.size} source commits; at least ${minimumSources} are required`);
+  }
+  const issuesWithIntroductions = candidate.issues.filter((issue) =>
+    issue.evidence.some((evidence) => evidence.role === "introduced")
+  ).length;
+  const minimumIntroductions = Math.min(3, minimumIssues);
+  if (issuesWithIntroductions < minimumIntroductions) {
+    throw new Error(
+      `issue graph identifies ${issuesWithIntroductions} introduced issues; at least ${minimumIntroductions} are required`
+    );
+  }
 }
 
 function canonicalIssueKeyReference(keys: ReadonlySet<string>, reference: string): string {

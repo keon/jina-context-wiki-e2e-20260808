@@ -206,7 +206,12 @@ test("causal graph API authorizes through the current pointer and serves cached 
       { headers }
     );
     assert.equal(trace.status, 200, await trace.clone().text());
-    assert.equal(array(record(await trace.json()).causalities).length, 1);
+    const traceCausalities = array(record(await trace.json()).causalities).map((value) => record(value));
+    assert.deepEqual(traceCausalities.map((causality) => String(causality.predicate)).sort(), [
+      "CAUSED_BY",
+      "CAUSED_BY",
+      "RESOLVED_BY"
+    ]);
 
     const full = await fetch(`${baseUrl}/causal-graph?repository=${REPOSITORY}`, { headers });
     assert.equal(full.status, 200, await full.clone().text());
