@@ -192,6 +192,10 @@ test("coordinated releases hold one renewable durable lease and reject overlap b
   assert.match(productionPreflight, /action === "release-renew" \? 3 : 12/);
   assert.match(productionPreflight, /revoke insert,update on jina_runtime\.api_state/);
   assert.match(productionPreflight, /grant select,insert,update on jina_runtime\.api_state/);
+  assert.match(apiServer, /DEFAULT_CONTEXT_WORKER_LEASE_MS = 5 \* 60 \* 1000/);
+  assert.match(deployment, /JINA_CONTEXT_WORKER_LEASE_MS:-300000/);
+  assert.match(deployment, /WORKER_HEARTBEAT_INTERVAL_MS=\$\{context_worker_heartbeat_interval_ms\}/);
+  assert.match(deployment, /must cover at least three worker heartbeat intervals/);
 });
 
 test("schema preflight and exact post-migration checks run under the release lease", () => {

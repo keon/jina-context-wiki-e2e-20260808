@@ -603,10 +603,12 @@ Equivalent-evidence derivation cache reuse remains safe because indexing perform
 checkpoint-membership check. Page and global repairs are bounded by the Board graph;
 exhaustion fails closed. Worker writes are fenced by the current board lease.
 
-The API Cloud Run request timeout is 60 minutes. The context worker operation client
-allows 62 minutes and terminal completion has a separate 10-minute deadline. The
-context-only lease is 75 minutes, exceeding both worker deadlines combined; deployment
-validation rejects inconsistent values. Ordinary task timing is unchanged.
+The API Cloud Run request timeout is 60 minutes. A Context operation may run longer in
+its sandbox and terminal completion has a separate deadline, but its Board authority is
+a five-minute renewable lease. The worker heartbeats every minute, so a healthy long
+operation keeps its authority while a terminated process becomes reclaimable within
+five minutes. Deployment validation requires the lease to cover at least three heartbeat
+intervals. Checkpointed model phases then resume without replaying completed work.
 
 Dense retrieval is disabled until its evaluation and approved embedding-provider gates
 pass. The pinned PageIndex Markdown hierarchy and deterministic bounded lexical tree

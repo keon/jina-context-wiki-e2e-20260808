@@ -47,7 +47,8 @@ api_memory="${JINA_API_MEMORY:-1Gi}"
 api_request_timeout_seconds="${JINA_API_REQUEST_TIMEOUT_SECONDS:-3600}"
 context_api_timeout_ms="${JINA_CONTEXT_API_TIMEOUT_MS:-7800000}"
 context_completion_timeout_ms="${JINA_CONTEXT_COMPLETION_TIMEOUT_MS:-600000}"
-context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-9000000}"
+context_worker_heartbeat_interval_ms="${JINA_CONTEXT_WORKER_HEARTBEAT_INTERVAL_MS:-60000}"
+context_worker_lease_ms="${JINA_CONTEXT_WORKER_LEASE_MS:-300000}"
 context_codex_context_tokens="${JINA_CONTEXT_CODEX_CONTEXT_TOKENS:-128000}"
 context_codex_compact_tokens="${JINA_CONTEXT_CODEX_COMPACT_TOKENS:-96000}"
 acceptance_derivation_budget_seconds="${JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS:-10800}"
@@ -155,6 +156,7 @@ validate_positive_integer "JINA_API_DB_POOL_MAX" "${api_db_pool_max}"
 validate_positive_integer "JINA_API_REQUEST_TIMEOUT_SECONDS" "${api_request_timeout_seconds}"
 validate_positive_integer "JINA_CONTEXT_API_TIMEOUT_MS" "${context_api_timeout_ms}"
 validate_positive_integer "JINA_CONTEXT_COMPLETION_TIMEOUT_MS" "${context_completion_timeout_ms}"
+validate_positive_integer "JINA_CONTEXT_WORKER_HEARTBEAT_INTERVAL_MS" "${context_worker_heartbeat_interval_ms}"
 validate_positive_integer "JINA_CONTEXT_WORKER_LEASE_MS" "${context_worker_lease_ms}"
 validate_positive_integer "JINA_CONTEXT_CODEX_CONTEXT_TOKENS" "${context_codex_context_tokens}"
 validate_positive_integer "JINA_CONTEXT_CODEX_COMPACT_TOKENS" "${context_codex_compact_tokens}"
@@ -203,8 +205,8 @@ if (( context_api_timeout_ms <= api_request_timeout_seconds * 1000 )); then
   echo "JINA_CONTEXT_API_TIMEOUT_MS must exceed the API request timeout" >&2
   exit 2
 fi
-if (( context_worker_lease_ms <= context_api_timeout_ms + context_completion_timeout_ms )); then
-  echo "JINA_CONTEXT_WORKER_LEASE_MS must exceed the combined context operation and completion timeouts" >&2
+if (( context_worker_lease_ms < context_worker_heartbeat_interval_ms * 3 )); then
+  echo "JINA_CONTEXT_WORKER_LEASE_MS must cover at least three worker heartbeat intervals" >&2
   exit 2
 fi
 validate_positive_integer "JINA_ACCEPTANCE_DERIVATION_BUDGET_SECONDS" "${acceptance_derivation_budget_seconds}"
@@ -617,7 +619,7 @@ context_worker_environment() {
   local claim_mode="$2"
   local target_revision="${3:-}"
   local environment
-  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_V1_API_URL=${v1_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
+  environment="^~^GOOGLE_CLOUD_PROJECT=${GCP_PROJECT_ID}~JINA_API_URL=${target_api_url}~JINA_V1_API_URL=${v1_api_url}~JINA_WORKER_CLAIM_MODE=${claim_mode}~WORKER_TOPICS=${context_board_topics}~WORKER_HEARTBEAT_INTERVAL_MS=${context_worker_heartbeat_interval_ms}~JINA_REQUIRE_GITHUB_INSTALLATION=false~CONTEXT_API_TIMEOUT_MS=${context_api_timeout_ms}~CONTEXT_COMPLETION_TIMEOUT_MS=${context_completion_timeout_ms}~CONTEXT_GITHUB_HISTORY_LIMIT=500~CONTEXT_GIT_HISTORY_LIMIT=5000~CONTEXT_MAX_FILE_BYTES=5242880~CONTEXT_MAX_SNAPSHOT_BYTES=8388608~CONTEXT_BOARD_EXECUTOR=daytona~CONTEXT_DAYTONA_MODEL_SECRET=${context_daytona_model_secret}~CONTEXT_DAYTONA_MODEL_SECRET_ENV=${context_daytona_model_secret_env}~CONTEXT_DAYTONA_MODEL_DOMAINS=${context_daytona_model_domains}~CONTEXT_CODEX_MODEL=gpt-5.6-terra~CONTEXT_CODEX_EFFORT=low~CONTEXT_CODEX_VERBOSITY=high~CONTEXT_CODEX_CONTEXT_TOKENS=${context_codex_context_tokens}~CONTEXT_CODEX_COMPACT_TOKENS=${context_codex_compact_tokens}~CONTEXT_PAGEINDEX_PYTHON=/opt/pageindex-venv/bin/python~CONTEXT_PAGEINDEX_WORKER=/opt/pageindex-worker/worker.py~PAGEINDEX_SOURCE_ROOT=/opt/PageIndex"
   if [[ "${claim_mode}" == "enabled" ]]; then
     [[ "${target_revision}" == "${context_candidate_revision}" ]] || {
       echo "Enabled Context worker requires its exact candidate revision" >&2
