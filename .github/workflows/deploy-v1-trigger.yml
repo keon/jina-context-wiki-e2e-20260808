@@ -310,4 +310,9 @@ jobs:
         run: npm run typecheck
 
       - name: Deploy Trigger.dev
-        run: npm run deploy
+        run: |
+          if [ "$DEPLOY_ENVIRONMENT" = "Staging" ]; then
+            npm run deploy -- --env staging
+          else
+            npm run deploy -- --env prod
+          fi
