@@ -207,9 +207,20 @@ retry_health "${api_url}/health"
 
 internal_token="$(gcloud secrets versions access latest \
   --secret="${internal_token_secret}" --project="${project}")"
-curl --fail --silent --show-error --max-time 20 \
-  --header "authorization: Bearer ${internal_token}" \
-  "${api_url}/overview" >/dev/null
+for attempt in $(seq 1 20); do
+  if curl --fail --silent --show-error --max-time 20 \
+      --header "authorization: Bearer ${internal_token}" \
+      --header "x-jina-tenant-id: ${context_tenant_id}" \
+      --header "x-jina-principal-id: user:staging-operator@jina.internal" \
+      "${api_url}/overview" >/dev/null; then
+    break
+  fi
+  if [[ "${attempt}" == "20" ]]; then
+    printf 'Staging API overview did not become ready\n' >&2
+    exit 1
+  fi
+  sleep 3
+done
 
 printf 'V2 staging deployed successfully\n'
 printf 'API: %s\n' "${api_url}"
