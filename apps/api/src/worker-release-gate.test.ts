@@ -72,7 +72,8 @@ test("exact active release reaches the Board transaction and topic/service ident
       ...requestIdentity("current-credential-current-credential")
     });
     assert.equal(accepted.status, 204);
-    assert.equal(store.mutationCount(), 1);
+    assert.equal(store.mutationCount(), 0);
+    assert.equal(store.verificationCount(), 1);
 
     const wrongService = await workerPost(baseUrl, "/internal/worker/claim", {
       workerId: "candidate",
@@ -81,7 +82,7 @@ test("exact active release reaches the Board transaction and topic/service ident
     });
     assert.equal(wrongService.status, 409);
     assert.equal((await wrongService.json()).code, "worker_release_rejected");
-    assert.equal(store.mutationCount(), 1);
+    assert.equal(store.mutationCount(), 0);
   } finally {
     await close();
   }
@@ -96,7 +97,7 @@ test("local development remains explicitly ungated when the release gate is disa
       topics: ["run-context-input-snapshot"]
     });
     assert.equal(response.status, 204);
-    assert.equal(store.mutationCount(), 1);
+    assert.equal(store.mutationCount(), 0);
   } finally {
     await close();
   }
@@ -111,12 +112,29 @@ function requestIdentity(credential: string): Record<string, string> {
   };
 }
 
-function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStore & { mutationCount(): number } {
+function guardedStateStore(
+  active: WorkerReleaseGuard | undefined
+): ApiStateStore & { mutationCount(): number; verificationCount(): number } {
   let snapshot: ApiSnapshot = {
     intakeState: createGitHubIntakeState(),
     devDeliverySequence: 0
   };
   let mutations = 0;
+  let verifications = 0;
+  const assertWorkerRelease = (guard: WorkerReleaseGuard): void => {
+    verifications += 1;
+    if (
+      !active ||
+      guard.releaseId !== active.releaseId ||
+      guard.credentialSha256 !== active.credentialSha256 ||
+      guard.service !== active.service ||
+      guard.revision !== active.revision
+    ) {
+      const error = new Error("worker release identity is not active");
+      error.name = "WorkerReleaseRejectedError";
+      throw error;
+    }
+  };
   return {
     async load() {
       return snapshot;
@@ -129,24 +147,15 @@ function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStor
       snapshot = next;
       return true;
     },
+    async verifyWorkerRelease(guard) {
+      assertWorkerRelease(guard);
+    },
     async update<T>(
       operation: (current: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
       _deliveryId?: string,
       guard?: WorkerReleaseGuard
     ) {
-      if (guard) {
-        if (
-          !active ||
-          guard.releaseId !== active.releaseId ||
-          guard.credentialSha256 !== active.credentialSha256 ||
-          guard.service !== active.service ||
-          guard.revision !== active.revision
-        ) {
-          const error = new Error("worker release identity is not active");
-          error.name = "WorkerReleaseRejectedError";
-          throw error;
-        }
-      }
+      if (guard) assertWorkerRelease(guard);
       mutations += 1;
       const result = await operation(snapshot);
       snapshot = result.state;
@@ -155,6 +164,9 @@ function guardedStateStore(active: WorkerReleaseGuard | undefined): ApiStateStor
     async close() {},
     mutationCount() {
       return mutations;
+    },
+    verificationCount() {
+      return verifications;
     }
   };
 }

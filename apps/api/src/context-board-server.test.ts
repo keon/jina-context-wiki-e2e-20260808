@@ -1192,6 +1192,7 @@ test("a quota-denied model task does not block later same-tenant non-model work"
     assert.equal(quota.denials.active_model_tasks?.count, 1);
 
     const beforeEmptyClaim = store.current().intakeState.board;
+    const updatesBeforeEmptyClaim = store.updateCount();
     const empty = await fetch(`${baseUrl}/internal/worker/claim`, {
       method: "POST",
       headers: internalHeaders(internalApiToken),
@@ -1202,6 +1203,7 @@ test("a quota-denied model task does not block later same-tenant non-model work"
     });
     assert.equal(empty.status, 204);
     assert.deepEqual(store.current().intakeState.board, beforeEmptyClaim);
+    assert.equal(store.updateCount(), updatesBeforeEmptyClaim);
     assert.equal((await quotaService.snapshot(tenantId)).denials.active_model_tasks?.count, 1);
 
     const beforeDeniedClaim = store.current().intakeState.board;
@@ -2860,10 +2862,12 @@ async function uploadWorkerArtifact(
   return (JSON.parse(body) as { artifact: ContextArtifactRef }).artifact;
 }
 
-function mutableStateStore(initial: ApiSnapshot): ApiStateStore & { current(): ApiSnapshot } {
+function mutableStateStore(initial: ApiSnapshot): ApiStateStore & { current(): ApiSnapshot; updateCount(): number } {
   let snapshot = structuredClone(initial);
+  let updates = 0;
   return {
     current: () => structuredClone(snapshot),
+    updateCount: () => updates,
     async load() {
       return structuredClone(snapshot);
     },
@@ -2878,6 +2882,7 @@ function mutableStateStore(initial: ApiSnapshot): ApiStateStore & { current(): A
     async update<T>(
       operation: (current: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>
     ) {
+      updates += 1;
       const updated = await operation(structuredClone(snapshot));
       snapshot = structuredClone(updated.state);
       return { committed: true, result: updated.result };

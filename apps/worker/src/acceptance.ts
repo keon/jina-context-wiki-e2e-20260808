@@ -178,7 +178,15 @@ export async function runProductionContextAcceptance(
   let completedTasks: Record<string, unknown>[] = [];
   let remediationAttempts = 0;
   while (Date.now() < deadline) {
-    const board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers: internalHeaders });
+    let board: Record<string, unknown>;
+    try {
+      board = await apiJson(fetchImpl, `${apiUrl}/board`, { headers: internalHeaders });
+    } catch (error) {
+      if (!isTransientApiFailure(error)) throw error;
+      log(`Production context build ${buildId}: transient Board read failure; retrying`);
+      await delay(pollIntervalMs);
+      continue;
+    }
     const tasks = requiredArray(board.tasks, "board.tasks").filter(isRecord);
     const root = tasks.find((task) => task.id === buildId);
     if (!root) throw new Error(`production context build ${buildId} is missing from the board`);
@@ -1488,12 +1496,19 @@ async function apiJson(fetchImpl: typeof fetch, url: string, init: RequestInit):
   try {
     value = text ? JSON.parse(text) : {};
   } catch {
+    if (!response.ok) {
+      throw new Error(`${new URL(url).pathname} failed with ${response.status}: non-JSON response`);
+    }
     throw new Error(`${new URL(url).pathname} returned invalid JSON`);
   }
   if (!response.ok) {
     throw new Error(`${new URL(url).pathname} failed with ${response.status}: ${redactedDetail(value)}`);
   }
   return record(value);
+}
+
+function isTransientApiFailure(error: unknown): boolean {
+  return error instanceof Error && / failed with (?:429|5\d\d):/.test(error.message);
 }
 
 function renderStatus(

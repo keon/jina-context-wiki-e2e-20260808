@@ -196,6 +196,7 @@ export interface ApiStateStore {
   ping(): Promise<void>;
   hasDelivery(deliveryId: string): Promise<boolean>;
   save(snapshot: ApiSnapshot, deliveryId?: string): Promise<boolean>;
+  verifyWorkerRelease?(workerRelease: WorkerReleaseGuard): Promise<void>;
   update<T>(
     operation: (snapshot: ApiSnapshot | undefined) => Promise<{ readonly state: ApiSnapshot; readonly result: T }>,
     deliveryId?: string,
@@ -2375,6 +2376,35 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const workerRelease = workerReleaseGuard(body);
     requireWorkerServiceForTopics(workerRelease, topics);
     const claimTenantIds = tenantId === "*" ? [...(await config.sharedIdentityResolver!.listTenantIds())] : [tenantId];
+    await reload();
+    const claimNow = nowIso();
+    const hasCandidate = intakeState.board.outbox.some((message) => {
+      const task = findTask(intakeState.board, message.taskId);
+      const claimable =
+        message.status === "pending" ||
+        (message.status === "leased" && message.leaseExpiresAt !== undefined && message.leaseExpiresAt <= claimNow);
+      return (
+        claimable && task && claimTenantIds.includes(String(task.metadata.tenantId)) && topics.includes(message.topic)
+      );
+    });
+    if (!hasCandidate) {
+      if (workerRelease) {
+        try {
+          if (config.stateStore?.verifyWorkerRelease) {
+            await config.stateStore.verifyWorkerRelease(workerRelease);
+          } else {
+            await mutate(async () => undefined, undefined, workerRelease);
+          }
+        } catch (error) {
+          if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
+            throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
+          }
+          throw error;
+        }
+      }
+      json(response, 204, {});
+      return;
+    }
     let quotaModelTask: { readonly tenantId: string; readonly taskId: string } | undefined;
     const terminatedBuilds = new Map<string, string>();
     let claimed;

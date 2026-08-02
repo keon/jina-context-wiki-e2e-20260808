@@ -91,6 +91,23 @@ export class PostgresJsonStateStore<T> {
     await pingPostgresPool(this.pool);
   }
 
+  async verifyWorkerRelease(workerRelease: WorkerReleaseGuard): Promise<void> {
+    await this.initialize();
+    const expectedRevisionColumn =
+      workerRelease.service === "jina-context-worker" ? "context_worker_revision" : "task_worker_revision";
+    const accepted = await this.pool.query(
+      `select 1
+       from jina_runtime.release_control
+       where id=1
+         and worker_claims_enabled
+         and worker_release_id=$1
+         and worker_credential_sha256=$2
+         and ${expectedRevisionColumn}=$3`,
+      [workerRelease.releaseId, workerRelease.credentialSha256, workerRelease.revision]
+    );
+    if (accepted.rowCount !== 1) throw new WorkerReleaseRejectedError();
+  }
+
   /**
    * Loads, changes, and stores state while holding the cross-instance lock.
    * The callback must keep external side effects idempotent because its database

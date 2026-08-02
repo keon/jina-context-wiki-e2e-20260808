@@ -282,6 +282,7 @@ test("production acceptance resumes one explicitly eligible checkpoint branch", 
 
 test("production acceptance creates, observes, queries, and verifies MCP", async () => {
   let boardReads = 0;
+  let boardAttempts = 0;
   let tokenRevoked = false;
   let staleTokenRevoked = false;
   const requested: string[] = [];
@@ -393,6 +394,10 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
     if (url.pathname === "/board") {
       if (authorization === `Bearer ${issuedSecret}`) {
         return json({ error: "token scope does not permit this route", code: "insufficient_scope" }, 403);
+      }
+      boardAttempts += 1;
+      if (boardAttempts === 1) {
+        return new Response("temporarily unavailable", { status: 429 });
       }
       boardReads += 1;
       const done = boardReads > 1;
@@ -710,6 +715,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
     "POST /context/build",
     "GET /board",
     "GET /board",
+    "GET /board",
     "GET /internal/context/builds/cb_acceptance/worker-completions",
     "POST /internal/context/tokens",
     "POST /context/build",
@@ -736,6 +742,7 @@ test("production acceptance creates, observes, queries, and verifies MCP", async
   assert.deepEqual(requestedAuthorization, [
     "Bearer context-worker-identity",
     "Bearer task-worker-identity",
+    "Bearer internal",
     "Bearer internal",
     "Bearer internal",
     "Bearer internal",
