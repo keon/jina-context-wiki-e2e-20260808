@@ -4992,19 +4992,32 @@ function prepareContextDeadlineRetry(
 ): { readonly state: BoardState; readonly deadlineRecovered: true } {
   const build = findTask(state, input.buildTaskId);
   const target = findTask(state, input.taskId);
+  const canceledByDeadline =
+    build?.type === contextBoardTaskTypes.build && target?.status === "canceled"
+      ? contextDeadlineInterruptedTaskIds(state, build).includes(target.id)
+      : false;
+  // A dispatchable stage can consume the last seconds of the build envelope and
+  // exhaust its own provider retries before the next claim observes the expired
+  // build deadline. In that case the stage is already `failed` (often with a
+  // provider category) rather than `canceled`, even though there is no usable
+  // execution budget left for the operator retry. Let a tenant administrator
+  // extend that exact failed task once the active-time budget is exhausted.
+  const failedAfterDeadline =
+    build?.type === contextBoardTaskTypes.build && target?.status === "failed"
+      ? contextBuildRemainingExecutionSeconds(state, build, input.now) <= 0
+      : false;
   if (
     !build ||
     build.type !== contextBoardTaskTypes.build ||
     build.status !== "failed" ||
     !target ||
     target.kind !== "dispatchable" ||
-    target.status !== "canceled" ||
     target.metadata.contextBuildId !== build.id ||
-    !contextDeadlineInterruptedTaskIds(state, build).includes(target.id)
+    (!canceledByDeadline && !failedAfterDeadline)
   ) {
     throw new OperatorRetryRejectedError(
       "unsafe_graph_state",
-      "deadline extension requires the exact dispatchable task canceled by a time-limited failed build"
+      "deadline extension requires a failed dispatchable task after its build deadline or the exact task canceled by a time-limited failed build"
     );
   }
   const previousBudgetSeconds = requiredPositiveInteger(
@@ -5048,8 +5061,15 @@ function prepareContextDeadlineRetry(
     {
       command: "CommentTask",
       taskId: target.id,
-      eventType: "context.deadline_interrupted_task_reclassified",
-      payload: { fromStatus: "canceled", toStatus: "failed", requestKey: input.requestKey, reason: input.reason }
+      eventType: canceledByDeadline
+        ? "context.deadline_interrupted_task_reclassified"
+        : "context.deadline_constrained_task_retry_prepared",
+      payload: {
+        fromStatus: target.status,
+        toStatus: "failed",
+        requestKey: input.requestKey,
+        reason: input.reason
+      }
     },
     { actor: { type: "user", id: input.actorId }, now: input.now }
   ).state;

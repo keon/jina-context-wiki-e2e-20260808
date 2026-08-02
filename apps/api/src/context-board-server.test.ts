@@ -1103,6 +1103,84 @@ test("tenant administrators can extend and resume only the task canceled by a bu
   }
 });
 
+test("tenant administrators can extend a provider-failed task after its build deadline", async () => {
+  const tenantId = "tenant-provider-deadline-recovery";
+  const repository = "omxyz/provider-deadline-recovery";
+  const failed = failedPublicationPlannerFixture(tenantId, repository, "provider-deadline");
+  const expiredAt = new Date(Date.now() - 301_000).toISOString();
+  let board: BoardState = {
+    ...failed.state,
+    tasks: failed.state.tasks.map((task) =>
+      task.id === failed.buildId
+        ? {
+            ...task,
+            createdAt: expiredAt,
+            updatedAt: expiredAt,
+            metadata: { ...task.metadata, derivationBudgetSeconds: 300 }
+          }
+        : task
+    )
+  };
+  board = appendEvent(
+    board,
+    "context.build_execution_lease_started",
+    expiredAt,
+    failed.buildId,
+    {
+      messageId: failed.oldLease.messageId,
+      taskId: failed.plannerId,
+      attempt: failed.oldLease.attempt,
+      leaseId: failed.oldLease.leaseId,
+      leaseExpiresAt: new Date(Date.now() + 60_000).toISOString()
+    }
+  );
+  const stateStore = mutableStateStore({
+    intakeState: { board, pullRequests: [] },
+    devDeliverySequence: 0
+  });
+  const quotaService = new ContextQuotaService({ store: new InMemoryContextQuotaStore() });
+  await quotaService.admitBuild({ tenantId, buildId: failed.buildId });
+  await quotaService.completeBuild({ tenantId, buildId: failed.buildId });
+  const server = createApiServer({
+    tenantId,
+    enableDevEndpoints: true,
+    stateStore,
+    contextQuotaService: quotaService
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const response = await fetch(`${baseUrl}/context/builds/${failed.buildId}/tasks/${failed.plannerId}/retry`, {
+      method: "POST",
+      headers: devHeaders(tenantId, "svc:operator"),
+      body: JSON.stringify({
+        requestKey: "operator:provider-deadline-recovery",
+        reason: "the provider retries consumed the remaining build envelope",
+        extendDeadlineBySeconds: 3_600
+      })
+    });
+    const body = (await response.json()) as Record<string, unknown>;
+    assert.equal(response.status, 202, JSON.stringify(body));
+    assert.equal(body.taskId, failed.plannerId);
+    assert.equal(typeof body.extendedDeadlineAt, "string");
+
+    const recovered = stateStore.current().intakeState.board;
+    assert.equal(findTask(recovered, failed.buildId)?.metadata.derivationBudgetSeconds, 3_900);
+    assert.equal(findTask(recovered, failed.plannerId)?.status, "queued");
+    assert.equal(
+      recovered.events.filter((event) => event.type === "context.deadline_constrained_task_retry_prepared").length,
+      1
+    );
+    assert.equal(
+      recovered.events.filter((event) => event.type === "context.deadline_interrupted_task_reclassified").length,
+      0
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
+  }
+});
+
 test("Context claims recover a settled build quota and defer excess parallel reservations", async () => {
   const tenantId = "tenant-reservation-headroom";
   const repository = "omxyz/reservation-fixture";

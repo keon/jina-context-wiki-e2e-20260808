@@ -255,3 +255,42 @@ and the staging App was returned to private visibility.
 The acceptance test finished with the staging App private and only installation
 `150654218` remaining. Do not leave the App public after an external-account
 acceptance run.
+
+### Accepted end-to-end Context publication (2026-08-02)
+
+The staging App installation on the selected `omxyz` fixtures was backfilled into
+the staging database with a correctly signed staging webhook. Context acceptance
+then exercised snapshot, planning, research, evaluation, repair, publication,
+indexing, cancellation, retry, catalog reads, search, and MCP access without
+calling a production endpoint.
+
+- Repository and commit: `omxyz/jina-context-graph-e2e` at
+  `54d9f8aabe93870ed7f25a6fee0942da171dbee4`
+- Successful build: `task_0bd2398154723b90a2e7cbf082b5207e`, 47 of 47 stages
+  completed with no failed stage
+- Published release: `cr_8d93f1d7e1f207acff05aaa88cb00df9`, seven documents
+- Published read proof: `Architecture and evidence boundaries`, 12,231 Markdown
+  characters and 32 immutable citations
+- Query proof: HTTP Context search and MCP `search_context` each returned three
+  results; MCP also listed `search_context`, `list_context`, `read_context`, and
+  `diff_context`
+- Credential proof: a five-minute, read/query-scoped staging token could list,
+  search, and read the release; revocation returned `200` and the next request
+  returned `401`
+- Storage/index proof after acceptance: two published generations, 11 documents,
+  81 fragments, 77 hierarchy nodes, 106 artifacts, and zero pending outbox items
+
+The preceding long build deliberately hit its deadline while a provider-backed
+evaluator was dispatching. That exposed an operator-retry gap after the deadline.
+The API now permits a tenant administrator to extend only the exact failed,
+dispatchable task for that build; it does not reopen sibling tasks. The regression
+test and the full API suite pass. Cloud Build
+`5de04fa5-11a3-4c8b-96e0-b5024229fe6b` produced the staging-only images deployed as:
+
+- `jina-api-staging-00002-7wd`
+- `jina-context-worker-staging-00002-wxn`
+- `jina-task-worker-staging-00002-jfq`
+
+The successful three-hour-cap build above ran on those revisions and completed in
+approximately 25 minutes. The earlier smoke build also proved time-budget failure,
+and `task_98a94295a48650f22c03b3843b8fcfe4` proved operator cancellation.

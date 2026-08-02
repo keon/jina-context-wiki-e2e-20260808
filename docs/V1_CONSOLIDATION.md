@@ -116,6 +116,20 @@ Provisioned platform resources:
   flow under review id `b587d680-8451-4752-befc-c44248edfa6b`. Its temporary
   App installation was then removed and the staging App returned to private
   visibility.
+- A production-sized Context build for `omxyz/jina-context-graph-e2e` commit
+  `54d9f8aabe93870ed7f25a6fee0942da171dbee4` completed all 47 stages under build
+  id `task_0bd2398154723b90a2e7cbf082b5207e`. Release
+  `cr_8d93f1d7e1f207acff05aaa88cb00df9` published seven documents. Catalog,
+  full-document read, search, all four MCP tools, scoped token minting, and
+  immediate revocation were exercised against the staging API. The selected
+  document contained 12,231 Markdown characters and 32 immutable citations.
+- That live Context exercise found and fixed a deadline-edge retry defect: a
+  tenant administrator may now extend and retry the exact dispatchable task
+  that failed as the build deadline expired. The permission does not broaden
+  to sibling tasks. The clean staging build was
+  `5de04fa5-11a3-4c8b-96e0-b5024229fe6b`; the accepted Cloud Run revisions are
+  `jina-api-staging-00002-7wd`, `jina-context-worker-staging-00002-wxn`, and
+  `jina-task-worker-staging-00002-jfq`.
 
 Repository automation:
 
@@ -129,6 +143,9 @@ Repository automation:
 Billing enforcement remains `off`; no Autumn production credential is mounted.
 Billing read/empty-state routes are accepted, while checkout/top-up writes remain
 outside staging acceptance until a dedicated test-mode Autumn key is provided.
+Live provider connect/disconnect also remains a credentialed acceptance item: its
+forms, routing, persistence contract, and automated tests pass, but no user's vendor
+key was modified during staging acceptance.
 
 The production GitHub App currently has organization-wide access to `omxyz`.
 Consequently, an `omxyz` repository cannot be used as an isolated staging PR
