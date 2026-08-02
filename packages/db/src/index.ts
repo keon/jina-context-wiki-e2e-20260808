@@ -1,4 +1,8 @@
-export { PostgresJsonStateStore, WorkerReleaseRejectedError } from "./postgres-json-state-store.js";
+export {
+  PostgresJsonStateStore,
+  StateStoreBusyError,
+  WorkerReleaseRejectedError
+} from "./postgres-json-state-store.js";
 export type { PostgresJsonStateStoreConfig, WorkerReleaseGuard } from "./postgres-json-state-store.js";
 export { PostgresSharedIdentityStore } from "./postgres-shared-identity-store.js";
 export { ContextDatabase } from "./context/database.js";

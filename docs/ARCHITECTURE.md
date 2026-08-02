@@ -46,6 +46,15 @@ Evidence bundles, prompts, reports, drafts, transcripts, audit payloads, and
 certifications remain content-addressed artifacts. This keeps scheduling transactions
 small and makes every completed unit reusable after process or sandbox loss.
 
+The mutable snapshot is hot orchestration state, not the historical system of record.
+It retains all active Context graphs and 20 terminal execution graphs per tenant; older
+execution children are pruned with their dependencies, outbox rows, and events. Their
+small terminal roots remain as request-idempotency and monotonic-ref-sequence tombstones.
+Published releases, documents, indexes, immutable artifacts, phase checkpoints, and
+quota ledgers remain in their dedicated stores. Snapshot lock acquisition is bounded to
+ten seconds, producing a retryable `board_busy` response instead of allowing contention
+to outlive a worker lease.
+
 Each dispatchable task is claimed through the durable outbox with an attempt-bound
 renewable lease and write-fence token. A worker that loses its lease cannot commit late
 results. Audit findings create repair tasks rather than erasing sibling progress; only

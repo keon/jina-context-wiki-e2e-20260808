@@ -32,6 +32,20 @@ Board rows never contain prompts, page bodies, evidence bundles, transcripts, re
 or audit payloads. Those values are immutable GCS objects under the same build scope.
 The dashboard projection removes active lease IDs and fence tokens.
 
+The hot Board snapshot retains every active Context graph and the 20 most recently
+updated terminal Context graphs per tenant. Older execution children are rebuildable
+operational history and are removed with their dependencies, outbox, and task events.
+Their lightweight terminal roots remain as request-idempotency and monotonic-ref-sequence
+tombstones. This retention does not remove published releases, current documents,
+immutable GCS artifacts, phase checkpoints, quota ledgers, or query indexes. Bounding
+the hot history prevents unrelated tenants and current worker leases from paying an
+ever-growing serialization cost for obsolete failed and canceled builds.
+
+Snapshot mutations use a ten-second advisory-lock timeout. Contention therefore returns
+the stable `board_busy` retry signal instead of waiting long enough to invalidate a
+worker lease. Worker release identity is still checked inside the same transaction after
+the lock is acquired.
+
 ## Canonical context records
 
 ### Evidence

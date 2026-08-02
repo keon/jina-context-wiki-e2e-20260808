@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { Pool } from "pg";
 import {
   PostgresJsonStateStore,
+  StateStoreBusyError,
   WorkerReleaseRejectedError,
   type WorkerReleaseGuard
 } from "./postgres-json-state-store.js";
@@ -21,6 +22,34 @@ const ACTIVE_CAUSAL_RELEASE: WorkerReleaseGuard = {
   service: "jina-causal-graph-worker",
   revision: "jina-causal-graph-worker-active"
 };
+
+test("snapshot mutations fail fast when the global state lock is busy", { skip: !databaseUrl }, async () => {
+  const controlPool = new Pool({ connectionString: databaseUrl, application_name: "jina-state-contention-test" });
+  const store = new PostgresJsonStateStore<{ value: number }>({
+    connectionString: databaseUrl,
+    applicationName: "jina-state-contention-store-test",
+    mutationLockTimeoutMillis: 100
+  });
+  const lockClient = await controlPool.connect();
+  try {
+    await controlPool.query("drop schema if exists jina_runtime cascade");
+    await store.load();
+    await lockClient.query("begin");
+    await lockClient.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
+    const startedAt = Date.now();
+    await assert.rejects(
+      store.update(async () => ({ state: { value: 1 }, result: true })),
+      StateStoreBusyError
+    );
+    assert.ok(Date.now() - startedAt < 2_000, "lock contention must fail before a worker lease is endangered");
+  } finally {
+    await lockClient.query("rollback").catch(() => undefined);
+    lockClient.release();
+    await store.close().catch(() => undefined);
+    await controlPool.query("drop schema if exists jina_runtime cascade").catch(() => undefined);
+    await controlPool.end();
+  }
+});
 
 test(
   "worker mutations are serialized with release changes and reject stale identities",

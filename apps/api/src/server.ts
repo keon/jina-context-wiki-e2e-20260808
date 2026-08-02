@@ -87,6 +87,7 @@ import { prReviewTaskTypeDependencies, prReviewTaskTypeTriggers } from "@jina/re
 import { entityId, nowIso, type IsoTimestamp } from "@jina/shared-kernel";
 import { createGitHubIntakeState, ingestGitHubWebhook, type GitHubIntakeState } from "./github-intake.js";
 import { admitContextBoardBuild } from "./context-board-admission.js";
+import { compactTerminalContextBuildHistory } from "./context-board-compaction.js";
 import {
   applyContextBoardTaskResult,
   finalizeContextBoardTaskResult,
@@ -560,10 +561,28 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
     const current = sanitizeSnapshotForCurrentRuntime(snapshot);
     intakeState = current.intakeState;
     devDeliverySequence = current.devDeliverySequence;
+    compactHotBoard();
   }
 
   function snapshot(): ApiSnapshot {
+    compactHotBoard();
     return { intakeState, devDeliverySequence };
+  }
+
+  function compactHotBoard(): void {
+    const compacted = compactTerminalContextBuildHistory(intakeState.board);
+    if (compacted.prunedBuilds === 0) return;
+    intakeState = { ...intakeState, board: compacted.state };
+    logger.info("compacted terminal Context build history", {
+      event: "context.board.compacted",
+      prunedBuilds: compacted.prunedBuilds,
+      prunedTasks: compacted.prunedTasks,
+      prunedDependencies: compacted.prunedDependencies,
+      prunedOutboxMessages: compacted.prunedOutboxMessages,
+      prunedEvents: compacted.prunedEvents,
+      retainedTasks: compacted.state.tasks.length,
+      retainedEvents: compacted.state.events.length
+    });
   }
 
   async function persist(deliveryId?: string): Promise<boolean> {
@@ -613,6 +632,9 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       } catch (error) {
         if (error instanceof Error && error.name === "WorkerReleaseRejectedError") {
           throw new ApiError(409, "worker_release_rejected", "worker release identity is not active");
+        }
+        if (error instanceof Error && error.name === "StateStoreBusyError") {
+          throw new ApiError(503, "board_busy", "durable Board state is busy; retry shortly");
         }
         throw error;
       }

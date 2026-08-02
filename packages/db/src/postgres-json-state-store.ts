@@ -4,6 +4,8 @@ import { pingPostgresPool } from "./postgres-health.js";
 export interface PostgresJsonStateStoreConfig extends PoolConfig {
   readonly applicationName?: string;
   readonly manageSchema?: boolean;
+  /** Bounds global snapshot contention so worker renewals can retry before leases expire. */
+  readonly mutationLockTimeoutMillis?: number;
 }
 
 export interface StateUpdate<T, R> {
@@ -37,11 +39,16 @@ export interface VersionedState<T> {
 export class PostgresJsonStateStore<T> {
   private readonly pool: Pool;
   private readonly manageSchema: boolean;
+  private readonly mutationLockTimeoutMillis: number;
   private initialized?: Promise<void>;
 
   constructor(config: PostgresJsonStateStoreConfig) {
-    const { manageSchema = true, ...poolConfig } = config;
+    const { manageSchema = true, mutationLockTimeoutMillis = 10_000, ...poolConfig } = config;
+    if (!Number.isSafeInteger(mutationLockTimeoutMillis) || mutationLockTimeoutMillis < 1) {
+      throw new Error("mutationLockTimeoutMillis must be a positive safe integer");
+    }
     this.manageSchema = manageSchema;
+    this.mutationLockTimeoutMillis = mutationLockTimeoutMillis;
     this.pool = new Pool({
       ...poolConfig,
       application_name: config.applicationName ?? "jina-api",
@@ -132,6 +139,7 @@ export class PostgresJsonStateStore<T> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await client.query("select set_config('lock_timeout', $1, true)", [`${this.mutationLockTimeoutMillis}ms`]);
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
 
       if (workerRelease) {
@@ -191,6 +199,7 @@ export class PostgresJsonStateStore<T> {
       return { committed: true, result: update.result };
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
+      if (postgresErrorCode(error) === "55P03") throw new StateStoreBusyError();
       throw error;
     } finally {
       client.release();
@@ -206,6 +215,7 @@ export class PostgresJsonStateStore<T> {
     const client = await this.pool.connect();
     try {
       await client.query("begin");
+      await client.query("select set_config('lock_timeout', $1, true)", [`${this.mutationLockTimeoutMillis}ms`]);
       await client.query("select pg_advisory_xact_lock(hashtext('jina_runtime.api_state'))");
 
       if (deliveryId) {
@@ -235,6 +245,7 @@ export class PostgresJsonStateStore<T> {
       return true;
     } catch (error) {
       await client.query("rollback").catch(() => undefined);
+      if (postgresErrorCode(error) === "55P03") throw new StateStoreBusyError();
       throw error;
     } finally {
       client.release();
@@ -323,4 +334,17 @@ export class WorkerReleaseRejectedError extends Error {
     super("worker release identity is not active");
     this.name = "WorkerReleaseRejectedError";
   }
+}
+
+export class StateStoreBusyError extends Error {
+  constructor() {
+    super("durable Board state is busy");
+    this.name = "StateStoreBusyError";
+  }
+}
+
+function postgresErrorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error && typeof error.code === "string"
+    ? error.code
+    : undefined;
 }
