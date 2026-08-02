@@ -224,6 +224,15 @@ first page. Verified checkpoints are visible as build progress but are not query
 context. A retry seeds both the latest plan and valid pages over the prior release and
 resumes instead of starting over.
 
+Task-level progress is finer than the published page boundary. Every expensive model
+call writes a first-writer-wins GCS phase artifact whose key binds the task, exact input
+artifact digests, public snapshot or citation set, prompt-contract version, and bounded
+attempt/repair diagnostic. Recording is fenced by the current Board lease, while later
+valid attempts may read the winning artifact. Consequently a per-task timeout repeats
+only an unfinished call; it does not repeat completed research, generation, audit, or
+repair calls. Public progress exposes only phase names and timestamps, never private
+artifact locations or model transcripts.
+
 The host verifies the lead's completion claim: required plan items must resolve to files
 or explicit unsupported reasons, deterministic areas must be accounted for, workers must
 be terminal, declared available evidence categories must actually be cited, and no

@@ -144,6 +144,16 @@ closed. An operator remediation pass may retain identical certified page bytes w
 the corrected defect was in a gate prompt, validator, model, or worker; the fresh
 gates still bind and reevaluate that exact snapshot.
 
+Each expensive model boundary also records an immutable, input-digest-bound phase
+checkpoint before host validation or the next model call. This includes research,
+planning and bounded corrections, page writing and repair, citation-audit batches,
+source challenge, task evaluation attempts, and global gap-repair/audit passes. If an
+attempt loses its lease or reaches its per-task time limit after recording one of these
+artifacts, the next fenced attempt reloads it and continues with host validation or the
+next unfinished phase instead of paying for the completed call again. A checkpoint is
+never reused when its exact source artifacts, public snapshot, contract version, or
+repair diagnostic changes.
+
 ## Inputs
 
 The immutable input snapshot contains:

@@ -88,6 +88,7 @@ const tenantScopedTables = [
   "repository_acl_projection",
   "query_runs",
   "retrieval_metrics",
+  "context_phase_checkpoints",
   "context_quota_ledgers",
   "api_tokens"
 ] as const;

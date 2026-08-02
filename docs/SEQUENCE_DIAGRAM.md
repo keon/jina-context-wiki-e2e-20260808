@@ -96,8 +96,12 @@ sequenceDiagram
 
 If a worker crashes, loses its lease, or reaches its time budget, its immutable
 checkpoints and verified sibling page tasks remain. The expired task is reclaimed with a
-new attempt and fence token; a digest-matching artifact is reused. No unaudited partial
-release becomes queryable.
+new attempt and fence token. Before every expensive model call, the worker reads the
+input-bound phase checkpoint; immediately after the call it records the immutable result
+before parsing, deterministic validation, or a bounded correction. The new attempt
+therefore resumes at the first unfinished model boundary. File-producing phases restore
+the exact private Markdown snapshot from GCS. No unaudited partial release becomes
+queryable.
 
 ## Incremental commit, PR, and issue
 

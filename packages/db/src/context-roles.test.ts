@@ -41,6 +41,19 @@ test("quota ledgers have a tenant-scoped least-privilege runtime role", () => {
   assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on jina_context\.context_quota_ledgers\s+using/);
 });
 
+test("phase checkpoints are immutable tenant rows indexed by build", () => {
+  assert.match(
+    CONTEXT_SCHEMA_SQL,
+    /create table if not exists jina_context\.context_phase_checkpoints \([\s\S]*primary key \(tenant_id,task_id,phase,checkpoint_key\)/
+  );
+  assert.match(
+    CONTEXT_SCHEMA_SQL,
+    /create index if not exists context_phase_checkpoints_build[\s\S]*\(tenant_id,build_id,recorded_at,task_id,phase\)/
+  );
+  assert.match(CONTEXT_ROLES_SQL, /alter table jina_context\.context_phase_checkpoints enable row level security;/);
+  assert.match(CONTEXT_ROLES_SQL, /create policy context_tenant_scope on jina_context\.context_phase_checkpoints/);
+});
+
 test("query role can hydrate projector status only inside its tenant scope", () => {
   const policy =
     /create policy context_generation_projectors_query on jina_context\.generation_projectors[\s\S]*?\n {2}\);/.exec(

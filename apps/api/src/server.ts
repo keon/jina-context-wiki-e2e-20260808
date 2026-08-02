@@ -28,6 +28,7 @@ import {
   BoardPageIndexAttachmentError,
   ContextCatalogService,
   MemoryContextEngineStore,
+  MemoryContextPhaseCheckpointStore,
   derivationDetailLevels,
   derivationProgressDocumentPath,
   isDerivationDetail,
@@ -63,6 +64,8 @@ import {
   type ContextArtifactRef,
   type ContextArtifactKind,
   type ContextEngineStore,
+  type ContextPhaseCheckpoint,
+  type ContextPhaseCheckpointStore,
   type IssueGraphRelease,
   type BoardIssueGraphPublicationTransactionPort,
   type BoardContextPublicationTransactionPort,
@@ -191,6 +194,7 @@ export interface ApiServerConfig {
   readonly contextBoardPageIndexAttachmentTransaction?: BoardPageIndexAttachmentTransactionPort;
   readonly issueGraphPublicationTransaction?: BoardIssueGraphPublicationTransactionPort;
   readonly contextQuotaService?: ContextQuotaService;
+  readonly contextPhaseCheckpointStore?: ContextPhaseCheckpointStore;
   /** Test/embedding override. Production uses the structured service logger. */
   readonly logger?: Logger;
 }
@@ -438,6 +442,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
   const metrics = new MetricsRegistry();
   const startedAt = nowIso();
   const contextStore: ContextEngineStore = config.contextStore ?? new MemoryContextEngineStore();
+  const contextPhaseCheckpointStore = config.contextPhaseCheckpointStore ?? new MemoryContextPhaseCheckpointStore();
   const contextCatalog = new ContextCatalogService(contextStore);
   const issueGraphCatalog = config.contextArtifactStore
     ? new IssueGraphCatalogService(contextStore, config.contextArtifactStore)
@@ -1611,7 +1616,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       await reload();
       const allowed = isTenantAdmin(principal) ? undefined : new Set(await permittedRepositories(principal));
       const activeOnly = url.searchParams.get("status") === "active";
-      const builds = intakeState.board.tasks
+      const buildTasks = intakeState.board.tasks
         .filter(
           (task) =>
             isContextBuildTaskType(task.type) &&
@@ -1621,12 +1626,16 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
         )
         .filter((task) => !activeOnly || !isTerminalTaskStatus(task.status))
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt) || left.id.localeCompare(right.id))
-        .slice(0, 50)
-        .map((task) => ({
-          ...publicContextBoardBuild(intakeState.board, task.id),
-          status: publicContextBuildStatus(task.status),
-          stages: publicContextBoardStages(intakeState.board, task.id)
-        }));
+        .slice(0, 50);
+      const phaseCheckpoints = await contextPhaseCheckpointStore.listBuilds({
+        tenantId: principal.tenantId,
+        buildIds: buildTasks.map((task) => task.id)
+      });
+      const builds = buildTasks.map((task) => ({
+        ...publicContextBoardBuild(intakeState.board, task.id),
+        status: publicContextBuildStatus(task.status),
+        stages: publicContextBoardStages(intakeState.board, task.id, phaseCheckpoints)
+      }));
       json(response, 200, { builds });
       return;
     }
@@ -1667,6 +1676,10 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       if (!build) throw notFound("build not found");
       const repository = requiredRepositoryName(build.metadata.repository, "repository");
       await requireRepositoryAccess(principal, repository);
+      const phaseCheckpoints = await contextPhaseCheckpointStore.listBuilds({
+        tenantId: principal.tenantId,
+        buildIds: [buildId]
+      });
       json(response, 200, {
         buildId,
         repository,
@@ -1690,7 +1703,7 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
             }
           : {}),
         ...publicContextBuildFailure(intakeState.board, build),
-        stages: publicContextBoardStages(intakeState.board, build.id),
+        stages: publicContextBoardStages(intakeState.board, build.id, phaseCheckpoints),
         pages: publicContextBoardCheckpointPages(intakeState.board, build.id),
         ...(isTenantAdmin(principal)
           ? {
@@ -2092,7 +2105,12 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const lease = await requireLeasedBoardTask(principal.tenantId, body);
       const phase = requiredContextPhaseCheckpointLabel(body.phase, "phase");
       const checkpointKey = requiredContextPhaseCheckpointKey(body.checkpointKey, "checkpointKey");
-      const checkpoint = findContextPhaseCheckpoint(intakeState.board, lease.task.id, phase, checkpointKey);
+      const checkpoint = await contextPhaseCheckpointStore.read({
+        tenantId: principal.tenantId,
+        taskId: lease.task.id,
+        phase,
+        checkpointKey
+      });
       json(response, 200, { checkpoint: checkpoint ?? null });
       return;
     }
@@ -2103,33 +2121,17 @@ export function createApiServer(config: ApiServerConfig = {}): Server {
       const checkpointKey = requiredContextPhaseCheckpointKey(body.checkpointKey, "checkpointKey");
       const artifact = parseContextArtifactRef(body.artifact);
       assertCurrentTaskOutputArtifact(lease.task, lease.buildTaskId, lease.message.payload.attempt, artifact);
-      const recorded = await mutate(async () => {
-        const current = leasedBoardTask(intakeState.board, principal.tenantId, body, nowIso());
-        const existing = findContextPhaseCheckpoint(intakeState.board, current.task.id, phase, checkpointKey);
-        if (existing) return { checkpoint: existing, created: false };
-        assertCurrentTaskOutputArtifact(current.task, current.buildTaskId, current.message.payload.attempt, artifact);
-        const board = applyCommand(
-          intakeState.board,
-          {
-            command: "CommentTask",
-            taskId: current.task.id,
-            eventType: "task.phase_checkpoint_recorded",
-            payload: {
-              phase,
-              checkpointKey,
-              attempt: current.message.payload.attempt,
-              artifact
-            }
-          },
-          { actor: RUN_ACTOR, now: nowIso() }
-        ).state;
-        intakeState = { ...intakeState, board };
-        return {
-          checkpoint: findContextPhaseCheckpoint(board, current.task.id, phase, checkpointKey)!,
-          created: true
-        };
+      const recorded = await contextPhaseCheckpointStore.record({
+        tenantId: principal.tenantId,
+        repository: requiredRepositoryName(lease.task.metadata.repository, "repository"),
+        buildId: lease.buildTaskId,
+        taskId: lease.task.id,
+        phase,
+        checkpointKey,
+        attempt: lease.message.payload.attempt,
+        artifact,
+        recordedAt: nowIso()
       });
-      if (!recorded) throw new ApiError(409, "conflict", "phase checkpoint recording raced another update");
       json(response, recorded.created ? 201 : 200, recorded);
       return;
     }
@@ -3859,7 +3861,11 @@ function publicContextBuildStatus(status: BoardTask["status"]): "active" | "comp
   return status === "done" ? "completed" : "failed";
 }
 
-function publicContextBoardStages(state: BoardState, buildTaskId: TaskId) {
+function publicContextBoardStages(
+  state: BoardState,
+  buildTaskId: TaskId,
+  phaseCheckpoints: readonly ContextPhaseCheckpoint[] = []
+) {
   return state.tasks
     .filter(
       (task) =>
@@ -3879,13 +3885,17 @@ function publicContextBoardStages(state: BoardState, buildTaskId: TaskId) {
       title: task.title,
       status: task.status,
       attempt: task.attempt,
-      ...publicContextTaskRuntime(state, task),
+      ...publicContextTaskRuntime(state, task, phaseCheckpoints),
       ...publicContextTaskFailure(state, task),
       updatedAt: task.updatedAt
     }));
 }
 
-function publicContextTaskRuntime(state: BoardState, task: BoardTask) {
+function publicContextTaskRuntime(
+  state: BoardState,
+  task: BoardTask,
+  phaseCheckpoints: readonly ContextPhaseCheckpoint[]
+) {
   let inputTokens = 0;
   let cachedInputTokens = 0;
   let outputTokens = 0;
@@ -3916,25 +3926,13 @@ function publicContextTaskRuntime(state: BoardState, task: BoardTask) {
   const retryFailure = retryEvent
     ? publicContextFailureFromCategory(retryEvent.payload?.category, retryEvent.payload?.reason)
     : undefined;
-  const phaseCheckpoints = state.events.flatMap((event) => {
-    if (
-      event.taskId !== task.id ||
-      event.type !== "task.phase_checkpoint_recorded" ||
-      typeof event.payload?.phase !== "string" ||
-      typeof event.payload.attempt !== "number" ||
-      !Number.isSafeInteger(event.payload.attempt) ||
-      event.payload.attempt < 1
-    ) {
-      return [];
-    }
-    return [
-      {
-        phase: event.payload.phase,
-        attempt: event.payload.attempt,
-        recordedAt: event.at
-      }
-    ];
-  });
+  const taskPhaseCheckpoints = phaseCheckpoints
+    .filter((checkpoint) => checkpoint.taskId === task.id)
+    .map((checkpoint) => ({
+      phase: checkpoint.phase,
+      attempt: checkpoint.attempt,
+      recordedAt: checkpoint.recordedAt
+    }));
   return {
     ...(startedAt ? { startedAt } : {}),
     ...(inputTokens || outputTokens
@@ -3952,7 +3950,7 @@ function publicContextTaskRuntime(state: BoardState, task: BoardTask) {
           lastRetryFailureReason: retryFailure.failureReason
         }
       : {}),
-    ...(phaseCheckpoints.length > 0 ? { phaseCheckpoints } : {})
+    ...(taskPhaseCheckpoints.length > 0 ? { phaseCheckpoints: taskPhaseCheckpoints } : {})
   };
 }
 
@@ -4806,40 +4804,6 @@ function sameArtifactIdentity(left: ContextArtifactRef, right: ContextArtifactRe
     left.sha256 === right.sha256 &&
     left.objectGeneration === right.objectGeneration
   );
-}
-
-interface ContextPhaseCheckpoint {
-  readonly phase: string;
-  readonly checkpointKey: string;
-  readonly attempt: number;
-  readonly artifact: ContextArtifactRef;
-  readonly recordedAt: string;
-}
-
-function findContextPhaseCheckpoint(
-  state: BoardState,
-  taskId: TaskId,
-  phase: string,
-  checkpointKey: string
-): ContextPhaseCheckpoint | undefined {
-  for (const event of [...state.events].reverse()) {
-    if (
-      event.taskId !== taskId ||
-      event.type !== "task.phase_checkpoint_recorded" ||
-      event.payload?.phase !== phase ||
-      event.payload.checkpointKey !== checkpointKey
-    ) {
-      continue;
-    }
-    return {
-      phase,
-      checkpointKey,
-      attempt: requiredPositiveInteger(event.payload.attempt, "phase checkpoint attempt"),
-      artifact: parseContextArtifactRef(event.payload.artifact),
-      recordedAt: event.at
-    };
-  }
-  return undefined;
 }
 
 function requiredContextPhaseCheckpointLabel(value: unknown, label: string): string {

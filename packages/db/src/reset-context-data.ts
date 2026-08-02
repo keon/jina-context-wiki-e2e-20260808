@@ -58,6 +58,7 @@ export const REBUILDABLE_CONTEXT_TABLES = [
   "retrieval_candidates",
   "answer_citations",
   "retrieval_metrics",
+  "context_phase_checkpoints",
   "context_quota_ledgers"
 ] as const;
 

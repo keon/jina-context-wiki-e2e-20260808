@@ -383,6 +383,30 @@ test("generic worker completion atomically expands a context board graph and ret
       assert.equal(checkpoint.checkpoint.attempt, plannerLease.attempt);
       assert.deepEqual(checkpoint.checkpoint.artifact, plannerCandidate);
     }
+    const phaseProgressResponse = await fetch(`${baseUrl}/context/builds/${created.buildTaskId}/progress`, {
+      headers: { authorization: `Bearer ${internalApiToken}` }
+    });
+    const phaseProgressText = await phaseProgressResponse.text();
+    assert.equal(phaseProgressResponse.status, 200, phaseProgressText);
+    const phaseProgress = JSON.parse(phaseProgressText) as {
+      stages: readonly {
+        id: string;
+        phaseCheckpoints?: readonly { phase: string; attempt: number; recordedAt: string }[];
+      }[];
+    };
+    assert.deepEqual(
+      phaseProgress.stages
+        .find((stage) => stage.id === plannerClaim.task.id)
+        ?.phaseCheckpoints?.map((checkpoint) => ({
+          phase: checkpoint.phase,
+          attempt: checkpoint.attempt
+        })),
+      [{ phase: "research-plan.candidate", attempt: plannerLease.attempt }]
+    );
+    assert.equal(
+      (await store.load())?.intakeState.board.events.some((event) => event.type === "task.phase_checkpoint_recorded"),
+      false
+    );
     const releaseResponse = await fetch(`${baseUrl}/internal/worker/release`, {
       method: "POST",
       headers: {

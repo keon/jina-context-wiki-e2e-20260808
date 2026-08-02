@@ -5,12 +5,18 @@ import {
   PostgresBoardContextPublicationRepository,
   PostgresContextQuotaStore,
   PostgresContextEngineStore,
+  PostgresContextPhaseCheckpointRepository,
   PostgresJsonStateStore,
   PostgresIssueGraphRepository,
   PostgresSharedIdentityStore,
   type PostgresJsonStateStoreConfig
 } from "@jina/db";
-import { FileContextArtifactStore, MemoryContextEngineStore, type ContextEngineStore } from "@jina/context-engine";
+import {
+  FileContextArtifactStore,
+  MemoryContextEngineStore,
+  MemoryContextPhaseCheckpointStore,
+  type ContextEngineStore
+} from "@jina/context-engine";
 import { createLogger, errorLogFields } from "@jina/observability";
 import { createApiServer } from "./server.js";
 import { ContextQuotaService, InMemoryContextQuotaStore } from "./context-quotas.js";
@@ -59,6 +65,9 @@ const contextDatabase = postgresConfig
   : undefined;
 const stateStore = createStateStore(postgresConfig);
 const contextStore = createContextStore(contextDatabase);
+const contextPhaseCheckpointStore = contextDatabase
+  ? new PostgresContextPhaseCheckpointRepository(contextDatabase)
+  : new MemoryContextPhaseCheckpointStore();
 const contextBoardPublicationTransaction = contextDatabase
   ? new PostgresBoardContextPublicationRepository(contextDatabase)
   : undefined;
@@ -98,6 +107,7 @@ const server = createApiServer({
   simulateRuns: process.env.JINA_SIMULATE_RUNS === "true",
   ...(stateStore ? { stateStore } : {}),
   contextStore,
+  contextPhaseCheckpointStore,
   ...(contextArtifactStore ? { contextArtifactStore } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardPublicationTransaction } : {}),
   ...(contextBoardPublicationTransaction ? { contextBoardReleaseSeedStore: contextBoardPublicationTransaction } : {}),

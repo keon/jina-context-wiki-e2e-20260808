@@ -93,6 +93,12 @@ rows store status, dependencies, attempts, leases, fences, bounded digests, and 
 references. Page bodies, diagnostics, audit reports, research plans, publication plans,
 critic results, and repair drafts are immutable artifacts under the build scope.
 
+`context_phase_checkpoints` is the fine-grained retry index for those artifacts. Its
+tenant/task/phase/input-digest primary key makes recording first-writer-wins; the build
+index serves dashboard progress and recovery without reading or locking the global Board
+snapshot. Each row stores only scope, attempt, immutable artifact reference, and
+timestamp. The current Board lease remains the authority that may create a row.
+
 A valid page artifact is resumable but private. Replaying identical inputs and output
 digest is idempotent; a repair creates a new attempt/pass artifact instead of overwriting
 the previous bytes. Dependency results carry the latest-pass references forward.

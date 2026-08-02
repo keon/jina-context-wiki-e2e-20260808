@@ -815,25 +815,39 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
   try {
     const historyPath = join(inputDirectory, "commit-history.json");
     await writeFile(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
-    const output = await requireBoardAgentStageRunner().run({
-      id: "issue-causality-derivation",
-      prompt: issueGraphPrompt(history.repository, history.ref, historyPath),
-      schema: ISSUE_GRAPH_STAGE_SCHEMA,
-      workingDirectory: inputDirectory,
-      additionalDirectories: [inputDirectory],
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CAUSAL_GRAPH_DERIVE_SECONDS", 300)
+    const phase = "causal-graph-derive.candidate";
+    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v1", phase, {
+      historyArtifactSha256: historyArtifact.sha256,
+      commitSha: history.commitSha
     });
+    const checkpoint = await checkpointedContextCandidate(work, {
+      phase,
+      checkpointKey,
+      kind: "issue-graph",
+      generate: async () => {
+        const output = await requireBoardAgentStageRunner().run({
+          id: "issue-causality-derivation",
+          prompt: issueGraphPrompt(history.repository, history.ref, historyPath),
+          schema: ISSUE_GRAPH_STAGE_SCHEMA,
+          workingDirectory: inputDirectory,
+          additionalDirectories: [inputDirectory],
+          readOnly: true,
+          budgetSeconds: stageBudgetSeconds("CAUSAL_GRAPH_DERIVE_SECONDS", 300)
+        });
+        return { candidate: output.parsed, generatedAt: new Date().toISOString() };
+      }
+    });
+    if (!isRecord(checkpoint)) throw new Error("causal graph derivation checkpoint is invalid");
     const graph = materializeIssueGraph({
       tenantId: history.tenantId,
       repository: history.repository,
       ref: history.ref,
       refSequence: history.refSequence,
       commitSha: history.commitSha,
-      generatedAt: new Date().toISOString(),
+      generatedAt: requiredString(checkpoint.generatedAt, "causal graph checkpoint generatedAt"),
       history: history.commits,
       historyComplete: history.complete,
-      candidate: output.parsed,
+      candidate: checkpoint.candidate,
       generator: {
         name: "codex-agentic-issue-deriver",
         version: "1",
@@ -1086,6 +1100,17 @@ interface WorkerPhaseCheckpoint {
   readonly recordedAt: string;
 }
 
+function contextPhaseCheckpointKey(
+  work: ClaimedWork<ContextWorkerTopic | CausalGraphWorkerTopic>,
+  contract: string,
+  phase: string,
+  input: unknown
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify({ version: 1, contract, phase, taskId: work.task.id, input }))
+    .digest("hex");
+}
+
 async function loadContextBoardPhaseCheckpoint(
   work: ClaimedWork,
   phase: string,
@@ -1125,6 +1150,54 @@ async function recordContextBoardPhaseCheckpoint(
     throw new Error("recorded Context phase checkpoint does not match its request");
   }
   return result.checkpoint;
+}
+
+async function checkpointedContextCandidate(
+  work: ClaimedWork<ContextWorkerTopic | CausalGraphWorkerTopic>,
+  input: {
+    readonly phase: string;
+    readonly checkpointKey: string;
+    readonly kind: ContextArtifactKind;
+    readonly generate: () => Promise<unknown>;
+  }
+): Promise<unknown> {
+  const existing = await loadContextBoardPhaseCheckpoint(work, input.phase, input.checkpointKey);
+  if (existing) {
+    logger.info(`resumed ${input.phase} from a durable checkpoint`, {
+      event: "context.phase_checkpoint.reused",
+      taskId: work.task.id,
+      contextBuildId: work.task.metadata.contextBuildId,
+      phase: input.phase,
+      checkpointKey: input.checkpointKey,
+      checkpointAttempt: existing.checkpoint.attempt,
+      artifactSha256: existing.checkpoint.artifact.sha256
+    });
+    return existing.value;
+  }
+  const candidate = await input.generate();
+  const artifact = await uploadContextBoardArtifact(work, {
+    kind: input.kind,
+    name: `${input.phase}.json`,
+    contentType: "application/json",
+    content: Buffer.from(JSON.stringify(candidate), "utf8")
+  });
+  const recorded = await recordContextBoardPhaseCheckpoint(work, {
+    phase: input.phase,
+    checkpointKey: input.checkpointKey,
+    artifact
+  });
+  const selected = await loadContextBoardPhaseCheckpoint(work, input.phase, input.checkpointKey);
+  if (!selected) throw new Error(`recorded Context phase checkpoint ${input.phase} is unavailable`);
+  logger.info(`recorded durable ${input.phase} checkpoint`, {
+    event: "context.phase_checkpoint.recorded",
+    taskId: work.task.id,
+    contextBuildId: work.task.metadata.contextBuildId,
+    phase: input.phase,
+    checkpointKey: input.checkpointKey,
+    checkpointAttempt: recorded.attempt,
+    artifactSha256: recorded.artifact.sha256
+  });
+  return selected.value;
 }
 
 async function loadPriorContext(work: ClaimedWork<ContextWorkerTopic>): Promise<PriorContextPacket | undefined> {
@@ -1198,79 +1271,33 @@ async function runContextResearchPlan(
     const runner = requireBoardAgentStageRunner();
     const repositoryAreas = repositoryContextAreas(snapshot.files);
     const checkpointKey = (phase: string) =>
-      createHash("sha256")
-        .update(
-          JSON.stringify({
-            version: 1,
-            contract: "research-plan-phase-checkpoints-v1",
-            phase,
-            taskId: work.task.id,
-            snapshotSha256: snapshotArtifact.sha256,
-            priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
-          })
-        )
-        .digest("hex");
-    const checkpointedCandidate = async (
-      phase: "research-plan.candidate" | "research-plan.repair",
-      generate: () => Promise<unknown>
-    ): Promise<unknown> => {
-      const key = checkpointKey(phase);
-      const existing = await loadContextBoardPhaseCheckpoint(work, phase, key);
-      if (existing) {
-        logger.info(`resumed ${phase} from a durable checkpoint`, {
-          event: "context.phase_checkpoint.reused",
-          taskId: work.task.id,
-          contextBuildId: work.task.metadata.contextBuildId,
-          phase,
-          checkpointKey: key,
-          checkpointAttempt: existing.checkpoint.attempt,
-          artifactSha256: existing.checkpoint.artifact.sha256
+      contextPhaseCheckpointKey(work, "research-plan-phase-checkpoints-v1", phase, {
+        snapshotSha256: snapshotArtifact.sha256,
+        priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
+      });
+    const candidate = await checkpointedContextCandidate(work, {
+      phase: "research-plan.candidate",
+      checkpointKey: checkpointKey("research-plan.candidate"),
+      kind: "research-plan",
+      generate: async () => {
+        const output = await runner.run({
+          id: "research-planner",
+          prompt: researchPlannerPrompt({
+            repository: snapshot.repository,
+            repositoryDirectory: checkout.directory,
+            manifestPath,
+            evidencePath,
+            repositoryAreas,
+            ...(priorContextPath ? { priorContextPath } : {})
+          }),
+          schema: RESEARCH_STAGE_SCHEMA,
+          workingDirectory: checkout.directory,
+          additionalDirectories: [inputDirectory],
+          readOnly: true,
+          budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_SECONDS", 240)
         });
-        return existing.value;
+        return output.parsed;
       }
-      const candidate = await generate();
-      const artifact = await uploadContextBoardArtifact(work, {
-        kind: "research-plan",
-        name: `${phase}.json`,
-        contentType: "application/json",
-        content: Buffer.from(JSON.stringify(candidate), "utf8")
-      });
-      const recorded = await recordContextBoardPhaseCheckpoint(work, {
-        phase,
-        checkpointKey: key,
-        artifact
-      });
-      const selected = await loadContextBoardPhaseCheckpoint(work, phase, key);
-      if (!selected) throw new Error(`recorded Context phase checkpoint ${phase} is unavailable`);
-      logger.info(`recorded durable ${phase} checkpoint`, {
-        event: "context.phase_checkpoint.recorded",
-        taskId: work.task.id,
-        contextBuildId: work.task.metadata.contextBuildId,
-        phase,
-        checkpointKey: key,
-        checkpointAttempt: recorded.attempt,
-        artifactSha256: recorded.artifact.sha256
-      });
-      return selected.value;
-    };
-    const candidate = await checkpointedCandidate("research-plan.candidate", async () => {
-      const output = await runner.run({
-        id: "research-planner",
-        prompt: researchPlannerPrompt({
-          repository: snapshot.repository,
-          repositoryDirectory: checkout.directory,
-          manifestPath,
-          evidencePath,
-          repositoryAreas,
-          ...(priorContextPath ? { priorContextPath } : {})
-        }),
-        schema: RESEARCH_STAGE_SCHEMA,
-        workingDirectory: checkout.directory,
-        additionalDirectories: [inputDirectory],
-        readOnly: true,
-        budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_SECONDS", 240)
-      });
-      return output.parsed;
     });
     const validationOptions = {
       repositoryFiles: snapshot.files.map((file) => ({
@@ -1291,26 +1318,31 @@ async function runContextResearchPlan(
           ref: snapshot.ref,
           diagnostic: diagnostic.slice(0, 500)
         });
-        return checkpointedCandidate("research-plan.repair", async () => {
-          const repaired = await runner.run({
-            id: "research-planner-repair",
-            prompt: researchPlannerRepairPrompt({
-              repository: snapshot.repository,
-              repositoryDirectory: checkout.directory,
-              manifestPath,
-              evidencePath,
-              repositoryAreas,
-              ...(priorContextPath ? { priorContextPath } : {}),
-              invalidPlan,
-              diagnostic
-            }),
-            schema: RESEARCH_STAGE_SCHEMA,
-            workingDirectory: checkout.directory,
-            additionalDirectories: [inputDirectory],
-            readOnly: true,
-            budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_REPAIR_SECONDS", 300)
-          });
-          return repaired.parsed;
+        return checkpointedContextCandidate(work, {
+          phase: "research-plan.repair",
+          checkpointKey: checkpointKey("research-plan.repair"),
+          kind: "research-plan",
+          generate: async () => {
+            const repaired = await runner.run({
+              id: "research-planner-repair",
+              prompt: researchPlannerRepairPrompt({
+                repository: snapshot.repository,
+                repositoryDirectory: checkout.directory,
+                manifestPath,
+                evidencePath,
+                repositoryAreas,
+                ...(priorContextPath ? { priorContextPath } : {}),
+                invalidPlan,
+                diagnostic
+              }),
+              schema: RESEARCH_STAGE_SCHEMA,
+              workingDirectory: checkout.directory,
+              additionalDirectories: [inputDirectory],
+              readOnly: true,
+              budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_PLANNER_REPAIR_SECONDS", 300)
+            });
+            return repaired.parsed;
+          }
         });
       }
     });
@@ -1360,21 +1392,43 @@ async function runContextResearch(work: ClaimedWork<"run-context-research">): Pr
     const evidencePath = join(inputDirectory, "evidence.json");
     await writeFile(evidencePath, `${JSON.stringify(snapshot, null, 2)}\n`, "utf8");
     const priorContextPath = await writePriorContextPacket(inputDirectory, priorContext);
-    const output = await requireBoardAgentStageRunner().run({
-      id: `research-${assignment.id}`,
-      prompt: researchWorkerPrompt({
-        repository: snapshot.repository,
-        repositoryDirectory: checkout.directory,
-        evidencePath,
+    const checkpointKey = contextPhaseCheckpointKey(
+      work,
+      "research-report-phase-checkpoint-v1",
+      "research-report.candidate",
+      {
         assignment,
-        ...(priorContextPath ? { priorContextPath } : {})
-      }),
-      workingDirectory: checkout.directory,
-      additionalDirectories: [inputDirectory],
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_WORKER_SECONDS", 600)
+        planArtifactSha256: work.task.metadata.planArtifact.sha256,
+        snapshotArtifactSha256: planPacket.snapshotArtifact.sha256,
+        priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
+      }
+    );
+    const candidate = await checkpointedContextCandidate(work, {
+      phase: "research-report.candidate",
+      checkpointKey,
+      kind: "research-report",
+      generate: async () => {
+        const output = await requireBoardAgentStageRunner().run({
+          id: `research-${assignment.id}`,
+          prompt: researchWorkerPrompt({
+            repository: snapshot.repository,
+            repositoryDirectory: checkout.directory,
+            evidencePath,
+            assignment,
+            ...(priorContextPath ? { priorContextPath } : {})
+          }),
+          workingDirectory: checkout.directory,
+          additionalDirectories: [inputDirectory],
+          readOnly: true,
+          budgetSeconds: stageBudgetSeconds("CONTEXT_RESEARCH_WORKER_SECONDS", 600)
+        });
+        return { report: output.text };
+      }
     });
-    if (output.text.length < 200) throw new Error(`research worker ${assignment.id} returned a shallow report`);
+    if (!isRecord(candidate) || typeof candidate.report !== "string") {
+      throw new Error(`research worker ${assignment.id} checkpoint is invalid`);
+    }
+    if (candidate.report.length < 200) throw new Error(`research worker ${assignment.id} returned a shallow report`);
     const outputArtifact = await uploadContextBoardArtifact(work, {
       kind: "research-report",
       name: `${assignment.id}.json`,
@@ -1383,7 +1437,7 @@ async function runContextResearch(work: ClaimedWork<"run-context-research">): Pr
         JSON.stringify({
           version: 1,
           assignmentId: assignment.id,
-          report: output.text,
+          report: candidate.report,
           planArtifact: work.task.metadata.planArtifact,
           snapshotArtifact: planPacket.snapshotArtifact
         }),
@@ -1434,22 +1488,36 @@ async function runContextPublicationPlan(
   try {
     const priorContextPath = await writePriorContextPacket(stageRoot, priorContext);
     const runner = requireBoardAgentStageRunner();
-    const output = await runner.run({
-      id: "documentation-planner",
-      prompt: documentationPlannerPrompt({
-        repository: snapshot.repository,
-        repositoryAreas,
-        researchPlan: planPacket.plan,
-        researchPackets,
-        ...(priorContextPath ? { priorContextPath } : {})
-      }),
-      schema: DOCUMENTATION_STAGE_SCHEMA,
-      workingDirectory: stageRoot,
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_DOCUMENTATION_PLANNER_SECONDS", 600)
+    const checkpointKey = (phase: string) =>
+      contextPhaseCheckpointKey(work, "publication-plan-phase-checkpoints-v1", phase, {
+        researchPlanSha256: work.task.metadata.planArtifact.sha256,
+        researchReportSha256s: reportArtifacts.map((artifact) => artifact.sha256).sort(),
+        priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
+      });
+    const candidate = await checkpointedContextCandidate(work, {
+      phase: "publication-plan.candidate",
+      checkpointKey: checkpointKey("publication-plan.candidate"),
+      kind: "publication-plan",
+      generate: async () => {
+        const output = await runner.run({
+          id: "documentation-planner",
+          prompt: documentationPlannerPrompt({
+            repository: snapshot.repository,
+            repositoryAreas,
+            researchPlan: planPacket.plan,
+            researchPackets,
+            ...(priorContextPath ? { priorContextPath } : {})
+          }),
+          schema: DOCUMENTATION_STAGE_SCHEMA,
+          workingDirectory: stageRoot,
+          readOnly: true,
+          budgetSeconds: stageBudgetSeconds("CONTEXT_DOCUMENTATION_PLANNER_SECONDS", 600)
+        });
+        return output.parsed;
+      }
     });
     const plan = await parsePublicationPlanWithRepair({
-      candidate: output.parsed,
+      candidate,
       options: {
         researchAssignments: planPacket.plan.assignments,
         repositoryAreas,
@@ -1481,22 +1549,37 @@ async function runContextPublicationPlan(
           }
         : {}),
       repair: async ({ invalidPlan, diagnostic }) => {
-        const repaired = await runner.run({
-          id: "documentation-planner-repair",
-          prompt: documentationPlannerRepairPrompt({
-            repository: snapshot.repository,
-            repositoryAreas,
-            researchPlan: planPacket.plan,
-            ...(priorContextPath ? { priorContextPath } : {}),
-            invalidPlan,
-            diagnostic
-          }),
-          schema: DOCUMENTATION_STAGE_SCHEMA,
-          workingDirectory: stageRoot,
-          readOnly: true,
-          budgetSeconds: stageBudgetSeconds("CONTEXT_DOCUMENTATION_PLANNER_REPAIR_SECONDS", 300)
+        logger.warn("publication planner contract rejected model output; scheduling bounded correction", {
+          event: "context.publication_plan.repair_scheduled",
+          taskId: work.task.id,
+          contextBuildId: work.task.metadata.contextBuildId,
+          repository: snapshot.repository,
+          ref: snapshot.ref,
+          diagnostic: diagnostic.slice(0, 500)
         });
-        return repaired.parsed;
+        return checkpointedContextCandidate(work, {
+          phase: "publication-plan.repair",
+          checkpointKey: checkpointKey("publication-plan.repair"),
+          kind: "publication-plan",
+          generate: async () => {
+            const repaired = await runner.run({
+              id: "documentation-planner-repair",
+              prompt: documentationPlannerRepairPrompt({
+                repository: snapshot.repository,
+                repositoryAreas,
+                researchPlan: planPacket.plan,
+                ...(priorContextPath ? { priorContextPath } : {}),
+                invalidPlan,
+                diagnostic
+              }),
+              schema: DOCUMENTATION_STAGE_SCHEMA,
+              workingDirectory: stageRoot,
+              readOnly: true,
+              budgetSeconds: stageBudgetSeconds("CONTEXT_DOCUMENTATION_PLANNER_REPAIR_SECONDS", 300)
+            });
+            return repaired.parsed;
+          }
+        });
       }
     });
     const outputArtifact = await uploadContextBoardArtifact(work, {
@@ -1648,25 +1731,48 @@ async function runContextPageWrite(work: ClaimedWork<"run-context-page-write">):
   await mkdir(outputDirectory, { recursive: true });
   try {
     const priorContextPath = await writePriorContextPacket(stageRoot, priorContext);
-    await requireBoardAgentStageRunner().run({
-      id: `write-${safeStageId(page.id)}`,
-      prompt: documentationWriterPrompt({
-        repository: snapshot.repository,
-        repositoryDirectory: checkout.directory,
-        outputDirectory,
-        writer: { ...sourceWriter, pageIds: [page.id] },
-        plan: publication.plan,
-        researchPackets,
-        ...(priorContextPath ? { priorContextPath } : {})
-      }),
-      workingDirectory: stageRoot,
-      additionalDirectories: [checkout.directory],
-      writableDirectories: [outputDirectory],
-      outputFiles: [join(outputDirectory, page.path)],
-      budgetSeconds: stageBudgetSeconds("CONTEXT_DOCUMENTATION_WRITER_SECONDS", 1_200)
+    const checkpointKey = contextPhaseCheckpointKey(
+      work,
+      "context-page-write-phase-checkpoint-v1",
+      "context-page-write.candidate",
+      {
+        page,
+        publicationArtifactSha256: publicationArtifact.sha256,
+        priorReleaseSha256: priorContext?.seed.releaseArtifact.sha256 ?? null
+      }
+    );
+    const candidate = await checkpointedContextCandidate(work, {
+      phase: "context-page-write.candidate",
+      checkpointKey,
+      kind: "context-page",
+      generate: async () => {
+        await requireBoardAgentStageRunner().run({
+          id: `write-${safeStageId(page.id)}`,
+          prompt: documentationWriterPrompt({
+            repository: snapshot.repository,
+            repositoryDirectory: checkout.directory,
+            outputDirectory,
+            writer: { ...sourceWriter, pageIds: [page.id] },
+            plan: publication.plan,
+            researchPackets,
+            ...(priorContextPath ? { priorContextPath } : {})
+          }),
+          workingDirectory: stageRoot,
+          additionalDirectories: [checkout.directory],
+          writableDirectories: [outputDirectory],
+          outputFiles: [join(outputDirectory, page.path)],
+          budgetSeconds: stageBudgetSeconds("CONTEXT_DOCUMENTATION_WRITER_SECONDS", 1_200)
+        });
+        await assertOnlyContextPage(outputDirectory, page.path);
+        return {
+          bodyMarkdown: canonicalPublicPageMarkdown(await readFile(join(outputDirectory, page.path), "utf8"))
+        };
+      }
     });
-    await assertOnlyContextPage(outputDirectory, page.path);
-    const bodyMarkdown = canonicalPublicPageMarkdown(await readFile(join(outputDirectory, page.path), "utf8"));
+    if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string") {
+      throw new Error(`page writer checkpoint is invalid for ${page.path}`);
+    }
+    const bodyMarkdown = canonicalPublicPageMarkdown(candidate.bodyMarkdown);
     if (bodyMarkdown.trim().length < 400) throw new Error(`page writer returned a shallow page for ${page.path}`);
     const draftInventory = boardPageAuditInventory({
       documentPath: page.path,
@@ -1821,16 +1927,29 @@ async function runContextPageAudit(work: ClaimedWork<"run-context-page-audit">):
                       `Expected citation IDs, each exactly once and no others:\n${JSON.stringify(expectedCitationIds, null, 2)}`
                     ].join("\n\n")
                   : basePrompt;
-                const output = await requireBoardAgentStageRunner().run({
-                  id: `${safeStageId(workerId)}-${index + 1}-format-${attempt}`,
-                  prompt,
-                  schema: CITATION_AUDIT_STAGE_SCHEMA,
-                  workingDirectory: checkout.directory,
-                  additionalDirectories: [auditRoot],
-                  readOnly: true,
-                  budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
+                const phase = `page-audit.batch-${index + 1}.attempt-${attempt}`;
+                const checkpointKey = contextPhaseCheckpointKey(work, "page-audit-phase-checkpoints-v1", phase, {
+                  inputDigest,
+                  expectedCitationIds,
+                  priorDiagnostic: priorDiagnostic ?? null
                 });
-                return output.parsed;
+                return checkpointedContextCandidate(work, {
+                  phase,
+                  checkpointKey,
+                  kind: "citation-audit",
+                  generate: async () => {
+                    const output = await requireBoardAgentStageRunner().run({
+                      id: `${safeStageId(workerId)}-${index + 1}-format-${attempt}`,
+                      prompt,
+                      schema: CITATION_AUDIT_STAGE_SCHEMA,
+                      workingDirectory: checkout.directory,
+                      additionalDirectories: [auditRoot],
+                      readOnly: true,
+                      budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
+                    });
+                    return output.parsed;
+                  }
+                });
               },
               parse: (value) => {
                 const citationIds = references.map((reference) => reference.citationId);
@@ -2016,17 +2135,38 @@ async function runContextPageRepair(work: ClaimedWork<"run-context-page-repair">
       .filter(Boolean)
       .join("\n\n");
     if (!prompt) throw new Error("page repair received no actionable findings");
-    await requireBoardAgentStageRunner().run({
-      id: `repair-${safeStageId(page.documentPath)}-${work.task.metadata.pass}`,
-      prompt,
-      workingDirectory: stageRoot,
-      additionalDirectories: [checkout.directory],
-      writableDirectories: [outputDirectory],
-      outputFiles: [targetPath],
-      budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_REPAIR_SECONDS", 600)
+    const checkpointKey = contextPhaseCheckpointKey(
+      work,
+      "context-page-repair-phase-checkpoint-v1",
+      "context-page-repair.candidate",
+      {
+        findingsArtifactSha256: findingsArtifact.sha256,
+        priorPageArtifactSha256: findings.pageArtifact.sha256,
+        pass: work.task.metadata.pass
+      }
+    );
+    const candidate = await checkpointedContextCandidate(work, {
+      phase: "context-page-repair.candidate",
+      checkpointKey,
+      kind: "context-page",
+      generate: async () => {
+        await requireBoardAgentStageRunner().run({
+          id: `repair-${safeStageId(page.documentPath)}-${work.task.metadata.pass}`,
+          prompt,
+          workingDirectory: stageRoot,
+          additionalDirectories: [checkout.directory],
+          writableDirectories: [outputDirectory],
+          outputFiles: [targetPath],
+          budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_REPAIR_SECONDS", 600)
+        });
+        await assertOnlyContextPage(outputDirectory, page.documentPath);
+        return { bodyMarkdown: canonicalPublicPageMarkdown(await readFile(targetPath, "utf8")) };
+      }
     });
-    await assertOnlyContextPage(outputDirectory, page.documentPath);
-    const bodyMarkdown = canonicalPublicPageMarkdown(await readFile(targetPath, "utf8"));
+    if (!isRecord(candidate) || typeof candidate.bodyMarkdown !== "string") {
+      throw new Error(`page repair checkpoint is invalid for ${page.documentPath}`);
+    }
+    const bodyMarkdown = canonicalPublicPageMarkdown(candidate.bodyMarkdown);
     const priorPlanStructuralProblems = pagePlanStructuralProblems(
       plannedPage,
       publication.plan.pages,
@@ -2236,9 +2376,16 @@ async function runContextSourceChallenge(
       readOnly: true,
       budgetSeconds: stageBudgetSeconds("CONTEXT_SOURCE_CHALLENGE_SECONDS", 900)
     } as const;
-    const output = await runner.run(stageInput);
+    const phaseCheckpointKey = (phase: string) =>
+      contextPhaseCheckpointKey(work, "source-challenge-phase-checkpoints-v1", phase, { inputDigest });
+    const candidate = await checkpointedContextCandidate(work, {
+      phase: "source-challenge.candidate",
+      checkpointKey: phaseCheckpointKey("source-challenge.candidate"),
+      kind: "gate-evaluation",
+      generate: async () => (await runner.run(stageInput)).parsed
+    });
     const result = await parseBoardSourceChallengeStageResultWithRepair(
-      output.parsed,
+      candidate,
       {
         workerId,
         inputDigest,
@@ -2248,19 +2395,26 @@ async function runContextSourceChallenge(
         repositoryPaths: repositoryInventory.paths
       },
       async (diagnostic, previousResult) => {
-        const repaired = await runner.run({
-          ...stageInput,
-          id: `${workerId}-validation-repair`,
-          prompt: sourceChallengeValidationRepairPrompt({
-            workerId,
-            repositoryDirectory: checkout.directory,
-            evidencePath,
-            repositoryPaths: repositoryInventory.paths,
-            diagnostic,
-            previousResult
-          })
+        return checkpointedContextCandidate(work, {
+          phase: "source-challenge.repair",
+          checkpointKey: phaseCheckpointKey("source-challenge.repair"),
+          kind: "gate-evaluation",
+          generate: async () => {
+            const repaired = await runner.run({
+              ...stageInput,
+              id: `${workerId}-validation-repair`,
+              prompt: sourceChallengeValidationRepairPrompt({
+                workerId,
+                repositoryDirectory: checkout.directory,
+                evidencePath,
+                repositoryPaths: repositoryInventory.paths,
+                diagnostic,
+                previousResult
+              })
+            });
+            return repaired.parsed;
+          }
         });
-        return repaired.parsed;
       }
     );
     const blockingTaskIds = new Set(result.addedTasks.filter((task) => task.material).map((task) => task.id));
@@ -2331,24 +2485,38 @@ async function runContextTaskEvaluation(
     let result: ReturnType<typeof parseCriticStageResult> | undefined;
     const contractRejections: string[] = [];
     for (let contractAttempt = 1; contractAttempt <= MAX_CRITIC_CONTRACT_ATTEMPTS; contractAttempt += 1) {
-      const output = await requireBoardAgentStageRunner().run({
-        id: contractAttempt === 1 ? workerId : `${workerId}-contract-repair-${contractAttempt - 1}`,
-        prompt:
-          contractAttempt === 1
-            ? prompt
-            : [
-                prompt,
-                `Previous results violated the host contract:\n${contractRejections.map((reason, index) => `${index + 1}. ${reason}`).join("\n")}`,
-                "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass. Every question, attempt, and gap ID must be unique, and every referenced gap ID must be defined exactly once.",
-                "Before returning, check every host invariant: copy the supplied snapshot digest, task-catalog digest, and worker IDs exactly; emit exactly one review result and one attempt for every supplied question and no others; keep each attempt's pageIds identical to its review result; give every non-passing result at least one defined blocking gap; and give every passing attempt no blocking unknowns plus every required answer part."
-              ].join("\n\n"),
-        schema: CRITIC_STAGE_SCHEMA,
-        workingDirectory: stageRoot,
-        readOnly: true,
-        budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
+      const phase = `task-evaluation.candidate.${contractAttempt}`;
+      const checkpointKey = contextPhaseCheckpointKey(work, "task-evaluation-phase-checkpoints-v1", phase, {
+        publicSnapshotDigest,
+        taskCatalogDigest,
+        contractRejections
+      });
+      const candidate = await checkpointedContextCandidate(work, {
+        phase,
+        checkpointKey,
+        kind: "gate-evaluation",
+        generate: async () => {
+          const output = await requireBoardAgentStageRunner().run({
+            id: contractAttempt === 1 ? workerId : `${workerId}-contract-repair-${contractAttempt - 1}`,
+            prompt:
+              contractAttempt === 1
+                ? prompt
+                : [
+                    prompt,
+                    `Previous results violated the host contract:\n${contractRejections.map((reason, index) => `${index + 1}. ${reason}`).join("\n")}`,
+                    "Re-evaluate every task and return one corrected complete result. A task with any blocking unknown must be partial or fail and reference a concrete blocking gap; never label it pass. Every question, attempt, and gap ID must be unique, and every referenced gap ID must be defined exactly once.",
+                    "Before returning, check every host invariant: copy the supplied snapshot digest, task-catalog digest, and worker IDs exactly; emit exactly one review result and one attempt for every supplied question and no others; keep each attempt's pageIds identical to its review result; give every non-passing result at least one defined blocking gap; and give every passing attempt no blocking unknowns plus every required answer part."
+                  ].join("\n\n"),
+            schema: CRITIC_STAGE_SCHEMA,
+            workingDirectory: stageRoot,
+            readOnly: true,
+            budgetSeconds: stageBudgetSeconds("CONTEXT_CRITIC_SECONDS", 900)
+          });
+          return output.parsed;
+        }
       });
       try {
-        const reconciled = reconcileCriticStageResult(output.parsed, workerId, expected);
+        const reconciled = reconcileCriticStageResult(candidate, workerId, expected);
         if (reconciled.corrections.length > 0) {
           logger.info("task evaluator reconciled copy-sensitive model output", {
             event: "context.contract_reconciled",
@@ -2470,23 +2638,40 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
       await writeFile(target, page.bodyMarkdown, "utf8");
     }
     const priorSnapshotDigest = createHash("sha256").update(publicContextSnapshot(currentPages)).digest("hex");
-    await requireBoardAgentStageRunner().run({
-      id: `gap-repair-${work.task.metadata.pass}`,
-      prompt: contextGapRepairPrompt({
-        repository: snapshot.repository,
-        repositoryDirectory: checkout.directory,
-        outputDirectory,
-        publicationPlan: publication.plan,
-        sourceChallenge: challenge.result,
-        taskEvaluation: evaluation.result,
-        pass: work.task.metadata.pass
-      }),
-      workingDirectory: stageRoot,
-      additionalDirectories: [checkout.directory],
-      writableDirectories: [outputDirectory],
-      outputFiles: currentPages.map(({ page }) => join(outputDirectory, page.documentPath)),
-      budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_REPAIR_SECONDS", 1_200)
+    const phaseCheckpointKey = (phase: string, input: unknown) =>
+      contextPhaseCheckpointKey(work, "context-gap-repair-phase-checkpoints-v1", phase, {
+        publicationArtifactSha256: publicationArtifact.sha256,
+        challengeArtifactSha256: challengeArtifact.sha256,
+        evaluationArtifactSha256: evaluationArtifact.sha256,
+        pass: work.task.metadata.pass,
+        input
+      });
+    const gapCandidate = await checkpointedContextCandidate(work, {
+      phase: "gap-repair.candidate",
+      checkpointKey: phaseCheckpointKey("gap-repair.candidate", priorSnapshotDigest),
+      kind: "context-draft",
+      generate: async () => {
+        await requireBoardAgentStageRunner().run({
+          id: `gap-repair-${work.task.metadata.pass}`,
+          prompt: contextGapRepairPrompt({
+            repository: snapshot.repository,
+            repositoryDirectory: checkout.directory,
+            outputDirectory,
+            publicationPlan: publication.plan,
+            sourceChallenge: challenge.result,
+            taskEvaluation: evaluation.result,
+            pass: work.task.metadata.pass
+          }),
+          workingDirectory: stageRoot,
+          additionalDirectories: [checkout.directory],
+          writableDirectories: [outputDirectory],
+          outputFiles: currentPages.map(({ page }) => join(outputDirectory, page.documentPath)),
+          budgetSeconds: stageBudgetSeconds("CONTEXT_GAP_REPAIR_SECONDS", 1_200)
+        });
+        return captureContextDirectory(outputDirectory);
+      }
     });
+    await restoreContextDirectory(outputDirectory, gapCandidate);
     let pages: ContextPageArtifact[] = [];
     let citationAudit: Awaited<ReturnType<typeof auditContextDraftCitations>> | undefined;
     let priorReferences = priorCitationAudit.references;
@@ -2525,21 +2710,31 @@ async function runContextGapRepair(work: ClaimedWork<"run-context-gap-repair">):
         writeFile(auditInputPath, `${JSON.stringify(citationAudit.input, null, 2)}\n`, "utf8"),
         writeFile(auditResultPath, `${JSON.stringify(citationAudit.result, null, 2)}\n`, "utf8")
       ]);
-      await requireBoardAgentStageRunner().run({
-        id: `gap-citation-repair-${work.task.metadata.pass}-${auditPass}`,
-        prompt: citationAuditRepairPrompt({
-          repositoryDirectory: checkout.directory,
-          outputDirectory,
-          auditInputPath,
-          auditResultPath,
-          unsupportedCitationIds: unsupported.map((candidate) => candidate.citationId)
-        }),
-        workingDirectory: stageRoot,
-        additionalDirectories: [checkout.directory],
-        writableDirectories: [outputDirectory],
-        outputFiles: pages.map((page) => join(outputDirectory, page.documentPath)),
-        budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_REPAIR_SECONDS", 600)
+      const repairPhase = `gap-citation-repair.pass-${auditPass}`;
+      const repairCandidate = await checkpointedContextCandidate(work, {
+        phase: repairPhase,
+        checkpointKey: phaseCheckpointKey(repairPhase, citationAudit.resultDigest),
+        kind: "context-draft",
+        generate: async () => {
+          await requireBoardAgentStageRunner().run({
+            id: `gap-citation-repair-${work.task.metadata.pass}-${auditPass}`,
+            prompt: citationAuditRepairPrompt({
+              repositoryDirectory: checkout.directory,
+              outputDirectory,
+              auditInputPath,
+              auditResultPath,
+              unsupportedCitationIds: unsupported.map((candidate) => candidate.citationId)
+            }),
+            workingDirectory: stageRoot,
+            additionalDirectories: [checkout.directory],
+            writableDirectories: [outputDirectory],
+            outputFiles: pages.map((page) => join(outputDirectory, page.documentPath)),
+            budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_REPAIR_SECONDS", 600)
+          });
+          return captureContextDirectory(outputDirectory);
+        }
       });
+      await restoreContextDirectory(outputDirectory, repairCandidate);
     }
     if (!citationAudit) throw new Error("context gap repair citation audit did not run");
     const publicSnapshotDigest = citationAudit.publicSnapshotDigest;
@@ -2690,27 +2885,40 @@ async function auditContextDraftCitations(input: {
   const batches = citationReferenceBatches(delta.pendingReferences);
   for (let index = 0; index < batches.length; index += 1) {
     const batch = batches[index]!;
-    const output = await requireBoardAgentStageRunner().run({
-      id: `gap-audit-${input.pass}-${input.auditPass}-${index + 1}`,
-      prompt: citationAuditStagePrompt({
-        workerId,
-        repository: input.snapshot.repository,
-        repositoryDirectory: input.checkoutDirectory,
-        evidencePath,
-        references: batch,
-        inputDigest,
-        publicSnapshotDigest
-      }),
-      schema: CITATION_AUDIT_STAGE_SCHEMA,
-      workingDirectory: input.checkoutDirectory,
-      additionalDirectories: [input.stageRoot],
-      readOnly: true,
-      budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
+    const phase = `gap-audit.pass-${input.auditPass}.batch-${index + 1}`;
+    const checkpointKey = contextPhaseCheckpointKey(input.work, "context-gap-audit-phase-checkpoints-v1", phase, {
+      inputDigest,
+      citationIds: batch.map((reference) => reference.citationId)
+    });
+    const candidate = await checkpointedContextCandidate(input.work, {
+      phase,
+      checkpointKey,
+      kind: "context-draft",
+      generate: async () => {
+        const output = await requireBoardAgentStageRunner().run({
+          id: `gap-audit-${input.pass}-${input.auditPass}-${index + 1}`,
+          prompt: citationAuditStagePrompt({
+            workerId,
+            repository: input.snapshot.repository,
+            repositoryDirectory: input.checkoutDirectory,
+            evidencePath,
+            references: batch,
+            inputDigest,
+            publicSnapshotDigest
+          }),
+          schema: CITATION_AUDIT_STAGE_SCHEMA,
+          workingDirectory: input.checkoutDirectory,
+          additionalDirectories: [input.stageRoot],
+          readOnly: true,
+          budgetSeconds: stageBudgetSeconds("CONTEXT_CITATION_AUDIT_SECONDS", 600)
+        });
+        return output.parsed;
+      }
     });
     batchAudits.push(
       parseCitationAuditStageResult(
         retainAssignedCitationAuditResults(
-          output.parsed,
+          candidate,
           batch.map((reference) => reference.citationId)
         ),
         {
@@ -3466,6 +3674,51 @@ async function contextMarkdownPaths(outputDirectory: string): Promise<string[]> 
   };
   await walk("");
   return files.sort();
+}
+
+interface ContextDirectoryCheckpoint {
+  readonly version: 1;
+  readonly files: readonly { readonly path: string; readonly bodyMarkdown: string }[];
+}
+
+async function captureContextDirectory(outputDirectory: string): Promise<ContextDirectoryCheckpoint> {
+  const paths = await contextMarkdownPaths(outputDirectory);
+  return {
+    version: 1,
+    files: await Promise.all(
+      paths.map(async (path) => ({
+        path,
+        bodyMarkdown: await readFile(join(outputDirectory, path), "utf8")
+      }))
+    )
+  };
+}
+
+async function restoreContextDirectory(outputDirectory: string, value: unknown): Promise<void> {
+  if (!isRecord(value) || value.version !== 1 || !Array.isArray(value.files) || value.files.length > 96) {
+    throw new Error("Context directory phase checkpoint is invalid");
+  }
+  const files = value.files.map((candidate, index) => {
+    if (!isRecord(candidate)) throw new Error(`Context directory checkpoint file ${index} is invalid`);
+    const path = requiredString(candidate.path, `Context directory checkpoint files[${index}].path`);
+    if (!/^(?:[a-z0-9][a-z0-9-]*\/)*[a-z0-9][a-z0-9-]*\.md$/.test(path)) {
+      throw new Error(`Context directory checkpoint path is invalid: ${path}`);
+    }
+    if (typeof candidate.bodyMarkdown !== "string" || !candidate.bodyMarkdown.trim()) {
+      throw new Error(`Context directory checkpoint files[${index}].bodyMarkdown is required`);
+    }
+    return { path, bodyMarkdown: candidate.bodyMarkdown };
+  });
+  if (new Set(files.map((file) => file.path)).size !== files.length) {
+    throw new Error("Context directory checkpoint contains duplicate paths");
+  }
+  await rm(outputDirectory, { recursive: true, force: true });
+  await mkdir(outputDirectory, { recursive: true });
+  for (const file of files) {
+    const target = join(outputDirectory, file.path);
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, file.bodyMarkdown, "utf8");
+  }
 }
 
 function markdownTitle(bodyMarkdown: string, documentPath: string): string {

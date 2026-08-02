@@ -367,6 +367,18 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   let uploadedLease: Record<string, unknown> | undefined;
   let uploadedArtifact: ArtifactRef | undefined;
   let claimedTopics: unknown;
+  let claimAttempt = 0;
+  const completionAttempts: Record<string, unknown>[] = [];
+  const phaseCheckpoints = new Map<
+    string,
+    {
+      readonly phase: string;
+      readonly checkpointKey: string;
+      readonly attempt: number;
+      readonly artifact: ArtifactRef;
+      readonly recordedAt: string;
+    }
+  >();
   const mock = createServer(async (request, response) => {
     const body = await readJson(request);
     if (request.url === "/internal/worker/claim") {
@@ -376,14 +388,15 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
         response.end();
         return;
       }
+      claimAttempt += 1;
       json(response, 200, {
         message: {
-          id: "message_gap_repair",
+          id: `message_gap_repair_${claimAttempt}`,
           topic: "run-context-gap-repair",
-          leaseId: "lease_gap_repair",
+          leaseId: `lease_gap_repair_${claimAttempt}`,
           leaseExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-          attempt: 1,
-          writeFenceToken: "fence_gap_repair"
+          attempt: claimAttempt,
+          writeFenceToken: `fence_gap_repair_${claimAttempt}`
         },
         task: {
           id: "task_gap_repair",
@@ -450,7 +463,7 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       uploadedLease = body;
       const content = Buffer.from(String(body.contentBase64), "base64");
       uploadedDraft = JSON.parse(content.toString("utf8")) as Record<string, unknown>;
-      const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/context-draft/task_gap_repair-attempt-1-${String(body.name)}`;
+      const key = `context-v2/tenants/tenant-board/repositories/acme/sample/builds/${buildId}/context-draft/task_gap_repair-attempt-${String(body.attempt)}-${String(body.name)}`;
       const ref: ArtifactRef = {
         uri: `file:///${key}`,
         key,
@@ -463,11 +476,44 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
       json(response, 201, { artifact: ref });
       return;
     }
+    if (request.url === "/internal/context/board/phase-checkpoints/read") {
+      json(response, 200, {
+        checkpoint: phaseCheckpoints.get(`${String(body.phase)}:${String(body.checkpointKey)}`) ?? null
+      });
+      return;
+    }
+    if (request.url === "/internal/context/board/phase-checkpoints") {
+      const key = `${String(body.phase)}:${String(body.checkpointKey)}`;
+      const existing = phaseCheckpoints.get(key);
+      if (existing) {
+        json(response, 200, { checkpoint: existing, created: false });
+        return;
+      }
+      const checkpoint = {
+        phase: String(body.phase),
+        checkpointKey: String(body.checkpointKey),
+        attempt: Number(body.attempt),
+        artifact: body.artifact as ArtifactRef,
+        recordedAt: new Date().toISOString()
+      };
+      phaseCheckpoints.set(key, checkpoint);
+      json(response, 201, { checkpoint, created: true });
+      return;
+    }
     if (request.url === "/internal/worker/renew") {
       json(response, 200, { renewed: true });
       return;
     }
+    if (request.url === "/internal/worker/release") {
+      json(response, 200, { released: true });
+      return;
+    }
     if (request.url === "/internal/worker/complete") {
+      completionAttempts.push(body);
+      if (completionAttempts.length === 1) {
+        json(response, 503, { error: "simulated response loss after phase checkpoints" });
+        return;
+      }
       completion = body;
       json(response, 200, { accepted: true });
       return;
@@ -521,8 +567,8 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.deepEqual(claimedTopics, ["run-context-gap-repair"]);
   assert.equal(uploadedLease?.kind, "context-draft");
   assert.equal(uploadedLease?.taskId, "task_gap_repair");
-  assert.equal(uploadedLease?.leaseId, "lease_gap_repair");
-  assert.equal(uploadedLease?.writeFenceToken, "fence_gap_repair");
+  assert.equal(uploadedLease?.leaseId, "lease_gap_repair_2");
+  assert.equal(uploadedLease?.writeFenceToken, "fence_gap_repair_2");
   assert.equal(uploadedDraft?.version, 1);
   const pages = uploadedDraft?.pages as readonly Record<string, unknown>[];
   assert.equal(pages.length, 1);
@@ -531,11 +577,14 @@ test("board gap repair reuses its prior global audit and emits a structurally gr
   assert.deepEqual(uploadedDraft?.sourceChallengeArtifact, challengeArtifact);
   assert.deepEqual(uploadedDraft?.taskEvaluationArtifact, evaluationArtifact);
   assert.equal(completion?.outcome, "done", output);
-  assert.deepEqual(completion?.modelUsage, {
+  assert.equal(completionAttempts.length, 2);
+  assert.deepEqual(completionAttempts[0]?.modelUsage, {
     inputTokens: 400,
     cachedInputTokens: 200,
     outputTokens: 80
   });
+  assert.deepEqual(completion?.modelUsage, { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 });
+  assert.ok(phaseCheckpoints.size >= 5);
   const finalAudit = record(uploadedDraft?.citationAudit);
   assert.match(String(record(finalAudit.worker).summary), /Reused \d+ exact digest-bound supported citation verdicts/);
   const finalReferences = record(uploadedDraft?.citationAuditInput).references as readonly unknown[];

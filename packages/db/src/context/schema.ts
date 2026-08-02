@@ -1301,6 +1301,25 @@ create index if not exists context_retrieval_metrics_scope
   on jina_context.retrieval_metrics
   (tenant_id,repository,metric_name,recorded_at desc);
 
+-- Fine-grained durable progress for model-backed Board tasks. The task graph
+-- remains the lease authority; these immutable rows avoid rewriting or locking
+-- the global Board snapshot after every expensive phase.
+create table if not exists jina_context.context_phase_checkpoints (
+  tenant_id text not null,
+  repository text not null,
+  build_id text not null check (build_id ~ '^task_'),
+  task_id text not null check (task_id ~ '^task_'),
+  phase text not null check (phase ~ '^[a-z][a-z0-9.-]{0,79}$'),
+  checkpoint_key text not null check (checkpoint_key ~ '^[0-9a-f]{64}$'),
+  attempt integer not null check (attempt > 0),
+  artifact jsonb not null,
+  recorded_at timestamptz not null,
+  primary key (tenant_id,task_id,phase,checkpoint_key)
+);
+create index if not exists context_phase_checkpoints_build
+  on jina_context.context_phase_checkpoints
+  (tenant_id,build_id,recorded_at,task_id,phase);
+
 -- Authoritative mutable quota state. The application serializes all mutations
 -- for one tenant under a transaction-scoped advisory lock; the row remains a
 -- compact implementation detail behind ContextQuotaStore.

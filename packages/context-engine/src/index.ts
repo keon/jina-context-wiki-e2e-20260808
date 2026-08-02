@@ -8,6 +8,7 @@ export * from "./context/catalog.js";
 
 export * from "./ports/context-engine-store.js";
 export * from "./ports/context-quota-store.js";
+export * from "./ports/context-phase-checkpoint-store.js";
 export * from "./ports/artifact-store.js";
 export * from "./ports/evidence-store.js";
 export * from "./ports/knowledge-store.js";
