@@ -663,6 +663,10 @@ jobs:
             fi
           fi
           candidate_tag="candidate-${GITHUB_RUN_ID}"
+          deploy_traffic_args=()
+          if [ "$service_exists" = true ]; then
+            deploy_traffic_args+=(--no-traffic)
+          fi
           gcloud run deploy "$SERVICE_NAME" \
             --image "$IMAGE" \
             --region "$REGION" \
@@ -673,7 +677,7 @@ jobs:
             --add-cloudsql-instances "${PROJECT_ID}:${REGION}:${CLOUD_SQL_INSTANCE}" \
             --set-env-vars "$env_vars" \
             --set-secrets "$secrets" \
-            --no-traffic \
+            "${deploy_traffic_args[@]}" \
             --tag "$candidate_tag" \
             --quiet
 
