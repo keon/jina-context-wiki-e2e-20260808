@@ -777,7 +777,7 @@ async function runCausalGraphDerive(work: ClaimedWork<"run-causal-graph-derive">
     await writeFile(historyPath, `${JSON.stringify(history, null, 2)}\n`, "utf8");
     await writeFile(candidateLedgerPath, `${JSON.stringify(candidateLedger, null, 2)}\n`, "utf8");
     const phase = "causal-graph-derive.candidate";
-    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v2", phase, {
+    const checkpointKey = contextPhaseCheckpointKey(work, "causal-graph-derive-phase-checkpoint-v3", phase, {
       historyArtifactSha256: historyArtifact.sha256,
       commitSha: history.commitSha
     });
