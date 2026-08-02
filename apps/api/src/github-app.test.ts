@@ -1051,7 +1051,7 @@ test("an ignored relay delivery cannot roll back work committed by another API i
   }
 });
 
-test("a newer relayed PR commit supersedes stale work and releases its build quota", async () => {
+test("a newer relayed ref build supersedes stale work and releases its build quota", async () => {
   const pullRequestNumber = 80;
   const firstHead = "1".repeat(40);
   const secondHead = "2".repeat(40);
@@ -1105,7 +1105,7 @@ test("a newer relayed PR commit supersedes stale work and releases its build quo
   assert.equal(progress.response.status, 200);
   assert.equal(progress.body.status, "failed");
   assert.equal(progress.body.failureCode, "build_superseded");
-  assert.equal(progress.body.failureReason, "A newer pull request commit superseded this Context build.");
+  assert.equal(progress.body.failureReason, "A newer build for this repository ref superseded this Context build.");
 });
 
 test("generic board work is fenced by attempt, lease id, and token", async () => {

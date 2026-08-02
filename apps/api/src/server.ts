@@ -4000,7 +4000,7 @@ const PUBLIC_CONTEXT_FAILURE_REASONS = {
   build_time_budget_exceeded: "This Context build reached its wall-clock limit.",
   build_token_budget_exceeded: "This Context build reached its model-token limit.",
   build_canceled: "This Context build was canceled by an authorized operator.",
-  build_superseded: "A newer pull request commit superseded this Context build.",
+  build_superseded: "A newer build for this repository ref superseded this Context build.",
   stage_failed: "This stage failed before producing a valid checkpoint.",
   build_failed: "This Context build stopped after a stage failure."
 } as const;

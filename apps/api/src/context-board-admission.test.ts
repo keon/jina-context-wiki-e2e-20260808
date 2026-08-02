@@ -331,7 +331,7 @@ test("a distinct PR synchronize delivery advances even when the head returns to 
   assert.notEqual(rollback.build.buildTaskId, opened.build.buildTaskId);
 });
 
-test("a newer PR commit cancels older queued work while replay leaves the newest build active", () => {
+test("a newer same-ref admission cancels older queued work while replay leaves the newest build active", () => {
   const first = github(
     createEmptyBoardState(),
     prEvent("pull_request.opened", 52, "1".repeat(40)),
@@ -367,7 +367,7 @@ test("a newer PR commit cancels older queued work while replay leaves the newest
   assert.deepEqual(supersededEvent?.payload, {
     actor: "context-build-admission",
     failureCategory: "build_superseded",
-    reason: "superseded by a newer pull request commit",
+    reason: "superseded by a newer build for the same repository ref",
     supersededByBuildTaskId: newer.build.buildTaskId
   });
 
@@ -434,20 +434,26 @@ test("a newer PR commit retires an active lease and preserves unrelated or termi
   assert.equal(findTask(newest.state, newest.build.buildTaskId)?.status, "triage");
 });
 
-test("same-commit PR deliveries and non-PR admissions do not supersede builds", () => {
+test("same-commit and non-PR same-ref admissions supersede older active builds", () => {
   const head = "7".repeat(40);
   const opened = github(createEmptyBoardState(), prEvent("pull_request.opened", 71, head), "delivery-pr-71-open");
   assert.equal(opened.outcome, "created");
   const sameCommit = github(opened.state, prEvent("pull_request.synchronize", 71, head), "delivery-pr-71-same-commit");
   assert.equal(sameCommit.outcome, "created");
-  assert.deepEqual(sameCommit.supersededBuildTaskIds, []);
-  assert.equal(findTask(sameCommit.state, opened.build.buildTaskId)?.status, "triage");
+  assert.deepEqual(sameCommit.supersededBuildTaskIds, [opened.build.buildTaskId]);
+  assert.equal(findTask(sameCommit.state, opened.build.buildTaskId)?.status, "canceled");
 
   const pushed = github(sameCommit.state, pushEvent("8".repeat(40)), "delivery-push-newer");
   assert.equal(pushed.outcome, "created");
   assert.deepEqual(pushed.supersededBuildTaskIds, []);
-  assert.equal(findTask(pushed.state, opened.build.buildTaskId)?.status, "triage");
+  assert.equal(findTask(pushed.state, opened.build.buildTaskId)?.status, "canceled");
   assert.equal(findTask(pushed.state, sameCommit.build.buildTaskId)?.status, "triage");
+
+  const newerPush = github(pushed.state, pushEvent("9".repeat(40)), "delivery-push-newest");
+  assert.equal(newerPush.outcome, "created");
+  assert.deepEqual(newerPush.supersededBuildTaskIds, [pushed.build.buildTaskId]);
+  assert.equal(findTask(newerPush.state, pushed.build.buildTaskId)?.status, "canceled");
+  assert.equal(findTask(newerPush.state, newerPush.build.buildTaskId)?.status, "triage");
 });
 
 test("comments, reviews, labels, edits, closes, deleted pushes, and tag pushes create no Context build", () => {

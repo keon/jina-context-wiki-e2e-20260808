@@ -137,7 +137,7 @@ export function admitContextBoardBuild(
     refSequence
   };
   const build = createContextBoardBuild(state, { ...scope, now: input.now });
-  const superseded = supersedeOlderPullRequestBuilds(build.state, build.buildTaskId, scope, input);
+  const superseded = supersedeOlderRefBuilds(build.state, build.buildTaskId, scope, input.now);
   return {
     state: superseded.state,
     outcome: "created",
@@ -147,27 +147,20 @@ export function admitContextBoardBuild(
   };
 }
 
-const SUPERSEDED_PULL_REQUEST_REASON = "superseded by a newer pull request commit";
+const SUPERSEDED_REF_REASON = "superseded by a newer build for the same repository ref";
 
-function supersedeOlderPullRequestBuilds(
+function supersedeOlderRefBuilds(
   state: BoardState,
   newBuildTaskId: TaskId,
   scope: ContextBuildScope,
-  input: ContextBoardAdmissionInput
+  now: string
 ): { readonly state: BoardState; readonly buildTaskIds: readonly TaskId[] } {
-  const event = input.source === "github" ? input.event : undefined;
-  if (event?.type !== "pull_request.opened" && event?.type !== "pull_request.synchronize") {
-    return { state, buildTaskIds: [] };
-  }
-
   const candidates = state.tasks.filter(
     (task) =>
       task.type === contextBoardTaskTypes.build &&
       task.metadata.tenantId === scope.tenantId &&
       task.metadata.repository === scope.repository &&
       task.metadata.ref === scope.ref &&
-      task.metadata.trigger === "pull_request" &&
-      task.metadata.commitSha !== scope.commitSha &&
       typeof task.metadata.refSequence === "number" &&
       task.metadata.refSequence < scope.refSequence &&
       !isTerminalTaskStatus(task.status)
@@ -177,7 +170,7 @@ function supersedeOlderPullRequestBuilds(
   for (const candidate of candidates) {
     const options = {
       actor: { type: "system" as const, id: "context-build-admission" },
-      now: input.now
+      now
     };
     const commented = applyCommand(
       next,
@@ -187,7 +180,7 @@ function supersedeOlderPullRequestBuilds(
         eventType: "context.build_superseded.failed",
         payload: {
           failureCategory: "build_superseded",
-          reason: SUPERSEDED_PULL_REQUEST_REASON,
+          reason: SUPERSEDED_REF_REASON,
           supersededByBuildTaskId: newBuildTaskId
         }
       },
@@ -200,7 +193,7 @@ function supersedeOlderPullRequestBuilds(
       options
     );
     if (!transitioned.accepted) throw new Error("failed to cancel superseded Context build");
-    next = reduceBoard(transitioned.state, input.now);
+    next = reduceBoard(transitioned.state, now);
   }
   return { state: next, buildTaskIds: candidates.map((candidate) => candidate.id) };
 }

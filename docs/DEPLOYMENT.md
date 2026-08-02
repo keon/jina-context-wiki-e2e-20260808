@@ -511,7 +511,10 @@ writes, and records it on the build and ingest stage. The checkpoint retains tha
 sequence. If an earlier accepted push finishes after a later accepted push, the earlier
 checkpoint remains stored for audit but cannot advance the projection-input frontier,
 commit derived context, become current, or publish a release over the higher
-admitted sequence. Request-key redelivery reuses the existing build and sequence.
+admitted sequence. Admission therefore cancels every older nonterminal build for the
+same tenant/repository/ref immediately, retires its leases, and releases its build quota;
+only the newest sequence spends worker and model capacity. Request-key redelivery reuses
+the existing build and sequence.
 
 The Board is the only production scheduler. It materializes snapshot, research
 plan, parallel subject research, publication plan, parallel page write/audit,
